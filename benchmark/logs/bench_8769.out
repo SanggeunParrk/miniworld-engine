@@ -1,0 +1,77 @@
+host=node01  date=Tue Jun 16 16:17:41 KST 2026
+torch 2.10.0+cu128 cuda NVIDIA H100 80GB HBM3
+
+############################################################
+# tm1/tm2 select: main vs miniworld
+############################################################
+device: NVIDIA H100 80GB HBM3  dtype: torch.bfloat16
+
+==================  tm1  (left/right gated GEMM)  ==================
+     L |  main (ms) | miniworld (ms) |     winner |   agree
+----------------------------------------------------------------
+   384 |      0.081 |          0.111 |       main | 0.0e+00
+   512 |      0.138 |          0.189 |       main | 0.0e+00
+   768 |      0.296 |          0.412 |       main | 0.0e+00
+  1024 |      0.527 |          0.728 |       main | 0.0e+00
+
+==================  tm2  (output gated dual-x GEMM)  ==================
+     L |  main (ms) | miniworld (ms) |     winner |   agree
+----------------------------------------------------------------
+   384 |      0.053 |          0.060 |       main | 0.0e+00
+   512 |      0.082 |          0.095 |       main | 0.0e+00
+   768 |      0.169 |          0.196 |       main | 0.0e+00
+  1024 |      0.294 |          0.337 |       main | 0.0e+00
+
+==================  verdict  ==================
+tm1: main won 4/4, miniworld won 0/4  ->  canonical = main
+tm2: main won 4/4, miniworld won 0/4  ->  canonical = main
+[exit=0]
+
+############################################################
+# tm1 per-op bench (pt/tn/nv/cu)
+############################################################
+tm1 fwd  dtype=torch.bfloat16  device=NVIDIA H100 80GB HBM3
+  triton main (psk/benchmark) loaded=True
+  triton perf (perf/trimul)   loaded=True
+ B    L    D    pt ms    tn ms    nv ms    cu ms  pt TF  tn TF  nv TF  cu TF  tn/pt  nv/pt  nv/tn
+-------------------------------------------------------------------------------------------------
+ 1  384  128    0.264    0.081    0.108      nan   73.2  238.2  179.0    nan  3.25x  2.44x  0.75x
+ 1  512  128    0.446    0.138    0.186      nan   77.0  248.8  185.0    nan  3.23x  2.40x  0.74x
+ 1  768  128    0.947    0.297    0.405      nan   81.6  260.3  190.8    nan  3.19x  2.34x  0.73x
+ 1 1024  128    1.662    0.522    0.718      nan   82.7  263.5  191.5    nan  3.19x  2.31x  0.73x
+[exit=0]
+
+############################################################
+# tm2 per-op bench (pt/tn/nv/cu)
+############################################################
+[warn] cu failed at B=1 L=384 D=128: [Errno 2] No such file or directory: '/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/triangle_multiplication/tm1/cute/tm2_cute_kernel.py'
+[warn] cu failed at B=1 L=512 D=128: module '_tm2_cute_kernel_impl' has no attribute 'tm2_dual_from_scratch'
+[warn] cu failed at B=1 L=768 D=128: module '_tm2_cute_kernel_impl' has no attribute 'tm2_dual_from_scratch'
+[warn] cu failed at B=1 L=1024 D=128: module '_tm2_cute_kernel_impl' has no attribute 'tm2_dual_from_scratch'
+tm2 fwd  dtype=torch.bfloat16  device=NVIDIA H100 80GB HBM3
+  triton main (psk/benchmark) loaded=True
+  triton perf (perf/trimul)   loaded=True
+ B    L    D    pt ms    tn ms    nv ms    cu ms  pt TF  tn TF  nv TF  cu TF  tn/pt  nv/pt  nv/tn
+-------------------------------------------------------------------------------------------------
+ 1  384  128    0.135    0.054    0.060      nan   71.5  180.5  161.0    nan  2.52x  2.25x  0.89x
+ 1  512  128    0.226    0.085    0.096      nan   75.9  202.5  179.9    nan  2.67x  2.37x  0.89x
+ 1  768  128    0.477    0.169    0.195      nan   81.1  228.9  197.8    nan  2.82x  2.44x  0.86x
+ 1 1024  128    0.834    0.288    0.338      nan   82.4  239.0  203.5    nan  2.90x  2.47x  0.85x
+[exit=0]
+
+############################################################
+# trimul composite bench (pt/tn/nv/cuequiv/cute)
+############################################################
+trimul fwd  dtype=torch.bfloat16  direction=outgoing  device=NVIDIA H100 80GB HBM3
+  triton tm1/tm2 (psk/benchmark) loaded=True
+  nvidia-triton dtv1 (perf/trimul) loaded=True
+  cuequivariance loaded: True
+ B    L    D    pt ms    tn ms    nv ms    cq ms    cu ms  pt TF  tn TF  nv TF  cq TF  tn/pt  nv/pt  cq/pt  nv/tn
+-----------------------------------------------------------------------------------------------------------------
+ 1  384  128    1.244    1.027    0.355    0.342      nan   34.9   42.3  122.6  127.2  1.21x  3.51x  3.64x  2.89x
+ 1  512  128    2.370    1.982    0.602    0.473      nan   36.2   43.3  142.8  181.4  1.20x  3.94x  5.01x  3.29x
+ 1  768  128    8.039    7.225    1.308    1.040      nan   28.9   32.1  177.4  223.1  1.11x  6.15x  7.73x  5.53x
+ 1 1024  128   15.542   13.994    2.382    1.995      nan   31.0   34.4  201.9  241.2  1.11x  6.52x  7.79x  5.87x
+[exit=0]
+
+ALL BENCHES DONE

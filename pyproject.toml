@@ -1,0 +1,115 @@
+[project]
+name = "miniworld-kernels"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
+dependencies = [
+  # kernels + module layers
+  "torch>=2.8",
+  "triton",
+  "einops",
+  "jaxtyping",
+  "numpy",
+  "scipy",
+  # cuequivariance baselines (CUEQUIVARIANCE implementation path)
+  "cuequivariance-torch>=0.9,<0.10",
+  # single bench harness (scripts/bench.py, team-gm hydra style)
+  "hydra-core",
+  "lightning",
+  "omegaconf",
+  "pydantic",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ----------------------------------------------------------------------------
+# ruff — mirrors team-gm (select ALL + team-gm ignores). Kernel/bench code is
+# math-heavy, so GEMM-notation names, magic numbers, and relaxed docstrings are
+# allowed per-file (matches team-gm's ``src/team_gm/modules/kernels/*``).
+# ----------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  # team-gm base set
+  "E731", "E741", "F722", "S311",
+  "D105", "D100", "D107", "D203", "D213",
+  "PLR0913", "ANN401", "PLR0402", "N812", "NPY002", "COM812",
+  # additional ignores for kernel-bench code
+  "E501",     # line-too-long (long bench prints)
+  "E701", "E702",  # multiple statements per line (probe scripts)
+  "BLE001",   # blind except (bench needs broad catch on kernel failures)
+  "PERF203",  # try/except in loops (bench iteration)
+  "PLR0124",  # comparison with itself (NaN check `ms == ms`)
+  "PT018",    # composite assertion
+  "TC002", "TC003",  # typing-only imports (cute types appear in signatures)
+  "N802", "N815",    # invalid fn / class-scope name (math notation)
+  "C408",     # unnecessary dict/collection call
+  "PGH004",   # blanket noqa
+  "RUF001", "RUF002", "RUF003",  # ambiguous unicode (Korean comments)
+  "RUF059",   # unused unpacked variable
+  "ERA001",   # commented-out code
+  # script-layout / vendored-faithful-copy artifacts
+  "E402",     # imports after the sys.path bootstrap prelude (script entrypoints)
+  "I001",     # import block ordering (bootstrap precedes imports)
+  "B023",     # loop var in lambda — fine for do_bench (called synchronously)
+  "FBT003",   # boolean positional in call — kernel APIs like mma.set(field, True)
+  "RUF100",   # unused noqa (vendored files carry team-gm's linter noqas)
+  "PLR2044",  # line with empty comment (vendored kernel separators)
+]
+
+# Vendored kernel implementations are faithful copies — don't lint their bodies.
+[tool.ruff.lint.per-file-ignores]
+"**/triton/*.py" = ["ALL"]
+"**/cuda/*.py" = ["ALL"]
+"**/*.py" = [
+  "N806", "N803",   # math-style variable / argument capitalization
+  "ANN",            # type annotations on every signature
+  "ARG001",         # unused fn args (cute kernel hooks)
+  "D",              # docstrings
+  "S101",           # assert in tests / bench guards
+  "INP001",         # implicit namespace pkg
+  "PLR2004",        # magic numerics
+  "PLC0415",        # lazy import inside fn
+  "FBT001", "FBT002",  # positional bools
+  "C901", "PLR0915",   # complexity / statement count
+  "TRY003", "EM101", "EM102",  # exception message style
+  "RET504",         # unnecessary tmp before return
+  "T201",           # print() in bench
+]
+
+[tool.ruff.format]
+docstring-code-format = false
+
+# ----------------------------------------------------------------------------
+# pyright / ty — CuTeDSL kernel code is dynamically typed; relax there.
+# ----------------------------------------------------------------------------
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportGeneralTypeIssues = "warning"
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env"]
+
+[tool.ty.environment]
+python-version = "3.10"

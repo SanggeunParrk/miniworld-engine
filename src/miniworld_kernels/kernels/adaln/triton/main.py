@@ -1,0 +1,866 @@
+# vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/adaln.py
+import os
+
+import torch
+import triton
+import triton.language as tl
+
+AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "adaln"
+
+if AUTOTUNE:
+    configs = [
+        triton.Config(
+            {"BLOCK_M": block_m, "BLOCK_NX": block_nx, "BLOCK_NC": block_nc},
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        for block_m in [16, 32]
+        for block_nx in [32, 64, 128]
+        for block_nc in [32, 64, 128]
+        for num_warps in [4, 8]
+        for num_stages in [2, 3, 4]
+    ]
+    bwd_configs = [
+        triton.Config(
+            {"BLOCK_M": block_m, "BLOCK_NX": block_nx, "BLOCK_NC": block_nc},
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        for block_m in [64, 128]
+        for block_nx in [64, 128]
+        for block_nc in [64, 128]
+        for num_warps in [4, 8]
+        for num_stages in [2, 3]
+    ]
+    param_configs = [
+        triton.Config(
+            {"BLOCK_M": block_m, "BLOCK_NX": block_nx, "BLOCK_NC": block_nc},
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+        for block_m in [32, 64]
+        for block_nx in [32, 64]
+        for block_nc in [32, 64]
+        for num_warps in [4, 8]
+        for num_stages in [2, 3]
+    ]
+else:
+    configs = [
+        triton.Config({"BLOCK_M": 16, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=4),
+        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=4),
+        triton.Config({"BLOCK_M": 16, "BLOCK_NX": 128, "BLOCK_NC": 64}, num_warps=8),
+        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 128, "BLOCK_NC": 64}, num_warps=8),
+    ]
+    bwd_configs = [
+        triton.Config({"BLOCK_M": 64, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=4),
+        triton.Config({"BLOCK_M": 128, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=8),
+        triton.Config({"BLOCK_M": 64, "BLOCK_NX": 128, "BLOCK_NC": 64}, num_warps=8),
+    ]
+    param_configs = [
+        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 32, "BLOCK_NC": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 64, "BLOCK_NX": 32, "BLOCK_NC": 32}, num_warps=4),
+        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 64, "BLOCK_NC": 32}, num_warps=8),
+        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 32, "BLOCK_NC": 64}, num_warps=8),
+    ]
+
+
+@triton.autotune(configs=configs, key=["NX", "NC"])
+@triton.jit
+def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
+    X,
+    Cond,
+    LnW,
+    ScaleW,
+    ScaleB,
+    BiasW,
+    Y,
+    XHat,
+    CondNorm,
+    Gate,
+    RstdX,
+    RstdC,
+    stride_xr,
+    stride_xc,
+    stride_cr,
+    stride_cc,
+    stride_swr,
+    stride_swc,
+    stride_bwr,
+    stride_bwc,
+    M,
+    NX: tl.constexpr,
+    NC: tl.constexpr,
+    eps_x,
+    eps_cond,
+    USE_BF16: tl.constexpr,
+    USE_FP16: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_NX: tl.constexpr,
+    BLOCK_NC: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_mask = rows < M
+
+    mean_x = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for x_start in range(0, NX, BLOCK_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_NX)
+        x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+        x_offsets = rows[:, None] * stride_xr + x_cols[None, :] * stride_xc
+        x = tl.load(X + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        mean_x += tl.sum(tl.where(x_mask, x, 0.0), axis=1)
+    mean_x /= NX
+
+    var_x = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for x_start in range(0, NX, BLOCK_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_NX)
+        x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+        x_offsets = rows[:, None] * stride_xr + x_cols[None, :] * stride_xc
+        x = tl.load(X + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        x_centered = tl.where(x_mask, x - mean_x[:, None], 0.0)
+        var_x += tl.sum(x_centered * x_centered, axis=1)
+    rstd_x = tl.rsqrt(var_x / NX + eps_x)
+
+    mean_cond = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for c_start in range(0, NC, BLOCK_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_NC)
+        c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+        cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
+        mean_cond += tl.sum(tl.where(c_mask, cond, 0.0), axis=1)
+    mean_cond /= NC
+
+    var_cond = tl.zeros([BLOCK_M], dtype=tl.float32)
+    for c_start in range(0, NC, BLOCK_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_NC)
+        c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+        cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
+        cond_centered = tl.where(c_mask, cond - mean_cond[:, None], 0.0)
+        var_cond += tl.sum(cond_centered * cond_centered, axis=1)
+    rstd_cond = tl.rsqrt(var_cond / NC + eps_cond)
+
+    tl.store(RstdX + rows, rstd_x, mask=row_mask)
+    tl.store(RstdC + rows, rstd_cond, mask=row_mask)
+
+    for c_start in range(0, NC, BLOCK_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_NC)
+        c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+        cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
+        cond_norm = (cond - mean_cond[:, None]) * rstd_cond[:, None]
+        tl.store(CondNorm + c_offsets, cond_norm, mask=c_mask)
+
+    for x_start in range(0, NX, BLOCK_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_NX)
+        x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+        x_offsets = rows[:, None] * stride_xr + x_cols[None, :] * stride_xc
+
+        x = tl.load(X + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        x_hat = (x - mean_x[:, None]) * rstd_x[:, None]
+
+        scale_b = tl.load(ScaleB + x_cols, mask=x_cols < NX, other=0.0).to(tl.float32)
+        scale = tl.zeros([BLOCK_M, BLOCK_NX], dtype=tl.float32)
+        bias = tl.zeros([BLOCK_M, BLOCK_NX], dtype=tl.float32)
+
+        for c_start in range(0, NC, BLOCK_NC):
+            c_cols = c_start + tl.arange(0, BLOCK_NC)
+            c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+            c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+            cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
+            cond_norm = (cond - mean_cond[:, None]) * rstd_cond[:, None]
+            lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
+            cond_aff = cond_norm * lnw[None, :]
+
+            if USE_BF16:
+                cond_aff = cond_aff.to(tl.bfloat16)
+            elif USE_FP16:
+                cond_aff = cond_aff.to(tl.float16)
+
+            scale_offsets = (
+                c_cols[:, None] * stride_swc + x_cols[None, :] * stride_swr
+            )
+            scale_mask = (c_cols[:, None] < NC) & (x_cols[None, :] < NX)
+            scale_w = tl.load(
+                ScaleW + scale_offsets,
+                mask=scale_mask,
+                other=0.0,
+            ).to(tl.float32)
+            if USE_BF16:
+                scale_w = scale_w.to(tl.bfloat16)
+            elif USE_FP16:
+                scale_w = scale_w.to(tl.float16)
+
+            bias_offsets = c_cols[:, None] * stride_bwc + x_cols[None, :] * stride_bwr
+            bias_mask = (c_cols[:, None] < NC) & (x_cols[None, :] < NX)
+            bias_w = tl.load(
+                BiasW + bias_offsets,
+                mask=bias_mask,
+                other=0.0,
+            ).to(tl.float32)
+            if USE_BF16:
+                bias_w = bias_w.to(tl.bfloat16)
+            elif USE_FP16:
+                bias_w = bias_w.to(tl.float16)
+
+            scale += tl.dot(cond_aff, scale_w)
+            bias += tl.dot(cond_aff, bias_w)
+
+        scale += scale_b[None, :]
+
+        if USE_BF16:
+            scale = scale.to(tl.bfloat16)
+            bias = bias.to(tl.bfloat16)
+        elif USE_FP16:
+            scale = scale.to(tl.float16)
+            bias = bias.to(tl.float16)
+
+        gate = tl.sigmoid(scale)
+        y = gate.to(tl.float32) * x_hat + bias.to(tl.float32)
+
+        tl.store(XHat + x_offsets, x_hat, mask=x_mask)
+        tl.store(Gate + x_offsets, gate, mask=x_mask)
+        tl.store(Y + x_offsets, y, mask=x_mask)
+
+
+@triton.autotune(
+    configs=bwd_configs,
+    key=["M", "NX", "NC"],
+    reset_to_zero=["DScaleB"],
+)
+@triton.jit
+def adaln_bwd_input_kernel(  # noqa: PLR0915
+    DY,
+    DX,
+    DCond,
+    DScaleB,
+    XHat,
+    CondNorm,
+    Gate,
+    LnW,
+    ScaleW,
+    BiasW,
+    RstdX,
+    RstdC,
+    stride_yr,
+    stride_yc,
+    stride_cr,
+    stride_cc,
+    stride_swr,
+    stride_swc,
+    stride_bwr,
+    stride_bwc,
+    M,
+    NX: tl.constexpr,
+    NC: tl.constexpr,
+    USE_BF16: tl.constexpr,
+    USE_FP16: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_NX: tl.constexpr,
+    BLOCK_NC: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_mask = rows < M
+
+    sum_grad_x = tl.zeros([BLOCK_M], dtype=tl.float32)
+    sum_grad_xhat = tl.zeros([BLOCK_M], dtype=tl.float32)
+
+    for x_start in range(0, NX, BLOCK_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_NX)
+        x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+        x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+        dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        grad_xhat = tl.where(x_mask, dy * gate, 0.0)
+        dscale = tl.where(x_mask, dy * x_hat * gate * (1.0 - gate), 0.0)
+
+        sum_grad_x += tl.sum(grad_xhat, axis=1)
+        sum_grad_xhat += tl.sum(grad_xhat * tl.where(x_mask, x_hat, 0.0), axis=1)
+
+        partial_dscale_b = tl.sum(dscale, axis=0)
+        tl.atomic_add(
+            DScaleB + x_cols,
+            partial_dscale_b.to(DScaleB.dtype.element_ty),
+            mask=x_cols < NX,
+        )
+
+    c1_x = sum_grad_xhat / NX
+    c2_x = sum_grad_x / NX
+    rstd_x = tl.load(RstdX + rows, mask=row_mask, other=0.0).to(tl.float32)
+
+    sum_grad_cond = tl.zeros([BLOCK_M], dtype=tl.float32)
+    sum_grad_cond_norm = tl.zeros([BLOCK_M], dtype=tl.float32)
+
+    for c_start in range(0, NC, BLOCK_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_NC)
+        c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+
+        cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(
+            tl.float32
+        )
+        lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
+        grad_cond_aff = tl.zeros([BLOCK_M, BLOCK_NC], dtype=tl.float32)
+
+        for x_start in range(0, NX, BLOCK_NX):
+            x_cols = x_start + tl.arange(0, BLOCK_NX)
+            x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+            dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            dy = tl.where(x_mask, dy, 0.0)
+            dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
+
+            weight_offsets = (
+                x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
+            )
+            weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
+            scale_w = tl.load(
+                ScaleW + weight_offsets,
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+            bias_w = tl.load(
+                BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+
+            grad_cond_aff = tl.dot(
+                dscale,
+                scale_w,
+                acc=grad_cond_aff,
+                input_precision="ieee",
+                out_dtype=tl.float32,
+            )
+            grad_cond_aff = tl.dot(
+                dy,
+                bias_w,
+                acc=grad_cond_aff,
+                input_precision="ieee",
+                out_dtype=tl.float32,
+            )
+
+        grad_cond_norm = grad_cond_aff * lnw[None, :]
+
+        sum_grad_cond += tl.sum(tl.where(c_mask, grad_cond_norm, 0.0), axis=1)
+        sum_grad_cond_norm += tl.sum(
+            tl.where(c_mask, grad_cond_norm * cond_norm, 0.0),
+            axis=1,
+        )
+
+    c1_cond = sum_grad_cond_norm / NC
+    c2_cond = sum_grad_cond / NC
+    rstd_cond = tl.load(RstdC + rows, mask=row_mask, other=0.0).to(tl.float32)
+
+    for x_start in range(0, NX, BLOCK_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_NX)
+        x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+        x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+        dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        grad_xhat = dy * gate
+        dx = (grad_xhat - (x_hat * c1_x[:, None] + c2_x[:, None])) * rstd_x[:, None]
+        tl.store(DX + x_offsets, dx, mask=x_mask)
+
+    for c_start in range(0, NC, BLOCK_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_NC)
+        c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+
+        cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(
+            tl.float32
+        )
+        lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
+        grad_cond_aff = tl.zeros([BLOCK_M, BLOCK_NC], dtype=tl.float32)
+
+        for x_start in range(0, NX, BLOCK_NX):
+            x_cols = x_start + tl.arange(0, BLOCK_NX)
+            x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+            dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            dy = tl.where(x_mask, dy, 0.0)
+            dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
+
+            weight_offsets = (
+                x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
+            )
+            weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
+            scale_w = tl.load(
+                ScaleW + weight_offsets,
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+            bias_w = tl.load(
+                BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+            grad_cond_aff = tl.dot(
+                dscale,
+                scale_w,
+                acc=grad_cond_aff,
+                input_precision="ieee",
+                out_dtype=tl.float32,
+            )
+            grad_cond_aff = tl.dot(
+                dy,
+                bias_w,
+                acc=grad_cond_aff,
+                input_precision="ieee",
+                out_dtype=tl.float32,
+            )
+
+        grad_cond_norm = grad_cond_aff * lnw[None, :]
+        dcond = (
+            grad_cond_norm - (cond_norm * c1_cond[:, None] + c2_cond[:, None])
+        ) * rstd_cond[:, None]
+        tl.store(DCond + c_offsets, dcond, mask=c_mask)
+
+
+@triton.autotune(configs=param_configs, key=["M", "NX", "NC"])
+@triton.jit
+def adaln_bwd_weight_kernel(
+    DY,
+    DScaleW,
+    DBiasW,
+    XHat,
+    CondNorm,
+    Gate,
+    LnW,
+    stride_yr,
+    stride_yc,
+    stride_cr,
+    stride_cc,
+    stride_swr,
+    stride_swc,
+    stride_bwr,
+    stride_bwc,
+    M,
+    NX: tl.constexpr,
+    NC: tl.constexpr,
+    USE_BF16: tl.constexpr,
+    USE_FP16: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_NX: tl.constexpr,
+    BLOCK_NC: tl.constexpr,
+):
+    pid_x = tl.program_id(0)
+    pid_c = tl.program_id(1)
+
+    x_cols = pid_x * BLOCK_NX + tl.arange(0, BLOCK_NX)
+    c_cols = pid_c * BLOCK_NC + tl.arange(0, BLOCK_NC)
+    x_mask = x_cols < NX
+    c_mask = c_cols < NC
+
+    lnw = tl.load(LnW + c_cols, mask=c_mask, other=0.0).to(tl.float32)
+    acc_scale_w = tl.zeros([BLOCK_NX, BLOCK_NC], dtype=tl.float32)
+    acc_bias_w = tl.zeros([BLOCK_NX, BLOCK_NC], dtype=tl.float32)
+
+    for row_start in tl.range(0, M, BLOCK_M):
+        rows = row_start + tl.arange(0, BLOCK_M)
+        row_mask = rows < M
+
+        x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+        x_row_mask = row_mask[:, None] & x_mask[None, :]
+        dy = tl.load(DY + x_offsets, mask=x_row_mask, other=0.0).to(tl.float32)
+        x_hat = tl.load(XHat + x_offsets, mask=x_row_mask, other=0.0).to(tl.float32)
+        gate = tl.load(Gate + x_offsets, mask=x_row_mask, other=0.0).to(tl.float32)
+        dy = tl.where(x_row_mask, dy, 0.0)
+        dscale = dy * tl.where(x_row_mask, x_hat, 0.0) * gate * (1.0 - gate)
+
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+        c_row_mask = row_mask[:, None] & c_mask[None, :]
+        cond_norm = tl.load(CondNorm + c_offsets, mask=c_row_mask, other=0.0).to(
+            tl.float32
+        )
+        cond_aff = tl.where(c_row_mask, cond_norm * lnw[None, :], 0.0)
+
+        dscale_for_dot = dscale
+        dy_for_dot = dy
+        cond_aff_for_dot = cond_aff
+        if USE_BF16:
+            dscale_for_dot = dscale.to(tl.bfloat16)
+            dy_for_dot = dy.to(tl.bfloat16)
+            cond_aff_for_dot = cond_aff.to(tl.bfloat16)
+        elif USE_FP16:
+            dscale_for_dot = dscale.to(tl.float16)
+            dy_for_dot = dy.to(tl.float16)
+            cond_aff_for_dot = cond_aff.to(tl.float16)
+
+        acc_scale_w += tl.dot(
+            tl.trans(dscale_for_dot),
+            cond_aff_for_dot,
+            input_precision="ieee",
+            out_dtype=tl.float32,
+        )
+        acc_bias_w += tl.dot(
+            tl.trans(dy_for_dot),
+            cond_aff_for_dot,
+            input_precision="ieee",
+            out_dtype=tl.float32,
+        )
+
+    scale_offsets = x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
+    bias_offsets = x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc
+    weight_mask = x_mask[:, None] & c_mask[None, :]
+    tl.store(DScaleW + scale_offsets, acc_scale_w, mask=weight_mask)
+    tl.store(DBiasW + bias_offsets, acc_bias_w, mask=weight_mask)
+
+
+@triton.autotune(configs=param_configs, key=["M", "NX", "NC"])
+@triton.jit
+def adaln_bwd_lnw_kernel(
+    DY,
+    DLnW,
+    XHat,
+    CondNorm,
+    Gate,
+    ScaleW,
+    BiasW,
+    stride_yr,
+    stride_yc,
+    stride_cr,
+    stride_cc,
+    stride_swr,
+    stride_swc,
+    stride_bwr,
+    stride_bwc,
+    M,
+    NX: tl.constexpr,
+    NC: tl.constexpr,
+    USE_BF16: tl.constexpr,
+    USE_FP16: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_NX: tl.constexpr,
+    BLOCK_NC: tl.constexpr,
+):
+    pid_c = tl.program_id(0)
+    c_cols = pid_c * BLOCK_NC + tl.arange(0, BLOCK_NC)
+    c_mask = c_cols < NC
+
+    acc_lnw = tl.zeros([BLOCK_NC], dtype=tl.float32)
+
+    for row_start in tl.range(0, M, BLOCK_M):
+        rows = row_start + tl.arange(0, BLOCK_M)
+        row_mask = rows < M
+        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+        c_row_mask = row_mask[:, None] & c_mask[None, :]
+        cond_norm = tl.load(CondNorm + c_offsets, mask=c_row_mask, other=0.0).to(
+            tl.float32
+        )
+        grad_cond_aff = tl.zeros([BLOCK_M, BLOCK_NC], dtype=tl.float32)
+
+        for x_start in range(0, NX, BLOCK_NX):
+            x_cols = x_start + tl.arange(0, BLOCK_NX)
+            x_mask = x_cols < NX
+            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+            x_row_mask = row_mask[:, None] & x_mask[None, :]
+
+            dy = tl.load(DY + x_offsets, mask=x_row_mask, other=0.0).to(tl.float32)
+            x_hat = tl.load(XHat + x_offsets, mask=x_row_mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + x_offsets, mask=x_row_mask, other=0.0).to(tl.float32)
+            dy = tl.where(x_row_mask, dy, 0.0)
+            dscale = dy * tl.where(x_row_mask, x_hat, 0.0) * gate * (1.0 - gate)
+
+            scale_offsets = x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
+            weight_mask = x_mask[:, None] & c_mask[None, :]
+            scale_w = tl.load(
+                ScaleW + scale_offsets,
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+            bias_w = tl.load(
+                BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
+                mask=weight_mask,
+                other=0.0,
+            ).to(tl.float32)
+
+            dscale_for_dot = dscale
+            dy_for_dot = dy
+            scale_w_for_dot = scale_w
+            bias_w_for_dot = bias_w
+            if USE_BF16:
+                dscale_for_dot = dscale.to(tl.bfloat16)
+                dy_for_dot = dy.to(tl.bfloat16)
+                scale_w_for_dot = scale_w.to(tl.bfloat16)
+                bias_w_for_dot = bias_w.to(tl.bfloat16)
+            elif USE_FP16:
+                dscale_for_dot = dscale.to(tl.float16)
+                dy_for_dot = dy.to(tl.float16)
+                scale_w_for_dot = scale_w.to(tl.float16)
+                bias_w_for_dot = bias_w.to(tl.float16)
+
+            grad_cond_aff = tl.dot(
+                dscale_for_dot,
+                scale_w_for_dot,
+                acc=grad_cond_aff,
+                input_precision="ieee",
+                out_dtype=tl.float32,
+            )
+            grad_cond_aff = tl.dot(
+                dy_for_dot,
+                bias_w_for_dot,
+                acc=grad_cond_aff,
+                input_precision="ieee",
+                out_dtype=tl.float32,
+            )
+
+        acc_lnw += tl.sum(
+            tl.where(c_row_mask, grad_cond_aff * cond_norm, 0.0),
+            axis=0,
+        )
+
+    tl.store(DLnW + c_cols, acc_lnw, mask=c_mask)
+
+
+class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
+    @staticmethod
+    @torch.compiler.disable()
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        cond: torch.Tensor,
+        cond_ln_weight: torch.Tensor,
+        scale_weight: torch.Tensor,
+        scale_bias: torch.Tensor,
+        bias_weight: torch.Tensor,
+        eps_x: float,
+        eps_cond: float,
+    ) -> torch.Tensor:
+        if not x.is_cuda or not cond.is_cuda:
+            msg = "Triton AdaptiveLayerNorm requires CUDA tensors."
+            raise RuntimeError(msg)
+        if (
+            not cond_ln_weight.is_cuda
+            or not scale_weight.is_cuda
+            or not scale_bias.is_cuda
+            or not bias_weight.is_cuda
+        ):
+            msg = "Triton AdaptiveLayerNorm requires CUDA parameters."
+            raise RuntimeError(msg)
+        devices = {
+            x.device,
+            cond.device,
+            cond_ln_weight.device,
+            scale_weight.device,
+            scale_bias.device,
+            bias_weight.device,
+        }
+        if len(devices) != 1:
+            msg = "Triton AdaptiveLayerNorm requires all inputs on the same device."
+            raise RuntimeError(msg)
+        if x.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+            msg = f"Unsupported dtype for Triton AdaptiveLayerNorm: {x.dtype}."
+            raise TypeError(msg)
+        if cond.dtype != x.dtype:
+            msg = "x and cond must have the same dtype for Triton AdaptiveLayerNorm."
+            raise TypeError(msg)
+
+        compute_dtype = x.dtype
+        if torch.is_autocast_enabled():
+            compute_dtype = torch.get_autocast_dtype("cuda")
+
+        orig_x_shape = x.shape
+        orig_cond_shape = cond.shape
+        x_2d = x.reshape(-1, orig_x_shape[-1]).contiguous()
+        cond_2d = cond.reshape(-1, orig_cond_shape[-1]).contiguous()
+
+        if x_2d.shape[0] != cond_2d.shape[0]:
+            msg = "AdaptiveLayerNorm expects x and cond to share leading dimensions."
+            raise ValueError(msg)
+
+        m, nx = x_2d.shape
+        _, nc = cond_2d.shape
+
+        y = torch.empty_like(x_2d)
+        x_hat = torch.empty((m, nx), dtype=torch.float32, device=x.device)
+        cond_norm = torch.empty((m, nc), dtype=torch.float32, device=x.device)
+        gate_dtype = (
+            compute_dtype
+            if compute_dtype in {torch.bfloat16, torch.float16}
+            else torch.float32
+        )
+        gate = torch.empty((m, nx), dtype=gate_dtype, device=x.device)
+        rstd_x = torch.empty(m, dtype=torch.float32, device=x.device)
+        rstd_cond = torch.empty(m, dtype=torch.float32, device=x.device)
+
+        grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M"])]
+        adaln_fwd_kernel[grid](
+            x_2d,
+            cond_2d,
+            cond_ln_weight,
+            scale_weight,
+            scale_bias,
+            bias_weight,
+            y,
+            x_hat,
+            cond_norm,
+            gate,
+            rstd_x,
+            rstd_cond,
+            x_2d.stride(0),
+            x_2d.stride(1),
+            cond_2d.stride(0),
+            cond_2d.stride(1),
+            scale_weight.stride(0),
+            scale_weight.stride(1),
+            bias_weight.stride(0),
+            bias_weight.stride(1),
+            m,
+            NX=nx,
+            NC=nc,
+            eps_x=eps_x,
+            eps_cond=eps_cond,
+            USE_BF16=compute_dtype == torch.bfloat16,
+            USE_FP16=compute_dtype == torch.float16,
+        )
+
+        ctx.save_for_backward(
+            x_hat,
+            cond_norm,
+            gate,
+            cond_ln_weight,
+            scale_weight,
+            bias_weight,
+            rstd_x,
+            rstd_cond,
+        )
+        ctx.orig_x_shape = orig_x_shape
+        ctx.orig_cond_shape = orig_cond_shape
+        ctx.x_dtype = x.dtype
+        ctx.cond_dtype = cond.dtype
+        ctx.cond_ln_weight_dtype = cond_ln_weight.dtype
+        ctx.scale_weight_dtype = scale_weight.dtype
+        ctx.scale_bias_dtype = scale_bias.dtype
+        ctx.bias_weight_dtype = bias_weight.dtype
+        ctx.use_bfloat16 = compute_dtype == torch.bfloat16
+        ctx.use_float16 = compute_dtype == torch.float16
+        return y.reshape(orig_x_shape)
+
+    @staticmethod
+    @torch.compiler.disable()
+    def backward(ctx, grad_output: torch.Tensor):
+        (
+            x_hat,
+            cond_norm,
+            gate,
+            cond_ln_weight,
+            scale_weight,
+            bias_weight,
+            rstd_x,
+            rstd_cond,
+        ) = ctx.saved_tensors
+
+        grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
+        m, nx = grad_output_2d.shape
+        _, nc = cond_norm.shape
+
+        dx = torch.empty_like(grad_output_2d)
+        dcond = torch.empty((m, nc), dtype=torch.float32, device=grad_output.device)
+        dlnw = torch.empty_like(cond_ln_weight, dtype=torch.float32)
+        dscale_w = torch.empty_like(scale_weight, dtype=torch.float32)
+        dscale_b = torch.zeros((nx,), dtype=torch.float32, device=grad_output.device)
+        dbias_w = torch.empty_like(bias_weight, dtype=torch.float32)
+
+        input_grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M"])]
+        adaln_bwd_input_kernel[input_grid](
+            grad_output_2d,
+            dx,
+            dcond,
+            dscale_b,
+            x_hat,
+            cond_norm,
+            gate,
+            cond_ln_weight,
+            scale_weight,
+            bias_weight,
+            rstd_x,
+            rstd_cond,
+            grad_output_2d.stride(0),
+            grad_output_2d.stride(1),
+            cond_norm.stride(0),
+            cond_norm.stride(1),
+            scale_weight.stride(0),
+            scale_weight.stride(1),
+            bias_weight.stride(0),
+            bias_weight.stride(1),
+            m,
+            NX=nx,
+            NC=nc,
+            USE_BF16=ctx.use_bfloat16,
+            USE_FP16=ctx.use_float16,
+        )
+        weight_grid = lambda meta: (
+            triton.cdiv(nx, meta["BLOCK_NX"]),
+            triton.cdiv(nc, meta["BLOCK_NC"]),
+        )
+        adaln_bwd_weight_kernel[weight_grid](
+            grad_output_2d,
+            dscale_w,
+            dbias_w,
+            x_hat,
+            cond_norm,
+            gate,
+            cond_ln_weight,
+            grad_output_2d.stride(0),
+            grad_output_2d.stride(1),
+            cond_norm.stride(0),
+            cond_norm.stride(1),
+            scale_weight.stride(0),
+            scale_weight.stride(1),
+            bias_weight.stride(0),
+            bias_weight.stride(1),
+            m,
+            NX=nx,
+            NC=nc,
+            USE_BF16=ctx.use_bfloat16,
+            USE_FP16=ctx.use_float16,
+        )
+        lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_NC"])]
+        adaln_bwd_lnw_kernel[lnw_grid](
+            grad_output_2d,
+            dlnw,
+            x_hat,
+            cond_norm,
+            gate,
+            scale_weight,
+            bias_weight,
+            grad_output_2d.stride(0),
+            grad_output_2d.stride(1),
+            cond_norm.stride(0),
+            cond_norm.stride(1),
+            scale_weight.stride(0),
+            scale_weight.stride(1),
+            bias_weight.stride(0),
+            bias_weight.stride(1),
+            m,
+            NX=nx,
+            NC=nc,
+            USE_BF16=ctx.use_bfloat16,
+            USE_FP16=ctx.use_float16,
+        )
+
+        return (
+            dx.reshape(ctx.orig_x_shape).to(ctx.x_dtype),
+            dcond.reshape(ctx.orig_cond_shape).to(ctx.cond_dtype),
+            dlnw.to(ctx.cond_ln_weight_dtype),
+            dscale_w.to(ctx.scale_weight_dtype),
+            dscale_b.to(ctx.scale_bias_dtype),
+            dbias_w.to(ctx.bias_weight_dtype),
+            None,
+            None,
+        )
+
+
+triton_adaptive_layer_norm = TritonAdaptiveLayerNormFunction.apply

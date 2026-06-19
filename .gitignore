@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# pixi materialized environments (regenerate from pixi.lock)
+.pixi/
+**/.pixi/
+
+# tool caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# profiling / large artifacts
+*.nsys-rep
+*.ncu-rep
+*.tar.gz
+
+# editor
+.vscode/
+
+# hydra run outputs (transient)
+outputs/
+results/
