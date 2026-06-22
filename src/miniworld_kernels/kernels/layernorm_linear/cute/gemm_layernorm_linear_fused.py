@@ -783,7 +783,11 @@ def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dty
     )
     mS = fake_tensor(vec_dtype, (l, n), leading_dim=1, divisibility=4)
     mB2 = fake_tensor(vec_dtype, (l, n), leading_dim=1, divisibility=4)
-    mX = fake_tensor(a_dtype, (m, k), leading_dim=1, divisibility=8)  # plain (M,K) X
+    # mX (the epilogue's X handle) must match the A operand's actual major, else the call's
+    # arg-validation rejects an M-major (k-strided) X — exactly the BDLL/m-major case where A
+    # is a (M,K) view of [B,D,L,L] with strides (1, L*L). Mirror make_fake_gemm_tensors' mA
+    # rule (a_leading = 1 if "k" else 0). k-major (the common case) is unchanged.
+    mX = fake_tensor(a_dtype, (m, k), leading_dim=(1 if a_major == "k" else 0), divisibility=8)  # (M,K) X
     # mDbg only exists in the warp-specialized bring-up; gated so the shipping signature
     # has None at this slot (else the runtime None mismatches a compiled Tensor arg).
     mDbg = fake_tensor(Float32, (m,), leading_dim=0, divisibility=4) if _WS_DEBUG else None
