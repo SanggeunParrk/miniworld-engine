@@ -273,8 +273,14 @@ def layernorm_linear_cute(
     eps: float = 1e-5,
     *,
     prefolded: tuple[Tensor, Tensor, Tensor] | None = None,
-) -> Tensor:
-    """Fused forward LayerNormLinear (Milestone 1: fused stats + fused GEMM epilogue)."""
+    return_stats: bool = False,
+):
+    """Fused forward LayerNormLinear (Milestone 1: fused stats + fused GEMM epilogue).
+
+    Returns ``Y``; with ``return_stats=True`` returns ``(Y, mean, rstd)`` — the LayerNorm
+    statistics this path already computes in its separate ``_stats`` pass, kept for the
+    backward pass (bwd needs mean & rstd; recomputing them is the only reason the fused
+    M2 can't serve training)."""
     assert x.is_cuda and x.dim() == 2
     M, K = x.shape
     N = weight.shape[0]
@@ -289,4 +295,6 @@ def layernorm_linear_cute(
     B22 = B2.float().contiguous().view(1, N)
     Y = torch.empty(M, N, device=x.device, dtype=x.dtype)
     gemm_layernorm_linear(x, Bw, Y, rstd2, c12, S2, B22)
+    if return_stats:
+        return Y, c1 / rstd, rstd  # mean = c1/rstd (c1 = mean*rstd), both fp32 [M]
     return Y

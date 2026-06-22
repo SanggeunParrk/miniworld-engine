@@ -13,25 +13,34 @@ __all__ = [
 ]
 
 
-def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *, prefolded=None):
-    """Forward LayerNormLinear, dispatched by output width N for the fastest path.
+def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
+                     save_stats: bool = False, prefolded=None):
+    """Forward LayerNormLinear, dispatched for the fastest path.
 
     Both backends fold ``W2 = gamma * W`` and compute ``Y = rstd*(X@W2) - c1*S + B2``
     (LayerNorm(X) never materialized), bit-comparable to
     ``F.linear(F.layer_norm(x), W, b)`` (cos = 0.999997).
 
-    - ``N <= 256`` → ``layernorm_linear_cute_fused`` (M2): LN stats reduced INSIDE the
-      GEMM main kernel on CUDA cores (one kernel, no extra gmem traffic). The
-      memory-bound regime where fusion wins — beats M1, torch.compile and TE
-      (d=128 M=262144: 0.062 ms vs M1 0.094 / tc 0.124 / TE 0.139).
-    - ``N > 256`` → ``layernorm_linear_cute`` (M1): folded GEMM + a separate (cheap)
-      stats pass. In the compute-bound regime the in-kernel reduction would steal WGMMA
-      issue throughput, so the separate-stats GEMM is faster (M1 already beats
-      torch.compile + TE on all shapes).
+    ``save_stats=False`` (inference) — dispatch by output width N for raw forward speed:
+      - ``N <= 256`` → ``layernorm_linear_cute_fused`` (M2): LN stats reduced INSIDE the
+        GEMM main kernel (one kernel, no extra gmem). The memory-bound regime where
+        fusion wins — beats M1, torch.compile and TE (d=128 M=262144: 0.062 ms vs M1
+        0.094 / tc 0.124 / TE 0.139). Returns ``Y``.
+      - ``N > 256`` → ``layernorm_linear_cute`` (M1): folded GEMM + a separate stats
+        pass. Compute-bound here, where the in-kernel reduction would steal WGMMA
+        throughput, so the separate-stats GEMM is faster. Returns ``Y``.
 
-    Threshold N=256 is the H100/bf16 crossover (see ``benchmark/`` and
-    ``cute/WARP_SPECIALIZED_STATS_DESIGN.md``).
+    ``save_stats=True`` (training) — ALWAYS use M1, the separate-stats path, regardless of
+    N, and return ``(Y, mean, rstd)``. Backward needs the LN stats; the fused M2 computes
+    them transiently inside the GEMM and discards them, so persisting them via M1's
+    explicit stats pass is the unconditional win once a backward pass follows (it would
+    otherwise have to recompute mean/rstd anyway). Threshold N=256 is the H100/bf16
+    forward-only crossover (see ``benchmark/`` and ``cute/WARP_SPECIALIZED_STATS_DESIGN.md``).
     """
+    if save_stats:
+        return layernorm_linear_cute(
+            x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, return_stats=True
+        )
     n = weight.shape[0]
     if n <= 256:
         return layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded)
