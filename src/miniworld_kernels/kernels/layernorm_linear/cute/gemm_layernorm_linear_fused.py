@@ -56,6 +56,7 @@ from quack.gemm_tvm_ffi_utils import (
 import os
 _DEBUG_MODE = int(os.environ.get("LNL_DEBUG", "0"))
 _WS_DEBUG = int(os.environ.get("LNL_WS_DEBUG", "0"))  # warp-specialized stats bring-up
+_WS = int(os.environ.get("LNL_WS", "0"))  # warp-specialized stats PRODUCTION path
 
 
 @cute.jit
@@ -85,29 +86,31 @@ def _reduce_gmem_coop(mX, m_base, s_rstd, s_c1, wg_off, tidx, len_k, len_k_f, ep
     warp_id = tidx // 32
     lane = cute.arch.lane_idx()
     nstep = len_k // 32
-    rows_per_warp = const_expr(blk_m // nwarps)
+    # ceil so non-divisor nwarps (e.g. 3 stats warps over 128 rows) still cover all rows.
+    rows_per_warp = const_expr((blk_m + nwarps - 1) // nwarps)
     for ri in cutlass.range_constexpr(rows_per_warp):
         r = ri * nwarps + warp_id
-        gm = m_base + r
-        s = Float32(0.0)
-        ssq = Float32(0.0)
-        for j in cutlass.range(nstep):
-            v = mX[gm, j * 32 + lane].to(Float32)
-            s += v
-            ssq += v * v
-        for i in cutlass.range_constexpr(5):  # log2(32) butterfly ALL-reduce
-            s = s + cute.arch.shuffle_sync_bfly(s, offset=1 << i)
-            ssq = ssq + cute.arch.shuffle_sync_bfly(ssq, offset=1 << i)
-        # After the butterfly ALL-reduce every lane holds the full s/ssq, so ALL 32
-        # lanes write the SAME value to s_rstd[wg_off+r] (a benign redundant store).
-        # This keeps the warp CONVERGED — an `if lane == 0` write left the warp
-        # divergent at the next named barrier (synccheck "Divergent thread(s) in warp")
-        # and deadlocked under pingpong.
-        mean = s / len_k_f
-        var = ssq / len_k_f - mean * mean
-        rstd = cute.math.rsqrt(var + eps, fastmath=True)
-        s_rstd[wg_off + r] = rstd
-        s_c1[wg_off + r] = mean * rstd
+        if r < blk_m:
+            gm = m_base + r
+            s = Float32(0.0)
+            ssq = Float32(0.0)
+            for j in cutlass.range(nstep):
+                v = mX[gm, j * 32 + lane].to(Float32)
+                s += v
+                ssq += v * v
+            for i in cutlass.range_constexpr(5):  # log2(32) butterfly ALL-reduce
+                s = s + cute.arch.shuffle_sync_bfly(s, offset=1 << i)
+                ssq = ssq + cute.arch.shuffle_sync_bfly(ssq, offset=1 << i)
+            # After the butterfly ALL-reduce every lane holds the full s/ssq, so ALL 32
+            # lanes write the SAME value to s_rstd[wg_off+r] (a benign redundant store).
+            # This keeps the warp CONVERGED — an `if lane == 0` write left the warp
+            # divergent at the next named barrier (synccheck "Divergent thread(s)") and
+            # deadlocked under pingpong.
+            mean = s / len_k_f
+            var = ssq / len_k_f - mean * mean
+            rstd = cute.math.rsqrt(var + eps, fastmath=True)
+            s_rstd[wg_off + r] = rstd
+            s_c1[wg_off + r] = mean * rstd
 
 
 @cute.jit
@@ -360,6 +363,15 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 varlen_k=varlen_k,
             )
             sched_data = storage.sched_data.get_tensor((4, self.sched_stage))
+        if const_expr(_WS):
+            # init the stats handshake mbarriers (Full[g], Empty[g]) as part of the main
+            # barrier-init protocol: ONE thread per barrier (thread t inits slot t), then
+            # fence; the cluster pipeline_init_wait below publishes them. (All 32 threads
+            # of a warp calling mbarrier_init on the same barrier is illegal — re-init.)
+            sStat_mbar = storage.sStatMbar.data_ptr()
+            if cute.arch.thread_idx()[0] < 2 * self.mma_warp_groups:
+                cute.arch.mbarrier_init(sStat_mbar + cute.arch.thread_idx()[0], 1)
+            cute.arch.mbarrier_init_fence()
         pipeline_init_arrive(cluster_shape_mn=self.cluster_shape_mnk[:-1], is_relaxed=True)
         sA = storage.sA.get_tensor(a_smem_layout.outer, swizzle=a_smem_layout.inner)
         sB = storage.sB.get_tensor(b_smem_layout.outer, swizzle=b_smem_layout.inner)
@@ -383,6 +395,12 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
             TileSchedulerCls.create, tile_sched_params, sched_data, sched_pipeline
         )
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mnk[:-1])
+        if const_expr(_WS):
+            # Empty[g] is now live (published by pipeline_init_wait). Pre-arrive it (ONE
+            # thread per barrier: thread g arrives Empty[g]) so the producer's first
+            # acquire passes; the producer's wait acquires this cross-warp via the mbar.
+            if cute.arch.thread_idx()[0] < self.mma_warp_groups:
+                cute.arch.mbarrier_arrive(sStat_mbar + self.mma_warp_groups + cute.arch.thread_idx()[0])
 
         if warp_idx >= self.ab_load_warp_id:
             cute.arch.setmaxregister_decrease(self.num_regs_load)
@@ -432,29 +450,49 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                     ab_pipeline.producer_tail(ab_producer_state)
                 if is_scheduler_warp:
                     tile_scheduler.producer_tail()
-            elif const_expr(_WS_DEBUG):
-                # [bring-up] STATS WARPS (the idle load-WG warps 9-11): independently
-                # replicate the STATIC tile sequence (work_idx = cluster_idx, += grid.z;
-                # _delinearize handles the swizzle) and dump per-row rstd to mDbg. Math
-                # WGs are untouched -> validates the warp-specialized scheduler+reduction
-                # in isolation. (warp_idx >= ab_load_warp_id + num_ab_load_warps.)
+            elif const_expr(_WS_DEBUG or _WS):
+                # STATS WARPS (the idle load-WG warps 9-11): independently replicate the
+                # STATIC tile sequence (work_idx = cluster_idx, += grid.z; _delinearize
+                # handles the swizzle) and reduce X[m-tile] from gmem ON THESE WARPS, in
+                # parallel with the math WGs' WGMMA (no MMA-throughput theft, no sA
+                # recycle race). _WS_DEBUG dumps to mDbg; _WS feeds the math WGs via the
+                # per-WG single-stage handshake (Empty[g]/Full[g] mbarriers).
                 BLK_M_s = const_expr(self.cta_tile_shape_mnk[0])
                 N_STAT_WARPS = const_expr(
                     self.threads_per_cta // 32 - (self.ab_load_warp_id + self.num_ab_load_warps)
                 )
+                MWG = const_expr(self.mma_warp_groups)
                 stidx = cute.arch.thread_idx()[0] - (self.ab_load_warp_id + self.num_ab_load_warps) * 32
+                s_rstd = epi_smem_tensors[self._epi_smem_map["mRstd"]]
+                s_c1 = epi_smem_tensors[self._epi_smem_map["mC1"]]
                 s_sched = TileSchedulerCls()
                 s_widx = s_sched._current_work_idx
                 gz = Int32(cute.arch.grid_dim()[2])
+                s_count = Int32(0)
                 s_wt = s_sched._delinearize_work_idx(s_widx)
                 while s_wt.is_valid_tile:
                     s_mc = s_wt.tile_idx
                     s_lenk = varlen_manager.len_k(s_mc[3])
-                    _stats_dump_gmem(
-                        epilogue_params.mX, epilogue_params.mDbg, s_mc[0] * BLK_M_s, stidx,
-                        s_lenk, Float32(s_lenk), epilogue_params.eps,
-                        blk_m=BLK_M_s, nwarps=N_STAT_WARPS,
-                    )
+                    if const_expr(_WS):
+                        g = s_count % MWG               # which math WG owns this tile
+                        ph = (s_count // MWG) % 2        # handshake phase for this g
+                        cute.arch.mbarrier_wait(sStat_mbar + MWG + g, ph)   # Empty[g]
+                        _reduce_gmem_coop(
+                            epilogue_params.mX, s_mc[0] * BLK_M_s, s_rstd, s_c1, g * BLK_M_s,
+                            stidx, s_lenk, Float32(s_lenk), epilogue_params.eps,
+                            blk_m=BLK_M_s, nwarps=N_STAT_WARPS,
+                        )
+                        cute.arch.barrier(barrier_id=10, number_of_threads=N_STAT_WARPS * 32)
+                        cute.arch.fence_view_async_shared()
+                        if stidx == 0:
+                            cute.arch.mbarrier_arrive(sStat_mbar + g)       # Full[g]
+                    else:
+                        _stats_dump_gmem(
+                            epilogue_params.mX, epilogue_params.mDbg, s_mc[0] * BLK_M_s, stidx,
+                            s_lenk, Float32(s_lenk), epilogue_params.eps,
+                            blk_m=BLK_M_s, nwarps=N_STAT_WARPS,
+                        )
+                    s_count = s_count + Int32(1)
                     s_widx = s_widx + gz
                     s_wt = s_sched._delinearize_work_idx(s_widx)
 
@@ -511,6 +549,10 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
             # n-tiles (the AlongN raster gives a WG consecutive same-m tiles). prev_m
             # tracks the last m-tile this WG reduced.
             prev_m = Int32(-1)
+            # warp-specialized consumer handshake: this WG's per-tile phase (mbar ptr
+            # = the hoisted sStat_mbar from the init block, reused to avoid touching the
+            # SharedStorage object inside a flattened dynamic-if branch).
+            ws_phase = Int32(0)
             if const_expr(self.pingpong):
                 if warp_idx >= 4:
                     epi_read_state.advance_iters(c_tile_cnt)
@@ -526,7 +568,18 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 len_k_f = Float32(len_k)
                 m_tile = tile_coord_mnkl[0]
                 do_reduce = Boolean(True)  # TODO reuse disabled (was buggy at BLK_N>128)
-                if const_expr(self.pingpong):
+                if const_expr(_WS):
+                    # WARP-SPECIALIZED: stats are produced by the idle load-WG warps and
+                    # land in s_rstd/s_c1[wg half] via the Full[g] mbarrier. The math WG
+                    # does a PLAIN GEMM (full WGMMA pipelining, no reduction stealing
+                    # throughput) and just waits for its stats before the epilogue.
+                    self.pingpong_barrier_sync(warp_group_idx, stage="mma")
+                    ab_read_state = self.mma(
+                        ab_pipeline, ab_read_state, mma_fn, acc, None, k_tile_cnt, warp_group_idx,
+                    )
+                    cute.arch.mbarrier_wait(sStat_mbar + warp_group_idx, ws_phase)  # Full[g]
+                    self.pingpong_barrier_sync(warp_group_idx, stage="epi")
+                elif const_expr(self.pingpong):
                     # --- LN stats from the GEMM's sA smem (already loaded by the TMA, so
                     # NO extra gmem traffic) reduced ON CUDA CORES in parallel with the
                     # WGMMA. pingpong: each WG runs a full tile, thread t owns row t, so
@@ -582,6 +635,12 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                     tRS_rD, None, None, tiled_copy_r2s, tRS_sD, None, None, None, copy_D, None,
                     tile_coord_mnkl, varlen_manager, self.epilogue_barrier, tile_scheduler, tidx, is_tma_warp,
                 )
+                if const_expr(_WS):
+                    # epilogue done reading s_rstd[wg half] -> free the stage (Empty[g])
+                    # for the producer's next tile; advance this WG's handshake phase.
+                    if tidx == 0:
+                        cute.arch.mbarrier_arrive(sStat_mbar + self.mma_warp_groups + warp_group_idx)
+                    ws_phase = ws_phase ^ Int32(1)
                 if const_expr(self.pingpong):
                     if is_tma_warp:
                         epi_store_pipeline.producer_tail()
@@ -657,6 +716,9 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
             epi_pipeline_array_ptr: cute.struct.MemRange[cutlass.Int64, self.epi_c_stage * 2]
             sched_pipeline_array_ptr: cute.struct.MemRange[cutlass.Int64, self.sched_stage * 2]
             sched_data: cute.struct.MemRange[Int32, self.sched_stage * 4]
+            # warp-specialized stats: 2 mbarriers per math WG (Full, Empty) for the
+            # single-stage producer(stats warps)->consumer(math WG) handshake.
+            sStatMbar: cute.struct.MemRange[cutlass.Int64, 2 * self.mma_warp_groups]
             sD: cute.struct.Align[
                 cute.struct.MemRange[self.d_dtype if self.d_dtype is not None else Int32, epi_smem_size],
                 self.buffer_align_bytes,

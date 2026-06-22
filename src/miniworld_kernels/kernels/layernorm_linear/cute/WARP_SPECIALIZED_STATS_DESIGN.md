@@ -132,11 +132,21 @@ divergent-barrier deadlock, the bug synccheck caught earlier).
    pre-advances one stage. Tile→WG split is `g = tile_count % mma_warp_groups`, matching
    the leapfrog, so producer full-arrives and consumer waits match 1:1 (no deadlock).
    Termination is automatic (producer's STATIC `is_valid_tile`; consumers' sched stream).
-3. Verify cos=0.999997 all shapes. Bench: large d should drop to ≈ fused-GEMM-only
-   (≈ M1's GEMM, measured 0.63 ms @ d768 M262144) → **win** (M1 also pays a stats
-   kernel). Watch small-d regression (3 stats warps may bottleneck fast tiles → risk-1a:
-   keep the in-math-warp path for d≤256).
-4. Tune S_STAT; risk-1b (4th WG) if 3 warps bottleneck.
+3. ✅ **DONE & VERIFIED CORRECT, but SLOWER — risk-1 materialized severely.** Full
+   producer→consumer mbarrier handshake works (`LNL_WS=1`, cos=0.999997 all 18 shapes).
+   The init bug that cost several iterations: `mbarrier_init`/pre-arrive must be ONE
+   thread per barrier (`if tid < 2*MWG`); `if warp_idx==0` re-inits each barrier 32×
+   → "Illegal barrier arrive" (found via `compute-sanitizer --tool memcheck`). BUT bench
+   is **much slower everywhere** (d768 M262144: 5.8 ms vs in-math-warp 1.2, M1 0.61;
+   even d128: 0.059 vs 0.013). Root cause: only **3 idle warps** read X from gmem —
+   96 threads can't saturate HBM (d768 re-reads 400 MB), so the producer is the critical
+   path and the math WGs stall on `Full[g]`; the single-stage handshake serializes on
+   top. The "gmem re-read hidden under WGMMA on separate warps" premise fails: 3 warps
+   are too few. ⇒ (A) as designed is a **net loss**. Shipping stays the in-math-warp
+   path (`_WS=0`, wins d≤256). The `_WS` code is kept gated for the record.
+4. To make (A) win would need the producer to read from **sA smem** (no gmem re-read,
+   smem BW), not gmem — but that reintroduces the sA recycle race the whole thing was
+   meant to avoid; OR a real 4th math-WG-sized producer (occupancy cost). Not pursued.
 
 ## Fallback
 If 3-warp throughput / scheduler-sync proves intractable, keep the current shipping
