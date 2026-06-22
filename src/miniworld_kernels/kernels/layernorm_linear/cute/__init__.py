@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._tuned import m1_config_for, m2_config_for
 from .gemm_layernorm_linear import fold_for_gemm, layernorm_linear_cute
 from .gemm_layernorm_linear_fused import layernorm_linear_cute_fused
 
@@ -37,11 +38,16 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     otherwise have to recompute mean/rstd anyway). Threshold N=256 is the H100/bf16
     forward-only crossover (see ``benchmark/`` and ``cute/WARP_SPECIALIZED_STATS_DESIGN.md``).
     """
+    m, n = x.shape[0], weight.shape[0]
     if save_stats:
         return layernorm_linear_cute(
-            x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, return_stats=True
+            x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded,
+            return_stats=True, config=m1_config_for(m, n),
         )
-    n = weight.shape[0]
     if n <= 256:
-        return layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded)
-    return layernorm_linear_cute(x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded)
+        return layernorm_linear_cute_fused(
+            x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=m2_config_for(m, n),
+        )
+    return layernorm_linear_cute(
+        x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=m1_config_for(m, n),
+    )
