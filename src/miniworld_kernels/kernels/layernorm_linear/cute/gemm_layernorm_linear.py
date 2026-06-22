@@ -274,6 +274,7 @@ def layernorm_linear_cute(
     *,
     prefolded: tuple[Tensor, Tensor, Tensor] | None = None,
     return_stats: bool = False,
+    config=None,
 ):
     """Fused forward LayerNormLinear (Milestone 1: fused stats + fused GEMM epilogue).
 
@@ -294,7 +295,7 @@ def layernorm_linear_cute(
     S2 = S.float().contiguous().view(1, N)
     B22 = B2.float().contiguous().view(1, N)
     Y = torch.empty(M, N, device=x.device, dtype=x.dtype)
-    gemm_layernorm_linear(x, Bw, Y, rstd2, c12, S2, B22)
+    gemm_layernorm_linear(x, Bw, Y, rstd2, c12, S2, B22, config=config)
     if return_stats:
         return Y, c1 / rstd, rstd  # mean = c1/rstd (c1 = mean*rstd), both fp32 [M]
     return Y

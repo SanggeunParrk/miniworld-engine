@@ -774,7 +774,10 @@ _FUSED_CONFIG = dict(tile_m=128, tile_n=128, cluster_m=1, cluster_n=1, pingpong=
 
 
 @jit_cache
-def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype, device_capacity):
+def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype, device_capacity, cfg):
+    # cfg = (tile_m, tile_n, cluster_m, cluster_n, pingpong) — part of the jit_cache key so
+    # the tuner can compile/run many configs without collision (default = _FUSED_CONFIG).
+    tile_m, tile_n, cluster_m, cluster_n, pingpong = cfg
     mA, mB, mD, mC, m, n, k, l = make_fake_gemm_tensors(
         a_dtype, b_dtype, d_dtype, None, a_major, b_major, d_major, None
     )
@@ -789,26 +792,33 @@ def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dty
     varlen_args = make_fake_varlen_args(False, False, False, None)
     return compile_gemm_kernel(
         GemmLNLFusedSm90, a_dtype,
-        (_FUSED_CONFIG["tile_m"], _FUSED_CONFIG["tile_n"]),
-        (_FUSED_CONFIG["cluster_m"], _FUSED_CONFIG["cluster_n"], 1),
-        _FUSED_CONFIG["pingpong"], _FUSED_CONFIG["pingpong"], False, False, device_capacity,  # persistent tied to pingpong
+        (tile_m, tile_n),
+        (cluster_m, cluster_n, 1),
+        pingpong, pingpong, False, False, device_capacity,  # persistent tied to pingpong
         mA, mB, mD, mC, epi_args, scheduler_args, varlen_args,
     )
 
 
-def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None):
+def _cfg_tuple(config):
+    """Normalize a config (dict or None) into the hashable cfg tuple for _compile_fused."""
+    c = config if config is not None else _FUSED_CONFIG
+    return (c["tile_m"], c["tile_n"], c["cluster_m"], c["cluster_n"], c["pingpong"])
+
+
+def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None):
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "SM90 (H100) only"
+    cfg = _cfg_tuple(config)
     A3, B3, D3 = A.unsqueeze(0), B.unsqueeze(0), D.unsqueeze(0)
     A_p, B_p, D_p, _ = perm3d(A3, B3, D3, None)
     a_major, b_major, d_major, _ = get_majors(A_p, B_p, D_p, None)
     a_dtype, b_dtype, d_dtype, _ = get_dtypes(A, B, D, None)
     vec_dtype = torch2cute_dtype_map[S.dtype]
-    compiled_fn = _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype, device_capacity)
+    compiled_fn = _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype, device_capacity, cfg)
     from quack.cache_utils import COMPILE_ONLY
     if COMPILE_ONLY:
         return
-    max_active_clusters = get_max_active_clusters(1)
+    max_active_clusters = get_max_active_clusters(cfg[2] * cfg[3])
     epi_args = GemmLNLFusedSm90.EpilogueArguments(
         mS=S, mB2=B2, eps=Float32(eps), mX=A, mDbg=mDbg,
         add_to_output=None, rounding_mode=None,
@@ -824,8 +834,11 @@ def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None):
     compiled_fn(A_p, B_p, D_p, None, epi_args, scheduler_args, varlen_args, None)
 
 
-def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *, prefolded=None):
-    """Fused forward LayerNormLinear — stats computed inside the GEMM (Milestone 2)."""
+def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *, prefolded=None, config=None):
+    """Fused forward LayerNormLinear — stats computed inside the GEMM (Milestone 2).
+
+    ``config`` (dict with tile_m/tile_n/cluster_m/cluster_n/pingpong) overrides the shipping
+    ``_FUSED_CONFIG`` — used by the tuner to sweep tile shapes."""
     from .gemm_layernorm_linear import fold_for_gemm
     assert x.is_cuda and x.dim() == 2
     M, K = x.shape
@@ -836,5 +849,5 @@ def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float 
     S2 = S.float().contiguous().view(1, N)
     B22 = B2.float().contiguous().view(1, N)
     Y = torch.empty(M, N, device=x.device, dtype=x.dtype)
-    gemm_lnl_fused(x, Bw, Y, S2, B22, eps)
+    gemm_lnl_fused(x, Bw, Y, S2, B22, eps, config=config)
     return Y

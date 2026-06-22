@@ -31,8 +31,10 @@ import matplotlib.pyplot as plt
 HEADER_RE = re.compile(r"M=(\d+)\s+d_in=(\d+)\s+d_out=(\d+)")
 # backends with both fwd and fwd+bwd:
 TIME_RE = re.compile(r"(torch\.compile|TE)\s+fwd=([\d.]+)\s*ms\s+fwd\+bwd=([\d.]+)\s*ms")
-# forward-only backends (e.g. our fused inference kernel):
-FWD_ONLY_RE = re.compile(r"\b(cute-fused|cute|triton)\s+fwd=([\d.]+)\s*ms")
+# forward-only timing lines (our fused inference kernel; also torch.compile/TE when a
+# forward-only sweep like tune.py omits fwd+bwd). cute-fused MUST precede cute so the
+# alternation doesn't match the "cute" prefix of "cute-fused".
+FWD_ONLY_RE = re.compile(r"(torch\.compile|TE|cute-fused|cute|triton)\s+fwd=([\d.]+)\s*ms")
 
 # Display order; only backends actually present in the log are shown.
 BACKENDS = ["torch.compile", "TE", "cute", "cute-fused", "triton"]
@@ -98,21 +100,30 @@ def make_table(data: dict, metric: str) -> str:
 
 
 def make_plot(data: dict, metric: str, label: str, out_png: Path, title: str) -> None:
+    """Grouped BAR chart: one subplot per M, x = d groups, one bar per backend."""
     Ms, ds = axes(data)
     fig, axs = plt.subplots(1, len(Ms), figsize=(5 * len(Ms), 4.2), squeeze=False)
     backends = backends_for(data, metric)
+    nb = max(len(backends), 1)
+    width = 0.8 / nb
+    xs = list(range(len(ds)))
     for j, M in enumerate(Ms):
         ax = axs[0][j]
-        for backend in backends:
+        for bi, backend in enumerate(backends):
             ys = [data.get((M, d), {}).get(backend, {}).get(metric) for d in ds]
-            ax.plot(ds, ys, marker="o", label=backend)
+            ys_plot = [(y if y is not None else 0.0) for y in ys]
+            offs = (bi - (nb - 1) / 2) * width
+            bars = ax.bar([x + offs for x in xs], ys_plot, width, label=backend)
+            ax.bar_label(bars, labels=[("" if y is None else f"{y:.3f}") for y in ys],
+                         fontsize=6, rotation=90, padding=2)
         ax.set_title(f"M = {M}")
         ax.set_xlabel("d (= d_in = d_out)")
-        ax.set_xticks(ds)
-        ax.grid(True, alpha=0.3)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(ds)
+        ax.grid(True, axis="y", alpha=0.3)
         if j == 0:
             ax.set_ylabel(f"{label} latency (ms)")
-        ax.legend()
+        ax.legend(fontsize=8)
     fig.suptitle(f"{title} — {label} (lower is better)")
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
@@ -135,6 +146,8 @@ def main() -> None:
 
     md = [f"# {args.title}\n", f"_Source: `{args.out_path}`_\n"]
     for metric, label in METRICS:
+        if not backends_for(data, metric):
+            continue  # e.g. a forward-only sweep has no fwd+bwd data
         png = args.output_dir / f"{name}_{metric.replace('+', '_')}.png"
         make_plot(data, metric, label, png, args.title)
         md.append(f"## {label} latency (ms) — `torch.compile` / **TE** (bold = faster)\n")
@@ -144,8 +157,9 @@ def main() -> None:
     md_path.write_text("\n".join(md))
     print(f"wrote {md_path}")
     for metric, _ in METRICS:
-        fname = f"{name}_{metric.replace('+', '_')}.png"
-        print(f"wrote {args.output_dir / fname}")
+        png = args.output_dir / f"{name}_{metric.replace('+', '_')}.png"
+        if png.exists():
+            print(f"wrote {png}")
 
 
 if __name__ == "__main__":
