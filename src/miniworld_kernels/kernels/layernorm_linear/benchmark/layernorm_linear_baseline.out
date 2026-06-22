@@ -1,0 +1,34 @@
+torch 2.10.0+cu128  device NVIDIA H100 80GB HBM3
+transformer_engine 2.16.0
+
+=== M=262144  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=3.041e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.716e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.278e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.3405 ms  fwd+bwd=0.9945 ms
+  TE             fwd=0.3698 ms  fwd+bwd=1.1700 ms
+
+=== M=65536  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.449e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.900e-05  cos=1.000000
+  dWl  max|abs|=4.000e+00  rel_fro=1.159e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1648 ms  fwd+bwd=0.4148 ms
+  TE             fwd=0.1373 ms  fwd+bwd=0.4200 ms
+
+=== M=16384  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.970e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.977e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=7.200e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1048 ms  fwd+bwd=0.3581 ms
+  TE             fwd=0.0908 ms  fwd+bwd=0.3028 ms
+
+=== M=262144  d_in=768  d_out=3072  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=3.071e-05  cos=1.000000
+  dx   max|abs|=3.125e-02  rel_fro=1.739e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.347e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=2.2528 ms  fwd+bwd=6.8193 ms
+  TE             fwd=2.2653 ms  fwd+bwd=7.1460 ms

@@ -1,0 +1,185 @@
+===VERIFY===
+18
+===BENCH===
+torch 2.10.0+cu128  device NVIDIA H100 80GB HBM3
+transformer_engine 2.16.0
+
+=== M=16384  d_in=128  d_out=128  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.169e-05  cos=1.000000
+  dx   max|abs|=3.906e-03  rel_fro=9.535e-06  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=7.071e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0158 ms  fwd+bwd=0.2173 ms
+  TE             fwd=0.0172 ms  fwd+bwd=0.1987 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute           fwd=0.0150 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-fused     fwd=0.0128 ms  (fold cached)
+
+=== M=65536  d_in=128  d_out=128  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=1.883e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.162e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=5.662e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0373 ms  fwd+bwd=0.2585 ms
+  TE             fwd=0.0423 ms  fwd+bwd=0.2221 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute           fwd=0.0311 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute-fused     fwd=0.0228 ms  (fold cached)
+
+=== M=262144  d_in=128  d_out=128  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.341e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.312e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.648e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1239 ms  fwd+bwd=0.4195 ms
+  TE             fwd=0.1385 ms  fwd+bwd=0.5582 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.557e-03  cos=0.999997
+  cute           fwd=0.0937 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.557e-03  cos=0.999997
+  cute-fused     fwd=0.0620 ms  (fold cached)
+
+=== M=16384  d_in=256  d_out=256  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.324e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.197e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=7.263e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0224 ms  fwd+bwd=0.2330 ms
+  TE             fwd=0.0255 ms  fwd+bwd=0.1918 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.0229 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.0190 ms  (fold cached)
+
+=== M=65536  d_in=256  d_out=256  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.530e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.264e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=6.497e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0606 ms  fwd+bwd=0.2657 ms
+  TE             fwd=0.0690 ms  fwd+bwd=0.2613 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.556e-03  cos=0.999997
+  cute           fwd=0.0566 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.556e-03  cos=0.999997
+  cute-fused     fwd=0.0486 ms  (fold cached)
+
+=== M=262144  d_in=256  d_out=256  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.623e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.260e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.572e-04  cos=1.000000
+  dg   max|abs|=9.766e-04  rel_fro=1.990e-07  cos=1.000000
+  torch.compile  fwd=0.2043 ms  fwd+bwd=0.6784 ms
+  TE             fwd=0.2274 ms  fwd+bwd=0.7935 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.1815 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.1616 ms  (fold cached)
+
+=== M=16384  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=4.012e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.911e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=8.443e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0297 ms  fwd+bwd=0.2533 ms
+  TE             fwd=0.0343 ms  fwd+bwd=0.1997 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.0247 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.0292 ms  (fold cached)
+
+=== M=65536  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.226e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.787e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=1.063e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0939 ms  fwd+bwd=0.3511 ms
+  TE             fwd=0.1015 ms  fwd+bwd=0.3474 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.0702 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.0903 ms  (fold cached)
+
+=== M=262144  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.133e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.686e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.434e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.3007 ms  fwd+bwd=1.1585 ms
+  TE             fwd=0.3393 ms  fwd+bwd=1.1163 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.2444 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.3260 ms  (fold cached)
+
+=== M=16384  d_in=512  d_out=512  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=1.981e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.455e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=4.752e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0368 ms  fwd+bwd=0.2533 ms
+  TE             fwd=0.0413 ms  fwd+bwd=0.2015 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.0353 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.0440 ms  (fold cached)
+
+=== M=65536  d_in=512  d_out=512  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.976e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.482e-05  cos=1.000000
+  dWl  max|abs|=4.000e+00  rel_fro=1.038e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1148 ms  fwd+bwd=0.4201 ms
+  TE             fwd=0.1254 ms  fwd+bwd=0.4164 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.1017 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.1487 ms  (fold cached)
+
+=== M=262144  d_in=512  d_out=512  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=3.221e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.319e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.403e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.4179 ms  fwd+bwd=1.4546 ms
+  TE             fwd=0.4509 ms  fwd+bwd=1.3858 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.3570 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.5603 ms  (fold cached)
+
+=== M=16384  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.171e-05  cos=1.000000
+  dx   max|abs|=1.562e-02  rel_fro=1.837e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=4.986e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0580 ms  fwd+bwd=0.2641 ms
+  TE             fwd=0.0586 ms  fwd+bwd=0.2051 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.563e-03  cos=0.999997
+  cute           fwd=0.0476 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.563e-03  cos=0.999997
+  cute-fused     fwd=0.0848 ms  (fold cached)
+
+=== M=65536  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.767e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.647e-05  cos=1.000000
+  dWl  max|abs|=4.000e+00  rel_fro=9.092e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.2001 ms  fwd+bwd=0.6721 ms
+  TE             fwd=0.2028 ms  fwd+bwd=0.6036 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.563e-03  cos=0.999997
+  cute           fwd=0.1611 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.563e-03  cos=0.999997
+  cute-fused     fwd=0.3142 ms  (fold cached)
+
+=== M=262144  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=3.043e-05  cos=1.000000
+  dx   max|abs|=1.562e-02  rel_fro=1.741e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.326e-04  cos=1.000000
+  dg   max|abs|=5.000e-01  rel_fro=6.182e-05  cos=1.000000
+  torch.compile  fwd=0.7418 ms  fwd+bwd=2.4432 ms
+  TE             fwd=0.7627 ms  fwd+bwd=2.2511 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.563e-03  cos=0.999997
+  cute           fwd=0.6099 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.563e-03  cos=0.999997
+  cute-fused     fwd=1.2084 ms  (fold cached)
