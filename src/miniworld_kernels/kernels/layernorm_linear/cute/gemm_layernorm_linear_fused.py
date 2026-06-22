@@ -600,8 +600,11 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                         mean = red_sum[0] / len_k_f
                         var = red_sumsq[0] / len_k_f - mean * mean
                         rstd = cute.math.rsqrt(var + epilogue_params.eps, fastmath=True)
-                        s_rstd[wg_off + tidx] = rstd
-                        s_c1[wg_off + tidx] = mean * rstd
+                        # only the first BLK_M threads own a row (BLK_M may be < TPWG,
+                        # e.g. tile_m=64). The guard is warp-uniform -> no divergence.
+                        if tidx < BLK_M:
+                            s_rstd[wg_off + tidx] = rstd
+                            s_c1[wg_off + tidx] = mean * rstd
                         prev_m = m_tile
                     self.pingpong_barrier_sync(warp_group_idx, stage="epi")
                 else:
