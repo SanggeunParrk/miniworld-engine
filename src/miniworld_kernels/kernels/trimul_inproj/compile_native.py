@@ -10,10 +10,15 @@ too gets compiled. This is the "compile everything consistently" path.
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
+from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
 
 from miniworld_kernels.kernels.trimul_inproj.cute.launch import prepack_lr_operand
+
+
+def _ln(x, w, b, eps, layout):
+    o = layer_norm_transpose(x, w, b, eps=eps, layout=layout)
+    return o[0] if isinstance(o, tuple) else o
 
 
 # ── cute front as a custom op ────────────────────────────────────────────────
@@ -97,13 +102,14 @@ class TriMulCompile(torch.nn.Module):
 
     def forward(self, pair, mask=None):
         B, L, _, D = pair.shape
-        x_n = F.layer_norm(pair, (D,), self.ln_in_w, self.ln_in_b, self.eps)
+        # fused cuequiv LN (differentiable, fast bwd); LN_out fuses the bdij->bijd transpose
+        x_n = _ln(pair, self.ln_in_w, self.ln_in_b, self.eps, "bijd->bijd")
         if mask is not None:
             m2 = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).unsqueeze(-1).to(x_n.dtype)
             x_n = x_n * m2
         lr = _front(x_n, self.WL, self.WLg, self.WR, self.WRg, self.b_lr)  # (B,2D,L,L)
         left_b, right_b = lr[:, :self.D], lr[:, self.D:]
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)       # (B,D,L,L)
-        out_n = F.layer_norm(tri.permute(0, 2, 3, 1), (D,), self.ln_out_w, self.ln_out_b, self.eps)
+        out_n = _ln(tri, self.ln_out_w, self.ln_out_b, self.eps, "bdij->bijd")  # (B,L,L,D)
         gate = torch.sigmoid(x_n @ self.Wg)
         return (out_n @ self.Wp) * gate
