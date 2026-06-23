@@ -13,26 +13,31 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from miniworld_kernels.kernels.trimul_inproj.cute.launch import (
-    prepack_lr_operand, trimul_inproj_cute_forward,
-)
+from miniworld_kernels.kernels.trimul_inproj.cute.launch import prepack_lr_operand
 
 
 # ── cute front as a custom op ────────────────────────────────────────────────
+# Returns the ONE combined [B,2D,L,L] buffer (no clone, no aliasing); the module
+# slices left=[:,:D]/right=[:,D:] as views (torch handles it under compile).
 @torch.library.custom_op("trimul_inproj::front", mutates_args=())
 def _front(x_n: Tensor, WL: Tensor, WLg: Tensor, WR: Tensor, WRg: Tensor,
-           b_lr: Tensor) -> tuple[Tensor, Tensor]:
-    left_b, right_b, _ = trimul_inproj_cute_forward(
-        x_n, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False, b_lr=b_lr)
-    # left_b/right_b are two slices of ONE combined [B,2D,L,L] buffer -> they alias
-    # each other; custom_op forbids aliased outputs. Clone to independent tensors.
-    return left_b.contiguous().clone(), right_b.contiguous().clone()
+           b_lr: Tensor) -> Tensor:
+    from quack.gemm_interface import gemm_act
+
+    from miniworld_kernels.kernels.trimul_inproj.cute import _bdll_patch
+    _bdll_patch.apply()
+    B, L, _, D = x_n.shape
+    x_flat = x_n.reshape(B * L * L, D)
+    lr = torch.empty(B, 2 * D, L, L, device=x_n.device, dtype=x_n.dtype)
+    lr_view = lr.view(2 * D, L * L).T  # (M, 2D) strides (1, L*L)
+    gemm_act(A=x_flat, B=b_lr, activation="glu", store_preact=False, postact_out=lr_view)
+    return lr
 
 
 @_front.register_fake
 def _(x_n, WL, WLg, WR, WRg, b_lr):
     B, L, _, D = x_n.shape
-    return (x_n.new_empty(B, D, L, L), x_n.new_empty(B, D, L, L))
+    return x_n.new_empty(B, 2 * D, L, L)
 
 
 def _front_setup(ctx, inputs, output):
@@ -40,7 +45,7 @@ def _front_setup(ctx, inputs, output):
     ctx.save_for_backward(x_n, WL, WLg, WR, WRg)
 
 
-def _front_backward(ctx, d_left_b, d_right_b):
+def _front_backward(ctx, d_lr):
     x_n, WL, WLg, WR, WRg = ctx.saved_tensors
     B, L, _, D = x_n.shape
     M = B * L * L
@@ -51,8 +56,8 @@ def _front_backward(ctx, d_left_b, d_right_b):
     pL, gLl, pR, gRl = pg[:, :D], pg[:, D:2 * D], pg[:, 2 * D:3 * D], pg[:, 3 * D:]
     gL, gR = torch.sigmoid(gLl), torch.sigmoid(gRl)
 
-    dL = d_left_b.permute(0, 2, 3, 1).reshape(M, D)        # bdll -> (M,D)
-    dR = d_right_b.permute(0, 2, 3, 1).reshape(M, D)
+    dL = d_lr[:, :D].permute(0, 2, 3, 1).reshape(M, D)     # combined bdll -> (M,D)
+    dR = d_lr[:, D:].permute(0, 2, 3, 1).reshape(M, D)
     d_pL = dL * gL
     d_gLlog = (dL * pL) * gL * (1 - gL)
     d_pR = dR * gR
@@ -96,7 +101,8 @@ class TriMulCompile(torch.nn.Module):
         if mask is not None:
             m2 = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).unsqueeze(-1).to(x_n.dtype)
             x_n = x_n * m2
-        left_b, right_b = _front(x_n, self.WL, self.WLg, self.WR, self.WRg, self.b_lr)
+        lr = _front(x_n, self.WL, self.WLg, self.WR, self.WRg, self.b_lr)  # (B,2D,L,L)
+        left_b, right_b = lr[:, :self.D], lr[:, self.D:]
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)       # (B,D,L,L)
         out_n = F.layer_norm(tri.permute(0, 2, 3, 1), (D,), self.ln_out_w, self.ln_out_b, self.eps)
         gate = torch.sigmoid(x_n @ self.Wg)
