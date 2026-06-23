@@ -261,6 +261,10 @@ class _LNLEpiMixin(GemmDefaultEpiMixin):
                 pass                       # debug: identity, output = acc (x@W2^T)
             else:
                 tRS_rD[i] = rstd[i] * tRS_rD[i] - c1[i] * S[i] + B2[i]
+                # optional fused gate-mul: C carries the gate tensor (M,N), so
+                # Y = (LN(X)@W) ⊙ gate in one kernel (trimul fused back-half).
+                if const_expr(tRS_rC is not None):
+                    tRS_rD[i] = tRS_rD[i] * tRS_rC[i].to(Float32)
         return None
 
 
@@ -626,16 +630,32 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                         tma_atom_d, varlen_manager.offset_batch_epi(mD_mnl, batch_idx),
                         self.cta_tile_shape_mnk[:2], self.epi_tile, sD, tile_coord_mnkl,
                     )
+                # C-input load plumbing (the optional fused gate-mul tensor) — must be
+                # wired or the epilogue receives tRS_rC=None and silently drops the gate.
+                copy_C = None
+                if const_expr(has_C):
+                    copy_C_fn, _, _ = self.epilog_gmem_copy_and_partition(
+                        tma_atom_c, varlen_manager.offset_batch_epi(mC_mnl, batch_idx),
+                        self.cta_tile_shape_mnk[:2], self.epi_tile, sC, tile_coord_mnkl,
+                    )
+                    copy_C = copy_utils.tma_producer_copy_fn(copy_C_fn, epi_pipeline)
                 d_dtype_for_layout = self.d_dtype if self.d_dtype is not None else cutlass.BFloat16
                 tiled_copy_r2s, tRS_rD, tRS_sD = self.epilog_smem_store_and_partition(
                     tiled_mma, self.d_layout, d_dtype_for_layout, sD, tidx
                 )
                 tRS_rAcc = self.epi_retile_acc(acc, tRS_rD, tiled_copy_r2s)
                 load_acc_subtile = partial(self.epi_load_acc_subtile, tRS_rAcc)
+                if const_expr(has_C):
+                    tiled_copy_s2r, tRS_rC, tSR_rC, tSR_sC = self.epilog_smem_load_and_partition(
+                        tiled_mma, self.c_layout, self.c_dtype, sC, tRS_rD.layout, tidx
+                    )
+                else:
+                    tiled_copy_s2r, tSR_sC, tRS_rC, tSR_rC = None, None, None, None
                 epi_read_state, epi_producer_state = self.epilogue(
                     epilogue_params, epi_smem_tensors, epi_pipeline, epi_store_pipeline,
                     epi_read_state, epi_producer_state, self.epi_tile, load_acc_subtile,
-                    tRS_rD, None, None, tiled_copy_r2s, tRS_sD, None, None, None, copy_D, None,
+                    tRS_rD, tRS_rC, None, tiled_copy_r2s, tRS_sD, tiled_copy_s2r, tSR_rC, tSR_sC,
+                    copy_D, copy_C,
                     tile_coord_mnkl, varlen_manager, self.epilogue_barrier, tile_scheduler, tidx, is_tma_warp,
                 )
                 if const_expr(_WS):
@@ -703,6 +723,10 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 mD, self.epi_smem_layout_staged, self.epi_tile, op_type="store",
             )
         tma_atom_c, tma_tensor_c = None, None
+        if const_expr(mC is not None):  # build the C-input TMA load (fork dropped this)
+            tma_atom_c, tma_tensor_c = self._make_tma_epi_atoms_and_tensors(
+                mC, self.epi_c_smem_layout_staged, self.epi_tile, op_type="load",
+            )
         epilogue_params = self.epi_to_underlying_arguments(epilogue_args)
         varlen_params = VarlenManager.to_underlying_arguments(varlen_args)
         TileSchedulerCls = self.get_scheduler_class(varlen_m=varlen_m)
@@ -774,12 +798,14 @@ _FUSED_CONFIG = dict(tile_m=128, tile_n=128, cluster_m=1, cluster_n=1, pingpong=
 
 
 @jit_cache
-def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype, device_capacity, cfg):
+def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype,
+                   device_capacity, cfg, c_dtype=None, c_major=None):
     # cfg = (tile_m, tile_n, cluster_m, cluster_n, pingpong) — part of the jit_cache key so
     # the tuner can compile/run many configs without collision (default = _FUSED_CONFIG).
+    # c_dtype/c_major non-None enables the optional C input = a fused gate-mul tensor.
     tile_m, tile_n, cluster_m, cluster_n, pingpong = cfg
     mA, mB, mD, mC, m, n, k, l = make_fake_gemm_tensors(
-        a_dtype, b_dtype, d_dtype, None, a_major, b_major, d_major, None
+        a_dtype, b_dtype, d_dtype, c_dtype, a_major, b_major, d_major, c_major
     )
     mS = fake_tensor(vec_dtype, (l, n), leading_dim=1, divisibility=4)
     mB2 = fake_tensor(vec_dtype, (l, n), leading_dim=1, divisibility=4)
@@ -809,16 +835,18 @@ def _cfg_tuple(config):
     return (c["tile_m"], c["tile_n"], c["cluster_m"], c["cluster_n"], c["pingpong"])
 
 
-def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None):
+def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None, gate=None):
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "SM90 (H100) only"
     cfg = _cfg_tuple(config)
     A3, B3, D3 = A.unsqueeze(0), B.unsqueeze(0), D.unsqueeze(0)
-    A_p, B_p, D_p, _ = perm3d(A3, B3, D3, None)
-    a_major, b_major, d_major, _ = get_majors(A_p, B_p, D_p, None)
-    a_dtype, b_dtype, d_dtype, _ = get_dtypes(A, B, D, None)
+    C3 = gate.unsqueeze(0) if gate is not None else None  # gate (M,N) as the C input
+    A_p, B_p, D_p, C_p = perm3d(A3, B3, D3, C3)
+    a_major, b_major, d_major, c_major = get_majors(A_p, B_p, D_p, C_p)
+    a_dtype, b_dtype, d_dtype, c_dtype = get_dtypes(A, B, D, gate)
     vec_dtype = torch2cute_dtype_map[S.dtype]
-    compiled_fn = _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype, device_capacity, cfg)
+    compiled_fn = _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major,
+                                 vec_dtype, device_capacity, cfg, c_dtype, c_major)
     from quack.cache_utils import COMPILE_ONLY
     if COMPILE_ONLY:
         return
@@ -835,14 +863,17 @@ def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None)
     # kept at the GEMM default (8) for L2 reuse (disabling it gave no speedup here).
     scheduler_args = make_scheduler_args(max_active_clusters, 8, None)
     varlen_args = make_varlen_args(None, None, None)
-    compiled_fn(A_p, B_p, D_p, None, epi_args, scheduler_args, varlen_args, None)
+    compiled_fn(A_p, B_p, D_p, C_p, epi_args, scheduler_args, varlen_args, None)
 
 
-def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *, prefolded=None, config=None):
+def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
+                                prefolded=None, config=None, gate=None):
     """Fused forward LayerNormLinear — stats computed inside the GEMM (Milestone 2).
 
     ``config`` (dict with tile_m/tile_n/cluster_m/cluster_n/pingpong) overrides the shipping
-    ``_FUSED_CONFIG`` — used by the tuner to sweep tile shapes."""
+    ``_FUSED_CONFIG`` — used by the tuner to sweep tile shapes.
+    ``gate`` (M, N) — optional fused gate-mul: returns ``(LN(x)@W) ⊙ gate`` in one
+    kernel (carried through the C input), for the trimul fused back-half."""
     from .gemm_layernorm_linear import fold_for_gemm
     assert x.is_cuda and x.dim() == 2
     M, K = x.shape
@@ -853,5 +884,5 @@ def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float 
     S2 = S.float().contiguous().view(1, N)
     B22 = B2.float().contiguous().view(1, N)
     Y = torch.empty(M, N, device=x.device, dtype=x.dtype)
-    gemm_lnl_fused(x, Bw, Y, S2, B22, eps, config=config)
+    gemm_lnl_fused(x, Bw, Y, S2, B22, eps, config=config, gate=gate)
     return Y
