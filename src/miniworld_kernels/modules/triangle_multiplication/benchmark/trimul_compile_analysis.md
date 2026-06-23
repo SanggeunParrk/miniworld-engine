@@ -108,6 +108,8 @@ layer + mask, **torch.compile (default), ms/layer**:
   `x_n@[WL|WLg|WR|WRg]` (1GB `(M,4D)`) + gated-EW (≈3GB R/W ≈ HBM limit). dt-v1
   saves its sigmoid in forward to skip the recompute — a possible future match.
 
+![fwd+full bars](trimul_fullmode_bars.png)
+
 ## Caveats
 
 - **Forward only.** dt-v1's biggest published wins are full (fwd+bwd), from its
