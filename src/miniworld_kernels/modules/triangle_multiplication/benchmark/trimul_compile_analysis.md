@@ -85,6 +85,29 @@ graph-break overhead, as if its `@disable` were "fixed"), it still loses to
 ours.compile (1.867). So dt-v1's `@torch.compiler.disable()` is **not our problem
 to fix, and fixing it would not change the verdict.**
 
+## Full mode (fwd+bwd) — training
+
+ours is now trainable (custom_op cute front + torch-native rest + cuequiv fused
+LN; `kernels/trimul_inproj/compile_native.py`). Full-mode fwd+bwd, bf16, single
+layer + mask, **torch.compile (default), ms/layer**:
+
+| L | **ours** | dt-v1 | cuequiv |
+|--:|--:|--:|--:|
+| 256 | **1.194** | 1.415 | 1.534 |
+| 512 | 2.362 | **2.160** | 2.286 |
+| 1024 | 9.161 | **8.273** | 8.958 |
+
+- **ours wins L=256** (1.19× vs dt-v1); **beats cuequiv at every L**; within
+  ~9–11% of dt-v1 at L≥512.
+- Backward correctness: fwd cos 0.99998, grad_x 0.99997 vs fp32 autograd.
+- Optimization path: B1 manual torch bwd 29.6ms → B2 compile-native 18.0 → B3
+  fused cuequiv LN **9.16ms** @1024. The LN backward (autograd `F.layer_norm`'s
+  fp32 path) was the bottleneck; the cuequiv `layer_norm_transpose` custom_op
+  (autograd-aware, `bdij->bijd` fuses the transpose) halved it.
+- Remaining ~0.9ms gap to dt-v1 is bandwidth-bound: the front-bwd recompute of
+  `x_n@[WL|WLg|WR|WRg]` (1GB `(M,4D)`) + gated-EW (≈3GB R/W ≈ HBM limit). dt-v1
+  saves its sigmoid in forward to skip the recompute — a possible future match.
+
 ## Caveats
 
 - **Forward only.** dt-v1's biggest published wins are full (fwd+bwd), from its
