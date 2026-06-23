@@ -22,11 +22,13 @@ def _ln(x, w, b, eps, layout):
 
 
 # ── cute front as a custom op ────────────────────────────────────────────────
-# Returns the ONE combined [B,2D,L,L] buffer (no clone, no aliasing); the module
-# slices left=[:,:D]/right=[:,D:] as views (torch handles it under compile).
+# forward returns (lr=[B,2D,L,L] gated output, preact=[B,4D,L,L] pre-GLU logits),
+# both channel-major (M-major views of bdll buffers). Saving preact lets the
+# backward skip the recompute GEMM AND stay channel-major (no bdll->blld transpose).
+# b_lr is built (differentiably) from WL/WLg/WR/WRg in the module, so weight grads
+# flow through it via autograd — the op only returns d_x_n and d_b_lr.
 @torch.library.custom_op("trimul_inproj::front", mutates_args=())
-def _front(x_n: Tensor, WL: Tensor, WLg: Tensor, WR: Tensor, WRg: Tensor,
-           b_lr: Tensor) -> Tensor:
+def _front(x_n: Tensor, b_lr: Tensor) -> tuple[Tensor, Tensor]:
     from quack.gemm_interface import gemm_act
 
     from miniworld_kernels.kernels.trimul_inproj.cute import _bdll_patch
@@ -34,49 +36,53 @@ def _front(x_n: Tensor, WL: Tensor, WLg: Tensor, WR: Tensor, WRg: Tensor,
     B, L, _, D = x_n.shape
     x_flat = x_n.reshape(B * L * L, D)
     lr = torch.empty(B, 2 * D, L, L, device=x_n.device, dtype=x_n.dtype)
-    lr_view = lr.view(2 * D, L * L).T  # (M, 2D) strides (1, L*L)
-    gemm_act(A=x_flat, B=b_lr, activation="glu", store_preact=False, postact_out=lr_view)
-    return lr
+    preact = torch.empty(B, 4 * D, L, L, device=x_n.device, dtype=x_n.dtype)
+    lr_view = lr.view(2 * D, L * L).T        # (M, 2D)
+    pre_view = preact.view(4 * D, L * L).T    # (M, 4D)  pre-GLU, interleaved [g|p]
+    gemm_act(A=x_flat, B=b_lr, activation="glu", preact_out=pre_view,
+             postact_out=lr_view, store_preact=True)
+    return lr, preact
 
 
 @_front.register_fake
-def _(x_n, WL, WLg, WR, WRg, b_lr):
+def _(x_n, b_lr):
     B, L, _, D = x_n.shape
-    return x_n.new_empty(B, 2 * D, L, L)
+    return x_n.new_empty(B, 2 * D, L, L), x_n.new_empty(B, 4 * D, L, L)
 
 
 def _front_setup(ctx, inputs, output):
-    x_n, WL, WLg, WR, WRg, b_lr = inputs
-    ctx.save_for_backward(x_n, WL, WLg, WR, WRg)
+    x_n, b_lr = inputs
+    _, preact = output
+    ctx.save_for_backward(x_n, b_lr, preact)
 
 
-def _front_backward(ctx, d_lr):
-    x_n, WL, WLg, WR, WRg = ctx.saved_tensors
+def _front_backward(ctx, d_lr, d_preact_unused):
+    x_n, b_lr, preact = ctx.saved_tensors
     B, L, _, D = x_n.shape
     M = B * L * L
-    xf = x_n.reshape(M, D)
-    # recompute proj/gate logits for left+right in ONE GEMM: x_n @ [WL|WLg|WR|WRg]
-    Wcat = torch.cat([WL, WLg, WR, WRg], dim=1)           # (D, 4D)
-    pg = xf @ Wcat                                         # (M, 4D)
-    pL, gLl, pR, gRl = pg[:, :D], pg[:, D:2 * D], pg[:, 2 * D:3 * D], pg[:, 3 * D:]
-    gL, gR = torch.sigmoid(gLl), torch.sigmoid(gRl)
+    D2 = 2 * D
+    # channel-major slices (B,D,L,L). b_lr cols interleaved: even=gate, odd=proj,
+    # first 2D = left, next 2D = right.
+    gLlog, pLc = preact[:, 0:D2:2], preact[:, 1:D2:2]
+    gRlog, pRc = preact[:, D2:4 * D:2], preact[:, D2 + 1:4 * D:2]
+    gL, gR = torch.sigmoid(gLlog), torch.sigmoid(gRlog)
+    dLc, dRc = d_lr[:, :D], d_lr[:, D:]                    # channel-major grads
+    d_pL = dLc * gL
+    d_gLlog = (dLc * pLc) * gL * (1 - gL)
+    d_pR = dRc * gR
+    d_gRlog = (dRc * pRc) * gR * (1 - gR)
 
-    dL = d_lr[:, :D].permute(0, 2, 3, 1).reshape(M, D)     # combined bdll -> (M,D)
-    dR = d_lr[:, D:].permute(0, 2, 3, 1).reshape(M, D)
-    d_pL = dL * gL
-    d_gLlog = (dL * pL) * gL * (1 - gL)
-    d_pR = dR * gR
-    d_gRlog = (dR * pR) * gR * (1 - gR)
+    # d_preact in the SAME interleaved channel-major layout as b_lr's columns
+    d_pre = torch.empty_like(preact)                       # (B,4D,L,L)
+    d_pre[:, 0:D2:2] = d_gLlog
+    d_pre[:, 1:D2:2] = d_pL
+    d_pre[:, D2:4 * D:2] = d_gRlog
+    d_pre[:, D2 + 1:4 * D:2] = d_pR
 
-    # input-grad: [d_pL|d_gLlog|d_pR|d_gRlog] @ [WL|WLg|WR|WRg]^T  (one GEMM)
-    DL = torch.cat([d_pL, d_gLlog, d_pR, d_gRlog], dim=1)  # (M, 4D)
-    dx_n = (DL @ Wcat.t()).reshape(B, L, L, D)
-    # weight-grad: x_n^T @ each
-    dWL = xf.t() @ d_pL
-    dWLg = xf.t() @ d_gLlog
-    dWR = xf.t() @ d_pR
-    dWRg = xf.t() @ d_gRlog
-    return dx_n, dWL, dWLg, dWR, dWRg, None
+    d_pre2 = d_pre.reshape(4 * D, M)                       # (4D, M)  (B=1)
+    dx_n = (b_lr @ d_pre2).t().reshape(B, L, L, D)         # b_lr(D,4D)@(4D,M)->(D,M)->blld
+    d_b_lr = (d_pre2 @ x_n.reshape(M, D)).t()              # (4D,M)@(M,D)->(4D,D)->(D,4D)
+    return dx_n, d_b_lr
 
 
 _front.register_autograd(_front_backward, setup_context=_front_setup)
@@ -97,8 +103,6 @@ class TriMulCompile(torch.nn.Module):
         self.ln_out_w, self.ln_out_b = b.ln_out.weight, b.ln_out.bias
         self.eps = b.ln_pair.eps
         self.D = self.WL.shape[0]
-        # b_lr prepacked once; registered as buffer so it moves with the module
-        self.register_buffer("b_lr", prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg))
 
     def forward(self, pair, mask=None):
         B, L, _, D = pair.shape
@@ -107,7 +111,9 @@ class TriMulCompile(torch.nn.Module):
         if mask is not None:
             m2 = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).unsqueeze(-1).to(x_n.dtype)
             x_n = x_n * m2
-        lr = _front(x_n, self.WL, self.WLg, self.WR, self.WRg, self.b_lr)  # (B,2D,L,L)
+        # b_lr built here (differentiable) so weight grads flow via autograd
+        b_lr = prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg)
+        lr, _preact = _front(x_n, b_lr)  # (B,2D,L,L), (B,4D,L,L)
         left_b, right_b = lr[:, :self.D], lr[:, self.D:]
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)       # (B,D,L,L)
         out_n = _ln(tri, self.ln_out_w, self.ln_out_b, self.eps, "bdij->bijd")  # (B,L,L,D)

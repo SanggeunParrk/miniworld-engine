@@ -112,33 +112,37 @@ def main():
             m.load_state_dict(b.state_dict()); return m.to(torch.bfloat16)
 
     names = ["ours", "dtv1", "cuequiv"]
-    print(f"\nfull-mode (fwd+bwd) ms/layer — bf16, single layer + mask", flush=True)
-    print(f"{'L':>5} | " + " | ".join(f"{n+' '+r:>14}" for n in names for r in ("eag", "comp")), flush=True)
-    for Lb in (256, 512, 1024):
+    print(f"\ncompiled, bf16, single layer + mask — fwd-only / bwd(=full-fwd) ms/layer", flush=True)
+    print(f"{'L':>5} | " + " | ".join(f"{n+' '+k:>11}" for n in names for k in ("fwd", "bwd")), flush=True)
+    for Lb in (256, 384, 512, 768, 1024):
         cells = []
         for name in names:
-            for reg in ("eager", "compile"):
-                torch._dynamo.reset(); torch.cuda.empty_cache()
-                m = make(name, base_module())
-                p = torch.randn(1, Lb, Lb, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-                msk = torch.rand(1, Lb, device="cuda") > 0.2
-                g = torch.randn_like(p)
-                fn = torch.compile(m) if reg == "compile" else m
+            torch._dynamo.reset(); torch.cuda.empty_cache()
+            m = make(name, base_module())
+            p = torch.randn(1, Lb, Lb, D, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+            msk = torch.rand(1, Lb, device="cuda") > 0.2
+            g = torch.randn_like(p)
+            fn = torch.compile(m)
 
-                def step():
-                    p.grad = None
-                    y = fn(p, msk)
-                    y.backward(g)
-                try:
-                    for _ in range(5):
-                        step()
-                    t = triton.testing.do_bench(step, warmup=10, rep=50, return_mode="median",
+            def fwd():
+                with torch.no_grad():
+                    fn(p, msk)
+
+            def full():
+                p.grad = None
+                y = fn(p, msk)
+                y.backward(g)
+            try:
+                for _ in range(5):
+                    full()
+                tf = triton.testing.do_bench(fwd, warmup=10, rep=50, return_mode="median")
+                tfull = triton.testing.do_bench(full, warmup=10, rep=50, return_mode="median",
                                                 grad_to_none=[p])
-                except Exception as e:  # noqa: BLE001
-                    print(f"   {name}.{reg}@{Lb} fail: {type(e).__name__}: {str(e)[:60]}", flush=True)
-                    t = float("nan")
-                cells.append(t)
-        print(f"{Lb:>5} | " + " | ".join(f"{c:>14.3f}" for c in cells), flush=True)
+                cells += [tf, tfull - tf]
+            except Exception as e:  # noqa: BLE001
+                print(f"   {name}@{Lb} fail: {type(e).__name__}: {str(e)[:60]}", flush=True)
+                cells += [float("nan"), float("nan")]
+        print(f"{Lb:>5} | " + " | ".join(f"{c:>11.3f}" for c in cells), flush=True)
 
 
 if __name__ == "__main__":
