@@ -178,7 +178,7 @@ def run_shape(M: int, d_in: int, d_out: int) -> None:
 
         print(f"  cute-fused     fwd={do_bench(fwd_cf):.4f} ms  (fold cached)")
 
-    # Our Triton kernel (once implemented).
+    # Our portable Triton kernel (the non-SM90 fallback; runs on H100 too).
     try:
         y_tr = layernorm_linear_triton(
             x.detach(), ref.layer_norm_weight, ref.layer_norm_bias, ref.weight, ref.bias,
@@ -187,6 +187,13 @@ def run_shape(M: int, d_in: int, d_out: int) -> None:
         pass
     else:
         print(compare("triton-fwd", y_tr, y_ref))
+
+        def fwd_tr():
+            layernorm_linear_triton(
+                xd, ref.layer_norm_weight, ref.layer_norm_bias, ref.weight, ref.bias,
+            )
+
+        print(f"  triton         fwd={do_bench(fwd_tr):.4f} ms")
 
 
 def main() -> None:
