@@ -1,11 +1,11 @@
-"""Triton entry point for the fused LayerNorm + Linear kernel (placeholder).
+"""Triton entry point for the fused LayerNorm + Linear kernel.
 
-To be implemented. The signature mirrors `layernorm_linear_pytorch` so the bench
-script can drop the Triton kernel in without rewiring. The goal is a single
-kernel that computes LayerNorm statistics and the projection GEMM in one pass,
-cutting the HBM round-trip the eager `LayerNorm` -> `Linear` pair pays — most
-promising in the memory-bound regime (small d, large M) where neither TE nor
-`torch.compile` is clearly ahead (see benchmark/).
+This is the **portable** backend: the cute path forks quack's ``GemmSm90`` (WGMMA +
+TMA + clusters) and is SM90/Hopper-only, so this Triton kernel is the general
+fallback that runs on any Triton-supported arch (Ampere/Ada/Hopper/Blackwell/ROCm).
+It computes ``LayerNorm(x) @ W^T + b`` in one fused kernel — LN stats reduced on-chip,
+then the projection GEMM — so eager ``LayerNorm`` -> ``Linear``'s extra HBM round trip
+is avoided. See ``triton/fused.py``.
 """
 
 from __future__ import annotations
@@ -21,4 +21,6 @@ def layernorm_linear_triton(
     bias: torch.Tensor | None,  # (d_out,)
     eps: float = 1e-5,
 ) -> torch.Tensor:
-    raise NotImplementedError("layernorm_linear Triton kernel not implemented yet")
+    from .triton.fused import layernorm_linear_triton_fwd
+
+    return layernorm_linear_triton_fwd(x, ln_weight, ln_bias, weight, bias, eps)
