@@ -18,8 +18,27 @@ from __future__ import annotations
 import torch
 import triton
 
-# torch/triton-only (no quack) — safe to import eagerly; this IS the LN-part backward.
-from ..layernorm.triton.main import get_seq_group, layer_norm_bwd_dx_fused
+# torch/triton-only (no quack) — safe to import eagerly; these ARE the LN fwd/bwd kernels.
+from ..layernorm.triton.main import get_seq_group, layer_norm_bwd_dx_fused, layer_norm_fwd_fused
+
+
+def _ln_forward(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, eps: float):
+    """x_normed = LayerNorm(x) via the repo's fused Triton kernel — one bf16 pass (replaces a
+    multi-pass fp32 torch recompute that dominated the backward). Stats are recomputed into
+    throwaway buffers (cheap) since we only need x_normed here."""
+    M, K = x.shape
+    y = torch.empty_like(x)
+    mean = torch.empty(M, dtype=torch.float32, device=x.device)
+    rstd = torch.empty(M, dtype=torch.float32, device=x.device)
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
+    layer_norm_fwd_fused[grid](
+        x, y, gamma, beta, mean, rstd,
+        x.stride(0), x.stride(1),
+        M, K, eps,
+        BLOCK_N=triton.next_power_of_2(K),
+        GROUP_M=get_seq_group(M),
+    )
+    return y
 
 
 def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
@@ -68,13 +87,15 @@ class LayerNormLinearFn(torch.autograd.Function):
         # GEMM #1: dx_normed = dY @ W  — (M,N)@(N,K) -> (M,K)  (W is already (N,K)=(K_gemm,N_gemm))
         dx_normed = gemm(dY, W)
 
-        # recompute x_normed = ((x-μ)·rstd)·γ + β for GEMM #2 (cheap; avoids saving it — TE-style)
-        xf = x.float()
-        xhat = (xf - mean.unsqueeze(1)) * rstd.unsqueeze(1)
-        x_normed = (xhat * gamma.float() + beta.float()).to(x.dtype)
+        # recompute x_normed (TE-style, not saved) via the fused Triton LN kernel — one bf16
+        # pass instead of the multi-pass fp32 torch recompute that was 42% of the backward.
+        x_normed = _ln_forward(x.to(dY.dtype), gamma, beta, ctx.eps)
 
-        # GEMM #2: dW = dYᵀ @ x_normed  — (N,M)@(M,K) -> (N,K)
-        dW = gemm(dY.t().contiguous(), x_normed)
+        # GEMM #2: dW = dYᵀ @ x_normed  — (N,M)@(M,K) -> (N,K). This is the "wgrad" aspect
+        # (contraction over the huge M, tiny N×K output) where quack has no split-K and stalls
+        # at ~1.2ms flat / ~27% peak; cuBLAS split-K is 3-18x faster here, so use torch.matmul.
+        # (dx's GEMM #1 stays on quack — there quack ties/beats cuBLAS.)
+        dW = torch.matmul(dY.t(), x_normed)
 
         # LN part: dx, dγ, dβ (reuses the Triton LN backward with dy = dx_normed)
         dx, dgamma, dbeta = _ln_backward(dx_normed, x, gamma, mean, rstd)
