@@ -17,26 +17,44 @@ from __future__ import annotations
 
 import torch
 import triton
+import triton.language as tl
 
-# torch/triton-only (no quack) — safe to import eagerly; these ARE the LN fwd/bwd kernels.
-from ..layernorm.triton.main import get_seq_group, layer_norm_bwd_dx_fused, layer_norm_fwd_fused
+# torch/triton-only (no quack) — safe to import eagerly; this IS the LN-part backward.
+from ..layernorm.triton.main import get_seq_group, layer_norm_bwd_dx_fused
 
 
-def _ln_forward(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, eps: float):
-    """x_normed = LayerNorm(x) via the repo's fused Triton kernel — one bf16 pass (replaces a
-    multi-pass fp32 torch recompute that dominated the backward). Stats are recomputed into
-    throwaway buffers (cheap) since we only need x_normed here."""
+@triton.jit
+def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1,
+                    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.arange(0, BLOCK_K)
+    rm = rows < M
+    cm = cols < K
+    x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
+                mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+    mean = tl.load(mean_ptr + rows, mask=rm, other=0.0)[:, None]
+    rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)[:, None]
+    g = tl.load(g_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
+    b = tl.load(b_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
+    y = (x - mean) * rstd * g + b
+    tl.store(y_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
+             y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+
+
+def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
+                       mean: torch.Tensor, rstd: torch.Tensor):
+    """x_normed = (x-mean)*rstd*γ + β, one fused bf16 pass using the SAVED mean/rstd (no stats
+    recompute). Replaces the multi-pass fp32 torch recompute that was 42% of the backward.
+    Fixed launch params (no autotune) for robustness across shapes."""
     M, K = x.shape
     y = torch.empty_like(x)
-    mean = torch.empty(M, dtype=torch.float32, device=x.device)
-    rstd = torch.empty(M, dtype=torch.float32, device=x.device)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
-    layer_norm_fwd_fused[grid](
-        x, y, gamma, beta, mean, rstd,
-        x.stride(0), x.stride(1),
-        M, K, eps,
-        BLOCK_N=triton.next_power_of_2(K),
-        GROUP_M=get_seq_group(M),
+    BLOCK_K = triton.next_power_of_2(K)
+    BLOCK_M = 8
+    grid = (triton.cdiv(M, BLOCK_M),)
+    _xnormed_kernel[grid](
+        x, gamma, beta, mean, rstd, y, M, K, x.stride(0), x.stride(1),
+        BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, num_warps=8,
     )
     return y
 
@@ -87,9 +105,9 @@ class LayerNormLinearFn(torch.autograd.Function):
         # GEMM #1: dx_normed = dY @ W  — (M,N)@(N,K) -> (M,K)  (W is already (N,K)=(K_gemm,N_gemm))
         dx_normed = gemm(dY, W)
 
-        # recompute x_normed (TE-style, not saved) via the fused Triton LN kernel — one bf16
+        # recompute x_normed (TE-style, not saved) from the SAVED mean/rstd — one fused bf16
         # pass instead of the multi-pass fp32 torch recompute that was 42% of the backward.
-        x_normed = _ln_forward(x.to(dY.dtype), gamma, beta, ctx.eps)
+        x_normed = _recompute_xnormed(x.to(dY.dtype), gamma, beta, mean, rstd)
 
         # GEMM #2: dW = dYᵀ @ x_normed  — (N,M)@(M,K) -> (N,K). This is the "wgrad" aspect
         # (contraction over the huge M, tiny N×K output) where quack has no split-K and stalls
