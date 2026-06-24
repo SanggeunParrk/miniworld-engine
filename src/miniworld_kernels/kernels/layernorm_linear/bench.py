@@ -29,11 +29,13 @@ sys.path[:] = [p for p in sys.path if p and Path(p).resolve() != _HERE]
 
 import torch
 
-from miniworld_kernels.kernels.layernorm_linear.cute import fold_for_gemm, layernorm_linear_cute
-from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
-    layernorm_linear_cute_fused,
+from miniworld_kernels.kernels.layernorm_linear import (
+    layernorm_linear,            # inference dispatch (cute best: M2 N<=256 / M1)
+    layernorm_linear_fn,         # trainable cute
+    layernorm_linear_triton,     # portable inference forward
+    layernorm_linear_triton_fn,  # trainable portable
 )
-from miniworld_kernels.kernels.layernorm_linear.interface import layernorm_linear_triton
+from miniworld_kernels.kernels.layernorm_linear.cute import fold_for_gemm
 from miniworld_kernels.kernels.layernorm_linear.reference import LayerNormLinearRef
 
 try:
@@ -88,138 +90,70 @@ def compare(name: str, a: torch.Tensor, b: torch.Tensor) -> str:
 
 
 def run_shape(M: int, d_in: int, d_out: int) -> None:
-    print(f"\n=== M={M}  d_in={d_in}  d_out={d_out}  dtype={DTYPE} ===")
+    """Canonical bench: 4 backends x {inference fwd, training fwd+bwd}.
 
+    Backends — all COMPILED (see benchmark/BENCHMARKING.md; eager is never benched):
+      pytorch = torch.compile(naive ref) | TE | triton (portable) | cute (best variant).
+    The "fwd" column is inference (cute = tuned dispatch w/ cached fold; triton = fused
+    kernel); the "fwd+bwd" column is training (cute = layernorm_linear_fn; triton =
+    layernorm_linear_triton_fn). pytorch/TE forward is identical in both.
+    """
+    print(f"\n=== M={M}  d_in={d_in}  d_out={d_out}  dtype={DTYPE} ===")
+    eps = 1e-5
     ref = LayerNormLinearRef(d_in, d_out).to(DEVICE, DTYPE)
     ref_c = torch.compile(ref)
-
     x = torch.randn(M, d_in, device=DEVICE, dtype=DTYPE, requires_grad=True)
     g = torch.randn(M, d_out, device=DEVICE, dtype=DTYPE)
+    gamma, beta, W, bias = ref.layer_norm_weight, ref.layer_norm_bias, ref.weight, ref.bias
+    xd = x.detach()
 
-    # --- correctness oracle: ONE clean fwd+bwd, capture grads before any timing
-    # loop runs (the timing loops below re-run backward many times and would
-    # otherwise accumulate the reference's parameter grads). ---
-    ref.zero_grad(set_to_none=True)
-    x.grad = None
-    y_ref = ref_c(x)
-    y_ref.backward(g)
+    # oracle (compiled pytorch naive) — capture once before timing loops re-run backward
+    ref.zero_grad(set_to_none=True); x.grad = None
+    y_ref = ref_c(x); y_ref.backward(g)
     y_ref_val = y_ref.detach().clone()
-    dx_ref = x.grad.clone()
-    dWl_ref = ref.weight.grad.clone()
-    dg_ref = ref.layer_norm_weight.grad.clone()
 
-    te_mod = None
+    def leaves():  # fresh requires_grad leaves for a fwd+bwd timing loop
+        return [t.detach().clone().requires_grad_(True) for t in (x, gamma, beta, W, bias)]
+
+    # 1) pytorch naive — COMPILED (never eager)
+    rg = [x, *ref.parameters()]
+    print(f"  pytorch        fwd={do_bench(lambda: ref_c(x)):.4f} ms  "
+          f"fwd+bwd={do_bench(lambda: ref_c(x).backward(g), grad_to_none=rg):.4f} ms")
+
+    # 2) TE
     if HAVE_TE:
-        x_te = x.detach().clone().requires_grad_(True)
         te_mod = te.LayerNormLinear(d_in, d_out, bias=True, params_dtype=DTYPE).to(DEVICE)
         copy_weights(te_mod, ref)
-        y_te = te_mod(x_te)
-        y_te.backward(g)
-        print(compare("fwd", y_te, y_ref_val))
-        print(compare("dx", x_te.grad, dx_ref))
-        print(compare("dWl", te_mod.weight.grad, dWl_ref))
-        print(compare("dg", te_mod.layer_norm_weight.grad, dg_ref))
+        x_te = x.detach().clone().requires_grad_(True)
+        print(compare("TE-fwd", te_mod(x_te), y_ref_val))
+        teg = [x_te, *te_mod.parameters()]
+        print(f"  TE             fwd={do_bench(lambda: te_mod(x_te)):.4f} ms  "
+              f"fwd+bwd={do_bench(lambda: te_mod(x_te).backward(g), grad_to_none=teg):.4f} ms")
 
-    # --- timing (triton.testing.do_bench zeroes grad_to_none between reps) ---
-    ref_grads = [x, *ref.parameters()]
-
-    def fwd_ref():
-        ref_c(x)
-
-    def fwdbwd_ref():
-        ref_c(x).backward(g)
-
-    print(
-        f"  torch.compile  fwd={do_bench(fwd_ref):.4f} ms  "
-        f"fwd+bwd={do_bench(fwdbwd_ref, grad_to_none=ref_grads):.4f} ms"
-    )
-
-    if HAVE_TE:
-        te_grads = [x_te, *te_mod.parameters()]
-
-        def fwd_te():
-            te_mod(x_te)
-
-        def fwdbwd_te():
-            te_mod(x_te).backward(g)
-
-        print(
-            f"  TE             fwd={do_bench(fwd_te):.4f} ms  "
-            f"fwd+bwd={do_bench(fwdbwd_te, grad_to_none=te_grads):.4f} ms"
-        )
-
-    # Our trainable cute path (autograd Fn): fwd + fwd+bwd, vs torch.compile/TE above.
-    from miniworld_kernels.kernels.layernorm_linear.autograd import layernorm_linear_fn
-    x_fn = x.detach().clone().requires_grad_(True)
-    gw = ref.layer_norm_weight.detach().clone().requires_grad_(True)
-    gb = ref.layer_norm_bias.detach().clone().requires_grad_(True)
-    Wfn = ref.weight.detach().clone().requires_grad_(True)
-    bfn = ref.bias.detach().clone().requires_grad_(True)
-    fn_grads = [x_fn, gw, gb, Wfn, bfn]
+    # 3) triton (portable): inference forward + trainable fwd+bwd
     try:
-        y_fn = layernorm_linear_fn(x_fn, gw, gb, Wfn, bfn)
+        y_tr = layernorm_linear_triton(xd, gamma, beta, W, bias, eps)
     except Exception as e:  # noqa: BLE001
-        print(f"  cute-train     [skipped: {type(e).__name__}: {e}]")
+        print(f"  triton         [skipped: {type(e).__name__}: {e}]")
     else:
-        print(compare("train-fwd", y_fn, y_ref_val))
+        print(compare("triton-fwd", y_tr, y_ref_val))
+        xt, gt, bt, Wt, bit = leaves()
+        trg = [xt, gt, bt, Wt, bit]
+        print(f"  triton         fwd={do_bench(lambda: layernorm_linear_triton(xd, gamma, beta, W, bias, eps)):.4f} ms  "
+              f"fwd+bwd={do_bench(lambda: layernorm_linear_triton_fn(xt, gt, bt, Wt, bit, eps).backward(g), grad_to_none=trg):.4f} ms")
 
-        def fwd_fn():
-            layernorm_linear_fn(x_fn, gw, gb, Wfn, bfn)
-
-        def fwdbwd_fn():
-            layernorm_linear_fn(x_fn, gw, gb, Wfn, bfn).backward(g)
-
-        print(
-            f"  cute-train     fwd={do_bench(fwd_fn):.4f} ms  "
-            f"fwd+bwd={do_bench(fwdbwd_fn, grad_to_none=fn_grads):.4f} ms"
-        )
-
-    # Our fused CuTeDSL (quack SM90) kernel. Prologue (fold) is cached — fixed
-    # weights — so we time only the stats + fused GEMM (inference-style).
-    xd = x.detach()
-    gamma, beta, W, bias = ref.layer_norm_weight, ref.layer_norm_bias, ref.weight, ref.bias
+    # 4) cute (best): inference = tuned dispatch w/ cached fold; training = layernorm_linear_fn
     try:
         prefold = fold_for_gemm(W, gamma, beta, bias, w2_dtype=xd.dtype)
-        y_cute = layernorm_linear_cute(xd, gamma, beta, W, bias, prefolded=prefold)
+        y_cu = layernorm_linear(xd, gamma, beta, W, bias, eps, prefolded=prefold)
     except Exception as e:  # noqa: BLE001
         print(f"  cute           [skipped: {type(e).__name__}: {e}]")
     else:
-        print(compare("cute-fwd", y_cute, y_ref))
-
-        def fwd_cute():
-            layernorm_linear_cute(xd, gamma, beta, W, bias, prefolded=prefold)
-
-        print(f"  cute           fwd={do_bench(fwd_cute):.4f} ms  (fold cached)")
-
-    # Milestone-2 fused kernel (stats inside the mainloop).
-    try:
-        y_cf = layernorm_linear_cute_fused(xd, gamma, beta, W, bias, prefolded=prefold)
-    except Exception as e:  # noqa: BLE001
-        print(f"  cute-fused     [skipped: {type(e).__name__}: {e}]")
-    else:
-        print(compare("cutefused-fwd", y_cf, y_ref))
-
-        def fwd_cf():
-            layernorm_linear_cute_fused(xd, gamma, beta, W, bias, prefolded=prefold)
-
-        print(f"  cute-fused     fwd={do_bench(fwd_cf):.4f} ms  (fold cached)")
-
-    # Our portable Triton kernel (the non-SM90 fallback; runs on H100 too).
-    try:
-        y_tr = layernorm_linear_triton(
-            x.detach(), ref.layer_norm_weight, ref.layer_norm_bias, ref.weight, ref.bias,
-        )
-    except NotImplementedError:
-        pass
-    else:
-        print(compare("triton-fwd", y_tr, y_ref))
-
-        def fwd_tr():
-            layernorm_linear_triton(
-                xd, ref.layer_norm_weight, ref.layer_norm_bias, ref.weight, ref.bias,
-            )
-
-        print(f"  triton         fwd={do_bench(fwd_tr):.4f} ms")
+        print(compare("cute-fwd", y_cu, y_ref_val))
+        xc, gc, bc, Wc, bic = leaves()
+        cg = [xc, gc, bc, Wc, bic]
+        print(f"  cute           fwd={do_bench(lambda: layernorm_linear(xd, gamma, beta, W, bias, eps, prefolded=prefold)):.4f} ms  "
+              f"fwd+bwd={do_bench(lambda: layernorm_linear_fn(xc, gc, bc, Wc, bic, eps).backward(g), grad_to_none=cg):.4f} ms")
 
 
 def main() -> None:

@@ -12,17 +12,24 @@ from __future__ import annotations
 
 import torch
 
-from .autograd import LayerNormLinearFn, layernorm_linear_fn
+from .autograd import (
+    LayerNormLinearFn,
+    LayerNormLinearTritonFn,
+    layernorm_linear_fn,
+    layernorm_linear_triton_fn,
+)
 from .interface import layernorm_linear_triton
 from .reference import LayerNormLinearRef, layernorm_linear_pytorch
 
 __all__ = [
     "LayerNormLinearFn",
     "LayerNormLinearRef",
+    "LayerNormLinearTritonFn",
     "layernorm_linear",          # hardware-dispatched inference: SM90 cute fast path, else Triton
-    "layernorm_linear_fn",       # trainable (autograd); v1 SM90/Hopper only
+    "layernorm_linear_fn",       # trainable (autograd, cute/SM90)
     "layernorm_linear_pytorch",
-    "layernorm_linear_triton",
+    "layernorm_linear_triton",   # portable inference forward
+    "layernorm_linear_triton_fn",  # trainable, portable (Triton fwd + cuBLAS/Triton bwd)
 ]
 
 

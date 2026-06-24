@@ -20,14 +20,17 @@ if str(_src) not in sys.path:
 import torch
 import torch.nn.functional as F
 
-from miniworld_kernels.kernels.layernorm_linear.autograd import layernorm_linear_fn
+from miniworld_kernels.kernels.layernorm_linear.autograd import (
+    layernorm_linear_fn,
+    layernorm_linear_triton_fn,
+)
 
 
 def cos(a, b):
     return F.cosine_similarity(a.float().flatten(), b.float().flatten(), dim=0).item()
 
 
-def check(M, K, N, dtype, has_bias):
+def check(M, K, N, dtype, has_bias, fn, tag):
     torch.manual_seed(0)
     eps = 1e-5
     xb = torch.randn(M, K, device="cuda", dtype=dtype)
@@ -43,7 +46,7 @@ def check(M, K, N, dtype, has_bias):
     b = bb.clone().requires_grad_(True)
     w = wb.clone().requires_grad_(True)
     bias = biasb.clone().requires_grad_(True) if has_bias else None
-    Y = layernorm_linear_fn(x, g, b, w, bias, eps)
+    Y = fn(x, g, b, w, bias, eps)
     Y.backward(dY)
 
     # fp32 autograd oracle
@@ -63,7 +66,7 @@ def check(M, K, N, dtype, has_bias):
     parts = " ".join(f"{n}={cos(a, o):.5f}" for n, a, o in rows)
     worst = min([fcos] + [cos(a, o) for _, a, o in rows])
     flag = "OK " if worst >= 0.999 else "FAIL"
-    print(f"[{flag}] M={M:>7} K={K:>4} N={N:>4} {str(dtype).split('.')[-1]:>8} bias={int(has_bias)} | "
+    print(f"[{flag}] {tag:>6} M={M:>7} K={K:>4} N={N:>4} {str(dtype).split('.')[-1]:>8} bias={int(has_bias)} | "
           f"Y={fcos:.5f} {parts}  worst={worst:.5f}", flush=True)
     return worst >= 0.999
 
@@ -71,11 +74,12 @@ def check(M, K, N, dtype, has_bias):
 def main():
     print(f"backward verify on {torch.cuda.get_device_name(0)}")
     ok = True
-    for dtype in (torch.bfloat16, torch.float16):
-        for (M, K, N) in [(8192, 128, 128), (16384, 256, 256), (8192, 384, 384),
-                          (16384, 512, 512), (8192, 768, 768), (4096, 256, 512)]:
-            for hb in (True, False):
-                ok &= check(M, K, N, dtype, hb)
+    for tag, fn in (("cute", layernorm_linear_fn), ("triton", layernorm_linear_triton_fn)):
+        for dtype in (torch.bfloat16, torch.float16):
+            for (M, K, N) in [(8192, 128, 128), (16384, 256, 256), (8192, 384, 384),
+                              (16384, 512, 512), (8192, 768, 768), (4096, 256, 512)]:
+                for hb in (True, False):
+                    ok &= check(M, K, N, dtype, hb, fn, tag)
     print("ALL PASS" if ok else "SOME FAILED")
 
 
