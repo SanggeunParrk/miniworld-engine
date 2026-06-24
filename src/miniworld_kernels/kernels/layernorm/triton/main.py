@@ -57,11 +57,11 @@ bwd_configs = configs
 @triton.autotune(configs=fwd_configs, key=["N", "GROUP_M"])
 @triton.jit
 def layer_norm_fwd_fused(
-    X, Y, W, B, Mean, Rstd,
+    X, Y, W, B, Mean, Rstd, Rowscale,
     stride_r, stride_c,
     M, N: tl.constexpr, eps: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    GROUP_M: tl.constexpr, HAS_ROWSCALE: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -108,6 +108,10 @@ def layer_norm_fwd_fused(
     b = tl.load(B, mask=col_mask)
     x_hat = x * rstd[:, None]
     y = x_hat * w + b
+    if HAS_ROWSCALE:  # fold a per-row scale (e.g. AF pair-mask) into the LN epilogue — free
+        rs_off = tl.arange(0, BLOCK_M) + row * BLOCK_M
+        rs = tl.load(Rowscale + rs_off, mask=rs_off < M, other=0.0).to(tl.float32)
+        y = y * rs[:, None]
     tl.store(Y, y, mask=mask)
 # fmt: on
 
@@ -159,7 +163,7 @@ def layer_norm_fwd_fused_recal(
 
 
 # fmt: off
-@triton.autotune(configs=bwd_configs, key=["N", "GROUP_M"])
+@triton.autotune(configs=bwd_configs, key=["N", "GROUP_M"], reset_to_zero=["DW", "DB"])
 @triton.jit
 def layer_norm_bwd_dx_fused(
     DX, DY, DW, DB,
@@ -243,11 +247,11 @@ class TritonLayerNormFunction(torch.autograd.Function):
         # fmt: off
         grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
         layer_norm_fwd_fused[grid](
-            x, y, weight, bias, mean, rstd,
+            x, y, weight, bias, mean, rstd, rstd,  # Rowscale=rstd placeholder (unused)
             x.stride(0), x.stride(1),
             M, N, eps,
             BLOCK_N=triton.next_power_of_2(N),
-            GROUP_M=get_seq_group(M),
+            GROUP_M=get_seq_group(M), HAS_ROWSCALE=False,
         )
         # fmt: on
 
@@ -292,3 +296,27 @@ class TritonLayerNormFunction(torch.autograd.Function):
 
 
 triton_layernorm = TritonLayerNormFunction.apply
+
+
+@torch.compiler.disable()
+def triton_layernorm_masked(x, weight, bias, eps, row_scale):
+    """Forward-only LN with a per-row scale folded into the epilogue (free) — for the
+    AF triangle pair-mask: y = LN(x) * row_scale[row]. row_scale is [M] (or anything
+    reshapeable to [M]); broadcast over the feature dim. No autograd (bench/inference)."""
+    y = torch.empty_like(x)
+    x = x.view(-1, x.shape[-1]).contiguous()
+    M, N = x.shape
+    mean = torch.empty(M, dtype=torch.float32, device=x.device)
+    rstd = torch.empty(M, dtype=torch.float32, device=x.device)
+    rs = row_scale.reshape(-1).to(x.dtype).contiguous()
+    # fmt: off
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
+    layer_norm_fwd_fused[grid](
+        x, y, weight, bias, mean, rstd, rs,
+        x.stride(0), x.stride(1),
+        M, N, eps,
+        BLOCK_N=triton.next_power_of_2(N),
+        GROUP_M=get_seq_group(M), HAS_ROWSCALE=True,
+    )
+    # fmt: on
+    return y

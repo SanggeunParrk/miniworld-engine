@@ -1,15 +1,14 @@
 """End-to-end trimul forward: OURS (best) vs cuequivariance vs nvidia dtv1
-vs pytorch — ALL measured under the SAME harness (torch.compile reduce-overhead,
-K=8 stack, do_bench median). B=1, D=128, bf16.
+vs pytorch — ALL measured under the SAME harness, TWO regimes (eager + manual
+CUDA-graph = the real launch-overhead-free training regime). B=1, D=128, bf16,
+NO mask. Everything autotuned: front (quack tuned=True), LN_in (triton autotune),
+v4 back (triton autotune), v5 back (per-L tile sweep), dtv1 (triton autotune).
 
-Fixes vs the earlier run:
-  - nvidia dtv1 is now MEASURED here (fused_triangle_multiplicative_update_dtv1),
-    not pulled from the README's eager numbers. Same compile-K8 methodology as
-    everything else, so the comparison is apples-to-apples.
-  - ours_v5 sweeps the fused-back tile config per L and uses the fastest (the
-    baked m2_config_for table only covers L<=512); reports the winner.
+This is the CANONICAL reconciled harness — supersedes the older mixed-methodology
+numbers (compare_bench reduce-overhead-K8, teamgm_faithful with-mask,
+whole_fwd_bench). LN_in is triton here (faster than cuequiv per ln_bench).
 
-OURS = LN_in -> trimul_inproj(left+right, bdll) -> bmm -> fused back:
+OURS = triton LN_in -> trimul_inproj(left+right, bdll) -> bmm -> fused back:
   ours_v4 : triton fused back (gate in-kernel)
   ours_v5 : cute layernorm_linear + folded gate-mul (gate precomputed), tuned
 COMPUTE NODE only. Run with QUACK_CACHE_DIR fresh.
@@ -30,6 +29,9 @@ import torch
 import torch.nn as nn
 import triton
 
+from miniworld_kernels.kernels.layernorm.triton.main import (
+    triton_layernorm, triton_layernorm_masked,
+)
 from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
     layernorm_linear_cute_fused,
 )
@@ -93,6 +95,11 @@ def main():
     Wp_t, Wg_t = mod.to_out.weight.T, mod.to_gate.weight.T
     b_lr = prepack_lr_operand(WL, WLg, WR, WRg)
 
+    # SAME weights everywhere so cos is meaningful (timing is data-independent anyway):
+    # load the cute module's seeded weights into the pytorch / cuequiv reference modules.
+    mods["pytorch"].load_state_dict(mod.state_dict())
+    mods["cuequivariance"].load_state_dict(mod.state_dict())
+
     # dtv1 weights (cuequiv/dtv1 concatenated API), from the SAME mod weights.
     dtv1_kw = dict(
         norm_in_weight=mod.ln_pair.weight, norm_in_bias=mod.ln_pair.bias,
@@ -102,28 +109,37 @@ def main():
         p_out_weight=mod.to_out.weight, g_out_weight=mod.to_gate.weight,
     )
 
-    def ours_nvidia_dtv1(pair):
+    def ours_nvidia_dtv1(pair, mask2d):
         return fused_triangle_multiplicative_update_dtv1(
-            pair, "outgoing", None, eps=eps, **dtv1_kw)
+            pair, "outgoing", mask2d, eps=eps, **dtv1_kw)
 
-    def _ln_in(pair):
+    def _ln_in(pair, rmask=None):
+        # triton LN_in (faster than cuequiv per ln_bench), no transpose. When rmask
+        # ([M] pair-mask) is given it is FOLDED into the LN epilogue (free) — proj(0)=0
+        # so masked xn -> left/right exactly zero at masked positions (== AF's
+        # mask*projection at every valid position; only the discarded output-gate at
+        # padding differs). Avoids the 2 extra EW passes a post-front mask would cost.
         b, l1, l2, d = pair.shape
-        o = layer_norm_transpose(pair.reshape(b * l1 * l2, d), mod.ln_pair.weight,
-                                 mod.ln_pair.bias, eps=mod.ln_pair.eps, layout="nd->nd")
-        return (o[0] if isinstance(o, tuple) else o).view(b, l1, l2, d)
+        xf = pair.reshape(b * l1 * l2, d)
+        if rmask is None:
+            xn = triton_layernorm(xf, mod.ln_pair.weight, mod.ln_pair.bias, mod.ln_pair.eps)
+        else:
+            xn = triton_layernorm_masked(xf, mod.ln_pair.weight, mod.ln_pair.bias,
+                                         mod.ln_pair.eps, rmask)
+        return xn.view(b, l1, l2, d)
 
-    def ours_v4(pair):
+    def ours_v4(pair, rmask):
         b, l1, l2, d = pair.shape
-        xn = _ln_in(pair)
+        xn = _ln_in(pair, rmask)  # mask folded into LN (free) -> left/right zeroed
         left, right, _ = trimul_inproj_cute_forward(
             xn, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False, b_lr=b_lr)
         tri = torch.einsum("bdik,bdjk->bdij", left, right)
         return trimul_back_triton(tri, xn, Wp_t, Wg_t, gln_w, gln_b, eps)
 
     def make_ours_v5(cfg):
-        def ours_v5(pair):
+        def ours_v5(pair, rmask):
             b, l1, l2, d = pair.shape
-            xn = _ln_in(pair)
+            xn = _ln_in(pair, rmask)
             left, right, gate = trimul_inproj_cute_forward(
                 xn, WL, WLg, WR, WRg, Wg, bdll_direct=True, compute_gate=True, b_lr=b_lr)
             tri = torch.einsum("bdik,bdjk->bdij", left, right)
@@ -134,37 +150,35 @@ def main():
             return y.view(b, l1, l2, d)
         return ours_v5
 
-    K = 8
-
-    def stacked(fn):
-        def stack(pair):
-            for _ in range(K):
-                pair = fn(pair)
-            return pair
-        return stack
-
-    def bench_compiled(fn, pair):
+    def bench_cudagraph(fn, pair):
+        """Manual CUDA-graph capture of ONE layer (launch-overhead-free = the real
+        training regime; cleaner than reduce-overhead K-stack, no graph-break noise)."""
         try:
-            torch._dynamo.reset()
-            cfn = torch.compile(stacked(fn), mode="reduce-overhead")
-            for _ in range(6):
-                cfn(pair)
-            return _bench(lambda: cfn(pair)) / K
+            with torch.no_grad():
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    for _ in range(5):
+                        fn(pair)
+                torch.cuda.current_stream().wait_stream(s)
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    fn(pair)
+            return _bench(g.replay)
         except Exception as e:  # noqa: BLE001
-            print(f"   compile fail: {type(e).__name__}: {str(e)[:80]}", flush=True)
+            print(f"   cudagraph fail: {type(e).__name__}: {str(e)[:80]}", flush=True)
             return float("nan")
 
-    def sweep_v5(pair):
+    def sweep_v5(pair, rmask):
         """Pick the fastest v5 tile config for this L (eager single-launch ranking)."""
         best, best_cfg = float("inf"), None
-        xn = _ln_in(pair)
         for cfg in _V5_CONFIGS:
             fn = make_ours_v5(cfg)
             try:
                 with torch.no_grad():
                     for _ in range(3):
-                        fn(pair)
-                t = triton.testing.do_bench(lambda: fn(pair), warmup=10, rep=30,
+                        fn(pair, rmask)
+                t = triton.testing.do_bench(lambda: fn(pair, rmask), warmup=10, rep=30,
                                             return_mode="median")
             except Exception as e:  # noqa: BLE001
                 print(f"   v5 cfg {cfg['tile_m']}x{cfg['tile_n']}cn{cfg['cluster_n']}"
@@ -188,35 +202,51 @@ def main():
             print(f"   eager fail: {type(e).__name__}: {str(e)[:80]}", flush=True)
             return float("nan")
 
-    Ls = [384, 512, 768, 1024]
+    def cos(a, b):
+        a, b = a.float().flatten(), b.float().flatten()
+        return (a @ b / (a.norm() * b.norm() + 1e-20)).item()
+
+    Ls = [256, 384, 512, 768, 1024]
     cols = ["pytorch", "nvidia(dtv1)", "cuequivariance", "ours_v4", "ours_v5"]
     rows_c, rows_e = {}, {}
     for L in Ls:
         pair = torch.randn(1, L, L, D, device="cuda", dtype=dtype)
-        v5_cfg = sweep_v5(pair)
+        # mask EXACTLY like team-gm (torch.rand(1,L)>0.2). Canonical placement (pytorch
+        # ref): mask the gated left/right (post-projection, pre-einsum), broadcast over
+        # D; output gate stays on UNMASKED xn. v4/v5 get m2c=[1,1,L,L] for bdll.
+        mask = torch.rand(1, L, device="cuda") > 0.2          # [1,L] bool
+        mask2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)      # [1,L,L] bool (for dtv1)
+        rmask = mask2d.reshape(-1).to(dtype)                  # [M] folded into ours' LN_in
+        v5_cfg = sweep_v5(pair, rmask)
+        v5fn = make_ours_v5(v5_cfg)
         variants = {
-            "pytorch": lambda p: mods["pytorch"](p),
-            "nvidia(dtv1)": ours_nvidia_dtv1,
-            "cuequivariance": lambda p: mods["cuequivariance"](p),
-            "ours_v4": ours_v4,
-            "ours_v5": make_ours_v5(v5_cfg),
+            "pytorch": lambda p: mods["pytorch"](p, mask),
+            "nvidia(dtv1)": lambda p: ours_nvidia_dtv1(p, mask2d),
+            "cuequivariance": lambda p: mods["cuequivariance"](p, mask),
+            "ours_v4": lambda p: ours_v4(p, rmask),
+            "ours_v5": lambda p: v5fn(p, rmask),
         }
+        if L == 256:  # correctness vs pytorch ref, WITH mask
+            ref = mods["pytorch"](pair, mask)
+            print(f"   cos vs pytorch(mask): v4={cos(variants['ours_v4'](pair), ref):.5f} "
+                  f"v5={cos(variants['ours_v5'](pair), ref):.5f} "
+                  f"dtv1={cos(variants['nvidia(dtv1)'](pair), ref):.5f}", flush=True)
         tc, te = {}, {}
         for name in cols:
             with torch.no_grad():
-                tc[name] = bench_compiled(variants[name], pair)
+                tc[name] = bench_cudagraph(variants[name], pair)
                 te[name] = bench_eager(variants[name], pair)
         rows_c[L], rows_e[L] = tc, te
-        print(f"[L={L}] compile " + " ".join(f"{c}={tc[c]:.3f}" for c in cols), flush=True)
-        print(f"[L={L}] eager   " + " ".join(f"{c}={te[c]:.3f}" for c in cols), flush=True)
+        print(f"[L={L}] cudagraph " + " ".join(f"{c}={tc[c]:.3f}" for c in cols), flush=True)
+        print(f"[L={L}] eager     " + " ".join(f"{c}={te[c]:.3f}" for c in cols), flush=True)
 
-    for tag, rows in (("COMPILE", rows_c), ("EAGER", rows_e)):
+    for tag, rows in (("CUDAGRAPH", rows_c), ("EAGER", rows_e)):
         print(f"\n=== {tag}, ms/layer ===")
         print(f"{'L':>5} | " + " | ".join(f"{c:>14}" for c in cols))
         print("-" * 92)
         for L in Ls:
             print(f"{L:>5} | " + " | ".join(f"{rows[L][c]:>14.3f}" for c in cols))
-    print("\nDATA_COMPILE " + ";".join(
+    print("\nDATA_CUDAGRAPH " + ";".join(
         f"{L}:" + ",".join(f"{rows_c[L][c]:.4f}" for c in cols) for L in Ls), flush=True)
     print("DATA_EAGER " + ";".join(
         f"{L}:" + ",".join(f"{rows_e[L][c]:.4f}" for c in cols) for L in Ls), flush=True)
