@@ -13,6 +13,10 @@ import torch
 from torch import Tensor
 from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
 
+from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
+from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
+    layernorm_linear_cute_fused,
+)
 from miniworld_kernels.kernels.trimul_inproj.cute.launch import prepack_lr_operand
 
 
@@ -88,6 +92,69 @@ def _front_backward(ctx, d_lr, d_preact_unused):
 _front.register_autograd(_front_backward, setup_context=_front_setup)
 
 
+# ── back-half as a custom op: LN_out + @Wp + gate-mul fused (layernorm_linear) ──
+# forward = one fused cute kernel (2x faster than cuequiv LN_out + matmul + mul at
+# large L, since proj N=D=128 is the M2-fused win regime); backward = torch formulas.
+@torch.library.custom_op("trimul_inproj::back", mutates_args=())
+def _back(tri: Tensor, gate: Tensor, Wp_lin: Tensor, ln_w: Tensor, ln_b: Tensor,
+          eps: float) -> Tensor:
+    from miniworld_kernels.kernels.trimul_inproj.cute import _bdll_patch
+    _bdll_patch.apply()
+    B, Dc, L, _ = tri.shape
+    M = B * L * L
+    tri_view = tri.reshape(Dc, M).t()                      # (M,D) strided view (no copy)
+    y = layernorm_linear_cute_fused(tri_view, ln_w, ln_b, Wp_lin, None, eps=eps,
+                                    gate=gate.reshape(M, Dc))
+    return y.view(B, L, L, Dc)
+
+
+@_back.register_fake
+def _(tri, gate, Wp_lin, ln_w, ln_b, eps):
+    B, Dc, L, _ = tri.shape
+    return tri.new_empty(B, L, L, Dc)
+
+
+def _back_setup(ctx, inputs, output):
+    tri, gate, Wp_lin, ln_w, ln_b, eps = inputs
+    ctx.save_for_backward(tri, gate, Wp_lin, ln_w, ln_b)
+    ctx.eps = eps
+
+
+def _back_backward(ctx, dy):
+    # GEMMs in bf16 (cuBLAS), fp32 only for the LN-stat reductions. (mean/var over D.)
+    tri, gate, Wp_lin, ln_w, ln_b = ctx.saved_tensors
+    eps = ctx.eps
+    B, Dc, L, _ = tri.shape
+    M = B * L * L
+    dt = tri.dtype
+    trib = tri.permute(0, 2, 3, 1).reshape(M, Dc)          # bf16 (M,D)
+    tf = trib.float()
+    mean = tf.mean(-1, keepdim=True)
+    rstd = torch.rsqrt(tf.var(-1, unbiased=False, keepdim=True) + eps)
+    xhat = (tf - mean) * rstd                              # fp32 (M,D)
+    out_n = (xhat * ln_w.float() + ln_b.float()).to(dt)    # bf16
+    g = gate.reshape(M, Dc)
+    dyr = dy.reshape(M, Dc)
+    Wp_xw = Wp_lin.t()                                     # bf16 (D,D), x@W
+    proj = out_n @ Wp_xw                                   # bf16
+    d_proj = dyr * g                                       # bf16
+    d_gate = dyr * proj                                    # bf16
+    d_out_n = d_proj @ Wp_xw.t()                           # bf16
+    dWp_lin = d_proj.t() @ out_n                           # bf16 (N,K)
+    don = d_out_n.float()
+    dxhat = don * ln_w.float()
+    c1 = dxhat.mean(-1, keepdim=True)
+    c2 = (dxhat * xhat).mean(-1, keepdim=True)
+    d_trib = (rstd * (dxhat - c1 - xhat * c2)).to(dt)
+    d_ln_w = (don * xhat).sum(0).to(ln_w.dtype)
+    d_ln_b = don.sum(0).to(ln_b.dtype)
+    d_tri = d_trib.reshape(B, L, L, Dc).permute(0, 3, 1, 2).contiguous()
+    return (d_tri, d_gate.reshape(B, L, L, Dc), dWp_lin, d_ln_w, d_ln_b, None)
+
+
+_back.register_autograd(_back_backward, setup_context=_back_setup)
+
+
 # ── module: torch-native around the custom op ────────────────────────────────
 class TriMulCompile(torch.nn.Module):
     def __init__(self, base):
@@ -106,8 +173,9 @@ class TriMulCompile(torch.nn.Module):
 
     def forward(self, pair, mask=None):
         B, L, _, D = pair.shape
-        # fused cuequiv LN (differentiable, fast bwd); LN_out fuses the bdij->bijd transpose
-        x_n = _ln(pair, self.ln_in_w, self.ln_in_b, self.eps, "bijd->bijd")
+        # LN_in: triton (faster than cuequiv, no transpose needed); LN_out keeps cuequiv
+        # for its fused bdij->bijd transpose. both autograd-aware.
+        x_n = triton_layernorm(pair.reshape(B * L * L, D), self.ln_in_w, self.ln_in_b, self.eps).view(B, L, L, D)
         if mask is not None:
             m2 = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).unsqueeze(-1).to(x_n.dtype)
             x_n = x_n * m2
@@ -116,6 +184,9 @@ class TriMulCompile(torch.nn.Module):
         lr, _preact = _front(x_n, b_lr)  # (B,2D,L,L), (B,4D,L,L)
         left_b, right_b = lr[:, :self.D], lr[:, self.D:]
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)       # (B,D,L,L)
+        # back-half: autograd-native (cuequiv LN_out fuses bdij->bijd transpose) — its
+        # cuequiv LN backward is far faster than a manual torch LN bwd. The fused-cute
+        # back (_back) is faster forward but needs a fast bwd kernel (B3) to win full mode.
         out_n = _ln(tri, self.ln_out_w, self.ln_out_b, self.eps, "bdij->bijd")  # (B,L,L,D)
         gate = torch.sigmoid(x_n @ self.Wg)
         return (out_n @ self.Wp) * gate
