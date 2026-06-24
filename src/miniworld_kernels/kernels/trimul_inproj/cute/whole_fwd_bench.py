@@ -38,6 +38,17 @@ D = 128
 EPS = 1e-5
 
 
+@torch.compiler.disable
+def _d_inproj(xn, WLt, WLgt, WRt, WRgt, b_lr):
+    return trimul_inproj_cute_forward(xn, WLt, WLgt, WRt, WRgt, None,
+                                      bdll_direct=True, compute_gate=False, b_lr=b_lr)
+
+
+@torch.compiler.disable
+def _d_lnl(view, lw_o, lb_o, Wp_lin, gate):
+    return layernorm_linear_cute_fused(view, lw_o, lb_o, Wp_lin, None, eps=EPS, gate=gate)
+
+
 def cos(a, b):
     a, b = a.float().flatten(), b.float().flatten()
     return (a @ b / (a.norm() * b.norm() + 1e-20)).item()
@@ -95,21 +106,21 @@ def main():
 
         def ours_opt():
             xn = triton_layernorm(xf, lw_in, lb_in, EPS)
-            lft, rgt, _ = trimul_inproj_cute_forward(xn.view(1, L, L, D), WLt, WLgt, WRt, WRgt, None,
-                                                     bdll_direct=True, compute_gate=False, b_lr=b_lr)
+            lft, rgt, _ = _d_inproj(xn.view(1, L, L, D), WLt, WLgt, WRt, WRgt, b_lr)
             tri = torch.einsum("bdik,bdjk->bdij", lft, rgt)
             gate = torch.sigmoid(xn @ Wg)
-            return layernorm_linear_cute_fused(tri.reshape(D, M).t(), lw_o, lb_o, Wp_lin, None,
-                                               eps=EPS, gate=gate)
+            return _d_lnl(tri.reshape(D, M).t(), lw_o, lb_o, Wp_lin, gate)
 
         if L == 256:
             print(f"  cos(opt, old) = {cos(ours_opt(), ours_old().reshape(M, D)):.5f}", flush=True)
 
-        def b_(fn):
+        def b_(fn):  # COMPILE each path (default mode, like team-gm); ours' cute kernels are @disable'd
             try:
-                for _ in range(5):
-                    fn()
-                return triton.testing.do_bench(fn, warmup=10, rep=50, return_mode="median")
+                torch._dynamo.reset()
+                cf = torch.compile(fn)
+                for _ in range(6):
+                    cf()
+                return triton.testing.do_bench(cf, warmup=10, rep=50, return_mode="median")
             except Exception as e:  # noqa: BLE001
                 print(f"   fail {type(e).__name__}: {str(e)[:60]}", flush=True)
                 return float("nan")
