@@ -114,15 +114,21 @@ def main():
         if L == 256:
             print(f"  cos(opt, old) = {cos(ours_opt(), ours_old().reshape(M, D)):.5f}", flush=True)
 
-        def b_(fn):  # COMPILE each path (default mode, like team-gm); ours' cute kernels are @disable'd
+        def b_(fn):  # manual CUDA graph (removes ALL launch overhead) = the real "optimized" regime
             try:
-                torch._dynamo.reset()
-                cf = torch.compile(fn)
-                for _ in range(6):
-                    cf()
-                return triton.testing.do_bench(cf, warmup=10, rep=50, return_mode="median")
+                with torch.no_grad():
+                    s = torch.cuda.Stream()
+                    s.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(s):
+                        for _ in range(5):
+                            fn()
+                    torch.cuda.current_stream().wait_stream(s)
+                    g = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(g):
+                        fn()
+                return triton.testing.do_bench(g.replay, warmup=10, rep=50, return_mode="median")
             except Exception as e:  # noqa: BLE001
-                print(f"   fail {type(e).__name__}: {str(e)[:60]}", flush=True)
+                print(f"   fail {type(e).__name__}: {str(e)[:70]}", flush=True)
                 return float("nan")
 
         def dtv1_call():
