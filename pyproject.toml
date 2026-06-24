@@ -28,88 +28,143 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 # ----------------------------------------------------------------------------
-# ruff — mirrors team-gm (select ALL + team-gm ignores). Kernel/bench code is
-# math-heavy, so GEMM-notation names, magic numbers, and relaxed docstrings are
-# allowed per-file (matches team-gm's ``src/team_gm/modules/kernels/*``).
+# ruff — matches team-gm (line-length 88, select ALL, same base ignore set).
+# Per-file relaxations mirror team-gm's: kernel code gets math-notation names /
+# no-annotation leniency, tests/scripts get the team-gm sets. The cute kernels
+# (CuTeDSL — no team-gm equivalent) get a small additional relaxation.
 # ----------------------------------------------------------------------------
 
 [tool.ruff]
-line-length = 100
+line-length = 88
 target-version = "py310"
 
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-  # team-gm base set
-  "E731", "E741", "F722", "S311",
-  "D105", "D100", "D107", "D203", "D213",
-  "PLR0913", "ANN401", "PLR0402", "N812", "NPY002", "COM812",
-  # additional ignores for kernel-bench code
-  "E501",     # line-too-long (long bench prints)
-  "E701", "E702",  # multiple statements per line (probe scripts)
-  "BLE001",   # blind except (bench needs broad catch on kernel failures)
-  "PERF203",  # try/except in loops (bench iteration)
-  "PLR0124",  # comparison with itself (NaN check `ms == ms`)
-  "PT018",    # composite assertion
-  "TC002", "TC003",  # typing-only imports (cute types appear in signatures)
-  "N802", "N815",    # invalid fn / class-scope name (math notation)
-  "C408",     # unnecessary dict/collection call
-  "PGH004",   # blanket noqa
-  "RUF001", "RUF002", "RUF003",  # ambiguous unicode (Korean comments)
-  "RUF059",   # unused unpacked variable
-  "ERA001",   # commented-out code
-  # script-layout / vendored-faithful-copy artifacts
-  "E402",     # imports after the sys.path bootstrap prelude (script entrypoints)
-  "I001",     # import block ordering (bootstrap precedes imports)
-  "B023",     # loop var in lambda — fine for do_bench (called synchronously)
-  "FBT003",   # boolean positional in call — kernel APIs like mma.set(field, True)
-  "RUF100",   # unused noqa (vendored files carry team-gm's linter noqas)
-  "PLR2044",  # line with empty comment (vendored kernel separators)
+  "E731",
+  "E741",
+  "F722",    # Incompatible with jaxtyping
+  "S311",
+  "D105",
+  "D100",
+  "D107",
+  "D203",
+  "D213",
+  "PLR0913",
+  "ANN401",
+  "PLR0402",
+  "N812",
+  "NPY002",
+  "COM812",  # Conflicts with ruff formatter
 ]
 
-# Vendored kernel implementations are faithful copies — don't lint their bodies.
 [tool.ruff.lint.per-file-ignores]
-"**/triton/*.py" = ["ALL"]
-"**/cuda/*.py" = ["ALL"]
-"**/*.py" = [
-  "N806", "N803",   # math-style variable / argument capitalization
-  "ANN",            # type annotations on every signature
-  "ARG001",         # unused fn args (cute kernel hooks)
-  "D",              # docstrings
-  "S101",           # assert in tests / bench guards
-  "INP001",         # implicit namespace pkg
-  "PLR2004",        # magic numerics
-  "PLC0415",        # lazy import inside fn
-  "FBT001", "FBT002",  # positional bools
-  "C901", "PLR0915",   # complexity / statement count
-  "TRY003", "EM101", "EM102",  # exception message style
-  "RET504",         # unnecessary tmp before return
-  "T201",           # print() in bench
+# team-gm's tests/scripts relaxations (+ E402/I001 for our sys.path bootstrap).
+"tests/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
+"scripts/*" = [
+  "D",
+  "ANN201",
+  "S101",
+  "INP001",
+  "FBT001",
+  "PLC0415",
+  "C901",
+  "PLR0915",
+  "E402",  # imports follow the sys.path bootstrap prelude
+  "I001",
 ]
+# team-gm's kernel relaxation (math-notation names, no annotations) for the
+# connecting/reference code that lives under kernels/ (interface.py, reference.py).
+"src/miniworld_kernels/kernels/**/*.py" = ["N806", "N803", "ANN", "ARG001", "D"]
+# Vendored kernel *bodies* are faithful copies (triton main/perf/miniworld,
+# CuTeDSL, CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
+# as the originals are not held to this repo's standards.
+"src/miniworld_kernels/kernels/**/triton/*.py" = ["ALL"]
+"src/miniworld_kernels/kernels/**/cute/*.py" = ["ALL"]
+"src/miniworld_kernels/kernels/**/cuda/*.py" = ["ALL"]
+# dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
+"src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
+"src/miniworld_kernels/_typecheck.py" = ["ANN", "D"]
 
 [tool.ruff.format]
 docstring-code-format = false
 
 # ----------------------------------------------------------------------------
-# pyright / ty — CuTeDSL kernel code is dynamically typed; relax there.
+# pyright / ty — team-gm ships no type-checker config; keep this minimal and
+# only exclude generated env dirs. CuTeDSL (cutlass) code is dynamically typed.
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
-include = ["src", "tests"]
-exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env"]
+include = ["src", "scripts", "tests"]
+exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env", "**/cute/**"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingImports = "warning"
-reportMissingTypeStubs = false
-reportUnknownMemberType = false
-reportUnknownArgumentType = false
-reportUnknownParameterType = false
-reportUnknownVariableType = false
-reportGeneralTypeIssues = "warning"
 
 [tool.ty.src]
-include = ["src", "tests"]
-exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env"]
+include = ["src", "scripts", "tests"]
+exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env", "**/cute/**"]
 
 [tool.ty.environment]
 python-version = "3.10"
+
+# ----------------------------------------------------------------------------
+# pixi — single unified environment for the whole repo (triton + Transformer
+# Engine cu12 + CuTeDSL/quack + cuequivariance + benching). Replaces the old
+# per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
+# gitignored. See benchmark/BENCHMARKING.md and kernels/*/README.md.
+#
+# Cluster notes (CSSB H100, driver 575 = CUDA 12.9-max):
+#   - MUST be cu12, never cu13 (transformer_engine_cu12 + core-cu12 extra).
+#   - Build needs no GPU (srun without --gres); compute nodes are offline so
+#     resolve/download runs on the login node wrapped in `timeout`.
+#   - Runtime needs this env's libstdc++: export LD_LIBRARY_PATH=$CONDA_PREFIX/lib
+# ----------------------------------------------------------------------------
+[tool.pixi.workspace]
+channels = ["conda-forge", "nvidia"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = "3.12.*"
+pip = "*"
+# CUDA toolchain to compile transformer_engine_torch from source (cu12.8).
+cuda-toolkit = "12.8.*"
+cudnn = "*"
+nccl = "*"
+cuda-nvtx-dev = "12.8.*"
+ninja = "*"
+cmake = "*"
+setuptools = "*"
+wheel = "*"
+pybind11 = "*"
+
+[tool.pixi.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu128"]
+no-build-isolation = ["transformer-engine-torch"]
+
+# [project.dependencies] (torch, triton, cuequivariance-torch, hydra, lightning,
+# einops, jaxtyping, numpy, scipy, ...) are picked up automatically. Add the
+# backends that don't belong in the published package's runtime deps:
+[tool.pixi.pypi-dependencies]
+miniworld-kernels = { path = ".", editable = true }
+transformer-engine = { version = "*", extras = ["pytorch", "core-cu12"] }
+transformer-engine-cu12 = "*"
+nvidia-cutlass-dsl = "==4.4.2"
+quack-kernels = "==0.3.11"
+cuequivariance-ops-torch-cu12 = "*"
+matplotlib = "*"
+
+[tool.pixi.activation.env]
+PYTHONNOUSERSITE = "1"
+CUDA_HOME = "$CONDA_PREFIX"
+
+# transformer-engine-torch's sdist metadata wrongly declares a dep on the cu13
+# core (the real build uses cu12), so the lock pins BOTH cu12 and cu13 and the
+# cu13 lib overwrites cu12 in transformer_engine/wheel_lib/. The cluster's 575
+# driver can't run cu13. `fix-te-cu12` reinstalls the cu12 core last so it wins.
+# RUN IT AFTER EVERY `pixi install`.
+[tool.pixi.tasks]
+fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.16.0"
+smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
+smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
+smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"

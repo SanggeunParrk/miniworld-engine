@@ -3,6 +3,17 @@
 Dedicated GPU kernel-development repo for MiniWorld / AF3-style ops. The idea is
 to **cut one op out of the full model and optimize it in isolation**:
 
+## Critical Safety
+
+This repo is often accessed from a cluster login node.
+
+- Do not run recursive scans outside this repo, especially commands like `find /home/psk6950 ...`.
+- Do not run installs, builds, benchmarks, profiling, or GPU-dependent commands on the login node.
+- Keep login-node activity limited to lightweight repo-local inspection.
+- Use `srun` or an allocated compute node for GPU work or heavy filesystem activity.
+
+Repo structure:
+
 - A **kernel** (`kernels/<unit>/`) is a chunk you deliberately chose to fuse and
   hand-optimize. It owns its backend implementations (`triton/`, `cute/`,
   `cuda/`) plus a PyTorch `reference.py`, a public `interface.py`, and a
@@ -41,8 +52,8 @@ src/miniworld_kernels/
     └── __init__.py
 scripts/bench.py                  # THE single bench entry (hydra, team-gm style)
 config/bench.yaml                 # bench config (kernel, implementations, compile, ...)
-benchmark/logs/                   # raw SLURM bench logs
-cute-env/                         # CuTeDSL pixi env (cu128 torch + cutlass-dsl + quack)
+benchmark/logs/                   # raw SLURM bench logs (cross-kernel/unified runs)
+pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
 tests/run_bench.sbatch            # single SLURM launcher for scripts/bench.py
 ```
 
@@ -53,13 +64,20 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 
 ## Benchmarking
 
+**Benchmark policy: follow the team-gm harness unless there is a specific reason
+not to.** In this repo that means `scripts/bench.py` + `config/bench.yaml` +
+`tests/run_bench.sbatch` are the default and preferred path. Do not replace
+them with ad hoc timing snippets or custom markdown summaries for final
+results.
+
 One entry point — `scripts/bench.py`, driven by `config/bench.yaml` (hydra):
 
 ```bash
-# (on a GPU; team-gm env has torch 2.10+cu128 + triton + cuequivariance)
-PY=/home/psk6950/team-gm/.pixi/envs/default/bin/python
-PYTHONPATH=src $PY scripts/bench.py kernel=triangle_multiplication \
-    implementations=[pytorch,triton,cuequivariance] compile=false
+# Unified repo env (.pixi/). --frozen keeps the cu12 TE core fix (see CLAUDE.md).
+srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
+  bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
+    PYTHONPATH=src python scripts/bench.py kernel=triangle_multiplication \
+      implementations=[pytorch,triton,cuequivariance] compile=false"'
 # or submit: sbatch tests/run_bench.sbatch
 ```
 
@@ -68,10 +86,15 @@ PYTHONPATH=src $PY scripts/bench.py kernel=triangle_multiplication \
 `compile=true` benches the `torch.compile`'d variant — no separate script.
 Results land in `benchmark/<gpu>/`; raw logs in `benchmark/logs/`.
 
+If an op is not yet integrated into the unified harness, a kernel-local
+`bench.py` is acceptable only as a temporary bridge. It should still emit the
+same kind of machine-parseable output so `scripts/plot_bench.py` can generate
+the `.md` + `.png` report pair in that kernel's `benchmark/` directory.
+
 The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
 implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN
-cute kernels). It needs the `cute-env` (cutlass-dsl + quack), so run
-`scripts/bench.py` with the cute-env python for that.
+cute kernels). cutlass-dsl + quack are in the unified env, so the same
+`pixi run --frozen ... scripts/bench.py implementations=[cute]` runs it.
 
 ## Status
 

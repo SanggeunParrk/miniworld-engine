@@ -26,3 +26,8 @@ dist/
 # hydra run outputs (transient)
 outputs/
 results/
+
+# secrets / local agent worktrees / scratch (added by checkpoint)
+notion_token
+_fold_t.py
+.claude/

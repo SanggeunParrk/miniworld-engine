@@ -1,5 +1,20 @@
 # miniworld-kernels — handoff (2026-06-16)
 
+## CRITICAL: LOGIN NODE SAFETY
+
+Do not run heavy or wide-scope commands on the cluster login node.
+
+Forbidden on the login node:
+- Recursive scans outside this repo, especially commands like `find /home/psk6950 ...`.
+- Home-directory or shared-filesystem walks.
+- Benchmarks, installs, builds, profiling, or GPU-dependent commands.
+
+Allowed on the login node:
+- Lightweight repo-local inspection only, rooted at `/home/psk6950/miniworld-kernels`.
+- Small reads such as `rg`, `sed`, `nl`, and `git status`.
+
+If work needs a GPU or broader system access, use `srun` or an allocated compute node.
+
 Status doc for the next agent. The repo was bootstrapped by consolidating GPU
 kernels out of `team-gm` and the `FlashAttentionBias` repo into a dedicated,
 self-contained kernel-development repo. **Goal: clean per-op folder structure +
@@ -118,15 +133,15 @@ benches keep working unchanged). User's expectation: psk/benchmark (main) wins.
 
 ### 4b. Confirm the end-to-end cute path still reproduces the headline numbers
 `trimul/cute/bench_trimul.py` is the flagship 4-way bench (pt / nv-triton /
-cuequivariance / cute). It needs the **cute-env** (cutlass-dsl + quack), not the
-FA env. Expected on H100, bf16, B=1, D=128: cute ≈ **1.71 ms at L=1024**, wins
-at L≥512. To run, install the cute-env first:
+cuequivariance / cute). cutlass-dsl + quack now live in the **unified repo-root
+pixi env** (the old `cute-env/` was deleted — see CLAUDE.md / `pyproject.toml`
+`[tool.pixi]`). Expected on H100, bf16, B=1, D=128: cute ≈ **1.71 ms at L=1024**,
+wins at L≥512. To run (on a GPU, unified env, `--frozen`):
 
 ```bash
-cd /home/psk6950/miniworld-kernels/cute-env && pixi install        # heavy: cu128 torch + cutlass-dsl + quack
-# then (on a GPU), with src/ + the cute dirs on path — bench_trimul has the bootstrap built in:
-srun ... bash -c "cd /home/psk6950/miniworld-kernels && pixi -C cute-env run python \
-  src/miniworld_kernels/kernels/triangle_multiplication/trimul/cute/bench_trimul.py"
+srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
+  bash -c 'cd /home/psk6950/miniworld-kernels && pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
+    python src/miniworld_kernels/kernels/triangle_multiplication/trimul/cute/bench_trimul.py"'
 ```
 
 ### 4c. Clean up the FlashAttentionBias repo (only after 4a/4b pass)

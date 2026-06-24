@@ -12,6 +12,7 @@ from .adaln.triton.main import triton_adaptive_layer_norm
 from .augmented_attention.triton.main import triton_augmented_attention_pair_bias
 from .bias_only_attention.triton.main import triton_bias_only_attention
 from .layernorm.triton.main import triton_layernorm
+from .transition.triton.fused import triton_transition_fused
 from .transition.triton.main import triton_transition
 from .triangle_attention.triton.main import triton_triangle_attention_pair_bias
 from .tm1.triton.main import triton_tm1
@@ -34,5 +35,6 @@ __all__ = [
     "triton_tm1",
     "triton_tm2",
     "triton_transition",
+    "triton_transition_fused",
     "triton_triangle_attention_pair_bias",
 ]

@@ -1,9 +1,12 @@
-"""Parse a bench_layernorm_linear.py log and emit a markdown report + graphs.
+"""Parse a team-gm-style bench log and emit a markdown report + graphs.
 
 Benchmarks in this repo always ship a **table and a graph together** (project
 convention — see benchmark/BENCHMARKING.md). This turns a captured ``.out`` into
-both: per-metric markdown tables and per-metric PNG line plots (latency vs d,
-one subplot per M, one line per backend).
+both: per-metric markdown tables and per-metric PNG plots. For 2D shape sweeps
+(``M`` and ``d``), each metric gets one grouped-bar PNG with:
+- x-axis = ``M``
+- one subplot per ``d``
+- one bar color per backend
 
 Usage::
 
@@ -26,23 +29,43 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import math
+
 import matplotlib.pyplot as plt
 
 HEADER_RE = re.compile(r"M=(\d+)\s+d_in=(\d+)\s+d_out=(\d+)")
+BACKENDS = [
+    "pytorch",
+    "torch.compile",
+    "TE",
+    "cuequivariance",
+    "cute-fused",
+    "cute-train",
+    "cute",
+    "triton",
+    "layernorm_kernel",
+    "v2",
+]
+BACKEND_RE = "|".join(re.escape(b) for b in BACKENDS)
 # backends with both fwd and fwd+bwd:
-TIME_RE = re.compile(r"(torch\.compile|TE)\s+fwd=([\d.]+)\s*ms\s+fwd\+bwd=([\d.]+)\s*ms")
+TIME_RE = re.compile(rf"({BACKEND_RE})\s+fwd=([\d.]+)\s*ms\s+fwd\+bwd=([\d.]+)\s*ms")
 # forward-only timing lines (our fused inference kernel; also torch.compile/TE when a
 # forward-only sweep like tune.py omits fwd+bwd). cute-fused MUST precede cute so the
 # alternation doesn't match the "cute" prefix of "cute-fused".
-FWD_ONLY_RE = re.compile(r"(torch\.compile|TE|cute-fused|cute|triton)\s+fwd=([\d.]+)\s*ms")
+FWD_ONLY_RE = re.compile(rf"({BACKEND_RE})\s+fwd=([\d.]+)\s*ms")
+CORR_RE = re.compile(
+    rf"({BACKEND_RE})\s+"
+    r"fwd\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
+    r"dx\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
+    r"dw\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
+    r"db\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)"
+)
 
-# Display order; only backends actually present in the log are shown.
-BACKENDS = ["torch.compile", "TE", "cute", "cute-fused", "triton"]
 METRICS = [("fwd", "forward"), ("fwd+bwd", "forward + backward")]
 
 
 def parse(out_path: Path) -> dict:
-    """Return {(M, d): {backend: {'fwd': ms, ['fwd+bwd': ms]}}}."""
+    """Return {(M, d): {backend: {'fwd': ms, ['fwd+bwd': ms], ['corr']: ...}}}."""
     data: dict = {}
     cur = None
     for line in out_path.read_text().splitlines():
@@ -56,11 +79,20 @@ def parse(out_path: Path) -> dict:
             continue
         t = TIME_RE.search(line)
         if t:
-            data[cur][t[1]] = {"fwd": float(t[2]), "fwd+bwd": float(t[3])}
+            data[cur].setdefault(t[1], {}).update({"fwd": float(t[2]), "fwd+bwd": float(t[3])})
             continue
         f = FWD_ONLY_RE.search(line)
         if f:
-            data[cur][f[1]] = {"fwd": float(f[2])}
+            data[cur].setdefault(f[1], {}).update({"fwd": float(f[2])})
+            continue
+        c = CORR_RE.search(line)
+        if c:
+            data[cur].setdefault(c[1], {})["corr"] = {
+                "fwd": {"abs": float(c[2]), "rel": float(c[3]), "cos": float(c[4])},
+                "dx": {"abs": float(c[5]), "rel": float(c[6]), "cos": float(c[7])},
+                "dw": {"abs": float(c[8]), "rel": float(c[9]), "cos": float(c[10])},
+                "db": {"abs": float(c[11]), "rel": float(c[12]), "cos": float(c[13])},
+            }
 
 
     return data
@@ -99,35 +131,83 @@ def make_table(data: dict, metric: str) -> str:
     return "\n".join(rows)
 
 
-def make_plot(data: dict, metric: str, label: str, out_png: Path, title: str) -> None:
-    """Grouped BAR chart: one subplot per M, x = d groups, one bar per backend."""
-    Ms, ds = axes(data)
-    fig, axs = plt.subplots(1, len(Ms), figsize=(5 * len(Ms), 4.2), squeeze=False)
-    backends = backends_for(data, metric)
+def color_map(backends: list[str]) -> dict[str, str]:
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    return {backend: colors[i % len(colors)] for i, backend in enumerate(backends)}
+
+
+def plot_grouped_bars(ax, data: dict, metric: str, backends: list[str], Ms: list[int], d: int, colors: dict[str, str]) -> None:
+    xs = list(range(len(Ms)))
     nb = max(len(backends), 1)
-    width = 0.8 / nb
-    xs = list(range(len(ds)))
-    for j, M in enumerate(Ms):
-        ax = axs[0][j]
-        for bi, backend in enumerate(backends):
-            ys = [data.get((M, d), {}).get(backend, {}).get(metric) for d in ds]
-            ys_plot = [(y if y is not None else 0.0) for y in ys]
-            offs = (bi - (nb - 1) / 2) * width
-            bars = ax.bar([x + offs for x in xs], ys_plot, width, label=backend)
-            ax.bar_label(bars, labels=[("" if y is None else f"{y:.3f}") for y in ys],
-                         fontsize=6, rotation=90, padding=2)
-        ax.set_title(f"M = {M}")
-        ax.set_xlabel("d (= d_in = d_out)")
-        ax.set_xticks(xs)
-        ax.set_xticklabels(ds)
-        ax.grid(True, axis="y", alpha=0.3)
-        if j == 0:
-            ax.set_ylabel(f"{label} latency (ms)")
-        ax.legend(fontsize=8)
+    width = 0.82 / nb
+    for bi, backend in enumerate(backends):
+        ys = [data.get((M, d), {}).get(backend, {}).get(metric) for M in Ms]
+        ys_plot = [y if y is not None else 0.0 for y in ys]
+        offs = (bi - (nb - 1) / 2) * width
+        ax.bar(
+            [x + offs for x in xs],
+            ys_plot,
+            width,
+            label=backend,
+            color=colors[backend],
+        )
+    ax.set_title(f"d = {d}")
+    ax.set_xlabel("M")
+    ax.set_xticks(xs)
+    ax.set_xticklabels([str(M) for M in Ms], rotation=20)
+    ax.grid(True, axis="y", alpha=0.3)
+
+
+def make_plot(data: dict, metric: str, label: str, out_png: Path, title: str) -> None:
+    """Per-metric grouped bar chart with x=M and one subplot per d."""
+    Ms, ds = axes(data)
+    backends = backends_for(data, metric)
+    ncols = min(3, max(len(ds), 1))
+    nrows = math.ceil(len(ds) / ncols)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(5.1 * ncols, 4.0 * nrows), squeeze=False, sharey=True)
+    colors = color_map(backends)
+
+    for ax, d in zip(axs.flat, ds):
+        plot_grouped_bars(ax, data, metric, backends, Ms, d, colors)
+    for ax in axs.flat[len(ds):]:
+        ax.axis("off")
+
+    for r in range(nrows):
+        axs[r][0].set_ylabel(f"{label} latency (ms)")
+
+    handles, labels = axs[0][0].get_legend_handles_labels()
     fig.suptitle(f"{title} — {label} (lower is better)")
-    fig.tight_layout()
+    fig.legend(handles, labels, loc="upper center", ncol=max(len(backends), 1), frameon=True)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
+
+
+def make_correctness_table(data: dict) -> str | None:
+    present = []
+    for key, rec in sorted(data.items()):
+        M, d = key
+        for backend in BACKENDS:
+            corr = rec.get(backend, {}).get("corr")
+            if corr is None:
+                continue
+            present.append((M, d, backend, corr))
+    if not present:
+        return None
+
+    lines = [
+        "| d (=d_in=d_out) | M | backend | fwd rel/cos | dx rel/cos | dw rel/cos | db rel/cos |",
+        "|---|---:|---|---|---|---|---|",
+    ]
+    for M, d, backend, corr in present:
+        lines.append(
+            f"| {d} | {M} | {backend} | "
+            f"{corr['fwd']['rel']:.3e} / {corr['fwd']['cos']:.6f} | "
+            f"{corr['dx']['rel']:.3e} / {corr['dx']['cos']:.6f} | "
+            f"{corr['dw']['rel']:.3e} / {corr['dw']['cos']:.6f} | "
+            f"{corr['db']['rel']:.3e} / {corr['db']['cos']:.6f} |"
+        )
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -150,9 +230,16 @@ def main() -> None:
             continue  # e.g. a forward-only sweep has no fwd+bwd data
         png = args.output_dir / f"{name}_{metric.replace('+', '_')}.png"
         make_plot(data, metric, label, png, args.title)
-        md.append(f"## {label} latency (ms) — `torch.compile` / **TE** (bold = faster)\n")
+        md.append(f"## {label} latency (ms)\n")
+        md.append("_table: rows = d, columns = M, cells = backend latencies_\n")
         md.append(make_table(data, metric) + "\n")
+        md.append("_plot: grouped bar chart with x = M and one subplot per d_\n")
         md.append(f"![{label}]({png.name})\n")
+    corr_table = make_correctness_table(data)
+    if corr_table is not None:
+        md.append("## Correctness summary\n")
+        md.append("_cells show relative Frobenius error / cosine similarity_\n")
+        md.append(corr_table + "\n")
     md_path = args.output_dir / f"{name}.md"
     md_path.write_text("\n".join(md))
     print(f"wrote {md_path}")

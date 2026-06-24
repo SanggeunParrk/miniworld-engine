@@ -8,14 +8,8 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal
   no cache entries captured
 
-miniworld_kernels.kernels.tm1.triton.main.fused_sigmoid_gate_bwd_kernel
-  single_config -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
-
-miniworld_kernels.kernels.tm1.triton.main.fused_sigmoid_gate_fwd_kernel
-  key=(4, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
-
-miniworld_kernels.kernels.tm2.triton.main.fused_sigmoid_gate2_bwd_kernel
+miniworld_kernels.kernels.transition.triton.main.transition_bwd_kernel
   no cache entries captured
 
-miniworld_kernels.kernels.tm2.triton.main.fused_sigmoid_gate2_fwd_kernel
-  key=(4, 128, float32, float32, float32, float32, float32) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=3
+miniworld_kernels.kernels.transition.triton.main.transition_fwd_kernel
+  no cache entries captured

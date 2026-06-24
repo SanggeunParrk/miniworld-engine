@@ -68,14 +68,15 @@ class Transition(nn.Module):
     @typecheck
     def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
         """Forward pass."""
-        x = self.ln_in(x)
         if self.implementation == ImplementationType.PYTORCH:
+            x = self.ln_in(x)
             a = self.expand_a(x)
             b = self.expand_b(x)
             x = swish_gate(a, b)
             return self.squeeze(x)
 
         if self.implementation == ImplementationType.CUDA:
+            x = self.ln_in(x)
             return kernels.cuda_transition(
                 x,
                 self.expand_a.weight,
@@ -88,12 +89,16 @@ class Transition(nn.Module):
             ImplementationType.TRITON,
             ImplementationType.CUEQUIVARIANCE,
         }:
-            return kernels.triton_transition(
+            # Fully fused: LayerNorm is folded into the expand kernel (no separate ln_in).
+            return kernels.triton_transition_fused(
                 x,
+                self.ln_in.weight,
+                self.ln_in.bias,
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
                 self.n,
+                self.ln_in.eps,
             )
 
         raise InvalidImplementationError(self.implementation)
