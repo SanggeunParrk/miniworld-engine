@@ -1,0 +1,245 @@
+===VERIFY===
+ALL PASS
+===BENCH===
+torch 2.10.0+cu128  device NVIDIA H100 80GB HBM3
+transformer_engine 2.16.0
+
+=== M=16384  d_in=128  d_out=128  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.514e-05  cos=1.000000
+  dx   max|abs|=3.906e-03  rel_fro=1.126e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=6.919e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0170 ms  fwd+bwd=0.2139 ms
+  TE             fwd=0.0174 ms  fwd+bwd=0.2052 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute-train     fwd=0.1213 ms  fwd+bwd=0.5551 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute           fwd=0.0153 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute-fused     fwd=0.0130 ms  (fold cached)
+  triton-fwd max|abs|=3.906e-03  rel_fro=7.341e-06  cos=1.000000
+  triton         fwd=0.0114 ms
+
+=== M=65536  d_in=128  d_out=128  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.459e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.021e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=1.523e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0375 ms  fwd+bwd=0.2642 ms
+  TE             fwd=0.0428 ms  fwd+bwd=0.2230 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-train     fwd=0.1420 ms  fwd+bwd=0.8114 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.0315 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.0228 ms  (fold cached)
+  triton-fwd max|abs|=3.906e-03  rel_fro=4.471e-06  cos=1.000000
+  triton         fwd=0.0262 ms
+
+=== M=262144  d_in=128  d_out=128  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.268e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.206e-05  cos=1.000000
+  dWl  max|abs|=4.000e+00  rel_fro=1.029e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1244 ms  fwd+bwd=0.4618 ms
+  TE             fwd=0.1390 ms  fwd+bwd=0.5590 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute-train     fwd=0.1481 ms  fwd+bwd=0.5780 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute           fwd=0.0939 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.558e-03  cos=0.999997
+  cute-fused     fwd=0.0620 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=9.341e-06  cos=1.000000
+  triton         fwd=0.0741 ms
+
+=== M=16384  d_in=256  d_out=256  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.806e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.355e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=9.269e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0252 ms  fwd+bwd=0.2359 ms
+  TE             fwd=0.0257 ms  fwd+bwd=0.2040 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-train     fwd=0.1224 ms  fwd+bwd=0.5704 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.0227 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.0194 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=1.101e-05  cos=1.000000
+  triton         fwd=0.0187 ms
+
+=== M=65536  d_in=256  d_out=256  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.479e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.290e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=8.316e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0611 ms  fwd+bwd=0.2721 ms
+  TE             fwd=0.0692 ms  fwd+bwd=0.2627 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.559e-03  cos=0.999997
+  cute-train     fwd=0.1207 ms  fwd+bwd=0.5821 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.559e-03  cos=0.999997
+  cute           fwd=0.0562 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.559e-03  cos=0.999997
+  cute-fused     fwd=0.0485 ms  (fold cached)
+  triton-fwd max|abs|=3.906e-03  rel_fro=8.219e-06  cos=1.000000
+  triton         fwd=0.0582 ms
+
+=== M=262144  d_in=256  d_out=256  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=2.601e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.328e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.343e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.2050 ms  fwd+bwd=0.6859 ms
+  TE             fwd=0.2283 ms  fwd+bwd=0.7862 ms
+  train-fwd max|abs|=6.641e-02  rel_fro=2.699e-03  cos=0.999996
+  cute-train     fwd=0.1973 ms  fwd+bwd=0.8900 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.1804 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.1656 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=9.331e-06  cos=1.000000
+  triton         fwd=0.2061 ms
+
+=== M=16384  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.487e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.784e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=8.325e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0295 ms  fwd+bwd=0.4304 ms
+  TE             fwd=0.0344 ms  fwd+bwd=0.2939 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-train     fwd=0.1255 ms  fwd+bwd=0.8103 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.0251 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.0294 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=3.509e-05  cos=1.000000
+  triton         fwd=0.0450 ms
+
+=== M=65536  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.414e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.779e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=9.462e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0936 ms  fwd+bwd=0.4662 ms
+  TE             fwd=0.1023 ms  fwd+bwd=0.3472 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-train     fwd=0.1247 ms  fwd+bwd=0.8248 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.0699 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.0909 ms  (fold cached)
+  triton-fwd max|abs|=1.562e-02  rel_fro=2.876e-05  cos=1.000000
+  triton         fwd=0.1483 ms
+
+=== M=262144  d_in=384  d_out=384  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.261e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.706e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.757e-04  cos=1.000000
+  dg   max|abs|=1.250e-01  rel_fro=2.166e-05  cos=1.000000
+  torch.compile  fwd=0.2973 ms  fwd+bwd=1.1571 ms
+  TE             fwd=0.3390 ms  fwd+bwd=1.1171 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-train     fwd=0.2892 ms  fwd+bwd=1.2544 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.2433 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=0.3301 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=3.322e-05  cos=1.000000
+  triton         fwd=0.5313 ms
+
+=== M=16384  d_in=512  d_out=512  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.465e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.423e-05  cos=1.000000
+  dWl  max|abs|=2.000e+00  rel_fro=9.720e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0367 ms  fwd+bwd=0.4352 ms
+  TE             fwd=0.0415 ms  fwd+bwd=0.2874 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-train     fwd=0.1209 ms  fwd+bwd=0.8171 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute           fwd=0.0357 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.560e-03  cos=0.999997
+  cute-fused     fwd=0.0437 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=3.936e-05  cos=1.000000
+  triton         fwd=0.0562 ms
+
+=== M=65536  d_in=512  d_out=512  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.345e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.489e-05  cos=1.000000
+  dWl  max|abs|=4.000e+00  rel_fro=1.197e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1144 ms  fwd+bwd=0.4658 ms
+  TE             fwd=0.1259 ms  fwd+bwd=0.4172 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.559e-03  cos=0.999997
+  cute-train     fwd=0.1498 ms  fwd+bwd=0.8211 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.559e-03  cos=0.999997
+  cute           fwd=0.1024 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.559e-03  cos=0.999997
+  cute-fused     fwd=0.1492 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=3.462e-05  cos=1.000000
+  triton         fwd=0.1903 ms
+
+=== M=262144  d_in=512  d_out=512  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=3.005e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.394e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.275e-04  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.4141 ms  fwd+bwd=1.4516 ms
+  TE             fwd=0.4516 ms  fwd+bwd=1.3839 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-train     fwd=0.3973 ms  fwd+bwd=1.5636 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute           fwd=0.3567 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-fused     fwd=0.5611 ms  (fold cached)
+  triton-fwd max|abs|=1.562e-02  rel_fro=3.391e-05  cos=1.000000
+  triton         fwd=0.6794 ms
+
+=== M=16384  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=7.812e-03  rel_fro=3.096e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.943e-05  cos=1.000000
+  dWl  max|abs|=1.000e+00  rel_fro=7.668e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.0579 ms  fwd+bwd=0.4263 ms
+  TE             fwd=0.0587 ms  fwd+bwd=0.2883 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-train     fwd=0.1284 ms  fwd+bwd=0.8036 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute           fwd=0.0477 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-fused     fwd=0.0849 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=3.727e-05  cos=1.000000
+  triton         fwd=0.1957 ms
+
+=== M=65536  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=3.218e-05  cos=1.000000
+  dx   max|abs|=7.812e-03  rel_fro=1.698e-05  cos=1.000000
+  dWl  max|abs|=4.000e+00  rel_fro=9.914e-05  cos=1.000000
+  dg   max|abs|=0.000e+00  rel_fro=0.000e+00  cos=1.000000
+  torch.compile  fwd=0.1979 ms  fwd+bwd=0.6701 ms
+  TE             fwd=0.2029 ms  fwd+bwd=0.6018 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-train     fwd=0.2127 ms  fwd+bwd=0.8554 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute           fwd=0.1579 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.562e-03  cos=0.999997
+  cute-fused     fwd=0.3154 ms  (fold cached)
+  triton-fwd max|abs|=1.562e-02  rel_fro=3.663e-05  cos=1.000000
+  triton         fwd=0.7375 ms
+
+=== M=262144  d_in=768  d_out=768  dtype=torch.bfloat16 ===
+  fwd  max|abs|=1.562e-02  rel_fro=2.919e-05  cos=1.000000
+  dx   max|abs|=1.562e-02  rel_fro=1.739e-05  cos=1.000000
+  dWl  max|abs|=8.000e+00  rel_fro=1.211e-04  cos=1.000000
+  dg   max|abs|=5.000e-01  rel_fro=6.090e-05  cos=1.000000
+  torch.compile  fwd=0.7357 ms  fwd+bwd=2.4582 ms
+  TE             fwd=0.7534 ms  fwd+bwd=2.2254 ms
+  train-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-train     fwd=0.6536 ms  fwd+bwd=2.7950 ms
+  cute-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute           fwd=0.6006 ms  (fold cached)
+  cutefused-fwd max|abs|=1.562e-02  rel_fro=2.561e-03  cos=0.999997
+  cute-fused     fwd=1.2236 ms  (fold cached)
+  triton-fwd max|abs|=7.812e-03  rel_fro=3.888e-05  cos=1.000000
+  triton         fwd=2.8073 ms

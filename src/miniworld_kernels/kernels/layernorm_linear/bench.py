@@ -148,6 +148,32 @@ def run_shape(M: int, d_in: int, d_out: int) -> None:
             f"fwd+bwd={do_bench(fwdbwd_te, grad_to_none=te_grads):.4f} ms"
         )
 
+    # Our trainable cute path (autograd Fn): fwd + fwd+bwd, vs torch.compile/TE above.
+    from miniworld_kernels.kernels.layernorm_linear.autograd import layernorm_linear_fn
+    x_fn = x.detach().clone().requires_grad_(True)
+    gw = ref.layer_norm_weight.detach().clone().requires_grad_(True)
+    gb = ref.layer_norm_bias.detach().clone().requires_grad_(True)
+    Wfn = ref.weight.detach().clone().requires_grad_(True)
+    bfn = ref.bias.detach().clone().requires_grad_(True)
+    fn_grads = [x_fn, gw, gb, Wfn, bfn]
+    try:
+        y_fn = layernorm_linear_fn(x_fn, gw, gb, Wfn, bfn)
+    except Exception as e:  # noqa: BLE001
+        print(f"  cute-train     [skipped: {type(e).__name__}: {e}]")
+    else:
+        print(compare("train-fwd", y_fn, y_ref_val))
+
+        def fwd_fn():
+            layernorm_linear_fn(x_fn, gw, gb, Wfn, bfn)
+
+        def fwdbwd_fn():
+            layernorm_linear_fn(x_fn, gw, gb, Wfn, bfn).backward(g)
+
+        print(
+            f"  cute-train     fwd={do_bench(fwd_fn):.4f} ms  "
+            f"fwd+bwd={do_bench(fwdbwd_fn, grad_to_none=fn_grads):.4f} ms"
+        )
+
     # Our fused CuTeDSL (quack SM90) kernel. Prologue (fold) is cached — fixed
     # weights — so we time only the stats + fused GEMM (inference-style).
     xd = x.detach()
