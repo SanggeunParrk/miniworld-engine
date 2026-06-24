@@ -69,12 +69,13 @@ def main():
     cq.load_state_dict(TriangleMultiplication(d_pair=D, implementation=ImplementationType.PYTORCH).cuda().state_dict()
                        if False else base.float().state_dict())
     cq = cq.to(dt)
-    dtv1_kw = dict(
-        norm_in_weight=base.ln_pair.weight, norm_in_bias=base.ln_pair.bias,
-        p_in_weight=torch.cat([base.to_left.weight, base.to_right.weight], 0),
-        g_in_weight=torch.cat([base.to_left_gate.weight, base.to_right_gate.weight], 0),
-        norm_out_weight=base.ln_out.weight, norm_out_bias=base.ln_out.bias,
-        p_out_weight=base.to_out.weight, g_out_weight=base.to_gate.weight)
+    bfp = base.float()  # dt-v1 wants fp32 params + autocast (bf16-mixed), like its native use
+    dtv1_fp_kw = dict(
+        norm_in_weight=bfp.ln_pair.weight, norm_in_bias=bfp.ln_pair.bias,
+        p_in_weight=torch.cat([bfp.to_left.weight, bfp.to_right.weight], 0),
+        g_in_weight=torch.cat([bfp.to_left_gate.weight, bfp.to_right_gate.weight], 0),
+        norm_out_weight=bfp.ln_out.weight, norm_out_bias=bfp.ln_out.bias,
+        p_out_weight=bfp.to_out.weight, g_out_weight=bfp.to_gate.weight)
 
     for L in (256, 512, 1024):
         M = L * L
@@ -113,12 +114,17 @@ def main():
                 print(f"   fail {type(e).__name__}: {str(e)[:60]}", flush=True)
                 return float("nan")
 
+        def dtv1_call():
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                return fused_triangle_multiplicative_update_dtv1(x, "outgoing", None, eps=EPS, **dtv1_fp_kw)
+
         t_old = b_(ours_old)
         t_opt = b_(ours_opt)
-        t_dt = b_(lambda: fused_triangle_multiplicative_update_dtv1(x, "outgoing", None, eps=EPS, **dtv1_kw))
+        t_dt = b_(dtv1_call)
         t_cq = b_(lambda: cq(x))
         print(f"  L={L:>4}: ours_old {t_old:.3f} | ours_OPT {t_opt:.3f} | dtv1 {t_dt:.3f} | cuequiv {t_cq:.3f} ms",
               flush=True)
+        print(f"DATA {L} {t_old:.4f} {t_opt:.4f} {t_dt:.4f} {t_cq:.4f}", flush=True)
 
 
 if __name__ == "__main__":
