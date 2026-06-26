@@ -31,18 +31,22 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from ..layernorm.triton.main import get_seq_group  # M-bucketing for the autotune key
+
+# Keyed on (N, GROUP_M) so the config is tuned PER (d, M-bucket) — not reused across M for a given
+# d (the earlier ["N"]-only key tuned on whichever M was hit first and reused it for all M).
 _LN_CONFIGS = [
     triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
-    for bm in (8, 16, 32, 64, 128) for nw in (4, 8) for ns in (2, 3, 4)
+    for bm in (8, 16, 32, 64, 128) for nw in (4, 8, 16) for ns in (2, 3, 4)
 ]
 
 
 # ───────────────────────── forward: LN-materialize (strided x → contiguous x_normed) ─────────
-@triton.autotune(configs=_LN_CONFIGS, key=["N"])
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M"])
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N, eps,
                    sx0, sx1, sn0, sn1,
-                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr):
     row = tl.program_id(0)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
@@ -74,17 +78,17 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
     _ln_mat_kernel[grid](
         x, xn, mean, rstd, gamma, beta, M, K, eps,
         x.stride(0), x.stride(1), xn.stride(0), xn.stride(1),
-        BLOCK_N=triton.next_power_of_2(K),
+        BLOCK_N=triton.next_power_of_2(K), GROUP_M=get_seq_group(M),
     )
     return xn, mean, rstd
 
 
 # ───────── backward: ONE LN-backward kernel → dx (arbitrary strides) + dγ + dβ (M-reduce) ─────
-@triton.autotune(configs=_LN_CONFIGS, key=["N"], reset_to_zero=["DG", "DB"])
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M"], reset_to_zero=["DG", "DB"])
 @triton.jit
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,
-                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr):
     row = tl.program_id(0)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
@@ -124,7 +128,7 @@ def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides):
         dx_normed, x, gamma, mean, rstd, dx, dgamma, dbeta, M, K,
         dx_normed.stride(0), dx_normed.stride(1), x.stride(0), x.stride(1),
         dx.stride(0), dx.stride(1),
-        BLOCK_N=triton.next_power_of_2(K),
+        BLOCK_N=triton.next_power_of_2(K), GROUP_M=get_seq_group(M),
     )
     return dx, dgamma, dbeta
 

@@ -7,6 +7,8 @@ Same algorithm as Transformer Engine (materialize `x_normed=LN(x)` → plain cuB
 
 > ⛔ All numbers are full fwd+bwd via `triton.testing.do_bench` (warmup 25, rep 100), grads
 > zeroed each iter. Bench: `te_style_bench.py`; plot: `te_style_plot.py` (both via `srun`).
+> The LN kernels autotune `BLOCK_M × num_warps × num_stages` keyed on **(N, M-bucket)** — keying
+> on N alone reused one M's config across all M for a given d (≈5-8% left on the table at large M).
 
 ![fwd+bwd vs TE / torch.compile](te_style_fwd_bwd.png)
 
@@ -14,41 +16,43 @@ Same algorithm as Transformer Engine (materialize `x_normed=LN(x)` → plain cuB
 
 | M | d | ours (ms) | TE (ms) | torch.compile (ms) | **ours vs TE** |
 |---:|---:|---:|---:|---:|:---:|
-| 16384 | 128 | 0.2176 | 0.2034 | 0.3279 | 0.93x |
-| 65536 | 128 | 0.2371 | 0.2199 | 0.2957 | 0.93x |
-| 262144 | 128 | 0.3727 | 0.5554 | 0.4180 | **1.49x** |
-| 16384 | 256 | 0.2083 | 0.1932 | 0.2288 | 0.93x |
-| 65536 | 256 | 0.3174 | 0.2913 | 0.4196 | 0.92x |
-| 262144 | 256 | 0.7600 | 0.7884 | 0.6782 | **1.04x** |
-| 16384 | 384 | 0.2156 | 0.2061 | 0.2641 | 0.96x |
-| 65536 | 384 | 0.3272 | 0.3521 | 0.4383 | 1.08x |
-| 262144 | 384 | 1.0688 | 1.1180 | 1.1579 | **1.05x** |
-| 16384 | 512 | 0.3127 | 0.2703 | 0.4167 | 0.86x |
-| 65536 | 512 | 0.4174 | 0.4165 | 0.4208 | 1.00x |
-| 262144 | 512 | 1.4546 | 1.3922 | 1.4594 | 0.96x |
+| 16384 | 128 | 0.2344 | 0.2853 | 0.3283 | 1.22x |
+| 65536 | 128 | 0.2389 | 0.2214 | 0.2647 | 0.93x |
+| 262144 | 128 | 0.3731 | 0.5536 | 0.4188 | **1.48x** |
+| 16384 | 256 | 0.2307 | 0.2059 | 0.2477 | 0.89x |
+| 65536 | 256 | 0.2616 | 0.2631 | 0.2869 | 1.01x |
+| 262144 | 256 | 0.6998 | 0.7841 | 0.6803 | **1.12x** |
+| 16384 | 384 | 0.2382 | 0.2072 | 0.2740 | 0.87x |
+| 65536 | 384 | 0.3262 | 0.3501 | 0.3518 | 1.07x |
+| 262144 | 384 | 1.0692 | 1.1178 | 1.1530 | **1.05x** |
+| 16384 | 512 | 0.2407 | 0.2183 | 0.2705 | 0.91x |
+| 65536 | 512 | 0.4174 | 0.4184 | 0.4188 | 1.00x |
+| 262144 | 512 | 1.4495 | 1.3873 | 1.4522 | 0.96x |
 
-Large-M (262144) beats TE through d≤384 (1.04–1.49x) and ties at d=512 (0.96x); small-M within
-4–14% (residual fixed overhead, widest at d=512). d=512 large-M is the one place ours dips slightly
-(0.96x) — the LN-materialize round-trip cost grows with d.
+Large-M (262144) beats TE through d≤384 (1.05–1.48x), ties at d=512 (0.96x). Mid-M (65536) ties or
+wins (1.00–1.07x). Small-M (16384) is the residual gap (0.87–0.91x at d≥256) = forward fixed-launch
+overhead — TE fuses LN into the GEMM prologue; we run a separate LN-materialize + plain GEMM. The
+(N,M)-bucketed autotune recovered the large/mid-M cases (d256 M65536 0.92→1.01x, M262144 1.04→1.12x).
 
 ## m-major input (trimul BDLL view; TE copies to contiguous internally)
 
 | M | d | ours (ms) | TE (ms) | torch.compile (ms) | **ours vs TE** |
 |---:|---:|---:|---:|---:|:---:|
-| 16384 | 128 | 0.3158 | 0.3223 | 0.3739 | 1.02x |
-| 65536 | 128 | 0.3120 | 0.3389 | 0.3894 | 1.09x |
-| 262144 | 128 | 0.4950 | 1.1258 | 1.4780 | **2.27x** |
-| 16384 | 256 | 0.2161 | 0.2277 | 0.2560 | 1.05x |
-| 65536 | 256 | 0.3217 | 0.5076 | 0.9642 | 1.58x |
-| 262144 | 256 | 0.7816 | 2.0176 | 2.8608 | **2.58x** |
-| 16384 | 384 | 0.2174 | 0.2387 | 0.3464 | 1.10x |
-| 65536 | 384 | 0.3475 | 0.7380 | 1.2504 | 2.12x |
-| 262144 | 384 | 1.1920 | 3.0665 | 4.1724 | **2.57x** |
-| 16384 | 512 | 0.2227 | 0.2826 | 0.4134 | 1.27x |
-| 65536 | 512 | 0.4485 | 0.9003 | 1.4375 | 2.01x |
-| 262144 | 512 | 1.5767 | 3.9320 | 5.2750 | **2.49x** |
+| 16384 | 128 | 0.2387 | 0.2308 | 0.2579 | 0.97x |
+| 65536 | 128 | 0.2385 | 0.3399 | 0.3677 | 1.43x |
+| 262144 | 128 | 0.4626 | 1.1309 | 1.5171 | **2.44x** |
+| 16384 | 256 | 0.2304 | 0.2437 | 0.2550 | 1.06x |
+| 65536 | 256 | 0.2605 | 0.5058 | 0.9675 | 1.94x |
+| 262144 | 256 | 0.8208 | 2.0124 | 2.8567 | **2.45x** |
+| 16384 | 384 | 0.2364 | 0.2407 | 0.3482 | 1.02x |
+| 65536 | 384 | 0.3521 | 0.7382 | 1.2469 | 2.10x |
+| 262144 | 384 | 1.2067 | 3.0639 | 4.1518 | **2.54x** |
+| 16384 | 512 | 0.2400 | 0.2831 | 0.4106 | 1.18x |
+| 65536 | 512 | 0.4386 | 0.9030 | 1.4647 | 2.06x |
+| 262144 | 512 | 1.4945 | 3.9554 | 5.2908 | **2.65x** |
 
-Wins everywhere (1.02–2.58x); the lead grows with M because TE pays the strided→contiguous copy
-regardless (probed: `TE(raw-strided)` == `TE(.contiguous())` timing), while we absorb the stride.
+Wins almost everywhere (0.97–2.65x; only d=128 M=16384 ≈ tie); the lead grows with M because TE
+pays the strided→contiguous copy regardless (probed: `TE(raw-strided)` == `TE(.contiguous())`
+timing), while we absorb the stride.
 
 All grads verified `cos=1.0` vs fp32 autograd (`te_style_verify.py`); `dx.stride() == x.stride()`.
