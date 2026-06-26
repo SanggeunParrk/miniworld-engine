@@ -12,6 +12,12 @@ LN-materialize kernel reads x at ARBITRARY strides (the stride-absorber) and the
 **dx in the SAME layout as the input** (m-major in → m-major out) so trimul's backward consumes it
 copy-free.
 
+Precision: dtype-transparent — fp32 / bf16 / fp16 inputs all flow through ONE code path (the LN
+kernels compute in fp32 and store `element_ty`; GEMMs accumulate in fp32). The path "splits" only
+where it matters: the LN kernels autotune per byte-width (fp32 vs 16-bit), and fp32 GEMMs honor a
+TF32-vs-true-fp32 policy (`set_fp32_matmul_precision`, default 'high'=TF32). v1 requires X and W to
+share a dtype (no mixed bf16-act/fp32-weight yet).
+
 Structure (all cuBLAS GEMMs = TE-parity; LN kernels are Triton = portable, no quack/SM90 dep):
   forward  : x_normed = LN(x)              (Triton, strided x → contiguous x_normed + mean,rstd)
              Y = x_normed @ Wᵀ + b         (F.linear / cuBLAS)
@@ -26,12 +32,45 @@ x_normed materialization (see kernels/.../cute/dgrad_lnbwd.py for the same ident
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
 
 from ..layernorm.triton.main import get_seq_group  # M-bucketing for the autotune key
+
+# ── dtype support ──────────────────────────────────────────────────────────────────────────────
+# The Triton LN kernels are dtype-generic (compute in fp32, store `element_ty`), so fp32/bf16/fp16
+# all flow through ONE code path. Two things ARE dtype-specific:
+#  • autotune: the configs are keyed on byte-width (DT) so fp32 (2× bytes → different occupancy)
+#    tunes separately from bf16/fp16 (which share, both 2-byte).
+#  • fp32 GEMM precision: TF32 ("high", fast) vs true-fp32 ("highest"). Low-precision GEMMs are
+#    unaffected (always bf16/fp16 operand + fp32 accum). Toggle via set_fp32_matmul_precision().
+_FP32_MATMUL_PRECISION = "high"   # "high" → TF32 (default, fast); "highest" → true fp32
+
+
+def set_fp32_matmul_precision(mode: str) -> None:
+    """'high' = TF32 cuBLAS for fp32 GEMMs (fast, ~fp32); 'highest' = true fp32 (accurate, slower).
+    Only affects fp32 inputs; bf16/fp16 are always fp32-accumulated regardless."""
+    global _FP32_MATMUL_PRECISION
+    assert mode in ("high", "highest")
+    _FP32_MATMUL_PRECISION = mode
+
+
+@contextlib.contextmanager
+def _fp32_matmul_ctx(dtype):
+    """For fp32 inputs, set cuBLAS TF32 per the policy (save/restore); no-op otherwise."""
+    if dtype is not torch.float32:
+        yield
+        return
+    prev = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = (_FP32_MATMUL_PRECISION == "high")
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev
 
 # Keyed on (N, GROUP_M) so the config is tuned PER (d, M-bucket) — not reused across M for a given
 # d (the earlier ["N"]-only key tuned on whichever M was hit first and reused it for all M).
@@ -42,11 +81,12 @@ _LN_CONFIGS = [
 
 
 # ───────────────────────── forward: LN-materialize (strided x → contiguous x_normed) ─────────
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M"])
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M", "DT"])
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N, eps,
                    sx0, sx1, sn0, sn1,
-                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr):
+                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr,
+                   DT: tl.constexpr):
     row = tl.program_id(0)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
@@ -78,17 +118,18 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
     _ln_mat_kernel[grid](
         x, xn, mean, rstd, gamma, beta, M, K, eps,
         x.stride(0), x.stride(1), xn.stride(0), xn.stride(1),
-        BLOCK_N=triton.next_power_of_2(K), GROUP_M=get_seq_group(M),
+        BLOCK_N=triton.next_power_of_2(K), GROUP_M=get_seq_group(M), DT=x.element_size(),
     )
     return xn, mean, rstd
 
 
 # ───────── backward: ONE LN-backward kernel → dx (arbitrary strides) + dγ + dβ (M-reduce) ─────
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M"], reset_to_zero=["DG", "DB"])
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M", "DT"], reset_to_zero=["DG", "DB"])
 @triton.jit
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,
-                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr):
+                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr,
+                   DT: tl.constexpr):
     # NOTE: one tile per program (atomic_add per block for dγ/dβ). A grid-stride variant (one
     # atomic per program) sped up CONTIGUOUS large-d (d512 0.96→1.07x) but CATASTROPHICALLY
     # regressed m-major d=256 (2.45→0.45x — the strided x/dx access interacts badly with the
@@ -131,7 +172,7 @@ def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides):
         dx_normed, x, gamma, mean, rstd, dx, dgamma, dbeta, M, K,
         dx_normed.stride(0), dx_normed.stride(1), x.stride(0), x.stride(1),
         dx.stride(0), dx.stride(1),
-        BLOCK_N=triton.next_power_of_2(K), GROUP_M=get_seq_group(M),
+        BLOCK_N=triton.next_power_of_2(K), GROUP_M=get_seq_group(M), DT=x.element_size(),
     )
     return dx, dgamma, dbeta
 
@@ -150,7 +191,8 @@ def _bias_grad(dY: torch.Tensor) -> torch.Tensor:
 # ───────────────────────── forward / backward / autograd Function ────────────────────────────
 def _te_forward(x, gamma, beta, W, bias, eps):
     x_normed, mean, rstd = _ln_materialize(x, gamma, beta, eps)
-    Y = F.linear(x_normed, W, bias)                # x_normed @ Wᵀ + bias  (cuBLAS)
+    with _fp32_matmul_ctx(x.dtype):
+        Y = F.linear(x_normed, W, bias)            # x_normed @ Wᵀ + bias  (cuBLAS; fp32→TF32 policy)
     return Y, x_normed, mean, rstd
 
 
@@ -158,10 +200,11 @@ def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias):
     """TE-matching 4-launch backward (cuBLAS dgrad + 1 LN-bwd kernel + cuBLAS wgrad + db reduce).
     dW uses the SAVED x_normed directly (TE-style) — no T-decomposition / elementwise tail."""
     dY = dY.contiguous() if dY.stride(-1) != 1 else dY
-    dx_normed = torch.matmul(dY, W)                       # dY@W → (M,K)
+    with _fp32_matmul_ctx(dY.dtype):                      # fp32→TF32 policy for all bwd GEMMs
+        dx_normed = torch.matmul(dY, W)                   # dY@W → (M,K)
+        dW = torch.matmul(dY.t(), x_normed)              # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
+        db = _bias_grad(dY).to(W.dtype) if has_bias else None  # linear bias grad (cuBLAS GEMV)
     dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride())  # dx(m-major)+dγ+dβ
-    dW = torch.matmul(dY.t(), x_normed)                  # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
-    db = _bias_grad(dY).to(W.dtype) if has_bias else None  # linear bias grad (cuBLAS GEMV)
     return dx, dgamma.to(gamma.dtype), dbeta.to(gamma.dtype), dW, db
 
 

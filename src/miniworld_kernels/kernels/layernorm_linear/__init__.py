@@ -20,7 +20,7 @@ from .autograd import (
 )
 from .interface import layernorm_linear_triton
 from .reference import LayerNormLinearRef, layernorm_linear_pytorch
-from .te_style import LayerNormLinearTEFn, layernorm_linear_te_fn
+from .te_style import LayerNormLinearTEFn, layernorm_linear_te_fn, set_fp32_matmul_precision
 
 __all__ = [
     "LayerNormLinearFn",
@@ -33,6 +33,7 @@ __all__ = [
     "layernorm_linear_te_fn",    # trainable, TE-style (materialize+cuBLAS, stride-transparent)
     "layernorm_linear_triton",   # portable inference forward
     "layernorm_linear_triton_fn",  # trainable, portable (Triton fwd + cuBLAS/Triton bwd)
+    "set_fp32_matmul_precision",  # te_fn fp32 GEMM policy: 'high'=TF32 (default) | 'highest'=true fp32
 ]
 
 
