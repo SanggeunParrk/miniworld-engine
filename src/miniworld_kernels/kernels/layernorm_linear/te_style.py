@@ -31,10 +31,14 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from .autograd import _recompute_xhat
+_LN_CONFIGS = [
+    triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
+    for bm in (8, 16, 32, 64, 128) for nw in (4, 8) for ns in (2, 3, 4)
+]
 
 
 # ───────────────────────── forward: LN-materialize (strided x → contiguous x_normed) ─────────
+@triton.autotune(configs=_LN_CONFIGS, key=["N"])
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N, eps,
                    sx0, sx1, sn0, sn1,
@@ -66,20 +70,21 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
     xn = torch.empty(M, K, device=x.device, dtype=x.dtype)         # contiguous out
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
     rstd = torch.empty(M, dtype=torch.float32, device=x.device)
-    BLOCK_M = 8
-    _ln_mat_kernel[(triton.cdiv(M, BLOCK_M),)](
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
+    _ln_mat_kernel[grid](
         x, xn, mean, rstd, gamma, beta, M, K, eps,
         x.stride(0), x.stride(1), xn.stride(0), xn.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_N=triton.next_power_of_2(K), num_warps=8,
+        BLOCK_N=triton.next_power_of_2(K),
     )
     return xn, mean, rstd
 
 
-# ───────────────────────── backward: LN-normalize backward → dx (arbitrary dx strides) ───────
+# ───────── backward: ONE LN-backward kernel → dx (arbitrary strides) + dγ + dβ (M-reduce) ─────
+@triton.autotune(configs=_LN_CONFIGS, key=["N"], reset_to_zero=["DG", "DB"])
 @triton.jit
-def _ln_dx_kernel(DXn, X, G, Mean, Rstd, DX, M, N,
-                  sdn0, sdn1, sx0, sx1, sdx0, sdx1,
-                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
+                   sdn0, sdn1, sx0, sx1, sdx0, sdx1,
+                   BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
     row = tl.program_id(0)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
@@ -99,44 +104,47 @@ def _ln_dx_kernel(DXn, X, G, Mean, Rstd, DX, M, N,
     dx = rstd * (dxhat - c2[:, None] - xhat * c1[:, None])
     tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1,
              dx.to(DX.dtype.element_ty), mask=mask)
+    # dγ = Σ_m dx_normed·x̂ ; dβ = Σ_m dx_normed  (reduce this block's M rows, atomic across blocks)
+    pdg = tl.sum(tl.where(mask, dxn * xhat, 0.0), axis=0)
+    pdb = tl.sum(tl.where(mask, dxn, 0.0), axis=0)
+    tl.atomic_add(DG + cols, pdg, mask=cmask)
+    tl.atomic_add(DB + cols, pdb, mask=cmask)
 
 
-def _ln_dx(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
-           mean: torch.Tensor, rstd: torch.Tensor, dx_strides):
-    """dx = rstd·(γ·dxn − meanₖ(γ·dxn) − x̂·meanₖ(γ·dxn·x̂)), x̂=(x-μ)·rstd. Reads x at its strides,
-    writes dx at `dx_strides` (so dx matches the input layout — m-major in → m-major out)."""
+def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides):
+    """ONE pass: dx = rstd·(γ·dxn − meanₖ(γ·dxn) − x̂·meanₖ(γ·dxn·x̂)) written at `dx_strides`
+    (m-major in→out), plus dγ=Σ_m dxn·x̂ and dβ=Σ_m dxn (atomic M-reduction). x̂ recomputed inside
+    from x (read at its strides) + saved μ,rstd — no separate recompute kernel."""
     M, K = x.shape
     dx = torch.empty_strided((M, K), dx_strides, device=x.device, dtype=dx_normed.dtype)
-    BLOCK_M = 8
-    _ln_dx_kernel[(triton.cdiv(M, BLOCK_M),)](
-        dx_normed, x, gamma, mean, rstd, dx, M, K,
+    dgamma = torch.zeros(K, dtype=torch.float32, device=x.device)
+    dbeta = torch.zeros(K, dtype=torch.float32, device=x.device)
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
+    _ln_bwd_kernel[grid](
+        dx_normed, x, gamma, mean, rstd, dx, dgamma, dbeta, M, K,
         dx_normed.stride(0), dx_normed.stride(1), x.stride(0), x.stride(1),
         dx.stride(0), dx.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_N=triton.next_power_of_2(K), num_warps=8,
+        BLOCK_N=triton.next_power_of_2(K),
     )
-    return dx
+    return dx, dgamma, dbeta
 
 
 # ───────────────────────── forward / backward / autograd Function ────────────────────────────
 def _te_forward(x, gamma, beta, W, bias, eps):
     x_normed, mean, rstd = _ln_materialize(x, gamma, beta, eps)
     Y = F.linear(x_normed, W, bias)                # x_normed @ Wᵀ + bias  (cuBLAS)
-    return Y, mean, rstd
+    return Y, x_normed, mean, rstd
 
 
-def _te_backward(dY, x, mean, rstd, gamma, beta, W, has_bias):
-    dY = dY.contiguous() if dY.stride(-1) != 1 else dY   # cuBLAS wants a sane layout; cheap if already
-    dx_normed = torch.matmul(dY, W)                # dY@W → (M,K) contiguous
-    dx = _ln_dx(dx_normed, x, gamma, mean, rstd, x.stride())   # dx in x's layout (m-major in→out)
-    xhat = _recompute_xhat(x, mean, rstd)          # (M,K) contiguous bf16
-    T = torch.matmul(dY.t(), xhat)                 # (N,K) wgrad on x̂
-    db = dY.sum(0)                                  # (N,)
-    Tf, gf, bf, dbf, Wf = T.float(), gamma.float(), beta.float(), db.float(), W.float()
-    dW = (gf[None, :] * Tf + dbf[:, None] * bf[None, :]).to(W.dtype)
-    dgamma = (Wf * Tf).sum(0).to(gamma.dtype)
-    dbeta = (dbf @ Wf).to(beta.dtype)
-    db_out = db.to(W.dtype) if has_bias else None
-    return dx, dgamma, dbeta, dW, db_out
+def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias):
+    """TE-matching 4-launch backward (cuBLAS dgrad + 1 LN-bwd kernel + cuBLAS wgrad + db reduce).
+    dW uses the SAVED x_normed directly (TE-style) — no T-decomposition / elementwise tail."""
+    dY = dY.contiguous() if dY.stride(-1) != 1 else dY
+    dx_normed = torch.matmul(dY, W)                       # dY@W → (M,K)
+    dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride())  # dx(m-major)+dγ+dβ
+    dW = torch.matmul(dY.t(), x_normed)                  # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
+    db = dY.sum(0).to(W.dtype) if has_bias else None     # linear bias grad
+    return dx, dgamma.to(gamma.dtype), dbeta.to(gamma.dtype), dW, db
 
 
 class LayerNormLinearTEFn(torch.autograd.Function):
@@ -145,15 +153,15 @@ class LayerNormLinearTEFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps):
-        Y, mean, rstd = _te_forward(x, ln_weight, ln_bias, weight, bias, eps)
-        ctx.save_for_backward(x, mean, rstd, ln_weight, ln_bias, weight)
+        Y, x_normed, mean, rstd = _te_forward(x, ln_weight, ln_bias, weight, bias, eps)
+        ctx.save_for_backward(x_normed, x, mean, rstd, ln_weight, weight)
         ctx.has_bias = bias is not None
         return Y
 
     @staticmethod
     def backward(ctx, dY):
-        x, mean, rstd, gamma, beta, W = ctx.saved_tensors
-        dx, dg, db_ln, dW, db = _te_backward(dY, x, mean, rstd, gamma, beta, W, ctx.has_bias)
+        x_normed, x, mean, rstd, gamma, W = ctx.saved_tensors
+        dx, dg, db_ln, dW, db = _te_backward(dY, x_normed, x, mean, rstd, gamma, W, ctx.has_bias)
         return dx, dg, db_ln, dW, db, None
 
 

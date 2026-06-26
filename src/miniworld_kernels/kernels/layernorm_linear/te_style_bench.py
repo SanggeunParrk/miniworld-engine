@@ -20,6 +20,8 @@ try:
 except Exception as e:
     print(f"[warn] no TE: {e}"); HAVE_TE = False
 
+torch.matmul(torch.zeros(8, 8, device=D, dtype=dt), torch.zeros(8, 8, device=D, dtype=dt))
+torch.cuda.synchronize()   # establish CUDA context before timed regions (avoid cold-context noise)
 print(f"torch {torch.__version__}  {torch.cuda.get_device_name(0)}")
 for mmajor in (False, True):
     print(f"\n=== {'m-major (trimul view; TE needs .contiguous())' if mmajor else 'contiguous'} ===")
