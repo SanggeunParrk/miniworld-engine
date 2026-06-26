@@ -20,14 +20,17 @@ from .autograd import (
 )
 from .interface import layernorm_linear_triton
 from .reference import LayerNormLinearRef, layernorm_linear_pytorch
+from .te_style import LayerNormLinearTEFn, layernorm_linear_te_fn
 
 __all__ = [
     "LayerNormLinearFn",
     "LayerNormLinearRef",
+    "LayerNormLinearTEFn",
     "LayerNormLinearTritonFn",
     "layernorm_linear",          # hardware-dispatched inference: SM90 cute fast path, else Triton
-    "layernorm_linear_fn",       # trainable (autograd, cute/SM90)
+    "layernorm_linear_fn",       # trainable (autograd, cute/SM90, fold-based)
     "layernorm_linear_pytorch",
+    "layernorm_linear_te_fn",    # trainable, TE-style (materialize+cuBLAS, stride-transparent)
     "layernorm_linear_triton",   # portable inference forward
     "layernorm_linear_triton_fn",  # trainable, portable (Triton fwd + cuBLAS/Triton bwd)
 ]
