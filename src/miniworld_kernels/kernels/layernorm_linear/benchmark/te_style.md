@@ -56,3 +56,20 @@ pays the strided→contiguous copy regardless (probed: `TE(raw-strided)` == `TE(
 timing), while we absorb the stride.
 
 All grads verified `cos=1.0` vs fp32 autograd (`te_style_verify.py`); `dx.stride() == x.stride()`.
+
+## across dtypes (full fwd+bwd, ours vs TE; `te_style_dtype_bench.py`)
+
+fp32 uses the default TF32 ('high') GEMM policy. `>1.0` = ours faster.
+
+| M | d | **contiguous** fp32 / bf16 / fp16 | **m-major** fp32 / bf16 / fp16 |
+|---:|---:|:---:|:---:|
+| 65536 | 256 | 1.18 / 1.00 / 0.93 | 1.77 / 1.99 / 1.82 |
+| 262144 | 256 | 1.14 / 1.11 / 0.91 | 1.92 / 2.42 / 2.19 |
+| 65536 | 512 | 1.06 / 1.05 / 1.05 | 1.57 / 2.08 / 2.11 |
+| 262144 | 512 | 1.05 / 1.00 / 1.02 | 1.77 / 2.59 / 2.60 |
+
+- **fp32: beats TE contiguous everywhere (1.05–1.18x)** — fp32 isn't TE's optimized path (its LN-in-GEMM
+  fusion targets 16-bit); our materialize + TF32 GEMM wins.
+- **bf16: tie–win** (1.00–1.11x). **fp16: ~tie, slightly behind at d=256 (0.91–0.93x)** — fp16 is TE's
+  most-tuned path.
+- **m-major (trimul): dominant in every dtype (1.57–2.60x)** — the stride win is dtype-independent.
