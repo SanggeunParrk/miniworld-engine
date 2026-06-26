@@ -13,7 +13,7 @@ try:
 except Exception as e:
     print("no TE", e); HAVE_TE = False
 
-for (M, d) in [(262144, 256), (262144, 384)]:
+for (M, d) in [(262144, 256), (262144, 384), (262144, 512)]:
     torch.manual_seed(0); eps = 1e-5
     x = torch.randn(M, d, device=D, dtype=dt)
     g = torch.randn(d, device=D, dtype=dt); be = torch.randn(d, device=D, dtype=dt)
@@ -29,7 +29,7 @@ for (M, d) in [(262144, 256), (262144, 384)]:
     t_dgrad = b(lambda: torch.matmul(gout, W))
     t_lnbwd = b(lambda: tes._ln_bwd(dxn, x, g, mean, rstd, x.stride()))
     t_wgrad = b(lambda: torch.matmul(gout.t(), xn))
-    t_db    = b(lambda: gout.sum(0))
+    t_db    = b(lambda: tes._bias_grad(gout))   # the shipping db (ones@dY GEMV), not torch.sum(0)
     ours_fwd = t_mat + t_fgemm
     ours_bwd = t_dgrad + t_lnbwd + t_wgrad + t_db
     print(f"  ours FWD  {ours_fwd:.4f} = materialize {t_mat:.4f} + fwd_gemm {t_fgemm:.4f}")

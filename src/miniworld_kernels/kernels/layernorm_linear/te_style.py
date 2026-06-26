@@ -89,6 +89,10 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,
                    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr):
+    # NOTE: one tile per program (atomic_add per block for dγ/dβ). A grid-stride variant (one
+    # atomic per program) sped up CONTIGUOUS large-d (d512 0.96→1.07x) but CATASTROPHICALLY
+    # regressed m-major d=256 (2.45→0.45x — the strided x/dx access interacts badly with the
+    # strided loop), so it was reverted. Keep this simple form (good on both layouts).
     row = tl.program_id(0)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
@@ -108,7 +112,6 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
     dx = rstd * (dxhat - c2[:, None] - xhat * c1[:, None])
     tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1,
              dx.to(DX.dtype.element_ty), mask=mask)
-    # dγ = Σ_m dx_normed·x̂ ; dβ = Σ_m dx_normed  (reduce this block's M rows, atomic across blocks)
     pdg = tl.sum(tl.where(mask, dxn * xhat, 0.0), axis=0)
     pdb = tl.sum(tl.where(mask, dxn, 0.0), axis=0)
     tl.atomic_add(DG + cols, pdg, mask=cmask)
