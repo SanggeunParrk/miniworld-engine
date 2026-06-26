@@ -1,26 +1,41 @@
-"""cute 1+4: fused dgrad GEMM (dY@W) + LN-backward epilogue.  [BRING-UP / iteration 1]
+"""cute 1+4: fused dgrad GEMM (dY@W) + LN-norm-backward epilogue → dx.  [VERIFIED cos=1.0]
 
-See FUSED_DGRAD_LNBWD_DESIGN.md. Forks M1's composable epilogue (GemmSm90 + GemmDefaultEpiMixin)
-on a `dY @ W` GEMM. tile_N = K so the full K-row is in ONE epilogue subtile → single-pass
-reduce+apply. x̂ is fed as the C operand (tRS_rC). v1 computes dx only (the novel N-reduction);
-dγ/dβ (M-reduction + atomic) added once dx verifies.
+See FUSED_DGRAD_LNBWD_DESIGN.md. Forks the composable epilogue (GemmSm90 + GemmDefaultEpiMixin)
+on a `dY @ W` GEMM and does the LN-normalize backward in the epilogue, so dx_normed (M,K) is
+never written/read back from HBM. x̂ is fed as the C operand (tRS_rC).
 
-    A = dY (M,N)   B = W (N,K)   C = x̂ (M,K)   D = dx (M,K)
+    A = dY (M,N)   B = Wᵀ (K,N)   C = x̂ (M,K)   D = dx (M,K)
     dx̂ = acc·γ ;  c2 = meanₖ(dx̂) ;  c1 = meanₖ(dx̂·x̂) ;  dx = rstd·(dx̂ − c2 − x̂·c1)
 
-BRING-UP STATUS (iter 5): COMPILES + RUNS, structure follows gemm_dact's GemmDGatedMixin
-template — two ColVecReduce ops ("mC2red","mC1red") give per-m accumulators via epi_loop_tensors,
-filled by `colvec_reduce_accumulate`, then warp_reduction(threads_in_group=4) finalized IN-visit
-(single subtile, tile_N=K), then dx applied. ColVecReduce param shape = (l,M,n_tiles) leading=2.
-iter 6: FIXED the GEMM orientation — quack computes A@Bᵀ, so dx_normed=dY@W needs B=Wᵀ (K,N),
-NOT W (N,K) (which silently computed dY@Wᵀ; N=K=d hid it). cos 0→0.48.
-STILL OFF: dx cos≈0.48. Leading suspect: `cute.arch.warp_reduction(.., threads_in_group=4)`
-likely reduces to a LEADER lane only (not broadcast to all 4 N-lanes), so the apply on the
-non-leader lanes reads a PARTIAL c2/c1 → ~half-right (cos~0.5). ColVecReduce.end writes from the
-N-coord-0 lane only, consistent with no broadcast. FIX: broadcast the reduced c2/c1 across the 4
-N-lanes (shuffle), or use the value only on the leader and let the layout broadcast. Verify with
-a DEBUG dump of c2 vs torch dxhat.sum(-1) per row. Also re-confirm lanes_in_N=4. Then dγ/dβ.
-NOT wired; shipping backward stays cuBLAS + separate LN-bwd.
+This kernel produces ONLY dx. dγ/dβ/dW are derived in the composed backward (autograd.py) from
+T = dYᵀ@x̂ (one wgrad GEMM) — db=Σ_m dY, dW=γ⊙T+outer(db,β), dγ=(W⊙T).sum(0), dβ=db@W — so NO
+in-epilogue M-reduction (RowVecReduce doesn't exist in quack) and NO dx_normed round-trip anywhere.
+
+KEY FIXES during bring-up (now resolved, cos 1.0 at K∈{128,256}, varied N):
+ - GEMM orientation: quack computes A@Bᵀ, so dx_normed=dY@W needs B=Wᵀ (K,N), NOT W (N,K)
+   (which silently computed dY@Wᵀ; N=K=d hid it).  cos 0→0.48.
+ - SINGLE epilogue subtile: the default epi_tile_N = gcd(32,tile_N) = 32 splits K=128 into 4
+   subtiles → each visit's warp_reduction over N saw only 32 cols → PARTIAL c1/c2 → cos≈0.48.
+   We override `_sm90_compute_tile_shape_or_override` to force epi_tile = the full CTA tile so the
+   whole K-row is in ONE subtile → single-pass reduce+apply. cos 0.48→1.0. Safe ONLY with
+   atom_layout 1×1 (tile_m=64, non-pingpong); a cooperative 2×1 atom iterates N-first and a
+   full-M epi_tile would mis-order (see the warning in that gemm_sm90 helper).
+ - warp_reduction uses shuffle_sync_bfly (butterfly) → already broadcasts to all N lanes (the
+   earlier "missing broadcast" hypothesis was wrong; the real cause was the subtile split).
+
+Verified by dgrad_lnbwd_verify.py (srun). Wired into autograd.py LayerNormLinear backward (K≤128).
+
+PERF (dgrad_lnbwd_bench.py, H100 bf16, full backward fused vs unfused cuBLAS-dgrad+Triton-LN-bwd):
+    M=16384  d=128 → 1.29x   |  d=256 → 1.20x
+    M=65536  d=128 → 0.99x   |  d=256 → 0.73x
+    M=262144 d=128 → 1.02x   |  d=256 → 0.75x
+  d=128 wins/ties everywhere (saving the dx_normed round-trip + the separate LN-bwd kernel). d=256
+  LOSES at large M: the full-N=256 epilogue subtile holds D+C (x̂) in smem, starving the mainloop
+  (ab_stage≈2 even after forcing epi_stage=epi_c_stage=1), so the dgrad GEMM falls behind quack's
+  tuned tile_m=128 cooperative gemm. The single-subtile invariant pins tile_m=64/atom-1×1, so we
+  can't use the faster cooperative tile. NEXT to rescue d=256: load x̂ directly from gmem in the
+  epilogue (M2's mX per-element pattern) instead of as the C operand → frees ~64KB epi-C smem →
+  more ab_stages. Until then the wired default gates fused to K≤128.
 """
 
 from __future__ import annotations
@@ -52,7 +67,46 @@ _LANES_IN_N = 4  # SM90 WGMMA epilogue: 4 lanes share an M row (ColVecReduce.end
 
 
 class _DgradLNBwdMixin(GemmDefaultEpiMixin):
-    """dx = rstd·(acc·γ − meanₖ(acc·γ) − x̂·meanₖ(acc·γ·x̂)).  γ=RowVec(n), rstd=ColVec(m), x̂=C."""
+    """dx = rstd·(acc·γ − meanₖ(acc·γ) − x̂·meanₖ(acc·γ·x̂)).  γ=RowVec(n), rstd=ColVec(m), x̂=C.
+
+    CRITICAL: the LN-backward row-reduction (c1,c2 over the full K) + apply must happen in ONE
+    epilogue subtile. The framework's default epi_tile_N = gcd(32, tile_N) = 32 → K=128 splits into
+    4 subtiles, each visit sees only 32 cols → PARTIAL c1/c2 → dx cos≈0.5 (the iter-6 bug). We force
+    epi_tile = the full CTA tile so the whole K-row lands in one subtile. Safe ONLY when atom_layout
+    is 1×1 (tile_m=64 non-pingpong): with a cooperative 2×1 atom the accumulator iterates N-first and
+    a full-M epi_tile would mis-order — see the warning in gemm_sm90._sm90_compute_tile_shape_or_override.
+    """
+
+    @classmethod
+    def _compute_stages(cls, cta_tile_shape_mnk, epi_tile, a_dtype, b_dtype, d_dtype, c_dtype,
+                        epilogue_args, smem_capacity, occupancy):
+        """Single full-N epi subtile ⇒ epi_stage=epi_c_stage=1 suffices (no subtile double-buffer).
+        The stock heuristic reserves 2+2 epi stages, which at K=256 starves the mainloop down to
+        ~2 ab stages (slow GEMM). Reclaiming that smem ~doubles ab_stage → competitive dgrad."""
+        epi_stage = 1
+        epi_c_stage = 0 if c_dtype is None else 1
+        d_bytes_per_stage = cute.size(epi_tile) * d_dtype.width // 8 if d_dtype is not None else 0
+        epi_bytes_per_stage = d_bytes_per_stage + cls.epi_smem_bytes_per_stage(
+            epilogue_args, cta_tile_shape_mnk, epi_tile)
+        epi_bytes = epi_bytes_per_stage * epi_stage
+        if c_dtype is not None:
+            epi_bytes += cute.size(epi_tile) * c_dtype.width // 8 * epi_c_stage
+        a_shape = cute.slice_(cta_tile_shape_mnk, (None, 0, None))
+        b_shape = cute.slice_(cta_tile_shape_mnk, (0, None, None))
+        ab_bytes_per_stage = (cute.size(a_shape) * a_dtype.width // 8
+                              + cute.size(b_shape) * b_dtype.width // 8)
+        remaining_bytes = smem_capacity // occupancy - 1024 - epi_bytes
+        ab_stage = remaining_bytes // ab_bytes_per_stage
+        return ab_stage, epi_stage, epi_c_stage
+
+    @staticmethod
+    def _sm90_compute_tile_shape_or_override(cta_tile_shape_mnk, atom_layout_mnk,
+                                             element_type=None, epi_tile_override=None):
+        # Force a single epilogue subtile (full N = K) so the per-row reduction+apply is single-pass.
+        # Requires atom_layout 1×1 (assert below catches a mis-set config).
+        assert atom_layout_mnk[0] == 1 and atom_layout_mnk[1] == 1, (
+            "_DgradLNBwd needs atom_layout 1×1 (tile_m=64, non-pingpong) for a full-N epi subtile")
+        return (cta_tile_shape_mnk[0], cta_tile_shape_mnk[1])
 
     # mC2red/mC1red: ColVecReduce gives correctly (m,n)→m -laid-out per-row accumulators via
     # epi_loop_tensors (begin allocates + zeros). We accumulate Σdx̂ and Σ(dx̂·x̂) in visit, then
@@ -142,7 +196,11 @@ def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: 
     K = W.shape[1]
     cfg = default_config(dY.device)
     # tile_N must cover K (single-subtile reduction): use K (<=256) as tile_n.
-    tile_mn = (cfg.tile_m, K)
+    # tile_m=64 + non-pingpong → atom_layout 1×1, the only regime where forcing a full-N
+    # epi subtile is safe (see _sm90_compute_tile_shape_or_override override above).
+    tile_m = 64
+    tile_mn = (tile_m, K)
+    pingpong = True   # tile_m=64 pingpong → still atom_layout 1×1 (single full-N epi subtile holds)
     dx = torch.empty(M, K, device=dY.device, dtype=dY.dtype)
     # GEMM computes A @ Bᵀ (contract last dims). We want dx_normed = dY @ W (contract N), so
     # B must be Wᵀ (K,N): dY @ (Wᵀ)ᵀ = dY @ W. (Passing W (N,K) computes dY@Wᵀ — wrong.)
@@ -152,13 +210,14 @@ def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: 
     a_maj, b_maj, d_maj, c_maj = get_majors(A_p, B_p, D_p, C_p)
     a_dt, b_dt, d_dt, c_dt = get_dtypes(dY, W, dx, xhat)
     vec_dt = torch2cute_dtype_map[rstd.dtype]
+    cluster_mnk = (1, 1, 1)
     fn = _compile(a_dt, b_dt, d_dt, c_dt, a_maj, b_maj, d_maj, c_maj, vec_dt,
-                  tile_mn, (cfg.cluster_m, cfg.cluster_n, 1), cfg.pingpong, True,
+                  tile_mn, cluster_mnk, pingpong, True,
                   cfg.is_dynamic_persistent, dev)
     from quack.cache_utils import COMPILE_ONLY
     if COMPILE_ONLY:
         return dx
-    mac = get_max_active_clusters(cfg.cluster_m * cfg.cluster_n)
+    mac = get_max_active_clusters(1)
     tile_count_semaphore = (
         torch.zeros(1, dtype=torch.int32, device=dY.device)
         if (cfg.is_dynamic_persistent and dev[0] == 9) else None

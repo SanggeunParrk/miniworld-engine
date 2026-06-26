@@ -1,16 +1,20 @@
 """Autograd-wrapped (trainable) LayerNormLinear. v1: SM90/Hopper only.
 
-The forward uses the stats-saving M1 path (``save_stats=True`` → returns ``(Y, mean, rstd)``),
-and the backward COMPOSES existing pieces rather than writing new kernels:
+The forward uses the stats-saving M1 path (``save_stats=True`` → returns ``(Y, mean, rstd)``).
 
-  dx_normed = dY @ W                         (quack SM90 GEMM)
-  dW        = dYᵀ @ x_normed                 (quack SM90 GEMM; x_normed recomputed)
+Backward (cute path, K≤256): the FUSED 1+4 kernel (``cute/dgrad_lnbwd.py``) does dY@W + the
+LN-norm-backward in one epilogue → dx, with NO dx_normed (M,K) round-trip. dW/dγ/dβ/db come from
+a single wgrad GEMM T = dYᵀ@x̂ (see ``_compose_backward_fused``). K>256 falls back to the
+unfused compose below.
+
+Backward (unfused compose — portable path + cute K>256):
+  dx_normed = dY @ W                         (quack SM90 GEMM / torch.matmul)
+  dW        = dYᵀ @ x_normed                 (cuBLAS wgrad; x_normed recomputed)
   dx,dγ,dβ  = LayerNormBackward(dx_normed,…)  (the repo's Triton ``layer_norm_bwd_dx_fused``)
   db        = Σ_m dY                          (reduction)
 
-See the derivation in the plan / README. Heavy backends (quack, cute) are imported lazily so
-this module imports on non-Hopper boxes; the GEMMs themselves require SM90 (v1 scope — the
-portable fallback is Phase 2).
+Heavy backends (quack, cute) are imported lazily so this module imports on non-Hopper boxes;
+the GEMMs/fused kernel require SM90 (the fully-portable training path is LayerNormLinearTritonFn).
 """
 
 from __future__ import annotations
@@ -57,6 +61,56 @@ def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
         BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, num_warps=8,
     )
     return y
+
+
+@triton.jit
+def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1,
+                 BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.arange(0, BLOCK_K)
+    rm = rows < M
+    cm = cols < K
+    x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
+                mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+    mean = tl.load(mean_ptr + rows, mask=rm, other=0.0)[:, None]
+    rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)[:, None]
+    y = (x - mean) * rstd
+    tl.store(y_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
+             y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+
+
+def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor):
+    """x̂ = (x-mean)·rstd (no affine), one fused bf16 pass using the SAVED mean/rstd."""
+    M, K = x.shape
+    y = torch.empty_like(x)
+    grid = (triton.cdiv(M, 8),)
+    _xhat_kernel[grid](x, mean, rstd, y, M, K, x.stride(0), x.stride(1),
+                       BLOCK_M=8, BLOCK_K=triton.next_power_of_2(K), num_warps=8)
+    return y
+
+
+def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias):
+    """Fused-1+4 cute backward (SM90, K≤256). dx comes from ``dgrad_lnbwd_cute`` (fused dY@W GEMM +
+    LN-norm-backward epilogue — no dx_normed (M,K) round-trip). dW/dγ/dβ/db are derived from a
+    single wgrad GEMM T = dYᵀ@x̂ (x̂ recomputed from saved stats — no x_normed materialization):
+
+        db = Σ_m dY ;  dW = γ⊙T + outer(db,β) ;  dγ = (W⊙T).sum(0) ;  dβ = db @ W
+
+    All exact (no division); verified cos=1.0 vs autograd (dgrad_lnbwd_verify.py)."""
+    from .cute.dgrad_lnbwd import dgrad_lnbwd_cute  # lazy (SM90)
+    dY = dY.contiguous()
+    xc = x.to(dY.dtype)
+    xhat = _recompute_xhat(xc, mean, rstd)               # (M,K) bf16 = (x-μ)·rstd
+    dx = dgrad_lnbwd_cute(dY, W, xhat, gamma, rstd)      # fused 1+4 → dx (M,K)
+    T = torch.matmul(dY.t(), xhat)                       # (N,K) wgrad on x̂ (cuBLAS)
+    db = dY.sum(0)                                       # (N,)
+    Tf, gf, bf, dbf, Wf = T.float(), gamma.float(), beta.float(), db.float(), W.float()
+    dW = (gf[None, :] * Tf + dbf[:, None] * bf[None, :]).to(W.dtype)
+    dgamma = (Wf * Tf).sum(0).to(gamma.dtype)
+    dbeta = (dbf @ Wf).to(beta.dtype)
+    db_out = db.to(W.dtype) if has_bias else None
+    return dx.to(x.dtype), dgamma, dbeta, dW, db_out
 
 
 def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
@@ -118,9 +172,19 @@ class LayerNormLinearFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dY):
         x, mean, rstd, gamma, beta, W = ctx.saved_tensors
-        dx, dg, db_ln, dW, db = _compose_backward(
-            dY, x, mean, rstd, gamma, beta, W, ctx.has_bias, dx_via_quack=True
-        )
+        K = x.shape[-1]
+        if K <= 128:
+            # Fused 1+4 (no dx_normed round-trip) — wins/ties at K=128 across M (A/B: 1.29x@16384,
+            # ~1.0x at larger M). At K=256 the full-N epi subtile starves the mainloop (D+C both in
+            # smem) → loses at large M; needs gmem x̂-load (M2 mX pattern) before it's wired. K>128
+            # uses the unfused compose below.  See dgrad_lnbwd.py / dgrad_lnbwd_bench.py.
+            dx, dg, db_ln, dW, db = _compose_backward_fused(
+                dY, x, mean, rstd, gamma, beta, W, ctx.has_bias
+            )
+        else:
+            dx, dg, db_ln, dW, db = _compose_backward(
+                dY, x, mean, rstd, gamma, beta, W, ctx.has_bias, dx_via_quack=True
+            )
         return dx, dg, db_ln, dW, db, None
 
 
