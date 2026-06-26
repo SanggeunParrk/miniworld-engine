@@ -26,7 +26,7 @@ print(f"torch {torch.__version__}  {torch.cuda.get_device_name(0)}")
 for mmajor in (False, True):
     print(f"\n=== {'m-major (trimul view; TE needs .contiguous())' if mmajor else 'contiguous'} ===")
     print(f"{'M':>8} {'d':>5} | {'ours ms':>8} {'TE ms':>8} {'pytorch ms':>11} | {'vs TE':>6} {'vs pt':>6}")
-    for d in (128, 256, 384):
+    for d in (128, 256, 384, 512):
         for M in (16384, 65536, 262144):
             torch.manual_seed(0)
             ref = LayerNormLinearRef(d, d).to(D, dt)
