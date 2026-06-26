@@ -12,13 +12,15 @@ BRING-UP STATUS (iter 5): COMPILES + RUNS, structure follows gemm_dact's GemmDGa
 template — two ColVecReduce ops ("mC2red","mC1red") give per-m accumulators via epi_loop_tensors,
 filled by `colvec_reduce_accumulate`, then warp_reduction(threads_in_group=4) finalized IN-visit
 (single subtile, tile_N=K), then dx applied. ColVecReduce param shape = (l,M,n_tiles) leading=2.
-STILL WRONG: dx cos≈0 (numerics off, |max|~38). Suspects to debug next (hardware-in-loop):
-  1. lanes_in_N hardcoded 4 — may differ for this tiled_copy (ColVecReduce derives it from
-     `_get_lane_warp_layouts`); if not 4 the N-lane reduction groups wrong lanes.
-  2. c2buf / dxhat flat-index alignment in colvec_reduce_accumulate (sizes/layout must match).
-  3. c2buf[i] read in the apply after filter_zeros+warp_reduction (broadcast read of the per-m
-     reduced value) — verify the reduced value lands where the apply reads.
-Debug via a DEBUG mode dumping c2/c1 vs a torch reference per row. Then add dγ/dβ. NOT wired.
+iter 6: FIXED the GEMM orientation — quack computes A@Bᵀ, so dx_normed=dY@W needs B=Wᵀ (K,N),
+NOT W (N,K) (which silently computed dY@Wᵀ; N=K=d hid it). cos 0→0.48.
+STILL OFF: dx cos≈0.48. Leading suspect: `cute.arch.warp_reduction(.., threads_in_group=4)`
+likely reduces to a LEADER lane only (not broadcast to all 4 N-lanes), so the apply on the
+non-leader lanes reads a PARTIAL c2/c1 → ~half-right (cos~0.5). ColVecReduce.end writes from the
+N-coord-0 lane only, consistent with no broadcast. FIX: broadcast the reduced c2/c1 across the 4
+N-lanes (shuffle), or use the value only on the leader and let the layout broadcast. Verify with
+a DEBUG dump of c2 vs torch dxhat.sum(-1) per row. Also re-confirm lanes_in_N=4. Then dγ/dβ.
+NOT wired; shipping backward stays cuBLAS + separate LN-bwd.
 """
 
 from __future__ import annotations
@@ -142,7 +144,10 @@ def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: 
     # tile_N must cover K (single-subtile reduction): use K (<=256) as tile_n.
     tile_mn = (cfg.tile_m, K)
     dx = torch.empty(M, K, device=dY.device, dtype=dY.dtype)
-    A, B, C, Dt = dY.unsqueeze(0), W.unsqueeze(0), xhat.unsqueeze(0), dx.unsqueeze(0)
+    # GEMM computes A @ Bᵀ (contract last dims). We want dx_normed = dY @ W (contract N), so
+    # B must be Wᵀ (K,N): dY @ (Wᵀ)ᵀ = dY @ W. (Passing W (N,K) computes dY@Wᵀ — wrong.)
+    Wt = W.t().contiguous()  # (K, N)
+    A, B, C, Dt = dY.unsqueeze(0), Wt.unsqueeze(0), xhat.unsqueeze(0), dx.unsqueeze(0)
     A_p, B_p, D_p, C_p = perm3d(A, B, Dt, C)
     a_maj, b_maj, d_maj, c_maj = get_majors(A_p, B_p, D_p, C_p)
     a_dt, b_dt, d_dt, c_dt = get_dtypes(dY, W, dx, xhat)
