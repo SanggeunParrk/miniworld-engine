@@ -13,6 +13,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.kernels.bias_only_attention import dispatch as _bo_dispatch
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -129,13 +130,88 @@ class TriangleAttention(nn.Module):
 
         raise InvalidImplementationError(self.implementation)
 
+    def _layernorm(self, pair: torch.Tensor) -> torch.Tensor:
+        """LayerNorm via this repo's standalone kernel for the TRITON impl.
+
+        Uses ``kernels.layernorm_kernel`` (the repo's own developed LayerNorm, not
+        the legacy vendored ``triton_layernorm``); it is fully autograd-aware. It
+        wins at large L but its dispatch overhead regresses at small L, so fall
+        back to torch's native LayerNorm below the per-GPU threshold (see dispatch).
+        """
+        if self.implementation == ImplementationType.TRITON and _bo_dispatch.use_kernels(
+            pair.shape[1]
+        ):
+            return kernels.layernorm_kernel(
+                pair, self.ln_pair.weight, self.ln_pair.bias, self.ln_pair.eps
+            )
+        return self.ln_pair(pair)
+
+    def _gate_out(self, gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """sigmoid(gate) * out @ to_out. Backend chosen per-GPU (dispatch): the fused
+        GEMM (gate folded into to_out) at small d_hidden vs the one-pass sigmoid*mul +
+        cuBLAS to_out at large d_hidden, where the wide fused tile degrades."""
+        dh = gate.shape[-1]
+        M = gate.shape[:-1].numel()
+        if _bo_dispatch.gate_use_fused(dh, self.to_out.weight.shape[0], M,
+                                       gate.device, gate.dtype):
+            return kernels.fused_gate_out(gate, out, self.to_out.weight)
+        return self.to_out(kernels.sigmoid_gate_fused(gate, out))
+
     def _kernel_bias_only_attention(
         self,
         value: torch.Tensor,
         bias: torch.Tensor,
     ) -> torch.Tensor:
+        # softmax(bias) is independent of i; this lowers (via opt_einsum) to a
+        # single big GEMM per (b,h) -- already optimal, no custom kernel beats it.
+        # `value` is a strided view (no .contiguous()): einsum folds the permute
+        # into the GEMM prep, which is cheaper than a separate copy.
         attention = F.softmax(bias, dim=-1)
         return torch.einsum("bhjk,bhikd->bhijd", attention, value)
+
+    def _inproj_weight(self) -> torch.Tensor:
+        """Concatenated [value|bias|gate] projection weight for the fused inference
+        path, cached across calls and rebuilt only when a projection weight changes
+        (keyed on the parameters' version counters). Avoids a per-forward torch.cat."""
+        w = (self.to_value.weight, self.to_bias.weight, self.to_gate.weight)
+        ver = tuple(t._version for t in w)
+        if getattr(self, "_wcat_ver", None) != ver:
+            self._wcat = torch.cat(w, dim=0)
+            self._wcat_ver = ver
+        return self._wcat
+
+    def _bias_only_inference(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Inference-only fused bias-only path (no autograd).
+
+        Fuses LayerNorm into the value/bias/gate projection (one ``layernorm_linear``
+        over a concatenated weight, so the normalized pair never materializes) and
+        the gate+to_out into ``fused_gate_out``. This wins for inference but its
+        fused backward loses to (layernorm_kernel + cuBLAS) for training, so it is
+        gated on ``not torch.is_grad_enabled()``.
+        """
+        from miniworld_kernels.kernels.layernorm_linear import layernorm_linear_triton
+
+        H = self.n_head
+        B, L, _, d = pair.shape
+        dv = self.to_value.weight.shape[0]
+        db = self.to_bias.weight.shape[0]
+        w_cat = self._inproj_weight()
+        proj = layernorm_linear_triton(
+            pair.reshape(-1, d), self.ln_pair.weight, self.ln_pair.bias, w_cat, None,
+            self.ln_pair.eps,
+        )
+        value, bias, gate = proj.split([dv, db, dv], dim=-1)
+        value = rearrange(value.view(B, L, L, dv), "B L L2 (H D) -> B H L L2 D", H=H)
+        bias = rearrange(bias.view(B, L, L, db), "B L L2 H -> B H L L2")
+        if mask is not None:
+            bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
+        out = self._kernel_bias_only_attention(value, bias)
+        out = rearrange(out, "B H L L2 D -> B L L2 (H D)")
+        return self._gate_out(gate.view(B, L, L, dv), out)
 
     @typecheck
     def forward(
@@ -148,14 +224,32 @@ class TriangleAttention(nn.Module):
             if not self.starting:
                 pair = rearrange(pair, "B I J D -> B J I D").contiguous()
             assert pair.is_contiguous()
-            pair = self.ln_pair(pair)
+
+            # Inference-only max-fusion path (folds LN into the projections). Gated by
+            # dispatch: needs L past the kernel-launch crossover and d_hidden small
+            # enough that the LN+proj concat GEMM stays tensor-core-friendly (it
+            # regresses once the concat is too wide).
+            if (
+                not self.use_self_attention
+                and not torch.is_grad_enabled()
+                and self.implementation == ImplementationType.TRITON
+                and _bo_dispatch.use_kernels(pair.shape[1])
+                and _bo_dispatch.use_infer_concat(self.to_value.weight.shape[0])
+            ):
+                out = self._bias_only_inference(pair, mask)
+                if not self.starting:
+                    out = rearrange(out, "B J I D -> B I J D").contiguous()
+                return out
+
+            pair = self._layernorm(pair)
             value = self.to_value(pair)
             bias = self.to_bias(pair)
 
-            value = rearrange(
-                value, "B L L2 (H D) -> B H L L2 D", H=self.n_head
-            ).contiguous()
-            bias = rearrange(bias, "B L L2 H -> B H L L2").contiguous()
+            # No .contiguous(): the bias-only einsum and the self-attention kernels
+            # consume these strided views directly (the triton kernel re-packs
+            # internally), so the explicit permute copy is pure overhead.
+            value = rearrange(value, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
+            bias = rearrange(bias, "B L L2 H -> B H L L2")
             if mask is not None:
                 bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
 
@@ -178,9 +272,19 @@ class TriangleAttention(nn.Module):
             else:
                 out = self._kernel_bias_only_attention(value, bias)
 
-            out = rearrange(out, "B H L L2 D -> B L L2 (H D)").contiguous()
-            out = sigmoid_gate(self.to_gate(pair), out)
-            out = self.to_out(out)
+            # sigmoid_gate is elementwise and materializes a contiguous result, so
+            # an explicit .contiguous() on this transpose view is redundant.
+            out = rearrange(out, "B H L L2 D -> B L L2 (H D)")
+            if self.implementation == ImplementationType.TRITON and _bo_dispatch.use_kernels(
+                pair.shape[1]
+            ):
+                # Fuse sigmoid(to_gate(pair)) * out + the to_out projection (gated
+                # tensor never hits HBM). Backend chosen per-GPU in _gate_out: fused
+                # GEMM at small DH, split (sigmoid*mul + cuBLAS to_out) at large DH.
+                out = self._gate_out(self.to_gate(pair), out)
+            else:
+                out = sigmoid_gate(self.to_gate(pair), out)
+                out = self.to_out(out)
 
             if not self.starting:
                 out = rearrange(out, "B J I D -> B I J D").contiguous()

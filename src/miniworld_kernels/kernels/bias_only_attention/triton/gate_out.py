@@ -86,40 +86,58 @@ def _gate_out_fwd(
     )
 
 
+@triton.autotune(
+    configs=[triton.Config({"BM": bm}, num_warps=w, num_stages=s)
+             for bm in (32, 64, 128) for w in (4, 8) for s in (2, 3, 4)],
+    key=["M", "N", "DH"],
+)
 @triton.jit
-def _gate_bwd_elem(
-    da_ptr,     # [M, DH]  = grad_out @ wo
+def _dgrad_epi(
+    do_ptr,     # [M, N]   = grad_out
+    wo_ptr,     # [N, DH]
     g_ptr,      # [M, DH]  = gate (pre-sigmoid)
     r_ptr,      # [M, DH]  = out_r
-    dr_ptr,     # out: d_out_r
-    dg_ptr,     # out: d_gate
-    a_ptr,      # out: gated = sigmoid(gate) * r  (for the d_wo GEMM)
-    n_elem,
-    BLOCK: tl.constexpr,
+    dr_ptr,     # out: d_out_r  [M, DH]
+    dg_ptr,     # out: d_gate   [M, DH]
+    a_ptr,      # out: gated = sigmoid(gate)*r  [M, DH]  (for the d_wo GEMM)
+    M, N: tl.constexpr, DH: tl.constexpr,
+    s_dom, s_don, s_won, s_woh, s_gm, s_gh, s_rm, s_rh, s_om, s_oh,
+    BM: tl.constexpr,
 ):
+    """Fuses the dgrad GEMM d_a = grad_out @ wo with the gate-backward epilogue:
+    d_a is never materialized, gate/out_r are read once. One kernel replaces the
+    cuBLAS dgrad + a separate elementwise pass."""
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    m = offs < n_elem
-    da = tl.load(da_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    g = tl.load(g_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    r = tl.load(r_ptr + offs, mask=m, other=0.0).to(tl.float32)
-    s = tl.sigmoid(g)
-    a = s * r
-    dr = s * da
-    dg = da * r * s * (1.0 - s)
-    tl.store(dr_ptr + offs, dr.to(dr_ptr.dtype.element_ty), mask=m)
-    tl.store(dg_ptr + offs, dg.to(dg_ptr.dtype.element_ty), mask=m)
-    tl.store(a_ptr + offs, a.to(a_ptr.dtype.element_ty), mask=m)
+    rm = pid * BM + tl.arange(0, BM)
+    rn = tl.arange(0, N)
+    rh = tl.arange(0, DH)
+    mm = rm[:, None] < M
+    do = tl.load(do_ptr + rm[:, None] * s_dom + rn[None, :] * s_don, mask=mm, other=0.0)
+    wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh)        # [N, DH]
+    da = tl.dot(do, wo)                                                     # [BM, DH] fp32
+    s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh,
+                           mask=mm, other=0.0).to(tl.float32))
+    r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=mm, other=0.0).to(tl.float32)
+    off = rm[:, None] * s_om + rh[None, :] * s_oh
+    tl.store(dr_ptr + off, (s * da).to(dr_ptr.dtype.element_ty), mask=mm)
+    tl.store(dg_ptr + off, (da * r * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=mm)
+    tl.store(a_ptr + off, (s * r).to(a_ptr.dtype.element_ty), mask=mm)
 
 
-def _bwd_elem(da, g, r):
-    """Single fused pass: (da, gate, out_r) -> (d_out_r, d_gate, gated)."""
-    n = da.numel()
-    dr = torch.empty_like(da)
-    dg = torch.empty_like(da)
-    a = torch.empty_like(da)
-    grid = lambda META: (triton.cdiv(n, META["BLOCK"]),)
-    _gate_bwd_elem[grid](da, g, r, dr, dg, a, n, BLOCK=1024)
+def _dgrad_epilogue(do2, wo, g2, r2):
+    """One kernel: d_a=do2@wo (GEMM) + gate-bwd epilogue -> (d_out_r, d_gate, gated)."""
+    M, DH = g2.shape
+    N = wo.shape[0]
+    dr = torch.empty_like(g2)
+    dg = torch.empty_like(g2)
+    a = torch.empty_like(g2)
+    grid = lambda META: (triton.cdiv(M, META["BM"]),)
+    _dgrad_epi[grid](
+        do2, wo, g2, r2, dr, dg, a, M, N, DH,
+        do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
+        g2.stride(0), g2.stride(1), r2.stride(0), r2.stride(1),
+        dr.stride(0), dr.stride(1),
+    )
     return dr, dg, a
 
 
@@ -159,10 +177,11 @@ class _FusedGateOut(torch.autograd.Function):
     def backward(ctx, grad_out):
         g2, r2, wo = ctx.saved_tensors
         N = ctx.N
-        do2 = grad_out.reshape(-1, N)
-        # out = a @ wo^T,  a = sigmoid(gate) * out_r
-        d_a = do2 @ wo                              # GEMM  [M, DH]
-        d_r, d_g, a = _bwd_elem(d_a, g2, r2)        # one fused elementwise pass
+        do2 = grad_out.reshape(-1, N).contiguous()
+        # out = a @ wo^T, a = sigmoid(gate)*out_r. Fuse the dgrad GEMM (d_a=do@wo)
+        # with the gate-backward epilogue so d_a never materializes; only the wgrad
+        # (d_wo = do^T @ a, needs the materialized gated `a`) stays on cuBLAS.
+        d_r, d_g, a = _dgrad_epilogue(do2, wo, g2, r2)
         d_wo = do2.transpose(0, 1) @ a              # GEMM  [N, DH]
         return (
             d_g.reshape(ctx.shape),
@@ -172,5 +191,71 @@ class _FusedGateOut(torch.autograd.Function):
 
 
 def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) -> torch.Tensor:
-    """sigmoid(gate) * out_r, then @ wo^T. gate/out_r [...,DH], wo [N,DH] -> [...,N]."""
+    """sigmoid(gate) * out_r, then @ wo^T. gate/out_r [...,DH], wo [N,DH] -> [...,N].
+
+    Folds the gate-mul into the to_out GEMM prologue (gated tensor never hits HBM).
+    WINS at small DH (<=128); at DH>=256 the wide tl.dot tile degrades (SM90 shared
+    pressure) and `sigmoid_gate_fused` + a cuBLAS to_out is faster -- see the d-aware
+    dispatch in the module and bench_back_designs.py.
+    """
     return _FusedGateOut.apply(gate, out_r, wo)
+
+
+# ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
+@triton.autotune(
+    configs=[triton.Config({"BLK": b}, num_warps=w) for b in (1024, 2048, 4096) for w in (4, 8)],
+    key=["n"],
+)
+@triton.jit
+def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLK: tl.constexpr):
+    off = tl.program_id(0) * BLK + tl.arange(0, BLK)
+    m = off < n
+    g = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
+    o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
+    tl.store(a_ptr + off, (g * o).to(a_ptr.dtype.element_ty), mask=m)
+
+
+@triton.autotune(
+    configs=[triton.Config({"BLK": b}, num_warps=w) for b in (1024, 2048, 4096) for w in (4, 8)],
+    key=["n"],
+)
+@triton.jit
+def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLK: tl.constexpr):
+    off = tl.program_id(0) * BLK + tl.arange(0, BLK)
+    m = off < n
+    da = tl.load(da_ptr + off, mask=m, other=0.0).to(tl.float32)
+    s = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
+    o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
+    tl.store(do_ptr + off, (da * s).to(do_ptr.dtype.element_ty), mask=m)
+    tl.store(dg_ptr + off, (da * o * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=m)
+
+
+class _SigmoidGate(torch.autograd.Function):
+    @staticmethod
+    @torch.compiler.disable()
+    def forward(ctx, gate, out):
+        a = torch.empty_like(gate)
+        n = gate.numel()
+        grid = lambda M: (triton.cdiv(n, M["BLK"]),)
+        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n)
+        ctx.save_for_backward(gate, out)
+        return a
+
+    @staticmethod
+    @torch.compiler.disable()
+    def backward(ctx, da):
+        gate, out = ctx.saved_tensors
+        dg = torch.empty_like(gate)
+        do = torch.empty_like(out)
+        n = gate.numel()
+        grid = lambda M: (triton.cdiv(n, M["BLK"]),)
+        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n)
+        return dg, do
+
+
+def sigmoid_gate_fused(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """sigmoid(gate) * out in ONE triton pass (vs torch's sigmoid then mul = 2 passes).
+
+    For the DH>=256 back path: this fused elementwise + a cuBLAS to_out beats the
+    wide fused tl.dot of `fused_gate_out`. gate/out same shape -> same shape."""
+    return _SigmoidGate.apply(gate, out)
