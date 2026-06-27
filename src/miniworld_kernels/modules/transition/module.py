@@ -90,7 +90,36 @@ class Transition(nn.Module):
             ImplementationType.CUEQUIVARIANCE,
         }:
             # Fully fused: LayerNorm is folded into the expand kernel (no separate ln_in).
+            # d-aware dispatch: the GEMMs are bandwidth/latency-bound (thin-K) at
+            # d_hidden<=128 where triton's lean b2b wins, and compute-bound at d_hidden>=256
+            # where quack SM90 WGMMA (cute) pulls ahead (the win grows with d). Route to the
+            # faster backend by d_hidden. See transition-b2b-forward-verdict.
+            if self.d_hidden >= 256:
+                return kernels.cute_transition_fused(
+                    x,
+                    self.ln_in.weight,
+                    self.ln_in.bias,
+                    self.expand_a.weight,
+                    self.expand_b.weight,
+                    self.squeeze.weight,
+                    self.n,
+                    self.ln_in.eps,
+                )
             return kernels.triton_transition_fused(
+                x,
+                self.ln_in.weight,
+                self.ln_in.bias,
+                self.expand_a.weight,
+                self.expand_b.weight,
+                self.squeeze.weight,
+                self.n,
+                self.ln_in.eps,
+            )
+
+        if self.implementation == ImplementationType.CUTE:
+            # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
+            # explicit selection). Same fused structure; LN folded into the cute expand.
+            return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
                 self.ln_in.bias,

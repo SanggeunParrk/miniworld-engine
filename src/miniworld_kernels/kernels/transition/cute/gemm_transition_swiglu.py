@@ -306,9 +306,15 @@ def transition_expand_swiglu_cute(
     assert x2.is_cuda and x2.dim() == 2
     M, K = x2.shape
     N = Wa.shape[0]
-    B, S, B2 = prefolded if prefolded is not None else fold_swiglu(
-        Wa, Wb, ln_weight, ln_bias, w2_dtype=x2.dtype
-    )
+    if prefolded is not None:
+        B, S, B2 = prefolded
+    else:
+        # Fused single-kernel fold (~28us) instead of the launch-bound torch fold (~141us).
+        # Weights change each optimizer step in training, so this fold can't be cached across
+        # steps; inference can still pass prefolded= to skip it. See transition-b2b-forward-verdict.
+        from miniworld_kernels.kernels.transition.triton.fold import fold_swiglu_triton
+
+        B, S, B2 = fold_swiglu_triton(Wa, Wb, ln_weight, ln_bias, w2_dtype=x2.dtype)
     rstd, c1 = stats_triton(x2, eps)
     rstd2 = rstd.contiguous().view(1, M)
     c12 = c1.contiguous().view(1, M)
