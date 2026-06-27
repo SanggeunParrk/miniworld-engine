@@ -1,0 +1,45 @@
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir-vs-separate (faithful pairformer block) on NVIDIA H100 80GB HBM3 | d_pair=128 h=128 dropout=0.25
+separate = sequential residuals (incoming sees outgoing-updated pair) + drop_row
+regime: pytorch=torch.compile; ours=CUDA-graph; TIMED in train mode (dropout on)
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+   [L=256] cos(eval): ours_sep=0.99998  ours_bidir=0.99999
+[L=256] pytorch_sep=2.520 pytorch_bidir=3.351 ours_sep=0.312 ours_bidir=0.241
+   [L=512] cos(eval): ours_sep=0.99998  ours_bidir=0.99999
+[L=512] pytorch_sep=4.985 pytorch_bidir=5.490 ours_sep=1.039 ours_bidir=0.801
+   [L=1024] cos(eval): ours_sep=0.99998  ours_bidir=0.99999
+[L=1024] pytorch_sep=27.916 pytorch_bidir=24.400 ours_sep=4.058 ours_bidir=3.245
+
+=== fused vs separate (faithful block), ms/layer; fuse↑ = separate/fused ===
+    L |   py_sep  py_bidir  fuse↑ |  ours_sep  ours_bidir  fuse↑
+----------------------------------------------------------------------
+  256 |    2.520     3.351  0.75x |     0.312       0.241  1.29x
+  512 |    4.985     5.490  0.91x |     1.039       0.801  1.30x
+ 1024 |   27.916    24.400  1.14x |     4.058       3.245  1.25x
+DATA 256=2.5197,3.3511,0.3116,0.2412;512=4.9855,5.4901,1.0392,0.8013;1024=27.9161,24.4001,4.0581,3.2449

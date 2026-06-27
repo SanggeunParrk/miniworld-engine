@@ -82,8 +82,10 @@ def trimul_inproj_cute_forward(
     *,
     bdll_direct: bool = False,
     compute_gate: bool = True,
-    b_lr: torch.Tensor | None = None,  # pre-packed (D, 4D); skips cat/interleave
+    b_lr: torch.Tensor | None = None,  # pre-packed (D, 4H); skips cat/interleave
     hidden_dim: int = -1,  # where D lives in x: -1/3 -> BLLD, 1 -> BDLL
+    out_hidden: int | None = None,  # per-side output width H (left/right each H wide); None -> D
+    return_preact: bool = False,  # also return the pre-glu activation [B,4H,L,L] (for front bwd)
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Forward. Returns ``(left_bdll, right_bdll, gate_blld)``.
 
@@ -127,11 +129,15 @@ def trimul_inproj_cute_forward(
     if B != 1:
         raise NotImplementedError("trimul_inproj cute path currently supports B=1")
     L = L1
+    # H = per-side output width (left/right each H wide). Default H=D (square trimul);
+    # bidirectional passes out_hidden=2*d_hidden so each side carries [outgoing|incoming].
+    H = out_hidden if out_hidden is not None else D
     weights = [] if b_lr is not None else [(WL, "WL"), (WLg, "WLg"), (WR, "WR"), (WRg, "WRg")]
     if compute_gate:
         weights.append((Wg, "Wg"))
     for W, name in weights:
-        assert W.shape == (D, D), f"{name}: expected ({D},{D}), got {tuple(W.shape)}"
+        exp = (D, D) if name == "Wg" else (D, H)  # gate is always D->D; proj weights D->H
+        assert W.shape == exp, f"{name}: expected {exp}, got {tuple(W.shape)}"
         assert W.dtype == x.dtype, f"{name}: dtype mismatch ({W.dtype} vs {x.dtype})"
 
     M = B * L * L
@@ -148,13 +154,13 @@ def trimul_inproj_cute_forward(
     # (M, 2D): cols [:D] = left, [D:] = right. Prefer a pre-packed `b_lr` (built
     # once via prepack_lr_operand) to skip the per-forward cat/interleave.
     if b_lr is None:
-        b_lr = torch.cat([_interleave(WLg, WL), _interleave(WRg, WR)], dim=1)  # (D, 4D)
+        b_lr = torch.cat([_interleave(WLg, WL), _interleave(WRg, WR)], dim=1)  # (D, 4H)
     else:
-        assert b_lr.shape == (D, 4 * D), f"b_lr: expected ({D},{4*D}), got {tuple(b_lr.shape)}"
+        assert b_lr.shape == (D, 4 * H), f"b_lr: expected ({D},{4*H}), got {tuple(b_lr.shape)}"
     B_lr = b_lr
 
     if bdll_direct:
-        # FAST path: M-major view of [B, 2D, L, L]. Stock quack rejects an
+        # FAST path: M-major view of [B, 2H, L, L]. Stock quack rejects an
         # M-major gated postact; our in-repo shim owns that policy (no quack file
         # is modified). See _bdll_patch.py.
         try:
@@ -163,19 +169,28 @@ def trimul_inproj_cute_forward(
             import _bdll_patch
 
         _bdll_patch.apply()
-        lr = torch.empty(B, 2 * D, L, L, device=x.device, dtype=x.dtype)
-        lr_view = lr.view(2 * D, L * L).T  # (M, 2D) strides (1, L*L)
+        lr = torch.empty(B, 2 * H, L, L, device=x.device, dtype=x.dtype)
+        lr_view = lr.view(2 * H, L * L).T  # (M, 2H) strides (1, L*L)
+        # preact written M-major straight into a [B,4H,L,L] buffer (same no-transpose
+        # trick as the postact) — channels = b_lr column order, exactly what
+        # front_bwd_fused wants. Avoids a (M,4H)->(4H,M) transpose in the forward.
+        preact_buf = torch.empty(B, 4 * H, L, L, device=x.device, dtype=x.dtype) \
+            if return_preact else None
+        preact_view = preact_buf.view(4 * H, L * L).T if return_preact else None  # (M,4H) str(1,M)
         gemm_act(
-            A=x_flat, B=B_lr, activation="glu", store_preact=False, postact_out=lr_view
+            A=x_flat, B=B_lr, activation="glu", store_preact=return_preact,
+            preact_out=preact_view, postact_out=lr_view,
         )
-        left_bdll = lr[:, :D]  # (B, D, L, L), contiguous for B=1
-        right_bdll = lr[:, D:]  # (B, D, L, L), contiguous for B=1
+        left_bdll = lr[:, :H]  # (B, H, L, L), contiguous for B=1
+        right_bdll = lr[:, H:]  # (B, H, L, L), contiguous for B=1
+        if return_preact:
+            return left_bdll, right_bdll, preact_buf
     else:
-        # FALLBACK (stock quack): natural n-major postact [B,L,L,2D], then permute.
+        # FALLBACK (stock quack): natural n-major postact [B,L,L,2H], then permute.
         _, lr_flat = gemm_act(A=x_flat, B=B_lr, activation="glu", store_preact=False)
-        lr_blld = lr_flat.view(B, L, L, 2 * D)  # (B, L, L, 2D)
-        left_bdll = lr_blld[..., :D].permute(0, 3, 1, 2).contiguous()  # (B,D,L,L)
-        right_bdll = lr_blld[..., D:].permute(0, 3, 1, 2).contiguous()  # (B,D,L,L)
+        lr_blld = lr_flat.view(B, L, L, 2 * H)  # (B, L, L, 2H)
+        left_bdll = lr_blld[..., :H].permute(0, 3, 1, 2).contiguous()  # (B,H,L,L)
+        right_bdll = lr_blld[..., H:].permute(0, 3, 1, 2).contiguous()  # (B,H,L,L)
 
     # --- gate: fused gemm + sigmoid in ONE quack launch (not torch) -----------
     # `gemm_act(activation="sigmoid")` = sigmoid(x @ Wg) with the sigmoid fused in

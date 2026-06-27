@@ -56,15 +56,16 @@ def main():
         b_lr = prepack_lr_operand(WL, WLg, WR, WRg)
         preact = (x_n.reshape(M, D) @ b_lr).t().reshape(1, 4 * D, L, L).contiguous()
         d_lr = torch.randn(1, 2 * D, L, L, device="cuda", dtype=dt)
+        d_left, d_right = d_lr[:, :D].contiguous(), d_lr[:, D:].contiguous()
 
-        dx, dWL, dWLg, dWR, dWRg = front_bwd_fused(d_lr, preact, x_n, WL, WLg, WR, WRg)
+        dx, dWL, dWLg, dWR, dWRg = front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
         rdx, rdWL, rdWLg, rdWR, rdWRg = ref(d_lr, preact, x_n, WL, WLg, WR, WRg)
         if L == 256:
             print(f"  cos dx={cos(dx,rdx):.5f} dWL={cos(dWL,rdWL):.5f} dWLg={cos(dWLg,rdWLg):.5f} "
                   f"dWR={cos(dWR,rdWR):.5f} dWRg={cos(dWRg,rdWRg):.5f}", flush=True)
 
         def fused():
-            front_bwd_fused(d_lr, preact, x_n, WL, WLg, WR, WRg)
+            front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
 
         def torch_path():
             ref(d_lr, preact, x_n, WL, WLg, WR, WRg)

@@ -1,0 +1,76 @@
+##### d_pair=128 #####
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir-vs-separate TRAINING d_pair=128 h=128 dropout=0.25 on NVIDIA H100 80GB HBM3
+separate = sequential dt-v1 residuals (incoming sees outgoing-updated pair) + drop_row
+regime: all torch.compile fwd+bwd, train mode (dropout on), event-timed
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+  cos(eval) vs fp32 ref: dtv1_sep=0.99999 dtv1_bidir=0.99999 ours_bidir=0.99999
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] dtv1_sep=3.335 dtv1_bidir=1.806 ours_bidir=1.864
+[L=384] dtv1_sep=3.777 dtv1_bidir=2.908 ours_bidir=2.645
+[L=512] dtv1_sep=5.257 dtv1_bidir=4.974 ours_bidir=4.490
+[L=768] dtv1_sep=11.465 dtv1_bidir=10.951 ours_bidir=9.836
+[L=1024] dtv1_sep=20.365 dtv1_bidir=19.662 ours_bidir=17.632
+
+=== separate vs bidir, fwd+bwd ms/layer (train mode); fuse↑ = dtv1_sep/bidir ===
+    L |     dtv1_sep |   dtv1_bidir |   ours_bidir | dtv1_fuse↑ | ours_fuse↑
+--------------------------------------------------------------------------------------------
+  256 |        3.335 |        1.806 |        1.864 |      1.85x |      1.79x
+  384 |        3.777 |        2.908 |        2.645 |      1.30x |      1.43x
+  512 |        5.257 |        4.974 |        4.490 |      1.06x |      1.17x
+  768 |       11.465 |       10.951 |        9.836 |      1.05x |      1.17x
+ 1024 |       20.365 |       19.662 |       17.632 |      1.04x |      1.15x
+DATA d128 dtv1_sep 256:3.3351,384:3.7774,512:5.2573,768:11.4650,1024:20.3646
+DATA d128 dtv1_bidir 256:1.8064,384:2.9082,512:4.9742,768:10.9507,1024:19.6619
+DATA d128 ours_bidir 256:1.8641,384:2.6449,512:4.4901,768:9.8362,1024:17.6324
+##### d_pair=256 #####
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir-vs-separate TRAINING d_pair=256 h=256 dropout=0.25 on NVIDIA H100 80GB HBM3
+separate = sequential dt-v1 residuals (incoming sees outgoing-updated pair) + drop_row
+regime: all torch.compile fwd+bwd, train mode (dropout on), event-timed
+  cos(eval) vs fp32 ref: dtv1_sep=0.99999 dtv1_bidir=0.99999 ours_bidir=0.99999
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] dtv1_sep=3.476 dtv1_bidir=2.095 ours_bidir=2.505
+[L=384] dtv1_sep=6.147 dtv1_bidir=5.860 ours_bidir=4.743
+[L=512] dtv1_sep=10.522 dtv1_bidir=10.206 ours_bidir=8.244
+[L=768] dtv1_sep=23.322 dtv1_bidir=22.801 ours_bidir=18.474
+[L=1024] dtv1_sep=41.883 dtv1_bidir=41.066 ours_bidir=33.570
+
+=== separate vs bidir, fwd+bwd ms/layer (train mode); fuse↑ = dtv1_sep/bidir ===
+    L |     dtv1_sep |   dtv1_bidir |   ours_bidir | dtv1_fuse↑ | ours_fuse↑
+--------------------------------------------------------------------------------------------
+  256 |        3.476 |        2.095 |        2.505 |      1.66x |      1.39x
+  384 |        6.147 |        5.860 |        4.743 |      1.05x |      1.30x
+  512 |       10.522 |       10.206 |        8.244 |      1.03x |      1.28x
+  768 |       23.322 |       22.801 |       18.474 |      1.02x |      1.26x
+ 1024 |       41.883 |       41.066 |       33.570 |      1.02x |      1.25x
+DATA d256 dtv1_sep 256:3.4758,384:6.1471,512:10.5217,768:23.3225,1024:41.8827
+DATA d256 dtv1_bidir 256:2.0953,384:5.8601,512:10.2057,768:22.8012,1024:41.0657
+DATA d256 ours_bidir 256:2.5046,384:4.7434,512:8.2440,768:18.4737,1024:33.5700

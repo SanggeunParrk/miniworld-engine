@@ -1,0 +1,84 @@
+========== ours_v6 ==========
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: pytorch=torch.compile; others=eager do_bench full-mode (no manual graph)
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] pytorch=0.916 ours_v6=0.895
+[L=512] pytorch=4.143 ours_v6=2.885
+[L=1024] pytorch=33.194 ours_v6=11.133
+
+=== single-dir trimul fwd+bwd, ms/layer (pytorch=compiled, others=CUDA-graph) ===
+    L |        pytorch |        ours_v6
+--------------------------------------------------------------------------------------------
+  256 |          0.916 |          0.895
+  512 |          4.143 |          2.885
+ 1024 |         33.194 |         11.133
+DATA pytorch 256:0.9159,512:4.1427,1024:33.1940
+DATA ours_v6 256:0.8952,512:2.8847,1024:11.1329
+========== nvidia(dtv1) ==========
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: pytorch=torch.compile; others=eager do_bench full-mode (no manual graph)
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] pytorch=0.915 nvidia(dtv1)=0.620
+[L=512] pytorch=4.139 nvidia(dtv1)=2.105
+[L=1024] pytorch=33.187 nvidia(dtv1)=8.265
+
+=== single-dir trimul fwd+bwd, ms/layer (pytorch=compiled, others=CUDA-graph) ===
+    L |        pytorch |   nvidia(dtv1)
+--------------------------------------------------------------------------------------------
+  256 |          0.915 |          0.620
+  512 |          4.139 |          2.105
+ 1024 |         33.187 |          8.265
+DATA pytorch 256:0.9153,512:4.1388,1024:33.1871
+DATA nvidia(dtv1) 256:0.6195,512:2.1054,1024:8.2647
+========== cuequivariance ==========
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: pytorch=torch.compile; others=eager do_bench full-mode (no manual graph)
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] pytorch=0.917 cuequivariance=0.694
+[L=512] pytorch=4.139 cuequivariance=2.353
+[L=1024] pytorch=33.209 cuequivariance=9.165
+
+=== single-dir trimul fwd+bwd, ms/layer (pytorch=compiled, others=CUDA-graph) ===
+    L |        pytorch | cuequivariance
+--------------------------------------------------------------------------------------------
+  256 |          0.917 |          0.694
+  512 |          4.139 |          2.353
+ 1024 |         33.209 |          9.165
+DATA pytorch 256:0.9172,512:4.1388,1024:33.2094
+DATA cuequivariance 256:0.6935,512:2.3534,1024:9.1654

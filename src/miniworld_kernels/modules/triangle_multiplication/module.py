@@ -90,10 +90,12 @@ class TriangleMultiplication(nn.Module):
         d_hidden: int | None = None,
         outgoing: bool = True,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        ln_implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
         self.implementation = implementation
+        self.ln_implementation = ln_implementation
         direction = "outgoing" if outgoing else "incoming"
         self.nvtx_enabled = False
         self.nvtx_name = f"triangle_multiplication/{direction}"
@@ -108,13 +110,13 @@ class TriangleMultiplication(nn.Module):
             )
             raise ValueError(msg)
 
-        self.ln_pair = LayerNorm(d_pair)
+        self.ln_pair = LayerNorm(d_pair, implementation=ln_implementation)
         self.to_left = Linear(d_pair, d_pair, bias=False, init="default")
         self.to_left_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_right = Linear(d_pair, d_pair, bias=False, init="default")
         self.to_right_gate = Linear(d_pair, d_pair, bias=False, init="zero")
 
-        self.ln_out = LayerNorm(d_pair)
+        self.ln_out = LayerNorm(d_pair, implementation=ln_implementation)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
 

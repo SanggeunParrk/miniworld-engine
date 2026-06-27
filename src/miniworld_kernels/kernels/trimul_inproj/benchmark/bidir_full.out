@@ -1,0 +1,180 @@
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir FULL [infer] d_pair=128 h=128 on NVIDIA H100 80GB HBM3
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+[infer D=128 L=256] ours_bidir=0.207 dtv1_bidir=0.317 ours_sep=0.254 dtv1_sep=0.361 cuequiv_sep=0.297
+[infer D=128 L=384] ours_bidir=0.416 dtv1_bidir=0.685 ours_sep=0.515 dtv1_sep=0.753 cuequiv_sep=0.598
+[infer D=128 L=512] ours_bidir=0.707 dtv1_bidir=1.176 ours_sep=0.859 dtv1_sep=1.284 cuequiv_sep=1.060
+[infer D=128 L=768] ours_bidir=1.569 dtv1_bidir=2.643 ours_sep=1.867 dtv1_sep=2.852 cuequiv_sep=2.348
+[infer D=128 L=1024] ours_bidir=2.948 dtv1_bidir=5.000 ours_sep=3.418 dtv1_sep=5.238 cuequiv_sep=4.301
+
+=== bidir FULL [infer] d_pair=128, ms/layer ===
+    L |   ours_bidir |   dtv1_bidir |     ours_sep |     dtv1_sep |  cuequiv_sep
+  256 |        0.207 |        0.317 |        0.254 |        0.361 |        0.297
+  384 |        0.416 |        0.685 |        0.515 |        0.753 |        0.598
+  512 |        0.707 |        1.176 |        0.859 |        1.284 |        1.060
+  768 |        1.569 |        2.643 |        1.867 |        2.852 |        2.348
+ 1024 |        2.948 |        5.000 |        3.418 |        5.238 |        4.301
+DATA infer d128 ours_bidir 256:0.2071,384:0.4164,512:0.7066,768:1.5693,1024:2.9479
+DATA infer d128 dtv1_bidir 256:0.3169,384:0.6849,512:1.1761,768:2.6427,1024:5.0003
+DATA infer d128 ours_sep 256:0.2544,384:0.5145,512:0.8585,768:1.8669,1024:3.4182
+DATA infer d128 dtv1_sep 256:0.3610,384:0.7528,512:1.2839,768:2.8516,1024:5.2380
+DATA infer d128 cuequiv_sep 256:0.2965,384:0.5977,512:1.0604,768:2.3476,1024:4.3014
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir FULL [infer] d_pair=256 h=256 on NVIDIA H100 80GB HBM3
+[infer D=256 L=256] ours_bidir=0.419 dtv1_bidir=0.697 ours_sep=0.508 dtv1_sep=0.772 cuequiv_sep=1.128
+[infer D=256 L=384] ours_bidir=0.893 dtv1_bidir=1.510 ours_sep=1.042 dtv1_sep=1.632 cuequiv_sep=2.688
+[infer D=256 L=512] ours_bidir=1.581 dtv1_bidir=2.635 ours_sep=1.841 dtv1_sep=2.853 cuequiv_sep=4.754
+[infer D=256 L=768] ours_bidir=3.636 dtv1_bidir=6.049 ours_sep=4.157 dtv1_sep=6.796 cuequiv_sep=10.730
+[infer D=256 L=1024] ours_bidir=6.702 dtv1_bidir=11.126 ours_sep=8.541 dtv1_sep=12.369 cuequiv_sep=19.393
+
+=== bidir FULL [infer] d_pair=256, ms/layer ===
+    L |   ours_bidir |   dtv1_bidir |     ours_sep |     dtv1_sep |  cuequiv_sep
+  256 |        0.419 |        0.697 |        0.508 |        0.772 |        1.128
+  384 |        0.893 |        1.510 |        1.042 |        1.632 |        2.688
+  512 |        1.581 |        2.635 |        1.841 |        2.853 |        4.754
+  768 |        3.636 |        6.049 |        4.157 |        6.796 |       10.730
+ 1024 |        6.702 |       11.126 |        8.541 |       12.369 |       19.393
+DATA infer d256 ours_bidir 256:0.4189,384:0.8927,512:1.5806,768:3.6362,1024:6.7018
+DATA infer d256 dtv1_bidir 256:0.6968,384:1.5100,512:2.6347,768:6.0486,1024:11.1261
+DATA infer d256 ours_sep 256:0.5077,384:1.0420,512:1.8408,768:4.1567,1024:8.5410
+DATA infer d256 dtv1_sep 256:0.7724,384:1.6324,512:2.8527,768:6.7955,1024:12.3694
+DATA infer d256 cuequiv_sep 256:1.1278,384:2.6876,512:4.7535,768:10.7298,1024:19.3930
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir FULL [infer] d_pair=512 h=512 on NVIDIA H100 80GB HBM3
+[infer D=512 L=256] ours_bidir=1.015 dtv1_bidir=1.628 ours_sep=1.188 dtv1_sep=1.854 cuequiv_sep=4.785
+[infer D=512 L=384] ours_bidir=2.230 dtv1_bidir=3.713 ours_sep=2.613 dtv1_sep=4.215 cuequiv_sep=10.751
+[infer D=512 L=512] ours_bidir=4.186 dtv1_bidir=6.616 ours_sep=4.675 dtv1_sep=7.692 cuequiv_sep=19.095
+[infer D=512 L=768] ours_bidir=10.209 dtv1_bidir=15.337 ours_sep=10.611 dtv1_sep=17.397 cuequiv_sep=43.101
+[infer D=512 L=1024] ours_bidir=18.119 dtv1_bidir=26.764 ours_sep=21.158 dtv1_sep=30.360 cuequiv_sep=77.200
+
+=== bidir FULL [infer] d_pair=512, ms/layer ===
+    L |   ours_bidir |   dtv1_bidir |     ours_sep |     dtv1_sep |  cuequiv_sep
+  256 |        1.015 |        1.628 |        1.188 |        1.854 |        4.785
+  384 |        2.230 |        3.713 |        2.613 |        4.215 |       10.751
+  512 |        4.186 |        6.616 |        4.675 |        7.692 |       19.095
+  768 |       10.209 |       15.337 |       10.611 |       17.397 |       43.101
+ 1024 |       18.119 |       26.764 |       21.158 |       30.360 |       77.200
+DATA infer d512 ours_bidir 256:1.0147,384:2.2303,512:4.1859,768:10.2086,1024:18.1187
+DATA infer d512 dtv1_bidir 256:1.6280,384:3.7133,512:6.6158,768:15.3372,1024:26.7641
+DATA infer d512 ours_sep 256:1.1875,384:2.6130,512:4.6746,768:10.6112,1024:21.1576
+DATA infer d512 dtv1_sep 256:1.8540,384:4.2149,512:7.6921,768:17.3971,1024:30.3596
+DATA infer d512 cuequiv_sep 256:4.7850,384:10.7512,512:19.0949,768:43.1014,1024:77.2004
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir FULL [train] d_pair=128 h=128 on NVIDIA H100 80GB HBM3
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=63>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=61>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=59>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=57>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=55>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=53>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=51>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=65>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+[train D=128 L=256] ours_bidir=2.214 dtv1_bidir=1.606 ours_sep=3.534 dtv1_sep=3.085 cuequiv_sep=2.575
+[train D=128 L=384] ours_bidir=2.126 dtv1_bidir=2.892 ours_sep=3.320 dtv1_sep=3.433 cuequiv_sep=3.328
+[train D=128 L=512] ours_bidir=3.372 dtv1_bidir=4.961 ours_sep=4.146 dtv1_sep=5.252 cuequiv_sep=5.698
+[train D=128 L=768] ours_bidir=7.388 dtv1_bidir=10.936 ours_sep=8.968 dtv1_sep=11.436 cuequiv_sep=12.450
+[train D=128 L=1024] ours_bidir=13.342 dtv1_bidir=19.602 ours_sep=15.965 dtv1_sep=20.305 cuequiv_sep=22.105
+
+=== bidir FULL [train] d_pair=128, ms/layer ===
+    L |   ours_bidir |   dtv1_bidir |     ours_sep |     dtv1_sep |  cuequiv_sep
+  256 |        2.214 |        1.606 |        3.534 |        3.085 |        2.575
+  384 |        2.126 |        2.892 |        3.320 |        3.433 |        3.328
+  512 |        3.372 |        4.961 |        4.146 |        5.252 |        5.698
+  768 |        7.388 |       10.936 |        8.968 |       11.436 |       12.450
+ 1024 |       13.342 |       19.602 |       15.965 |       20.305 |       22.105
+DATA train d128 ours_bidir 256:2.2143,384:2.1259,512:3.3715,768:7.3880,1024:13.3417
+DATA train d128 dtv1_bidir 256:1.6058,384:2.8921,512:4.9606,768:10.9358,1024:19.6019
+DATA train d128 ours_sep 256:3.5336,384:3.3202,512:4.1462,768:8.9682,1024:15.9648
+DATA train d128 dtv1_sep 256:3.0851,384:3.4327,512:5.2520,768:11.4362,1024:20.3049
+DATA train d128 cuequiv_sep 256:2.5746,384:3.3277,512:5.6982,768:12.4496,1024:22.1052
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir FULL [train] d_pair=256 h=256 on NVIDIA H100 80GB HBM3
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[train D=256 L=256] ours_bidir=2.086 dtv1_bidir=2.085 ours_sep=3.217 dtv1_sep=3.058 cuequiv_sep=3.933
+[train D=256 L=384] ours_bidir=3.804 dtv1_bidir=5.850 ours_sep=4.714 dtv1_sep=6.144 cuequiv_sep=9.518
+[train D=256 L=512] ours_bidir=6.555 dtv1_bidir=10.176 ours_sep=8.023 dtv1_sep=10.473 cuequiv_sep=16.686
+[train D=256 L=768] ours_bidir=15.016 dtv1_bidir=22.761 ours_sep=17.898 dtv1_sep=23.290 cuequiv_sep=37.448
+[train D=256 L=1024] ours_bidir=27.161 dtv1_bidir=40.946 ours_sep=32.412 dtv1_sep=41.889 cuequiv_sep=66.973
+
+=== bidir FULL [train] d_pair=256, ms/layer ===
+    L |   ours_bidir |   dtv1_bidir |     ours_sep |     dtv1_sep |  cuequiv_sep
+  256 |        2.086 |        2.085 |        3.217 |        3.058 |        3.933
+  384 |        3.804 |        5.850 |        4.714 |        6.144 |        9.518
+  512 |        6.555 |       10.176 |        8.023 |       10.473 |       16.686
+  768 |       15.016 |       22.761 |       17.898 |       23.290 |       37.448
+ 1024 |       27.161 |       40.946 |       32.412 |       41.889 |       66.973
+DATA train d256 ours_bidir 256:2.0856,384:3.8044,512:6.5550,768:15.0162,1024:27.1608
+DATA train d256 dtv1_bidir 256:2.0847,384:5.8505,512:10.1758,768:22.7612,1024:40.9462
+DATA train d256 ours_sep 256:3.2175,384:4.7140,512:8.0234,768:17.8983,1024:32.4121
+DATA train d256 dtv1_sep 256:3.0581,384:6.1436,512:10.4729,768:23.2899,1024:41.8893
+DATA train d256 cuequiv_sep 256:3.9331,384:9.5178,512:16.6857,768:37.4479,1024:66.9726
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+bidir FULL [train] d_pair=512 h=512 on NVIDIA H100 80GB HBM3
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[train D=512 L=256] ours_bidir=3.891 dtv1_bidir=4.547 ours_sep=4.624 dtv1_sep=5.593 cuequiv_sep=12.303
+[train D=512 L=384] ours_bidir=8.512 dtv1_bidir=12.871 ours_sep=9.805 dtv1_sep=13.435 cuequiv_sep=29.422
+[train D=512 L=512] ours_bidir=15.282 dtv1_bidir=22.726 ours_sep=17.441 dtv1_sep=23.621 cuequiv_sep=51.897
+[train D=512 L=768] ours_bidir=35.292 dtv1_bidir=51.562 ours_sep=39.774 dtv1_sep=53.212 cuequiv_sep=116.577
+[train D=512 L=1024] ours_bidir=64.731 dtv1_bidir=93.522 ours_sep=72.184 dtv1_sep=96.204 cuequiv_sep=207.824
+
+=== bidir FULL [train] d_pair=512, ms/layer ===
+    L |   ours_bidir |   dtv1_bidir |     ours_sep |     dtv1_sep |  cuequiv_sep
+  256 |        3.891 |        4.547 |        4.624 |        5.593 |       12.303
+  384 |        8.512 |       12.871 |        9.805 |       13.435 |       29.422
+  512 |       15.282 |       22.726 |       17.441 |       23.621 |       51.897
+  768 |       35.292 |       51.562 |       39.774 |       53.212 |      116.577
+ 1024 |       64.731 |       93.522 |       72.184 |       96.204 |      207.824
+DATA train d512 ours_bidir 256:3.8915,384:8.5124,512:15.2816,768:35.2919,1024:64.7311
+DATA train d512 dtv1_bidir 256:4.5466,384:12.8714,512:22.7262,768:51.5619,1024:93.5224
+DATA train d512 ours_sep 256:4.6242,384:9.8054,512:17.4413,768:39.7741,1024:72.1836
+DATA train d512 dtv1_sep 256:5.5926,384:13.4346,512:23.6209,768:53.2119,1024:96.2039
+DATA train d512 cuequiv_sep 256:12.3034,384:29.4225,512:51.8974,768:116.5775,1024:207.8242

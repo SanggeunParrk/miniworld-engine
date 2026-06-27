@@ -1,0 +1,39 @@
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+trimul D-sweep on NVIDIA H100 80GB HBM3 | D=[128]
+regime: pytorch=torch.compile(reduce-overhead); others=CUDA-graph (no eager)
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+   [D=128 L=128] cos vs pytorch: ours_v4=0.99998 ours_v6=0.99998 nvidia(dtv1)=0.99998
+[D=128 L=128] pytorch=1.581 nvidia(dtv1)=0.049 cuequivariance=0.053 ours_v4=0.037 ours_v6=0.058
+   [D=128 L=256] cos vs pytorch: ours_v4=0.99998 ours_v6=0.99998 nvidia(dtv1)=0.99998
+[D=128 L=256] pytorch=1.727 nvidia(dtv1)=0.162 cuequivariance=0.136 ours_v4=0.101 ours_v6=0.118
+   [D=128 L=384] cos vs pytorch: ours_v4=0.99998 ours_v6=0.99998 nvidia(dtv1)=0.99998
+[D=128 L=384] pytorch=3.433 nvidia(dtv1)=0.335 cuequivariance=0.264 ours_v4=0.206 ours_v6=0.218
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd-node01: error: *** STEP 9458.0 ON node01 CANCELLED AT 2026-06-26T14:19:08 ***
+srun: error: node01: task 0: Exited with exit code 143

@@ -1,0 +1,108 @@
+========== pytorch ==========
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: ALL methods torch.compile (default) fwd+bwd, params require grad, event-timed
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=384: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=512: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=768: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=1024: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  -> correctness ALL L: PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] pytorch=1.137
+[L=384] pytorch=2.803
+[L=512] pytorch=5.417
+[L=768] pytorch=20.603
+[L=1024] pytorch=38.426
+
+=== single-dir trimul fwd+bwd, ms/layer (ALL torch.compile default, event-timed) ===
+    L |        pytorch
+--------------------------------------------------------------------------------------------
+  256 |          1.137
+  384 |          2.803
+  512 |          5.417
+  768 |         20.603
+ 1024 |         38.426
+DATA pytorch 256:1.1373,384:2.8029,512:5.4171,768:20.6027,1024:38.4260
+========== ours_v6 ==========
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: ALL methods torch.compile (default) fwd+bwd, params require grad, event-timed
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=384: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=512: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=768: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=1024: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  -> correctness ALL L: PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] ours_v6=0.894
+[L=384] ours_v6=1.107
+[L=512] ours_v6=1.879
+[L=768] ours_v6=4.139
+[L=1024] ours_v6=7.406
+
+=== single-dir trimul fwd+bwd, ms/layer (ALL torch.compile default, event-timed) ===
+    L |        ours_v6
+--------------------------------------------------------------------------------------------
+  256 |          0.894
+  384 |          1.107
+  512 |          1.879
+  768 |          4.139
+ 1024 |          7.406
+DATA ours_v6 256:0.8939,384:1.1073,512:1.8793,768:4.1392,1024:7.4065
+========== nvidia(dtv1) ==========
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: ALL methods torch.compile (default) fwd+bwd, params require grad, event-timed
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=384: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=512: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=768: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  correctness L=1024: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+  -> correctness ALL L: PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] nvidia(dtv1)=1.413
+[L=384] nvidia(dtv1)=1.589
+[L=512] nvidia(dtv1)=2.444
+[L=768] nvidia(dtv1)=5.324
+[L=1024] nvidia(dtv1)=9.551
+
+=== single-dir trimul fwd+bwd, ms/layer (ALL torch.compile default, event-timed) ===
+    L |   nvidia(dtv1)
+--------------------------------------------------------------------------------------------
+  256 |          1.413
+  384 |          1.589
+  512 |          2.444
+  768 |          5.324
+ 1024 |          9.551
+DATA nvidia(dtv1) 256:1.4126,384:1.5890,512:2.4438,768:5.3241,1024:9.5508

@@ -1,0 +1,52 @@
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+v6 single-dir fwd+bwd on NVIDIA H100 80GB HBM3
+regime: pytorch=torch.compile; others=eager do_bench full-mode (no manual graph)
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=58>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=56>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=54>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=52>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=50>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=48>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=46>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/quack/autotuner.py:395: ResourceWarning: unclosed file <_io.BufferedReader name=60>
+  self._precompile(*args, configs=pruned_configs, **kwargs)
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+  correctness L=256: fwd cos=0.99998  grad_x cos=0.99997 -> PASS
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+[L=256] pytorch: fwd=0.334 fb=1.161 nvidia(dtv1): fwd=0.235 fb=1.157 cuequivariance: fwd=0.375 fb=1.800 ours_v6: fwd=0.366 fb=1.298
+[L=512] pytorch: fwd=1.504 fb=5.427 nvidia(dtv1): fwd=0.579 fb=2.166 cuequivariance: fwd=0.476 fb=2.421 ours_v6: fwd=0.784 fb=3.106
+[L=1024] pytorch: fwd=11.556 fb=38.535 nvidia(dtv1): fwd=2.375 fb=8.347 cuequivariance: fwd=1.961 fb=9.278 ours_v6: fwd=3.091 fb=11.612
+
+=== single-dir trimul, EAGER ms/layer (fwd / fwd+bwd / bwd=diff) ===
+    L |         method |      fwd   fwd+bwd      bwd
+------------------------------------------------------------
+  256 |        pytorch |    0.334     1.161    0.827
+  256 |   nvidia(dtv1) |    0.235     1.157    0.923
+  256 | cuequivariance |    0.375     1.800    1.425
+  256 |        ours_v6 |    0.366     1.298    0.932
+  512 |        pytorch |    1.504     5.427    3.922
+  512 |   nvidia(dtv1) |    0.579     2.166    1.587
+  512 | cuequivariance |    0.476     2.421    1.945
+  512 |        ours_v6 |    0.784     3.106    2.322
+ 1024 |        pytorch |   11.556    38.535   26.979
+ 1024 |   nvidia(dtv1) |    2.375     8.347    5.972
+ 1024 | cuequivariance |    1.961     9.278    7.318
+ 1024 |        ours_v6 |    3.091    11.612    8.521
+DATA_FWD 256=0.3342,0.2349,0.3752,0.3664;512=1.5044,0.5791,0.4762,0.7842;1024=11.5559,2.3753,1.9605,3.0913
+DATA_FB 256=1.1608,1.1574,1.8002,1.2982;512=5.4265,2.1661,2.4212,3.1057;1024=38.5352,8.3469,9.2780,11.6123
