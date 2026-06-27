@@ -1,22 +1,22 @@
-# LayerNorm baselines (H100, bf16)
+# LayerNorm: ours vs legacy triton (H100, bf16)
 
 _Source: `src/miniworld_kernels/kernels/layernorm/benchmark/bench_layernorm.out`_
 
-## forward: speedup vs PyTorch default (×)
+## forward: speedup vs Triton default (×)
 
-_higher is better; table rows = d, columns = M, bold = fastest. See `bench_layernorm_fwd_speedup.png`._
+_higher is better; table rows = d, columns = M, bold = fastest. See `bench_layernorm_vs_triton_fwd_speedup.png`._
 
-_speedup of Triton / cuEquivariance / ours vs PyTorch (bold = best)_
+_speedup of PyTorch / cuEquivariance / ours vs Triton (bold = best)_
 
 | d (=d_in=d_out) | M=147456 | M=262144 | M=589824 | M=1048576 |
 |---|---|---|---|---|
-| 128 | **5.13×** / 4.46× / 5.10× | **5.50×** / 4.94× / **5.50×** | **5.85×** / 5.33× / 5.83× | 5.98× / 5.49× / **5.98×** |
-| 256 | 3.31× / 2.55× / **3.32×** | **3.46×** / 2.75× / 3.46× | **3.60×** / 2.91× / 3.59× | 3.65× / 2.99× / **3.65×** |
-| 384 | **2.72×** / 1.58× / 2.71× | **2.79×** / 1.61× / **2.79×** | **2.87×** / 1.66× / 2.86× | 2.88× / 1.68× / **2.89×** |
-| 512 | 2.42× / 1.36× / **2.42×** | 2.46× / 1.36× / **2.46×** | **2.50×** / 1.39× / **2.50×** | 2.52× / 1.40× / **2.52×** |
-| 768 | **1.94×** / 0.95× / **1.94×** | **1.96×** / 0.97× / 1.95× | 1.97× / 0.98× / **1.98×** | 1.98× / 0.98× / **1.98×** |
+| 128 | 0.19× / 0.87× / **0.99×** | 0.18× / 0.90× / **1.00×** | 0.17× / 0.91× / **1.00×** | 0.17× / 0.92× / **1.00×** |
+| 256 | 0.30× / 0.77× / **1.00×** | 0.29× / 0.79× / **1.00×** | 0.28× / 0.81× / **1.00×** | 0.27× / 0.82× / **1.00×** |
+| 384 | 0.37× / 0.58× / **1.00×** | 0.36× / 0.58× / **1.00×** | 0.35× / 0.58× / **1.00×** | 0.35× / 0.58× / **1.00×** |
+| 512 | 0.41× / 0.56× / **1.00×** | 0.41× / 0.55× / **1.00×** | 0.40× / 0.55× / **1.00×** | 0.40× / 0.55× / **1.00×** |
+| 768 | 0.51× / 0.49× / **1.00×** | 0.51× / 0.49× / **1.00×** | 0.51× / 0.50× / **1.00×** | 0.50× / 0.49× / **1.00×** |
 
-![forward speedup](bench_layernorm_fwd_speedup.png)
+![forward speedup](bench_layernorm_vs_triton_fwd_speedup.png)
 
 ### forward latency (ms)
 
@@ -32,23 +32,23 @@ _backends: pytorch / triton / cuequivariance / layernorm_kernel (bold = fastest)
 | 512 | 0.2578 / 0.1066 / 0.1894 / **0.1064** | 0.4531 / 0.1841 / 0.3323 / **0.1840** | 1.0113 / **0.4043** / 0.7293 / **0.4043** | 1.7925 / 0.7120 / 1.2835 / **0.7111** |
 | 768 | 0.3028 / **0.1557** / 0.3185 / **0.1557** | 0.5325 / **0.2722** / 0.5514 / 0.2726 | 1.1893 / 0.6029 / 1.2167 / **0.6004** | 2.1089 / 1.0637 / 2.1503 / **1.0625** |
 
-![forward latency](bench_layernorm_fwd_latency.png)
+![forward latency](bench_layernorm_vs_triton_fwd_latency.png)
 
-## forward + backward: speedup vs PyTorch default (×)
+## forward + backward: speedup vs Triton default (×)
 
-_higher is better; table rows = d, columns = M, bold = fastest. See `bench_layernorm_fwd_bwd_speedup.png`._
+_higher is better; table rows = d, columns = M, bold = fastest. See `bench_layernorm_vs_triton_fwd_bwd_speedup.png`._
 
-_speedup of Triton / cuEquivariance / ours vs PyTorch (bold = best)_
+_speedup of PyTorch / cuEquivariance / ours vs Triton (bold = best)_
 
 | d (=d_in=d_out) | M=147456 | M=262144 | M=589824 | M=1048576 |
 |---|---|---|---|---|
-| 128 | **2.43×** / 1.61× / 1.77× | **3.69×** / 2.54× / 2.66× | **3.97×** / 2.74× / 3.88× | **4.04×** / 2.83× / 3.99× |
-| 256 | **2.00×** / 1.47× / 1.96× | 2.06× / 1.59× / **2.24×** | 2.11× / 1.70× / **2.19×** | 2.15× / 1.76× / **2.43×** |
-| 384 | 1.62× / 1.19× / **1.64×** | 1.55× / 1.24× / **1.71×** | 1.58× / 1.28× / **1.78×** | 1.60× / 1.31× / **1.82×** |
-| 512 | 1.67× / 0.96× / **1.70×** | 1.57× / 0.99× / **1.77×** | 1.61× / 1.05× / **1.85×** | 1.63× / 1.09× / **1.90×** |
-| 768 | 1.14× / 0.83× / **1.78×** | 1.14× / 0.86× / **1.83×** | 1.16× / 0.90× / **1.89×** | 1.17× / 0.92× / **1.93×** |
+| 128 | 0.41× / 0.66× / **0.73×** | 0.27× / 0.69× / **0.72×** | 0.25× / 0.69× / **0.98×** | 0.25× / 0.70× / **0.99×** |
+| 256 | 0.50× / 0.73× / **0.98×** | 0.48× / 0.77× / **1.09×** | 0.48× / 0.81× / **1.04×** | 0.47× / 0.82× / **1.13×** |
+| 384 | 0.62× / 0.73× / **1.01×** | 0.64× / 0.80× / **1.10×** | 0.63× / 0.81× / **1.12×** | 0.62× / 0.82× / **1.14×** |
+| 512 | 0.60× / 0.57× / **1.02×** | 0.64× / 0.63× / **1.13×** | 0.62× / 0.65× / **1.15×** | 0.61× / 0.67× / **1.17×** |
+| 768 | 0.88× / 0.73× / **1.57×** | 0.88× / 0.75× / **1.60×** | 0.86× / 0.78× / **1.63×** | 0.85× / 0.79× / **1.64×** |
 
-![forward + backward speedup](bench_layernorm_fwd_bwd_speedup.png)
+![forward + backward speedup](bench_layernorm_vs_triton_fwd_bwd_speedup.png)
 
 ### forward + backward latency (ms)
 
@@ -64,7 +64,7 @@ _backends: pytorch / triton / cuequivariance / layernorm_kernel (bold = fastest)
 | 512 | 0.5847 / 0.3507 / 0.6108 / **0.3435** | 1.0113 / 0.6427 / 1.0181 / **0.5707** | 2.2573 / 1.4044 / 2.1528 / **1.2180** | 4.0446 / 2.4812 / 3.7208 / **2.1291** |
 | 768 | 0.7573 / 0.6671 / 0.9178 / **0.4260** | 1.3252 / 1.1614 / 1.5419 / **0.7248** | 2.9892 / 2.5729 / 3.3188 / **1.5804** | 5.3456 / 4.5581 / 5.7881 / **2.7745** |
 
-![forward + backward latency](bench_layernorm_fwd_bwd_latency.png)
+![forward + backward latency](bench_layernorm_vs_triton_fwd_bwd_latency.png)
 
 ## Correctness summary
 

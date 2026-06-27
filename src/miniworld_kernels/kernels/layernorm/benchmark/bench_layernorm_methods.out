@@ -1,0 +1,224 @@
+host=NVIDIA H100 80GB HBM3 torch=2.10.0+cu128 dtype=torch.bfloat16
+implementations=pytorch,triton_atomic,triton_partial,layernorm_dispatch  sweep=M=L^2 for L in [384, 512, 768, 1024], D in [128, 256, 384, 512, 768]  eps=1e-05
+
+=== M=147456  d_in=128  d_out=128 ===
+# L=384 D=128
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.1624 ms fwd+bwd=0.3433 ms
+  triton_atomic  fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.739e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
+triton_atomic fwd=0.0320 ms fwd+bwd=0.1413 ms
+  triton_partial fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.737e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
+triton_partial fwd=0.0322 ms fwd+bwd=0.1763 ms
+  layernorm_dispatch fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.739e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
+layernorm_dispatch fwd=0.0322 ms fwd+bwd=0.1432 ms
+
+=== M=262144  d_in=128  d_out=128 ===
+# L=512 D=128
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.2853 ms fwd+bwd=0.5849 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+triton_atomic fwd=0.0520 ms fwd+bwd=0.1587 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.192e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+triton_partial fwd=0.0518 ms fwd+bwd=0.2473 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+layernorm_dispatch fwd=0.0520 ms fwd+bwd=0.1588 ms
+
+=== M=589824  d_in=128  d_out=128 ===
+# L=768 D=128
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.6335 ms fwd+bwd=1.2541 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
+triton_atomic fwd=0.1075 ms fwd+bwd=0.3171 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.836e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
+triton_partial fwd=0.1078 ms fwd+bwd=0.5458 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
+layernorm_dispatch fwd=0.1079 ms fwd+bwd=0.3177 ms
+
+=== M=1048576  d_in=128  d_out=128 ===
+# L=1024 D=128
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=1.1217 ms fwd+bwd=2.1918 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
+triton_atomic fwd=0.1858 ms fwd+bwd=0.5418 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.837e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
+triton_partial fwd=0.1858 ms fwd+bwd=0.8625 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.261e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
+layernorm_dispatch fwd=0.1857 ms fwd+bwd=0.5393 ms
+
+=== M=147456  d_in=256  d_out=256 ===
+# L=384 D=256
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.1914 ms fwd+bwd=0.4214 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.890e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
+triton_atomic fwd=0.0576 ms fwd+bwd=0.2100 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.879e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
+triton_partial fwd=0.0570 ms fwd+bwd=0.2232 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.890e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
+layernorm_dispatch fwd=0.0571 ms fwd+bwd=0.2100 ms
+
+=== M=262144  d_in=256  d_out=256 ===
+# L=512 D=256
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.3352 ms fwd+bwd=0.7162 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.737e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
+triton_atomic fwd=0.0967 ms fwd+bwd=0.3466 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.785e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
+triton_partial fwd=0.0964 ms fwd+bwd=0.3129 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.785e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
+layernorm_dispatch fwd=0.0964 ms fwd+bwd=0.3129 ms
+
+=== M=589824  d_in=256  d_out=256 ===
+# L=768 D=256
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.7466 ms fwd+bwd=1.5600 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.807e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
+triton_atomic fwd=0.2073 ms fwd+bwd=0.7399 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.804e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
+triton_partial fwd=0.2068 ms fwd+bwd=0.7047 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.804e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
+layernorm_dispatch fwd=0.2068 ms fwd+bwd=0.7049 ms
+
+=== M=1048576  d_in=256  d_out=256 ===
+# L=1024 D=256
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=1.3220 ms fwd+bwd=2.7617 ms
+  triton_atomic  fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.841e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
+triton_atomic fwd=0.3620 ms fwd+bwd=1.2873 ms
+  triton_partial fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.836e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
+triton_partial fwd=0.3620 ms fwd+bwd=1.1272 ms
+  layernorm_dispatch fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.836e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
+layernorm_dispatch fwd=0.3622 ms fwd+bwd=1.1272 ms
+
+=== M=147456  d_in=384  d_out=384 ===
+# L=384 D=384
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.2228 ms fwd+bwd=0.4991 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.800e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
+triton_atomic fwd=0.0821 ms fwd+bwd=0.3088 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.805e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
+triton_partial fwd=0.0821 ms fwd+bwd=0.3397 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.800e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
+layernorm_dispatch fwd=0.0823 ms fwd+bwd=0.3087 ms
+
+=== M=262144  d_in=384  d_out=384 ===
+# L=512 D=384
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.3913 ms fwd+bwd=0.8570 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.027e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.343e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
+triton_atomic fwd=0.1405 ms fwd+bwd=0.5492 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.020e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
+triton_partial fwd=0.1397 ms fwd+bwd=0.5355 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.020e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
+layernorm_dispatch fwd=0.1398 ms fwd+bwd=0.5354 ms
+
+=== M=589824  d_in=384  d_out=384 ===
+# L=768 D=384
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.8715 ms fwd+bwd=1.8913 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.934e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
+triton_atomic fwd=0.3053 ms fwd+bwd=1.1959 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.925e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
+triton_partial fwd=0.3053 ms fwd+bwd=1.1278 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.925e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
+layernorm_dispatch fwd=0.3054 ms fwd+bwd=1.1283 ms
+
+=== M=1048576  d_in=384  d_out=384 ===
+# L=1024 D=384
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=1.5447 ms fwd+bwd=3.3694 ms
+  triton_atomic  fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.016e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
+triton_atomic fwd=0.5360 ms fwd+bwd=2.1091 ms
+  triton_partial fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.013e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
+triton_partial fwd=0.5361 ms fwd+bwd=1.9618 ms
+  layernorm_dispatch fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.013e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
+layernorm_dispatch fwd=0.5362 ms fwd+bwd=1.9619 ms
+
+=== M=147456  d_in=512  d_out=512 ===
+# L=384 D=512
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.2583 ms fwd+bwd=0.5856 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.081e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
+triton_atomic fwd=0.1063 ms fwd+bwd=0.3504 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.075e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
+triton_partial fwd=0.1066 ms fwd+bwd=0.3868 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.081e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
+layernorm_dispatch fwd=0.1065 ms fwd+bwd=0.3503 ms
+
+=== M=262144  d_in=512  d_out=512 ===
+# L=512 D=512
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.4532 ms fwd+bwd=1.0107 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.840e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.359e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
+triton_atomic fwd=0.1843 ms fwd+bwd=0.6407 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.382e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
+triton_partial fwd=0.1840 ms fwd+bwd=0.6091 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.382e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
+layernorm_dispatch fwd=0.1838 ms fwd+bwd=0.6088 ms
+
+=== M=589824  d_in=512  d_out=512 ===
+# L=768 D=512
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=1.0056 ms fwd+bwd=2.2440 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.704e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
+triton_atomic fwd=0.4036 ms fwd+bwd=1.4082 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.687e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
+triton_partial fwd=0.4036 ms fwd+bwd=1.2994 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.687e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
+layernorm_dispatch fwd=0.4036 ms fwd+bwd=1.2992 ms
+
+=== M=1048576  d_in=512  d_out=512 ===
+# L=1024 D=512
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=1.7796 ms fwd+bwd=4.0128 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.800e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+triton_atomic fwd=0.7117 ms fwd+bwd=2.4736 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.803e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+triton_partial fwd=0.7120 ms fwd+bwd=2.2597 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.803e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+layernorm_dispatch fwd=0.7122 ms fwd+bwd=2.2597 ms
+
+=== M=147456  d_in=768  d_out=768 ===
+# L=384 D=768
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.3010 ms fwd+bwd=0.7550 ms
+  triton_atomic  fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
+triton_atomic fwd=0.1557 ms fwd+bwd=0.6668 ms
+  triton_partial fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.013e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
+triton_partial fwd=0.1556 ms fwd+bwd=0.5042 ms
+  layernorm_dispatch fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.013e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
+layernorm_dispatch fwd=0.1555 ms fwd+bwd=0.5043 ms
+
+=== M=262144  d_in=768  d_out=768 ===
+# L=512 D=768
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=0.5323 ms fwd+bwd=1.3220 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.081e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.529e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+triton_atomic fwd=0.2723 ms fwd+bwd=1.1609 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.076e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+triton_partial fwd=0.2709 ms fwd+bwd=0.8777 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.076e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+layernorm_dispatch fwd=0.2709 ms fwd+bwd=0.8780 ms
+
+=== M=589824  d_in=768  d_out=768 ===
+# L=768 D=768
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=1.1828 ms fwd+bwd=2.9765 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+triton_atomic fwd=0.6028 ms fwd+bwd=2.5738 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.997e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+triton_partial fwd=0.6005 ms fwd+bwd=1.8714 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.997e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+layernorm_dispatch fwd=0.6005 ms fwd+bwd=1.8690 ms
+
+=== M=1048576  d_in=768  d_out=768 ===
+# L=1024 D=768
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
+pytorch fwd=2.0943 ms fwd+bwd=5.3244 ms
+  triton_atomic  fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.999e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.431e-03, cos=0.999997)
+triton_atomic fwd=1.0609 ms fwd+bwd=4.5337 ms
+  triton_partial fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.430e-03, cos=0.999997)
+triton_partial fwd=1.0654 ms fwd+bwd=3.2738 ms
+  layernorm_dispatch fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.430e-03, cos=0.999997)
+layernorm_dispatch fwd=1.0652 ms fwd+bwd=3.2741 ms
+
+DONE

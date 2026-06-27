@@ -97,6 +97,7 @@ class TritonLayerNormPartialReductionFunction(torch.autograd.Function):
             bias,
             mean,
             rstd,
+            rstd,  # placeholder when HAS_ROWSCALE=False; keep the call shape identical to main.py
             x_2d.stride(0),
             x_2d.stride(1),
             m,
@@ -104,6 +105,7 @@ class TritonLayerNormPartialReductionFunction(torch.autograd.Function):
             eps,
             BLOCK_N=triton.next_power_of_2(n),
             GROUP_M=get_seq_group(m),
+            HAS_ROWSCALE=False,
         )
 
         ctx.save_for_backward(x_2d, weight, mean, rstd)

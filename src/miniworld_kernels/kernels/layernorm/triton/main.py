@@ -237,9 +237,9 @@ class TritonLayerNormFunction(torch.autograd.Function):
         bias: torch.Tensor | None,
         eps: float,
     ):
-        y = torch.empty_like(x)
-        x = x.view(-1, x.shape[-1]).contiguous()
-        M, N = x.shape
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+        y_2d = torch.empty_like(x_2d)
+        M, N = x_2d.shape
 
         mean = torch.empty(M, dtype=torch.float32, device=x.device)
         rstd = torch.empty(M, dtype=torch.float32, device=x.device)
@@ -247,8 +247,8 @@ class TritonLayerNormFunction(torch.autograd.Function):
         # fmt: off
         grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
         layer_norm_fwd_fused[grid](
-            x, y, weight, bias, mean, rstd, rstd,  # Rowscale=rstd placeholder (unused)
-            x.stride(0), x.stride(1),
+            x_2d, y_2d, weight, bias, mean, rstd, rstd,  # Rowscale=rstd placeholder (unused)
+            x_2d.stride(0), x_2d.stride(1),
             M, N, eps,
             BLOCK_N=triton.next_power_of_2(N),
             GROUP_M=get_seq_group(M), HAS_ROWSCALE=False,
@@ -256,12 +256,13 @@ class TritonLayerNormFunction(torch.autograd.Function):
         # fmt: on
 
         ctx.save_for_backward(
-            x.to(torch.bfloat16),
+            x_2d.to(torch.bfloat16),
             weight,
             mean,
             rstd,
         )
-        return y
+        ctx.input_shape = x.shape
+        return y_2d.view_as(x)
 
     @staticmethod
     @torch.compiler.disable()
@@ -269,16 +270,17 @@ class TritonLayerNormFunction(torch.autograd.Function):
         x, weight, mean, rstd = ctx.saved_tensors
         x = x.to(dy.dtype)
         M, N = x.shape
+        dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
 
         # allocate output
-        dx = torch.empty_like(dy)
+        dx_2d = torch.empty_like(dy_2d)
         dw = torch.zeros(N, dtype=torch.float32, device=x.device)
         db = torch.zeros(N, dtype=torch.float32, device=x.device)
 
         # fmt: off
         grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
         layer_norm_bwd_dx_fused[grid](
-            dx, dy, dw, db,
+            dx_2d, dy_2d, dw, db,
             x, weight, mean, rstd,
             dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
             M, N,
@@ -288,7 +290,7 @@ class TritonLayerNormFunction(torch.autograd.Function):
         # fmt: on
 
         return (
-            dx,
+            dx_2d.view(ctx.input_shape),
             dw,
             db,
             None,
@@ -303,20 +305,20 @@ def triton_layernorm_masked(x, weight, bias, eps, row_scale):
     """Forward-only LN with a per-row scale folded into the epilogue (free) — for the
     AF triangle pair-mask: y = LN(x) * row_scale[row]. row_scale is [M] (or anything
     reshapeable to [M]); broadcast over the feature dim. No autograd (bench/inference)."""
-    y = torch.empty_like(x)
-    x = x.view(-1, x.shape[-1]).contiguous()
-    M, N = x.shape
+    x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+    y_2d = torch.empty_like(x_2d)
+    M, N = x_2d.shape
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
     rstd = torch.empty(M, dtype=torch.float32, device=x.device)
-    rs = row_scale.reshape(-1).to(x.dtype).contiguous()
+    rs = row_scale.reshape(-1).to(x_2d.dtype).contiguous()
     # fmt: off
     grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
     layer_norm_fwd_fused[grid](
-        x, y, weight, bias, mean, rstd, rs,
-        x.stride(0), x.stride(1),
+        x_2d, y_2d, weight, bias, mean, rstd, rs,
+        x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
         BLOCK_N=triton.next_power_of_2(N),
         GROUP_M=get_seq_group(M), HAS_ROWSCALE=True,
     )
     # fmt: on
-    return y
+    return y_2d.view_as(x)

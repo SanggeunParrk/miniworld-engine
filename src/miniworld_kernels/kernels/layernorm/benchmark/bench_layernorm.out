@@ -4,221 +4,221 @@ implementations=pytorch,triton,cuequivariance,layernorm_kernel  sweep=M=L^2 for 
 === M=147456  d_in=128  d_out=128 ===
 # L=384 D=128
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.1626 ms fwd+bwd=0.3448 ms
+pytorch fwd=0.1632 ms fwd+bwd=0.3449 ms
   triton         fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.739e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
-triton fwd=0.0324 ms fwd+bwd=0.1359 ms
+triton fwd=0.0318 ms fwd+bwd=0.1418 ms
   cuequivariance fwd(abs=1.562e-02, rel=8.294e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.420e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
-cuequivariance fwd=0.0369 ms fwd+bwd=0.2198 ms
-  layernorm_kernel fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.737e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
-layernorm_kernel fwd=0.0328 ms fwd+bwd=0.1771 ms
+cuequivariance fwd=0.0366 ms fwd+bwd=0.2145 ms
+  layernorm_kernel fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.739e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
+layernorm_kernel fwd=0.0320 ms fwd+bwd=0.1947 ms
 
 === M=262144  d_in=128  d_out=128 ===
 # L=512 D=128
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.2840 ms fwd+bwd=0.5828 ms
-  triton         fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.971e-03, cos=0.999996)
-triton fwd=0.0524 ms fwd+bwd=0.1590 ms
+pytorch fwd=0.2851 ms fwd+bwd=0.5840 ms
+  triton         fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+triton fwd=0.0518 ms fwd+bwd=0.1582 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.119e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.577e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
-cuequivariance fwd=0.0581 ms fwd+bwd=0.2320 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.192e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
-layernorm_kernel fwd=0.0521 ms fwd+bwd=0.2467 ms
+cuequivariance fwd=0.0577 ms fwd+bwd=0.2295 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+layernorm_kernel fwd=0.0518 ms fwd+bwd=0.2195 ms
 
 === M=589824  d_in=128  d_out=128 ===
 # L=768 D=128
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.6301 ms fwd+bwd=1.2489 ms
+pytorch fwd=0.6293 ms fwd+bwd=1.2466 ms
   triton         fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
-triton fwd=0.1077 ms fwd+bwd=0.3175 ms
+triton fwd=0.1075 ms fwd+bwd=0.3143 ms
   cuequivariance fwd(abs=1.562e-02, rel=6.299e-06, cos=1.000000)  dx(abs=6.250e-02, rel=1.690e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
-cuequivariance fwd=0.1182 ms fwd+bwd=0.4565 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.836e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
-layernorm_kernel fwd=0.1083 ms fwd+bwd=0.5437 ms
+cuequivariance fwd=0.1180 ms fwd+bwd=0.4545 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
+layernorm_kernel fwd=0.1079 ms fwd+bwd=0.3213 ms
 
 === M=1048576  d_in=128  d_out=128 ===
 # L=1024 D=128
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=1.1147 ms fwd+bwd=2.1814 ms
+pytorch fwd=1.1138 ms fwd+bwd=2.1786 ms
   triton         fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
-triton fwd=0.1862 ms fwd+bwd=0.5412 ms
+triton fwd=0.1864 ms fwd+bwd=0.5388 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.804e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.517e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
-cuequivariance fwd=0.2033 ms fwd+bwd=0.7713 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.837e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
-layernorm_kernel fwd=0.1861 ms fwd+bwd=0.8591 ms
+cuequivariance fwd=0.2029 ms fwd+bwd=0.7695 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
+layernorm_kernel fwd=0.1862 ms fwd+bwd=0.5454 ms
 
 === M=147456  d_in=256  d_out=256 ===
 # L=384 D=256
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.1907 ms fwd+bwd=0.4186 ms
+pytorch fwd=0.1900 ms fwd+bwd=0.4180 ms
   triton         fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.890e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
-triton fwd=0.0579 ms fwd+bwd=0.2092 ms
+triton fwd=0.0574 ms fwd+bwd=0.2086 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.800e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.677e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
-cuequivariance fwd=0.0747 ms fwd+bwd=0.2860 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.879e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
-layernorm_kernel fwd=0.0577 ms fwd+bwd=0.2216 ms
+cuequivariance fwd=0.0746 ms fwd+bwd=0.2843 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.890e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
+layernorm_kernel fwd=0.0572 ms fwd+bwd=0.2132 ms
 
 === M=262144  d_in=256  d_out=256 ===
 # L=512 D=256
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.3336 ms fwd+bwd=0.7142 ms
+pytorch fwd=0.3331 ms fwd+bwd=0.7114 ms
   triton         fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.737e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
-triton fwd=0.0971 ms fwd+bwd=0.3469 ms
+triton fwd=0.0962 ms fwd+bwd=0.3449 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.037e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.465e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
-cuequivariance fwd=0.1212 ms fwd+bwd=0.4496 ms
+cuequivariance fwd=0.1212 ms fwd+bwd=0.4485 ms
   layernorm_kernel fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.785e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
-layernorm_kernel fwd=0.0966 ms fwd+bwd=0.3126 ms
+layernorm_kernel fwd=0.0964 ms fwd+bwd=0.3170 ms
 
 === M=589824  d_in=256  d_out=256 ===
 # L=768 D=256
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.7420 ms fwd+bwd=1.5526 ms
+pytorch fwd=0.7412 ms fwd+bwd=1.5535 ms
   triton         fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.807e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
-triton fwd=0.2073 ms fwd+bwd=0.7368 ms
+triton fwd=0.2061 ms fwd+bwd=0.7380 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.071e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.524e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
-cuequivariance fwd=0.2550 ms fwd+bwd=0.9136 ms
+cuequivariance fwd=0.2550 ms fwd+bwd=0.9127 ms
   layernorm_kernel fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.804e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
-layernorm_kernel fwd=0.2070 ms fwd+bwd=0.7040 ms
+layernorm_kernel fwd=0.2062 ms fwd+bwd=0.7097 ms
 
 === M=1048576  d_in=256  d_out=256 ===
 # L=1024 D=256
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=1.3139 ms fwd+bwd=2.7485 ms
+pytorch fwd=1.3213 ms fwd+bwd=2.7625 ms
   triton         fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.841e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
-triton fwd=0.3628 ms fwd+bwd=1.2840 ms
+triton fwd=0.3620 ms fwd+bwd=1.2861 ms
   cuequivariance fwd(abs=6.250e-02, rel=8.492e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.554e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
-cuequivariance fwd=0.4417 ms fwd+bwd=1.5638 ms
+cuequivariance fwd=0.4421 ms fwd+bwd=1.5682 ms
   layernorm_kernel fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.836e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
-layernorm_kernel fwd=0.3625 ms fwd+bwd=1.1245 ms
+layernorm_kernel fwd=0.3619 ms fwd+bwd=1.1346 ms
 
 === M=147456  d_in=384  d_out=384 ===
 # L=384 D=384
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.2219 ms fwd+bwd=0.4971 ms
+pytorch fwd=0.2227 ms fwd+bwd=0.4980 ms
   triton         fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.800e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
-triton fwd=0.0829 ms fwd+bwd=0.3085 ms
+triton fwd=0.0820 ms fwd+bwd=0.3073 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.710e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.660e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
-cuequivariance fwd=0.1406 ms fwd+bwd=0.4204 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.805e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
-layernorm_kernel fwd=0.0832 ms fwd+bwd=0.3396 ms
+cuequivariance fwd=0.1408 ms fwd+bwd=0.4194 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.800e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
+layernorm_kernel fwd=0.0823 ms fwd+bwd=0.3036 ms
 
 === M=262144  d_in=384  d_out=384 ===
 # L=512 D=384
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.3886 ms fwd+bwd=0.8529 ms
+pytorch fwd=0.3910 ms fwd+bwd=0.8556 ms
   triton         fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.027e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
-triton fwd=0.1406 ms fwd+bwd=0.5482 ms
+triton fwd=0.1400 ms fwd+bwd=0.5506 ms
   cuequivariance fwd(abs=3.125e-02, rel=1.027e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.865e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
-cuequivariance fwd=0.2425 ms fwd+bwd=0.6911 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.020e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
-layernorm_kernel fwd=0.1399 ms fwd+bwd=0.5346 ms
+cuequivariance fwd=0.2425 ms fwd+bwd=0.6888 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.027e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
+layernorm_kernel fwd=0.1400 ms fwd+bwd=0.5017 ms
 
 === M=589824  d_in=384  d_out=384 ===
 # L=768 D=384
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.8663 ms fwd+bwd=1.8821 ms
+pytorch fwd=0.8713 ms fwd+bwd=1.8915 ms
   triton         fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.934e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
-triton fwd=0.3060 ms fwd+bwd=1.1957 ms
+triton fwd=0.3039 ms fwd+bwd=1.1950 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.575e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.868e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
-cuequivariance fwd=0.5242 ms fwd+bwd=1.4682 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.925e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
-layernorm_kernel fwd=0.3064 ms fwd+bwd=1.1230 ms
+cuequivariance fwd=0.5260 ms fwd+bwd=1.4730 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.934e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
+layernorm_kernel fwd=0.3045 ms fwd+bwd=1.0626 ms
 
 === M=1048576  d_in=384  d_out=384 ===
 # L=1024 D=384
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=1.5343 ms fwd+bwd=3.3575 ms
+pytorch fwd=1.5444 ms fwd+bwd=3.3691 ms
   triton         fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.016e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
-triton fwd=0.5372 ms fwd+bwd=2.1035 ms
+triton fwd=0.5356 ms fwd+bwd=2.1045 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.516e-06, cos=1.000000)  dx(abs=6.250e-02, rel=1.931e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
-cuequivariance fwd=0.9133 ms fwd+bwd=2.5532 ms
-  layernorm_kernel fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.013e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
-layernorm_kernel fwd=0.5376 ms fwd+bwd=1.9541 ms
+cuequivariance fwd=0.9205 ms fwd+bwd=2.5680 ms
+  layernorm_kernel fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.016e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
+layernorm_kernel fwd=0.5349 ms fwd+bwd=1.8506 ms
 
 === M=147456  d_in=512  d_out=512 ===
 # L=384 D=512
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.2567 ms fwd+bwd=0.5842 ms
+pytorch fwd=0.2578 ms fwd+bwd=0.5847 ms
   triton         fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.081e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
-triton fwd=0.1073 ms fwd+bwd=0.3506 ms
+triton fwd=0.1066 ms fwd+bwd=0.3507 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.884e-06, cos=1.000000)  dx(abs=6.250e-02, rel=1.895e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
-cuequivariance fwd=0.1903 ms fwd+bwd=0.6097 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.075e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
-layernorm_kernel fwd=0.1075 ms fwd+bwd=0.3879 ms
+cuequivariance fwd=0.1894 ms fwd+bwd=0.6108 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.081e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
+layernorm_kernel fwd=0.1064 ms fwd+bwd=0.3435 ms
 
 === M=262144  d_in=512  d_out=512 ===
 # L=512 D=512
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.4505 ms fwd+bwd=1.0070 ms
+pytorch fwd=0.4531 ms fwd+bwd=1.0113 ms
   triton         fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.840e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.359e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
-triton fwd=0.1837 ms fwd+bwd=0.6428 ms
+triton fwd=0.1841 ms fwd+bwd=0.6427 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.393e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.557e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.359e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
-cuequivariance fwd=0.3319 ms fwd+bwd=1.0142 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.382e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
-layernorm_kernel fwd=0.1839 ms fwd+bwd=0.6076 ms
+cuequivariance fwd=0.3323 ms fwd+bwd=1.0181 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.840e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.359e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
+layernorm_kernel fwd=0.1840 ms fwd+bwd=0.5707 ms
 
 === M=589824  d_in=512  d_out=512 ===
 # L=768 D=512
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=1.0042 ms fwd+bwd=2.2473 ms
+pytorch fwd=1.0113 ms fwd+bwd=2.2573 ms
   triton         fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.704e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
-triton fwd=0.4038 ms fwd+bwd=1.4076 ms
+triton fwd=0.4043 ms fwd+bwd=1.4044 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.410e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.475e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
-cuequivariance fwd=0.7292 ms fwd+bwd=2.1521 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.687e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
-layernorm_kernel fwd=0.4038 ms fwd+bwd=1.2966 ms
+cuequivariance fwd=0.7293 ms fwd+bwd=2.1528 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.704e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
+layernorm_kernel fwd=0.4043 ms fwd+bwd=1.2180 ms
 
 === M=1048576  d_in=512  d_out=512 ===
 # L=1024 D=512
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=1.7802 ms fwd+bwd=4.0225 ms
-  triton         fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.800e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.394e-03, cos=0.999997)
-triton fwd=0.7135 ms fwd+bwd=2.4831 ms
+pytorch fwd=1.7925 ms fwd+bwd=4.0446 ms
+  triton         fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.800e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+triton fwd=0.7120 ms fwd+bwd=2.4812 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.657e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.528e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
-cuequivariance fwd=1.2828 ms fwd+bwd=3.7302 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.803e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
-layernorm_kernel fwd=0.7117 ms fwd+bwd=2.2619 ms
+cuequivariance fwd=1.2835 ms fwd+bwd=3.7208 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.800e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+layernorm_kernel fwd=0.7111 ms fwd+bwd=2.1291 ms
 
 === M=147456  d_in=768  d_out=768 ===
 # L=384 D=768
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.3016 ms fwd+bwd=0.7564 ms
+pytorch fwd=0.3028 ms fwd+bwd=0.7573 ms
   triton         fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
-triton fwd=0.1570 ms fwd+bwd=0.6644 ms
+triton fwd=0.1557 ms fwd+bwd=0.6671 ms
   cuequivariance fwd(abs=3.125e-02, rel=8.645e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.912e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
-cuequivariance fwd=0.3176 ms fwd+bwd=0.9172 ms
-  layernorm_kernel fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.013e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
-layernorm_kernel fwd=0.1568 ms fwd+bwd=0.5050 ms
+cuequivariance fwd=0.3185 ms fwd+bwd=0.9178 ms
+  layernorm_kernel fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
+layernorm_kernel fwd=0.1557 ms fwd+bwd=0.4260 ms
 
 === M=262144  d_in=768  d_out=768 ===
 # L=512 D=768
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=0.5294 ms fwd+bwd=1.3232 ms
-  triton         fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.081e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
-triton fwd=0.2723 ms fwd+bwd=1.1585 ms
+pytorch fwd=0.5325 ms fwd+bwd=1.3252 ms
+  triton         fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.081e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.529e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+triton fwd=0.2722 ms fwd+bwd=1.1614 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.211e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.836e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
-cuequivariance fwd=0.5528 ms fwd+bwd=1.5417 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.076e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
-layernorm_kernel fwd=0.2715 ms fwd+bwd=0.8793 ms
+cuequivariance fwd=0.5514 ms fwd+bwd=1.5419 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.081e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+layernorm_kernel fwd=0.2726 ms fwd+bwd=0.7248 ms
 
 === M=589824  d_in=768  d_out=768 ===
 # L=768 D=768
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=1.1818 ms fwd+bwd=2.9786 ms
-  triton         fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.740e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
-triton fwd=0.5997 ms fwd+bwd=2.5679 ms
+pytorch fwd=1.1893 ms fwd+bwd=2.9892 ms
+  triton         fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+triton fwd=0.6029 ms fwd+bwd=2.5729 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.699e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.883e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
-cuequivariance fwd=1.2165 ms fwd+bwd=3.3092 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.997e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
-layernorm_kernel fwd=0.6007 ms fwd+bwd=1.8705 ms
+cuequivariance fwd=1.2167 ms fwd+bwd=3.3188 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+layernorm_kernel fwd=0.6004 ms fwd+bwd=1.5804 ms
 
 === M=1048576  d_in=768  d_out=768 ===
 # L=1024 D=768
 pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=1.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=1.000000) db(abs=0.000e+00,rel=0.000e+00,cos=1.000000)
-pytorch fwd=2.0948 ms fwd+bwd=5.3259 ms
+pytorch fwd=2.1089 ms fwd+bwd=5.3456 ms
   triton         fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.999e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.689e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.431e-03, cos=0.999997)
-triton fwd=1.0596 ms fwd+bwd=4.5416 ms
+triton fwd=1.0637 ms fwd+bwd=4.5581 ms
   cuequivariance fwd(abs=3.125e-02, rel=9.168e-06, cos=1.000000)  dx(abs=3.125e-02, rel=1.866e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.430e-03, cos=0.999997)
-cuequivariance fwd=2.1462 ms fwd+bwd=5.7793 ms
-  layernorm_kernel fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.430e-03, cos=0.999997)
-layernorm_kernel fwd=1.0618 ms fwd+bwd=3.2778 ms
+cuequivariance fwd=2.1503 ms fwd+bwd=5.7881 ms
+  layernorm_kernel fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.999e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.430e-03, cos=0.999997)
+layernorm_kernel fwd=1.0625 ms fwd+bwd=2.7745 ms
 
 DONE

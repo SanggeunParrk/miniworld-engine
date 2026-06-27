@@ -116,10 +116,22 @@ class LayerNorm(nn.LayerNorm):
             return super().forward(input)
         if self.implementation in {
             ImplementationType.TRITON,
-            ImplementationType.CUDA,
             ImplementationType.CUEQUIVARIANCE,
         }:
             return kernels.triton_layernorm(
+                input,
+                self.weight,
+                self.bias,
+                self.eps,
+            )
+        if self.implementation in {
+            ImplementationType.MINIWORLD,
+            ImplementationType.CUDA,
+        }:
+            # miniworld = our auto-routing LayerNorm: forward fused triton (HBM-bound,
+            # at the bandwidth wall) + backward auto-dispatched per shape
+            # (persistent / partial / atomic). See kernels/layernorm.
+            return kernels.layernorm_kernel(
                 input,
                 self.weight,
                 self.bias,

@@ -1,0 +1,184 @@
+host=NVIDIA H100 80GB HBM3 torch=2.10.0+cu128 dtype=torch.bfloat16
+implementations=pytorch,triton,triton_persistent,cute (quack RMSNorm proxy)  sweep=M=L^2 for L in [384, 512, 768, 1024], D in [128, 256, 384, 512, 768]  eps=1e-05
+
+=== M=147456  d_in=128  d_out=128 ===
+# L=384 D=128
+pytorch fwd=0.1634 ms fwd+bwd=0.3452 ms
+  triton         fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.739e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
+triton fwd=0.0322 ms fwd+bwd=0.1478 ms
+  triton_persistent fwd(abs=1.562e-02, rel=9.502e-06, cos=1.000000)  dx(abs=1.562e-02, rel=1.739e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.352e-03, cos=0.999997)  db(abs=2.000e+00, rel=2.213e-03, cos=0.999998)
+triton_persistent fwd=0.0321 ms fwd+bwd=0.1606 ms
+cute fwd=0.0327 ms fwd+bwd=0.1281 ms  [quack RMSNorm proxy]
+
+=== M=262144  d_in=128  d_out=128 ===
+# L=512 D=128
+pytorch fwd=0.2854 ms fwd+bwd=0.5850 ms
+  triton         fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+triton fwd=0.0517 ms fwd+bwd=0.1589 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.026e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.191e-05, cos=1.000000)  dw(abs=4.000e+00, rel=1.801e-03, cos=0.999998)  db(abs=8.000e+00, rel=2.969e-03, cos=0.999996)
+triton_persistent fwd=0.0518 ms fwd+bwd=0.1712 ms
+cute fwd=0.0526 ms fwd+bwd=0.1414 ms  [quack RMSNorm proxy]
+
+=== M=589824  d_in=128  d_out=128 ===
+# L=768 D=128
+pytorch fwd=0.6340 ms fwd+bwd=1.2564 ms
+  triton         fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
+triton fwd=0.1075 ms fwd+bwd=0.3142 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.058e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.847e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.239e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.424e-03, cos=0.999997)
+triton_persistent fwd=0.1076 ms fwd+bwd=0.3315 ms
+cute fwd=0.1094 ms fwd+bwd=0.2846 ms  [quack RMSNorm proxy]
+
+=== M=1048576  d_in=128  d_out=128 ===
+# L=1024 D=128
+pytorch fwd=1.1138 ms fwd+bwd=2.1811 ms
+  triton         fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.261e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
+triton fwd=0.1857 ms fwd+bwd=0.5354 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.146e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.847e-05, cos=1.000000)  dw(abs=1.600e+01, rel=3.252e-03, cos=0.999995)  db(abs=8.000e+00, rel=2.277e-03, cos=0.999997)
+triton_persistent fwd=0.1860 ms fwd+bwd=0.5595 ms
+cute fwd=0.1887 ms fwd+bwd=0.4869 ms  [quack RMSNorm proxy]
+
+=== M=147456  d_in=256  d_out=256 ===
+# L=384 D=256
+pytorch fwd=0.1903 ms fwd+bwd=0.4178 ms
+  triton         fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.890e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
+triton fwd=0.0573 ms fwd+bwd=0.2094 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.066e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.890e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.462e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.598e-03, cos=0.999997)
+triton_persistent fwd=0.0572 ms fwd+bwd=0.2211 ms
+cute fwd=0.0579 ms fwd+bwd=0.1546 ms  [quack RMSNorm proxy]
+
+=== M=262144  d_in=256  d_out=256 ===
+# L=512 D=256
+pytorch fwd=0.3356 ms fwd+bwd=0.7152 ms
+  triton         fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.737e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
+triton fwd=0.0965 ms fwd+bwd=0.3465 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.090e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.737e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.286e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.324e-03, cos=0.999997)
+triton_persistent fwd=0.0963 ms fwd+bwd=0.3587 ms
+cute fwd=0.0972 ms fwd+bwd=0.2552 ms  [quack RMSNorm proxy]
+
+=== M=589824  d_in=256  d_out=256 ===
+# L=768 D=256
+pytorch fwd=0.7413 ms fwd+bwd=1.5508 ms
+  triton         fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.807e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
+triton fwd=0.2068 ms fwd+bwd=0.7415 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.144e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.807e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.354e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.667e-03, cos=0.999996)
+triton_persistent fwd=0.2070 ms fwd+bwd=0.7475 ms
+cute fwd=0.2085 ms fwd+bwd=0.5403 ms  [quack RMSNorm proxy]
+
+=== M=1048576  d_in=256  d_out=256 ===
+# L=1024 D=256
+pytorch fwd=1.3128 ms fwd+bwd=2.7498 ms
+  triton         fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.841e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
+triton fwd=0.3623 ms fwd+bwd=1.2808 ms
+  triton_persistent fwd(abs=6.250e-02, rel=1.197e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.841e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.731e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.569e-03, cos=0.999997)
+triton_persistent fwd=0.3611 ms fwd+bwd=1.2964 ms
+cute fwd=0.3666 ms fwd+bwd=0.9425 ms  [quack RMSNorm proxy]
+
+=== M=147456  d_in=384  d_out=384 ===
+# L=384 D=384
+pytorch fwd=0.2212 ms fwd+bwd=0.4965 ms
+  triton         fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.800e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
+triton fwd=0.0825 ms fwd+bwd=0.3076 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.202e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.800e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.376e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.751e-03, cos=0.999996)
+triton_persistent fwd=0.0822 ms fwd+bwd=0.2996 ms
+cute fwd=0.0826 ms fwd+bwd=0.2245 ms  [quack RMSNorm proxy]
+
+=== M=262144  d_in=384  d_out=384 ===
+# L=512 D=384
+pytorch fwd=0.3884 ms fwd+bwd=0.8569 ms
+  triton         fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.027e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.343e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
+triton fwd=0.1395 ms fwd+bwd=0.5207 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.258e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.027e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.344e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.276e-03, cos=0.999997)
+triton_persistent fwd=0.1395 ms fwd+bwd=0.4947 ms
+cute fwd=0.1400 ms fwd+bwd=0.3776 ms  [quack RMSNorm proxy]
+
+=== M=589824  d_in=384  d_out=384 ===
+# L=768 D=384
+pytorch fwd=0.8717 ms fwd+bwd=1.8811 ms
+  triton         fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.934e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
+triton fwd=0.3050 ms fwd+bwd=1.1355 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.207e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.934e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.306e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.440e-03, cos=0.999997)
+triton_persistent fwd=0.3048 ms fwd+bwd=1.0574 ms
+cute fwd=0.3062 ms fwd+bwd=0.8181 ms  [quack RMSNorm proxy]
+
+=== M=1048576  d_in=384  d_out=384 ===
+# L=1024 D=384
+pytorch fwd=1.5444 ms fwd+bwd=3.3698 ms
+  triton         fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.016e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
+triton fwd=0.5357 ms fwd+bwd=2.0191 ms
+  triton_persistent fwd(abs=6.250e-02, rel=1.227e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.016e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.308e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.393e-03, cos=0.999997)
+triton_persistent fwd=0.5345 ms fwd+bwd=1.8430 ms
+cute fwd=0.5379 ms fwd+bwd=1.4322 ms  [quack RMSNorm proxy]
+
+=== M=147456  d_in=512  d_out=512 ===
+# L=384 D=512
+pytorch fwd=0.2576 ms fwd+bwd=0.5844 ms
+  triton         fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.081e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
+triton fwd=0.1067 ms fwd+bwd=0.3483 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.217e-05, cos=1.000000)  dx(abs=6.250e-02, rel=2.081e-05, cos=1.000000)  dw(abs=4.000e+00, rel=2.859e-03, cos=0.999996)  db(abs=4.000e+00, rel=2.367e-03, cos=0.999997)
+triton_persistent fwd=0.1068 ms fwd+bwd=0.3379 ms
+cute fwd=0.1070 ms fwd+bwd=0.3226 ms  [quack RMSNorm proxy]
+
+=== M=262144  d_in=512  d_out=512 ===
+# L=512 D=512
+pytorch fwd=0.4499 ms fwd+bwd=1.0051 ms
+  triton         fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.840e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.359e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
+triton fwd=0.1835 ms fwd+bwd=0.5939 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.124e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.840e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.359e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.724e-03, cos=0.999996)
+triton_persistent fwd=0.1837 ms fwd+bwd=0.5639 ms
+cute fwd=0.1843 ms fwd+bwd=0.5520 ms  [quack RMSNorm proxy]
+
+=== M=589824  d_in=512  d_out=512 ===
+# L=768 D=512
+pytorch fwd=1.0038 ms fwd+bwd=2.2453 ms
+  triton         fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.704e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
+triton fwd=0.4035 ms fwd+bwd=1.3184 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.199e-05, cos=1.000000)  dx(abs=3.125e-02, rel=1.704e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.695e-03, cos=0.999996)  db(abs=8.000e+00, rel=2.737e-03, cos=0.999996)
+triton_persistent fwd=0.4036 ms fwd+bwd=1.2139 ms
+cute fwd=0.4063 ms fwd+bwd=1.2136 ms  [quack RMSNorm proxy]
+
+=== M=1048576  d_in=512  d_out=512 ===
+# L=1024 D=512
+pytorch fwd=1.7925 ms fwd+bwd=4.0514 ms
+  triton         fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.800e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+triton fwd=0.7126 ms fwd+bwd=2.3133 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.156e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.800e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.488e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.417e-03, cos=0.999997)
+triton_persistent fwd=0.7118 ms fwd+bwd=2.1223 ms
+cute fwd=0.7151 ms fwd+bwd=2.1394 ms  [quack RMSNorm proxy]
+
+=== M=147456  d_in=768  d_out=768 ===
+# L=384 D=768
+pytorch fwd=0.3028 ms fwd+bwd=0.7573 ms
+  triton         fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
+triton fwd=0.1561 ms fwd+bwd=0.6685 ms
+  triton_persistent fwd(abs=6.250e-02, rel=1.316e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.350e-03, cos=0.999997)  db(abs=4.000e+00, rel=2.326e-03, cos=0.999997)
+triton_persistent fwd=0.1563 ms fwd+bwd=0.4220 ms
+cute fwd=0.1563 ms fwd+bwd=0.3989 ms  [quack RMSNorm proxy]
+
+=== M=262144  d_in=768  d_out=768 ===
+# L=512 D=768
+pytorch fwd=0.5328 ms fwd+bwd=1.3252 ms
+  triton         fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.081e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+triton fwd=0.2712 ms fwd+bwd=1.1184 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.245e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.081e-05, cos=1.000000)  dw(abs=8.000e+00, rel=2.528e-03, cos=0.999997)  db(abs=8.000e+00, rel=2.763e-03, cos=0.999996)
+triton_persistent fwd=0.2709 ms fwd+bwd=0.7192 ms
+cute fwd=0.2722 ms fwd+bwd=0.6894 ms  [quack RMSNorm proxy]
+
+=== M=589824  d_in=768  d_out=768 ===
+# L=768 D=768
+pytorch fwd=1.1898 ms fwd+bwd=2.9903 ms
+  triton         fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+triton fwd=0.6020 ms fwd+bwd=2.4110 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.226e-05, cos=1.000000)  dx(abs=3.125e-02, rel=2.000e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.739e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.585e-03, cos=0.999997)
+triton_persistent fwd=0.6023 ms fwd+bwd=1.5733 ms
+cute fwd=0.6042 ms fwd+bwd=1.5238 ms  [quack RMSNorm proxy]
+
+=== M=1048576  d_in=768  d_out=768 ===
+# L=1024 D=768
+pytorch fwd=2.1089 ms fwd+bwd=5.3491 ms
+  triton         fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.999e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.690e-03, cos=0.999997)  db(abs=1.600e+01, rel=2.431e-03, cos=0.999997)
+triton fwd=1.0632 ms fwd+bwd=4.8820 ms
+  triton_persistent fwd(abs=3.125e-02, rel=1.204e-05, cos=1.000000)  dx(abs=6.250e-02, rel=1.999e-05, cos=1.000000)  dw(abs=1.600e+01, rel=2.692e-03, cos=0.999996)  db(abs=1.600e+01, rel=2.430e-03, cos=0.999997)
+triton_persistent fwd=1.0638 ms fwd+bwd=2.7680 ms
+cute fwd=1.0695 ms fwd+bwd=2.7173 ms  [quack RMSNorm proxy]
+
+DONE
