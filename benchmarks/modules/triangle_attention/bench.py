@@ -2,7 +2,7 @@
 
 Methodology (matches the trimul module benchmarks):
   inference : pytorch = torch.compile ; ours = manual CUDA-graph (deployment regime)
-  training  : both torch.compile (params require grad, exact fwd+bwd)
+  training  : both torch.compile (params require grad, exact training step)
 ms / layer, B=1, bf16, H100. d_pair sweep {128, 256, 512}; bias-only
 (use_self_attention=False). "ours" = the TRITON implementation (repo layernorm_kernel
 + fused_gate_out/split + inference LN+proj concat + per-GPU dispatch).
@@ -104,7 +104,7 @@ def run(kind, dims, dtype, B, nh):
     print(f"### {title} bias-only triangle attention  B={B} H={nh} dtype={dtype}")
     print(f"# device={torch.cuda.get_device_name()}  inference=pt:compile/ours:cudagraph  train=compile")
     # Emit the benchmarks/runners/plot_bench.py format (M=L^2, d_in=d_out=d_pair; backend lines
-    # `pytorch`/`triton` with fwd=inference, fwd+bwd=training) so the shared plotter
+    # `pytorch`/`triton` with inference/training timings) so the shared plotter
     # renders the standard speedup/latency charts + tables.
     print(f"host={torch.cuda.get_device_name()} torch={torch.__version__} dtype={dtype}")
     print("implementations=pytorch,triton  inference: pytorch=torch.compile / "
@@ -123,8 +123,8 @@ def run(kind, dims, dtype, B, nh):
             tou = bench_train_compiled(ours, pair, mask, dy)
             print(f"\n=== M={L * L}  d_in={d}  d_out={d} ===")
             print(f"# L={L} D={d}")
-            print(f"pytorch fwd={ipt:.3f} ms fwd+bwd={tpt:.3f} ms")
-            print(f"triton fwd={iou:.3f} ms fwd+bwd={tou:.3f} ms", flush=True)
+            print(f"pytorch inference={ipt:.3f} ms training={tpt:.3f} ms")
+            print(f"triton inference={iou:.3f} ms training={tou:.3f} ms", flush=True)
             del pair, mask, dy, pt, ours
             torch.cuda.empty_cache()
 

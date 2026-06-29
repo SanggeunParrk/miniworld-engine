@@ -112,5 +112,5 @@ CUDA-graph capture.
 
 Nothing to do — just run. The first training step (or first time each
 `(d, M-bucket)` is hit) calibrates and writes the cache; subsequent runs and
-re-imports read it. To pre-warm explicitly, run one forward+backward per shape you
+re-imports read it. To pre-warm explicitly, run one inference+training pass per shape you
 care about. To inspect/clear, look at / delete the JSON under the cache dir.

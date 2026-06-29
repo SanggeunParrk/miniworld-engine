@@ -87,13 +87,14 @@ configs:
 srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
   bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
     PYTHONPATH=src python benchmarks/runners/bench.py kernel=triangle_multiplication \
-      implementations=[pytorch,triton,cuequivariance] compile=false"'
+      implementations=[pytorch,triton,cuequivariance] mode=inference"'
 # or submit: sbatch submits/run_bench.sbatch
 ```
 
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
 `transition`, `adaptive_layernorm`, `augmented_attention_token/atom`).
-`compile=true` benches the `torch.compile`'d variant — no separate script.
+All final benchmarks run the `torch.compile`d path; non-compiled debug probes
+are not valid final benchmark results.
 Generated results land in the selected target's `artifacts/` directory, for
 example `benchmarks/modules/triangle_multiplication/artifacts/`.
 

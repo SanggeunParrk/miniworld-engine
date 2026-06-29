@@ -89,8 +89,8 @@ Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
        python benchmarks/runners/plot_bench.py '"\"$A/<name>.out\" \"$A\""' --name <name>"'
    ```
    This writes `<name>.md` (markdown tables + embedded graphs) and one PNG per
-   metric (`_fwd.png`, `_fwd_bwd.png`) into `$A`. Keep that generated output in
-   artifacts; summarize durable conclusions in `docs/`.
+   metric (`_inference.png`, `_training.png`) into `$A`. Keep that generated
+   output in artifacts; summarize durable conclusions in `docs/`.
 
 `benchmarks/runners/plot_bench.py` parses the standard bench-output format
 (`=== M=.. d_in=.. d_out=.. ===` blocks + `torch.compile`/`TE` timing lines), so
@@ -128,7 +128,7 @@ Rules baked into the module:
   go in `docs/`.
 - **Use the shared style** (`miniworld_kernels.viz`) for every figure — never
   ad-hoc colours.
-- **Both forward and forward+backward** when the op is used in training.
+- **Both inference and training** when the op is used in training.
 - Bold the faster backend in each table cell; "lower is better" on graphs.
 - Report numerical agreement (max abs error, relative Frobenius error, cosine)
   alongside latency — never just speed.

@@ -2,7 +2,7 @@ kernel: transition
 implementations:
   - pytorch
   - triton
-mode: forward
+mode: inference
 metric: time
 compile: true
 precision: "bf16-mixed"

@@ -96,7 +96,7 @@ Correctness **verified** vs fp32 reference for **both** paths — `left`/`right`
 ```
 trimul_inproj/
 ├── __init__.py
-├── reference.py        # pytorch reference (functional + nn.Module fwd/bwd)
+├── reference.py        # pytorch reference (functional + nn.Module inference/training)
 ├── interface.py        # trimul_inproj_cute(...) public entry (lazy cute import)
 ├── cute/
 │   ├── launch.py       # the kernel: 1 gated GEMM (left+right, bdll) + torch gate

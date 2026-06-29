@@ -65,12 +65,20 @@ class BenchConfig(BaseModel):
         ImplementationType.PYTORCH.value,
         ImplementationType.TRITON.value,
     ]
-    mode: Literal["forward", "full"]
+    mode: Literal["inference", "training"]
     metric: Literal["time", "memory"]
     compile: bool = False
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
     name_suffix: str = ""
+
+
+def is_inference_mode(mode: str) -> bool:
+    return mode == "inference"
+
+
+def mode_label(mode: str) -> str:
+    return "inference" if is_inference_mode(mode) else "training"
 
 
 class ImplementationSpec(NamedTuple):
@@ -194,7 +202,7 @@ def bench_triangle_multiplication(
         y = forward()
         fabric.backward(y, dy)
 
-    func = forward if conf.mode == "forward" else full
+    func = forward if is_inference_mode(conf.mode) else full
     if conf.metric == "time":
         return bench_time(func, grad_to_none=[pair])["median_ms"]
     return bench_memory(func)["median_mb"]
@@ -248,7 +256,7 @@ def bench_triangle_attention(
         y = forward()
         fabric.backward(y, dy)
 
-    func = forward if conf.mode == "forward" else full
+    func = forward if is_inference_mode(conf.mode) else full
     if conf.metric == "time":
         return bench_time(func, grad_to_none=[pair])["median_ms"]
     return bench_memory(func)["median_mb"]
@@ -293,7 +301,7 @@ def bench_transition(
         y = forward()
         fabric.backward(y, dy)
 
-    func = forward if conf.mode == "forward" else full
+    func = forward if is_inference_mode(conf.mode) else full
     if conf.metric == "time":
         return bench_time(func, grad_to_none=[x])["median_ms"]
     return bench_memory(func)["median_mb"]
@@ -366,7 +374,7 @@ def bench_adaptive_layernorm(
         y = forward()
         fabric.backward(y, dy)
 
-    func = forward if conf.mode == "forward" else full
+    func = forward if is_inference_mode(conf.mode) else full
     try:
         if conf.metric == "time":
             return bench_time(func, grad_to_none=[x, cond])["median_ms"]
@@ -410,7 +418,7 @@ def bench_augmented_attention_token(
         out_single = forward()
         fabric.backward(out_single, dy_single)
 
-    func = forward if conf.mode == "forward" else full
+    func = forward if is_inference_mode(conf.mode) else full
     if conf.metric == "time":
         return bench_time(func, grad_to_none=[pair, single, cond])["median_ms"]
     return bench_memory(func)["median_mb"]
@@ -452,7 +460,7 @@ def bench_augmented_attention_atom(
         out_single = forward()
         fabric.backward(out_single, dy_single)
 
-    func = forward if conf.mode == "forward" else full
+    func = forward if is_inference_mode(conf.mode) else full
     try:
         if conf.metric == "time":
             return bench_time(func, grad_to_none=[pair, single, cond])["median_ms"]
@@ -606,6 +614,9 @@ def build_autotune_summary(
 )
 def main(cfg: DictConfig) -> None:
     conf = BenchConfig.model_validate(cfg)
+    if not conf.compile:
+        msg = "Final benchmarks must run compiled. Use compile=true."
+        raise ValueError(msg)
     bench_func = KERNEL_MAP[conf.kernel]
 
     torch.backends.cuda.matmul.allow_tf32 = conf.allow_tf32
@@ -616,7 +627,7 @@ def main(cfg: DictConfig) -> None:
     bench_args = [
         conf.kernel,
         f"n_layers={conf.n_layers}",
-        conf.mode,
+        mode_label(conf.mode),
         conf.metric,
         str(conf.precision),
     ]

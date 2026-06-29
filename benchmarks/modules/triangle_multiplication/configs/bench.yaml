@@ -1,6 +1,6 @@
 # Single-bench config (hydra). Override on the CLI, e.g.
 #   python benchmarks/runners/bench.py kernel=transition implementations=[pytorch,triton]
-#   python benchmarks/runners/bench.py kernel=triangle_multiplication compile=false mode=forward
+#   python benchmarks/runners/bench.py kernel=triangle_multiplication mode=inference
 d_single: 384
 d_pair: 128
 d_single_token: 768
@@ -24,7 +24,7 @@ implementations:
   - cuequivariance
 # TriangleMultiplication also accepts:
 #   triton_pytorch_ln | triton_ln
-mode: forward          # forward | full (full adds the backward pass)
+mode: inference        # inference | training
 metric: time           # time | memory
 compile: true
 allow_tf32: true

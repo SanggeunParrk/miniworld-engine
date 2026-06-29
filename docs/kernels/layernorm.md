@@ -49,10 +49,10 @@ tables/plots against an existing kernel instead. Two reports are kept here:
 
 - `bench_layernorm_vs_triton.{md,*.png}` — `--baseline triton` (legacy vendored
   kernel). Forward is the *same* fused kernel (≈1.00×); the win is the
-  partial-reduction backward dispatch: **1.32–1.39× fwd+bwd at d=768**, ~1.05–1.14×
+  partial-reduction backward dispatch: **1.32–1.39× training at d=768**, ~1.05–1.14×
   at mid d, neutral at d=128 (dispatch falls back to atomic there).
 - `bench_layernorm_vs_cuequiv.{md,*.png}` — `--baseline cuequivariance`. Ours is
-  **1.10–2.03× forward** and **1.30–1.82× fwd+bwd** (margin grows with d; cuEquiv
+  **1.10–2.03× inference** and **1.30–1.82× training** (margin grows with d; cuEquiv
   degrades badly past d=512).
 
 Both are re-rendered from the same `bench_layernorm.out` — no re-run needed, just
@@ -63,16 +63,16 @@ change `--baseline` and `--name`.
 Historical CuTeDSL/H100 investigation notes found that a cute / H100-specific
 rewrite did not justify becoming the default path. Two old bench modes backed it:
 
-- `bench.py --suite fwd_tune` — forward-only, reports achieved HBM bandwidth
+- `bench.py --suite inference_tune` — inference-only, reports achieved HBM bandwidth
   (% of 3.35 TB/s peak); compares pytorch / triton / `triton/lowreg.py` /
-  quack CuTeDSL LN forward.
-- `bench.py --suite cute_bwd` — fwd+bwd, our triton LN vs quack CuTeDSL RMSNorm
+  quack CuTeDSL LN inference.
+- `bench.py --suite cute_training` — training, our triton LN vs quack CuTeDSL RMSNorm
   (backward proxy; quack ships no LN backward).
 
-Headline: **forward is at the bandwidth wall (82–90% peak) — no rewrite helps**;
+Headline: **inference is at the bandwidth wall (82–90% peak) — no rewrite helps**;
 **backward has real headroom — a CuTeDSL-style persistent `sm_count` grid is
-1.2–2.3× faster than our triton backward, the gap growing with d** (1.79× fwd+bwd
-at d=768). The forward `lowreg` variant is a confirmed negative result (kept as a
+1.2–2.3× faster than our triton backward, the gap growing with d** (1.79× training
+at d=768). The inference `lowreg` variant is a confirmed negative result (kept as a
 documented probe).
 
 ## Note

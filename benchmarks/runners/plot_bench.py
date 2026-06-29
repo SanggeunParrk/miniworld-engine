@@ -75,25 +75,26 @@ BACKENDS = [
     "v2",
 ]
 BACKEND_RE = "|".join(re.escape(b) for b in BACKENDS)
-# backends with both fwd and fwd+bwd:
-TIME_RE = re.compile(rf"({BACKEND_RE})\s+fwd=([\d.]+)\s*ms\s+fwd\+bwd=([\d.]+)\s*ms")
-# forward-only timing lines (our fused inference kernel; also torch.compile/TE when a
-# forward-only sweep like tune.py omits fwd+bwd). cute-fused MUST precede cute so the
+# backends with both inference and training timings:
+TIME_RE = re.compile(
+    rf"({BACKEND_RE})\s+inference=([\d.]+)\s*ms\s+training=([\d.]+)\s*ms",
+)
+# inference-only timing lines. cute-fused MUST precede cute so the
 # alternation doesn't match the "cute" prefix of "cute-fused".
-FWD_ONLY_RE = re.compile(rf"({BACKEND_RE})\s+fwd=([\d.]+)\s*ms")
+INFERENCE_ONLY_RE = re.compile(rf"({BACKEND_RE})\s+inference=([\d.]+)\s*ms")
 CORR_RE = re.compile(
     rf"({BACKEND_RE})\s+"
-    r"fwd\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
+    r"inference\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
     r"dx\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
     r"dw\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)\s+"
     r"db\(abs=([\deE.+-]+),rel=([\deE.+-]+),cos=([\deE.+-]+)\)"
 )
 
-METRICS = [("fwd", "forward"), ("fwd+bwd", "forward + backward")]
+METRICS = [("inference", "inference"), ("training", "training")]
 
 
 def parse(out_path: Path) -> dict:
-    """Return {(M, d): {backend: {'fwd': ms, ['fwd+bwd': ms], ['corr']: ...}}}."""
+    """Return {(M, d): {backend: {'inference': ms, ['training': ms], ['corr']: ...}}}."""
     data: dict = {}
     cur = None
     for line in out_path.read_text().splitlines():
@@ -111,16 +112,18 @@ def parse(out_path: Path) -> dict:
             continue
         t = TIME_RE.search(line)
         if t:
-            data[cur].setdefault(t[1], {}).update({"fwd": float(t[2]), "fwd+bwd": float(t[3])})
+            data[cur].setdefault(t[1], {}).update(
+                {"inference": float(t[2]), "training": float(t[3])},
+            )
             continue
-        f = FWD_ONLY_RE.search(line)
+        f = INFERENCE_ONLY_RE.search(line)
         if f:
-            data[cur].setdefault(f[1], {}).update({"fwd": float(f[2])})
+            data[cur].setdefault(f[1], {}).update({"inference": float(f[2])})
             continue
         c = CORR_RE.search(line)
         if c:
             data[cur].setdefault(c[1], {})["corr"] = {
-                "fwd": {"abs": float(c[2]), "rel": float(c[3]), "cos": float(c[4])},
+                "inference": {"abs": float(c[2]), "rel": float(c[3]), "cos": float(c[4])},
                 "dx": {"abs": float(c[5]), "rel": float(c[6]), "cos": float(c[7])},
                 "dw": {"abs": float(c[8]), "rel": float(c[9]), "cos": float(c[10])},
                 "db": {"abs": float(c[11]), "rel": float(c[12]), "cos": float(c[13])},
@@ -354,13 +357,13 @@ def make_correctness_table(data: dict) -> str | None:
         return None
 
     lines = [
-        "| d (=d_in=d_out) | M | backend | fwd rel/cos | dx rel/cos | dw rel/cos | db rel/cos |",
+        "| d (=d_in=d_out) | M | backend | inference rel/cos | dx rel/cos | dw rel/cos | db rel/cos |",
         "|---|---:|---|---|---|---|---|",
     ]
     for M, d, backend, corr in present:
         lines.append(
             f"| {d} | {M} | {backend} | "
-            f"{corr['fwd']['rel']:.3e} / {corr['fwd']['cos']:.6f} | "
+            f"{corr['inference']['rel']:.3e} / {corr['inference']['cos']:.6f} | "
             f"{corr['dx']['rel']:.3e} / {corr['dx']['cos']:.6f} | "
             f"{corr['dw']['rel']:.3e} / {corr['dw']['cos']:.6f} | "
             f"{corr['db']['rel']:.3e} / {corr['db']['cos']:.6f} |"
@@ -394,8 +397,8 @@ def main() -> None:
     md = [f"# {args.title}\n", f"_Source: `{args.out_path}`_\n"]
     for metric, label in METRICS:
         if not backends_for(data, metric):
-            continue  # e.g. a forward-only sweep has no fwd+bwd data
-        mtag = metric.replace("+", "_")
+            continue  # e.g. an inference-only sweep has no training data
+        mtag = metric
         # Headline: speedup vs default (higher = better, the winner is tallest).
         sp_png = args.output_dir / f"{name}_{mtag}_speedup.png"
         make_speedup_plot(data, metric, label, sp_png, args.title)
@@ -420,7 +423,7 @@ def main() -> None:
     md_path.write_text("\n".join(md))
     print(f"wrote {md_path}")
     for metric, _ in METRICS:
-        mtag = metric.replace("+", "_")
+        mtag = metric
         for suffix in (f"{mtag}_speedup", f"{mtag}_latency"):
             png = args.output_dir / f"{name}_{suffix}.png"
             if png.exists():

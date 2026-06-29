@@ -8,7 +8,7 @@ than cuBLAS**; the win needs a **fast GEMM**, i.e. quack's `GemmSm90`. cuBLAS ca
 epilogue, so we fork quack like M1 did.
 
 ## Why this is M1-level, NOT M2-level
-M2 (forward) was hard because it reduced the **A operand in the mainloop** (sA recycle race,
+M2 (inference) was hard because it reduced the **A operand in the mainloop** (sA recycle race,
 pingpong barrier divergence, deadlocks). **1+4 needs NONE of that**: mean/rstd are saved inputs,
 so there is no mainloop reduction. It's a **composable epilogue** on a standard `dY@W` GEMM —
 the M1 pattern (`GemmDefaultEpiMixin` + `epi_ops`), not the M2 fork.
@@ -24,14 +24,15 @@ d=128 M=262144 ≈ 30% of the bwd).
 
 ## GEMM
 A = dY (M, N), B = W (N, K) → out = dx_normed (M, K). Contraction = N. (W is already (N,K) =
-(K_gemm, N_gemm); same operand orientation as the forward's `gemm(dY, W)` in autograd.py.)
+(K_gemm, N_gemm); same operand orientation as the inference `gemm(dY, W)` in autograd.py.)
 
 ## Epilogue (custom epi op, single subtile = full K row)
 Inputs broadcast onto the acc fragment:
 - `γ` (K,) → `RowVecLoad("gamma")` (per output column).
 - `rstd`,`mean` (M,) → `ColVecLoad("rstd")`, `ColVecLoad("mean")` (per row).
-- `x` (M,K) → per-element load (like M2's `mX`) to form `x̂ = (x−mean)·rstd`. (Or save x̂ in fwd
-  and load it directly — cheaper; co-design with the fold-free fwd if adopted.)
+- `x` (M,K) → per-element load (like M2's `mX`) to form `xhat = (x-mean)*rstd`.
+  Or save `xhat` in inference and load it directly; co-design with the fold-free
+  inference path if adopted.
 Per row (within the single subtile that holds all K):
 1. `dx̂ = acc · γ`
 2. warp/smem reduce over the subtile's N(=K): `c2 = Σ dx̂ / K`, `c1 = Σ (dx̂·x̂) / K`

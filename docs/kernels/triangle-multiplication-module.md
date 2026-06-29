@@ -1,4 +1,4 @@
-# trimul — full TriangleMultiplication forward
+# trimul — full TriangleMultiplication inference
 
 ## Math
 

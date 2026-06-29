@@ -20,7 +20,7 @@ eager `LayerNorm` → `Linear` pair pays.
 | `pytorch`        | `layernorm_linear_pytorch` — `F.layer_norm` + `F.linear`          |
 | `torch.compile`  | `torch.compile(LayerNormLinearRef)` — the baseline / correctness oracle |
 | `te`             | NVIDIA Transformer Engine `te.LayerNormLinear` (baseline)         |
-| `cute`           | `cute/`: **our fused forward** — quack SM90 GEMM + folded LayerNorm epilogue (Milestone 1) |
+| `cute`           | `cute/`: **our fused inference** — quack SM90 GEMM + folded LayerNorm epilogue (Milestone 1) |
 | `triton`         | `layernorm_linear_triton` — alternative single-pass kernel (placeholder) |
 
 ## How the fused kernel works (`cute/`)
@@ -40,7 +40,7 @@ GEMM mainloop / WGMMA scheduling is untouched.
 ## Baseline results (H100, bf16) — TE vs torch.compile
 
 Square `d_in = d_out ∈ {128,256,384,512,768}` × `M ∈ {16384,65536,262144}`,
-forward + backward. Generated tables and graphs now belong under
+inference + training. Generated tables and graphs now belong under
 `benchmarks/kernels/layernorm_linear/artifacts/`.
 
 Numerics agree to bf16 (`cos = 1.000000`, rel-Frobenius ~1e-4). Latency verdict:
@@ -64,7 +64,7 @@ layernorm_linear/
 └── cute/          # SM90 CuTe/quack implementation
 ```
 
-## Fused kernel result (Milestone 1, H100 bf16, forward)
+## Fused kernel result (Milestone 1, H100 bf16, inference)
 
 `cute` vs the baselines on the square grid.
 Correctness: `cos = 0.999997` vs the true op (bf16-level) for all K=N shapes.
@@ -80,7 +80,7 @@ Forward latency (ms) via `triton.testing.do_bench`, fastest in **bold**:
 | 768 | 0.0578 / 0.0583 / **0.0476** | 0.1989 / 0.2031 / **0.1608** | 0.7418 / 0.7673 / **0.6084** |
 
 **The thesis holds — and more strongly than first measured.** The fused `cute`
-kernel is the fastest forward in **all 15** shapes (~10–30% over the best
+kernel is the fastest inference path in **all 15** shapes (~10–30% over the best
 baseline), by never materializing LayerNorm(X). This is with `torch.compile`
 stats (Milestone 1) — the in-mainloop stats (Milestone 2, `*_fused.py`) should
 widen it further. (Earlier numbers used a hand-rolled timer whose per-call sync
@@ -98,7 +98,7 @@ there is no separate stats pass. Implemented by forking quack's `GemmSm90`
 - ✅ **Correct** — `cos = 0.999997` (bf16-level) across the whole grid AND the
   QKV shape (K=4096, N=12288); the separate-stats large-N bug does NOT occur here
   (no ColVecLoad). Historical validation scripts were removed from the package tree.
-- Perf (forward): **fastest at small d** (d=128, M=16384: 0.0129 ms — beats TE
+- Perf (inference): **fastest at small d** (d=128, M=16384: 0.0129 ms — beats TE
   0.0173 and the M1 kernel), but **slower at larger d** (the first version uses a
   NON-persistent tile scheduler — the persistent path has an unresolved stats-smem
   reuse race — and the in-mainloop reduction competes with the GEMM as d grows).
@@ -110,7 +110,7 @@ there is no separate stats pass. Implemented by forking quack's `GemmSm90`
 - ✅ Milestone 0: folded math validated (`verify_folding.py`); cancellation only
   bites at pathological mean≳1000 (naive var breaks first).
 - ✅ Milestone 1 (`cute/gemm_layernorm_linear.py`): separate (torch.compile) stats
-  + fused GEMM epilogue. Fastest forward in all grid shapes (~10–30% over TE).
+  + fused GEMM epilogue. Fastest inference path in all grid shapes (~10–30% over TE).
   ⚠️ Known bug: QKV large-N ~2% off (persistent + ColVecLoad) — square exact.
 - ✅ Milestone 2 (`cute/gemm_layernorm_linear_fused.py`): stats in the mainloop,
   2 kernels, correct everywhere incl. QKV; wins at small d; large-d perf pending

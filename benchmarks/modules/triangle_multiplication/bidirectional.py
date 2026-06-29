@@ -1,6 +1,6 @@
 r"""Bidirectional TriangleMultiplication bench — team-gm harness format.
 
-Compares, forward (inference) and forward+backward (training), on H100/bf16:
+Compares inference and training on H100/bf16:
   - pytorch  = torch.compile(BidirectionalTriangleMultiplication ref)   [oracle + baseline]
   - ours     = BidirV6TriMul (fused front + split back, merged-backward, cute/quack + cuBLAS)
   - dtv1     = a fused bidirectional dt-v1 (dt-v1's own kernels, same architecture)
@@ -9,7 +9,8 @@ Compares, forward (inference) and forward+backward (training), on H100/bf16:
 Sweeps M = L^2 (L = seq_len) × d_pair. ALL COMPILED
 (docs/benchmarks.md hard rule: the pytorch
 baseline is torch.compile, never eager; ours/dtv1/cuequiv are already-compiled kernels).
-Emits the parseable `=== M=.. d_in=.. d_out=.. ===` + `<backend> fwd=.. ms fwd+bwd=.. ms`
+Emits the parseable `=== M=.. d_in=.. d_out=.. ===` +
+`<backend> inference=.. ms training=.. ms`
 format that `benchmarks/runners/plot_bench.py` renders into a table + graph.
 
 Lives under benchmarks/modules/triangle_multiplication because it is a module
@@ -97,10 +98,13 @@ class _Cuequiv2(nn.Module):
         return self.o(pair) + self.i(pair)
 
 
-def _timed(label: str, fwd, full, leaves):
-    t_fwd = do_bench(fwd)
-    t_full = do_bench(full, grad_to_none=leaves)
-    print(f"  {label:13s} fwd={t_fwd:.4f} ms  fwd+bwd={t_full:.4f} ms", flush=True)
+def _timed(label: str, inference, training, leaves):
+    t_inference = do_bench(inference)
+    t_training = do_bench(training, grad_to_none=leaves)
+    print(
+        f"  {label:13s} inference={t_inference:.4f} ms  training={t_training:.4f} ms",
+        flush=True,
+    )
 
 
 def run_shape(L: int, d: int) -> None:
@@ -117,7 +121,7 @@ def run_shape(L: int, d: int) -> None:
     pair = torch.randn(1, L, L, d, device=DEVICE, dtype=DTYPE)
     g = torch.randn_like(pair)
 
-    # oracle: compiled pytorch ref (forward value for correctness)
+    # oracle: compiled pytorch ref (inference value for correctness)
     ref_c = torch.compile(base)
     with torch.no_grad():
         y_ref = ref_c(pair).detach()
@@ -126,7 +130,7 @@ def run_shape(L: int, d: int) -> None:
         p = pair.detach().clone().requires_grad_(True)
         params = [pr for pr in model.parameters() if pr.requires_grad]
 
-        def fwd():
+        def inference():
             return model(p)
 
         def full():
@@ -134,7 +138,7 @@ def run_shape(L: int, d: int) -> None:
             for pr in params:
                 pr.grad = None
             model(p).backward(g)
-        return fwd, full, [p, *params]
+        return inference, full, [p, *params]
 
     # 1) pytorch (compiled) — baseline
     f, fu, lv = mk(ref_c)
@@ -144,7 +148,7 @@ def run_shape(L: int, d: int) -> None:
     try:
         ours = BidirV6TriMul(base)
         with torch.no_grad():
-            print(f"  ours-fwd cos={cos(y_ref, ours(pair)):.6f}", flush=True)
+            print(f"  ours-inference cos={cos(y_ref, ours(pair)):.6f}", flush=True)
         f, fu, lv = mk(ours)
         _timed("ours", f, fu, lv)
     except Exception as e:  # noqa: BLE001
@@ -154,7 +158,7 @@ def run_shape(L: int, d: int) -> None:
     try:
         dtv1 = _DtV1Bidir(base)
         with torch.no_grad():
-            print(f"  dtv1-fwd cos={cos(y_ref, dtv1(pair)):.6f}", flush=True)
+            print(f"  dtv1-inference cos={cos(y_ref, dtv1(pair)):.6f}", flush=True)
         f, fu, lv = mk(dtv1)
         _timed("dtv1", f, fu, lv)
     except Exception as e:  # noqa: BLE001
@@ -177,7 +181,7 @@ def main() -> None:
     _bdll_patch.apply()
     for d in D_LIST:
         for L in L_LIST:
-            if d == 512 and L >= 768:   # d512 L>=768 fwd+bwd activations exceed sane bench mem
+            if d == 512 and L >= 768:   # d512 L>=768 training activations exceed sane bench mem
                 continue
             run_shape(L, d)
 
