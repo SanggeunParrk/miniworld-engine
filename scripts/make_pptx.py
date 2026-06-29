@@ -6,7 +6,7 @@ parts, so we emit them directly with zipfile + string templates. The result is
 an editable PowerPoint/Keynote/Google-Slides file.
 
 Embeds the speedup bar charts we generated, dark theme, EN + KO bilingual.
-Run via srun (CPU only); writes benchmark/miniworld_nvidia_deck.pptx.
+Run via srun (CPU only); writes benchmarks/reports/deck/miniworld_nvidia_deck.pptx.
 """
 
 import struct
@@ -15,7 +15,7 @@ from html import escape
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "benchmark" / "miniworld_nvidia_deck.pptx"
+OUT = ROOT / "benchmarks" / "reports" / "deck" / "miniworld_nvidia_deck.pptx"
 
 INK = "0E1320"; INK2 = "161D2E"; WHITE = "FFFFFF"; DIM = "9AA6BE"
 OURS = "E8412B"; NV = "76B900"; TEAL = "11A6A0"; GREY = "9AA3B2"; AMBER = "E8A23D"

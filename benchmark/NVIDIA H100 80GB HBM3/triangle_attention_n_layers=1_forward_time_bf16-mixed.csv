@@ -1,3 +1,0 @@
-seq_len,pytorch (Time (ms)),triton (Time (ms)),cuequivariance (Time (ms))
-384.000000,0.901088,0.900736,0.899840
-512.000000,1.492832,1.497984,1.494240

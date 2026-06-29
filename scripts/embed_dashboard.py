@@ -1,10 +1,10 @@
 """Inline the benchmark sweep PNGs into the dashboard as base64 data URIs.
 
 The Artifact CSP blocks file/CDN image refs, so the dashboard must carry its
-images inline. This reads ``benchmark/dashboard.html`` (which uses ``__SWEEP_*__``
-tokens as <img> sources), replaces each token with a ``data:image/png;base64,…``
+images inline. This reads ``benchmarks/reports/deck/dashboard.html`` (which uses
+``__SWEEP_*__`` tokens as <img> sources), replaces each token with a ``data:image/png;base64,…``
 URI built from the matplotlib speedup bar charts we generated, and writes
-``benchmark/dashboard.built.html`` — the file that gets published.
+``benchmarks/reports/deck/dashboard.built.html`` — the file that gets published.
 
 Pure stdlib; CPU only. Run via srun, never the login node.
 """
@@ -13,10 +13,11 @@ import base64
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+DECK = ROOT / "benchmarks" / "reports" / "deck"
 # (source -> built) files that use the __SWEEP_*__ image tokens.
 PAGES = [
-    (ROOT / "benchmark" / "dashboard.html", ROOT / "benchmark" / "dashboard.built.html"),
-    (ROOT / "benchmark" / "slides.html", ROOT / "benchmark" / "slides.built.html"),
+    (DECK / "dashboard.html", DECK / "dashboard.built.html"),
+    (DECK / "slides.html", DECK / "slides.built.html"),
 ]
 
 IMAGES = {
