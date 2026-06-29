@@ -2,7 +2,7 @@
 
 Some kernels choose among multiple correct implementations at runtime. Those
 choices are performance policy, not benchmark output, so their caches must not
-live under `benchmarks/artifacts/` and must not be committed.
+live under any `benchmarks/**/artifacts/` directory and must not be committed.
 
 The persistent on-disk cache root is:
 

@@ -19,8 +19,8 @@ subfolders, not in a separate sibling kernel directory.
 - `interface.py`: public entrypoint for the new kernel
 - `compile_native.py`: `custom_op` entrypoints for `atomic` / `partial` / `dispatch`
   compile paths
-- Kernel benchmarks live under `benchmarks/kernels/layernorm/`; generated results live
-  under `benchmarks/artifacts/`.
+- Kernel benchmarks live under `benchmarks/kernels/layernorm/`; generated
+  results live under that target's `artifacts/`.
 
 The default sweep is:
 
@@ -32,8 +32,8 @@ The default sweep is:
 This kernel is **not** an excuse to freestyle benchmarking.
 
 - The preferred benchmark path in this repo is the unified team-gm-style
-  harness: `benchmarks/runners/bench.py` + `benchmarks/configs/bench.yaml` +
-  `tests/run_bench.sbatch`.
+  harness: `benchmarks/runners/bench.py` +
+  `benchmarks/modules/<module>/configs/bench.yaml` + `tests/run_bench.sbatch`.
 - Temporary LayerNorm probes should stay untracked until promoted into
   `benchmarks/kernels/layernorm/`.
 - Keep benchmark output aligned with the team-gm flow so logs and reports are

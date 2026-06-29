@@ -16,7 +16,7 @@ Lives under benchmarks/modules/triangle_multiplication because it is a module
 benchmark, not package code.
 
 Run (compute node):
-    K=benchmarks/artifacts/triangle_multiplication
+    K=benchmarks/modules/triangle_multiplication/artifacts/bidirectional
     pixi run --frozen bash -c \
       "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
        python benchmarks/modules/triangle_multiplication/bidirectional.py" \

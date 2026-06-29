@@ -7,8 +7,8 @@ ms / layer, B=1, bf16, H100. d_pair sweep {128, 256, 512}; bias-only
 (use_self_attention=False). "ours" = the TRITON implementation (repo layernorm_kernel
 + fused_gate_out/split + inference LN+proj concat + per-GPU dispatch).
 
-Emits parseable sections; capture under benchmarks/artifacts/, render reports
-with benchmarks/runners/plot_bench.py.
+Emits parseable sections; capture under this target's artifacts/, render
+reports with benchmarks/runners/plot_bench.py.
 Run via srun on a compute node (see CLAUDE.md).
 """
 

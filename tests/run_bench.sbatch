@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:30:00
-#SBATCH --output=benchmarks/artifacts/unified_%j.out
+#SBATCH --output=benchmarks/modules/triangle_multiplication/artifacts/unified_%j.out
 
 set -uo pipefail
 cd /home/psk6950/miniworld-kernels

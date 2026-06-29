@@ -12,9 +12,9 @@ Usage::
 
     python benchmarks/runners/plot_bench.py <bench.out> <output_dir> [--title "..."]
 
-``<output_dir>`` is the kernel's own benchmark folder
-(``benchmarks/artifacts/<kernel>/`` by default). Curated reports live under
-``benchmarks/artifacts/``. See ``docs/benchmarks.md``.
+``<output_dir>`` is the target's own artifact folder, such as
+``benchmarks/kernels/<kernel>/artifacts/`` or
+``benchmarks/modules/<module>/artifacts/``. See ``docs/benchmarks.md``.
 
 Runs CPU-only (no GPU); needs matplotlib. On the cluster use the team-gm env
 with its libstdc++ on LD_LIBRARY_PATH (system gcc lacks CXXABI_1.3.15), via srun.

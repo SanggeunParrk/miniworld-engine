@@ -2,17 +2,17 @@
 
 ## Directory Boundary
 
-`benchmarks/` has four meanings:
+`benchmarks/` has three meanings:
 
-- `configs/`: tracked input configuration.
-- `kernels/<kernel>/`: isolated kernel benchmarks.
-- `modules/<module>/`: composed module benchmarks.
+- `kernels/<kernel>/`: isolated kernel benchmarks, with target-local
+  `configs/` and `artifacts/`.
+- `modules/<module>/`: composed module benchmarks, with target-local
+  `configs/` and `artifacts/`.
 - `runners/`: supported executable entry points.
-- `artifacts/`: generated output, ignored by git except `.gitkeep`.
 
 Do not add benchmark code under `src/`. Do not add archive folders. Do not add
 curated markdown reports under `benchmarks/`; write durable explanations under
-`docs/` and keep generated tables/plots under `benchmarks/artifacts/`.
+`docs/` and keep generated tables/plots under the target's `artifacts/`.
 
 ## Hard Rule: All Benchmarks Run Compiled
 
@@ -33,8 +33,8 @@ Do **not** invent ad hoc benchmark methodology for this repo unless the user
 explicitly asks for a one-off experiment.
 
 - If an op is already covered by the repo's unified bench harness, use
-  `benchmarks/runners/bench.py` + `benchmarks/configs/bench.yaml` +
-  `tests/run_bench.sbatch`.
+  `benchmarks/runners/bench.py` +
+  `benchmarks/modules/<module>/configs/bench.yaml` + `tests/run_bench.sbatch`.
 - That harness is the descendant of the `team-gm` benchmarking flow. Follow its
   shapes, dtype mode, compile/eager mode, and reporting format unless there is a
   concrete reason not to.
@@ -51,9 +51,8 @@ explicitly asks for a one-off experiment.
 
 The standard for "done" is: **team-gm-style harness, team-gm-style output,
 benchmark registered under `benchmarks/kernels/<kernel>/` or
-`benchmarks/modules/<module>/`, and generated artifacts under
-`benchmarks/artifacts/`.** Anything else is only a debug probe, not a benchmark
-result.
+`benchmarks/modules/<module>/`, and generated artifacts under that target's
+`artifacts/`.** Anything else is only a debug probe, not a benchmark result.
 
 **Every benchmark in this repo ships a table AND a graph together.** A table
 alone hides trends; a graph alone hides exact numbers. Always produce both, and
@@ -61,14 +60,15 @@ save them next to each other so a result is never just a wall of text.
 
 **Generated benchmark results do not live in package code.** Raw logs, CSVs,
 PNGs, SVGs, PDFs, slide exports, profiler outputs, and rendered markdown tables
-go under `benchmarks/artifacts/` by default. Durable interpretation belongs in
-`docs/`, not in a benchmark archive tree.
+go under `benchmarks/kernels/<kernel>/artifacts/` or
+`benchmarks/modules/<module>/artifacts/` by default. Durable interpretation
+belongs in `docs/`, not in a benchmark archive tree.
 
 ## Workflow (example: `layernorm_linear`)
 
 Prefer this exact flow over ad hoc measurement.
 
-Let `A=benchmarks/artifacts/layernorm_linear`.
+Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
 
 1. **Run** the bench on a GPU compute node, capturing stdout into `$A`. Uses the
    repo's unified pixi env (`.pixi/`); `--frozen` keeps the cu12 TE core fix in
@@ -123,8 +123,8 @@ Rules baked into the module:
 
 ## Conventions
 
-- **Generated results go in `benchmarks/artifacts/`**; durable explanations go
-  in `docs/`.
+- **Generated results go in the target's `artifacts/`**; durable explanations
+  go in `docs/`.
 - **Use the shared style** (`miniworld_kernels.viz`) for every figure — never
   ad-hoc colours.
 - **Both forward and forward+backward** when the op is used in training.
@@ -135,5 +135,5 @@ Rules baked into the module:
 ## Runtime Dispatch Caches
 
 Benchmark output and runtime dispatch caches are separate. Generated benchmark
-files stay under `benchmarks/artifacts/`; runtime dispatch caches stay outside
+files stay under target-local `artifacts/`; runtime dispatch caches stay outside
 the repo by default. See `operations/dispatch-cache.md`.

@@ -470,6 +470,15 @@ KERNEL_MAP = {
     "augmented_attention_atom": bench_augmented_attention_atom,
 }
 
+TARGET_DIRS = {
+    "triangle_multiplication": _REPO_ROOT / "benchmarks" / "modules" / "triangle_multiplication",
+    "triangle_attention": _REPO_ROOT / "benchmarks" / "modules" / "triangle_attention",
+    "transition": _REPO_ROOT / "benchmarks" / "modules" / "transition",
+    "adaptive_layernorm": _REPO_ROOT / "benchmarks" / "modules" / "adaptive_layernorm",
+    "augmented_attention_token": _REPO_ROOT / "benchmarks" / "modules" / "augmented_attention",
+    "augmented_attention_atom": _REPO_ROOT / "benchmarks" / "modules" / "augmented_attention",
+}
+
 # Per-implementation (colour, linestyle) come from the repo-wide canonical
 # palette (miniworld_kernels.viz) so these line plots match the grouped-bar
 # figures from benchmarks/runners/plot_bench.py — same backend, same colour,
@@ -590,7 +599,11 @@ def build_autotune_summary(
     return "Triton autotune summary\n" + "\n\n".join(sections)
 
 
-@hydra.main(config_path="../configs", config_name="bench", version_base=None)
+@hydra.main(
+    config_path="../modules/triangle_multiplication/configs",
+    config_name="bench",
+    version_base=None,
+)
 def main(cfg: DictConfig) -> None:
     conf = BenchConfig.model_validate(cfg)
     bench_func = KERNEL_MAP[conf.kernel]
@@ -625,7 +638,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     gpu_name = torch.cuda.get_device_name(0)
-    results_dir = _REPO_ROOT / "benchmarks" / "artifacts" / gpu_name
+    results_dir = TARGET_DIRS[conf.kernel] / "artifacts" / gpu_name
     results_dir.mkdir(parents=True, exist_ok=True)
     autotune_cache_records: dict[str, dict[tuple, triton.Config]] = {}
     autotune_single_config_records: dict[str, triton.Config] = {}

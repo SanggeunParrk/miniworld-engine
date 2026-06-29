@@ -47,8 +47,9 @@ the deleted `cute-env/` + `te-env/` folders. Use `pixi run`/`pixi run --frozen`.
 ## Layout / benchmarking
 
 See `README.md` and `docs/benchmarks.md`. One bench entry point only:
-`benchmarks/runners/bench.py` (Hydra) + `benchmarks/configs/bench.yaml`,
-launched via `tests/run_bench.sbatch`. Do not add new standalone bench scripts.
+`benchmarks/runners/bench.py` (Hydra) +
+`benchmarks/modules/<module>/configs/bench.yaml`, launched via
+`tests/run_bench.sbatch`. Do not add new standalone bench scripts.
 
 If a kernel is not yet wired into `benchmarks/runners/bench.py`, any temporary
 local probe must stay untracked until it is promoted into

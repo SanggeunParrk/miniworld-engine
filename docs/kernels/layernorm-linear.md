@@ -41,7 +41,7 @@ GEMM mainloop / WGMMA scheduling is untouched.
 
 Square `d_in = d_out ∈ {128,256,384,512,768}` × `M ∈ {16384,65536,262144}`,
 forward + backward. Generated tables and graphs now belong under
-`benchmarks/artifacts/`.
+`benchmarks/kernels/layernorm_linear/artifacts/`.
 
 Numerics agree to bf16 (`cos = 1.000000`, rel-Frobenius ~1e-4). Latency verdict:
 

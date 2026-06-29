@@ -1,0 +1,8 @@
+kernel: transition
+implementations:
+  - pytorch
+  - triton
+mode: forward
+metric: time
+compile: true
+precision: "bf16-mixed"
