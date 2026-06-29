@@ -1,6 +1,6 @@
 # Single-bench config (hydra). Override on the CLI, e.g.
-#   python scripts/bench.py kernel=transition implementations=[pytorch,triton]
-#   python scripts/bench.py kernel=triangle_multiplication compile=false mode=forward
+#   python benchmarks/runners/bench.py kernel=transition implementations=[pytorch,triton]
+#   python benchmarks/runners/bench.py kernel=triangle_multiplication compile=false mode=forward
 d_single: 384
 d_pair: 128
 d_single_token: 768
