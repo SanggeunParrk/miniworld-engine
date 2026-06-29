@@ -19,6 +19,19 @@ dist/
 *.nsys-rep
 *.ncu-rep
 *.tar.gz
+*.so
+
+# generated benchmark/profiling artifacts
+benchmarks/artifacts/*
+!benchmarks/artifacts/.gitkeep
+benchmark/logs/
+*.out
+
+# local scratch/vendor workspaces kept outside package boundaries
+_ct_tmp/
+_trans_tmp/
+third_party/ct_cutlass_workbench/*.out
+third_party/ct_cutlass_workbench/*.so
 
 # editor
 .vscode/

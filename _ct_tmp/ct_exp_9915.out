@@ -1,6 +1,0 @@
-d=128 M=2048 wgrad=cublas worst_cos=1.00000 OK
-d=128 M=2048 wgrad=triton worst_cos=1.00000 OK
-d=768 M=512 wgrad=cublas worst_cos=1.00000 OK
-d=768 M=512 wgrad=triton worst_cos=1.00000 OK
-DONE
-[exit=0] CT EXP DONE

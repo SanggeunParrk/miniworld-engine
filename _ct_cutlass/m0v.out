@@ -1,3 +1,0 @@
-ptxas error   : Entry function '_Z9m0_kernelILi64ELi128ELi128EEvPKfS1_Pfi' uses too much shared data (0x18000 bytes, 0xc000 max)
-error: command '/home/psk6950/miniworld-kernels/.pixi/envs/default/bin/nvcc' failed with exit code 255
-=== BUILD EXIT 1 ===

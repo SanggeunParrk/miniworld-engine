@@ -14,13 +14,17 @@ This repo is often accessed from a cluster login node.
 
 Repo structure:
 
-- A **kernel** (`kernels/<unit>/`) is a chunk you deliberately chose to fuse and
+- A **kernel** (`src/miniworld_kernels/kernels/<unit>/`) is a chunk you deliberately chose to fuse and
   hand-optimize. It owns its backend implementations (`triton/`, `cute/`,
-  `cuda/`) plus a PyTorch `reference.py`, a public `interface.py`, and a
-  `benchmark/` dir holding that kernel's results.
-- A **module** (`modules/<op>/`) is a part cut from the model (e.g.
-  `triangle_multiplication`). It only *connects* kernels — it has **no**
-  `triton/cute/cuda` folders — and keeps its own `benchmark/` results.
+  `cuda/`) plus a PyTorch `reference.py` and a public `interface.py`.
+- A **module** (`src/miniworld_kernels/modules/<op>/`) is a part cut from the
+  model (e.g. `triangle_multiplication`). It only *connects* kernels — it has
+  **no** `triton/cute/cuda` folders.
+- A **benchmark suite** (`benchmarks/suites/<op>.py`) defines how an op is
+  measured. Generated logs, CSVs, plots, slide exports, and profiler outputs go
+  under `benchmarks/artifacts/` unless they are curated reports.
+- An **experiment** (`experiments/<op>/`) is one-off research history: probes,
+  diagnostics, profiling scripts, discarded variants, and migration notes.
 
 Kernels and modules were consolidated here out of `team-gm`
 (`src/team_gm/modules/`, across `psk/benchmark`, `perf/trimul`, `miniworld`,
@@ -31,11 +35,10 @@ Kernels and modules were consolidated here out of `team-gm`
 ```
 src/miniworld_kernels/
 ├── _typecheck.py                 # standalone team_gm.typecheck shim
-├── kernels/                      # fusion units: backends + per-kernel results
+├── kernels/                      # fusion units: importable backends
 │   ├── tm1/  tm2/                #   left/right- and output-gated GEMM kernels
 │   │   ├── reference.py interface.py
-│   │   ├── triton/ cute/ cuda/   #   backend implementations
-│   │   └── benchmark/            #   this kernel's results
+│   │   └── triton/ cute/ cuda/   #   backend implementations
 │   ├── transition/ layernorm/ adaln/
 │   ├── triangle_attention/ augmented_attention/
 │   ├── bias_only_attention/ gated_projection/
@@ -45,14 +48,20 @@ src/miniworld_kernels/
     ├── triangle_multiplication/  #   module.py (connects tm1/tm2/LN; pytorch/triton/
     │   ├── module.py             #     cute/cuequivariance via ImplementationType)
     │   ├── reference.py interface.py baseline_dtv1.py
-    │   └── benchmark/            #   this op's results
     ├── triangle_attention/ transition/ adaptive_layernorm/ augmented_attention/
     ├── exceptions.py             #   ImplementationType (pytorch/triton/cuda/cute/cuequivariance)
     ├── primitives.py ops.py      #   shared connecting utilities (LayerNorm, Linear, gates)
     └── __init__.py
-scripts/bench.py                  # THE single bench entry (hydra, team-gm style)
-config/bench.yaml                 # bench config (kernel, implementations, compile, ...)
-benchmark/logs/                   # raw SLURM bench logs (cross-kernel/unified runs)
+benchmarks/
+├── configs/                      # tracked benchmark inputs
+├── runners/                      # benchmark CLI entry points
+├── suites/                       # op-specific benchmark definitions
+├── reports/                      # curated human-readable reports
+└── artifacts/                    # generated outputs; gitignored by default
+experiments/                      # one-off probes, diagnostics, migration debt
+third_party/                      # external checkouts/submodules
+scripts/bench.py                  # legacy active bench entry during migration
+config/bench.yaml                 # legacy active bench config during migration
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
 tests/run_bench.sbatch            # single SLURM launcher for scripts/bench.py
 ```
@@ -65,10 +74,13 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 ## Benchmarking
 
 **Benchmark policy: follow the team-gm harness unless there is a specific reason
-not to.** In this repo that means `scripts/bench.py` + `config/bench.yaml` +
-`tests/run_bench.sbatch` are the default and preferred path. Do not replace
-them with ad hoc timing snippets or custom markdown summaries for final
+not to.** During migration, `scripts/bench.py` + `config/bench.yaml` +
+`tests/run_bench.sbatch` remain the active path. The target home is
+`benchmarks/runners/`, `benchmarks/configs/`, and `benchmarks/suites/`. Do not
+replace them with ad hoc timing snippets or custom markdown summaries for final
 results.
+
+Detailed benchmark conventions live in `benchmarks/CONVENTIONS.md`.
 
 One entry point — `scripts/bench.py`, driven by `config/bench.yaml` (hydra):
 
@@ -84,12 +96,14 @@ srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
 `transition`, `adaptive_layernorm`, `augmented_attention_token/atom`).
 `compile=true` benches the `torch.compile`'d variant — no separate script.
-Results land in `benchmark/<gpu>/`; raw logs in `benchmark/logs/`.
+Generated results should land in `benchmarks/artifacts/`. Existing
+`benchmark/<gpu>/`, `benchmark/logs/`, and `src/**/benchmark/` outputs are
+migration debt and should not be used for new result formats.
 
-If an op is not yet integrated into the unified harness, a kernel-local
-`bench.py` is acceptable only as a temporary bridge. It should still emit the
-same kind of machine-parseable output so `scripts/plot_bench.py` can generate
-the `.md` + `.png` report pair in that kernel's `benchmark/` directory.
+If an op is not yet integrated into the unified harness, a temporary local
+bench is acceptable only as migration debt. It should still emit the same kind
+of machine-parseable output so the shared renderer can generate the report. Once
+stable, move the definition into `benchmarks/suites/`.
 
 The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
 implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN
@@ -105,7 +119,7 @@ from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WI
 ## Toolchain
 
 ```bash
-ruff check src/
-ruff format src/
+ruff check src/miniworld_kernels benchmarks
+ruff format src/miniworld_kernels benchmarks
 ty check
 ```

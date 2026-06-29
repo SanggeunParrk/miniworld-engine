@@ -37,6 +37,15 @@ where = ["src"]
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+exclude = [
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  "benchmarks/artifacts",
+  "experiments",
+  "third_party",
+]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -73,6 +82,18 @@ ignore = [
   "E402",  # imports follow the sys.path bootstrap prelude
   "I001",
 ]
+"benchmarks/**/*.py" = [
+  "D",
+  "ANN201",
+  "S101",
+  "INP001",
+  "FBT001",
+  "PLC0415",
+  "C901",
+  "PLR0915",
+  "E402",
+  "I001",
+]
 # team-gm's kernel relaxation (math-notation names, no annotations) for the
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
 "src/miniworld_kernels/kernels/**/*.py" = ["N806", "N803", "ANN", "ARG001", "D"]
@@ -95,15 +116,41 @@ docstring-code-format = false
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
-include = ["src", "scripts", "tests"]
-exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env", "**/cute/**"]
+include = ["src", "benchmarks", "scripts", "tests"]
+exclude = [
+  ".pixi",
+  "**/.pixi",
+  "**/__pycache__",
+  "cute-env",
+  "**/cute/**",
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  "benchmarks/artifacts",
+  "experiments",
+  "third_party",
+]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
 reportMissingImports = "warning"
 
 [tool.ty.src]
-include = ["src", "scripts", "tests"]
-exclude = [".pixi", "**/.pixi", "**/__pycache__", "cute-env", "**/cute/**"]
+include = ["src", "benchmarks", "scripts", "tests"]
+exclude = [
+  ".pixi",
+  "**/.pixi",
+  "**/__pycache__",
+  "cute-env",
+  "**/cute/**",
+  "_ct_cutlass",
+  "_ct_tmp",
+  "_trans_tmp",
+  "benchmark",
+  "benchmarks/artifacts",
+  "experiments",
+  "third_party",
+]
 
 [tool.ty.environment]
 python-version = "3.10"
@@ -112,7 +159,7 @@ python-version = "3.10"
 # pixi — single unified environment for the whole repo (triton + Transformer
 # Engine cu12 + CuTeDSL/quack + cuequivariance + benching). Replaces the old
 # per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
-# gitignored. See benchmark/BENCHMARKING.md and kernels/*/README.md.
+# gitignored. See benchmarks/CONVENTIONS.md and kernels/*/README.md.
 #
 # Cluster notes (CSSB H100, driver 575 = CUDA 12.9-max):
 #   - MUST be cu12, never cu13 (transformer_engine_cu12 + core-cu12 extra).
