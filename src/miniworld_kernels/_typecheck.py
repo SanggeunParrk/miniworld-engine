@@ -33,7 +33,7 @@ def typecheck(cls_or_func: F) -> F: ...
 def typecheck(cls_or_func: type[C] | F) -> type[C] | F:
     """Decorate with jaxtyped+beartype when ``SHOULD_TYPECHECK=true``, else no-op."""
     if _SHOULD_TYPECHECK:
-        from beartype import beartype
+        from beartype import beartype  # pyright: ignore[reportMissingImports]
         from jaxtyping import jaxtyped
 
         return jaxtyped(typechecker=beartype)(cls_or_func)

@@ -13,7 +13,7 @@ __all__ = ["load_ext", "cond_transition_train_cutlass"]
 
 def load_ext():
     try:
-        import ct_train_ext  # noqa: F401
+        import ct_train_ext  # pyright: ignore[reportMissingImports]
 
         return ct_train_ext
     except Exception:

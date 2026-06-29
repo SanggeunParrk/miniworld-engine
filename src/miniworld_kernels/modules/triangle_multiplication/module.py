@@ -47,9 +47,9 @@ def _load_cute_fns():
         if str(d) not in sys.path:
             sys.path.insert(0, str(d))
     from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
-    from fused_ln_mask import fused_ln_mask
-    from launch import tm1_cute_forward
-    from tm2_cute import tm2_cute_forward
+    from fused_ln_mask import fused_ln_mask  # pyright: ignore[reportMissingImports]
+    from launch import tm1_cute_forward  # pyright: ignore[reportMissingImports]
+    from tm2_cute import tm2_cute_forward  # pyright: ignore[reportMissingImports]
 
     _CUTE_FNS = (tm1_cute_forward, tm2_cute_forward, fused_ln_mask, layer_norm_transpose)
     return _CUTE_FNS

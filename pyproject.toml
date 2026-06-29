@@ -87,8 +87,10 @@ ignore = [
 docstring-code-format = false
 
 # ----------------------------------------------------------------------------
-# pyright / ty — team-gm ships no type-checker config; keep this minimal and
-# only exclude generated env dirs. CuTeDSL (cutlass) code is dynamically typed.
+# pyright / ty — team-gm ships no type-checker config. This repo contains
+# Triton/CuTe launch syntax, optional native extensions, and dynamic PyTorch
+# modules, so pyright is kept as an import/syntax smoke check rather than a full
+# static typing gate.
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
@@ -107,7 +109,7 @@ exclude = [
   "third_party",
 ]
 pythonVersion = "3.10"
-typeCheckingMode = "basic"
+typeCheckingMode = "off"
 reportMissingImports = "warning"
 
 [tool.ty.src]
@@ -175,6 +177,7 @@ quack-kernels = "==0.3.11"
 cuequivariance-ops-torch-cu12 = "*"
 matplotlib = "*"
 ruff = "*"
+pyright = "*"
 
 [tool.pixi.activation.env]
 PYTHONNOUSERSITE = "1"
@@ -192,3 +195,4 @@ smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE Layer
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
 ruff-check = "ruff check src benchmarks submits"
 ruff-format = "ruff format src benchmarks submits"
+pyright = "pyright"
