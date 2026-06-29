@@ -48,7 +48,10 @@ from miniworld_kernels.viz import (
 # (e.g. the legacy vendored `triton` or `cuequivariance`) instead of PyTorch.
 BASELINE = "pytorch"
 
-HEADER_RE = re.compile(r"M=(\d+)\s+d_in=(\d+)\s+d_out=(\d+)")
+HEADER_RE = re.compile(r"M=(\d+)\s+d_in=(\d+)\s+d_out=(\d+)(?:\s+L=(\d+))?")
+# X-axis identity for the sweep columns: "M" (token count, default) or "L" (sequence length,
+# when the bench header carries an `L=` field — e.g. trimul, where M=L² is unintuitive).
+_AXIS = "M"
 BACKENDS = [
     "pytorch",
     "torch.compile",
@@ -96,8 +99,12 @@ def parse(out_path: Path) -> dict:
     for line in out_path.read_text().splitlines():
         h = HEADER_RE.search(line)
         if h:
+            global _AXIS
             M, d_in, _d_out = int(h[1]), int(h[2]), int(h[3])
-            cur = (M, d_in)
+            x = M
+            if h[4]:                      # header carries L= -> sweep columns are L, not M=L²
+                x, _AXIS = int(h[4]), "L"
+            cur = (x, d_in)
             data[cur] = {}
             continue
         if cur is None:
@@ -137,7 +144,7 @@ def axes(data: dict) -> tuple[list[int], list[int]]:
 def make_table(data: dict, metric: str) -> str:
     Ms, ds = axes(data)
     backends = backends_for(data, metric)
-    head = "| d (=d_in=d_out) | " + " | ".join(f"M={M}" for M in Ms) + " |"
+    head = "| d (=d_in=d_out) | " + " | ".join(f"{_AXIS}={M}" for M in Ms) + " |"
     sep = "|" + "---|" * (len(Ms) + 1)
     rows = [f"_backends: {' / '.join(backends)} (bold = fastest)_\n", head, sep]
     for d in ds:
@@ -178,7 +185,7 @@ def plot_grouped_bars(ax, data: dict, metric: str, backends: list[str], Ms: list
         )
         _label_bars(ax, rects, ys, "{:.3g}")
     ax.set_title(f"d = {d}")
-    ax.set_xlabel("M")
+    ax.set_xlabel(_AXIS)
     ax.set_xticks(xs)
     ax.set_xticklabels([str(M) for M in Ms], rotation=20)
     return (lo if lo != float("inf") else 0.01), hi
@@ -237,7 +244,7 @@ def plot_speedup_bars(ax, data: dict, metric: str, backends: list[str], Ms: list
         _label_bars(ax, rects, sp, "{:.2f}×")
     ax.axhline(1.0, ls=(0, (4, 2)), lw=1.0, color="#5A6473", zorder=0)
     ax.set_title(f"d = {d}")
-    ax.set_xlabel("M")
+    ax.set_xlabel(_AXIS)
     ax.set_xticks(xs)
     ax.set_xticklabels([str(M) for M in Ms], rotation=20)
     return top
@@ -279,7 +286,7 @@ def make_speedup_table(data: dict, metric: str) -> str:
     """Table of speedup vs default (×), rows = d, cols = M, bold = fastest."""
     Ms, ds = axes(data)
     backends = [b for b in backends_for(data, metric) if canonical(b) != BASELINE]
-    head = "| d (=d_in=d_out) | " + " | ".join(f"M={M}" for M in Ms) + " |"
+    head = "| d (=d_in=d_out) | " + " | ".join(f"{_AXIS}={M}" for M in Ms) + " |"
     sep = "|" + "---|" * (len(Ms) + 1)
     rows = [f"_speedup of {' / '.join(label_for(b) for b in backends)} vs {label_for(BASELINE)} (bold = best)_\n", head, sep]
     for d in ds:
