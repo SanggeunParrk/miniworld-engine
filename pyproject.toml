@@ -33,7 +33,7 @@ where = ["src"]
 # This repo keeps faithful ports, benchmark probes, and module wrappers side by
 # side. `select = ["ALL"]` turns docstring, annotation, naming, print, and
 # complexity rules into noise for that shape of code. Keep ruff focused on rules
-# that catch real breakage across src/benchmarks/tests.
+# that catch real breakage across src/benchmarks/submits.
 # ----------------------------------------------------------------------------
 
 [tool.ruff]
@@ -63,7 +63,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # team-gm's tests/benchmarks relaxations (+ E402/I001 for our sys.path bootstrap).
-"tests/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
+"submits/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
 "benchmarks/**/*.py" = [
   "E402",
 ]
@@ -92,7 +92,7 @@ docstring-code-format = false
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
-include = ["src", "benchmarks", "tests"]
+include = ["src", "benchmarks", "submits"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -111,7 +111,7 @@ typeCheckingMode = "basic"
 reportMissingImports = "warning"
 
 [tool.ty.src]
-include = ["src", "benchmarks", "tests"]
+include = ["src", "benchmarks", "submits"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -190,5 +190,5 @@ fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
-ruff-check = "ruff check src benchmarks tests"
-ruff-format = "ruff format src benchmarks tests"
+ruff-check = "ruff check src benchmarks submits"
+ruff-format = "ruff format src benchmarks submits"

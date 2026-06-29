@@ -9,7 +9,7 @@ ms / layer, B=1, bf16, H100. d_pair sweep {128, 256, 512}; bias-only
 
 Emits parseable sections; capture under this target's artifacts/, render
 reports with benchmarks/runners/plot_bench.py.
-Run via srun on a compute node (see CLAUDE.md).
+Run via srun on a compute node.
 """
 
 import sys

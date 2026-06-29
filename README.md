@@ -60,7 +60,7 @@ third_party/                      # external checkouts/submodules
 benchmarks/runners/bench.py       # active bench runner
 benchmarks/modules/triangle_multiplication/configs/bench.yaml
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
-tests/run_bench.sbatch            # single SLURM launcher for benchmarks/runners/bench.py
+submits/run_bench.sbatch          # single SLURM launcher for benchmarks/runners/bench.py
 ```
 
 In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical),
@@ -72,7 +72,7 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 
 **Benchmark policy: follow the team-gm harness unless there is a specific reason
 not to.** The active path is `benchmarks/runners/bench.py` +
-`benchmarks/modules/<module>/configs/bench.yaml` + `tests/run_bench.sbatch`.
+`benchmarks/modules/<module>/configs/bench.yaml` + `submits/run_bench.sbatch`.
 Do not replace the harness with ad hoc timing snippets or custom markdown
 summaries for final results.
 
@@ -83,12 +83,12 @@ One entry point — `benchmarks/runners/bench.py`, driven by target-local Hydra
 configs:
 
 ```bash
-# Unified repo env (.pixi/). --frozen keeps the cu12 TE core fix (see CLAUDE.md).
+# Unified repo env (.pixi/). --frozen keeps the cu12 TE core fix.
 srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
   bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
     PYTHONPATH=src python benchmarks/runners/bench.py kernel=triangle_multiplication \
       implementations=[pytorch,triton,cuequivariance] compile=false"'
-# or submit: sbatch tests/run_bench.sbatch
+# or submit: sbatch submits/run_bench.sbatch
 ```
 
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,

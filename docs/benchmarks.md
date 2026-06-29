@@ -34,7 +34,8 @@ explicitly asks for a one-off experiment.
 
 - If an op is already covered by the repo's unified bench harness, use
   `benchmarks/runners/bench.py` +
-  `benchmarks/modules/<module>/configs/bench.yaml` + `tests/run_bench.sbatch`.
+  `benchmarks/modules/<module>/configs/bench.yaml` +
+  `submits/run_bench.sbatch`.
 - That harness is the descendant of the `team-gm` benchmarking flow. Follow its
   shapes, dtype mode, compile/eager mode, and reporting format unless there is a
   concrete reason not to.

@@ -33,7 +33,8 @@ This kernel is **not** an excuse to freestyle benchmarking.
 
 - The preferred benchmark path in this repo is the unified team-gm-style
   harness: `benchmarks/runners/bench.py` +
-  `benchmarks/modules/<module>/configs/bench.yaml` + `tests/run_bench.sbatch`.
+  `benchmarks/modules/<module>/configs/bench.yaml` +
+  `submits/run_bench.sbatch`.
 - Temporary LayerNorm probes should stay untracked until promoted into
   `benchmarks/kernels/layernorm/`.
 - Keep benchmark output aligned with the team-gm flow so logs and reports are
