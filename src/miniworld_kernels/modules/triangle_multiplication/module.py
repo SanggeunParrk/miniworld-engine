@@ -223,7 +223,6 @@ class TriangleMultiplication(nn.Module):
         Requires the cute env (cutlass-dsl + quack). Outgoing direction only.
         """
         if not self.outgoing:
-            msg = "cute path supports outgoing direction only"
             raise InvalidImplementationError(self.implementation)
         tm1_cute_forward, tm2_cute_forward, fused_ln_mask, layer_norm_transpose = (
             _load_cute_fns()

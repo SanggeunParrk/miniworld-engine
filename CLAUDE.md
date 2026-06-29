@@ -51,8 +51,9 @@ See `README.md` and `docs/benchmarks.md`. One bench entry point only:
 launched via `tests/run_bench.sbatch`. Do not add new standalone bench scripts.
 
 If a kernel is not yet wired into `benchmarks/runners/bench.py`, any temporary
-local probe must stay untracked until it is promoted into `benchmarks/suites/`,
-and it must still follow the **team-gm harness style**:
+local probe must stay untracked until it is promoted into
+`benchmarks/kernels/<kernel>/` or `benchmarks/modules/<module>/`, and it must
+still follow the **team-gm harness style**:
 
 - same kind of baseline comparisons,
 - same parseable stdout format,

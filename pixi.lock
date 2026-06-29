@@ -268,6 +268,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/8b/4d/5740c27110b83634d8491c3b5facf0111b3e554c3164f4fb953be9bddaf6/pytorch_lightning-2.6.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/3f/63/e80a50a1af53f102535fd701abaeb8f1d5c294223027b794fd5279b30a9e/quack_kernels-0.3.11-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/86/b1/a976a136d40ade83ce743578399865f57001003a409acadc0ecbb3051082/ruff-0.15.20-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/dd/aa/1b939f6c67ed68635bb538e6752d3dacc02f66535182e939a89581a44e9c/scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -2700,7 +2701,7 @@ packages:
 - pypi: ./
   name: miniworld-kernels
   version: 0.1.0
-  sha256: 451a7587f0a90dbb11e2e332589c49c128188680df5c8d58749b5236ff5e6664
+  sha256: 3f1d02fbab00d7693e8a4c2b466173d2186d6b83f50726a71ae7654f2d9b1992
   requires_dist:
   - torch>=2.8
   - triton
@@ -3451,6 +3452,11 @@ packages:
   purls: []
   size: 193775
   timestamp: 1748644872902
+- pypi: https://files.pythonhosted.org/packages/86/b1/a976a136d40ade83ce743578399865f57001003a409acadc0ecbb3051082/ruff-0.15.20-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: ruff
+  version: 0.15.20
+  sha256: 309809086c2acb67624950a3c8133e80f32d0d3e27106c0cd60ff26657c9f24b
+  requires_python: '>=3.7'
 - pypi: https://files.pythonhosted.org/packages/dd/aa/1b939f6c67ed68635bb538e6752d3dacc02f66535182e939a89581a44e9c/scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: scipy
   version: 1.18.0

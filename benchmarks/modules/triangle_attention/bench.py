@@ -15,7 +15,7 @@ Run via srun on a compute node (see CLAUDE.md).
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _SRC = str(_REPO_ROOT / "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)

@@ -9,10 +9,12 @@ Detailed methodology and plotting conventions are in `../docs/benchmarks.md`.
 
 - `configs/`: tracked benchmark inputs, currently the Hydra config consumed by
   `runners/bench.py`.
+- `kernels/<kernel>/`: isolated kernel benchmarks. Use this when the benchmark
+  targets one fusion unit under `src/miniworld_kernels/kernels/<kernel>/`.
+- `modules/<module>/`: composed module benchmarks. Use this when the benchmark
+  targets a user-facing module under `src/miniworld_kernels/modules/<module>/`.
 - `runners/`: executable benchmark and rendering entry points. These are the
   only supported CLI targets.
-- `suites/`: op-specific standalone benchmark definitions for kernels/modules
-  not yet covered cleanly by the unified runner.
 - `artifacts/`: generated logs, CSVs, images, HTML, slides, profiler output,
   and temporary reports. This directory is gitignored except `.gitkeep` files.
 

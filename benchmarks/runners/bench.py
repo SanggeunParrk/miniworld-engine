@@ -24,7 +24,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import triton
-from hydra.core.hydra_config import HydraConfig
 from lightning import Fabric
 from omegaconf import DictConfig
 from pydantic import BaseModel

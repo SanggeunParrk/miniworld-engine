@@ -20,9 +20,11 @@ Repo structure:
 - A **module** (`src/miniworld_kernels/modules/<op>/`) is a part cut from the
   model (e.g. `triangle_multiplication`). It only *connects* kernels — it has
   **no** `triton/cute/cuda` folders.
-- A **benchmark suite** (`benchmarks/suites/<op>.py`) defines how an op is
-  measured. Generated logs, CSVs, plots, rendered tables, slide exports, and
-  profiler outputs go under `benchmarks/artifacts/`.
+- A **benchmark** lives next to its target type:
+  `benchmarks/kernels/<kernel>/...` for isolated kernels and
+  `benchmarks/modules/<module>/...` for composed model modules. Generated logs,
+  CSVs, plots, rendered tables, slide exports, and profiler outputs go under
+  `benchmarks/artifacts/`.
 
 Kernels and modules were consolidated here out of `team-gm`
 (`src/team_gm/modules/`, across `psk/benchmark`, `perf/trimul`, `miniworld`,
@@ -52,8 +54,9 @@ src/miniworld_kernels/
     └── __init__.py
 benchmarks/
 ├── configs/                      # tracked benchmark inputs
+├── kernels/                      # isolated kernel benchmarks, by kernel name
+├── modules/                      # composed module benchmarks, by module name
 ├── runners/                      # benchmark CLI entry points
-├── suites/                       # op-specific benchmark definitions
 └── artifacts/                    # generated outputs; gitignored by default
 docs/                             # repo docs, cache policy, kernel notes
 third_party/                      # external checkouts/submodules
@@ -97,7 +100,8 @@ srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G
 Generated results land in `benchmarks/artifacts/`.
 
 If an op is not yet integrated into the unified harness, keep local probes
-untracked and move the stable definition into `benchmarks/suites/`.
+untracked and move the stable definition into `benchmarks/kernels/<kernel>/`
+or `benchmarks/modules/<module>/`.
 
 The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
 implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN
@@ -114,7 +118,7 @@ from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WI
 ## Toolchain
 
 ```bash
-ruff check src/miniworld_kernels benchmarks
-ruff format src/miniworld_kernels benchmarks
+pixi run --frozen ruff-check
+pixi run --frozen ruff-format
 ty check
 ```

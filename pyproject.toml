@@ -28,10 +28,12 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 # ----------------------------------------------------------------------------
-# ruff — matches team-gm (line-length 88, select ALL, same base ignore set).
-# Per-file relaxations mirror team-gm's: kernel code gets math-notation names /
-# no-annotation leniency, tests/benchmarks get the team-gm sets. The cute kernels
-# (CuTeDSL — no team-gm equivalent) get a small additional relaxation.
+# ruff — practical repo policy.
+#
+# This repo keeps faithful ports, benchmark probes, and module wrappers side by
+# side. `select = ["ALL"]` turns docstring, annotation, naming, print, and
+# complexity rules into noise for that shape of code. Keep ruff focused on rules
+# that catch real breakage across src/benchmarks/tests.
 # ----------------------------------------------------------------------------
 
 [tool.ruff]
@@ -47,22 +49,15 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["ALL"]
+select = ["E", "F", "W"]
 ignore = [
+  "E501",
+  "E701",
+  "E702",
+  "E402",
   "E731",
   "E741",
   "F722",    # Incompatible with jaxtyping
-  "S311",
-  "D105",
-  "D100",
-  "D107",
-  "D203",
-  "D213",
-  "PLR0913",
-  "ANN401",
-  "PLR0402",
-  "N812",
-  "NPY002",
   "COM812",  # Conflicts with ruff formatter
 ]
 
@@ -70,20 +65,11 @@ ignore = [
 # team-gm's tests/benchmarks relaxations (+ E402/I001 for our sys.path bootstrap).
 "tests/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
 "benchmarks/**/*.py" = [
-  "D",
-  "ANN201",
-  "S101",
-  "INP001",
-  "FBT001",
-  "PLC0415",
-  "C901",
-  "PLR0915",
   "E402",
-  "I001",
 ]
 # team-gm's kernel relaxation (math-notation names, no annotations) for the
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
-"src/miniworld_kernels/kernels/**/*.py" = ["N806", "N803", "ANN", "ARG001", "D"]
+"src/miniworld_kernels/kernels/**/*.py" = []
 # Vendored kernel *bodies* are faithful copies (triton main/perf/miniworld,
 # CuTeDSL, CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
 # as the originals are not held to this repo's standards.
@@ -92,7 +78,10 @@ ignore = [
 "src/miniworld_kernels/kernels/**/cuda/*.py" = ["ALL"]
 # dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
 "src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
-"src/miniworld_kernels/_typecheck.py" = ["ANN", "D"]
+"src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [
+  "ALL",
+]
+"src/miniworld_kernels/_typecheck.py" = []
 
 [tool.ruff.format]
 docstring-code-format = false
@@ -185,6 +174,7 @@ nvidia-cutlass-dsl = "==4.4.2"
 quack-kernels = "==0.3.11"
 cuequivariance-ops-torch-cu12 = "*"
 matplotlib = "*"
+ruff = "*"
 
 [tool.pixi.activation.env]
 PYTHONNOUSERSITE = "1"
@@ -200,3 +190,5 @@ fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
+ruff-check = "ruff check src benchmarks tests"
+ruff-format = "ruff format src benchmarks tests"

@@ -12,14 +12,14 @@ baseline is torch.compile, never eager; ours/dtv1/cuequiv are already-compiled k
 Emits the parseable `=== M=.. d_in=.. d_out=.. ===` + `<backend> fwd=.. ms fwd+bwd=.. ms`
 format that `benchmarks/runners/plot_bench.py` renders into a table + graph.
 
-Lives under benchmarks/suites because it is an executable benchmark, not package
-code.
+Lives under benchmarks/modules/triangle_multiplication because it is a module
+benchmark, not package code.
 
 Run (compute node):
     K=benchmarks/artifacts/triangle_multiplication
     pixi run --frozen bash -c \
       "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-       python benchmarks/suites/triangle_multiplication_bidirectional.py" \
+       python benchmarks/modules/triangle_multiplication/bidirectional.py" \
       | tee $K/bidirectional.out
     python benchmarks/runners/plot_bench.py $K/bidirectional.out $K --name bidirectional \
       --title 'Bidirectional TriangleMultiplication (H100, bf16)'
@@ -32,7 +32,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path[:] = [p for p in sys.path if p and Path(p).resolve() != _HERE]
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _SRC = str(_REPO_ROOT / "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
@@ -41,7 +41,7 @@ import torch
 import torch.nn as nn
 import triton
 
-from miniworld_kernels.kernels.trimul_inproj.cute import _bdll_patch, dispatch
+from miniworld_kernels.kernels.trimul_inproj.cute import _bdll_patch
 from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training import BidirV6TriMul
 from miniworld_kernels.modules.exceptions import ImplementationType
 from miniworld_kernels.modules.triangle_multiplication.baseline_dtv1_bidir import (
@@ -167,7 +167,7 @@ def run_shape(L: int, d: int) -> None:
     except Exception as e:  # noqa: BLE001
         print(f"  cuequivariance [skipped: {type(e).__name__}: {str(e)[:70]}]", flush=True)
 
-    del base, pair, g, ref_c
+    del base, ref_c
     torch.cuda.empty_cache()
 
 

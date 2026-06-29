@@ -5,8 +5,9 @@
 `benchmarks/` has four meanings:
 
 - `configs/`: tracked input configuration.
+- `kernels/<kernel>/`: isolated kernel benchmarks.
+- `modules/<module>/`: composed module benchmarks.
 - `runners/`: supported executable entry points.
-- `suites/`: op-specific benchmark definitions.
 - `artifacts/`: generated output, ignored by git except `.gitkeep`.
 
 Do not add benchmark code under `src/`. Do not add archive folders. Do not add
@@ -48,8 +49,9 @@ explicitly asks for a one-off experiment.
   - compare against the canonical baselines for that op,
   - produce the standard output schema consumed by the shared renderer.
 
-The standard for "done" is: **team-gm-style harness, team-gm-style output, suite
-registered under `benchmarks/suites/`, and generated artifacts under
+The standard for "done" is: **team-gm-style harness, team-gm-style output,
+benchmark registered under `benchmarks/kernels/<kernel>/` or
+`benchmarks/modules/<module>/`, and generated artifacts under
 `benchmarks/artifacts/`.** Anything else is only a debug probe, not a benchmark
 result.
 

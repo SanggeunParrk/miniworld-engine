@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 # Drop our own dir from sys.path so `import triton` finds the real package, not

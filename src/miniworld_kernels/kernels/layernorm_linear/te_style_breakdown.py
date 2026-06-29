@@ -1,9 +1,9 @@
 """Where does the ~5-9% contiguous gap vs TE come from? Decompose ours into per-op times and
 split fwd/bwd for both ours and TE."""
-import torch, triton
+import torch
 import torch.nn.functional as F
+import triton
 from miniworld_kernels.kernels.layernorm_linear import te_style as tes
-from miniworld_kernels.kernels.layernorm_linear.reference import LayerNormLinearRef
 
 D = torch.device("cuda"); dt = torch.bfloat16
 def b(fn, rg=None): return triton.testing.do_bench(fn, warmup=25, rep=100, grad_to_none=rg or [])

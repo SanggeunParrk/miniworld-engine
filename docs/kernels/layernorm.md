@@ -19,7 +19,7 @@ subfolders, not in a separate sibling kernel directory.
 - `interface.py`: public entrypoint for the new kernel
 - `compile_native.py`: `custom_op` entrypoints for `atomic` / `partial` / `dispatch`
   compile paths
-- Benchmark suites live under `benchmarks/suites/`; generated results live
+- Kernel benchmarks live under `benchmarks/kernels/layernorm/`; generated results live
   under `benchmarks/artifacts/`.
 
 The default sweep is:
@@ -35,7 +35,7 @@ This kernel is **not** an excuse to freestyle benchmarking.
   harness: `benchmarks/runners/bench.py` + `benchmarks/configs/bench.yaml` +
   `tests/run_bench.sbatch`.
 - Temporary LayerNorm probes should stay untracked until promoted into
-  `benchmarks/suites/`.
+  `benchmarks/kernels/layernorm/`.
 - Keep benchmark output aligned with the team-gm flow so logs and reports are
   directly comparable to the rest of the repo.
 - Do not treat quick `python - <<'PY'` experiments as benchmark artifacts.
