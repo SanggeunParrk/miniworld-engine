@@ -26,12 +26,15 @@ benchmarks/artifacts/**
 !benchmarks/artifacts/**/
 !benchmarks/artifacts/**/.gitkeep
 benchmark/logs/
+benchmark/
+config/
 src/**/benchmark/
 *.out
 
 # local scratch/vendor workspaces kept outside package boundaries
 _ct_tmp/
 _trans_tmp/
+experiments/
 third_party/ct_cutlass_workbench/*.out
 third_party/ct_cutlass_workbench/*.so
 

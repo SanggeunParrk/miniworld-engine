@@ -9,7 +9,8 @@ pair representation in a single read of x:
 
 This is distinct from ``tm1`` (left+right only) and ``tm2`` (the output
 gate+projection+mul). Pulling ``gate`` to the front lets the back half fold the
-final mul into the layernorm-linear epilogue — see ``README.md``.
+final mul into the layernorm-linear epilogue — see
+``docs/kernels/trimul-inproj.md``.
 
 Three execution paths (import directly to avoid forcing the quack import):
 

@@ -30,7 +30,7 @@ where = ["src"]
 # ----------------------------------------------------------------------------
 # ruff — matches team-gm (line-length 88, select ALL, same base ignore set).
 # Per-file relaxations mirror team-gm's: kernel code gets math-notation names /
-# no-annotation leniency, tests/scripts get the team-gm sets. The cute kernels
+# no-annotation leniency, tests/benchmarks get the team-gm sets. The cute kernels
 # (CuTeDSL — no team-gm equivalent) get a small additional relaxation.
 # ----------------------------------------------------------------------------
 
@@ -43,7 +43,6 @@ exclude = [
   "_trans_tmp",
   "benchmark",
   "benchmarks/artifacts",
-  "experiments",
   "third_party",
 ]
 
@@ -68,20 +67,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# team-gm's tests/scripts relaxations (+ E402/I001 for our sys.path bootstrap).
+# team-gm's tests/benchmarks relaxations (+ E402/I001 for our sys.path bootstrap).
 "tests/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
-"scripts/*" = [
-  "D",
-  "ANN201",
-  "S101",
-  "INP001",
-  "FBT001",
-  "PLC0415",
-  "C901",
-  "PLR0915",
-  "E402",  # imports follow the sys.path bootstrap prelude
-  "I001",
-]
 "benchmarks/**/*.py" = [
   "D",
   "ANN201",
@@ -116,7 +103,7 @@ docstring-code-format = false
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
-include = ["src", "benchmarks", "scripts", "tests"]
+include = ["src", "benchmarks", "tests"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -128,7 +115,6 @@ exclude = [
   "_trans_tmp",
   "benchmark",
   "benchmarks/artifacts",
-  "experiments",
   "third_party",
 ]
 pythonVersion = "3.10"
@@ -136,7 +122,7 @@ typeCheckingMode = "basic"
 reportMissingImports = "warning"
 
 [tool.ty.src]
-include = ["src", "benchmarks", "scripts", "tests"]
+include = ["src", "benchmarks", "tests"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -148,7 +134,6 @@ exclude = [
   "_trans_tmp",
   "benchmark",
   "benchmarks/artifacts",
-  "experiments",
   "third_party",
 ]
 
@@ -159,7 +144,7 @@ python-version = "3.10"
 # pixi — single unified environment for the whole repo (triton + Transformer
 # Engine cu12 + CuTeDSL/quack + cuequivariance + benching). Replaces the old
 # per-backend cute-env/ and te-env/ folders. The materialized `.pixi/` is
-# gitignored. See benchmarks/CONVENTIONS.md and kernels/*/README.md.
+# gitignored. See docs/benchmarks.md and docs/kernels/.
 #
 # Cluster notes (CSSB H100, driver 575 = CUDA 12.9-max):
 #   - MUST be cu12, never cu13 (transformer_engine_cu12 + core-cu12 extra).

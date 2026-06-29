@@ -22,8 +22,8 @@ The fused dgrad kernels also emit the materialized operands (dout,dscale,dab) so
 wgrad GEMMs (dWs,dWsc,dWa,dWb) can reuse them. wgrad stays cuBLAS unconditionally
 (reductions over M = cuBLAS's domain).
 
-MEASURED VERDICT (H100, CUDA-graph; archived conditioned_transition training reports
-under benchmarks/reports/archive): CORRECT (all 7 grads +
+MEASURED VERDICT (H100, CUDA-graph; pre-cleanup conditioned_transition training runs):
+CORRECT (all 7 grads +
 cos_y = 1.00000). Eager fwd+bwd is autograd-overhead-bound (~330us flat for every path) and
 not informative; under CUDA graph this fused path reaches/BEATS torch-eager at atom M<=4096
 (1.03x @ M=2048) but loses to the cuBLAS-GEMM training path (training.py) at large atom and

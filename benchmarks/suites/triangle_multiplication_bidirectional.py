@@ -7,7 +7,7 @@ Compares, forward (inference) and forward+backward (training), on H100/bf16:
   - cuequiv  = cuequivariance triangle_multiplicative_update run for both directions (×2)
 
 Sweeps M = L^2 (L = seq_len) × d_pair. ALL COMPILED
-(benchmarks/CONVENTIONS.md hard rule: the pytorch
+(docs/benchmarks.md hard rule: the pytorch
 baseline is torch.compile, never eager; ours/dtv1/cuequiv are already-compiled kernels).
 Emits the parseable `=== M=.. d_in=.. d_out=.. ===` + `<backend> fwd=.. ms fwd+bwd=.. ms`
 format that `benchmarks/runners/plot_bench.py` renders into a table + graph.

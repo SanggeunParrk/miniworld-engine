@@ -5,7 +5,7 @@ LayerNorm over the last dim immediately followed by a Linear (GEMM + bias).
 the **cute** backend (``cute/``) is the SM90/Hopper fast path (forks quack's
 ``GemmSm90`` — WGMMA + TMA + clusters), and the **Triton** backend
 (``triton/fused.py``) is the portable fallback for any other arch. ``layernorm_linear``
-dispatches by GPU capability. See README.md.
+dispatches by GPU capability. See docs/kernels/layernorm-linear.md.
 """
 
 from __future__ import annotations

@@ -6,8 +6,8 @@ value[i,k,d] has i-stride = L*D, so the per-k load is badly non-coalesced. torch
 permute -> contiguous -> cuBLAS path wins decisively. Do NOT revive the
 "avoid the permute via strided/gathered loads" idea -- it loses. The op-level
 winner is plain torch.einsum; the real wins are module-level (LN + .contiguous +
-gate). See the archived bias-only attention benchmark report under
-`benchmarks/reports/archive/`.
+gate). The H100 crossover is documented in the benchmark history and summarized
+in the dispatch policy docs.
 
 Op:  out[b,h,i,j,d] = sum_k softmax_k(bias[b,h,j,k]) * value[b,h,i,k,d]
 

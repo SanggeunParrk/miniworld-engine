@@ -1,6 +1,6 @@
 """cute 1+4: fused dgrad GEMM (dY@W) + LN-norm-backward epilogue → dx.  [VERIFIED cos=1.0]
 
-See FUSED_DGRAD_LNBWD_DESIGN.md. Forks the composable epilogue (GemmSm90 + GemmDefaultEpiMixin)
+See docs/design/layernorm-linear-fused-dgrad-lnbwd.md. Forks the composable epilogue (GemmSm90 + GemmDefaultEpiMixin)
 on a `dY @ W` GEMM and does the LN-normalize backward in the epilogue, so dx_normed (M,K) is
 never written/read back from HBM. x̂ is fed as the C operand (tRS_rC).
 

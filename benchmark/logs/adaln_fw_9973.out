@@ -1,8 +1,0 @@
-host=node01
-building fused fwd (EVT — slow)...
-build OK
-  M=4096 d=768: fwd1cos=1.000000  fullcos=1.000000  maxabs=0.000e+00
-  M=32768 d=768: fwd1cos=1.000000  fullcos=1.000000  maxabs=0.000e+00
-  M=8192 d=128: fwd1cos=1.000000  fullcos=1.000000  maxabs=0.000e+00
-DONE
-EXIT=0

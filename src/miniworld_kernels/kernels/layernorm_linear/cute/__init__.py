@@ -37,7 +37,7 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     explicit stats pass is the unconditional win once a backward pass follows (it would
     otherwise have to recompute mean/rstd anyway). Threshold N=256 is the H100/bf16
     forward-only crossover (see archived LayerNormLinear reports and
-    ``cute/WARP_SPECIALIZED_STATS_DESIGN.md``).
+    ``docs/design/layernorm-linear-warp-specialized-stats.md``).
     """
     m, n = x.shape[0], weight.shape[0]
     if save_stats:

@@ -21,10 +21,8 @@ Repo structure:
   model (e.g. `triangle_multiplication`). It only *connects* kernels — it has
   **no** `triton/cute/cuda` folders.
 - A **benchmark suite** (`benchmarks/suites/<op>.py`) defines how an op is
-  measured. Generated logs, CSVs, plots, slide exports, and profiler outputs go
-  under `benchmarks/artifacts/` unless they are curated reports.
-- An **experiment** (`experiments/<op>/`) is one-off research history: probes,
-  diagnostics, profiling scripts, discarded variants, and migration notes.
+  measured. Generated logs, CSVs, plots, rendered tables, slide exports, and
+  profiler outputs go under `benchmarks/artifacts/`.
 
 Kernels and modules were consolidated here out of `team-gm`
 (`src/team_gm/modules/`, across `psk/benchmark`, `perf/trimul`, `miniworld`,
@@ -56,11 +54,10 @@ benchmarks/
 ├── configs/                      # tracked benchmark inputs
 ├── runners/                      # benchmark CLI entry points
 ├── suites/                       # op-specific benchmark definitions
-├── reports/                      # curated human-readable reports
 └── artifacts/                    # generated outputs; gitignored by default
-experiments/                      # one-off probes, diagnostics, migration debt
+docs/                             # repo docs, cache policy, kernel notes
 third_party/                      # external checkouts/submodules
-benchmarks/runners/bench.py                  # compatibility wrapper for the bench runner
+benchmarks/runners/bench.py       # active bench runner
 benchmarks/configs/bench.yaml     # active bench config
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
 tests/run_bench.sbatch            # single SLURM launcher for benchmarks/runners/bench.py
@@ -75,11 +72,12 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 
 **Benchmark policy: follow the team-gm harness unless there is a specific reason
 not to.** The active path is `benchmarks/runners/bench.py` +
-`benchmarks/configs/bench.yaml` + `tests/run_bench.sbatch`. The `scripts/`
-entry points are compatibility wrappers only. Do not replace the harness with
-ad hoc timing snippets or custom markdown summaries for final results.
+`benchmarks/configs/bench.yaml` + `tests/run_bench.sbatch`. Do not replace the
+harness with ad hoc timing snippets or custom markdown summaries for final
+results.
 
-Detailed benchmark conventions live in `benchmarks/CONVENTIONS.md`.
+Detailed benchmark conventions live in `docs/benchmarks.md`. Runtime dispatch
+cache policy lives in `docs/operations/dispatch-cache.md`.
 
 One entry point — `benchmarks/runners/bench.py`, driven by
 `benchmarks/configs/bench.yaml` (hydra):
@@ -96,13 +94,10 @@ srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
 `transition`, `adaptive_layernorm`, `augmented_attention_token/atom`).
 `compile=true` benches the `torch.compile`'d variant — no separate script.
-Generated results land in `benchmarks/artifacts/`. Curated historical reports
-that used to live under `src/**/benchmark/` are archived under
-`benchmarks/reports/archive/`.
+Generated results land in `benchmarks/artifacts/`.
 
-If an op is not yet integrated into the unified harness, a temporary local
-bench belongs under `experiments/`, not package code. Once stable, move the
-definition into `benchmarks/suites/`.
+If an op is not yet integrated into the unified harness, keep local probes
+untracked and move the stable definition into `benchmarks/suites/`.
 
 The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
 implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN

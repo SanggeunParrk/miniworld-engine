@@ -1,7 +1,7 @@
 """Parse a team-gm-style bench log and emit a markdown report + graphs.
 
 Benchmarks in this repo always ship a **table and a graph together** (project
-convention — see benchmarks/CONVENTIONS.md). This turns a captured ``.out`` into
+convention — see docs/benchmarks.md). This turns a captured ``.out`` into
 both: per-metric markdown tables and per-metric PNG plots. For 2D shape sweeps
 (``M`` and ``d``), each metric gets one grouped-bar PNG with:
 - x-axis = ``M``
@@ -14,7 +14,7 @@ Usage::
 
 ``<output_dir>`` is the kernel's own benchmark folder
 (``benchmarks/artifacts/<kernel>/`` by default). Curated reports live under
-``benchmarks/reports/``. See ``benchmarks/CONVENTIONS.md``.
+``benchmarks/artifacts/``. See ``docs/benchmarks.md``.
 
 Runs CPU-only (no GPU); needs matplotlib. On the cluster use the team-gm env
 with its libstdc++ on LD_LIBRARY_PATH (system gcc lacks CXXABI_1.3.15), via srun.
@@ -43,7 +43,7 @@ from miniworld_kernels.viz import (
 )
 
 # The "default" everything is measured against (compiled PyTorch — see
-# benchmarks/CONVENTIONS.md: the naive baseline is always torch.compile(ref)).
+# docs/benchmarks.md: the naive baseline is always torch.compile(ref)).
 # Override with --baseline to compare speedups against an existing kernel
 # (e.g. the legacy vendored `triton` or `cuequivariance`) instead of PyTorch.
 BASELINE = "pytorch"
