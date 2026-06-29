@@ -1,0 +1,25 @@
+host=node01 date=Sat Jun 27 11:55:19 KST 2026
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+=== correctness (fp32) ===
+  verify d=768 M=16384 torch.float32: cos=1.000000 maxabs=5.718e-04
+  verify d=128 M=131072 torch.float32: cos=1.000000 maxabs=1.071e-03
+=== correctness (bf16) ===
+  verify d=768 M=16384 torch.bfloat16: cos=0.999997 maxabs=3.125e-02
+
+## TOKEN fp32  d=768 dtype=torch.float32
+   seq        M |  pt_eager  pt_compile  cur_triton  ours_inf | spd_vs_compile
+   384    12288 |    0.2894      0.2185      0.3774    0.1729 |          1.26x
+   512    16384 |    0.3780      0.2799      0.4972    0.2203 |          1.27x
+   640    20480 |    0.4516      0.3407      0.6205    0.2690 |          1.27x
+   768    24576 |    0.5390      0.4015      0.7412    0.3263 |          1.23x
+   896    28672 |    0.6211      0.4654      0.8679    0.3738 |          1.24x
+  1024    32768 |    0.7024      0.5219      0.9879    0.4238 |          1.23x
+
+## ATOM fp32  d=128 dtype=torch.float32
+   seq        M |  pt_eager  pt_compile  cur_triton  ours_inf | spd_vs_compile
+  2048    65536 |    0.3583      0.1826      0.1182    0.1195 |          1.53x
+  4096   131072 |    0.6830      0.3428      0.2217    0.2229 |          1.54x
+  6144   196608 |    1.0098      0.5017      0.3220    0.3222 |          1.56x
+  8192   262144 |    1.3288      0.6549      0.4177    0.4232 |          1.55x
+[exit=0]
+DONE

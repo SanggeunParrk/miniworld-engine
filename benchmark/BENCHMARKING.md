@@ -78,9 +78,38 @@ Let `K=src/miniworld_kernels/kernels/layernorm_linear/benchmark`.
 (`=== M=.. d_in=.. d_out=.. ===` blocks + `torch.compile`/`TE` timing lines), so
 any bench that prints in that format gets table + graph for free.
 
+## Visual style (single source of truth)
+
+All figures — both plotting paths — share one palette/theme so the benchmark
+figures read as **one coherent set** (this matters for the paper: a reviewer
+sees the same backend in the same colour in every plot). Defined once in
+`src/miniworld_kernels/viz/style.py` and imported by both:
+
+- `scripts/plot_bench.py` (grouped bars from `.out`) and
+- `scripts/bench.py` (Triton `perf_report` line plots).
+
+Rules baked into the module:
+
+- **Colour by meaning, not by position.** `color_for(name)` maps *any* spelling
+  of a backend (`cuequiv`/`cuequivariance`, `cute`/`cute-fused`/`ours v4`, …) to
+  one canonical identity → one fixed colour. Unknown names get a deterministic
+  hash colour (stable across figures, never index-dependent). Never hand-assign
+  colours in a kernel-local bench — call `color_for` / `style_for`.
+  - **ours / cute family → hot (red/orange)** — the winner pops.
+  - **NVIDIA family (cuequivariance / dtv1 / TE) → greens & teal.**
+  - **baselines (pytorch / torch.compile / triton) → grey & blue** (recede).
+- **`apply_theme()`** installs the publication rcParams (fonts, clean spines,
+  y-grid). Call it once before plotting.
+- **Vector output for the paper.** `save_figure(fig, path)` writes `.png` (for
+  markdown/slides) **plus `.svg` and `.pdf`** (LaTeX `\includegraphics`,
+  infinite zoom). The `.md` report embeds the PNG; the SVG/PDF are the archived
+  paper assets next to it.
+
 ## Conventions
 
 - **Results go in `kernels/<kernel>/benchmark/`** — log + report + PNGs together.
+- **Use the shared style** (`miniworld_kernels.viz`) for every figure — never
+  ad-hoc colours.
 - **Both forward and forward+backward** when the op is used in training.
 - Bold the faster backend in each table cell; "lower is better" on graphs.
 - Report numerical agreement (max abs error, relative Frobenius error, cosine)

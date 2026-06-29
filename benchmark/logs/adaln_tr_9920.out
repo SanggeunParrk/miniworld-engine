@@ -1,0 +1,25 @@
+host=node01 date=Sat Jun 27 13:44:20 KST 2026
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+=== grad correctness (fp32) ===
+  d=768 M=16384 torch.float32: fwd_cos=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+  d=128 M=131072 torch.float32: fwd_cos=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+=== grad correctness (bf16) ===
+  d=768 M=16384 torch.bfloat16: fwd_cos=0.999997 | dx=1.00000 dcond=0.99999 dlnw=0.99999 dWs=0.99999 dsb=0.99999 dWb=1.00000
+
+## TOKEN fp32  d=768 dtype=torch.float32  (fwd+bwd)
+   seq        M |  pt_eager  cur_triton  ours_train |  vs_eager   vs_cur
+   384    12288 |    0.9831     17.2512      0.6836 |     1.44x   25.24x
+   512    16384 |    1.2422     21.4487      0.8562 |     1.45x   25.05x
+   640    20480 |    1.4473     28.2025      1.0396 |     1.39x   27.13x
+   768    24576 |    1.6989     33.1728      1.2355 |     1.38x   26.85x
+   896    28672 |    1.9571     39.6120      1.4216 |     1.38x   27.86x
+  1024    32768 |    2.1956     45.4621      1.6113 |     1.36x   28.22x
+
+## ATOM fp32  d=128 dtype=torch.float32  (fwd+bwd)
+   seq        M |  pt_eager  cur_triton  ours_train |  vs_eager   vs_cur
+  2048    65536 |    1.0833     10.7125      0.4771 |     2.27x   22.45x
+  4096   131072 |    1.6352     21.4140      0.7263 |     2.25x   29.48x
+  6144   196608 |    2.3856     31.9109      1.0450 |     2.28x   30.54x
+  8192   262144 |    3.0483     42.7893      1.3612 |     2.24x   31.43x
+[exit=0]
+DONE

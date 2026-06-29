@@ -22,8 +22,11 @@ implementations:
   - pytorch
   - triton
   - cuequivariance
+# TriangleMultiplication also accepts:
+#   triton_pytorch_ln | triton_ln
 mode: forward          # forward | full (full adds the backward pass)
 metric: time           # time | memory
 compile: true
 allow_tf32: true
 precision: "bf16-mixed"
+name_suffix: ""

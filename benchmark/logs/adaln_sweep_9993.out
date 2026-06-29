@@ -1,0 +1,49 @@
+host=node01
+building sweep (8 kernels — slow)...
+build OK
+
+## M=32768 K=768 N=768  (39 GF)   cuBLAS=121.7us (318 TF/s)
+   cfg0:   201.5us  (192 TF/s)  cuBLAS/ct=0.60x  cos=1.00000 <-- best
+   cfg1:   201.8us  (192 TF/s)  cuBLAS/ct=0.60x  cos=1.00000
+   cfg2:   225.3us  (172 TF/s)  cuBLAS/ct=0.54x  cos=1.00000
+   cfg3:   245.6us  (157 TF/s)  cuBLAS/ct=0.50x  cos=1.00000
+   cfg4:   191.6us  (202 TF/s)  cuBLAS/ct=0.63x  cos=1.00000 <-- best
+   cfg5:   191.0us  (202 TF/s)  cuBLAS/ct=0.64x  cos=1.00000 <-- best
+   cfg6:   215.6us  (179 TF/s)  cuBLAS/ct=0.56x  cos=1.00000
+   cfg7:   230.5us  (168 TF/s)  cuBLAS/ct=0.53x  cos=1.00000
+   => BEST cfg5 191.0us (cuBLAS 121.7us)
+
+## M=32768 K=768 N=1536  (77 GF)   cuBLAS=226.8us (341 TF/s)
+   cfg0:   401.3us  (193 TF/s)  cuBLAS/ct=0.57x  cos=1.00000 <-- best
+   cfg1:   366.7us  (211 TF/s)  cuBLAS/ct=0.62x  cos=1.00000 <-- best
+   cfg2:   421.4us  (183 TF/s)  cuBLAS/ct=0.54x  cos=1.00000
+   cfg3:   446.5us  (173 TF/s)  cuBLAS/ct=0.51x  cos=1.00000
+   cfg4:   376.9us  (205 TF/s)  cuBLAS/ct=0.60x  cos=1.00000
+   cfg5:   360.6us  (214 TF/s)  cuBLAS/ct=0.63x  cos=1.00000 <-- best
+   cfg6:   451.4us  (171 TF/s)  cuBLAS/ct=0.50x  cos=1.00000
+   cfg7:   439.1us  (176 TF/s)  cuBLAS/ct=0.52x  cos=1.00000
+   => BEST cfg5 360.6us (cuBLAS 226.8us)
+
+## M=262144 K=128 N=128  (9 GF)   cuBLAS=103.3us (83 TF/s)
+   cfg0:   163.0us  ( 53 TF/s)  cuBLAS/ct=0.63x  cos=1.00000 <-- best
+   cfg1:   165.3us  ( 52 TF/s)  cuBLAS/ct=0.62x  cos=1.00000
+   cfg2:   183.6us  ( 47 TF/s)  cuBLAS/ct=0.56x  cos=1.00000
+   cfg3:   178.9us  ( 48 TF/s)  cuBLAS/ct=0.58x  cos=1.00000
+   cfg4:   188.9us  ( 45 TF/s)  cuBLAS/ct=0.55x  cos=1.00000
+   cfg5:   181.7us  ( 47 TF/s)  cuBLAS/ct=0.57x  cos=1.00000
+   cfg6:   159.9us  ( 54 TF/s)  cuBLAS/ct=0.65x  cos=1.00000 <-- best
+   cfg7:   154.3us  ( 56 TF/s)  cuBLAS/ct=0.67x  cos=1.00000 <-- best
+   => BEST cfg7 154.3us (cuBLAS 103.3us)
+
+## M=262144 K=128 N=256  (17 GF)   cuBLAS=157.5us (109 TF/s)
+   cfg0:   300.6us  ( 57 TF/s)  cuBLAS/ct=0.52x  cos=1.00000 <-- best
+   cfg1:   304.7us  ( 56 TF/s)  cuBLAS/ct=0.52x  cos=1.00000
+   cfg2:   312.0us  ( 55 TF/s)  cuBLAS/ct=0.50x  cos=1.00000
+   cfg3:   320.2us  ( 54 TF/s)  cuBLAS/ct=0.49x  cos=1.00000
+   cfg4:   304.7us  ( 56 TF/s)  cuBLAS/ct=0.52x  cos=1.00000
+   cfg5:   305.8us  ( 56 TF/s)  cuBLAS/ct=0.52x  cos=1.00000
+   cfg6:   301.2us  ( 57 TF/s)  cuBLAS/ct=0.52x  cos=1.00000
+   cfg7:   280.4us  ( 61 TF/s)  cuBLAS/ct=0.56x  cos=1.00000 <-- best
+   => BEST cfg7 280.4us (cuBLAS 157.5us)
+DONE
+EXIT=0

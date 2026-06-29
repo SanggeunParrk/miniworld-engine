@@ -1,0 +1,800 @@
+<title>miniworld-kernels × NVIDIA — collaboration tracks</title>
+<style>
+  :root{
+    --ink:#0E1320; --ink-2:#161D2E; --ink-line:#27314A;
+    --paper:#F7F8FA; --card:#FFFFFF; --text:#1A1F2B; --text-dim:#5A6473;
+    --text-onink:#E7ECF5; --text-onink-dim:#9AA6BE;
+    --ours:#E8412B; --ours-2:#F29A38; --nv:#76B900; --teal:#11A6A0;
+    --amber:#E8A23D; --grey:#9AA3B2; --good:#1E9E8A;
+    --maxw:1080px;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--text);font-family:var(--sans);
+    line-height:1.6;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+  h1,h2,h3,h4{text-wrap:balance;line-height:1.12;letter-spacing:-.02em;margin:0}
+  p{margin:0}
+  .mono{font-family:var(--mono)}
+  .tnum{font-variant-numeric:tabular-nums}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.22em;text-transform:uppercase;color:var(--text-dim);font-weight:600}
+
+  /* highlighter — marks key phrases inside body text */
+  .hl{background:linear-gradient(transparent 56%, rgba(232,65,43,.30) 0);padding:0 .05em}
+  .hl-nv{background:linear-gradient(transparent 56%, rgba(118,185,0,.34) 0);padding:0 .05em}
+  .hl-tl{background:linear-gradient(transparent 56%, rgba(17,166,160,.30) 0);padding:0 .05em}
+  .nvword{color:var(--nv)}
+
+  /* full-sweep table inside details */
+  .sweep{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:4px;font-family:var(--mono)}
+  .sweep th,.sweep td{padding:6px 8px;text-align:right;border-bottom:1px solid #EAEDF1;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .sweep th:first-child,.sweep td:first-child{text-align:left}
+  .sweep thead th{font-size:.66rem;letter-spacing:.05em;color:var(--text-dim);font-weight:700}
+  .sweep .r-ours td{color:var(--ours);font-weight:700;background:rgba(232,65,43,.05)}
+  .sweep .r-nv td{color:#4f7d00} .sweep .r-tl td{color:#0c7d78} .sweep .r-base td{color:var(--text-dim)}
+  /* sweep line chart */
+  .sweepwrap{margin:6px 0 12px}
+  .sweeplegend{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:.7rem;color:var(--text-dim);margin-bottom:4px}
+  .sweeplegend span{display:inline-flex;align-items:center;gap:5px}
+  .sweeplegend i{width:12px;height:3px;border-radius:2px;display:inline-block}
+  .sweepchart{width:100%;max-width:470px;height:auto;display:block}
+  .sweepimg{width:100%;height:auto;display:block;border:1px solid #E6E9EF;border-radius:8px;background:#fff}
+  .sax{stroke:#D7DCE3;stroke-width:1}
+  .saxlab{font-family:var(--mono);font-size:8.5px;fill:var(--text-dim)}
+
+  /* language toggle */
+  .lx.ko{display:none}
+  body[data-lang="ko"] .lx.ko{display:revert}
+  body[data-lang="ko"] .lx.en{display:none}
+  .langbar{position:sticky;top:0;z-index:30;background:rgba(14,19,32,.88);backdrop-filter:blur(8px);border-bottom:1px solid var(--ink-line)}
+  .langbar .inner{display:flex;gap:6px;padding:8px 24px;max-width:var(--maxw);margin:0 auto;justify-content:flex-end}
+  .langbtn{font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;padding:5px 12px;border-radius:8px;
+    border:1px solid var(--ink-line);background:transparent;color:var(--text-onink-dim);cursor:pointer}
+  .langbtn[aria-pressed="true"]{background:var(--ours);border-color:var(--ours);color:#fff;font-weight:700}
+
+  /* hero */
+  .hero{background:
+      radial-gradient(1100px 520px at 80% -10%, rgba(232,65,43,.18), transparent 60%),
+      radial-gradient(900px 480px at 6% 120%, rgba(118,185,0,.12), transparent 55%), var(--ink);
+    color:var(--text-onink);padding:60px 0 54px;border-bottom:1px solid var(--ink-line)}
+  .hero .eyebrow{color:var(--text-onink-dim)}
+  .hero h1{font-size:clamp(2rem,4.8vw,3.3rem);font-weight:850;margin:16px 0 0;color:#fff}
+  .hero h1 .accent{color:var(--ours)}
+  .lede{max-width:64ch;margin-top:16px;color:var(--text-onink-dim);font-size:1.05rem}
+  .chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}
+  .chip{display:flex;flex-direction:column;gap:2px;background:rgba(255,255,255,.04);border:1px solid var(--ink-line);
+    border-radius:12px;padding:11px 15px;min-width:140px}
+  .chip .k{font-family:var(--mono);font-size:.66rem;letter-spacing:.13em;text-transform:uppercase;color:var(--text-onink-dim)}
+  .chip .n{font-size:1.2rem;font-weight:750;color:#fff;font-variant-numeric:tabular-nums}
+  .chip .n em{font-style:normal;color:var(--ours)}
+
+  section{padding:56px 0}
+  .sec-head{display:flex;flex-direction:column;gap:9px;margin-bottom:30px}
+  .sec-head h2{font-size:clamp(1.45rem,3.1vw,2.05rem);font-weight:800}
+  .sec-head p{max-width:none;color:var(--text-dim)}
+  .trackno{font-family:var(--mono);font-size:.8rem;letter-spacing:.2em;color:var(--ours);font-weight:700}
+
+  .tracks{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+  .track-card{background:var(--card);border:1px solid #E6E9EF;border-radius:16px;padding:22px;position:relative;overflow:hidden}
+  .track-card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--ours)}
+  .track-card .num{font-family:var(--mono);color:var(--ours);font-size:.78rem;letter-spacing:.16em}
+  .track-card h3{font-size:1.12rem;margin:8px 0 8px;font-weight:780}
+  .track-card p{font-size:.9rem;color:var(--text-dim)}
+  .track-card .ev{margin-top:12px;font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--good)}
+
+  .tracksec{border-top:1px solid #E6E9EF}
+  .tracksec.alt{background:var(--ink);color:var(--text-onink)}
+  .tracksec.alt .sec-head h2{color:#fff}
+  .tracksec.alt .sec-head p{color:var(--text-onink-dim)}
+
+  .board{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:30px}
+  .kcard{background:var(--card);border:1px solid #E6E9EF;border-radius:14px;padding:18px;position:relative;overflow:hidden;
+    transition:transform .18s ease,box-shadow .18s ease}
+  .kcard:hover{transform:translateY(-3px);box-shadow:0 14px 34px -18px rgba(20,26,40,.4)}
+  .kcard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--ours)}
+  .kcard .sub{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .kcard h3{font-size:1rem;font-weight:750;margin:2px 0 0}
+  .kcard .big{font-family:var(--mono);font-size:2rem;font-weight:700;color:var(--ours);margin:12px 0 0;font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+  .kcard .big small{font-size:.82rem;color:var(--text-dim);font-weight:600;letter-spacing:0}
+  .kcard .vs{margin-top:6px;font-size:.84rem} .kcard .vs b{color:var(--ink)}
+
+  .kblock{background:var(--card);border:1px solid #E6E9EF;border-radius:16px;padding:22px;margin-bottom:18px}
+  .kblock>.head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;justify-content:space-between}
+  .kblock .ktitle{font-size:1.18rem;font-weight:780}
+  .kblock .ktag{font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .grid2{display:grid;grid-template-columns:1.04fr .96fr;gap:26px;align-items:start;margin-top:16px}
+  @media(max-width:820px){.grid2{grid-template-columns:1fr}}
+  .subh{font-size:.9rem;font-weight:750;margin:0 0 4px}
+  .note{font-size:.82rem;color:var(--text-dim);margin-bottom:12px}
+
+  .diagram{width:100%;height:auto;display:block;overflow:visible}
+  .dlabel{font-family:var(--mono);font-size:9px;letter-spacing:.05em;fill:var(--text-dim)}
+  .dbox{font-family:var(--sans);font-weight:700;font-size:11px;fill:#fff}
+  .dbox-d{font-family:var(--sans);font-size:8.5px;fill:#fff;opacity:.92}
+  .dnote{font-family:var(--mono);font-size:9px;fill:var(--amber);font-weight:700}
+  .dshape{font-family:var(--mono);font-size:8.5px;fill:var(--text-dim)}
+  .dk{font-family:var(--mono);font-size:8.5px;fill:#2A2F3A;font-weight:700}
+
+  .chart{display:flex;flex-direction:column;gap:10px;margin-top:4px}
+  .bar{display:grid;grid-template-columns:104px 1fr 52px;align-items:center;gap:10px}
+  .bar .lab{font-family:var(--mono);font-size:.72rem;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar .track{height:20px;background:#EEF1F5;border-radius:6px;overflow:hidden}
+  .bar .fill{height:100%;border-radius:6px;width:0;transition:width .9s cubic-bezier(.2,.7,.2,1)}
+  .bar .val{font-family:var(--mono);font-size:.8rem;font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
+  .bar.ours .fill{background:var(--ours)} .bar.ours .val{color:var(--ours)}
+  .bar.ours2 .fill{background:var(--ours-2)} .bar.ours2 .val{color:#C5781C}
+  .bar.nv .fill{background:var(--nv)} .bar.nv .val{color:#4f7d00}
+  .bar.teal .fill{background:var(--teal)} .bar.teal .val{color:#0c7d78}
+  .bar.base .fill{background:var(--grey)} .bar.base .val{color:var(--text-dim)}
+  .baseline-mark{font-family:var(--mono);font-size:.7rem;color:var(--text-dim);margin-top:6px}
+
+  details.deep{margin-top:16px;border:1px solid #E6E9EF;border-radius:12px;background:#FBFCFD;overflow:hidden}
+  details.deep>summary{cursor:pointer;list-style:none;padding:12px 16px;font-family:var(--mono);font-size:.74rem;
+    letter-spacing:.08em;text-transform:uppercase;color:var(--ours);font-weight:700;display:flex;align-items:center;gap:8px}
+  details.deep>summary::-webkit-details-marker{display:none}
+  details.deep>summary::before{content:"+";font-size:1rem;line-height:1}
+  details.deep[open]>summary::before{content:"–"}
+  .deepbody{padding:4px 18px 20px}
+  .deepbody h5{font-size:.8rem;margin:18px 0 8px;color:var(--ink);font-weight:750;font-family:var(--mono);letter-spacing:.04em;text-transform:uppercase}
+  .deepbody h5:first-child{margin-top:8px}
+  .algo{background:#fff;border:1px solid #E6E9EF;border-radius:10px;padding:14px}
+  .steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px;counter-reset:s}
+  .steps li{display:flex;gap:10px;font-size:.88rem}
+  .steps li::before{counter-increment:s;content:counter(s);font-family:var(--mono);color:var(--ours);font-weight:700;flex:none;width:1.2em}
+  .diff{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid #E6E9EF;border-radius:10px;overflow:hidden;font-size:.86rem}
+  @media(max-width:560px){.diff{grid-template-columns:1fr}}
+  .diff>div{padding:12px 14px}
+  .diff .was{background:#F2F3F6;border-right:1px solid #E6E9EF}
+  .diff .was .h{color:var(--text-dim)} .diff .now .h{color:var(--ours)}
+  .diff .h{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;font-weight:700;margin-bottom:5px}
+  .built{font-size:.88rem;background:rgba(17,166,160,.07);border-left:3px solid var(--teal);padding:10px 14px;border-radius:0 8px 8px 0}
+
+  .limtable{width:100%;border-collapse:collapse;margin-top:6px;font-size:.88rem}
+  .limtable th,.limtable td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--ink-line);vertical-align:top}
+  .limtable thead th{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-onink-dim);font-weight:700}
+  .limtable td .m{color:#fff;font-weight:700}
+  .limtable td:last-child{color:#FBC9C0}
+  .limtable .src{font-family:var(--mono);font-size:.72rem;color:var(--text-onink-dim)}
+  .limtable a{color:var(--ours-2)}
+  .scrollx{overflow-x:auto}
+
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:8px}
+  @media(max-width:760px){.twocol{grid-template-columns:1fr}}
+  .ipanel{background:var(--ink-2);border:1px solid var(--ink-line);border-radius:14px;padding:20px}
+  .ipanel h4{color:#fff;font-size:1rem;margin-bottom:8px}
+  .ipanel p,.ipanel li{color:var(--text-onink-dim);font-size:.9rem}
+  .ipanel ul{margin:10px 0 0;padding-left:18px} .ipanel li{margin:6px 0}
+  .lightpanel{background:var(--card);border:1px solid #E6E9EF;border-radius:14px;padding:20px}
+  .lightpanel h4{font-size:1rem;margin-bottom:8px}
+  .lightpanel ul{margin:10px 0 0;padding-left:18px;color:var(--text-dim);font-size:.9rem}
+  .lightpanel li{margin:7px 0}
+  .kicker{display:flex;align-items:center;flex-wrap:wrap;gap:10px;background:linear-gradient(90deg, rgba(17,166,160,.10), transparent 80%);
+    border:1px solid rgba(17,166,160,.3);border-left:4px solid var(--teal);border-radius:12px;padding:13px 18px;margin:18px 0 0;font-size:1rem}
+
+  .next{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-top:6px}
+  .nextcard{background:var(--card);border:1px solid #E6E9EF;border-radius:14px;padding:18px}
+  .nextcard .when{font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ours);font-weight:700}
+  .nextcard h4{margin:8px 0 6px;font-size:1rem}
+  .nextcard p{font-size:.88rem;color:var(--text-dim)}
+
+  footer{padding:42px 0 60px;color:var(--text-dim);font-size:.84rem;border-top:1px solid #E6E9EF}
+  footer h3{font-size:.95rem;color:var(--text);margin-bottom:10px}
+  footer ul{margin:0;padding-left:18px} footer li{margin:6px 0;max-width:84ch}
+  footer a{color:var(--ours)}
+
+  .reveal{opacity:0;transform:translateY(14px)}
+  .reveal.in{opacity:1;transform:none;transition:opacity .55s ease,transform .55s ease}
+  @media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}.bar .fill{transition:none}}
+</style>
+
+<div class="langbar"><div class="inner">
+  <button class="langbtn" data-lang="en" aria-pressed="true">EN</button>
+  <button class="langbtn" data-lang="ko" aria-pressed="false">한국어</button>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <div class="eyebrow">miniworld-kernels · NVIDIA · pre-meeting</div>
+  <h1 class="lx en">Kernel optimization with <span class="nvword">NVIDIA</span> — three working tracks.</h1>
+  <h1 class="lx ko"><span class="nvword">NVIDIA</span>와의 커널 최적화 협업: 작업 트랙 3가지.</h1>
+  <p class="lx en lede">Today's pre-meeting fixes the agenda for the 7/2 offline session. We propose the three tracks
+    below; each is backed by kernels we have already implemented and benchmarked on H100.</p>
+  <p class="lx ko lede">오늘 사전 미팅의 목적은 7/2 오프라인 세션의 의제를 확정하는 것입니다. 아래 세 가지 트랙을 제안하며,
+    각 트랙은 H100에서 이미 구현하고 벤치마크한 커널로 뒷받침됩니다.</p>
+  <div class="chips">
+    <div class="chip"><span class="k lx en">tracks today</span><span class="k lx ko">오늘 다룰 트랙</span><span class="n tnum">3</span></div>
+    <div class="chip"><span class="k lx en">kernels as evidence</span><span class="k lx ko">근거 커널</span><span class="n tnum">4</span></div>
+    <div class="chip"><span class="k lx en">vs cuEquivariance</span><span class="k lx ko">vs cuEquivariance</span><span class="n tnum">1.2–1.8<em>×</em></span></div>
+    <div class="chip"><span class="k">platform</span><span class="n">H100 · bf16</span></div>
+  </div>
+</div></header>
+
+<!-- OVERVIEW -->
+<section class="wrap reveal">
+  <div class="sec-head">
+    <div class="eyebrow lx en">the agenda</div><div class="eyebrow lx ko">의제</div>
+    <h2 class="lx en">What we want to agree on today</h2>
+    <h2 class="lx ko">오늘 합의하려는 것</h2>
+    <p class="lx en">The meeting is about these three tracks. The principle running through Track 01 is simple:
+      <span class="hl">we build the first version</span> and <span class="hl-nv">NVIDIA drives the second-stage optimization</span>.</p>
+    <p class="lx ko">이번 미팅의 핵심은 아래 세 트랙입니다. 트랙 1을 관통하는 원칙은 분명합니다 —
+      <span class="hl">1차 개발은 우리가 맡고</span>, <span class="hl-nv">2차 최적화는 NVIDIA가 주도</span>합니다.</p>
+  </div>
+  <div class="tracks">
+    <article class="track-card">
+      <div class="num">TRACK 01</div>
+      <h3 class="lx en">Co-optimize the kernels</h3><h3 class="lx ko">커널 공동 최적화</h3>
+      <p class="lx en">We build v1, NVIDIA optimizes v2. Forward / backward / inference, tuned op by op as the model needs.</p>
+      <p class="lx ko">우리가 1차 개발, NVIDIA가 2차 최적화. forward / backward / inference를 모델 요구에 따라 op 단위로 최적화합니다.</p>
+      <div class="ev lx en">evidence ↓ 4 kernels · 5–11× vs default</div><div class="ev lx ko">근거 ↓ 커널 4종 · default 대비 5–11×</div>
+    </article>
+    <article class="track-card">
+      <div class="num">TRACK 02</div>
+      <h3 class="lx en">AF3-like model inference</h3><h3 class="lx ko">AF3-like 모델 인퍼런스</h3>
+      <p class="lx en">Fit large inference on a single ordinary GPU — chunking, CPU offload, fused kernels — without a cluster.</p>
+      <p class="lx ko">대규모 인퍼런스를 일반 GPU 한 장에 — chunking, CPU offload, 융합 커널로. 클러스터 없이.</p>
+      <div class="ev lx en">evidence ↓ cuEquiv ≈ 1.0× at large d</div><div class="ev lx ko">근거 ↓ 큰 d에서 cuEquiv ≈ 1.0×</div>
+    </article>
+    <article class="track-card">
+      <div class="num">TRACK 03</div>
+      <h3 class="lx en">Education &amp; ramp-up</h3><h3 class="lx ko">교육 &amp; 역량 강화</h3>
+      <p class="lx en">Close the gap from AI-assisted to expert CuTeDSL — material, pairing, and learning from each re-optimization.</p>
+      <p class="lx ko">AI 보조 단계에서 CuTeDSL 전문 수준으로. 자료·페어링, 그리고 재최적화 과정에서의 학습으로.</p>
+      <div class="ev lx en">evidence ↓ how we built these</div><div class="ev lx ko">근거 ↓ 우리의 개발 방식</div>
+    </article>
+  </div>
+</section>
+
+<!-- TRACK 01 -->
+<section class="tracksec"><div class="wrap reveal">
+  <div class="sec-head">
+    <div class="trackno">TRACK 01</div>
+    <h2 class="lx en">Co-optimize the kernels</h2><h2 class="lx ko">커널 공동 최적화</h2>
+    <p class="lx en">We implemented four kernels on top of the team-gm base and benchmarked each against the same default
+      (<span class="mono">torch.compile</span>'d PyTorch) and against NVIDIA's own kernels. This is the starting point we bring;
+      <span class="hl">we build v1</span>, and <span class="hl-nv">NVIDIA's second-stage optimization</span> plugs in here. Expand
+      <em>Details</em> on any kernel for the algorithm visualization, the diff against the previous version, and how it was built.</p>
+    <p class="lx ko">team-gm 베이스 위에 네 개의 커널을 직접 구현하고, 각각을 동일한 default(<span class="mono">torch.compile</span> PyTorch)
+      및 NVIDIA 커널과 비교 벤치마크했습니다. 이것이 우리가 가져오는 출발점이며 — <span class="hl">1차 개발은 우리가</span>,
+      <span class="hl-nv">2차 최적화는 NVIDIA가</span> 이 지점에서 결합됩니다. 각 커널의 <em>Details</em>를 펼치면 알고리즘 시각화,
+      이전 버전과의 차이, 개발 방식을 확인할 수 있습니다.</p>
+  </div>
+
+  <div class="board">
+    <article class="kcard"><div class="sub">trimul_inproj</div><h3>Triangle Multiplication</h3>
+      <div class="big tnum">11.3<small>×</small></div>
+      <div class="vs lx en">vs default · beats <b>cuEquiv &amp; dt-v1 1.4×</b></div><div class="vs lx ko">vs default · <b>cuEquiv·dt-v1 1.4×</b> 능가</div></article>
+    <article class="kcard"><div class="sub">transition</div><h3>Transition (SwiGLU)</h3>
+      <div class="big tnum">5.5<small>×</small></div>
+      <div class="vs lx en">vs default · <b>h never hits HBM</b></div><div class="vs lx ko">vs default · <b>h가 HBM에 안 감</b></div></article>
+    <article class="kcard"><div class="sub">layernorm_linear</div><h3>LayerNorm + Linear</h3>
+      <div class="big tnum">3.1<small>×</small></div>
+      <div class="vs lx en">vs default · beats <b>TransformerEngine</b></div><div class="vs lx ko">vs default · <b>TransformerEngine</b> 능가</div></article>
+    <article class="kcard"><div class="sub">layernorm</div><h3>LayerNorm</h3>
+      <div class="big tnum">6.0<small>×</small></div>
+      <div class="vs lx en">vs default · cuEquiv only ~1.0× at large d</div><div class="vs lx ko">vs default · 큰 d서 cuEquiv ~1.0×뿐</div></article>
+  </div>
+
+  <!-- TRIMUL -->
+  <div class="kblock">
+    <div class="head"><div class="ktitle">Triangle Multiplication</div><div class="ktag">trimul_inproj · forward done · backward in progress</div></div>
+    <div class="grid2">
+      <div>
+        <div class="subh lx en">Kernel structure</div><div class="subh lx ko">커널 구조</div>
+        <p class="note lx en">Baseline launches many kernels and splits left/right; ours fuses the front into one gated GEMM with a direct <span class="mono">bdll</span> write, folds LN_in in, and fuses the back-half.</p>
+        <p class="note lx ko">baseline은 다수 커널 + 좌/우 분리. ours는 front를 하나의 gated GEMM으로 융합하여 <span class="mono">bdll</span>을 직접 기록하고, LN_in을 folding하며, back-half도 융합합니다.</p>
+        <svg class="diagram" viewBox="0 0 560 198" role="img" aria-label="TriMul: ~7 launches vs 2 fused kernels + bmm">
+          <text x="0" y="13" class="dlabel">BASELINE — ~7 separate launches, incl. a wasted layout transpose</text>
+          <rect x="0"   y="22" width="64" height="28" rx="6" fill="#9AA3B2"/><text x="32"  y="40" text-anchor="middle" class="dbox" style="font-size:9px">LN_in</text>
+          <rect x="74"  y="22" width="58" height="28" rx="6" fill="#9AA3B2"/><text x="103" y="40" text-anchor="middle" class="dbox" style="font-size:9px">left</text>
+          <rect x="142" y="22" width="58" height="28" rx="6" fill="#9AA3B2"/><text x="171" y="40" text-anchor="middle" class="dbox" style="font-size:9px">right</text>
+          <rect x="210" y="22" width="52" height="28" rx="6" fill="#9AA3B2"/><text x="236" y="40" text-anchor="middle" class="dbox" style="font-size:9px">gate</text>
+          <rect x="272" y="22" width="78" height="28" rx="6" fill="#E8A23D"/><text x="311" y="40" text-anchor="middle" class="dbox" style="font-size:9px">transpose</text>
+          <rect x="360" y="22" width="60" height="28" rx="6" fill="#11A6A0"/><text x="390" y="40" text-anchor="middle" class="dbox" style="font-size:9px">bmm</text>
+          <rect x="430" y="22" width="58" height="28" rx="6" fill="#9AA3B2"/><text x="459" y="40" text-anchor="middle" class="dbox" style="font-size:9px">LN_out</text>
+          <rect x="498" y="22" width="62" height="28" rx="6" fill="#9AA3B2"/><text x="529" y="40" text-anchor="middle" class="dbox" style="font-size:8.5px">out·gate</text>
+          <text x="0" y="64" class="dnote">amber = wasted layout transpose · 7 kernel launches</text>
+
+          <text x="0" y="100" class="dlabel">OURS — 2 fused custom kernels around one bmm · no transpose</text>
+          <rect x="0" y="112" width="214" height="56" rx="9" fill="#E8412B"/>
+          <text x="107" y="128" text-anchor="middle" class="dk" style="fill:#fff;font-size:9px">KERNEL 1 · input projection (tm1)</text>
+          <text x="107" y="144" text-anchor="middle" class="dbox" style="font-size:10px">LN_in + [ left | right ]</text>
+          <text x="107" y="158" text-anchor="middle" class="dbox-d">one gated GEMM → bdll direct</text>
+          <rect x="230" y="112" width="96" height="56" rx="9" fill="#11A6A0"/>
+          <text x="278" y="136" text-anchor="middle" class="dk" style="fill:#fff;font-size:9px">cuBLAS</text>
+          <text x="278" y="151" text-anchor="middle" class="dbox" style="font-size:10px">bmm · L³</text>
+          <rect x="342" y="112" width="218" height="56" rx="9" fill="#E8412B"/>
+          <text x="451" y="128" text-anchor="middle" class="dk" style="fill:#fff;font-size:9px">KERNEL 2 · output projection (tm2)</text>
+          <text x="451" y="144" text-anchor="middle" class="dbox" style="font-size:10px">LN_out + out·proj ⊙ gate</text>
+          <text x="451" y="158" text-anchor="middle" class="dbox-d">fused in one pass</text>
+          <path d="M214 140 L230 140" stroke="#B5341F" stroke-width="2" marker-end="url(#arT)"/><path d="M326 140 L342 140" stroke="#B5341F" stroke-width="2" marker-end="url(#arT)"/>
+          <text x="0" y="190" class="dlabel" style="fill:#E8412B;font-weight:700">→ ours best at every L · 1.2–1.4× over cuEquiv &amp; dt-v1</text>
+          <defs><marker id="arT" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#B5341F"/></marker></defs>
+        </svg>
+      </div>
+      <div>
+        <div class="subh lx en">Forward speedup vs default — L=1024</div><div class="subh lx ko">forward 속도배수 vs default — L=1024</div>
+        <p class="note lx en">Each kernel at its best regime; bf16, D=128. Taller = faster.</p><p class="note lx ko">각 커널 최적 regime; bf16, D=128. 막대가 길수록 빠릅니다.</p>
+        <div class="chart" data-chart>
+          <div class="bar ours"><div class="lab">ours</div><div class="track"><div class="fill" data-w="100"></div></div><div class="val">11.3×</div></div>
+          <div class="bar teal"><div class="lab">cuEquiv</div><div class="track"><div class="fill" data-w="72.7"></div></div><div class="val">8.2×</div></div>
+          <div class="bar nv"><div class="lab">dt-v1</div><div class="track"><div class="fill" data-w="71.3"></div></div><div class="val">8.1×</div></div>
+          <div class="bar base"><div class="lab">PyTorch</div><div class="track"><div class="fill" data-w="8.8"></div></div><div class="val">1.0×</div></div>
+        </div>
+        <div class="baseline-mark">latency @1024 — ours <b class="mono">1.87 ms</b> · cuEquiv 2.57 · dt-v1 2.62 · PyTorch 21.2</div>
+      </div>
+    </div>
+
+    <details class="deep">
+      <summary><span class="lx en">Details — algorithm, what changed, how built</span><span class="lx ko">자세히 — 알고리즘 · 변경점 · 개발 방식</span></summary>
+      <div class="deepbody">
+        <h5 class="lx en">Algorithm — two fused kernels around one bmm</h5><h5 class="lx ko">알고리즘 — bmm을 사이에 둔 두 개의 융합 커널</h5>
+        <p style="font-size:.88rem;margin:0 0 12px" class="lx en">The module is <b>two custom kernels</b>: <b style="color:var(--ours)">Kernel 1</b> does the input projection
+          (LN_in + left/right gated GEMM, writing <span class="mono">bdll</span> directly), a cuBLAS <span class="mono">bmm</span> does the L³ core,
+          and <b style="color:var(--ours)">Kernel 2</b> does the output projection (LN_out + out-proj ⊙ gate).</p>
+        <p style="font-size:.88rem;margin:0 0 12px" class="lx ko"><b>두 개의 커스텀 커널</b>로 구성됩니다. <b style="color:var(--ours)">커널 1</b>은 입력 사영
+          (LN_in + 좌/우 gated GEMM, <span class="mono">bdll</span> 직접 기록), 가운데 cuBLAS <span class="mono">bmm</span>이 L³ 코어를 담당하고,
+          <b style="color:var(--ours)">커널 2</b>는 출력 사영(LN_out + out-proj ⊙ gate)을 수행합니다.</p>
+        <div class="algo">
+          <svg class="diagram" viewBox="0 0 560 132" role="img" aria-label="Kernel 1 internals">
+            <text x="0" y="13" class="dk" style="fill:#B5341F">KERNEL 1 (tm1) internals — SM90 warp-specialized gated GEMM, LN-folded</text>
+            <rect x="0"   y="38" width="100" height="56" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="50"  y="62" text-anchor="middle" class="dk">inputs</text><text x="50"  y="78" text-anchor="middle" class="dshape">x[BM,D] · W[D,4D]</text>
+            <rect x="112" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="162" y="60" text-anchor="middle" class="dbox" style="font-size:10px">TMA load</text><text x="162" y="76" text-anchor="middle" class="dbox-d">producer → SMEM (2×)</text>
+            <rect x="224" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="274" y="60" text-anchor="middle" class="dbox" style="font-size:10px">WGMMA</text><text x="274" y="76" text-anchor="middle" class="dbox-d">x̂·W · LN_in folded</text>
+            <rect x="336" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="386" y="60" text-anchor="middle" class="dbox" style="font-size:10px">epilogue</text><text x="386" y="76" text-anchor="middle" class="dbox-d">σ-gate ⊙ · split L|R</text>
+            <rect x="448" y="38" width="100" height="56" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="498" y="60" text-anchor="middle" class="dk">TMA store</text><text x="498" y="76" text-anchor="middle" class="dshape">→ bdll [B,D,L,L]</text>
+            <path d="M100 66 L112 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k1)"/><path d="M212 66 L224 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k1)"/><path d="M324 66 L336 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k1)"/><path d="M436 66 L448 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k1)"/>
+            <text x="0" y="116" class="dshape">x̂ = (x−μ)·rstd folded into the MMA · left = Lᵥ·σ(L_g), right = Rᵥ·σ(R_g) — gate never materialized · strided bdll write is free (TMA)</text>
+            <defs><marker id="k1" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#B5341F"/></marker></defs>
+          </svg>
+        </div>
+        <div class="algo" style="margin-top:10px">
+          <svg class="diagram" viewBox="0 0 560 132" role="img" aria-label="Kernel 2 internals">
+            <text x="0" y="13" class="dk" style="fill:#B5341F">KERNEL 2 (tm2) internals — output projection, gate fused in the epilogue</text>
+            <rect x="0"   y="38" width="100" height="56" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="50"  y="62" text-anchor="middle" class="dk">inputs</text><text x="50"  y="78" text-anchor="middle" class="dshape">tri[B,D,L,L] · x_n</text>
+            <rect x="112" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="162" y="60" text-anchor="middle" class="dbox" style="font-size:10px">LN_out</text><text x="162" y="76" text-anchor="middle" class="dbox-d">normalize tri</text>
+            <rect x="224" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="274" y="60" text-anchor="middle" class="dbox" style="font-size:10px">WGMMA</text><text x="274" y="76" text-anchor="middle" class="dbox-d">tri · Wₒ</text>
+            <rect x="336" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="386" y="60" text-anchor="middle" class="dbox" style="font-size:10px">gate</text><text x="386" y="76" text-anchor="middle" class="dbox-d">σ(x_n · W_g)</text>
+            <rect x="448" y="38" width="100" height="56" rx="7" fill="#E8412B"/><text x="498" y="60" text-anchor="middle" class="dbox" style="font-size:10px">epilogue</text><text x="498" y="76" text-anchor="middle" class="dbox-d">Y = ⊙ gate → store</text>
+            <path d="M100 66 L112 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k2)"/><path d="M212 66 L224 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k2)"/><path d="M324 66 L336 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k2)"/><path d="M436 66 L448 66" stroke="#B5341F" stroke-width="1.8" marker-end="url(#k2)"/>
+            <text x="0" y="116" class="dshape">gate σ(x_n·W_g) is multiplied into the projection in-register; Y is written once — no separate gate tensor</text>
+            <defs><marker id="k2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#B5341F"/></marker></defs>
+          </svg>
+        </div>
+        <h5 class="lx en">What changed from the previous kernel</h5><h5 class="lx ko">이전 커널과의 차이</h5>
+        <div class="diff">
+          <div class="was"><div class="h">PREVIOUS (tm1)</div>
+            <span class="lx en">Left and right projected in two separate launches; an explicit permute / <span class="mono">bdll→blld</span> transpose to fix the layout; the gate materialized separately.</span>
+            <span class="lx ko">좌·우 사영을 두 번에 나누어 launch하고, 레이아웃 보정을 위한 명시적 permute / <span class="mono">bdll→blld</span> transpose를 거쳤으며, gate를 별도로 materialize했습니다.</span></div>
+          <div class="now"><div class="h">NOW (trimul_inproj)</div>
+            <span class="lx en">Left+right in <b>one</b> gated GEMM (6–9% faster); the <b>bdll direct write removes the transpose</b> (3–13× over the permute fallback); LN_in folded in.</span>
+            <span class="lx ko">좌+우를 <b>하나</b>의 gated GEMM으로 처리(6–9% 향상)하고, <b>bdll 직접 기록으로 transpose를 제거</b>(permute 대비 3–13×)하며, LN_in을 folding했습니다.</span></div>
+        </div>
+        <h5 class="lx en">How it was built</h5><h5 class="lx ko">개발 방식</h5>
+        <p class="built lx en">The front GEMM uses quack's SM90 warp-specialized gated GEMM (TMA producer / WGMMA consumer, σ·mul fused in the epilogue); the bdll direct write needs an in-repo quack patch. We developed it iteratively with AI. The front GEMM already runs at ~67% of the HBM roofline — memory-bound and near-saturated — so the remaining lever is fusion, not GEMM-internal tuning. <span class="hl">This is exactly where NVIDIA's second-stage tuning would add the most.</span></p>
+        <p class="built lx ko">front GEMM은 quack의 SM90 warp-specialized gated GEMM(TMA 생산자 / WGMMA 소비자, epilogue에서 σ·mul 융합)을 사용하며, bdll 직접 기록에는 레포 내 quack 패치가 필요합니다. AI와 함께 반복적으로 개발했습니다. front GEMM은 이미 HBM roofline의 ~67%로 메모리 바운드·거의 포화 상태여서, 남은 레버는 GEMM 내부 튜닝이 아니라 융합입니다. <span class="hl">바로 이 지점에서 NVIDIA의 2차 튜닝이 가장 큰 효과를 낼 것입니다.</span></p>
+        <h5 class="lx en">Full sweep — speedup vs default, by L</h5><h5 class="lx ko">전체 sweep — L별 default 대비 속도배수</h5>
+        <div class="sweepwrap"><img class="sweepimg" alt="TriMul speedup vs L — bar chart" src="__SWEEP_TRIMUL__"></div>
+        <div class="scrollx"><table class="sweep">
+          <thead><tr><th>L</th><th>128</th><th>256</th><th>384</th><th>512</th><th>768</th><th>1024</th></tr></thead>
+          <tbody>
+            <tr class="r-ours"><td>ours</td><td>5.18×</td><td>6.26×</td><td>6.42×</td><td>7.55×</td><td>10.73×</td><td>11.33×</td></tr>
+            <tr class="r-tl"><td>cuEquiv</td><td>4.01×</td><td>4.68×</td><td>5.12×</td><td>5.46×</td><td>7.72×</td><td>8.24×</td></tr>
+            <tr class="r-nv"><td>dt-v1</td><td>4.25×</td><td>4.54×</td><td>4.96×</td><td>5.39×</td><td>7.57×</td><td>8.08×</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </details>
+  </div>
+
+  <!-- TRANSITION -->
+  <div class="kblock">
+    <div class="head"><div class="ktitle">Transition (SwiGLU MLP)</div><div class="ktag">transition · forward done</div></div>
+    <div class="grid2">
+      <div>
+        <div class="subh lx en">Kernel structure</div><div class="subh lx ko">커널 구조</div>
+        <p class="note lx en">The naive path writes the 4×-wide hidden <span class="mono">h</span> to HBM between every stage; ours keeps it in SMEM and launches once.</p>
+        <p class="note lx ko">naive 경로는 4× 넓은 hidden <span class="mono">h</span>를 단계마다 HBM에 기록합니다. ours는 이를 SMEM에 두고 한 번만 launch합니다.</p>
+        <svg class="diagram" viewBox="0 0 560 256" role="img" aria-label="Transition: baseline HBM round-trips vs ours fused">
+          <!-- BASELINE -->
+          <text x="0" y="13" class="dlabel">BASELINE — 4 launches; h drops to HBM between each stage</text>
+          <rect x="0"   y="22" width="116" height="30" rx="7" fill="#9AA3B2"/><text x="58"  y="41" text-anchor="middle" class="dbox">LayerNorm</text>
+          <rect x="148" y="22" width="116" height="30" rx="7" fill="#9AA3B2"/><text x="206" y="41" text-anchor="middle" class="dbox">expand ↑4×</text>
+          <rect x="296" y="22" width="116" height="30" rx="7" fill="#9AA3B2"/><text x="354" y="41" text-anchor="middle" class="dbox">SwiGLU</text>
+          <rect x="444" y="22" width="116" height="30" rx="7" fill="#9AA3B2"/><text x="502" y="41" text-anchor="middle" class="dbox">squeeze ↓</text>
+          <rect x="0" y="92" width="560" height="20" rx="5" fill="#E8A23D" opacity="0.18"/><text x="6" y="105" class="dnote">HBM — slow</text>
+          <path d="M58 52 L132 100 L206 52"  fill="none" stroke="#E8A23D" stroke-width="2.2" marker-end="url(#vN)"/>
+          <path d="M206 52 L280 100 L354 52" fill="none" stroke="#E8A23D" stroke-width="2.2" marker-end="url(#vN)"/>
+          <path d="M354 52 L428 100 L502 52" fill="none" stroke="#E8A23D" stroke-width="2.2" marker-end="url(#vN)"/>
+          <text x="280" y="128" text-anchor="middle" class="dnote">↑ 3 round-trips of the 4×-wide h</text>
+          <!-- OURS -->
+          <text x="0" y="158" class="dlabel">OURS — 1 launch; h stays on-chip</text>
+          <rect x="0" y="166" width="560" height="46" rx="10" fill="none" stroke="#E8412B" stroke-width="1.4" stroke-dasharray="5 3"/>
+          <text x="10" y="180" class="dk" style="fill:#B5341F">GPU chip · SMEM / registers</text>
+          <rect x="120" y="184" width="320" height="22" rx="6" fill="#E8412B"/><text x="280" y="199" text-anchor="middle" class="dbox" style="font-size:10px">LN → expand → SwiGLU → squeeze</text>
+          <rect x="0" y="224" width="560" height="18" rx="5" fill="#E8A23D" opacity="0.18"/>
+          <path d="M70 224 L70 206" stroke="#E8A23D" stroke-width="2.4" marker-end="url(#vN2)"/>
+          <path d="M490 206 L490 224" stroke="#E8A23D" stroke-width="2.4" marker-end="url(#vN2)"/>
+          <text x="70" y="238" text-anchor="middle" class="dnote">read x</text><text x="490" y="238" text-anchor="middle" class="dnote">write y</text>
+          <text x="280" y="238" text-anchor="middle" class="dlabel" style="fill:#E8412B;font-weight:700">0 round-trips · ≈5.5× vs PyTorch</text>
+          <defs>
+            <marker id="vN" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#E8A23D"/></marker>
+            <marker id="vN2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#E8A23D"/></marker>
+          </defs>
+        </svg>
+      </div>
+      <div>
+        <div class="subh lx en">Forward speedup vs default — seq_len=1024</div><div class="subh lx ko">forward 속도배수 vs default — seq_len=1024</div>
+        <p class="note lx en">Three implementations on identical weights, d=128.</p><p class="note lx ko">동일 가중치, d=128, 세 가지 구현.</p>
+        <div class="chart" data-chart>
+          <div class="bar ours"><div class="lab">Triton b2b</div><div class="track"><div class="fill" data-w="100"></div></div><div class="val">5.4×</div></div>
+          <div class="bar ours2"><div class="lab">cute</div><div class="track"><div class="fill" data-w="76.5"></div></div><div class="val">4.1×</div></div>
+          <div class="bar base"><div class="lab">Triton orig</div><div class="track"><div class="fill" data-w="73.9"></div></div><div class="val">4.0×</div></div>
+          <div class="bar base"><div class="lab">PyTorch</div><div class="track"><div class="fill" data-w="18.7"></div></div><div class="val">1.0×</div></div>
+        </div>
+        <div class="baseline-mark">latency @1024 — b2b <b class="mono">1.24 ms</b> vs PyTorch 6.67 ms</div>
+      </div>
+    </div>
+    <details class="deep">
+      <summary><span class="lx en">Details — algorithm, what changed, how built</span><span class="lx ko">자세히 — 알고리즘 · 변경점 · 개발 방식</span></summary>
+      <div class="deepbody">
+        <h5 class="lx en">Algorithm — the whole MLP staged on-chip</h5><h5 class="lx ko">알고리즘 — MLP 전체를 on-chip에 적재</h5>
+        <div class="algo">
+          <svg class="diagram" viewBox="0 0 560 196" role="img" aria-label="Transition detailed algorithm">
+            <rect x="0" y="150" width="560" height="22" rx="5" fill="#E8A23D" opacity="0.13"/><text x="6" y="164" class="dnote">HBM — touched only twice (read x, write y)</text>
+            <rect x="0" y="40" width="80" height="34" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="40" y="55" text-anchor="middle" class="dk">x</text><text x="40" y="68" text-anchor="middle" class="dshape">[*, d]</text>
+            <!-- on-chip band -->
+            <rect x="100" y="14" width="372" height="92" rx="10" fill="none" stroke="#E8412B" stroke-dasharray="4 3"/>
+            <text x="108" y="28" class="dk" style="fill:#B5341F">one kernel · SMEM / registers</text>
+            <rect x="112" y="40" width="74" height="34" rx="6" fill="#E8412B"/><text x="149" y="61" text-anchor="middle" class="dbox" style="font-size:10px">LayerNorm</text>
+            <rect x="198" y="40" width="92" height="34" rx="6" fill="#E8412B"/><text x="244" y="56" text-anchor="middle" class="dbox" style="font-size:10px">expand W₁</text><text x="244" y="68" text-anchor="middle" class="dbox-d">[d, 2·4d]</text>
+            <rect x="302" y="40" width="76" height="34" rx="6" fill="#E8412B"/><text x="340" y="56" text-anchor="middle" class="dbox" style="font-size:10px">SwiGLU</text><text x="340" y="68" text-anchor="middle" class="dbox-d">h [*,4d]</text>
+            <rect x="390" y="40" width="76" height="34" rx="6" fill="#E8412B"/><text x="428" y="56" text-anchor="middle" class="dbox" style="font-size:10px">squeeze W₂</text><text x="428" y="68" text-anchor="middle" class="dbox-d">[4d, d]</text>
+            <path d="M186 57 L198 57" stroke="#fff" stroke-width="1.6" marker-end="url(#arB)"/><path d="M290 57 L302 57" stroke="#fff" stroke-width="1.6" marker-end="url(#arB)"/><path d="M378 57 L390 57" stroke="#fff" stroke-width="1.6" marker-end="url(#arB)"/>
+            <rect x="492" y="40" width="68" height="34" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="526" y="55" text-anchor="middle" class="dk">y</text><text x="526" y="68" text-anchor="middle" class="dshape">[*, d]</text>
+            <path d="M80 57 L112 57" stroke="#5A6473" stroke-width="1.6" marker-end="url(#arB2)"/><path d="M466 57 L492 57" stroke="#5A6473" stroke-width="1.6" marker-end="url(#arB2)"/>
+            <text x="244" y="128" text-anchor="middle" class="dshape">the 4×-wide h [*, 4d] is produced and consumed entirely in SMEM — never written to HBM</text>
+            <defs><marker id="arB" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto"><path d="M0 0 L5 3 L0 6 z" fill="#fff"/></marker>
+              <marker id="arB2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#5A6473"/></marker></defs>
+          </svg>
+        </div>
+        <h5 class="lx en">What changed from the previous kernel</h5><h5 class="lx ko">이전 커널과의 차이</h5>
+        <div class="diff">
+          <div class="was"><div class="h">PREVIOUS (triton old)</div>
+            <span class="lx en">A separate Triton LayerNorm, then an expand kernel that writes <span class="mono">h</span> to HBM, then a cuBLAS squeeze — h round-trips through global memory.</span>
+            <span class="lx ko">별도의 Triton LayerNorm, <span class="mono">h</span>를 HBM에 기록하는 expand 커널, 그리고 cuBLAS squeeze로 나뉘어 h가 전역 메모리를 왕복했습니다.</span></div>
+          <div class="now"><div class="h">NOW (triton b2b)</div>
+            <span class="lx en">LN+expand+SwiGLU+squeeze in one kernel with h off HBM: <b>1.34–1.39× over old</b>, 5.3–5.5× over PyTorch.</span>
+            <span class="lx ko">LN+expand+SwiGLU+squeeze를 한 커널에 담아 h를 HBM 밖에 둡니다: <b>old 대비 1.34–1.39×</b>, PyTorch 대비 5.3–5.5×.</span></div>
+        </div>
+        <h5 class="lx en">How it was built</h5><h5 class="lx ko">개발 방식</h5>
+        <p class="built lx en">A true single-kernel squeeze fusion (split-K atomic) is numerically correct but ~500–1000× slower (per-element atomicAdd). A fast fused squeeze needs a 2nd WGMMA in the epilogue — a large quack fork with no payoff at the model's d=128. So we ship <b>triton b2b for d=128 and a cute-composed path for d≥256</b> (K-bound), where Triton's BLOCK_K scales badly.</p>
+        <p class="built lx ko">진정한 단일 커널 squeeze 융합(split-K atomic)은 수치적으로는 정확하지만 per-element atomicAdd 때문에 ~500–1000× 느립니다. 빠른 fused squeeze에는 epilogue에 두 번째 WGMMA가 필요한데, 이는 quack의 큰 fork이면서 모델의 d=128에서는 이득이 없습니다. 따라서 <b>d=128은 triton b2b, d≥256(K-bound)은 cute 조합 경로</b>로 제공합니다. 후자에서는 Triton의 BLOCK_K 확장성이 떨어집니다.</p>
+        <h5 class="lx en">Full sweep — speedup vs default, by seq_len</h5><h5 class="lx ko">전체 sweep — seq_len별 default 대비 속도배수</h5>
+        <div class="sweepwrap"><img class="sweepimg" alt="Transition speedup vs seq_len — bar chart" src="__SWEEP_TRANSITION__"></div>
+        <div class="scrollx"><table class="sweep">
+          <thead><tr><th>seq_len</th><th>384</th><th>512</th><th>640</th><th>768</th><th>896</th><th>1024</th></tr></thead>
+          <tbody>
+            <tr class="r-ours"><td>Triton b2b</td><td>5.26×</td><td>5.43×</td><td>5.50×</td><td>5.51×</td><td>5.37×</td><td>5.36×</td></tr>
+            <tr class="r-base"><td>cute</td><td>3.97×</td><td>3.92×</td><td>3.96×</td><td>3.97×</td><td>4.09×</td><td>4.10×</td></tr>
+            <tr class="r-base"><td>Triton orig</td><td>3.93×</td><td>4.01×</td><td>4.04×</td><td>3.97×</td><td>4.03×</td><td>3.96×</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </details>
+  </div>
+
+  <!-- LAYERNORM_LINEAR -->
+  <div class="kblock">
+    <div class="head"><div class="ktitle">LayerNorm + Linear</div><div class="ktag">layernorm_linear · fwd + bwd · vs TransformerEngine</div></div>
+    <div class="grid2">
+      <div>
+        <div class="subh lx en">Kernel structure</div><div class="subh lx ko">커널 구조</div>
+        <p class="note lx en">Baseline runs a LayerNorm kernel that writes normalized X̂ to HBM, then a GEMM reads it back. Ours does both in one SM90 kernel.</p>
+        <p class="note lx ko">baseline은 정규화된 X̂를 HBM에 기록하는 LayerNorm 커널을 돌린 뒤 GEMM이 이를 다시 읽습니다. ours는 둘을 하나의 SM90 커널에서 처리합니다.</p>
+        <svg class="diagram" viewBox="0 0 560 244" role="img" aria-label="LayerNormLinear: baseline X-hat round-trip vs ours fused">
+          <!-- BASELINE -->
+          <text x="0" y="13" class="dlabel">BASELINE — 2 launches; normalized X̂ round-trips through HBM</text>
+          <rect x="20" y="22" width="200" height="34" rx="7" fill="#9AA3B2"/><text x="120" y="37" text-anchor="middle" class="dbox">LayerNorm</text><text x="120" y="49" text-anchor="middle" class="dbox-d">mean · rstd · normalize</text>
+          <rect x="340" y="22" width="200" height="34" rx="7" fill="#9AA3B2"/><text x="440" y="37" text-anchor="middle" class="dbox">Linear / GEMM</text><text x="440" y="49" text-anchor="middle" class="dbox-d">X̂ · W</text>
+          <rect x="0" y="90" width="560" height="20" rx="5" fill="#E8A23D" opacity="0.18"/><text x="6" y="103" class="dnote">HBM — slow</text>
+          <path d="M120 56 L280 100 L440 56" fill="none" stroke="#E8A23D" stroke-width="2.2" marker-end="url(#vL)"/>
+          <text x="280" y="126" text-anchor="middle" class="dnote">↑ X̂ (M×d) written, then read back</text>
+          <!-- OURS -->
+          <text x="0" y="158" class="dlabel">OURS — 1 SM90 kernel; X̂ stays in registers</text>
+          <rect x="0" y="166" width="560" height="46" rx="10" fill="none" stroke="#E8412B" stroke-width="1.4" stroke-dasharray="5 3"/>
+          <text x="10" y="180" class="dk" style="fill:#B5341F">GPU chip · registers</text>
+          <rect x="70" y="184" width="420" height="22" rx="6" fill="#E8412B"/><text x="280" y="199" text-anchor="middle" class="dbox" style="font-size:10px">GEMM tile: mean/rstd → normalize+affine (epilogue) → X̂·W</text>
+          <rect x="0" y="224" width="560" height="18" rx="5" fill="#E8A23D" opacity="0.18"/>
+          <path d="M70 224 L70 206" stroke="#E8A23D" stroke-width="2.4" marker-end="url(#vL2)"/>
+          <path d="M490 206 L490 224" stroke="#E8A23D" stroke-width="2.4" marker-end="url(#vL2)"/>
+          <text x="70" y="238" text-anchor="middle" class="dnote">read X</text><text x="490" y="238" text-anchor="middle" class="dnote">write Y</text>
+          <text x="280" y="238" text-anchor="middle" class="dlabel" style="fill:#E8412B;font-weight:700">X̂ never in HBM · beats TransformerEngine</text>
+          <defs>
+            <marker id="vL" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#E8A23D"/></marker>
+            <marker id="vL2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#E8A23D"/></marker>
+          </defs>
+        </svg>
+      </div>
+      <div>
+        <div class="subh lx en">Forward speedup vs default — d=128, M=262 144</div><div class="subh lx ko">forward 속도배수 vs default — d=128, M=262 144</div>
+        <p class="note lx en">TransformerEngine dips <em>below</em> the compiled-PyTorch baseline here.</p><p class="note lx ko">여기서 TransformerEngine은 compiled PyTorch 기준선 <em>아래</em>로 떨어집니다.</p>
+        <div class="chart" data-chart>
+          <div class="bar ours"><div class="lab">ours (cute)</div><div class="track"><div class="fill" data-w="100"></div></div><div class="val">2.03×</div></div>
+          <div class="bar base"><div class="lab">Triton</div><div class="track"><div class="fill" data-w="83.7"></div></div><div class="val">1.70×</div></div>
+          <div class="bar base"><div class="lab">PyTorch</div><div class="track"><div class="fill" data-w="49.3"></div></div><div class="val">1.00×</div></div>
+          <div class="bar nv"><div class="lab">TE</div><div class="track"><div class="fill" data-w="44.3"></div></div><div class="val">0.90×</div></div>
+        </div>
+        <div class="baseline-mark lx en">ours leads across d ∈ {128…768}; 1.16–3.09× vs default, always &gt; TE</div>
+        <div class="baseline-mark lx ko">d ∈ {128…768} 전 구간 선두; default 대비 1.16–3.09×, 항상 TE 위</div>
+      </div>
+    </div>
+    <details class="deep">
+      <summary><span class="lx en">Details — algorithm, what changed, how built</span><span class="lx ko">자세히 — 알고리즘 · 변경점 · 개발 방식</span></summary>
+      <div class="deepbody">
+        <h5 class="lx en">Algorithm — LN folded into the GEMM epilogue</h5><h5 class="lx ko">알고리즘 — LN을 GEMM epilogue에 folding</h5>
+        <div class="algo">
+          <svg class="diagram" viewBox="0 0 560 196" role="img" aria-label="LayerNormLinear detailed algorithm">
+            <rect x="0" y="150" width="560" height="22" rx="5" fill="#E8A23D" opacity="0.13"/><text x="6" y="164" class="dnote">HBM — read X, write Y. X̂ never appears here.</text>
+            <rect x="0" y="40" width="78" height="34" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="39" y="55" text-anchor="middle" class="dk">X</text><text x="39" y="68" text-anchor="middle" class="dshape">[M, d]</text>
+            <rect x="100" y="14" width="372" height="92" rx="10" fill="none" stroke="#E8412B" stroke-dasharray="4 3"/>
+            <text x="108" y="28" class="dk" style="fill:#B5341F">one SM90 GEMM kernel · per output tile</text>
+            <rect x="112" y="40" width="104" height="34" rx="6" fill="#E8412B"/><text x="164" y="56" text-anchor="middle" class="dbox" style="font-size:10px">tile reduce</text><text x="164" y="68" text-anchor="middle" class="dbox-d">→ mean, rstd</text>
+            <rect x="228" y="40" width="116" height="34" rx="6" fill="#E8412B"/><text x="286" y="56" text-anchor="middle" class="dbox" style="font-size:10px">epilogue</text><text x="286" y="68" text-anchor="middle" class="dbox-d">X̂ = γ·(X−μ)·rstd+β</text>
+            <rect x="356" y="40" width="104" height="34" rx="6" fill="#E8412B"/><text x="408" y="56" text-anchor="middle" class="dbox" style="font-size:10px">MMA</text><text x="408" y="68" text-anchor="middle" class="dbox-d">X̂ · W (in regs)</text>
+            <path d="M216 57 L228 57" stroke="#fff" stroke-width="1.6" marker-end="url(#arC)"/><path d="M344 57 L356 57" stroke="#fff" stroke-width="1.6" marker-end="url(#arC)"/>
+            <rect x="492" y="40" width="68" height="34" rx="7" fill="#EEF1F5" stroke="#CBD2DD"/><text x="526" y="55" text-anchor="middle" class="dk">Y</text><text x="526" y="68" text-anchor="middle" class="dshape">[M, n]</text>
+            <path d="M78 57 L112 57" stroke="#5A6473" stroke-width="1.6" marker-end="url(#arC2)"/><path d="M460 57 L492 57" stroke="#5A6473" stroke-width="1.6" marker-end="url(#arC2)"/>
+            <text x="286" y="128" text-anchor="middle" class="dshape">LN statistics computed inside the tile loop; X̂ consumed by the MMA from registers</text>
+            <defs><marker id="arC" markerWidth="7" markerHeight="7" refX="5" refY="3" orient="auto"><path d="M0 0 L5 3 L0 6 z" fill="#fff"/></marker>
+              <marker id="arC2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#5A6473"/></marker></defs>
+          </svg>
+        </div>
+        <h5 class="lx en">What changed from the previous kernel</h5><h5 class="lx ko">이전 커널과의 차이</h5>
+        <div class="diff">
+          <div class="was"><div class="h">PREVIOUS / TransformerEngine</div>
+            <span class="lx en">A LayerNorm pass writes normalized X̂ to HBM, then a separate GEMM reads it back.</span>
+            <span class="lx ko">LayerNorm 패스가 정규화된 X̂를 HBM에 기록하고, 별도의 GEMM이 이를 다시 읽습니다.</span></div>
+          <div class="now"><div class="h">NOW (cute SM90)</div>
+            <span class="lx en">LN statistics computed in-kernel and folded into the GEMM epilogue — X̂ never reaches HBM. Beats TE at every (M, d).</span>
+            <span class="lx ko">LN 통계를 커널 내에서 계산하여 GEMM epilogue에 folding합니다 — X̂가 HBM에 도달하지 않습니다. 모든 (M, d)에서 TE를 능가합니다.</span></div>
+        </div>
+        <h5 class="lx en">How it was built</h5><h5 class="lx ko">개발 방식</h5>
+        <p class="built lx en">Built on quack's SM90 folded epilogue, with per-(M,d) configs swept and wired into the dispatcher. We also tried a warp-specialized LN-stats path — it was correct but a net perf loss, and we kept that result rather than hiding it.</p>
+        <p class="built lx ko">quack의 SM90 folded epilogue를 기반으로, (M,d)별 config를 스윕하여 디스패처에 연결했습니다. warp-specialized LN-stats 경로도 시도했으나 정확하더라도 성능상 손해여서, 그 결과를 숨기지 않고 그대로 기록했습니다.</p>
+        <h5 class="lx en">Full sweep — speedup vs default, by d (M=262 144)</h5><h5 class="lx ko">전체 sweep — d별 default 대비 속도배수 (M=262 144)</h5>
+        <div class="sweepwrap"><img class="sweepimg" alt="LayerNormLinear speedup grid — bar chart" src="__SWEEP_LNL__"></div>
+        <div class="scrollx"><table class="sweep">
+          <thead><tr><th>d</th><th>128</th><th>256</th><th>384</th><th>512</th><th>768</th></tr></thead>
+          <tbody>
+            <tr class="r-ours"><td>ours (cute)</td><td>2.03×</td><td>1.59×</td><td>1.25×</td><td>1.19×</td><td>1.25×</td></tr>
+            <tr class="r-base"><td>Triton</td><td>1.70×</td><td>1.13×</td><td>0.56×</td><td>0.61×</td><td>0.26×</td></tr>
+            <tr class="r-nv"><td>TransformerEngine</td><td>0.90×</td><td>0.90×</td><td>0.88×</td><td>0.92×</td><td>0.97×</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </details>
+  </div>
+</div></section>
+
+<!-- TRACK 02 -->
+<section class="tracksec alt"><div class="wrap reveal">
+  <div class="sec-head">
+    <div class="trackno">TRACK 02</div>
+    <h2 class="lx en">AF3-like model inference</h2><h2 class="lx ko">AF3-like 모델 인퍼런스</h2>
+    <p class="lx en">AF3-like models hit a hard wall on a single GPU at roughly <span class="hl">1,000–3,000 residues</span> — the pair
+      representation is O(N²), and the network fires <b style="color:#fff">tens of thousands of un-fused kernels per step</b>
+      (≈37k linear, 25k LayerNorm, 12k activation — about 100× an LLM of the same size), so intermediates pile up in HBM.
+      Existing fixes each pay a price. Our target: large inference on <span class="hl">one ordinary GPU</span>, without a cluster and without precision loss.</p>
+    <p class="lx ko">AF3-like 모델은 단일 GPU에서 대략 <span class="hl">1,000–3,000 residue</span> 수준에서 벽에 부딪힙니다. pair 표현이
+      O(N²)인 데다, 네트워크가 <b style="color:#fff">스텝마다 수만 개의 미융합 커널</b>(linear 약 37k, LayerNorm 25k, activation 12k —
+      동급 LLM의 약 100배)을 띄워 중간 텐서가 HBM에 쌓이기 때문입니다. 기존 해법은 각각 대가를 치릅니다. 우리 목표는
+      <span class="hl">일반 GPU 한 장</span>에서, 클러스터 없이·정밀도 손실 없이 대규모 인퍼런스를 돌리는 것입니다.</p>
+  </div>
+
+  <h4 class="lx en" style="color:#fff;margin:0 0 10px">Existing approaches &amp; their limits</h4>
+  <h4 class="lx ko" style="color:#fff;margin:0 0 10px">기존 방법과 한계</h4>
+  <div class="scrollx">
+    <table class="limtable">
+      <thead><tr>
+        <th><span class="lx en">approach</span><span class="lx ko">방법</span></th>
+        <th><span class="lx en">idea</span><span class="lx ko">아이디어</span></th>
+        <th><span class="lx en">limitation</span><span class="lx ko">한계</span></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="m">Fold-CP</span><br><span class="src">NVIDIA BioNeMo · <a href="https://arxiv.org/abs/2603.14806">arXiv:2603.14806</a></span></td>
+          <td><span class="lx en">2-D context parallelism; shards the pair rep to O(N²/P). 4 GPUs → 3.6k residues; 256 GPUs → 20k tokens.</span>
+              <span class="lx ko">2-D 컨텍스트 병렬로 pair 표현을 O(N²/P)로 분산. 4 GPU → 3.6k residue, 256 GPU → 20k 토큰.</span></td>
+          <td><span class="lx en">Requires an <b>H100/B200 cluster (dozens–hundreds of GPUs)</b> — no help for single / few-GPU users.</span>
+              <span class="lx ko"><b>H100/B200 클러스터(수십~수백 장)</b>가 필요 — 단일·소수 GPU 사용자에겐 무용.</span></td>
+        </tr>
+        <tr>
+          <td><span class="m">MegaFold</span><br><span class="src"><a href="https://arxiv.org/html/2506.20686v1">arXiv:2506.20686</a></span></td>
+          <td><span class="lx en">Fused EvoAttention + DeepFusion (LN+Linear, SwiGLU) + AOT data cache. 1.23× memory, 1.73× step.</span>
+              <span class="lx ko">융합 EvoAttention + DeepFusion(LN+Linear, SwiGLU) + AOT 데이터 캐시. 메모리 1.23×, 스텝 1.73×.</span></td>
+          <td><span class="lx en">Targets <b>training</b>; max length only +1.35×. Confirms fusion is the lever — the same lever we pull per-kernel.</span>
+              <span class="lx ko"><b>학습</b> 중심이며 최대 길이는 +1.35×에 그침. 융합이 핵심 레버임을 확인 — 우리가 커널별로 당기는 그 레버.</span></td>
+        </tr>
+        <tr>
+          <td><span class="m">Unified memory</span><br><span class="src">AF3 default · <a href="https://github.com/google-deepmind/alphafold3/blob/main/docs/performance.md">DeepMind docs</a></span></td>
+          <td><span class="lx en">Spill GPU memory to host RAM on overflow.</span><span class="lx ko">메모리 초과 시 호스트 RAM으로 spill.</span></td>
+          <td><span class="lx en">Runs on 1 GPU but <b>markedly slower</b> (host bandwidth) — a stopgap.</span>
+              <span class="lx ko">1 GPU로 돌지만 <b>현저히 느림</b>(호스트 대역폭) — 임시방편.</span></td>
+        </tr>
+        <tr>
+          <td><span class="m">FastFold / AutoChunk</span><br><span class="src"><a href="https://dl.acm.org/doi/10.1145/3627535.3638465">PPoPP'24</a> · <a href="https://arxiv.org/pdf/2401.10652">arXiv:2401.10652</a></span></td>
+          <td><span class="lx en">Auto-searched activation chunking — single A100 to ~10k residues, ~75% memory cut, ~5× inference.</span>
+              <span class="lx ko">자동 탐색 activation chunking — 단일 A100에서 ~10k residue, 메모리 ~75%↓, 인퍼런스 ~5×.</span></td>
+          <td><span class="lx en">Chunking is <b>generic / op-agnostic</b> (recompute overhead, not co-designed with fused kernels); mostly <b>AlphaFold2</b>, and the parallel path targets clusters.</span>
+              <span class="lx ko">chunking이 <b>범용 / op-무관</b>(recompute 오버헤드, 융합 커널과 공동설계 안 됨); 주로 <b>AlphaFold2</b>, 병렬 경로는 클러스터 대상.</span></td>
+        </tr>
+        <tr>
+          <td><span class="m">ScaleFold</span><br><span class="src">AF2 training</span></td>
+          <td><span class="lx en">Scheduling + parallelism to cut multi-GPU communication.</span><span class="lx ko">스케줄링+병렬화로 멀티-GPU 통신 절감.</span></td>
+          <td><span class="lx en">A <b>training</b> system — limited benefit at inference.</span><span class="lx ko"><b>학습</b> 시스템 — 인퍼런스에는 이득 제한적.</span></td>
+        </tr>
+        <tr>
+          <td><span class="m">LightNobel</span><br><span class="src"><a href="https://arxiv.org/html/2505.05893v1">arXiv:2505.05893</a></span></td>
+          <td><span class="lx en">Adaptive activation quantization to extend length.</span><span class="lx ko">적응형 activation 양자화로 길이 확장.</span></td>
+          <td><span class="lx en">A <b>precision tradeoff</b> from quantization.</span><span class="lx ko">양자화에 따른 <b>정밀도 손실</b>.</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="kicker" style="margin-top:20px;background:linear-gradient(90deg, rgba(232,65,43,.12), transparent 80%);border-left-color:var(--ours);border-color:rgba(232,65,43,.3);color:#E7ECF5;display:block">
+    <div class="lx en"><b style="color:#fff">Why go further.</b> Each line above solves <em>one</em> axis in a <em>generic</em> way: Fold-CP buys length with a cluster; FastFold/AutoChunk chunk activations op-agnostically (recompute overhead) and target AF2; quantization trades precision; the rest are training systems. None co-designs <span class="hl">fused kernels + op-aware chunking</span> for <span class="hl">AF3 inference on a single GPU</span> — and that is where the gains compound.</div>
+    <div class="lx ko"><b style="color:#fff">왜 더 나아가야 하나.</b> 위 항목들은 각자 <em>한 축</em>을 <em>범용적으로</em> 풉니다 — Fold-CP는 클러스터로 길이를 사고, FastFold/AutoChunk는 op-무관하게 activation을 자른 뒤(recompute 오버헤드) AF2를 겨냥하며, 양자화는 정밀도를 내주고, 나머지는 학습 시스템입니다. <span class="hl">융합 커널 + op별 chunking</span>을 <span class="hl">AF3 단일 GPU 인퍼런스</span>에 맞춰 공동설계한 사례는 없습니다 — 바로 거기서 이득이 곱해집니다.</div>
+  </div>
+
+  <div class="twocol" style="margin-top:22px">
+    <div class="ipanel">
+      <div class="subh" style="color:#fff;font-size:.9rem;margin-bottom:10px">
+        <span class="lx en">Where each approach lands</span><span class="lx ko">각 방법의 위치</span></div>
+      <!-- original schematic: GPUs needed (x) vs reachable length (y) -->
+      <svg class="diagram" viewBox="0 0 480 250" role="img" aria-label="Approaches by GPUs needed vs reachable length">
+        <line x1="54" y1="20" x2="54" y2="210" stroke="#3A445E" stroke-width="1.2"/>
+        <line x1="54" y1="210" x2="460" y2="210" stroke="#3A445E" stroke-width="1.2"/>
+        <text x="54" y="232" class="dlabel" style="fill:#9AA6BE">1 GPU</text>
+        <text x="250" y="232" text-anchor="middle" class="dlabel" style="fill:#9AA6BE">→  more GPUs needed  →</text>
+        <text x="455" y="232" text-anchor="end" class="dlabel" style="fill:#9AA6BE">cluster (256)</text>
+        <text x="14" y="120" class="dlabel" style="fill:#9AA6BE" transform="rotate(-90 14 120)">reachable length →</text>
+        <!-- "what users have" region -->
+        <rect x="54" y="20" width="120" height="190" fill="rgba(232,65,43,.06)"/>
+        <text x="60" y="36" class="dshape" style="fill:#FBC9C0">what most users have</text>
+        <!-- points -->
+        <circle cx="80" cy="180" r="6" fill="#9AA3B2"/><text x="92" y="184" class="dshape" style="fill:#E7ECF5">naive · ~3k res</text>
+        <circle cx="92" cy="150" r="6" fill="#9AA3B2"/><text x="104" y="154" class="dshape" style="fill:#E7ECF5">unified mem (slow)</text>
+        <circle cx="100" cy="120" r="6" fill="#E8A23D"/><text x="112" y="124" class="dshape" style="fill:#E7ECF5">AutoChunk ~3.2× (overhead)</text>
+        <circle cx="430" cy="60" r="6" fill="#76B900"/><text x="424" y="50" text-anchor="end" class="dshape" style="fill:#E7ECF5">Fold-CP · 20k tok / 256 GPU</text>
+        <circle cx="300" cy="95" r="6" fill="#76B900"/><text x="294" y="88" text-anchor="end" class="dshape" style="fill:#E7ECF5">Fold-CP · 3.6k / 4 GPU</text>
+        <!-- ours target -->
+        <circle cx="120" cy="70" r="8" fill="#E8412B"/><text x="134" y="74" class="dk" style="fill:#FBC9C0">ours target — 1 GPU, large</text>
+        <text x="120" y="58" text-anchor="middle" class="dshape" style="fill:#E8412B">chunk + offload + fused</text>
+      </svg>
+      <p style="color:var(--text-onink-dim);font-size:.82rem;margin-top:6px" class="lx en">Original schematic (not to scale). Fold-CP buys length with GPUs; we aim for length on one GPU.</p>
+      <p style="color:var(--text-onink-dim);font-size:.82rem;margin-top:6px" class="lx ko">개념도(비례 아님). Fold-CP는 GPU 수로 길이를 사고, 우리는 한 장으로 길이를 노립니다.</p>
+    </div>
+    <div class="ipanel">
+      <h4 class="lx en">What we'd build</h4><h4 class="lx ko">우리가 만들 것</h4>
+      <ul>
+        <li class="lx en">Chunking / streaming of the O(N²) pair representation</li><li class="lx ko">O(N²) pair 표현의 chunking / 스트리밍</li>
+        <li class="lx en">CPU offload for cold tensors, overlapped with compute</li><li class="lx ko">cold 텐서의 CPU offload를 연산과 오버랩</li>
+        <li class="lx en">Inference-only fused paths — fewer intermediates means <span class="hl">less memory <em>and</em> less recompute</span> than chunking alone</li><li class="lx ko">인퍼런스 전용 융합 경로 — 중간 텐서가 줄어 chunking만 할 때보다 <span class="hl">메모리와 recompute를 동시에 절감</span></li>
+        <li class="lx en">No cluster; no quantization precision loss</li><li class="lx ko">클러스터 불필요; 양자화 정밀도 손실 없음</li>
+      </ul>
+      <div class="kicker" style="margin-top:16px;background:linear-gradient(90deg, rgba(118,185,0,.12), transparent 80%);border-left-color:var(--nv);border-color:rgba(118,185,0,.3);color:#E7ECF5">
+        <span class="lx en"><span class="hl-nv">cuEquivariance is not the speed ceiling</span> — LayerNorm ≈ 1.0× at large d, and ours beats it 1.2–1.4× on TriMul.</span>
+        <span class="lx ko"><span class="hl-nv">cuEquivariance는 속도 한계가 아닙니다</span> — 큰 d에서 LayerNorm ≈ 1.0×, TriMul에선 우리가 1.2–1.4× 능가.</span>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- TRACK 03 -->
+<section class="tracksec"><div class="wrap reveal">
+  <div class="sec-head">
+    <div class="trackno">TRACK 03</div>
+    <h2 class="lx en">Education &amp; ramp-up</h2><h2 class="lx ko">교육 &amp; 역량 강화</h2>
+    <p class="lx en">We are not GPU-kernel specialists by training, so we want to close the gap deliberately rather than keep leaning
+      on AI. Here is where we stand, where AI plateaus, and what would help.</p>
+    <p class="lx ko">우리는 GPU 커널 전공자가 아니므로, AI에 계속 의존하기보다 그 간극을 의도적으로 좁히고자 합니다. 현재 수준,
+      AI가 한계에 부딪히는 지점, 그리고 도움이 될 것을 정리했습니다.</p>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">
+    <div class="lightpanel">
+      <h4 class="lx en">Where we stand</h4><h4 class="lx ko">현재 수준</h4>
+      <ul>
+        <li class="lx en"><b>Triton:</b> comfortable — we write and autotune it directly.</li><li class="lx ko"><b>Triton:</b> 익숙합니다 — 직접 작성하고 오토튜닝합니다.</li>
+        <li class="lx en"><b>CuTeDSL (cute):</b> used it this round, but AI-driven.</li><li class="lx ko"><b>CuTeDSL (cute):</b> 이번에 사용했으나 AI 주도였습니다.</li>
+        <li class="lx en">We iterate fast, validate correctness against fp64, and read <span class="mono">do_bench</span> / roofline numbers.</li>
+        <li class="lx ko">빠르게 반복하고, fp64 대비 정확도를 검증하며, <span class="mono">do_bench</span>·roofline 수치를 해석합니다.</li>
+      </ul>
+    </div>
+    <div class="lightpanel">
+      <h4 class="lx en">Where AI plateaus</h4><h4 class="lx ko">AI가 한계에 부딪히는 지점</h4>
+      <ul>
+        <li class="lx en">cute results land near Triton-level, or amount to simple quack variants.</li><li class="lx ko">cute 결과가 Triton 수준이거나 quack의 단순 변형에 그칩니다.</li>
+        <li class="lx en">Not yet fluent in <span class="hl">warp specialization, TMA / WGMMA pipelining, epilogue-fusion design, occupancy &amp; register/SMEM budgeting</span>.</li>
+        <li class="lx ko"><span class="hl">warp specialization, TMA / WGMMA 파이프라이닝, epilogue 융합 설계, occupancy·레지스터/SMEM 예산</span>은 아직 능숙하지 않습니다.</li>
+        <li class="lx en">Hard to judge <em>when</em> a hand-written CuTeDSL kernel would beat the AI / quack baseline.</li>
+        <li class="lx ko">손으로 작성한 CuTeDSL이 AI·quack 기준선을 <em>언제</em> 능가할지 판단하기 어렵습니다.</li>
+      </ul>
+    </div>
+    <div class="lightpanel">
+      <h4 class="lx en">What would help from NVIDIA</h4><h4 class="lx ko">NVIDIA에 요청드릴 것</h4>
+      <ul>
+        <li class="lx en">Internal CuTeDSL / SM90 material and a set of canonical kernel patterns.</li><li class="lx ko">내부 CuTeDSL / SM90 자료와 canonical 커널 패턴 모음.</li>
+        <li class="lx en">A light pairing / office-hours channel during co-optimization.</li><li class="lx ko">공동 최적화 기간의 가벼운 페어링 / 오피스아워 채널.</li>
+        <li class="lx en">Guidance on reading a profile and choosing the next lever.</li><li class="lx ko">프로파일을 읽고 다음 레버를 고르는 방법에 대한 가이드.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="kicker">
+    <span class="lx en">📐 <b>Learn from the diff</b> — we build v1, NVIDIA re-optimizes to v2, and we study exactly what changed and why.</span>
+    <span class="lx ko">📐 <b>diff로 배우기</b> — 우리가 v1을 만들고 NVIDIA가 v2로 재최적화하면, 무엇이 왜 바뀌었는지 정확히 학습합니다.</span>
+  </div>
+</div></section>
+
+<!-- NEXT -->
+<section class="wrap reveal">
+  <div class="sec-head">
+    <div class="eyebrow lx en">outcome</div><div class="eyebrow lx ko">결과물</div>
+    <h2 class="lx en">From today's pre-meeting to 7/2</h2><h2 class="lx ko">오늘 사전 미팅에서 7/2까지</h2>
+  </div>
+  <div class="next">
+    <div class="nextcard"><div class="when lx en">today</div><div class="when lx ko">오늘</div>
+      <h4 class="lx en">Agree the three tracks</h4><h4 class="lx ko">세 트랙 합의</h4>
+      <p class="lx en">Confirm scope and which kernel / op leads each track.</p><p class="lx ko">범위와 각 트랙을 이끌 커널 / op를 확정합니다.</p></div>
+    <div class="nextcard"><div class="when lx en">before 7/2</div><div class="when lx ko">7/2 전</div>
+      <h4 class="lx en">Prepare evidence &amp; questions</h4><h4 class="lx ko">근거·질문 준비</h4>
+      <p class="lx en">TriMul backward results; a written CuTeDSL question list.</p><p class="lx ko">TriMul backward 결과와 CuTeDSL 질문 목록을 준비합니다.</p></div>
+    <div class="nextcard"><div class="when lx en">7/2 offline</div><div class="when lx ko">7/2 오프라인</div>
+      <h4 class="lx en">Work the diffs together</h4><h4 class="lx ko">함께 diff 작업</h4>
+      <p class="lx en">Pick one kernel and do the v1→v2 co-optimization live.</p><p class="lx ko">커널 하나를 골라 v1→v2 공동 최적화를 현장에서 진행합니다.</p></div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <h3 class="lx en">Methodology &amp; honest caveats</h3><h3 class="lx ko">방법론 &amp; 정직한 단서</h3>
+  <ul>
+    <li class="lx en">All baselines are <b>torch.compile</b>'d PyTorch (never eager) — eager is launch-bound and an unfair reference.</li>
+    <li class="lx ko">모든 기준선은 <b>torch.compile</b> PyTorch입니다(eager 아님) — eager는 launch-bound라 공정한 비교가 아닙니다.</li>
+    <li class="lx en">H100 80GB, <b>bf16</b>, B=1. TriMul: D=128, single layer + mask; each kernel at its best regime (eager / compile / CUDA-graph). cuEquivariance &amp; dt-v1 reproduce team-gm's harness.</li>
+    <li class="lx ko">H100 80GB, <b>bf16</b>, B=1. TriMul: D=128, 단일 레이어 + 마스크; 각 커널은 최적 regime(eager / compile / CUDA-graph). cuEquivariance·dt-v1은 team-gm 하네스를 재현합니다.</li>
+    <li class="lx en">TriMul figures are <b>forward-only</b>; our backward is in development (within ~10% of dt-v1 at large L, ahead of cuEquivariance).</li>
+    <li class="lx ko">TriMul 수치는 <b>forward 전용</b>이며, backward는 개발 중입니다(큰 L에서 dt-v1의 ~10% 이내, cuEquivariance보다 앞섭니다).</li>
+    <li class="lx en">Sources: Fold-CP <a href="https://arxiv.org/abs/2603.14806">arXiv:2603.14806</a>, MegaFold <a href="https://arxiv.org/html/2506.20686v1">2506.20686</a>, AutoChunk <a href="https://arxiv.org/pdf/2401.10652">2401.10652</a>, LightNobel <a href="https://arxiv.org/html/2505.05893v1">2505.05893</a>, AF3 <a href="https://github.com/google-deepmind/alphafold3/blob/main/docs/performance.md">docs</a>. Built from validated repo numbers (<span class="mono">scripts/plot_bench.py</span>, <span class="mono">plot_sweep.py</span>, <span class="mono">miniworld_kernels.viz</span>).</li>
+    <li class="lx ko">출처: Fold-CP <a href="https://arxiv.org/abs/2603.14806">arXiv:2603.14806</a>, MegaFold <a href="https://arxiv.org/html/2506.20686v1">2506.20686</a>, AutoChunk <a href="https://arxiv.org/pdf/2401.10652">2401.10652</a>, LightNobel <a href="https://arxiv.org/html/2505.05893v1">2505.05893</a>, AF3 <a href="https://github.com/google-deepmind/alphafold3/blob/main/docs/performance.md">문서</a>. 레포의 검증된 수치 기반(<span class="mono">scripts/plot_bench.py</span>, <span class="mono">plot_sweep.py</span>, <span class="mono">miniworld_kernels.viz</span>).</li>
+  </ul>
+</div></footer>
+
+<script>
+(function(){
+  var rm = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var btns = document.querySelectorAll('.langbtn');
+  function setLang(l){
+    document.body.setAttribute('data-lang', l);
+    btns.forEach(function(b){ b.setAttribute('aria-pressed', b.getAttribute('data-lang')===l ? 'true':'false'); });
+  }
+  btns.forEach(function(b){ b.addEventListener('click', function(){ setLang(b.getAttribute('data-lang')); }); });
+  setLang('en');
+
+  var io = new IntersectionObserver(function(es){
+    es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
+  }, {threshold:0.1});
+  document.querySelectorAll('.reveal').forEach(function(el){ io.observe(el); });
+
+  var cio = new IntersectionObserver(function(es){
+    es.forEach(function(e){ if(e.isIntersecting){
+      e.target.querySelectorAll('.fill').forEach(function(f){ f.style.width=(f.getAttribute('data-w')||0)+'%'; });
+      cio.unobserve(e.target);
+    }});
+  }, {threshold:0.25});
+  document.querySelectorAll('[data-chart]').forEach(function(c){
+    if(rm){ c.querySelectorAll('.fill').forEach(function(f){ f.style.width=(f.getAttribute('data-w')||0)+'%'; }); }
+    else { cio.observe(c); }
+  });
+})();
+</script>

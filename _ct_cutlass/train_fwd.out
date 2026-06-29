@@ -1,0 +1,47 @@
+=== BUILD ===
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(151): warning #12-D: parsing restarts here after previous syntax error
+        nullptr, dC, y.data_ptr<float>(), dD } };
+                                               ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(151): warning #940-D: missing return statement at end of non-void function "ct::fused_y"
+        nullptr, dC, y.data_ptr<float>(), dD } };
+                                               ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(152): error: identifier "G" is undefined
+    launch<G>(args, cond.device());
+           ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(152): error: expected a ")"
+    launch<G>(args, cond.device());
+                  ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(152): error: expected a ";"
+    launch<G>(args, cond.device());
+                        ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(153): error: expected a declaration
+    return {y, scale};
+    ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(159): error: identifier "fused_h" is undefined
+    m.def("fused_h", &fused_h, "h = silu(x@Wa^T) * b  (fused epilogue)");
+                      ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(160): error: identifier "fused_y" is undefined
+    m.def("fused_y", &fused_y, "y = sigmoid(cond@Wsc^T + b_sc) * out ; returns {y, scale}");
+                      ^
+
+/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu(163): error: expected a declaration
+  }
+  ^
+
+33 errors detected in the compilation of "/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu".
+error: command '/home/psk6950/miniworld-kernels/.pixi/envs/default/bin/nvcc' failed with exit code 2
+=== BUILD EXIT 1 ===
+=== TEST ===
+Traceback (most recent call last):
+  File "/home/psk6950/miniworld-kernels/_ct_cutlass/train_fwd_test.py", line 3, in <module>
+    import ct_train_ext as ext
+ModuleNotFoundError: No module named 'ct_train_ext'

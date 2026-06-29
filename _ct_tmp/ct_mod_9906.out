@@ -1,0 +1,7 @@
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+d= 128 L= 2048 | inf_cos=1.000000 | train fwd=1.000000 dx=1.000000 dWa=1.000000 dbsc=1.000000 | yshape=(2, 2048, 128)
+d= 768 L=  512 | inf_cos=1.000000 | train fwd=1.000000 dx=1.000000 dWa=1.000000 dbsc=1.000000 | yshape=(2, 512, 768)
+DONE
+[exit=0] CT MOD DONE

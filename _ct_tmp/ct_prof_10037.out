@@ -1,0 +1,17 @@
+===== ROOFLINE (per-kernel) =====
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3  [per-kernel CUDA-graph + roofline]
+    L   kernel      us     GB/s    %BW  TFLOP/s   %cmp
+  384   expand    15.2      856    26%      120    24%
+  384  squeeze    14.2      705    21%       80    16%
+  768   expand    25.4      651    19%      143    29%
+  768  squeeze    33.1      428    13%       68    14%
+ 1024   expand    29.1      648    19%      166    34%
+ 1024  squeeze    29.6      571    17%      102    21%
+DONE
+
+===== ncu availability =====
+lrwxrwxrwx 1 psk6950 cssb 30 Apr  3  2025 /home/psk6950/miniworld-kernels/.pixi/envs/default/bin/ncu -> ../nsight-compute-2025.1.1/ncu
+NVIDIA (R) Nsight Compute Command Line Profiler
+Copyright (c) 2018-2025 NVIDIA Corporation
+Version 2025.1.1.0 (build 35528883) (public-release)
+[exit=0] PROF DONE

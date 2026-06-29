@@ -1,0 +1,19 @@
+host=node01 date=Sat Jun 27 14:05:10 KST 2026
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/autograd/graph.py:865: UserWarning: The AccumulateGrad node's stream does not match the stream of the node that produced the incoming gradient. This may incur unnecessary synchronization and break CUDA graph capture if the AccumulateGrad node's stream is the default stream. This mismatch is caused by an AccumulateGrad node created prior to the current iteration being kept alive. This can happen if the autograd graph is still being kept alive by tensors such as the loss, or if you are using DDP, which will stash a reference to the node. To resolve the mismatch, delete all references to the autograd graph or ensure that DDP initialization is performed under the same stream as subsequent forwards. If the mismatch is intentional, you can use torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False) to suppress this warning. (Triggered internally at /pytorch/torch/csrc/autograd/input_buffer.cpp:240.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+=== CORRECTNESS (production default, _FWD_MODE=cublas) ===
+  atom d=128 M=2048 worst_cos=1.00000 OK
+  token d=768 M=384 worst_cos=1.00000 OK
+
+=== CUDA-graph fwd+bwd (us): _FWD_MODE cublas vs fused, + eager/compile ===
+stream      M    d |   cublas    fused    eager  compile | cub_vs_eager fused_vs_eager fused_vs_cub
+  atom   2048  128 |     91.0     93.4    116.1     86.9 |        1.28x          1.24x        0.97x
+  atom   4096  128 |    116.2    119.8    142.1    113.1 |        1.22x          1.19x        0.97x
+  atom   8192  128 |    163.4    158.8    200.0    159.7 |        1.22x          1.26x        1.03x
+ token    384  768 |    148.9    145.9    177.1    156.0 |        1.19x          1.21x        1.02x
+ token    512  768 |    166.2    164.6    199.5    172.3 |        1.20x          1.21x        1.01x
+ token    768  768 |    214.3    226.7    240.5    207.6 |        1.12x          1.06x        0.95x
+ token   1024  768 |    228.5    246.2    264.2    233.7 |        1.16x          1.07x        0.93x
+DONE
+[exit=0] CT FIN DONE

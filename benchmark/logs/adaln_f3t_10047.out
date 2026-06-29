@@ -1,0 +1,21 @@
+host=node01
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+=== grad correctness ===
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/autograd/graph.py:865: UserWarning: Attempting to run cuBLAS, but there was no current CUDA context! Attempting to set the primary context... (Triggered internally at /pytorch/aten/src/ATen/cuda/CublasHandlePool.cpp:330.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+  d=768 M=16384: fwd=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+  d=128 M=131072: fwd=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+
+#### TOKEN d=768 fp32 (fwd+bwd)
+    seq        M |    eager  compile adaln_train   fused3 | f3/comp  f3/at
+    384    12288 |    979.8    735.4       720.2    851.3 |   0.86x  0.85x
+    512    16384 |   1245.6    902.0       869.5   1049.9 |   0.86x  0.83x
+    768    24576 |   1695.4   1201.0      1264.8   1409.3 |   0.85x  0.90x
+   1024    32768 |   2199.7   1555.3      1588.0   1849.3 |   0.84x  0.86x
+
+#### ATOM d=128 fp32 (fwd+bwd)
+    seq        M |    eager  compile adaln_train   fused3 | f3/comp  f3/at
+   2048    65536 |   1082.3    496.2       444.7    524.5 |   0.95x  0.85x
+   4096   131072 |   1628.3    919.6       809.4    980.5 |   0.94x  0.83x
+   8192   262144 |   3035.2   1699.9      1505.3   1699.6 |   1.00x  0.89x
+EXIT=0

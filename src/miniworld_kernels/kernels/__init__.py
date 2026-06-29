@@ -11,6 +11,10 @@ from __future__ import annotations
 from .adaln.triton.main import triton_adaptive_layer_norm
 from .augmented_attention.triton.main import triton_augmented_attention_pair_bias
 from .bias_only_attention.triton.gate_out import fused_gate_out, sigmoid_gate_fused
+from .conditioned_transition.triton.interface import (
+    cond_transition_inference_dispatch,
+)
+from .conditioned_transition.triton.training import cond_transition_train
 from .bias_only_attention.triton.main import triton_bias_only_attention
 from .layernorm.interface import layernorm_kernel
 from .layernorm.triton.main import triton_layernorm
@@ -36,6 +40,8 @@ def cute_transition_fused(*args, **kwargs):
 
 
 __all__ = [
+    "cond_transition_inference_dispatch",
+    "cond_transition_train",
     "cuda_transition",
     "cute_transition_fused",
     "fused_gate_out",

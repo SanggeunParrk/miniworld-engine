@@ -36,6 +36,10 @@ from miniworld_kernels.kernels.layernorm.dispatch_cache import gpu_key, mbucket
 
 # ---- static H100 thresholds (defaults / fallback) --------------------------------
 KERNEL_MIN_L = 384
+# Fused gate+to_out vs split, keyed on the OUTPUT width n_out (= d_pair = to_out's
+# out_features). fused wins for n_out <= 128 (incl. the bidirectional case where the
+# contraction d_hidden=2h is large but the output stays d_pair=128); split wins for
+# wider outputs where the fused tl.dot tile degrades on SM90.
 GATE_FUSED_MAX_DH = 128
 INFER_CONCAT_MAX_DH = 256
 
@@ -125,7 +129,12 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
     """True -> fused_gate_out; False -> split. Static H100 by DH; calibrated+cached
     per GPU on other arches (or when forced)."""
     mode = autotune_mode()
-    static = d_hidden <= GATE_FUSED_MAX_DH
+    # The fused tl.dot's tile is [BLOCK_M, OUTPUT_N] (N = n_out = d_pair); the
+    # contraction d_hidden is just looped over (BLOCK_K). So fused-vs-split is decided
+    # by the OUTPUT width n_out, NOT by d_hidden. (bench_back_designs conflated them
+    # because there d_hidden == n_out; the bidir case d_hidden=2h, n_out=d_pair shows
+    # fused still wins at n_out=128 despite d_hidden=256.)
+    static = n_out <= GATE_FUSED_MAX_DH
     if mode == "off":
         return static
     if mode != "force" and _is_sm90(device):

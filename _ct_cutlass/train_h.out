@@ -1,0 +1,15 @@
+=== BUILD (fused_h only) ===
+running build_ext
+W0627 15:10:56.631000 2903439 site-packages/torch/utils/cpp_extension.py:535] There are no g++ version bounds defined for CUDA version 12.8
+building 'ct_train_ext' extension
+creating build/temp.linux-x86_64-cpython-312/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass
+/home/psk6950/miniworld-kernels/.pixi/envs/default/bin/nvcc -I/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass/include -I/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass/tools/util/include -I/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass -I/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/include -I/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -I/home/psk6950/miniworld-kernels/.pixi/envs/default/include -I/home/psk6950/miniworld-kernels/.pixi/envs/default/include/python3.12 -c /home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.cu -o build/temp.linux-x86_64-cpython-312/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 --expt-relaxed-constexpr --expt-extended-lambda -gencode arch=compute_90a,code=sm_90a -DCT_NO_FUSED_Y -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=ct_train_ext
+creating build/lib.linux-x86_64-cpython-312
+g++ -pthread -B /home/psk6950/miniworld-kernels/.pixi/envs/default/compiler_compat -fno-strict-overflow -Wsign-compare -DNDEBUG -O2 -Wall -fPIC -O2 -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/include -fPIC -O2 -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/include -shared -Wl,--allow-shlib-undefined -Wl,-rpath,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -Wl,-rpath-link,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -Wl,--allow-shlib-undefined -Wl,-rpath,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -Wl,-rpath-link,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib build/temp.linux-x86_64-cpython-312/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass/ct_train.o -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/lib -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -lc10 -ltorch -ltorch_cpu -ltorch_python -lcudart -lc10_cuda -ltorch_cuda -o build/lib.linux-x86_64-cpython-312/ct_train_ext.cpython-312-x86_64-linux-gnu.so
+copying build/lib.linux-x86_64-cpython-312/ct_train_ext.cpython-312-x86_64-linux-gnu.so -> 
+=== BUILD EXIT 0 ===
+=== TEST ===
+[atom] cos(h) = 1.000000  (M=2048 K=128 ND=256)
+[token] cos(h) = 1.000000  (M=1024 K=768 ND=1536)
+FUSED_H DONE
+=== DONE ===

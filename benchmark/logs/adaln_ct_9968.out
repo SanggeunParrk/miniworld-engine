@@ -1,0 +1,12 @@
+host=node01
+/home/psk6950/miniworld-kernels/.pixi/envs/default/bin/nvcc
+Build cuda_12.8.r12.8/compiler.35583870_0
+building (nvcc, CUTLASS templates — slow)...
+[1/2] /home/psk6950/miniworld-kernels/.pixi/envs/default/bin/nvcc --generate-dependencies-with-compile --dependency-output gemm_tf32.cuda.o.d -DTORCH_EXTENSION_NAME=adaln_cutlass_tf32 -DTORCH_API_INCLUDE_EXTENSION_H -I/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass/include -I/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass/tools/util/include -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/include -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/include -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/include/python3.12 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda -DCUTLASS_ENABLE_TENSOR_CORE_MMA=1 -DNDEBUG -c /home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/adaln/cutlass/gemm_tf32.cu -o gemm_tf32.cuda.o 
+[2/2] c++ gemm_tf32.cuda.o -shared -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -lcudart -o adaln_cutlass_tf32.so
+build OK
+  M=4096 K=768 N=768: cos=1.000000 maxabs=0.000e+00
+  M=32768 K=768 N=1536: cos=1.000000 maxabs=0.000e+00
+  M=8192 K=128 N=256: cos=1.000000 maxabs=0.000e+00
+DONE
+EXIT=0

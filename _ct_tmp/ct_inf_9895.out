@@ -1,0 +1,13 @@
+host=node01 date=Sat Jun 27 12:03:11 KST 2026
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+stream      M     d |       cos    maxerr |  fused_us  torch_us speedup
+------------------------------------------------------------------------
+  atom   2048   128 | FAIL OutOfResources: out of resource: shared memory, Required: 393728, 
+  atom   4096   128 | FAIL OutOfResources: out of resource: shared memory, Required: 393728, 
+  atom   8192   128 | FAIL OutOfResources: out of resource: shared memory, Required: 393728, 
+ token    384   768 | FAIL CompilationError: at 26:12:
+    rows = pid_m * BLOCK_M + tl.arange(0
+ token   1024   768 | FAIL CompilationError: at 26:12:
+    rows = pid_m * BLOCK_M + tl.arange(0
+DONE
+[exit=0] CT INF DONE

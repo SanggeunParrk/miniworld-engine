@@ -1,0 +1,18 @@
+host=node01
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+
+## d=768 seq=384 M=12288 torch.float32
+  FWD: cond_aff=31.6  gemm=90.5  epilogue=69.1  | sum=191.1
+  BWD: bwd_x=81.1  dcond_aff(D@W)=118.9  dW(Dt@aff)=166.4  dsb=59.4  condLNbwd=65.5  | sum=491.2
+  TOTAL fwd+bwd ~= 682.4 us
+
+## d=768 seq=1024 M=32768 torch.float32
+  FWD: cond_aff=73.4  gemm=226.4  epilogue=171.0  | sum=470.8
+  BWD: bwd_x=204.7  dcond_aff(D@W)=277.3  dW(Dt@aff)=423.5  dsb=132.5  condLNbwd=140.8  | sum=1178.9
+  TOTAL fwd+bwd ~= 1649.7 us
+
+## d=128 seq=8192 M=262144 torch.float32
+  FWD: cond_aff=95.1  gemm=154.7  epilogue=226.0  | sum=475.8
+  BWD: bwd_x=271.6  dcond_aff(D@W)=148.8  dW(Dt@aff)=151.9  dsb=167.0  condLNbwd=151.2  | sum=890.6
+  TOTAL fwd+bwd ~= 1366.4 us
+DONE

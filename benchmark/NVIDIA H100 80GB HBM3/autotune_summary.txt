@@ -1,15 +1,21 @@
 Triton autotune summary
-miniworld_kernels.kernels.layernorm.triton.main.layer_norm_bwd_dx_fused
-  no cache entries captured
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_input_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
 
-miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
-  no cache entries captured
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_lnw_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
 
-miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal
-  no cache entries captured
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_weight_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
 
-miniworld_kernels.kernels.transition.triton.main.transition_bwd_kernel
-  no cache entries captured
-
-miniworld_kernels.kernels.transition.triton.main.transition_fwd_kernel
-  no cache entries captured
+miniworld_kernels.kernels.adaln.triton.main.adaln_fwd_kernel
+  key=(128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3

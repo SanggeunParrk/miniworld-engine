@@ -1,0 +1,13 @@
+host=node01
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+
+M=32768 K=768 N=768 (39GF): cuBLAS=145.7us (265TF/s)  triton=329.6us (117TF/s) cuBLAS/tri=0.44x cos=1.00000
+  triton best: BM: 256, BN: 128, BK: 32, GM: 8, num_warps: 8, num_ctas: 1, num_stages: 4, maxnreg: None
+
+M=32768 K=768 N=1536 (77GF): cuBLAS=275.5us (281TF/s)  triton=648.8us (119TF/s) cuBLAS/tri=0.42x cos=1.00000
+  triton best: BM: 256, BN: 128, BK: 32, GM: 8, num_warps: 8, num_ctas: 1, num_stages: 3, maxnreg: None
+
+M=262144 K=128 N=256 (17GF): cuBLAS=197.4us (87TF/s)  triton=255.5us (67TF/s) cuBLAS/tri=0.77x cos=1.00000
+  triton best: BM: 256, BN: 64, BK: 32, GM: 8, num_warps: 4, num_ctas: 1, num_stages: 3, maxnreg: None
+DONE
+EXIT=0

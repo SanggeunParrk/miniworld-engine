@@ -1,0 +1,14 @@
+host=node01 date=Sat Jun 27 17:20:57 KST 2026
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+
+=== FORWARD: 1+2|3+4+5 vs b2b vs eager vs compile (CUDA graph, us) ===
+stream      M    d |       cos   cos_b2b |   12_345      b2b    eager  compile |  vs_b2b vs_eager  vs_comp
+  atom   2048  128 |  0.999999  0.999999 |     13.3     25.1     30.8     45.4 |   1.88x    2.32x    3.41x
+  atom   4096  128 |  0.999999  0.999999 |     16.5     25.3     39.6     50.2 |   1.53x    2.40x    3.04x
+  atom   8192  128 |  0.999999  0.999999 |     29.0     27.0     57.8     70.5 |   0.93x    2.00x    2.43x
+ token    384  768 |  0.999999       n/a |     29.8      n/a     49.9     66.9 |    n/a    1.67x    2.25x
+ token    512  768 |  0.999999       n/a |     32.6      n/a     49.8     73.5 |    n/a    1.53x    2.25x
+ token    768  768 |  0.999999       n/a |     57.0      n/a     60.8     79.1 |    n/a    1.07x    1.39x
+ token   1024  768 |  0.999999       n/a |     60.7      n/a     68.0     87.2 |    n/a    1.12x    1.44x
+DONE
+[exit=0] CT G DONE

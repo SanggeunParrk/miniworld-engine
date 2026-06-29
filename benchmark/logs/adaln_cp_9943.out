@@ -1,0 +1,11 @@
+host=node01
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+
+## d=768 seq=1024 M=32768
+  torch.float32   : FAILED: TypeError: a_dtype should be float16 or float8   | cuBLAS_materialize=312.8us
+  torch.bfloat16  : cos=0.999997  time=198.6us   | cuBLAS_materialize=192.4us
+
+## d=128 seq=8192 M=262144
+  torch.float32   : FAILED: TypeError: a_dtype should be float16 or float8   | cuBLAS_materialize=535.2us
+  torch.bfloat16  : cos=0.999997  time=155.7us   | cuBLAS_materialize=366.7us
+DONE

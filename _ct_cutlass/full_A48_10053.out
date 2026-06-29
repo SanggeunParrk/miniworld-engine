@@ -1,0 +1,27 @@
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+  [correctness] atom M=98304 d=128 ...
+    cos_min=1.00000
+  [correctness] atom M=196608 d=128 ...
+    cos_min=1.00000
+  [correctness] atom M=393216 d=128 ...
+    cos_min=1.00000
+  [correctness] token M=18432 d=768 ...
+    cos_min=1.00000
+  [correctness] token M=24576 d=768 ...
+    cos_min=1.00000
+  [correctness] token M=36864 d=768 ...
+    cos_min=1.00000
+  [correctness] token M=49152 d=768 ...
+    cos_min=1.00000
+
+=== FULL pure-CUTLASS fwd+bwd vs cond_transition_train vs compile (CUDA graph) ===
+stream      M    d |  cos_min |  cutlass     ours  compile |  vs_ours  vs_comp
+  atom  98304  128 |  1.00000 |   1391.6   1373.4   1505.3 |    0.99x    1.08x
+  atom 196608  128 |  1.00000 |   2681.4   2675.5   2910.5 |    1.00x    1.09x
+  atom 393216  128 |  1.00000 |   5079.5   5083.0   5650.8 |    1.00x    1.11x
+ token  18432  768 |  1.00000 |   2430.3   2216.0   2502.6 |    0.91x    1.03x
+ token  24576  768 |  1.00000 |   3152.0   2970.4   3232.3 |    0.94x    1.03x
+ token  36864  768 |  1.00000 |   4705.7   4337.0   4872.2 |    0.92x    1.04x
+ token  49152  768 |  1.00000 |   6600.8   6018.6   6388.4 |    0.91x    0.97x
+FULL DONE
+[exit=0] FULLA48 DONE

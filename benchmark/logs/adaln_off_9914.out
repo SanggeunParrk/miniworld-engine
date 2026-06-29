@@ -1,0 +1,158 @@
+host=node01 date=Sat Jun 27 13:28:26 KST 2026
+
+### token full eager :: d_single_token=768 min_seq_len=384 max_seq_len=1024 seq_len_step=128 compile=false
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/lightning/fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python scripts/bench.py kernel=adaptive_layernorm implement ...
+adaptive_layernorm_n_layers=1_full_time_32:
+   seq_len  pytorch (Time (ms))  triton (Time (ms))
+0    384.0             1.000752           17.761087
+1    512.0             1.256544           21.578048
+2    640.0             1.452624           28.507488
+3    768.0             1.698432           32.923346
+4    896.0             1.960416           39.687248
+5   1024.0             2.202800           44.628273
+
+Triton autotune summary
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_input_kernel
+  key=(12288, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(16384, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(20480, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(24576, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(28672, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(32768, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_lnw_kernel
+  key=(12288, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(16384, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(20480, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(24576, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(28672, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(32768, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_weight_kernel
+  key=(12288, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(16384, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(20480, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(24576, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(28672, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(32768, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_fwd_kernel
+  key=(768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=64, BLOCK_NX=128, num_warps=8, num_stages=3
+[exit=0]
+
+### token full compile :: d_single_token=768 min_seq_len=384 max_seq_len=1024 seq_len_step=128 compile=true
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/lightning/fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python scripts/bench.py kernel=adaptive_layernorm implement ...
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+adaptive_layernorm_n_layers=1_full_time_32_compile:
+   seq_len  pytorch (Time (ms))  triton (Time (ms))
+0    384.0             0.710000           17.284576
+1    512.0             0.864032           21.412479
+2    640.0             0.971728           28.620768
+3    768.0             1.138848           33.320433
+4    896.0             1.302176           40.199921
+5   1024.0             1.461664           45.588064
+
+Triton autotune summary
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_input_kernel
+  key=(12288, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(16384, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(20480, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(24576, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(28672, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(32768, 768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_lnw_kernel
+  key=(12288, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(16384, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(20480, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(24576, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(28672, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(32768, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_weight_kernel
+  key=(12288, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(16384, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(20480, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(24576, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(28672, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(32768, 768, 768, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_fwd_kernel
+  key=(768, 768, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=64, BLOCK_NX=128, num_warps=8, num_stages=3
+[exit=0]
+
+### atom full eager :: d_single_token=128 min_seq_len=2048 max_seq_len=8192 seq_len_step=2048 compile=false
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/lightning/fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python scripts/bench.py kernel=adaptive_layernorm implement ...
+adaptive_layernorm_n_layers=1_full_time_32:
+   seq_len  pytorch (Time (ms))  triton (Time (ms))
+0   2048.0             1.099200           10.721856
+1   4096.0             1.644800           21.269936
+2   6144.0             2.372832           31.882273
+3   8192.0             3.050688           42.507729
+
+Triton autotune summary
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_input_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_lnw_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_weight_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_fwd_kernel
+  key=(128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+[exit=0]
+
+### atom full compile :: d_single_token=128 min_seq_len=2048 max_seq_len=8192 seq_len_step=2048 compile=true
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:1480: DeprecationWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/lightning/fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python scripts/bench.py kernel=adaptive_layernorm implement ...
+/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+adaptive_layernorm_n_layers=1_full_time_32_compile:
+   seq_len  pytorch (Time (ms))  triton (Time (ms))
+0   2048.0             0.786112           10.666912
+1   4096.0             0.752048           21.269056
+2   6144.0             1.069728           31.873920
+3   8192.0             1.360544           42.502159
+
+Triton autotune summary
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_input_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_lnw_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_bwd_weight_kernel
+  key=(131072, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(196608, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(262144, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+  key=(65536, 128, 128, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=64, BLOCK_NC=32, BLOCK_NX=32, num_warps=4, num_stages=3
+
+miniworld_kernels.kernels.adaln.triton.main.adaln_fwd_kernel
+  key=(128, 128, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32, float32) -> BLOCK_M=32, BLOCK_NC=64, BLOCK_NX=64, num_warps=4, num_stages=3
+[exit=0]
+DONE

@@ -1,0 +1,49 @@
+host=node01  A=48
+############ INFERENCE ############
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+=== correctness (fp32) ===
+  verify d=768 M=16384 torch.float32: materialize cos=1.000000 maxabs=5.718e-04 | fused cos=1.000000 maxabs=5.633e-03
+  verify d=128 M=131072 torch.float32: materialize cos=1.000000 maxabs=1.071e-03 | fused cos=1.000000 maxabs=6.527e-03
+=== correctness (bf16) ===
+  verify d=768 M=16384 torch.bfloat16: materialize cos=0.999997 maxabs=3.125e-02 | fused cos=0.999995 maxabs=3.125e-02
+
+## TOKEN fp32  d=768 dtype=torch.float32
+   seq        M |  pt_eager  pt_compile  cur_triton  ours_mat  ours_fused | best_vs_comp  best_vs_cur
+   384    18432 |    0.4191      0.3139      0.6116    0.2491      0.6372 |        1.26x        2.46x
+   512    24576 |    0.5429      0.4019      0.7425    0.3246      0.6692 |        1.24x        2.29x
+   640    30720 |    0.6593      0.4889      0.9705    0.3982      0.7442 |        1.23x        2.44x
+   768    36864 |    0.7823      0.5842      1.0993    0.4732      1.0264 |        1.23x        2.32x
+   896    43008 |    0.9025      0.6734      1.3335    0.5488      1.0538 |        1.23x        2.43x
+  1024    49152 |    1.0276      0.7617      1.4653    0.6226      1.1541 |        1.22x        2.35x
+
+## ATOM fp32  d=128 dtype=torch.float32
+   seq        M |  pt_eager  pt_compile  cur_triton  ours_mat  ours_fused | best_vs_comp  best_vs_cur
+  2048    98304 |    0.5268      0.2637      0.1704    0.1735      0.1157 |        2.28x        1.47x
+  4096   196608 |    1.0119      0.5031      0.3213    0.3221      0.2093 |        2.40x        1.54x
+  6144   294912 |    1.4986      0.7366      0.4684    0.4755      0.3009 |        2.45x        1.56x
+  8192   393216 |    1.9864      0.9735      0.6140    0.6247      0.3891 |        2.50x        1.58x
+
+############ TRAINING ############
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+=== grad correctness (fp32) ===
+  d=768 M=16384 torch.float32: fwd_cos=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+  d=128 M=131072 torch.float32: fwd_cos=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+=== grad correctness (bf16) ===
+  d=768 M=16384 torch.bfloat16: fwd_cos=0.999997 | dx=0.99999 dcond=0.99999 dlnw=0.99999 dWs=0.99999 dsb=0.99999 dWb=1.00000
+
+## TOKEN fp32  d=768 dtype=torch.float32  (fwd+bwd)
+   seq        M |  pt_eager  cur_triton  ours_train |  vs_eager   vs_cur
+   384    18432 |    1.3781     26.0162      0.9947 |     1.39x   26.15x
+   512    24576 |    1.7004     33.4485      1.2490 |     1.36x   26.78x
+   640    30720 |    2.0727     42.8996      1.5360 |     1.35x   27.93x
+   768    36864 |    2.4631     51.1925      1.7925 |     1.37x   28.56x
+   896    43008 |    2.8181     61.3131      2.0652 |     1.36x   29.69x
+  1024    49152 |    3.1955     68.3332      2.3404 |     1.37x   29.20x
+
+## ATOM fp32  d=128 dtype=torch.float32  (fwd+bwd)
+   seq        M |  pt_eager  cur_triton  ours_train |  vs_eager   vs_cur
+  2048    98304 |    1.2490     16.0670      0.6328 |     1.97x   25.39x
+  4096   196608 |    2.3636     31.8863      1.1588 |     2.04x   27.52x
+  6144   294912 |    3.3875     47.9976      1.6788 |     2.02x   28.59x
+  8192   393216 |    4.4144     64.3416      2.2032 |     2.00x   29.20x
+EXIT=0

@@ -1,0 +1,28 @@
+host=node01 date=Sat Jun 27 15:47:33 KST 2026
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+  [correctness] atom M=2048 d=128 ...
+    cos_min=1.00000
+  [correctness] atom M=4096 d=128 ...
+    cos_min=1.00000
+  [correctness] atom M=8192 d=128 ...
+    cos_min=1.00000
+  [correctness] token M=384 d=768 ...
+    cos_min=1.00000
+  [correctness] token M=512 d=768 ...
+    cos_min=1.00000
+  [correctness] token M=768 d=768 ...
+    cos_min=1.00000
+  [correctness] token M=1024 d=768 ...
+    cos_min=1.00000
+
+=== FULL pure-CUTLASS fwd+bwd vs cond_transition_train vs compile (CUDA graph) ===
+stream      M    d |  cos_min |  cutlass     ours  compile |  vs_ours  vs_comp
+  atom   2048  128 |  1.00000 |    122.2     90.7    315.7 |    0.74x    2.58x
+  atom   4096  128 |  1.00000 |    143.7    116.4    263.4 |    0.81x    1.83x
+  atom   8192  128 |  1.00000 |    181.0    157.9    261.3 |    0.87x    1.44x
+ token    384  768 |  1.00000 |    228.9    147.0    320.3 |    0.64x    1.40x
+ token    512  768 |  1.00000 |    243.3    163.8    274.5 |    0.67x    1.13x
+ token    768  768 |  1.00000 |    278.8    213.5    274.3 |    0.77x    0.98x
+ token   1024  768 |  1.00000 |    300.1    228.4    280.7 |    0.76x    0.94x
+FULL DONE
+=== FULL E2E DONE ===

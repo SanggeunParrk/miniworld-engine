@@ -1,0 +1,16 @@
+NVIDIA H100 80GB HBM3
+stream      M    d |          stage | fused_tri cublas+elem  ratio
+  atom   2048  128 |     dh+gatebwd |      14.9         7.5  1.97x
+  atom   2048  128 |   dx+swiglubwd |      27.1        11.3  2.40x
+  atom   2048  128 |          dcond |       9.0         5.5  1.63x
+  atom   8192  128 |     dh+gatebwd |      49.3        13.4  3.67x
+  atom   8192  128 |   dx+swiglubwd |      55.9        26.6  2.10x
+  atom   8192  128 |          dcond |      22.6        10.0  2.25x
+ token    384  768 |     dh+gatebwd |      94.7        13.9  6.83x
+ token    384  768 |   dx+swiglubwd |     132.4        24.4  5.43x
+ token    384  768 |          dcond |      22.1         9.2  2.40x
+ token   1024  768 |     dh+gatebwd |     153.3        21.5  7.12x
+ token   1024  768 |   dx+swiglubwd |     233.2        38.2  6.11x
+ token   1024  768 |          dcond |      22.0        10.1  2.18x
+DONE
+[exit=0] CT MG DONE

@@ -1,0 +1,32 @@
+NVIDIA H100 80GB HBM3
+stream      M    d |      gemm |   triton   cublas tri/cub
+  atom   2048  128 |        dh |     20.7      6.9   2.99x
+  atom   2048  128 |     dcond |     20.5      6.9   2.96x
+  atom   2048  128 |  dx_1gemm |     21.1      8.2   2.57x
+  atom   2048  128 |   dx_2dot |     24.4      8.2   2.98x
+  atom   4096  128 |        dh |     20.5      6.9   2.97x
+  atom   4096  128 |     dcond |     20.5      8.0   2.57x
+  atom   4096  128 |  dx_1gemm |     20.5      8.3   2.46x
+  atom   4096  128 |   dx_2dot |     24.2      8.3   2.92x
+  atom   8192  128 |        dh |     20.4      9.1   2.26x
+  atom   8192  128 |     dcond |     20.7     10.4   1.98x
+  atom   8192  128 |  dx_1gemm |     23.2     11.2   2.07x
+  atom   8192  128 |   dx_2dot |     42.9     11.2   3.83x
+ token    384  768 |        dh |     24.3     11.7   2.07x
+ token    384  768 |     dcond |     20.9     10.1   2.06x
+ token    384  768 |  dx_1gemm |     71.1     20.8   3.42x
+ token    384  768 |   dx_2dot |     99.9     20.8   4.81x
+ token    512  768 |        dh |     24.2     12.3   1.97x
+ token    512  768 |     dcond |     20.8     10.2   2.03x
+ token    512  768 |  dx_1gemm |     71.3     23.0   3.09x
+ token    512  768 |   dx_2dot |    101.8     23.0   4.42x
+ token    768  768 |        dh |     29.1     19.7   1.48x
+ token    768  768 |     dcond |     21.0     10.3   2.05x
+ token    768  768 |  dx_1gemm |     83.2     26.3   3.16x
+ token    768  768 |   dx_2dot |    197.9     26.3   7.52x
+ token   1024  768 |        dh |     29.3     17.7   1.65x
+ token   1024  768 |     dcond |     20.8     10.4   2.00x
+ token   1024  768 |  dx_1gemm |     83.1     26.4   3.14x
+ token   1024  768 |   dx_2dot |    200.0     26.4   7.57x
+DONE
+[exit=0] CT M2 DONE

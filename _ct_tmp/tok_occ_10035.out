@@ -1,0 +1,8 @@
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3  [CUDA-graph]
+    L    d |       cos       us   (prior token CUDA-graph: 384=29.8 512=32.6 768=57.0 1024=60.7)
+  384  768 |  0.999999    29.5
+  512  768 |  0.999999    30.2
+  768  768 |  0.999999    58.6
+ 1024  768 |  0.999999    60.6
+DONE
+[exit=0] TOK DONE

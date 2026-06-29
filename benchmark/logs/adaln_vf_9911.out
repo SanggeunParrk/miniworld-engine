@@ -1,0 +1,8 @@
+host=node01 date=Sat Jun 27 13:25:56 KST 2026
+--- verify only ---
+  d=768 M=16384 torch.float32: fwd_cos=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+  d=128 M=131072 torch.float32: fwd_cos=1.000000 | dx=1.00000 dcond=1.00000 dlnw=1.00000 dWs=1.00000 dsb=1.00000 dWb=1.00000
+  d=768 M=16384 torch.bfloat16: fwd_cos=0.999997 | dx=1.00000 dcond=0.99999 dlnw=0.99999 dWs=0.99999 dsb=0.99999 dWb=1.00000
+VERIFY DONE
+[exit=0]
+DONE

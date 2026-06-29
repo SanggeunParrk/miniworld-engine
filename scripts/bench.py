@@ -5,6 +5,7 @@ import importlib
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 from typing import Literal
 
 # When run as `python scripts/bench.py`, sys.path[0] is `.../scripts`, which can
@@ -36,6 +37,7 @@ from miniworld_kernels.modules import (
     TriangleAttention,
     TriangleMultiplication,
 )
+from miniworld_kernels.viz import style_for
 
 if not torch.cuda.is_available():
     msg = "CUDA is not available. Please run on a machine with a CUDA-capable GPU."
@@ -59,15 +61,40 @@ class BenchConfig(BaseModel):
     seq_len_step: int = 64
 
     kernel: str
-    implementations: list[ImplementationType] = [
-        ImplementationType.PYTORCH,
-        ImplementationType.TRITON,
+    implementations: list[str] = [
+        ImplementationType.PYTORCH.value,
+        ImplementationType.TRITON.value,
     ]
     mode: Literal["forward", "full"]
     metric: Literal["time", "memory"]
     compile: bool = False
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
+    name_suffix: str = ""
+
+
+class ImplementationSpec(NamedTuple):
+    impl: ImplementationType
+    ln_impl: ImplementationType | None
+    label: str
+
+
+def parse_implementation_spec(raw: str) -> ImplementationSpec:
+    key = raw.strip().lower()
+    if key in {impl.value for impl in ImplementationType}:
+        return ImplementationSpec(ImplementationType(key), None, key)
+    if key in {"triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch"}:
+        return ImplementationSpec(ImplementationType.TRITON, ImplementationType.PYTORCH, raw)
+    if key in {
+        "triton_ln",
+        "triton_kernel_ln",
+        "triton_dispatch_ln",
+        "triton-ln-kernel",
+        "triton-ln-dispatch",
+    }:
+        return ImplementationSpec(ImplementationType.TRITON, ImplementationType.CUDA, raw)
+    msg = f"Unknown implementation spec: {raw!r}"
+    raise ValueError(msg)
 
 
 def bench_memory(func: Callable, warmup: int = 3, rep: int = 10) -> dict[str, float]:
@@ -122,15 +149,21 @@ def bench_time(
 def bench_triangle_multiplication(
     conf: BenchConfig,
     seq_len: int,
-    implementation: ImplementationType,
+    implementation: str,
     fabric: Fabric,
 ):
+    spec = parse_implementation_spec(implementation)
+
     class MultiTriangleMultiplication(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    TriangleMultiplication(conf.d_pair, implementation=implementation)
+                    TriangleMultiplication(
+                        conf.d_pair,
+                        implementation=spec.impl,
+                        ln_implementation=spec.ln_impl or ImplementationType.PYTORCH,
+                    )
                     for _ in range(conf.n_layers)
                 ],
             )
@@ -170,9 +203,11 @@ def bench_triangle_multiplication(
 def bench_triangle_attention(
     conf: BenchConfig,
     seq_len: int,
-    implementation: ImplementationType,
+    implementation: str,
     fabric: Fabric,
 ):
+    spec = parse_implementation_spec(implementation)
+
     class MultiTriangleAttention(nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -180,7 +215,7 @@ def bench_triangle_attention(
                 [
                     TriangleAttention(
                         conf.d_pair,
-                        implementation=implementation,
+                        implementation=spec.impl,
                         use_self_attention=False,
                     )
                     for _ in range(conf.n_layers)
@@ -222,15 +257,17 @@ def bench_triangle_attention(
 def bench_transition(
     conf: BenchConfig,
     seq_len: int,
-    implementation: ImplementationType,
+    implementation: str,
     fabric: Fabric,
 ):
+    spec = parse_implementation_spec(implementation)
+
     class MultiTransition(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    Transition(conf.d_pair, implementation=implementation)
+                    Transition(conf.d_pair, implementation=spec.impl)
                     for _ in range(conf.n_layers)
                 ],
             )
@@ -265,10 +302,12 @@ def bench_transition(
 def bench_adaptive_layernorm(
     conf: BenchConfig,
     seq_len: int,
-    implementation: ImplementationType,
+    implementation: str,
     fabric: Fabric,
 ):
-    if implementation not in {
+    spec = parse_implementation_spec(implementation)
+    implementation_type = spec.impl
+    if implementation_type not in {
         ImplementationType.PYTORCH,
         ImplementationType.TRITON,
     }:
@@ -284,7 +323,7 @@ def bench_adaptive_layernorm(
                     AdaptiveLayerNorm(
                         d_hidden=conf.d_single_token,
                         d_cond=conf.d_single_token,
-                        implementation=implementation,
+                        implementation=implementation_type,
                     )
                     for _ in range(conf.n_layers)
                 ],
@@ -339,15 +378,16 @@ def bench_adaptive_layernorm(
 def bench_augmented_attention_token(
     conf: BenchConfig,
     seq_len: int,
-    implementation: ImplementationType,
+    implementation: str,
     fabric: Fabric,
 ):
+    spec = parse_implementation_spec(implementation)
     model = AugmentedAttentionPairBias(
         d_single=conf.d_single_token,
         d_cond=conf.d_single_token,
         d_pair=conf.d_pair,
         n_head=16,
-        implementation=implementation,
+        implementation=spec.impl,
     ).to(DEVICE)
 
     if conf.compile:
@@ -379,15 +419,16 @@ def bench_augmented_attention_token(
 def bench_augmented_attention_atom(
     conf: BenchConfig,
     seq_len: int,
-    implementation: ImplementationType,
+    implementation: str,
     fabric: Fabric,
 ):
+    spec = parse_implementation_spec(implementation)
     model = AugmentedAttentionPairBias(
         d_single=conf.d_single_atom,
         d_cond=conf.d_single_atom,
         d_pair=conf.d_pair_atom,
         n_head=4,
-        implementation=implementation,
+        implementation=spec.impl,
     ).to(DEVICE)
 
     if conf.compile:
@@ -429,12 +470,11 @@ KERNEL_MAP = {
     "augmented_attention_atom": bench_augmented_attention_atom,
 }
 
-impl_styles = {
-    ImplementationType.PYTORCH: ("green", "-"),
-    ImplementationType.TRITON: ("blue", "-"),
-    ImplementationType.CUTE: ("purple", "-"),
-    ImplementationType.CUEQUIVARIANCE: ("red", "-"),
-}
+# Per-implementation (colour, linestyle) come from the repo-wide canonical
+# palette (miniworld_kernels.viz) so these line plots match the grouped-bar
+# figures from scripts/plot_bench.py — same backend, same colour, every figure.
+def impl_style(impl: str):  # noqa: ANN201 - matplotlib (color, linestyle)
+    return style_for(impl)
 
 # Triton autotuner objects live in the per-op `triton/main.py` of each kernel.
 AUTOTUNE_MODULES = {
@@ -568,14 +608,16 @@ def main(cfg: DictConfig) -> None:
     ]
     if conf.compile:
         bench_args.append("compile")
+    if conf.name_suffix:
+        bench_args.append(conf.name_suffix)
 
     bench_config = triton.testing.Benchmark(
         x_names=["seq_len"],
         x_vals=list(range(conf.min_seq_len, conf.max_seq_len + 1, conf.seq_len_step)),
         line_arg="implementation",
         line_vals=conf.implementations,
-        line_names=[impl.value for impl in conf.implementations],
-        styles=[impl_styles.get(impl, ("gray", "-")) for impl in conf.implementations],
+        line_names=conf.implementations,
+        styles=[impl_style(impl) for impl in conf.implementations],
         ylabel=ylabel,
         plot_name="_".join(bench_args),
         args={"conf": conf, "fabric": fabric},

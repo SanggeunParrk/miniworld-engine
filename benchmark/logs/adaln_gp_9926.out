@@ -1,0 +1,42 @@
+host=node01
+torch 2.10.0+cu128 NVIDIA H100 80GB HBM3
+
+## M=32768 NX=768 NC=768 torch.float32
+  -- wgrad --
+   D.t()@cond_aff            : 388.0
+   (cond_aff.t()@D).t()      : 392.9
+   separate dscale.t,dy.t    : 383.4
+   Dc(contig)@cond_aff       : 246.7  (+ contiguify cost excl.)
+  -- dgrad --
+   D@w_cat                   : 275.0
+   addmm dscale@Ws + dy@Wb   : 407.0
+  -- fwd gemm --
+   cond_aff@w_cat.t()        : 224.6
+   cond_aff@wt(contig)       : 280.7
+
+## M=12288 NX=768 NC=768 torch.float32
+  -- wgrad --
+   D.t()@cond_aff            : 169.0
+   (cond_aff.t()@D).t()      : 167.9
+   separate dscale.t,dy.t    : 191.2
+   Dc(contig)@cond_aff       : 111.7  (+ contiguify cost excl.)
+  -- dgrad --
+   D@w_cat                   : 118.4
+   addmm dscale@Ws + dy@Wb   : 221.4
+  -- fwd gemm --
+   cond_aff@w_cat.t()        : 90.1
+   cond_aff@wt(contig)       : 102.1
+
+## M=262144 NX=128 NC=128 torch.float32
+  -- wgrad --
+   D.t()@cond_aff            : 153.7
+   (cond_aff.t()@D).t()      : 153.3
+   separate dscale.t,dy.t    : 208.7
+   Dc(contig)@cond_aff       : 161.2  (+ contiguify cost excl.)
+  -- dgrad --
+   D@w_cat                   : 147.9
+   addmm dscale@Ws + dy@Wb   : 343.2
+  -- fwd gemm --
+   cond_aff@w_cat.t()        : 157.0
+   cond_aff@wt(contig)       : 197.7
+DONE

@@ -1,0 +1,13 @@
+host=node01 date=Sat Jun 27 12:04:27 KST 2026
+torch 2.10.0+cu128  NVIDIA H100 80GB HBM3
+stream      M     d |       cos    maxerr |  fused_us  torch_us speedup
+------------------------------------------------------------------------
+  atom   2048   128 |  0.999999  5.52e-03 |      33.3      57.6   1.73x
+  atom   4096   128 |  0.999999  6.62e-03 |      33.1      56.2   1.70x
+  atom   8192   128 |  0.999999  5.47e-03 |      33.3      67.2   2.02x
+ token    384   768 | FAIL CompilationError: at 26:12:
+    rows = pid_m * BLOCK_M + tl.arange(0
+ token   1024   768 | FAIL CompilationError: at 26:12:
+    rows = pid_m * BLOCK_M + tl.arange(0
+DONE
+[exit=0] CT INF DONE

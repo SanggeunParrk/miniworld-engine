@@ -1,0 +1,22 @@
+=== BUILD ===
+running build_ext
+W0627 14:51:53.593000 2899070 site-packages/torch/utils/cpp_extension.py:659] Attempted to use ninja as the BuildExtension backend but we could not find ninja.. Falling back to using the slow distutils backend.
+W0627 14:51:53.604000 2899070 site-packages/torch/utils/cpp_extension.py:525] The detected CUDA version (12.9) has a minor version mismatch with the version that was used to compile PyTorch (12.8). Most likely this shouldn't be a problem.
+W0627 14:51:53.604000 2899070 site-packages/torch/utils/cpp_extension.py:535] There are no g++ version bounds defined for CUDA version 12.9
+building 'ct_gate_ext' extension
+/usr/local/cuda/bin/nvcc -I/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass/include -I/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass/tools/util/include -I/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/include -I/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -I/usr/local/cuda/include -I/home/psk6950/miniworld-kernels/.pixi/envs/default/include/python3.12 -c gate_gemm.cu -o build/temp.linux-x86_64-cpython-312/gate_gemm.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -std=c++17 --expt-relaxed-constexpr --expt-extended-lambda -gencode arch=compute_90a,code=sm_90a -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=ct_gate_ext
+ptxas info    : (C7510) Potential Performance Loss: wgmma.mma_async instructions are serialized due to wgmma pipeline crossing function boundary at a function call in the function '_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_34MainloopSm90TmaGmmaWarpSpecializedILi7ENS5_IJNS4_1CILi1EEENSA_ILi2EEESB_EEENS1_35KernelTmaWarpSpecializedCooperativeEEENS5_IJNSA_ILi128EEESG_NSA_ILi32EEEEEEfNS5_IJlSB_lEEEfSJ_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_4SM904GMMA30MMA_64x128x8_F32TF32TF32_SS_TNILNSN_7ScaleInE1ELSP_1EEEEEENS4_6LayoutINS5_IJSC_SB_SB_EEENS5_IJSB_NSA_ILi0EEESU_EEEEENS5_IJNS4_10UnderscoreESX_SX_EEEEENS4_23SM90_TMA_LOAD_MULTICASTENS4_14ComposedLayoutINS4_7SwizzleILi3ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi32EEENSS_INS5_IJNSA_ILi8EEESH_EEENS5_IJSH_SB_EEEEEEEvNS4_8identityENS4_13SM90_TMA_LOADES1A_vS1B_EENS_8epilogue10collective6detail29Sm90TmaWarpSpecializedAdapterINS1F_15DefaultEpilogueISJ_SJ_NS1E_6thread17LinearCombinationIfLi1EffLNS1J_9ScaleType4KindE0ELNS_15FloatRoundStyleE2EfEENS1_15EpilogueDefaultEEEEEvvEEEEvNT_6ParamsE'
+creating build/lib.linux-x86_64-cpython-312
+g++ -pthread -B /home/psk6950/miniworld-kernels/.pixi/envs/default/compiler_compat -fno-strict-overflow -Wsign-compare -DNDEBUG -O2 -Wall -fPIC -O2 -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/include -fPIC -O2 -isystem /home/psk6950/miniworld-kernels/.pixi/envs/default/include -shared -Wl,--allow-shlib-undefined -Wl,-rpath,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -Wl,-rpath-link,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -Wl,--allow-shlib-undefined -Wl,-rpath,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -Wl,-rpath-link,/home/psk6950/miniworld-kernels/.pixi/envs/default/lib -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib build/temp.linux-x86_64-cpython-312/gate_gemm.o -L/home/psk6950/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/torch/lib -L/usr/local/cuda/lib64 -lc10 -ltorch -ltorch_cpu -ltorch_python -lcudart -lc10_cuda -ltorch_cuda -o build/lib.linux-x86_64-cpython-312/ct_gate_ext.cpython-312-x86_64-linux-gnu.so
+copying build/lib.linux-x86_64-cpython-312/ct_gate_ext.cpython-312-x86_64-linux-gnu.so -> 
+=== BUILD EXIT 0 ===
+=== TEST ===
+[GATE] shape M=1024 K=768 N=1536
+[GATE] cos(cutlass, fp32_ref) = 1.000000
+[GATE] cos(torch_tf32, fp32_ref) = 1.000000
+[GATE] maxabsdiff(cutlass, torch_tf32) = 0.000e+00
+[GATE] cutlass = 21.71 us
+[GATE] torch(cuBLAS tf32) = 14.93 us
+[GATE] cutlass/cublas ratio = 1.454x
+[GATE] RESULT: PASS (cos>=0.999 and <=1.5x cuBLAS)
+=== DONE ===
