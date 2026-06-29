@@ -24,6 +24,8 @@ dist/
 # generated benchmark/profiling artifacts
 benchmarks/artifacts/*
 !benchmarks/artifacts/.gitkeep
+!benchmarks/artifacts/**/
+!benchmarks/artifacts/**/.gitkeep
 benchmark/logs/
 *.out
 

@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:30:00
-#SBATCH --output=benchmark/logs/unified_%j.out
+#SBATCH --output=benchmarks/artifacts/logs/unified_%j.out
 
 set -uo pipefail
 cd /home/psk6950/miniworld-kernels
@@ -25,9 +25,9 @@ run() {  # $1 = kernel, rest = extra hydra overrides
   k="$1"; shift
   echo ""
   echo "############################################################"
-  echo "# scripts/bench.py  kernel=$k  $*"
+  echo "# benchmarks/runners/bench.py  kernel=$k  $*"
   echo "############################################################"
-  "$PY" scripts/bench.py kernel="$k" \
+  "$PY" benchmarks/runners/bench.py kernel="$k" \
     implementations='[pytorch,triton,cuequivariance]' \
     mode=forward metric=time max_seq_len=512 seq_len_step=128 "$@"
   echo "[exit=$?]"

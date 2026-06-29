@@ -60,10 +60,10 @@ benchmarks/
 └── artifacts/                    # generated outputs; gitignored by default
 experiments/                      # one-off probes, diagnostics, migration debt
 third_party/                      # external checkouts/submodules
-scripts/bench.py                  # legacy active bench entry during migration
-config/bench.yaml                 # legacy active bench config during migration
+scripts/bench.py                  # compatibility wrapper for the bench runner
+benchmarks/configs/bench.yaml     # active bench config
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
-tests/run_bench.sbatch            # single SLURM launcher for scripts/bench.py
+tests/run_bench.sbatch            # single SLURM launcher for benchmarks/runners/bench.py
 ```
 
 In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical),
@@ -74,21 +74,21 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 ## Benchmarking
 
 **Benchmark policy: follow the team-gm harness unless there is a specific reason
-not to.** During migration, `scripts/bench.py` + `config/bench.yaml` +
-`tests/run_bench.sbatch` remain the active path. The target home is
-`benchmarks/runners/`, `benchmarks/configs/`, and `benchmarks/suites/`. Do not
-replace them with ad hoc timing snippets or custom markdown summaries for final
-results.
+not to.** The active path is `benchmarks/runners/bench.py` +
+`benchmarks/configs/bench.yaml` + `tests/run_bench.sbatch`. The `scripts/`
+entry points are compatibility wrappers only. Do not replace the harness with
+ad hoc timing snippets or custom markdown summaries for final results.
 
 Detailed benchmark conventions live in `benchmarks/CONVENTIONS.md`.
 
-One entry point — `scripts/bench.py`, driven by `config/bench.yaml` (hydra):
+One entry point — `benchmarks/runners/bench.py`, driven by
+`benchmarks/configs/bench.yaml` (hydra):
 
 ```bash
 # Unified repo env (.pixi/). --frozen keeps the cu12 TE core fix (see CLAUDE.md).
 srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
   bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-    PYTHONPATH=src python scripts/bench.py kernel=triangle_multiplication \
+    PYTHONPATH=src python benchmarks/runners/bench.py kernel=triangle_multiplication \
       implementations=[pytorch,triton,cuequivariance] compile=false"'
 # or submit: sbatch tests/run_bench.sbatch
 ```
@@ -108,7 +108,8 @@ stable, move the definition into `benchmarks/suites/`.
 The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
 implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN
 cute kernels). cutlass-dsl + quack are in the unified env, so the same
-`pixi run --frozen ... scripts/bench.py implementations=[cute]` runs it.
+`pixi run --frozen ... benchmarks/runners/bench.py implementations=[cute]`
+runs it.
 
 ## Status
 

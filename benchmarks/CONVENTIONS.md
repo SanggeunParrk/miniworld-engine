@@ -19,9 +19,8 @@ Do **not** invent ad hoc benchmark methodology for this repo unless the user
 explicitly asks for a one-off experiment.
 
 - If an op is already covered by the repo's unified bench harness, use
-  `scripts/bench.py` + `config/bench.yaml` + `tests/run_bench.sbatch` during
-  migration. The target home is `benchmarks/runners/`, `benchmarks/configs/`,
-  and `benchmarks/suites/`.
+  `benchmarks/runners/bench.py` + `benchmarks/configs/bench.yaml` +
+  `tests/run_bench.sbatch`.
 - That harness is the descendant of the `team-gm` benchmarking flow. Follow its
   shapes, dtype mode, compile/eager mode, and reporting format unless there is a
   concrete reason not to.
@@ -63,7 +62,7 @@ Let `A=benchmarks/artifacts/layernorm_linear`.
    ```bash
    srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 \
      --mem=64G --cpus-per-task=8 --time=00:30:00 \
-     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python -m miniworld_kernels.kernels.<kernel>.bench"' \
+     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python benchmarks/runners/bench.py kernel=<kernel>"' \
      | tee "$A/<name>.out"
    ```
 2. **Render** the table + graphs into the same artifact directory. **Never run this on the
@@ -72,13 +71,13 @@ Let `A=benchmarks/artifacts/layernorm_linear`.
    ```bash
    srun --account=cssb --qos=cssb_h100 --partition=h100 --mem=16G --cpus-per-task=4 --time=00:10:00 \
      bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-       python scripts/plot_bench.py '"\"$A/<name>.out\" \"$A\""' --name <name>"'
+       python benchmarks/runners/plot_bench.py '"\"$A/<name>.out\" \"$A\""' --name <name>"'
    ```
    This writes `<name>.md` (markdown tables + embedded graphs) and one PNG per
    metric (`_fwd.png`, `_fwd_bwd.png`) into `$A`. Promote only curated reports
    into `benchmarks/reports/`.
 
-`scripts/plot_bench.py` parses the standard bench-output format
+`benchmarks/runners/plot_bench.py` parses the standard bench-output format
 (`=== M=.. d_in=.. d_out=.. ===` blocks + `torch.compile`/`TE` timing lines), so
 any bench that prints in that format gets table + graph for free.
 
@@ -89,8 +88,8 @@ figures read as **one coherent set** (this matters for the paper: a reviewer
 sees the same backend in the same colour in every plot). Defined once in
 `src/miniworld_kernels/viz/style.py` and imported by both:
 
-- `scripts/plot_bench.py` (grouped bars from `.out`) and
-- `scripts/bench.py` (Triton `perf_report` line plots).
+- `benchmarks/runners/plot_bench.py` (grouped bars from `.out`) and
+- `benchmarks/runners/bench.py` (Triton `perf_report` line plots).
 
 Rules baked into the module:
 

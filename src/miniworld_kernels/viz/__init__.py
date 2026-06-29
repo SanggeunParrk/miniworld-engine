@@ -1,7 +1,8 @@
 """Shared visualization conventions for miniworld-kernels benchmarks.
 
 One palette, one theme, one set of display labels — used by *every* plotting
-path in the repo (``scripts/plot_bench.py`` and ``scripts/bench.py``) so that a
+path in the repo (``benchmarks/runners/plot_bench.py`` and
+``benchmarks/runners/bench.py``) so that a
 backend always gets the same colour, label and ordering across every figure.
 This is what makes the benchmark figures publication-coherent: a reader (or a
 paper reviewer) sees "ours" in the same hot colour in every plot, and the

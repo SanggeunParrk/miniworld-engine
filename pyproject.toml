@@ -13,7 +13,7 @@ dependencies = [
   "scipy",
   # cuequivariance baselines (CUEQUIVARIANCE implementation path)
   "cuequivariance-torch>=0.9,<0.10",
-  # single bench harness (scripts/bench.py, team-gm hydra style)
+  # single bench harness (benchmarks/runners/bench.py, team-gm hydra style)
   "hydra-core",
   "lightning",
   "omegaconf",

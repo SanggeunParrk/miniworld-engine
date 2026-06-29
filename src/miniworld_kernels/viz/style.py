@@ -3,8 +3,8 @@
 The single source of truth for how benchmark figures look in this repo. Both
 plotting paths import from here:
 
-- ``scripts/plot_bench.py`` — matplotlib grouped bars from a parsed ``.out``.
-- ``scripts/bench.py`` — Triton ``perf_report`` line plots (wants
+- ``benchmarks/runners/plot_bench.py`` — matplotlib grouped bars from a parsed ``.out``.
+- ``benchmarks/runners/bench.py`` — Triton ``perf_report`` line plots (wants
   ``(colour, linestyle)`` tuples via :func:`style_for`).
 
 Design philosophy (so figures read as one coherent set, paper-ready):
