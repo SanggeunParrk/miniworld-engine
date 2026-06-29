@@ -20,7 +20,7 @@ import numpy as np
 
 from miniworld_kernels.viz import apply_theme, color_for, label_for, save_figure
 
-BENCH = _src_root / "miniworld_kernels/kernels/trimul_inproj/benchmark"
+BENCH = _src_root / "miniworld_kernels/modules/triangle_multiplication/benchmark"
 COLS = ["pytorch_bmm", "dtv1_bidir", "cuequiv_x2", "ours_bidir"]
 KEY = {"pytorch_bmm": "pytorch", "dtv1_bidir": "dtv1", "cuequiv_x2": "cuequivariance",
        "ours_bidir": "ours"}

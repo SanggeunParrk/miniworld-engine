@@ -20,7 +20,7 @@ import numpy as np
 
 from miniworld_kernels.viz import apply_theme, color_for, save_figure
 
-BENCH = _src_root / "miniworld_kernels/kernels/trimul_inproj/benchmark"
+BENCH = _src_root / "miniworld_kernels/modules/triangle_multiplication/benchmark"
 COLS = ["dtv1_sep", "dtv1_bidir", "ours_bidir"]
 KEY = {"dtv1_sep": "pytorch", "dtv1_bidir": "dtv1", "ours_bidir": "ours"}
 LBL = {"dtv1_sep": "dtv1 separate (2 residual blocks)", "dtv1_bidir": "dtv1 bidir (1 block)",
