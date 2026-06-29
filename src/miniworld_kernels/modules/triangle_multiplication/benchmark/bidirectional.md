@@ -1,6 +1,6 @@
 # Bidirectional TriangleMultiplication (H100, bf16)
 
-_Source: `src/miniworld_kernels/kernels/trimul_inproj/benchmark/bidirectional.out`_
+_Source: `src/miniworld_kernels/modules/triangle_multiplication/benchmark/bidirectional.out`_
 
 ## forward: speedup vs PyTorch default (×)
 

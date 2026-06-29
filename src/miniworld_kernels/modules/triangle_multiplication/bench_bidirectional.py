@@ -11,12 +11,17 @@ baseline is torch.compile, never eager; ours/dtv1/cuequiv are already-compiled k
 Emits the parseable `=== M=.. d_in=.. d_out=.. ===` + `<backend> fwd=.. ms fwd+bwd=.. ms`
 format that `scripts/plot_bench.py` renders into a table + graph under `benchmark/`.
 
+Lives next to the module it benchmarks (BidirectionalTriangleMultiplication in
+modules/triangle_multiplication/); results render into that module's benchmark/ folder.
+
 Run (compute node):
+    K=src/miniworld_kernels/modules/triangle_multiplication/benchmark
     pixi run --frozen bash -c \
       "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-       python -m miniworld_kernels.kernels.trimul_inproj.bench_bidirectional" \
-      | tee src/miniworld_kernels/kernels/trimul_inproj/benchmark/bidirectional.out
-    python scripts/plot_bench.py <...>/benchmark/bidirectional.out <...>/benchmark --name bidirectional
+       python -m miniworld_kernels.modules.triangle_multiplication.bench_bidirectional" \
+      | tee $K/bidirectional.out
+    python scripts/plot_bench.py $K/bidirectional.out $K --name bidirectional \
+      --title 'Bidirectional TriangleMultiplication (H100, bf16)'
 """
 
 from __future__ import annotations
