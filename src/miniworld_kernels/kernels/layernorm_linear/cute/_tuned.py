@@ -1,4 +1,4 @@
-"""Baked autotune result for LayerNormLinear (see ``tune.py`` / ``benchmark/tuned_lnl.*``).
+"""Baked autotune result for LayerNormLinear (see ``tune.py``).
 
 A per-(M, d) lookup of the fastest *correct* GEMM config found by the sweep, used by the
 ``layernorm_linear`` dispatcher. Shapes not in the table fall back to the path's default

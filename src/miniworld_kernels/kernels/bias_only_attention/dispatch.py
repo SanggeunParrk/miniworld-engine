@@ -1,6 +1,7 @@
 """Per-GPU dispatch for the bias-only triangle-attention backends.
 
-Three crossovers, all measured on H100 / d_pair=128 (see benchmark/bias_only.md):
+Three crossovers, all measured on H100 / d_pair=128 (see archived bias-only reports
+under benchmarks/reports/archive):
 
   * ``KERNEL_MIN_L`` (384): below this L the triton kernels' launch/dispatch cost
     loses to the plain torch path -> fall back to torch.

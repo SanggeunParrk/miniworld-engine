@@ -40,8 +40,8 @@ GEMM mainloop / WGMMA scheduling is untouched.
 ## Baseline results (H100, bf16) — TE vs torch.compile
 
 Square `d_in = d_out ∈ {128,256,384,512,768}` × `M ∈ {16384,65536,262144}`,
-forward + backward. Full tables + graphs:
-[`benchmark/layernorm_linear_square_sweep.md`](benchmark/layernorm_linear_square_sweep.md).
+forward + backward. Historical tables and graphs are archived under
+`benchmarks/reports/archive/`.
 
 Numerics agree to bf16 (`cos = 1.000000`, rel-Frobenius ~1e-4). Latency verdict:
 
@@ -60,16 +60,13 @@ single LN+GEMM pass should beat both by cutting the intermediate HBM write.
 layernorm_linear/
 ├── reference.py   # PyTorch ref: layernorm_linear_pytorch + LayerNormLinearRef (nn.Module)
 ├── interface.py   # layernorm_linear_triton — Triton entry point (WIP placeholder)
-├── bench.py       # fwd+bwd bench: torch.compile vs TE vs triton (auto-skips WIP)
 ├── triton/        # Triton kernel implementation (to come)
-├── benchmark/     # results: logs + rendered md report + PNGs (table + graph)
 └── README.md      # ← you are here
 ```
 
 ## Fused kernel result (Milestone 1, H100 bf16, forward)
 
-`cute` vs the baselines on the square grid (table + graphs:
-[`benchmark/layernorm_linear_cute_sweep.md`](benchmark/layernorm_linear_cute_sweep.md)).
+`cute` vs the baselines on the square grid.
 Correctness: `cos = 0.999997` vs the true op (bf16-level) for all K=N shapes.
 
 Forward latency (ms) via `triton.testing.do_bench`, fastest in **bold**:
@@ -100,7 +97,7 @@ there is no separate stats pass. Implemented by forking quack's `GemmSm90`
 
 - ✅ **Correct** — `cos = 0.999997` (bf16-level) across the whole grid AND the
   QKV shape (K=4096, N=12288); the separate-stats large-N bug does NOT occur here
-  (no ColVecLoad). Validated in `verify_cute_fused.py`.
+  (no ColVecLoad). Historical validation scripts live under `experiments/archive/`.
 - Perf (forward): **fastest at small d** (d=128, M=16384: 0.0129 ms — beats TE
   0.0173 and the M1 kernel), but **slower at larger d** (the first version uses a
   NON-persistent tile scheduler — the persistent path has an unresolved stats-smem

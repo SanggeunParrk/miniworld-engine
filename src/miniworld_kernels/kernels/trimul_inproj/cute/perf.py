@@ -1,7 +1,7 @@
 """Micro-benchmark for the trimul_inproj input-projection kernel.
 
 Kernel-development diagnostic (like tm1's ``triton/perf.py``) — NOT the module
-bench (`scripts/bench.py`). Answers two design questions for the left+right+gate
+bench (`benchmarks/runners/bench.py`). Answers two design questions for the left+right+gate
 front kernel:
 
   1. Does the `[B,D,L,L]` direct write beat the permute fallback?

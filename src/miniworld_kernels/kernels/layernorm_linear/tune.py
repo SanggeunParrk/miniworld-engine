@@ -5,9 +5,9 @@ verifies each against the torch reference (discards any config whose cosine drop
 below threshold — M2's larger tiles can reintroduce the sA-recycle race), times
 the survivors with `triton.testing.do_bench`, and keeps the fastest *correct*
 config per cell. It then prints the winners in the standard bench `.out` format
-(so `scripts/plot_bench.py` renders the table + bar chart unchanged) plus a
+(so `benchmarks/runners/plot_bench.py` renders the table + bar chart unchanged) plus a
 `[tune]` line per cell naming the chosen config, and writes the best-config map
-to `benchmark/tuned_configs.json`.
+to `benchmarks/artifacts/layernorm_linear/tuned_configs.json`.
 
   - cute        = M1 (separate stats + folded-GEMM epilogue), config = quack GemmConfig
   - cute-fused  = M2 (stats inside the mainloop), config = tile_m/tile_n/cluster/pingpong
@@ -181,7 +181,14 @@ def main() -> None:
     tuned: dict = {}
     for shape in SHAPES:
         run_shape(*shape, tuned=tuned)
-    out = _HERE / "benchmark" / "tuned_configs.json"
+    out = (
+        _HERE.parents[3]
+        / "benchmarks"
+        / "artifacts"
+        / "layernorm_linear"
+        / "tuned_configs.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(tuned, indent=2))
     print(f"\nwrote {out}")
 

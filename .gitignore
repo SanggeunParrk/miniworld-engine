@@ -26,6 +26,7 @@ benchmarks/artifacts/**
 !benchmarks/artifacts/**/
 !benchmarks/artifacts/**/.gitkeep
 benchmark/logs/
+src/**/benchmark/
 *.out
 
 # local scratch/vendor workspaces kept outside package boundaries

@@ -21,9 +21,9 @@ PAGES = [
 ]
 
 IMAGES = {
-    "__SWEEP_TRIMUL__": ROOT / "src/miniworld_kernels/modules/triangle_multiplication/benchmark/trimul_forward_speedup.png",
-    "__SWEEP_TRANSITION__": ROOT / "src/miniworld_kernels/kernels/transition/benchmark/transition_forward_speedup.png",
-    "__SWEEP_LNL__": ROOT / "src/miniworld_kernels/kernels/layernorm_linear/benchmark/layernorm_linear_fwd_speedup.png",
+    "__SWEEP_TRIMUL__": ROOT / "benchmarks/artifacts/deck_inputs/trimul_forward_speedup.png",
+    "__SWEEP_TRANSITION__": ROOT / "benchmarks/artifacts/deck_inputs/transition_forward_speedup.png",
+    "__SWEEP_LNL__": ROOT / "benchmarks/artifacts/deck_inputs/layernorm_linear_fwd_speedup.png",
 }
 
 

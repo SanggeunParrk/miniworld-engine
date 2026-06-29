@@ -47,8 +47,8 @@ save them next to each other so a result is never just a wall of text.
 **Generated benchmark results do not live in package code.** Raw logs, CSVs,
 PNGs, SVGs, PDFs, slide exports, and profiler outputs go under
 `benchmarks/artifacts/` by default. Curated markdown or HTML summaries go under
-`benchmarks/reports/` when they are worth reviewing in source control. Existing
-`benchmark/` and `src/**/benchmark/` outputs are migration debt.
+`benchmarks/reports/` when they are worth reviewing in source control. Historical
+reports removed from package paths live under `benchmarks/reports/archive/`.
 
 ## Workflow (example: `layernorm_linear`)
 

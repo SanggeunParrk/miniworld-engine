@@ -6,7 +6,8 @@ fastest one per shape. The pick was only *measured* on H100, so on any other GPU
 
 Code: [`dispatch_cache.py`](dispatch_cache.py) (cache I/O) +
 [`compile_native.py`](compile_native.py) (`_resolve_bwd_path`). Background and the
-H100 numbers that motivated it: [`benchmark/CUTE_INVESTIGATION.md`](benchmark/CUTE_INVESTIGATION.md).
+H100 numbers that motivated it are archived under
+`benchmarks/reports/archive/src/miniworld_kernels/kernels/layernorm/benchmark/`.
 
 ## The three backward paths
 

@@ -19,9 +19,8 @@ subfolders, not in a separate sibling kernel directory.
 - `interface.py`: public entrypoint for the new kernel
 - `compile_native.py`: `custom_op` entrypoints for `atomic` / `partial` / `dispatch`
   compile paths
-- `bench.py`: temporary standalone bench, but it must stay in **team-gm bench
-  format** so `scripts/plot_bench.py` can parse it
-- `benchmark/`: raw logs, markdown report, and graphs
+- Benchmark suites and reports live outside package code under `benchmarks/`.
+  Historical reports are archived under `benchmarks/reports/archive/`.
 
 The default sweep is:
 
@@ -32,45 +31,18 @@ The default sweep is:
 
 This kernel is **not** an excuse to freestyle benchmarking.
 
-- The preferred benchmark path in this repo is still the unified team-gm-style
-  harness: `scripts/bench.py` + `config/bench.yaml` + `tests/run_bench.sbatch`.
-- `layernorm/bench.py` exists only because standalone LayerNorm is not yet wired
-  into that harness.
-- Keep its output format aligned with the team-gm flow so the resulting `.out`
-  log, `.md` report, and `.png` graphs are directly comparable to the rest of
-  the repo.
+- The preferred benchmark path in this repo is the unified team-gm-style
+  harness: `benchmarks/runners/bench.py` + `benchmarks/configs/bench.yaml` +
+  `tests/run_bench.sbatch`.
+- Temporary LayerNorm probes belong under `experiments/`, not this package
+  directory.
+- Keep benchmark output aligned with the team-gm flow so logs and reports are
+  directly comparable to the rest of the repo.
 - Do not treat quick `python - <<'PY'` experiments as benchmark artifacts.
-
-## Run
-
-Bench on a compute node:
-
-```bash
-srun --partition=h100 --account=cssb --qos=cssb_h100 --gres=gpu:h100:1 \
-  --cpus-per-task=8 --mem=64G --time=00:30:00 \
-  bash -lc 'cd /home/psk6950/miniworld-kernels && \
-    export PYTHONPATH=src && \
-    export LD_LIBRARY_PATH=.pixi/envs/default/lib:${LD_LIBRARY_PATH:-} && \
-    ./.pixi/envs/default/bin/python -m miniworld_kernels.kernels.layernorm.bench \
-      | tee src/miniworld_kernels/kernels/layernorm/benchmark/bench_layernorm.out'
-```
-
-Render the markdown report and graphs on a compute node as well:
-
-```bash
-srun --partition=h100 --account=cssb --qos=cssb_h100 --mem=16G --cpus-per-task=4 --time=00:10:00 \
-  bash -lc 'cd /home/psk6950/miniworld-kernels && \
-    export LD_LIBRARY_PATH=.pixi/envs/default/lib:${LD_LIBRARY_PATH:-} && \
-    ./.pixi/envs/default/bin/python scripts/plot_bench.py \
-      src/miniworld_kernels/kernels/layernorm/benchmark/bench_layernorm.out \
-      src/miniworld_kernels/kernels/layernorm/benchmark \
-      --title "LayerNorm baselines MD sweep (H100, bf16)" \
-      --name bench_layernorm'
-```
 
 ## Comparing against an existing kernel (not PyTorch)
 
-`scripts/plot_bench.py` defaults to speedup-vs-PyTorch, but PyTorch is not the
+`benchmarks/runners/plot_bench.py` defaults to speedup-vs-PyTorch, but PyTorch is not the
 kernel we are trying to beat. Pass `--baseline <backend>` to render the speedup
 tables/plots against an existing kernel instead. Two reports are kept here:
 
@@ -87,7 +59,7 @@ change `--baseline` and `--name`.
 
 ## CuTeDSL / H100 investigation
 
-See `benchmark/CUTE_INVESTIGATION.md` for whether a cute / H100-specific rewrite
+See the archived `CUTE_INVESTIGATION.md` for whether a cute / H100-specific rewrite
 helps. Two extra bench suites back it:
 
 - `bench.py --suite fwd_tune` — forward-only, reports achieved HBM bandwidth
@@ -117,7 +89,7 @@ implementations:
 - `partial` — partial-buffer backward, `[cdiv(M, block_m), D]` then final reduction
 - `persistent` — persistent grid-stride backward (`triton/persistent.py`): a fixed
   `NUM_SM * waves` grid, vectorized 2D tiles, only `[grid, D]` partial rows. Ported
-  from quack's CuTeDSL backward algorithm; see `benchmark/CUTE_INVESTIGATION.md`.
+  from quack's CuTeDSL backward algorithm; see the archived `CUTE_INVESTIGATION.md`.
 
 The present H100 heuristic (`compile_native.py:_dispatch_bwd`) is:
 

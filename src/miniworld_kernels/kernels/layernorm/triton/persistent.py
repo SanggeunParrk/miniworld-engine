@@ -1,7 +1,7 @@
 """Persistent grid-stride LayerNorm backward (triton port of quack's bwd algorithm).
 
 The shipped partial path (`triton/partial.py`) has three algorithmic weaknesses
-that the cute-vs-triton bench (`benchmark/CUTE_INVESTIGATION.md`) pinned as the
+that the archived cute-vs-triton bench report pinned as the
 reason quack's CuTeDSL backward is 1.2-2.3x faster:
 
 1. a scalar ``for ri in range(BLOCK_M)`` row loop instead of a vectorized 2D tile;

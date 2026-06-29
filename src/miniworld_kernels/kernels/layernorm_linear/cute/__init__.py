@@ -36,7 +36,8 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     them transiently inside the GEMM and discards them, so persisting them via M1's
     explicit stats pass is the unconditional win once a backward pass follows (it would
     otherwise have to recompute mean/rstd anyway). Threshold N=256 is the H100/bf16
-    forward-only crossover (see ``benchmark/`` and ``cute/WARP_SPECIALIZED_STATS_DESIGN.md``).
+    forward-only crossover (see archived LayerNormLinear reports and
+    ``cute/WARP_SPECIALIZED_STATS_DESIGN.md``).
     """
     m, n = x.shape[0], weight.shape[0]
     if save_stats:

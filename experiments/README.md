@@ -9,3 +9,6 @@ library code.
 
 When an experiment becomes a supported benchmark, move it into
 `benchmarks/suites/` and keep only the final report in `benchmarks/reports/`.
+
+`archive/src/` contains scripts moved out of `src/miniworld_kernels/` during the
+package cleanup. They are retained as research history only.

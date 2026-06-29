@@ -103,7 +103,7 @@ def run(kind, dims, dtype, B, nh):
     title = "single-dir" if kind == "single" else "bidirectional"
     print(f"### {title} bias-only triangle attention  B={B} H={nh} dtype={dtype}")
     print(f"# device={torch.cuda.get_device_name()}  inference=pt:compile/ours:cudagraph  train=compile")
-    # Emit the scripts/plot_bench.py format (M=L^2, d_in=d_out=d_pair; backend lines
+    # Emit the benchmarks/runners/plot_bench.py format (M=L^2, d_in=d_out=d_pair; backend lines
     # `pytorch`/`triton` with fwd=inference, fwd+bwd=training) so the shared plotter
     # renders the standard speedup/latency charts + tables.
     print(f"host={torch.cuda.get_device_name()} torch={torch.__version__} dtype={dtype}")

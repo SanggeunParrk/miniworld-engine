@@ -3,3 +3,6 @@
 Curated reports live here. Generated raw logs, CSVs, PNGs, SVGs, PDFs, and slide
 exports belong in `benchmarks/artifacts/` unless a report explicitly depends on
 checking them in.
+
+`archive/` contains historical markdown reports moved out of package-local
+`benchmark/` directories.

@@ -25,7 +25,7 @@ KEY FIXES during bring-up (now resolved, cos 1.0 at K∈{128,256}, varied N):
 
 Verified by dgrad_lnbwd_verify.py (srun). Wired into autograd.py LayerNormLinear backward (K≤128).
 
-PERF (dgrad_lnbwd_bench.py, H100 bf16, full backward fused vs unfused cuBLAS-dgrad+Triton-LN-bwd):
+PERF (archived dgrad_lnbwd bench, H100 bf16, full backward fused vs unfused cuBLAS-dgrad+Triton-LN-bwd):
     M=16384  d=128 → 1.29x   |  d=256 → 1.20x
     M=65536  d=128 → 0.99x   |  d=256 → 0.73x
     M=262144 d=128 → 1.02x   |  d=256 → 0.75x

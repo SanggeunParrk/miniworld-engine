@@ -60,7 +60,7 @@ benchmarks/
 └── artifacts/                    # generated outputs; gitignored by default
 experiments/                      # one-off probes, diagnostics, migration debt
 third_party/                      # external checkouts/submodules
-scripts/bench.py                  # compatibility wrapper for the bench runner
+benchmarks/runners/bench.py                  # compatibility wrapper for the bench runner
 benchmarks/configs/bench.yaml     # active bench config
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
 tests/run_bench.sbatch            # single SLURM launcher for benchmarks/runners/bench.py
@@ -96,14 +96,13 @@ srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
 `transition`, `adaptive_layernorm`, `augmented_attention_token/atom`).
 `compile=true` benches the `torch.compile`'d variant — no separate script.
-Generated results should land in `benchmarks/artifacts/`. Existing
-`benchmark/<gpu>/`, `benchmark/logs/`, and `src/**/benchmark/` outputs are
-migration debt and should not be used for new result formats.
+Generated results land in `benchmarks/artifacts/`. Curated historical reports
+that used to live under `src/**/benchmark/` are archived under
+`benchmarks/reports/archive/`.
 
 If an op is not yet integrated into the unified harness, a temporary local
-bench is acceptable only as migration debt. It should still emit the same kind
-of machine-parseable output so the shared renderer can generate the report. Once
-stable, move the definition into `benchmarks/suites/`.
+bench belongs under `experiments/`, not package code. Once stable, move the
+definition into `benchmarks/suites/`.
 
 The **cute** path is `implementations=[cute]` (an `ImplementationType.CUTE`
 implementation of `triangle_multiplication` that connects the tm1/tm2/fused-LN
