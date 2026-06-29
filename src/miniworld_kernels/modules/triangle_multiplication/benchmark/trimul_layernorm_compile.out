@@ -1,0 +1,49 @@
+# TriangleMultiplication compile benchmark with LayerNorm variants on NVIDIA H100 80GB HBM3 (torch.bfloat16)
+=== M=128 d_in=128 d_out=128 ===
+pytorch fwd=0.1028 ms fwd+bwd=0.3451 ms
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+triton fwd=0.5628 ms fwd+bwd=1.5158 ms
+triton fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+layernorm_dispatch fwd=0.5836 ms fwd+bwd=1.5332 ms
+layernorm_dispatch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+
+=== M=256 d_in=128 d_out=128 ===
+pytorch fwd=0.5409 ms fwd+bwd=1.6051 ms
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+triton fwd=0.6476 ms fwd+bwd=1.6289 ms
+triton fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+layernorm_dispatch fwd=0.6556 ms fwd+bwd=1.6915 ms
+layernorm_dispatch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+
+=== M=384 d_in=128 d_out=128 ===
+pytorch fwd=0.9879 ms fwd+bwd=3.4505 ms
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+triton fwd=0.8341 ms fwd+bwd=3.3340 ms
+triton fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+layernorm_dispatch fwd=0.8255 ms fwd+bwd=2.9490 ms
+layernorm_dispatch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+
+=== M=512 d_in=128 d_out=128 ===
+pytorch fwd=1.9173 ms fwd+bwd=6.6605 ms
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+triton fwd=1.6345 ms fwd+bwd=6.3849 ms
+triton fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+layernorm_dispatch fwd=1.6228 ms fwd+bwd=5.6852 ms
+layernorm_dispatch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+
+=== M=768 d_in=128 d_out=128 ===
+pytorch fwd=7.0260 ms fwd+bwd=23.5261 ms
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+triton fwd=6.3946 ms fwd+bwd=22.8560 ms
+triton fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+layernorm_dispatch fwd=6.3686 ms fwd+bwd=21.0209 ms
+layernorm_dispatch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+
+=== M=1024 d_in=128 d_out=128 ===
+pytorch fwd=13.1299 ms fwd+bwd=45.1612 ms
+pytorch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+triton fwd=12.0139 ms fwd+bwd=44.0645 ms
+triton fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+layernorm_dispatch fwd=11.9860 ms fwd+bwd=40.5513 ms
+layernorm_dispatch fwd(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dx(abs=0.000e+00,rel=0.000e+00,cos=0.000000) dw(abs=0.000e+00,rel=0.000e+00,cos=0.000000) db(abs=0.000e+00,rel=0.000e+00,cos=0.000000)
+
