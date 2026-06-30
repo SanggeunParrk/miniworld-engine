@@ -4,7 +4,8 @@ This document records the MiniWorld bias-only TriangleAttention benchmark path.
 It covers `TriangleAttention(use_self_attention=False)`: LayerNorm/projection,
 bias-only attention, and output gating. The `softmax -> bmm` portion is kept as
 the unfused attention operation; the optimization target is the surrounding
-kernel structure.
+kernel structure. Full triangular self-attention is tracked separately under the
+`triangle_attention` benchmark target.
 
 ## Scope
 

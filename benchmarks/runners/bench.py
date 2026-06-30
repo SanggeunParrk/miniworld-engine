@@ -773,6 +773,84 @@ def bench_bias_only_attention(
     )
 
 
+def bench_triangle_attention(
+    conf: BenchConfig,
+    seq_len: int,
+    implementation: str,
+    fabric: Fabric,
+):
+    spec = triton_miniworld_spec(implementation)
+    if implementation.strip().lower() == OLD_TRITON_IMPL:
+        return BenchResult(
+            value=float("nan"),
+            status="failed",
+            error="old_triton is only defined for bias_only_attention",
+        )
+
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+
+    class MultiTriangleAttention(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [
+                    TriangleAttention(
+                        conf.d_pair,
+                        implementation=spec.impl,
+                        use_self_attention=True,
+                    )
+                    for _ in range(conf.n_layers)
+                ],
+            )
+
+        def forward(
+            self,
+            pair: torch.Tensor,
+            mask: torch.Tensor | None,
+        ) -> torch.Tensor:
+            for layer in self.layers:
+                pair = layer(pair, mask)
+            return pair
+
+    model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
+    if conf.compile and conf.cudagraph == "disabled":
+        model.compile()
+    model = fabric.setup_module(model)
+
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    dy = torch.randn_like(pair)
+    pair.requires_grad = True
+    mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
+
+    def inference_step() -> torch.Tensor:
+        return model(pair, mask)
+
+    def training_step() -> None:
+        y = inference_step()
+        fabric.backward(y, dy)
+
+    func = inference_step if is_inference_mode(conf.mode) else training_step
+    execution_path = {
+        ImplementationType.PYTORCH: "module.reference.torch",
+        ImplementationType.TRITON: (
+            "modules.triangle_attention.full."
+            "layernorm+qkv_bias_projection+triton_triangle_attention_pair_bias+gate_out"
+        ),
+        ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
+    }.get(spec.impl, spec.impl.value)
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=[pair, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(pair.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=execution_path,
+        reference="module.reference.torch",
+    )
+
+
 def bench_transition(
     conf: BenchConfig,
     seq_len: int,
@@ -1173,7 +1251,7 @@ KERNEL_MAP = {
     "triangle_multiplication": bench_triangle_multiplication,
     "triangle_multiplication_bidirectional": bench_bidirectional_triangle_multiplication,
     "bias_only_attention": bench_bias_only_attention,
-    "triangle_attention": bench_bias_only_attention,
+    "triangle_attention": bench_triangle_attention,
     "transition": bench_transition,
     "conditioned_transition": bench_conditioned_transition,
     "adaptive_layernorm": bench_adaptive_layernorm,
@@ -1218,9 +1296,8 @@ AUTOTUNE_MODULES = {
     ],
     "triangle_attention": [
         "miniworld_kernels.kernels.layernorm.triton.main",
-        "miniworld_kernels.kernels.layernorm_linear.triton.main",
         "miniworld_kernels.kernels.bias_only_attention.triton.gate_out",
-        "miniworld_kernels.kernels.bias_only_attention.triton.main",
+        "miniworld_kernels.kernels.triangle_attention.triton.main",
     ],
     "transition": [
         "miniworld_kernels.kernels.layernorm.triton.main",

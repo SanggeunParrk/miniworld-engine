@@ -88,6 +88,9 @@ run_selected() {
       # developed path here is the bias-only TriangleAttention case (use_self_attention=False).
       run_matrix bias_only_attention '[pytorch,cuequivariance,old_triton,miniworld]' 'mask_prob=0.0 min_seq_len=384 max_seq_len=1024 seq_len_step=128 d_pair_values=[128,256,512] sweep_seq_len=384'
       ;;
+    triangle_attention)
+      run_matrix triangle_attention '[pytorch,cuequivariance,miniworld]' 'mask_prob=0.0 min_seq_len=384 max_seq_len=1024 seq_len_step=128 d_pair_values=[128,256,512] sweep_seq_len=384'
+      ;;
     transition)
       run_matrix transition '[pytorch,old_triton,miniworld]' 'mask_prob=0.0 min_seq_len=384 max_seq_len=1024 seq_len_step=128 d_pair_values=[128,256,512] sweep_seq_len=384'
       ;;
