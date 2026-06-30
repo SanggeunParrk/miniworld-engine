@@ -68,8 +68,15 @@ def _patch_postact_assert() -> None:
         assert d in src, f"quack gated postact assert changed; review: {d!r}"
         src = src.replace(d, "pass  # bdll patch: n-major postact assert dropped")
     method = _redefine(src, "epi_to_underlying_arguments", "epi")
-    # Shadow the mixin method on the concrete SM90 class used by _compile_gemm_act.
-    _ga.GemmGatedSm90.epi_to_underlying_arguments = method
+    # Shadow the mixin method on the concrete classes used by _compile_gemm_act.
+    # SM90 (H100) and SM100 (B200) both subclass GemmGatedMixin; the n-major-c
+    # asserts live on the mixin, so we shadow on each concrete arch class that
+    # exists in this quack build. (Patching the mixin directly would also work,
+    # but per-class keeps the override explicit + survives mixin refactors.)
+    for cls_name in ("GemmGatedSm90", "GemmGatedSm100", "GemmGatedSm120"):
+        cls = getattr(_ga, cls_name, None)
+        if cls is not None:
+            cls.epi_to_underlying_arguments = method
 
 
 def ensure_sigmoid_act() -> None:
