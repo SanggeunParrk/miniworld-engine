@@ -185,6 +185,25 @@ Before treating a benchmark artifact as final, check every item below.
   `benchmarks/runners/plot_csv.py`; benchmark code writes CSV only and plotting
   remains a separate step.
 
+## Module Benchmark Matrix
+
+`triangle_multiplication_bidirectional` already has its own final artifact set;
+`submits/run_bench.sbatch` intentionally covers the remaining repo-developed
+module kernels:
+
+| target | implementations | sweeps | modes | notes |
+| --- | --- | --- | --- | --- |
+| `bias_only_attention` | `pytorch`, `cuequivariance`, `old_triton`, `miniworld` | `seq_len`, `d_pair` | inference, training | This is the bias-only TriangleAttention case (`use_self_attention=False`). `old_triton` is the Team-GM vendored bias-only Triton attention kernel. MiniWorld covers the developed LN/projection/gate dispatch path; full triangle self-attention remains a vendored Team-GM Triton path and is not a final MiniWorld result. See `docs/kernels/bias-only-attention.md`. |
+| `transition` | `pytorch`, `old_triton`, `miniworld` | `seq_len`, `d_pair` | inference, training | `old_triton` is the Team-GM Triton transition path (`LayerNorm(TRITON)` + `kernels.transition.triton.main`). MiniWorld means the production d-aware fused route: Triton for small `d_pair`, CuTe for large `d_pair`. Component-only `cute` runs are diagnostics, not final plots. |
+| `conditioned_transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmarks the post-AdaLN tail only; inference dispatch is fused at `d_pair<=128` and composed above that, training uses the custom autograd path. |
+| `adaptive_layernorm` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmark treats `d_pair` as the AdaLN hidden/condition width so d sweeps change the real tensor shape. |
+| `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |
+| `augmented_attention_atom` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | atom path; L sweep still includes `L=384`; unsupported/OOM points stay as failed CSV rows. |
+
+Final plots must show a single `MiniWorld` series. If a diagnostic CSV includes
+component aliases such as `cute` plus `miniworld`, the shared plotter collapses
+them to the canonical `MiniWorld` backend before drawing.
+
 ## Runtime Dispatch Caches
 
 Benchmark output and runtime dispatch caches are separate. Generated benchmark

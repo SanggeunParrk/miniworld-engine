@@ -33,6 +33,7 @@ from triton.runtime.autotuner import Autotuner
 from miniworld_kernels.modules import (
     AdaptiveLayerNorm,
     AugmentedAttentionPairBias,
+    ConditionedTransition,
     ImplementationType,
     Transition,
     TriangleAttention,
@@ -51,6 +52,7 @@ from miniworld_kernels.modules.triangle_multiplication.module import _load_cute_
 
 DTV1_IMPL = "dtv1"
 MINIWORLD_IMPL = "miniworld"
+OLD_TRITON_IMPL = "old_triton"
 if not torch.cuda.is_available():
     msg = "CUDA is not available. Please run on a machine with a CUDA-capable GPU."
     raise RuntimeError(msg)
@@ -129,6 +131,22 @@ class BenchResult(NamedTuple):
     grad_cosine: float | None = None
 
 
+def module_miniworld_spec(raw: str) -> ImplementationSpec:
+    if raw.strip().lower() == MINIWORLD_IMPL:
+        return ImplementationSpec(ImplementationType.CUEQUIVARIANCE, None, raw)
+    if raw.strip().lower() == OLD_TRITON_IMPL:
+        return ImplementationSpec(ImplementationType.TRITON, None, raw)
+    return parse_implementation_spec(raw)
+
+
+def triton_miniworld_spec(raw: str) -> ImplementationSpec:
+    if raw.strip().lower() == MINIWORLD_IMPL:
+        return ImplementationSpec(ImplementationType.TRITON, None, raw)
+    if raw.strip().lower() == OLD_TRITON_IMPL:
+        return ImplementationSpec(ImplementationType.PYTORCH, None, raw)
+    return parse_implementation_spec(raw)
+
+
 def parse_implementation_spec(raw: str) -> ImplementationSpec:
     key = raw.strip().lower()
     if key == MINIWORLD_IMPL:
@@ -196,6 +214,41 @@ def bench_time(
         "p20_ms": p20,
         "p80_ms": p80,
     }
+
+
+def measured_result(
+    *,
+    conf: BenchConfig,
+    func: Callable,
+    grad_to_none: list,
+    params: list,
+    is_train: bool,
+    input_dtype: str,
+    parameter_dtype: str,
+    execution_path: str,
+    reference: str,
+) -> BenchResult:
+    if conf.metric == "memory":
+        value = bench_memory(func)["median_mb"]
+    elif conf.cudagraph == "manual":
+        graph = capture_cudagraph(func, params, is_train=is_train)
+        value = bench_time(graph.replay, grad_to_none=grad_to_none)["median_ms"]
+    elif conf.cudagraph == "graphed":
+        if is_train:
+            graphed = torch.cuda.make_graphed_callables(func, ())
+            value = bench_time(graphed, grad_to_none=grad_to_none)["median_ms"]
+        else:
+            graph = capture_cudagraph(func, [], is_train=False)
+            value = bench_time(graph.replay, grad_to_none=grad_to_none)["median_ms"]
+    else:
+        value = bench_time(func, grad_to_none=grad_to_none)["median_ms"]
+    return BenchResult(
+        value=value,
+        input_dtype=input_dtype,
+        parameter_dtype=parameter_dtype,
+        execution_path=execution_path,
+        reference=reference,
+    )
 
 
 def capture_cudagraph(step: Callable, params: list, is_train: bool,
@@ -634,20 +687,33 @@ def bench_triangle_multiplication(
     )
 
 
-def bench_triangle_attention(
+def bench_bias_only_attention(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
     fabric: Fabric,
 ):
-    spec = parse_implementation_spec(implementation)
+    spec = triton_miniworld_spec(implementation)
+    is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+
+    class OldTritonBiasOnlyAttention(TriangleAttention):
+        def _kernel_bias_only_attention(
+            self,
+            value: torch.Tensor,
+            bias: torch.Tensor,
+        ) -> torch.Tensor:
+            from miniworld_kernels import kernels
+
+            return kernels.triton_bias_only_attention(value, bias)
 
     class MultiTriangleAttention(nn.Module):
         def __init__(self) -> None:
             super().__init__()
+            layer_cls = OldTritonBiasOnlyAttention if is_old_triton else TriangleAttention
             self.layers = nn.ModuleList(
                 [
-                    TriangleAttention(
+                    layer_cls(
                         conf.d_pair,
                         implementation=spec.impl,
                         use_self_attention=False,
@@ -665,12 +731,12 @@ def bench_triangle_attention(
                 pair = layer(pair, mask)
             return pair
 
-    model = MultiTriangleAttention().to(DEVICE)
-    if conf.compile:
+    model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
+    if conf.compile and conf.cudagraph == "disabled":
         model.compile()
     model = fabric.setup_module(model)
 
-    pair = torch.randn(1, seq_len, seq_len, conf.d_pair).to(DEVICE)
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
     dy = torch.randn_like(pair)
     pair.requires_grad = True
     mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
@@ -684,9 +750,27 @@ def bench_triangle_attention(
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [pair, *list(model.parameters())]
-    if conf.metric == "time":
-        return as_bench_result(bench_time(func, grad_to_none=grad_to_none)["median_ms"])
-    return as_bench_result(bench_memory(func)["median_mb"])
+    execution_path = {
+        ImplementationType.PYTORCH: "module.reference.torch",
+        ImplementationType.TRITON: (
+            "modules.triangle_attention.bias_only."
+            "layernorm_linear+torch_bias_only_attention+gate_out"
+        ),
+        ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
+    }.get(spec.impl, spec.impl.value)
+    if is_old_triton:
+        execution_path = "kernels.bias_only_attention.triton.main"
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=grad_to_none,
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(pair.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=execution_path,
+        reference="module.reference.torch",
+    )
 
 
 def bench_transition(
@@ -695,14 +779,29 @@ def bench_transition(
     implementation: str,
     fabric: Fabric,
 ):
-    spec = parse_implementation_spec(implementation)
+    spec = module_miniworld_spec(implementation)
+    is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
+
+    class OldTritonTransition(Transition):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            from miniworld_kernels import kernels
+
+            x = self.ln_in(x)
+            return kernels.triton_transition(
+                x,
+                self.expand_a.weight,
+                self.expand_b.weight,
+                self.squeeze.weight,
+                self.n,
+            )
 
     class MultiTransition(nn.Module):
         def __init__(self) -> None:
             super().__init__()
+            layer_cls = OldTritonTransition if is_old_triton else Transition
             self.layers = nn.ModuleList(
                 [
-                    Transition(conf.d_pair, implementation=spec.impl)
+                    layer_cls(conf.d_pair, implementation=spec.impl)
                     for _ in range(conf.n_layers)
                 ],
             )
@@ -713,6 +812,7 @@ def bench_transition(
             return x
 
     model = MultiTransition().to(DEVICE)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:
         model.compile()
     model = fabric.setup_module(model)
@@ -730,9 +830,128 @@ def bench_transition(
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, *list(model.parameters())]
-    if conf.metric == "time":
-        return as_bench_result(bench_time(func, grad_to_none=grad_to_none)["median_ms"])
-    return as_bench_result(bench_memory(func)["median_mb"])
+    if spec.impl == ImplementationType.CUEQUIVARIANCE:
+        if not is_inference_mode(conf.mode) and conf.d_pair >= 256:
+            execution_path = "module.reference.torch.dispatch_fallback"
+        else:
+            execution_path = (
+                "kernels.transition.cute.fused"
+                if conf.d_pair >= 256
+                else "kernels.transition.triton.fused"
+            )
+    else:
+        execution_path = {
+            ImplementationType.PYTORCH: "module.reference.torch",
+            ImplementationType.TRITON: "kernels.transition.triton.fused",
+            ImplementationType.CUDA: "kernels.transition.cuda",
+            ImplementationType.CUTE: (
+                "kernels.transition.cute.forward+triton.backward"
+                if not is_inference_mode(conf.mode)
+                else "kernels.transition.cute.fused"
+            ),
+        }.get(spec.impl, spec.impl.value)
+    if is_old_triton:
+        execution_path = "kernels.transition.triton.main"
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=grad_to_none,
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(x.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=execution_path,
+        reference="module.reference.torch",
+    )
+
+
+def bench_conditioned_transition(
+    conf: BenchConfig,
+    seq_len: int,
+    implementation: str,
+    fabric: Fabric,
+):
+    spec = module_miniworld_spec(implementation)
+    if spec.impl not in {
+        ImplementationType.PYTORCH,
+        ImplementationType.TRITON,
+        ImplementationType.CUEQUIVARIANCE,
+    }:
+        return as_bench_result(float("nan"))
+
+    class MultiConditionedTransition(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [
+                    ConditionedTransition(
+                        d_hidden=conf.d_pair,
+                        d_cond=conf.d_single_token,
+                        implementation=spec.impl,
+                    )
+                    for _ in range(conf.n_layers)
+                ],
+            )
+
+        def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+            for layer in self.layers:
+                x = layer(x, cond)
+            return x
+
+    model = MultiConditionedTransition().to(DEVICE)
+    if conf.compile:
+        model.compile()
+    model = fabric.setup_module(model)
+
+    x = torch.randn(
+        conf.n_augment,
+        1,
+        seq_len,
+        conf.d_pair,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    cond = torch.randn(
+        conf.n_augment,
+        1,
+        seq_len,
+        conf.d_single_token,
+        device=DEVICE,
+        requires_grad=True,
+    )
+    dy = torch.randn_like(x)
+
+    def inference_step() -> torch.Tensor:
+        return model(x, cond)
+
+    def training_step() -> None:
+        y = inference_step()
+        fabric.backward(y, dy)
+
+    func = inference_step if is_inference_mode(conf.mode) else training_step
+    grad_to_none = [x, cond, *list(model.parameters())]
+    if spec.impl in {ImplementationType.TRITON, ImplementationType.CUEQUIVARIANCE}:
+        if is_inference_mode(conf.mode):
+            execution_path = (
+                "kernels.conditioned_transition.triton.inference"
+                if conf.d_pair <= 128
+                else "kernels.conditioned_transition.triton.composed"
+            )
+        else:
+            execution_path = "kernels.conditioned_transition.triton.training"
+    else:
+        execution_path = "module.reference.torch"
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=grad_to_none,
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(x.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=execution_path,
+        reference="module.reference.torch",
+    )
 
 
 def bench_adaptive_layernorm(
@@ -741,13 +960,13 @@ def bench_adaptive_layernorm(
     implementation: str,
     fabric: Fabric,
 ):
-    spec = parse_implementation_spec(implementation)
+    spec = triton_miniworld_spec(implementation)
     implementation_type = spec.impl
     if implementation_type not in {
         ImplementationType.PYTORCH,
         ImplementationType.TRITON,
     }:
-        return float("nan")
+        return as_bench_result(float("nan"))
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -757,8 +976,8 @@ def bench_adaptive_layernorm(
             self.layers = nn.ModuleList(
                 [
                     AdaptiveLayerNorm(
-                        d_hidden=conf.d_single_token,
-                        d_cond=conf.d_single_token,
+                        d_hidden=conf.d_pair,
+                        d_cond=conf.d_pair,
                         implementation=implementation_type,
                     )
                     for _ in range(conf.n_layers)
@@ -779,7 +998,7 @@ def bench_adaptive_layernorm(
         conf.n_augment,
         1,
         seq_len,
-        conf.d_single_token,
+        conf.d_pair,
         device=DEVICE,
         dtype=dtype,
         requires_grad=True,
@@ -788,7 +1007,7 @@ def bench_adaptive_layernorm(
         conf.n_augment,
         1,
         seq_len,
-        conf.d_single_token,
+        conf.d_pair,
         device=DEVICE,
         dtype=dtype,
         requires_grad=True,
@@ -805,11 +1024,23 @@ def bench_adaptive_layernorm(
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, cond, *list(model.parameters())]
     try:
-        if conf.metric == "time":
-            return as_bench_result(bench_time(func, grad_to_none=grad_to_none)["median_ms"])
-        return as_bench_result(bench_memory(func)["median_mb"])
+        return measured_result(
+            conf=conf,
+            func=func,
+            grad_to_none=grad_to_none,
+            params=list(model.parameters()),
+            is_train=not is_inference_mode(conf.mode),
+            input_dtype=str(x.dtype).replace("torch.", ""),
+            parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+            execution_path=(
+                "module.reference.torch"
+                if implementation_type == ImplementationType.PYTORCH
+                else "kernels.adaln.triton.main"
+            ),
+            reference="module.reference.torch",
+        )
     except torch.cuda.OutOfMemoryError:
-        return float("nan")
+        return as_bench_result(float("nan"))
 
 
 def bench_augmented_attention_token(
@@ -818,22 +1049,27 @@ def bench_augmented_attention_token(
     implementation: str,
     fabric: Fabric,
 ):
-    spec = parse_implementation_spec(implementation)
+    spec = triton_miniworld_spec(implementation)
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     model = AugmentedAttentionPairBias(
         d_single=conf.d_single_token,
         d_cond=conf.d_single_token,
         d_pair=conf.d_pair,
         n_head=16,
         implementation=spec.impl,
-    ).to(DEVICE)
+    ).to(device=DEVICE, dtype=dtype)
 
     if conf.compile:
         model.compile()
     model = fabric.setup_module(model)
 
-    pair = torch.randn(1, seq_len, seq_len, conf.d_pair).to(DEVICE)
-    single = torch.randn(conf.n_augment, 1, seq_len, conf.d_single_token).to(DEVICE)
-    cond = torch.randn(conf.n_augment, 1, seq_len, conf.d_single_token).to(DEVICE)
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    single = torch.randn(
+        conf.n_augment, 1, seq_len, conf.d_single_token, device=DEVICE, dtype=dtype
+    )
+    cond = torch.randn(
+        conf.n_augment, 1, seq_len, conf.d_single_token, device=DEVICE, dtype=dtype
+    )
     dy_single = torch.randn_like(single)
     pair.requires_grad = True
     single.requires_grad = True
@@ -849,9 +1085,21 @@ def bench_augmented_attention_token(
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [pair, single, cond, *list(model.parameters())]
-    if conf.metric == "time":
-        return as_bench_result(bench_time(func, grad_to_none=grad_to_none)["median_ms"])
-    return as_bench_result(bench_memory(func)["median_mb"])
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=grad_to_none,
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(single.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=(
+            "module.reference.torch"
+            if spec.impl == ImplementationType.PYTORCH
+            else "kernels.augmented_attention.triton.main"
+        ),
+        reference="module.reference.torch",
+    )
 
 
 def bench_augmented_attention_atom(
@@ -860,23 +1108,28 @@ def bench_augmented_attention_atom(
     implementation: str,
     fabric: Fabric,
 ):
-    spec = parse_implementation_spec(implementation)
+    spec = triton_miniworld_spec(implementation)
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     model = AugmentedAttentionPairBias(
         d_single=conf.d_single_atom,
         d_cond=conf.d_single_atom,
         d_pair=conf.d_pair_atom,
         n_head=4,
         implementation=spec.impl,
-    ).to(DEVICE)
+    ).to(device=DEVICE, dtype=dtype)
 
     if conf.compile:
         model.compile()
     model = fabric.setup_module(model)
 
     atom_len = seq_len * 8
-    pair = torch.randn(1, atom_len, atom_len, conf.d_pair_atom).to(DEVICE)
-    single = torch.randn(conf.n_augment, 1, atom_len, conf.d_single_atom).to(DEVICE)
-    cond = torch.randn(conf.n_augment, 1, atom_len, conf.d_single_atom).to(DEVICE)
+    pair = torch.randn(1, atom_len, atom_len, conf.d_pair_atom, device=DEVICE, dtype=dtype)
+    single = torch.randn(
+        conf.n_augment, 1, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype
+    )
+    cond = torch.randn(
+        conf.n_augment, 1, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype
+    )
     dy_single = torch.randn_like(single)
     pair.requires_grad = True
     single.requires_grad = True
@@ -893,11 +1146,23 @@ def bench_augmented_attention_atom(
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [pair, single, cond, *list(model.parameters())]
     try:
-        if conf.metric == "time":
-            return as_bench_result(bench_time(func, grad_to_none=grad_to_none)["median_ms"])
-        return as_bench_result(bench_memory(func)["median_mb"])
+        return measured_result(
+            conf=conf,
+            func=func,
+            grad_to_none=grad_to_none,
+            params=list(model.parameters()),
+            is_train=not is_inference_mode(conf.mode),
+            input_dtype=str(single.dtype).replace("torch.", ""),
+            parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+            execution_path=(
+                "module.reference.torch"
+                if spec.impl == ImplementationType.PYTORCH
+                else "kernels.augmented_attention.triton.main"
+            ),
+            reference="module.reference.torch",
+        )
     except torch.cuda.OutOfMemoryError:
-        return float("nan")
+        return as_bench_result(float("nan"))
 
 
 def bench_bidirectional_triangle_multiplication(conf, seq_len, implementation, fabric):
@@ -907,8 +1172,10 @@ def bench_bidirectional_triangle_multiplication(conf, seq_len, implementation, f
 KERNEL_MAP = {
     "triangle_multiplication": bench_triangle_multiplication,
     "triangle_multiplication_bidirectional": bench_bidirectional_triangle_multiplication,
-    "triangle_attention": bench_triangle_attention,
+    "bias_only_attention": bench_bias_only_attention,
+    "triangle_attention": bench_bias_only_attention,
     "transition": bench_transition,
+    "conditioned_transition": bench_conditioned_transition,
     "adaptive_layernorm": bench_adaptive_layernorm,
     "augmented_attention_token": bench_augmented_attention_token,
     "augmented_attention_atom": bench_augmented_attention_atom,
@@ -918,8 +1185,11 @@ TARGET_DIRS = {
     "triangle_multiplication": _REPO_ROOT / "benchmarks" / "modules" / "triangle_multiplication",
     "triangle_multiplication_bidirectional": _REPO_ROOT / "benchmarks" / "modules"
     / "triangle_multiplication_bidirectional",
+    "bias_only_attention": _REPO_ROOT / "benchmarks" / "modules" / "bias_only_attention",
     "triangle_attention": _REPO_ROOT / "benchmarks" / "modules" / "triangle_attention",
     "transition": _REPO_ROOT / "benchmarks" / "modules" / "transition",
+    "conditioned_transition": _REPO_ROOT / "benchmarks" / "modules"
+    / "conditioned_transition",
     "adaptive_layernorm": _REPO_ROOT / "benchmarks" / "modules" / "adaptive_layernorm",
     "augmented_attention_token": _REPO_ROOT / "benchmarks" / "modules" / "augmented_attention",
     "augmented_attention_atom": _REPO_ROOT / "benchmarks" / "modules" / "augmented_attention",
@@ -940,12 +1210,27 @@ AUTOTUNE_MODULES = {
         "miniworld_kernels.kernels.tm2.triton.main",
         "miniworld_kernels.kernels.trimul_inproj.triton.back_fused",
     ],
+    "bias_only_attention": [
+        "miniworld_kernels.kernels.layernorm.triton.main",
+        "miniworld_kernels.kernels.layernorm_linear.triton.main",
+        "miniworld_kernels.kernels.bias_only_attention.triton.gate_out",
+        "miniworld_kernels.kernels.bias_only_attention.triton.main",
+    ],
     "triangle_attention": [
-        "miniworld_kernels.kernels.triangle_attention.triton.main",
+        "miniworld_kernels.kernels.layernorm.triton.main",
+        "miniworld_kernels.kernels.layernorm_linear.triton.main",
+        "miniworld_kernels.kernels.bias_only_attention.triton.gate_out",
+        "miniworld_kernels.kernels.bias_only_attention.triton.main",
     ],
     "transition": [
         "miniworld_kernels.kernels.layernorm.triton.main",
         "miniworld_kernels.kernels.transition.triton.main",
+        "miniworld_kernels.kernels.transition.triton.fused",
+    ],
+    "conditioned_transition": [
+        "miniworld_kernels.kernels.conditioned_transition.triton.inference",
+        "miniworld_kernels.kernels.conditioned_transition.triton.composed",
+        "miniworld_kernels.kernels.conditioned_transition.triton.training",
     ],
     "adaptive_layernorm": [
         "miniworld_kernels.kernels.adaln.triton.main",
@@ -1067,6 +1352,7 @@ CSV_FIELDS = [
     "unit",
     "mode",
     "compiled",
+    "cudagraph",
     "precision",
     "allow_tf32",
     "sweep_axis",
@@ -1128,10 +1414,17 @@ def csv_row(
     status: str = "ok",
     error: str = "",
 ) -> dict[str, str | int | float | bool | None]:
-    spec = None if implementation == DTV1_IMPL else parse_implementation_spec(implementation)
+    if implementation == DTV1_IMPL:
+        spec = None
+    elif implementation == OLD_TRITON_IMPL:
+        spec = ImplementationSpec(ImplementationType.TRITON, None, implementation)
+    else:
+        spec = parse_implementation_spec(implementation)
     implementation_type = DTV1_IMPL if spec is None else spec.impl.value
     if implementation == MINIWORLD_IMPL:
         implementation_type = MINIWORLD_IMPL
+    if implementation == OLD_TRITON_IMPL:
+        implementation_type = OLD_TRITON_IMPL
     return {
         "run_name": run_name,
         "target_kind": target_kind(conf.kernel),
@@ -1143,6 +1436,7 @@ def csv_row(
         "unit": result_unit(conf.metric),
         "mode": mode_label(conf.mode),
         "compiled": conf.compile,
+        "cudagraph": conf.cudagraph,
         "precision": conf.precision,
         "allow_tf32": conf.allow_tf32,
         "sweep_axis": conf.sweep_axis,

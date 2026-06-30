@@ -130,11 +130,12 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
     layer_norm_bwd_dx_fused[grid](
         dx, dx_normed, dgamma, dbeta,
-        xc, gamma, mean, rstd,
+        xc, gamma, mean, rstd, rstd,
         dgamma.stride(0), dbeta.stride(0), xc.stride(0), xc.stride(1),
         M, K,
         BLOCK_N=triton.next_power_of_2(K),
         GROUP_M=get_seq_group(M),
+        HAS_ROWSCALE=False,
     )
     return dx, dgamma, dbeta
 

@@ -138,6 +138,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
         weight,
         mean,
         rstd,
+        rstd,
         dw.stride(0),
         db.stride(0),
         x_2d.stride(0),
@@ -146,6 +147,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
         n,
         BLOCK_N=triton.next_power_of_2(n),
         GROUP_M=get_seq_group(m),
+        HAS_ROWSCALE=False,
     )
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
 
@@ -336,4 +338,3 @@ def layernorm_partial_compile(x: Tensor, weight: Tensor, bias: Tensor, eps: floa
 
 def layernorm_dispatch_compile(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
     return _dispatch_fwd(x, weight, bias, eps)[0]
-
