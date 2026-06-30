@@ -167,11 +167,11 @@ def layer_norm_fwd_fused_recal(
 @triton.jit
 def layer_norm_bwd_dx_fused(
     DX, DY, DW, DB,
-    X, W, Mean, Rstd,
+    X, W, Mean, Rstd, Rowscale,
     stride_wc, stride_bc, stride_r, stride_c,
     M, N: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    GROUP_M: tl.constexpr, HAS_ROWSCALE: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
     row = tl.program_id(0)
@@ -199,6 +199,10 @@ def layer_norm_bwd_dx_fused(
     # Load data to SRAM
     x = tl.load(X, mask=mask, other=0).to(tl.float32)
     dy = tl.load(DY, mask=mask, other=0).to(tl.float32)
+    if HAS_ROWSCALE:  # bwd of y = LN(x)*rs: scale incoming grad by rs (then dx/dw/db all follow)
+        rs_idx = tl.arange(0, BLOCK_M) + row * BLOCK_M
+        rs = tl.load(Rowscale + rs_idx, mask=rs_idx < M, other=0.0).to(tl.float32)
+        dy = dy * rs[:, None]
     w = tl.load(W).to(tl.float32)
     mean = tl.load(Mean).to(tl.float32)
     rstd = tl.load(Rstd).to(tl.float32)
@@ -236,6 +240,7 @@ class TritonLayerNormFunction(torch.autograd.Function):
         weight: torch.Tensor | None,
         bias: torch.Tensor | None,
         eps: float,
+        row_scale: torch.Tensor | None = None,
     ):
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         y_2d = torch.empty_like(x_2d)
@@ -244,14 +249,18 @@ class TritonLayerNormFunction(torch.autograd.Function):
         mean = torch.empty(M, dtype=torch.float32, device=x.device)
         rstd = torch.empty(M, dtype=torch.float32, device=x.device)
 
+        has_rs = row_scale is not None
+        # per-row scale (e.g. AF pair-mask) folded into the LN epilogue — y = LN(x)*rs, FREE
+        # (no extra (M,N) multiply / HBM round-trip). rs reshaped to [M], broadcast over N.
+        rs = row_scale.reshape(-1).to(x_2d.dtype).contiguous() if has_rs else rstd
         # fmt: off
         grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
         layer_norm_fwd_fused[grid](
-            x_2d, y_2d, weight, bias, mean, rstd, rstd,  # Rowscale=rstd placeholder (unused)
+            x_2d, y_2d, weight, bias, mean, rstd, rs,  # rs (or rstd placeholder when no rowscale)
             x_2d.stride(0), x_2d.stride(1),
             M, N, eps,
             BLOCK_N=triton.next_power_of_2(N),
-            GROUP_M=get_seq_group(M), HAS_ROWSCALE=False,
+            GROUP_M=get_seq_group(M), HAS_ROWSCALE=has_rs,
         )
         # fmt: on
 
@@ -260,14 +269,16 @@ class TritonLayerNormFunction(torch.autograd.Function):
             weight,
             mean,
             rstd,
+            rs if has_rs else None,
         )
+        ctx.has_rowscale = has_rs
         ctx.input_shape = x.shape
         return y_2d.view_as(x)
 
     @staticmethod
     @torch.compiler.disable()
     def backward(ctx, dy: torch.Tensor):
-        x, weight, mean, rstd = ctx.saved_tensors
+        x, weight, mean, rstd, rs = ctx.saved_tensors
         x = x.to(dy.dtype)
         M, N = x.shape
         dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
@@ -276,16 +287,17 @@ class TritonLayerNormFunction(torch.autograd.Function):
         dx_2d = torch.empty_like(dy_2d)
         dw = torch.zeros(N, dtype=torch.float32, device=x.device)
         db = torch.zeros(N, dtype=torch.float32, device=x.device)
+        has_rs = ctx.has_rowscale
 
         # fmt: off
         grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]
         layer_norm_bwd_dx_fused[grid](
             dx_2d, dy_2d, dw, db,
-            x, weight, mean, rstd,
+            x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)
             dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
             M, N,
             BLOCK_N=triton.next_power_of_2(N),
-            GROUP_M=get_seq_group(M),
+            GROUP_M=get_seq_group(M), HAS_ROWSCALE=has_rs,
         )
         # fmt: on
 
@@ -294,10 +306,15 @@ class TritonLayerNormFunction(torch.autograd.Function):
             dw,
             db,
             None,
+            None,
         )
 
 
-triton_layernorm = TritonLayerNormFunction.apply
+def triton_layernorm(x, weight, bias, eps, row_scale=None):
+    """LayerNorm (autograd). Optional `row_scale` [M] folds a per-row scale into the LN epilogue
+    (fwd) and the grad into the LN backward (bwd) — y = LN(x)*rs, the AF pair-mask applied FREE
+    (no separate (M,N) multiply). rs=None -> plain LN."""
+    return TritonLayerNormFunction.apply(x, weight, bias, eps, row_scale)
 
 
 @torch.compiler.disable()

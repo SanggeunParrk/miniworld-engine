@@ -124,6 +124,77 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl
     tl.store(out + 3 * DMi + idx, (dR * gR).to(et), mask=mask)                  # d_pR
 
 
+@triton.autotune(
+    configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
+    key=["DM"],
+)
+@triton.jit
+def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr, BLK: tl.constexpr):
+    """Like `_dconcat_kernel` but builds a 5-block d_concat (5D,M):
+       [d_gLlog; d_pL; d_gRlog; d_pR; d_glogit].
+    Block 4 relayouts the gate input-grad d_glogit (M,D) row-major into channel-major (D,M).
+    Folding d_glogit in lets ONE GEMM give all 5 weight grads (incl dWg) AND ONE GEMM give
+    dx_n = dconcᵀ@W_all = (front dxn) + (d_glogit@Wgᵀ) — i.e. 6a+6b+dWg collapse. Single-dir
+    only (gate width == per-side hidden D)."""
+    Mi = M.to(tl.int64)
+    DMi = DM.to(tl.int64)
+    idx = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
+    mask = idx < DMi
+    d = idx // Mi
+    m = idx - d * Mi
+    D2 = 2 * D
+    dL = tl.load(dL_ptr + idx, mask=mask, other=0.0).to(tl.float32)
+    dR = tl.load(dR_ptr + idx, mask=mask, other=0.0).to(tl.float32)
+    gLlog = tl.load(preact + (2 * d) * Mi + m, mask=mask, other=0.0).to(tl.float32)
+    pL = tl.load(preact + (2 * d + 1) * Mi + m, mask=mask, other=0.0).to(tl.float32)
+    gRlog = tl.load(preact + (D2 + 2 * d) * Mi + m, mask=mask, other=0.0).to(tl.float32)
+    pR = tl.load(preact + (D2 + 2 * d + 1) * Mi + m, mask=mask, other=0.0).to(tl.float32)
+    gL, gR = tl.sigmoid(gLlog), tl.sigmoid(gRlog)
+    dglog = tl.load(dglog_ptr + m * D + d, mask=mask, other=0.0).to(tl.float32)  # (M,D)->(D,M)
+    et = out.dtype.element_ty
+    tl.store(out + idx, (dL * pL * gL * (1 - gL)).to(et), mask=mask)            # d_gLlog
+    tl.store(out + DMi + idx, (dL * gL).to(et), mask=mask)                      # d_pL
+    tl.store(out + 2 * DMi + idx, (dR * pR * gR * (1 - gR)).to(et), mask=mask)  # d_gRlog
+    tl.store(out + 3 * DMi + idx, (dR * gR).to(et), mask=mask)                  # d_pR
+    tl.store(out + 4 * DMi + idx, dglog.to(et), mask=mask)                      # d_glogit
+
+
+def front_bwd_dW_glogit(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit, Wg):
+    """NEGATIVE RESULT — tried & not adopted (kept as reference). Collapses the single-dir back
+    half to TWO cuBLAS GEMMs by folding d_glogit in as the 5th d_concat block:
+      dWs5 = dconc5 @ x_n   (5D,D) -> dWLg/dWL/dWRg/dWR + dWg          (all weight grads, 1 GEMM)
+      dx_n = dconc5ᵀ @ W_all (M,D) = dconcᵀ@W_stack + d_glogit@Wgᵀ     (6a+6b in 1 GEMM, add free)
+    Replaces the old 4 GEMMs (dWg, dWs, dxn_front, addmm). BUT folding the (M,D) d_glogit into the
+    channel-major (D,M) 5th block needs a non-coalesced (stride-D) relayout in `_dconcat5_kernel`,
+    plus a larger (5D,M) dconc materialization. Measured: small-L gain cancels (relayout cost ≈
+    saved launch), large-L regresses ~16% (the relayout/materialization GPU cost dominates when
+    GPU-bound). The shipped path fuses ONLY the cheap add via cuBLAS addmm. square single-dir."""
+    B, H, L, _ = d_left.shape
+    Din = WL.shape[0]
+    M = B * L * L
+    dt = x_n.dtype
+    dL2 = d_left.reshape(H * M)
+    dR2 = d_right.reshape(H * M)
+    preact2 = preact.reshape(4 * H, M)
+    xf = x_n.reshape(M, Din)
+    dglog = d_glogit.reshape(M, H)
+
+    dconc5 = torch.empty(5 * H, M, device=x_n.device, dtype=dt)
+    DM = H * M
+    _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](
+        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H)
+
+    dWs = dconc5 @ xf                                            # (5H, Din) cuBLAS huge-K
+    dWLg = dWs[:H].t().contiguous()
+    dWL = dWs[H:2 * H].t().contiguous()
+    dWRg = dWs[2 * H:3 * H].t().contiguous()
+    dWR = dWs[3 * H:4 * H].t().contiguous()
+    dWg = dWs[4 * H:].t().contiguous()
+    W_all = torch.cat([WLg.t(), WL.t(), WRg.t(), WR.t(), Wg.t()], dim=0)   # (5H, Din)
+    dxn = dconc5.t() @ W_all                                     # (M, Din) cuBLAS — dxn+gate fused
+    return dxn, dWL, dWLg, dWR, dWRg, dWg
+
+
 def front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     """d_left/d_right:(B,H,L,L) preact:(B,4H,L,L) x_n:(B,L,L,Din) W*:(Din,H). dx_n + 4 wgrads.
 
