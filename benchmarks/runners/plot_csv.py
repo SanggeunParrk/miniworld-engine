@@ -18,7 +18,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from miniworld_kernels.viz import apply_theme, label_for, save_figure, sort_backends, style_for
+from miniworld_kernels.viz import (
+    apply_theme,
+    canonical,
+    label_for,
+    save_figure,
+    sort_backends,
+    style_for,
+)
 
 BASELINE = "pytorch"
 
@@ -52,15 +59,20 @@ def x_label(x_field: str) -> str:
 
 
 def series_by_impl(rows: list[dict[str, str]], x_field: str) -> dict[str, list[tuple[int, float]]]:
-    series: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    series: dict[str, dict[int, float]] = defaultdict(dict)
     for row in rows:
         if not row["value"]:
             continue
         value = float(row["value"])
         if not math.isfinite(value):
             continue
-        series[row["implementation"]].append((int(row[x_field]), value))
-    return {impl: sorted(points) for impl, points in series.items()}
+        impl = canonical(row["implementation"])
+        x_value = int(row[x_field])
+        if impl not in series or row["implementation"] == impl:
+            series[impl][x_value] = value
+        else:
+            series[impl].setdefault(x_value, value)
+    return {impl: sorted(points.items()) for impl, points in series.items()}
 
 
 def output_stem(rows: list[dict[str, str]], requested: str | None) -> str:
@@ -75,15 +87,20 @@ def output_stem(rows: list[dict[str, str]], requested: str | None) -> str:
         suffix = "L_sweep"
     elif suffix == "d_pair":
         suffix = "d_sweep"
-    return f"{target}_{row['mode']}_{suffix}"
+    graph_suffix = ""
+    if row.get("cudagraph", "disabled") != "disabled":
+        graph_suffix = f"_{row['cudagraph']}"
+    return f"{target}_{row['mode']}{graph_suffix}_{suffix}"
 
 
 def common_title(rows: list[dict[str, str]], fallback: str) -> str:
     if not rows:
         return fallback
     row = rows[0]
+    graph = row.get("cudagraph", "disabled")
+    graph_text = "" if graph == "disabled" else f" {graph}"
     return (
-        f"{row['target']} {row['mode']} {row['metric']}"
+        f"{row['target']} {row['mode']}{graph_text} {row['metric']}"
     )
 
 
@@ -99,6 +116,7 @@ def caption(rows: list[dict[str, str]]) -> str:
     fixed_text = f" | {' '.join(fixed)}" if fixed else ""
     return (
         f"{row['device']} | {row['precision']} | compile={row['compiled']} | "
+        f"cudagraph={row.get('cudagraph', 'disabled')} | "
         f"torch={row['torch_version']} cuda={row['cuda_version']}{fixed_text}"
     )
 

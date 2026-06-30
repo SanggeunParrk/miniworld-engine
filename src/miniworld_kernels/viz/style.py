@@ -43,6 +43,7 @@ ORDER: list[str] = [
     "pytorch",
     "torch.compile",
     "triton",
+    "old-triton",
     "triton-atomic",
     "triton-atomic-compile",
     "triton-partial",
@@ -63,6 +64,7 @@ DISPLAY: dict[str, str] = {
     "pytorch": "PyTorch",
     "torch.compile": "torch.compile",
     "triton": "Triton",
+    "old-triton": "old Triton",
     "triton-atomic": "Triton atomic",
     "triton-atomic-compile": "Triton atomic compile",
     "triton-partial": "Triton partial",
@@ -84,6 +86,7 @@ PALETTE: dict[str, str] = {
     "pytorch": "#B9C0CC",        # light grey — naive reference
     "torch.compile": "#6E7B91",  # slate
     "triton": "#2E6FDB",         # blue
+    "old-triton": "#7A86A1",     # muted blue-grey for Team-GM legacy Triton
     "triton-atomic": "#5B8FF9",  # lighter blue variant for the atomic path
     "triton-atomic-compile": "#1F4AA8",  # dark blue compiled atomic path
     "triton-partial": "#F29A38",  # warm orange for the partial-reduction variant
@@ -107,6 +110,7 @@ LINESTYLE: dict[str, str] = {
     "pytorch": (0, (1, 1)),       # dotted
     "torch.compile": (0, (4, 2)),  # dashed
     "triton": "-",
+    "old-triton": (0, (4, 2)),
     "triton-atomic": "-",
     "triton-atomic-compile": (0, (4, 2)),
     "triton-partial": "-",
@@ -140,6 +144,9 @@ _ALIASES: dict[str, str] = {
     "compiled": "torch.compile", "inductor": "torch.compile",
     # triton
     "triton": "triton",
+    "oldtriton": "old-triton",
+    "teamgmtriton": "old-triton",
+    "teamgm": "old-triton",
     "tritonatomic": "triton-atomic",
     "tritonatomiccompile": "triton-atomic-compile",
     "tritonpartial": "triton-partial",

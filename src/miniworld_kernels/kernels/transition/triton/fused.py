@@ -422,6 +422,7 @@ if AUTOTUNE:
     ]
 else:
     _egb_configs = [
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=4),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
@@ -433,14 +434,15 @@ else:
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,
-    h_ptr, dA_ptr, dB_ptr, xn_ptr,
+    h_ptr, dA_ptr, dB_ptr, dAB_ptr, xn_ptr,
     M, ND, K,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_gm, stride_gn,    # grad_expand / h / dA / dB: (M, ND) row-major
+    stride_abm, stride_abn,  # dAB: (M, 2*ND) row-major, [dA | dB]
     stride_nm, stride_nk,    # xn out: (M, K) row-major
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    NORMALIZE: tl.constexpr,
+    NORMALIZE: tl.constexpr, STORE_H: tl.constexpr, STACK_DAB: tl.constexpr,
 ):
     # Recompute a=xn@Wa, b=xn@Wb ONCE (tile M,ND; loop K). Emits:
     #   h  = silu(a)*b                  (for dWs = go^T @ h)
@@ -490,9 +492,24 @@ def _transition_expand_gatebwd_kernel(
     goff = rows[:, None] * stride_gm + cols[None, :] * stride_gn
     gmask = rmask[:, None] & cmask[None, :]
     ge = tl.load(ge_ptr + goff, mask=gmask, other=0.0).to(tl.float32)
-    tl.store(h_ptr + goff, (silu * b).to(et), mask=gmask)
-    tl.store(dA_ptr + goff, (ge * b * (sig + silu * (1.0 - sig))).to(et), mask=gmask)
-    tl.store(dB_ptr + goff, (ge * silu).to(et), mask=gmask)
+    if STORE_H:
+        tl.store(h_ptr + goff, (silu * b).to(et), mask=gmask)
+    dA = (ge * b * (sig + silu * (1.0 - sig))).to(et)
+    dB = (ge * silu).to(et)
+    if STACK_DAB:
+        tl.store(
+            dAB_ptr + rows[:, None] * stride_abm + cols[None, :] * stride_abn,
+            dA,
+            mask=gmask,
+        )
+        tl.store(
+            dAB_ptr + rows[:, None] * stride_abm + (cols[None, :] + ND) * stride_abn,
+            dB,
+            mask=gmask,
+        )
+    else:
+        tl.store(dA_ptr + goff, dA, mask=gmask)
+        tl.store(dB_ptr + goff, dB, mask=gmask)
 # fmt: on
 
 
@@ -508,18 +525,21 @@ def _transition_expand_gatebwd(x2, rstd, c1, gamma, beta, wa, wb, grad_expand):
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
-        h, dA, dB, xn,
+        h, dA, dB, dA, xn,
         M, ND, K,
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        dA.stride(0), dA.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=True,
+        STORE_H=True,
+        STACK_DAB=False,
     )
     return h, dA, dB, xn
 
 
-def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand):
+def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool = True):
     """Version B: reuse the SAVED xn (no normalize, no emit) + recompute a,b once -> (h, dA, dB).
 
     ``xn`` is the (M, K) normalized x emitted and saved by the forward kernel. The gatebwd
@@ -528,22 +548,49 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand):
     """
     M, K = xn.shape
     ND = wa.shape[0]
-    h = torch.empty_like(grad_expand)
+    h = torch.empty_like(grad_expand) if store_h else grad_expand
     dA = torch.empty_like(grad_expand)
     dB = torch.empty_like(grad_expand)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
         wa.contiguous(), wb.contiguous(), grad_expand,
-        h, dA, dB, xn,               # xn_ptr unused (no emit) — pass xn itself as filler
+        h, dA, dB, dA, xn,           # dAB/xn_ptr unused — pass existing tensors as filler
         M, ND, K,
         xn.stride(0), xn.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        dA.stride(0), dA.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=False,
+        STORE_H=store_h,
+        STACK_DAB=False,
     )
-    return h, dA, dB
+    return (h, dA, dB) if store_h else (dA, dB)
+
+
+def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand):
+    """Version B stacked: emit h and dAB=[dA | dB] for two larger GEMMs downstream."""
+    M, K = xn.shape
+    ND = wa.shape[0]
+    h = torch.empty_like(grad_expand)
+    dAB = torch.empty(M, ND * 2, device=xn.device, dtype=grad_expand.dtype)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    _transition_expand_gatebwd_kernel[grid](
+        xn, xn, xn, xn, xn,
+        wa.contiguous(), wb.contiguous(), grad_expand,
+        h, dAB, dAB, dAB, xn,
+        M, ND, K,
+        xn.stride(0), xn.stride(1),
+        wa.stride(0), wa.stride(1),
+        grad_expand.stride(0), grad_expand.stride(1),
+        dAB.stride(0), dAB.stride(1),
+        xn.stride(0), xn.stride(1),
+        NORMALIZE=False,
+        STORE_H=True,
+        STACK_DAB=True,
+    )
+    return h, dAB
 
 
 # fmt: off
@@ -721,8 +768,9 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         grad_expand = go @ squeeze_weight         # dh  [M, ND]
         # ONE fused kernel recomputes a,b once -> h (for dWs), dA, dB (SwiGLU gate bwd).
         if ctx.has_xn:
-            # Version B: reuse the saved xn directly (no inline-normalize, no emit).
-            h, dA, dB = _transition_expand_gatebwd_savedxn(
+            # Version B: reuse saved xn and emit stacked dAB=[dA | dB]. This keeps the
+            # math identical but replaces dWa/dWb and dA@Wa+dB@Wb with two larger GEMMs.
+            h, dAB = _transition_expand_gatebwd_savedxn_stacked(
                 xn_saved, expand_a_weight, expand_b_weight, grad_expand,
             )
             xn = xn_saved
@@ -733,9 +781,42 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
                 expand_a_weight, expand_b_weight, grad_expand,
             )
         dWs = go.t() @ h                          # [D, ND]
-        dWa = dA.t() @ xn                         # [ND, K]
-        dWb = dB.t() @ xn
-        d_xn = dA @ expand_a_weight + dB @ expand_b_weight  # grad to normalized x [M, K]
+        if ctx.has_xn:
+            w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)
+            dWab = dAB.t() @ xn
+            dWa = dWab[: expand_a_weight.shape[0]]
+            dWb = dWab[expand_a_weight.shape[0] :]
+            if (
+                os.getenv("TRANSITION_DAB_LNBWD", "0") == "1"
+                and K <= 128
+                and torch.cuda.get_device_capability(x2.device)[0] >= 9
+            ):
+                from miniworld_kernels.kernels.transition.cute.dab_lnbwd import (
+                    transition_dab_lnbwd_cute,
+                )
+
+                dx = transition_dab_lnbwd_cute(
+                    dAB, w_ab, x2, ln_weight, rstd, c1,
+                )
+                db_ab = dAB.sum(0)
+                # xn = gamma*xhat + beta, so dAB.T@xhat can be recovered from
+                # dAB.T@xn when gamma is nonzero. This path is experimental and gated.
+                t_xhat = (
+                    dWab.float() - db_ab.float()[:, None] * ln_bias.float()[None, :]
+                ) / ln_weight.float()[None, :]
+                dgamma = (w_ab.float() * t_xhat).sum(0)
+                dbeta = db_ab.float() @ w_ab.float()
+                return (
+                    dx.reshape(orig_shape),
+                    dgamma.to(ln_weight.dtype),
+                    dbeta.to(ln_bias.dtype),
+                    dWa, dWb, dWs, None, None, None,
+                )
+            d_xn = dAB @ w_ab
+        else:
+            dWa = dA.t() @ xn                         # [ND, K]
+            dWb = dB.t() @ xn
+            d_xn = dA @ expand_a_weight + dB @ expand_b_weight  # grad to normalized x [M, K]
 
         # LayerNorm backward (Triton kernel from saved stats: dx, dgamma, dbeta)
         dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight)

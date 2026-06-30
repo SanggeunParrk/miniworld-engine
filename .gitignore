@@ -25,6 +25,12 @@ dist/
 benchmarks/**/artifacts/**
 !benchmarks/**/artifacts/**/
 !benchmarks/**/artifacts/**/.gitkeep
+!benchmarks/**/artifacts/**/*.csv
+!benchmarks/**/artifacts/**/*.svg
+!benchmarks/**/artifacts/**/*.png
+!benchmarks/**/artifacts/**/*.pdf
+!benchmarks/**/artifacts/**/*.txt
+!benchmarks/**/artifacts/**/*.json
 benchmark/logs/
 benchmark/
 config/

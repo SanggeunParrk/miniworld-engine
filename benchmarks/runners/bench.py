@@ -404,8 +404,8 @@ class MiniWorldTriangleMultiplicationInference(nn.Module):
         self.left_gate_weight = base.to_left_gate.weight.T
         self.right_weight = base.to_right.weight.T
         self.right_gate_weight = base.to_right_gate.weight.T
-        self.gate_weight = base.to_gate.weight.T
-        self.out_weight = base.to_out.weight.T
+        self.gate_weight = base.to_gate.weight.T.contiguous()
+        self.out_weight = base.to_out.weight.T.contiguous()
         self.out_weight_nn = base.to_out.weight
         self.norm_in_weight = base.ln_pair.weight
         self.norm_in_bias = base.ln_pair.bias

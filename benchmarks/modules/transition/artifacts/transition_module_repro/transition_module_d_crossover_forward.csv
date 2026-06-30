@@ -1,0 +1,13 @@
+seq_len,d_hidden,implementation,identity,kind,latency_ms
+512,128,PyTorch,pytorch,module:pytorch,1.3485440015792847
+512,128,Triton (prev),triton,triton_prev,0.6606880128383636
+512,128,Triton b2b (ours),miniworld,module:triton,0.3216640055179596
+512,128,cute (ours),miniworld-alt,module:cute,0.4402559995651245
+512,256,PyTorch,pytorch,module:pytorch,2.4653120040893555
+512,256,Triton (prev),triton,triton_prev,1.3118720054626465
+512,256,Triton b2b (ours),miniworld,module:triton,0.9593279957771301
+512,256,cute (ours),miniworld-alt,module:cute,0.9769920110702515
+512,512,PyTorch,pytorch,module:pytorch,5.553408145904541
+512,512,Triton (prev),triton,triton_prev,3.5810240507125854
+512,512,Triton b2b (ours),miniworld,module:triton,2.758143901824951
+512,512,cute (ours),miniworld-alt,module:cute,2.81222403049469
