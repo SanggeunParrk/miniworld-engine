@@ -173,6 +173,12 @@ class TriMulCompile(torch.nn.Module):
         self.ln_out_w, self.ln_out_b = b.ln_out.weight, b.ln_out.bias
         self.eps = b.ln_pair.eps
         self.D = self.WL.shape[0]
+        # Prepack the sm_100 front B-operands ONCE (interleaved [WLᵀ|WRᵀ], [WLgᵀ|WRgᵀ])
+        # so the hot path skips the per-call cat/transpose.
+        from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
+            prepack_lr_operand_sm100,
+        )
+        self._front_packed = prepack_lr_operand_sm100(self.WL, self.WLg, self.WR, self.WRg)
 
     def forward(self, pair, mask=None):
         B, L, _, D = pair.shape
@@ -184,8 +190,13 @@ class TriMulCompile(torch.nn.Module):
             x_n = fused_ln_mask(pair, self.ln_in_w, self.ln_in_b, m2, self.eps)
         else:
             x_n = triton_layernorm(pair.reshape(B * L * L, D), self.ln_in_w, self.ln_in_b, self.eps).view(B, L, L, D)
-        # front: existing triton kernel (cute quack gemm_act asserts on sm_100).
-        left_b, right_b, _ = trimul_front_triton(x_n, self.WL, self.WLg, self.WR, self.WRg, self.Wg)
+        # front: custom sm_100 bdll-direct gated GEMM (M-major t2r + epilogue-fused
+        # gate-mul, 2 quack tcgen05 GEMMs, no transpose) — beats the triton front
+        # (0.448 vs 0.543ms@1024). left/right come out [B,D,L,L] bdll directly.
+        from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
+            trimul_front_sm100_fused,
+        )
+        left_b, right_b = trimul_front_sm100_fused(x_n, packed=self._front_packed)
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)       # (B,D,L,L)
         # back-half: existing triton kernel (LN_out + proj + gate-mul), no cuequiv.
         return trimul_back_triton(tri, x_n, self.Wp, self.Wg,
