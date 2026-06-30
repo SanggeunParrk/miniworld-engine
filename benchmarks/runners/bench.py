@@ -417,7 +417,7 @@ def triangle_multiplication_path(implementation: str, mode: str, d_pair: int) ->
             return "miniworld.trimul_inproj_inference"
         return "miniworld.forward_only_front+split_back"
     if implementation == MINIWORLD_IMPL:
-        return "miniworld.v6_training"
+        return "miniworld.v6_training_merged"
     if implementation == DTV1_IMPL:
         return "dtv1.fused_triangle_multiplicative_update"
     return implementation

@@ -43,20 +43,19 @@ This kernel is **not** an excuse to freestyle benchmarking.
 
 ## Comparing against an existing kernel (not PyTorch)
 
-`benchmarks/runners/plot_bench.py` defaults to speedup-vs-PyTorch, but PyTorch is not the
-kernel we are trying to beat. Pass `--baseline <backend>` to render the speedup
-tables/plots against an existing kernel instead. Two reports are kept here:
+`benchmarks/runners/plot_csv.py` defaults to speedup-vs-PyTorch, but PyTorch is
+not always the kernel we are trying to beat. Pass `--baseline <backend>` to
+render speedup bar plots against an existing kernel instead. Historical reports:
 
-- `bench_layernorm_vs_triton.{md,*.png}` — `--baseline triton` (legacy vendored
+- `bench_layernorm_vs_triton.*` — `--baseline triton` (legacy vendored
   kernel). Forward is the *same* fused kernel (≈1.00×); the win is the
   partial-reduction backward dispatch: **1.32–1.39× training at d=768**, ~1.05–1.14×
   at mid d, neutral at d=128 (dispatch falls back to atomic there).
-- `bench_layernorm_vs_cuequiv.{md,*.png}` — `--baseline cuequivariance`. Ours is
+- `bench_layernorm_vs_cuequiv.*` — `--baseline cuequivariance`. Ours is
   **1.10–2.03× inference** and **1.30–1.82× training** (margin grows with d; cuEquiv
   degrades badly past d=512).
 
-Both are re-rendered from the same `bench_layernorm.out` — no re-run needed, just
-change `--baseline` and `--name`.
+New results must be re-rendered from CSV, not from captured stdout.
 
 ## CuTeDSL / H100 investigation
 
@@ -77,11 +76,8 @@ documented probe).
 
 ## Note
 
-Each metric PNG now contains both views in one figure:
-
-- x-axis is `M`
-- each `D` gets its own subplot
-- bars are grouped by backend
+Current benchmark figures are grouped bar plots rendered from CSV. Latency uses
+"lower is better"; speedup uses "higher is better".
 
 The current `layernorm_kernel` path auto-dispatches the backward between three
 implementations:

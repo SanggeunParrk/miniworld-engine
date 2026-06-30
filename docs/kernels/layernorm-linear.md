@@ -10,8 +10,8 @@ y = Linear(LayerNorm(x))
 ```
 
 LayerNorm over the last dim (stats in fp32), then an affine GEMM. This is the
-`te.LayerNormLinear` op; fusing the two stages saves the HBM round-trip the
-eager `LayerNorm` → `Linear` pair pays.
+`te.LayerNormLinear` op; fusing the two stages saves the HBM round-trip paid by
+the separate `LayerNorm` -> `Linear` pair.
 
 ## Implementations
 

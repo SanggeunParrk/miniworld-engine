@@ -9,8 +9,8 @@ plotting paths import from here:
 
 Design philosophy (so figures read as one coherent set, paper-ready):
 
-- **ours / cute family → hot colours (red / orange).** The thing we built is
-  always the warm, eye-catching series — the winner should pop.
+- **MiniWorld / cute family → dark gold.** The thing we built is always the same
+  blackened-gold series so it is immediately recognisable.
 - **NVIDIA family (cuequivariance / dtv1 / Transformer Engine) → greens & teal.**
   NVIDIA's brand green, kept together so "the NVIDIA kernels" are visually a group.
 - **plain baselines (pytorch / torch.compile / triton) → cool greys & blue.**
@@ -73,9 +73,9 @@ DISPLAY: dict[str, str] = {
     "dtv1": "NVIDIA dtv1",
     "layernorm-dispatch": "Auto dispatch",
     "layernorm-dispatch-compile": "Auto dispatch compile",
-    "miniworld": "ours",
-    "miniworld-alt": "ours (alt)",
-    "miniworld-alt2": "ours (alt₂)",
+    "miniworld": "MiniWorld",
+    "miniworld-alt": "MiniWorld (alt)",
+    "miniworld-alt2": "MiniWorld (alt₂)",
 }
 
 # Canonical colour per identity. Hex strings (no matplotlib needed to read them).
@@ -95,10 +95,10 @@ PALETTE: dict[str, str] = {
     "cuda": "#9CCC3C",           # light green (generic CUDA path)
     "layernorm-dispatch": "#E8412B",  # hero red-orange for the shipped dispatch path
     "layernorm-dispatch-compile": "#A8281A",  # darker compiled dispatch path
-    # miniworld (ours) — hot, pops
-    "miniworld": "#E8412B",      # signature red-orange (the hero)
-    "miniworld-alt": "#F29A38",  # warm orange (second variant, e.g. v5)
-    "miniworld-alt2": "#A8281A",  # deep brick (third variant, e.g. v2)
+    # MiniWorld (ours) — gold, fixed across every figure.
+    "miniworld": "#D4AF37",
+    "miniworld-alt": "#F2C94C",
+    "miniworld-alt2": "#8A6A14",
 }
 
 # Linestyle per identity for line plots (perf_report). ours = solid & prominent;
@@ -238,9 +238,9 @@ def sort_backends(names: list[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Matplotlib theme + vector-friendly saving (imported lazily)
 # --------------------------------------------------------------------------- #
-# Default output formats. PNG for markdown embeds and slides; SVG/PDF are vector
-# for the paper (LaTeX \includegraphics, infinite zoom, editable in Illustrator).
-FORMATS: tuple[str, ...] = ("png", "svg", "pdf")
+# Default output format. SVG is the source artifact; PNG/PDF can be derived from
+# it when needed, so benchmark rendering keeps only the canonical vector file.
+FORMATS: tuple[str, ...] = ("svg",)
 
 
 def apply_theme() -> None:
@@ -276,10 +276,8 @@ def apply_theme() -> None:
         "legend.frameon": True,
         "legend.framealpha": 0.95,
         "legend.edgecolor": "#D7DCE3",
-        # vector text stays text (selectable / searchable in the PDF)
+        # vector text stays text (selectable / searchable in the SVG)
         "svg.fonttype": "none",
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
     })
 
 
@@ -287,8 +285,8 @@ def save_figure(fig, out_path: Path, formats: tuple[str, ...] = FORMATS) -> list
     """Save ``fig`` to ``out_path`` in every requested format.
 
     ``out_path``'s suffix is ignored; one file per format is written next to it
-    (``foo.png``, ``foo.svg``, ``foo.pdf``). Returns the paths written. The PNG
-    (when requested) is what markdown reports embed; SVG/PDF are the paper assets.
+    (``foo.svg`` by default). Returns the paths written. SVG stays editable and
+    can be converted to PNG/PDF outside the benchmark pipeline when required.
     """
     out_path = Path(out_path)
     written = []

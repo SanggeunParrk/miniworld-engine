@@ -74,7 +74,8 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 not to.** The active path is `benchmarks/runners/bench.py` +
 `benchmarks/modules/<module>/configs/bench.yaml` + `submits/run_bench.sbatch`.
 Do not replace the harness with ad hoc timing snippets or custom markdown
-summaries for final results.
+summaries for final results. A benchmark run writes CSV; plotting is a separate
+CSV-rendering step.
 
 Detailed benchmark conventions live in `docs/benchmarks.md`. Runtime dispatch
 cache policy lives in `docs/operations/dispatch-cache.md`.
@@ -87,7 +88,7 @@ configs:
 srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
   bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
     PYTHONPATH=src python benchmarks/runners/bench.py kernel=triangle_multiplication \
-      implementations=[pytorch,triton,cuequivariance] mode=inference"'
+      implementations=[pytorch,dtv1,cuequivariance,miniworld] mode=inference"'
 # or submit: sbatch submits/run_bench.sbatch
 ```
 
@@ -97,6 +98,11 @@ All final benchmarks run the `torch.compile`d path; non-compiled debug probes
 are not valid final benchmark results.
 Generated results land in the selected target's `artifacts/` directory, for
 example `benchmarks/modules/triangle_multiplication/artifacts/`.
+The benchmark CSV is the source of truth. It includes method, dimensions,
+precision, mode, metric, device, compile flag, and value. Render SVG figures
+from it with `benchmarks/runners/plot_csv.py`.
+For trimul, run separate `sweep_axis=seq_len` and `sweep_axis=d_pair` jobs; the
+figure caption records the fixed dimension (`d_pair=...` or `L=...`).
 
 If an op is not yet integrated into the unified harness, keep local probes
 untracked and move the stable definition into `benchmarks/kernels/<kernel>/`

@@ -67,10 +67,9 @@ import. No quack file is modified; survives `pixi install`. (Note: a distinct
 `__qualname__` on the patched compile fn busts quack's disk cache so a stale
 n-major `.o` from a pre-patch run isn't reused.)
 
-> 🔴 The same stock-quack gap also breaks **tm1's existing cute path**
-> (`modules/triangle_multiplication/module.py::_forward_cute` →
-> `tm1_cute_forward(..., out_layout="bdll_direct")`). `_bdll_patch.apply()` fixes
-> that path too — just import+apply it there.
+The same stock-quack gap also breaks tm1's existing cute direct-BDLL path in
+`modules/triangle_multiplication/module.py`. `_bdll_patch.apply()` fixes that
+path too; import and apply it before the tm1 cute launch.
 
 ## Status
 

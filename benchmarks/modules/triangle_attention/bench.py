@@ -7,8 +7,8 @@ ms / layer, B=1, bf16, H100. d_pair sweep {128, 256, 512}; bias-only
 (use_self_attention=False). "ours" = the TRITON implementation (repo layernorm_kernel
 + fused_gate_out/split + inference LN+proj concat + per-GPU dispatch).
 
-Emits parseable sections; capture under this target's artifacts/, render
-reports with benchmarks/runners/plot_bench.py.
+TODO: migrate this legacy local probe to the unified CSV runner before treating
+its numbers as final benchmark artifacts.
 Run via srun on a compute node.
 """
 
@@ -103,9 +103,8 @@ def run(kind, dims, dtype, B, nh):
     title = "single-dir" if kind == "single" else "bidirectional"
     print(f"### {title} bias-only triangle attention  B={B} H={nh} dtype={dtype}")
     print(f"# device={torch.cuda.get_device_name()}  inference=pt:compile/ours:cudagraph  train=compile")
-    # Emit the benchmarks/runners/plot_bench.py format (M=L^2, d_in=d_out=d_pair; backend lines
-    # `pytorch`/`triton` with inference/training timings) so the shared plotter
-    # renders the standard speedup/latency charts + tables.
+    # Legacy human-readable timing output. Final benchmark artifacts should come
+    # from benchmarks/runners/bench.py as CSV.
     print(f"host={torch.cuda.get_device_name()} torch={torch.__version__} dtype={dtype}")
     print("implementations=pytorch,triton  inference: pytorch=torch.compile / "
           "triton=CUDA-graph ; train: both torch.compile  use_self_attention=False")

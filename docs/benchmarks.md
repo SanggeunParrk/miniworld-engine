@@ -16,16 +16,16 @@ curated markdown reports under `benchmarks/`; write durable explanations under
 
 ## Hard Rule: All Benchmarks Run Compiled
 
-**Every benchmark MUST measure the `torch.compile`d path, never eager.** Eager PyTorch
-is launch-bound and gives meaninglessly slow baselines — comparing a fused kernel to
-eager is not a fair or valid result.
+**Every benchmark MUST measure the `torch.compile`d path, never non-compiled PyTorch.**
+Non-compiled PyTorch is launch-bound and gives meaninglessly slow baselines; comparing a
+fused kernel to that path is not a fair or valid result.
 
 - The PyTorch-naive baseline is **always** `torch.compile(ref)` (reduce-overhead /
-  default), warmed up before timing — NEVER the eager module.
+  default), warmed up before timing; never the non-compiled module.
 - Time only steady-state (post-warmup) so compilation cost is excluded.
 - TE / cute / triton are already compiled kernels; the rule is mainly about the
-  PyTorch baseline — but the principle is absolute: **no eager numbers in any
-  benchmark table or graph.** An eager measurement is a debug probe, not a result.
+  PyTorch baseline, but the principle is absolute: **no non-compiled numbers in any
+  benchmark table or graph.** A non-compiled measurement is a debug probe, not a result.
 
 ## Hard Rule: Follow The Team-GM Bench Harness
 
@@ -37,7 +37,7 @@ explicitly asks for a one-off experiment.
   `benchmarks/modules/<module>/configs/bench.yaml` +
   `submits/run_bench.sbatch`.
 - That harness is the descendant of the `team-gm` benchmarking flow. Follow its
-  shapes, dtype mode, compile/eager mode, and reporting format unless there is a
+  shapes, dtype mode, compilation policy, and reporting format unless there is a
   concrete reason not to.
 - Do **not** replace the harness with custom timing loops, notebook cells,
   random one-off `python - <<'PY'` snippets, or hand-written markdown tables for
@@ -55,13 +55,22 @@ benchmark registered under `benchmarks/kernels/<kernel>/` or
 `benchmarks/modules/<module>/`, and generated artifacts under that target's
 `artifacts/`.** Anything else is only a debug probe, not a benchmark result.
 
-**Every benchmark in this repo ships a table AND a graph together.** A table
-alone hides trends; a graph alone hides exact numbers. Always produce both, and
-save them next to each other so a result is never just a wall of text.
+**Every benchmark in this repo writes a complete CSV first.** The CSV is the
+source of truth: it must include the method, dimensions, dtype/precision, mode,
+metric, device, compile flag, and measured value. Plots are a separate step that
+read the CSV; benchmark code must not draw figures.
+Shape sweeps are explicit: use `sweep_axis=seq_len` for L sweeps and
+`sweep_axis=d_pair` for channel-width sweeps. The CSV must record both the
+swept axis and the fixed dimensions. If a backend does not support a shape,
+write a `status=failed` row with the error and leave `value` empty so plotting
+can skip that point without hiding the unsupported case.
+For d sweeps, prefer explicit `d_pair_values` when the paper/report only wants
+canonical widths; trimul uses `128, 256, 512` rather than an arithmetic range
+that accidentally includes unsupported or irrelevant intermediate widths.
 
 **Generated benchmark results do not live in package code.** Raw logs, CSVs,
-PNGs, SVGs, PDFs, slide exports, profiler outputs, and rendered markdown tables
-go under `benchmarks/kernels/<kernel>/artifacts/` or
+SVGs, slide exports, and profiler outputs go under
+`benchmarks/kernels/<kernel>/artifacts/` or
 `benchmarks/modules/<module>/artifacts/` by default. Durable interpretation
 belongs in `docs/`, not in a benchmark archive tree.
 
@@ -71,40 +80,40 @@ Prefer this exact flow over ad hoc measurement.
 
 Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
 
-1. **Run** the bench on a GPU compute node, capturing stdout into `$A`. Uses the
+1. **Run** the bench on a GPU compute node. Uses the
    repo's unified pixi env (`.pixi/`); `--frozen` keeps the cu12 TE core fix in
    place (a bare `pixi run`/`install` re-pins cu13 — see pyproject `fix-te-cu12`):
    ```bash
    srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 \
      --mem=64G --cpus-per-task=8 --time=00:30:00 \
-     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python benchmarks/runners/bench.py kernel=<kernel>"' \
-     | tee "$A/<name>.out"
+     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python benchmarks/runners/bench.py kernel=<kernel>"'
    ```
-2. **Render** the table + graphs into the same artifact directory. **Never run this on the
+   This writes a long-form CSV under the target-local artifact directory.
+2. **Render** plots from the CSV into the same artifact directory. **Never run this on the
    login node** — route it through `srun` (CPU only, no `--gres`). matplotlib is
    in the unified env; `LD_LIBRARY_PATH` picks up its libstdc++ (`CXXABI_1.3.15`):
    ```bash
    srun --account=cssb --qos=cssb_h100 --partition=h100 --mem=16G --cpus-per-task=4 --time=00:10:00 \
      bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-       python benchmarks/runners/plot_bench.py '"\"$A/<name>.out\" \"$A\""' --name <name>"'
+       python benchmarks/runners/plot_csv.py '"\"$A/<name>.csv\" \"$A\""' --name <name>"'
    ```
-   This writes `<name>.md` (markdown tables + embedded graphs) and one PNG per
-   metric (`_inference.png`, `_training.png`) into `$A`. Keep that generated
-   output in artifacts; summarize durable conclusions in `docs/`.
-
-`benchmarks/runners/plot_bench.py` parses the standard bench-output format
-(`=== M=.. d_in=.. d_out=.. ===` blocks + `torch.compile`/`TE` timing lines), so
-any bench that prints in that format gets table + graph for free.
+   This writes grouped bar plots (`*_latency.svg` and `*_speedup.svg`). If
+   `--name` is omitted, the renderer uses short mode-aware names such as
+   `trimul_inference_L_sweep_latency.svg` and
+   `trimul_training_d_sweep_speedup.svg`. Keep those generated SVGs in
+   artifacts; derive PNG/PDF from SVG only when a downstream tool explicitly
+   needs that format. Summarize durable conclusions in `docs/`.
+   The plot caption must include the fixed sweep dimensions, e.g. `d_pair=128`
+   for an L sweep or `L=384` for a d sweep.
 
 ## Visual style (single source of truth)
 
-All figures — both plotting paths — share one palette/theme so the benchmark
+All figures share one palette/theme so the benchmark
 figures read as **one coherent set** (this matters for the paper: a reviewer
 sees the same backend in the same colour in every plot). Defined once in
-`src/miniworld_kernels/viz/style.py` and imported by both:
+`src/miniworld_kernels/viz/style.py` and imported by:
 
-- `benchmarks/runners/plot_bench.py` (grouped bars from `.out`) and
-- `benchmarks/runners/bench.py` (Triton `perf_report` line plots).
+- `benchmarks/runners/plot_csv.py` (grouped bar plots from benchmark CSVs).
 
 Rules baked into the module:
 
@@ -113,14 +122,15 @@ Rules baked into the module:
   one canonical identity → one fixed colour. Unknown names get a deterministic
   hash colour (stable across figures, never index-dependent). Never hand-assign
   colours in a kernel-local bench — call `color_for` / `style_for`.
-  - **ours / cute family → hot (red/orange)** — the winner pops.
+  - **MiniWorld / cute family → gold** — the repo's kernels are
+    visually fixed across every figure.
   - **NVIDIA family (cuequivariance / dtv1 / TE) → greens & teal.**
   - **baselines (pytorch / torch.compile / triton) → grey & blue** (recede).
 - **`apply_theme()`** installs the publication rcParams (fonts, clean spines,
   y-grid). Call it once before plotting.
-- **Vector output for the paper.** `save_figure(fig, path)` writes `.png` (for
-  markdown/slides) **plus `.svg` and `.pdf`** (LaTeX `\includegraphics`,
-  infinite zoom). All of those are generated artifacts.
+- **SVG-only output.** `save_figure(fig, path)` writes `.svg` only. SVG is the
+  canonical vector artifact; convert it to PNG/PDF outside the benchmark runner
+  if a paper, slide deck, or website requires that derivative format.
 
 ## Conventions
 
@@ -129,9 +139,51 @@ Rules baked into the module:
 - **Use the shared style** (`miniworld_kernels.viz`) for every figure — never
   ad-hoc colours.
 - **Both inference and training** when the op is used in training.
-- Bold the faster backend in each table cell; "lower is better" on graphs.
+- Latency plots use "lower is better"; speedup plots use "higher is better".
 - Report numerical agreement (max abs error, relative Frobenius error, cosine)
   alongside latency — never just speed.
+
+## Benchmark Acceptance Checklist
+
+Before treating a benchmark artifact as final, check every item below.
+
+- [ ] **Compile path:** `compiled=True` is present in the CSV, and the run used
+  the repo benchmark entry point with `compile=true`; PyTorch baseline is never
+  non-compiled.
+- [ ] **Dtype and autotune:** CSV rows record `input_dtype` and
+  `parameter_dtype`; each CSV has a matching `<run_name>_autotune_summary.txt`
+  for Triton-autotuned kernels, and that file shows both the candidate config
+  set and the selected cache entries for the measured shapes. `autotune_summary.txt`
+  is only the latest-run compatibility copy, not the full audit record.
+- [ ] **Kernel tiling:** repo-developed kernels have an explicit tiling strategy
+  appropriate for the measured shape family. The benchmark notes or autotune
+  summary must make the relevant tile dimensions visible, e.g. `BLOCK_M`,
+  `BLOCK_N`, `BLOCK_K`, warp/stage counts, or the equivalent CuTe/quack tile
+  shape.
+- [ ] **Reference agreement:** CSV rows include `reference`, `output_max_abs`,
+  `output_rel_frob`, and `output_cosine`; training rows also include
+  `grad_max_abs`, `grad_rel_frob`, and `grad_cosine` when the runner has a
+  reference path wired.
+- [ ] **Inference/training separation:** implementation rows identify the
+  `execution_path`, and MiniWorld-style kernels must use distinct inference and
+  training paths when the kernel design has separate save/no-save behavior.
+- [ ] **Both modes:** final artifacts include both inference and training CSVs
+  and SVGs for training-relevant ops.
+- [ ] **Both sweeps:** final artifacts include both L sweep (`sweep_axis=seq_len`)
+  and d sweep (`sweep_axis=d_pair`). For trimul, the d sweep uses
+  `d_pair_values=[128,256,512]` at fixed `L=384`.
+- [ ] **All applicable methods:** rows include every applicable implementation,
+  including PyTorch, and the repo-developed kernel is routed through its intended
+  production path rather than a debug/prototype path.
+- [ ] **CUDA graph option:** the benchmark design explicitly decides whether
+  CUDA graph capture is part of the fair regime for each implementation. If it
+  is used, the CSV/report must identify that regime; if it is not used, the
+  docs or benchmark notes must explain why `torch.compile`/steady-state timing
+  is the intended comparison.
+- [ ] **Approved runner and plotter:** CSVs come from
+  `benchmarks/runners/bench.py`; figures come from
+  `benchmarks/runners/plot_csv.py`; benchmark code writes CSV only and plotting
+  remains a separate step.
 
 ## Runtime Dispatch Caches
 
