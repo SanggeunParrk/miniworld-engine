@@ -26,11 +26,10 @@ sweep_seq_len: 384    # fixed L for d_pair sweeps
 # Which op to bench. One of:
 #   triangle_multiplication | triangle_attention | transition |
 #   adaptive_layernorm | augmented_attention_token | augmented_attention_atom
-kernel: triangle_multiplication
+kernel: triangle_multiplication_bidirectional
 implementations:
   - pytorch
   - dtv1
-  - cuequivariance
   - miniworld
 # TriangleMultiplication also accepts:
 #   triton | triton_pytorch_ln | triton_ln | cute
