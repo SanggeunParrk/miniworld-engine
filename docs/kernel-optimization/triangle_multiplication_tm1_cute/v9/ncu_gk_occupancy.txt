@@ -1,0 +1,43 @@
+==PROF== Connected to process 1707885 (/home/snu_hwle/psk/miniworld-kernels/.pixi/envs/default/bin/python3.12)
+PRE M=1048576 N=128 K=128
+/home/snu_hwle/psk/miniworld-kernels/.pixi/envs/default/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/pipeline/helpers.py:410: UserWarning: NamedBarrier ID 0 is by other driver APIs (i.e. sync_threads()) and should not be used.
+  warnings.warn(
+==PROF== Profiling "kernel_cutlass_kernel___main__GateGemmK_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_Atom_ThrID_10_TV_Layout_Src_1819201__0": 0%....50%....100% - 9 passes
+tile_k=64 stages=2 left cos=0.999999
+==PROF== Profiling "kernel_cutlass_kernel___main__GateGemmK_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_Atom_ThrID_10_TV_Layout_Src_1819201__0": 0%....50%....100% - 9 passes
+tile_k=64 stages=2 2xGEMM(both sides)=0.622 ms
+==PROF== Disconnected from process 1707885
+[1707885] python3.12@127.0.0.1
+  kernel_cutlass_kernel___main__GateGemmK_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_Atom_ThrID_10_TV_Layout_Src_1819201__0 (8192, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+    Section: Command line profiler metrics
+    ---------------------------------------------------------------- --------------- ------------
+    Metric Name                                                          Metric Unit Metric Value
+    ---------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                             %        12.36
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed               %        14.26
+    gpu__time_duration.sum                                                        us       521.66
+    launch__occupancy_limit_registers                                          block            6
+    launch__occupancy_limit_shared_mem                                         block            2
+    launch__registers_per_thread                                     register/thread           80
+    launch__waves_per_multiprocessor                                                        27.68
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                               %        32.80
+    sm__warps_active.avg.pct_of_peak_sustained_active                              %        12.01
+    ---------------------------------------------------------------- --------------- ------------
+
+  kernel_cutlass_kernel___main__GateGemmK_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_Atom_ThrID_10_TV_Layout_Src_1819201__0 (8192, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+    Section: Command line profiler metrics
+    ---------------------------------------------------------------- --------------- ------------
+    Metric Name                                                          Metric Unit Metric Value
+    ---------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                             %        12.42
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed               %        14.32
+    gpu__time_duration.sum                                                        us       520.48
+    launch__occupancy_limit_registers                                          block            6
+    launch__occupancy_limit_shared_mem                                         block            2
+    launch__registers_per_thread                                     register/thread           80
+    launch__waves_per_multiprocessor                                                        27.68
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                               %        32.75
+    sm__warps_active.avg.pct_of_peak_sustained_active                              %        12.01
+    ---------------------------------------------------------------- --------------- ------------
+
+NCU_DONE rc=0
