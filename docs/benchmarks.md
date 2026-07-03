@@ -4,15 +4,38 @@
 
 `benchmarks/` has three meanings:
 
-- `kernels/<kernel>/`: isolated kernel benchmarks, with target-local
-  `configs/` and `artifacts/`.
-- `modules/<module>/`: composed module benchmarks, with target-local
-  `configs/` and `artifacts/`.
-- `runners/`: supported executable entry points.
+- `kernels/<kernel>/`: isolated kernel benchmarks.
+- `modules/<module>/`: composed module benchmarks.
+- `runners/`: shared, kernel-agnostic executable entry points (`bench.py`,
+  `plot_csv.py`, and any reusable harness usable across targets).
 
-Do not add benchmark code under `src/`. Do not add archive folders. Do not add
-curated markdown reports under `benchmarks/`; write durable explanations under
-`docs/` and keep generated tables/plots under the target's `artifacts/`.
+### Per-target subdirectories (strict)
+
+Every `kernels/<k>/` and `modules/<m>/` target uses exactly these subdirs, each
+with one job. Nothing else belongs at the target root.
+
+- `configs/` — Hydra bench config (`bench.yaml`).
+- `artifacts/` — **generated benchmark outputs only**: `*.csv`, `*.svg`,
+  `*_autotune_summary.txt`. No Python, no profiler captures, no repro trees.
+  (`.gitignore` already drops everything under `artifacts/` except the data
+  file types, so stray code dumped here is silently untracked — do not rely on
+  that; just don't put it here.)
+- `profiles/` — **profiler capture outputs**: `*.nsys-rep`, `*.ncu-rep`,
+  `*.sqlite`. Sibling of `artifacts/`, never nested inside it. Captures are
+  git-ignored (large binaries); the dir is kept via `.gitkeep`.
+
+A target holds **no Python at all** — only `configs/`, `artifacts/`, `profiles/`.
+
+Rules of thumb:
+- **Every** benchmark/profiling `.py` (bench runner, plot renderer, nsys
+  capture-replay harness, diagnostic driver) lives in `benchmarks/runners/`,
+  never inside a target. Example: `runners/nsys_trimul_capture_replay.py`.
+- Profiler capture files go in the target's `profiles/`, never `artifacts/`.
+
+Do not add benchmark code under `src/`. Do not add archive folders or repro
+source trees under a target. Do not add curated markdown reports under
+`benchmarks/`; write durable explanations under `docs/` and keep generated
+tables/plots under the target's `artifacts/`.
 
 ## Hard Rule: All Benchmarks Run Compiled
 
@@ -99,8 +122,10 @@ Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
    ```
    This writes grouped bar plots (`*_latency.svg` and `*_speedup.svg`). If
    `--name` is omitted, the renderer uses short mode-aware names such as
-   `trimul_inference_L_sweep_latency.svg` and
-   `trimul_training_d_sweep_speedup.svg`. Keep those generated SVGs in
+   `trimul_inference_manual_L_sweep_latency.svg` and
+   `trimul_training_manual_d_sweep_speedup.svg` (the `manual` segment reflects
+   the `cudagraph=manual` deployment config these kernels are benched under).
+   Keep those generated SVGs in
    artifacts; derive PNG/PDF from SVG only when a downstream tool explicitly
    needs that format. Summarize durable conclusions in `docs/`.
    The plot caption must include the fixed sweep dimensions, e.g. `d_pair=128`
@@ -149,7 +174,9 @@ Before treating a benchmark artifact as final, check every item below.
 
 - [ ] **Compile path:** `compiled=True` is present in the CSV, and the run used
   the repo benchmark entry point with `compile=true`; PyTorch baseline is never
-  non-compiled.
+  non-compiled. For Transition manual CUDA graph artifacts, `compiled=False`
+  means the measured module was captured eagerly because CUDA graph capture is
+  the timing regime; the `cudagraph` column must record `manual`.
 - [ ] **Dtype and autotune:** CSV rows record `input_dtype` and
   `parameter_dtype`; each CSV has a matching `<run_name>_autotune_summary.txt`
   for Triton-autotuned kernels, and that file shows both the candidate config
@@ -183,7 +210,8 @@ Before treating a benchmark artifact as final, check every item below.
 - [ ] **Approved runner and plotter:** CSVs come from
   `benchmarks/runners/bench.py`; figures come from
   `benchmarks/runners/plot_csv.py`; benchmark code writes CSV only and plotting
-  remains a separate step.
+  remains a separate step. Canonical CSV files should be replaced atomically
+  after a run finishes, not truncated in place at job start.
 
 ## Module Benchmark Matrix
 

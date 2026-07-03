@@ -1,7 +1,8 @@
 """Reproduce the historical fast Transition module log.
 
-This restores the runner that produced:
-``benchmarks/modules/transition/artifacts/repro_71fee1c_tree/_trans_tmp/bench_module.out``.
+This restores the runner that reproduced the historical fast Transition module log
+(the ``repro_71fee1c_tree`` snapshot it once referenced has been removed as stray
+artifact-tree clutter).
 
 It is intentionally a diagnostic, not the canonical CSV benchmark runner. The historical
 regime used ``triton.testing.do_bench`` directly on the real ``Transition`` module with
