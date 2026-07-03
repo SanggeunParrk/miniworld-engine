@@ -77,21 +77,39 @@ def tm1_cute_forward(
         right_bdll = right_flat.view(B, L, L, D).permute(0, 3, 1, 2).contiguous()
         return left_bdll, right_bdll
     if out_layout == "bdll_direct":
-        # Pre-allocate the [B, D, L, L] storage, then pass an M-major view of
-        # it as gemm_act's postact_out. The view's (M=B*L*L, N=D) strides are
-        # (1, L*L) so the GEMM's row index m == flat-(b,r,c) lands at the
-        # right gmem offset and the column index n == D lands at stride L*L —
-        # i.e. the kernel writes directly into the [B,D,L,L] storage with no
-        # subsequent transpose. Requires the patched quack (n-major-c assert
-        # dropped on postact, pa_leading_dim follows detected layout).
+        # Zero-copy [B, D, L, L] store with NO transpose: pre-allocate the
+        # [B, D, L, L] storage and hand the GEMM an M-major view of it
+        # (shape (M=L*L, N=D), strides (1, L*L)) as postact_out. Row index
+        # m == flat-(r,c) lands at stride 1, column n == D at stride L*L, i.e.
+        # the kernel writes straight into [B,D,L,L] — killing the ~4.5ms
+        # permute of the "bdll" path.
+        #
+        # Why NOT the fused "glu" gated GEMM here: quack 0.3.11's *gated*
+        # epilogue scrambles an M-major postact (its smem tile stays n-major
+        # while TMA stores m-major). Its *non-gated* store is correct for
+        # M-major, so we split the side into two plain GEMMs (proj = x@Wp,
+        # gate = x@Wg) straight into M-major [B,D,L,L] views and fuse
+        # sigmoid(gate)*proj pointwise. Same GEMM FLOPs as the gated path;
+        # the only extra cost is one gate write + a cheap pointwise.
         if B != 1:
             raise NotImplementedError("bdll_direct currently only supports B=1")
-        left_bdll = torch.empty(B, D, L, L, device=x.device, dtype=x.dtype)
-        right_bdll = torch.empty(B, D, L, L, device=x.device, dtype=x.dtype)
-        # M-major flat view, shape (M=L*L, N=D), strides (1, L*L).
-        left_view = left_bdll.view(D, L * L).T
-        right_view = right_bdll.view(D, L * L).T
-        gemm_act(A=x_flat, B=B_left, activation="glu", store_preact=False, postact_out=left_view)
-        gemm_act(A=x_flat, B=B_right, activation="glu", store_preact=False, postact_out=right_view)
+
+        def _bdll_buf():
+            t = torch.empty(B, D, L, L, device=x.device, dtype=x.dtype)
+            return t, t.view(D, L * L).T  # (storage[B,D,L,L], M-major (M=L*L,N=D) view)
+
+        left_bdll, left_view = _bdll_buf()
+        right_bdll, right_view = _bdll_buf()
+        gate_buf, gate_view = _bdll_buf()  # reused for both sides
+
+        # left = sigmoid(x @ WLg) * (x @ WL)
+        gemm_act(A=x_flat, B=WL, activation=None, store_preact=False, postact_out=left_view)
+        gemm_act(A=x_flat, B=WLg, activation=None, store_preact=False, postact_out=gate_view)
+        left_bdll.mul_(torch.sigmoid(gate_buf))
+
+        # right = sigmoid(x @ WRg) * (x @ WR)
+        gemm_act(A=x_flat, B=WR, activation=None, store_preact=False, postact_out=right_view)
+        gemm_act(A=x_flat, B=WRg, activation=None, store_preact=False, postact_out=gate_view)
+        right_bdll.mul_(torch.sigmoid(gate_buf))
         return left_bdll, right_bdll
     raise ValueError(f"unknown out_layout: {out_layout!r}")

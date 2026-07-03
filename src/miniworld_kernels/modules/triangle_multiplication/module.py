@@ -241,6 +241,11 @@ class TriangleMultiplication(nn.Module):
             )
             x_normed = (out[0] if isinstance(out, tuple) else out).view(b, l1, l2, d)
 
+        # Zero-copy [B,D,L,L] store (no transpose). bdll_direct now writes the
+        # side output straight into [B,D,L,L] via two non-gated M-major GEMMs +
+        # a pointwise sigmoid-gate (quack 0.3.11's gated epilogue can't do an
+        # M-major postact; its non-gated store can — see launch.py). This drops
+        # the ~4.5ms permute the plain "bdll" path incurs at L=1024.
         left_bdll, right_bdll = tm1_cute_forward(
             x_normed,
             self.to_left.weight.T,
