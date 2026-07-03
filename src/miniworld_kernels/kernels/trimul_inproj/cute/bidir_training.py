@@ -101,8 +101,13 @@ class BidirBackHalf(torch.autograd.Function):
             return _quack_gemm_act(d_glogit, Wg_t, C=dxn_front, activation=None,
                                    store_preact=False)[1]
 
-        def _dxn_cublas():  # cuBLAS: addmm fuses the dx_gate add (wins at small L)
-            return torch.addmm(dconcT @ W_stack, d_glogit, Wg_t)
+        def _dxn_cublas():  # cuBLAS: accumulate the dx_gate add IN-PLACE. Out-of-place
+            # torch.addmm(C, A, B) stages β·C by copying C (a full (M,D)=268MB DtoD memcpy) into
+            # the output before the GEMM; seeding the buffer with the gate term and accumulating
+            # dconcᵀ@W_stack in-place removes that copy.
+            dx = torch.mm(d_glogit, Wg_t)
+            dx.addmm_(dconcT, W_stack)
+            return dx
 
         # dispatch: cuBLAS wins small L (quack launch overhead), cute ≈/wins large L.
         dx_n = dispatch.pick("dxn", (M, 4 * H + D, D),
