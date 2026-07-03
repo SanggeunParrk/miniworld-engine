@@ -85,7 +85,9 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_bwd_dx_fused
     candidate[82] BLOCK_M=64, num_warps=16, num_stages=3
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
-  no cache entries captured
+  key=(128, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=64, num_warps=4, num_stages=3
+  key=(256, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=4
+  key=(512, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=16, num_warps=4, num_stages=2
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
   candidate_configs=84
@@ -173,7 +175,9 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
     candidate[82] BLOCK_M=64, num_warps=16, num_stages=3
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
-  key=(128, 10, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=16, num_warps=4, num_stages=4
+  key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=16, num_warps=4, num_stages=3
+  key=(256, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=4
+  key=(512, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=4
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal
   candidate_configs=84
@@ -306,7 +310,9 @@ miniworld_kernels.modules.triangle_multiplication.baseline_dtv1._input_gated_gem
     candidate[15] BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=4, maxnreg=128
     candidate[16] BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=5, maxnreg=128
     candidate[17] BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=2
-  no cache entries captured
+  key=(147456, 1024, 512, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, float32) -> BLOCK_K=64, BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=3, maxnreg=128
+  key=(147456, 256, 128, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, float32) -> BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
+  key=(147456, 512, 256, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, float32) -> BLOCK_K=64, BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=3, maxnreg=128
 
 miniworld_kernels.modules.triangle_multiplication.baseline_dtv1._output_gated_gemm_kernel
   candidate_configs=17
@@ -327,4 +333,6 @@ miniworld_kernels.modules.triangle_multiplication.baseline_dtv1._output_gated_ge
     candidate[15] BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=4, maxnreg=128
     candidate[16] BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=5, maxnreg=128
     candidate[17] BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=2
-  no cache entries captured
+  key=(147456, 128, 128, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, float32) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
+  key=(147456, 256, 256, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, float32) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=4, maxnreg=128
+  key=(147456, 512, 512, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, float32) -> BLOCK_K=64, BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=2
