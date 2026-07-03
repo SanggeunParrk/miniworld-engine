@@ -16,6 +16,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
 
 @triton.jit
 def _dx_kernel(d_lr, preact, W, dx, M, D: tl.constexpr, BM: tl.constexpr):
@@ -92,10 +94,11 @@ def _dw_kernel(d_lr, preact, x_n, dW, M, D: tl.constexpr, BK: tl.constexpr, NPRO
 
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
-    key=["DM"],
+    key=["GROUP_M", "D"],
 )
 @triton.jit
-def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl.constexpr):
+def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl.constexpr,
+                    GROUP_M: tl.constexpr):
     """1D channel-major elementwise: out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR].
     Iterate over DM=D*M positions (d,m); dL=dL_ptr[idx], dR=dR_ptr[idx] (separate left/right
     buffers — no d_lr cat in the caller); preact is interleaved so needs (2d)*M+m indexing.
@@ -126,10 +129,11 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl
 
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
-    key=["DM"],
+    key=["GROUP_M", "D"],
 )
 @triton.jit
-def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr, BLK: tl.constexpr):
+def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr,
+                     BLK: tl.constexpr, GROUP_M: tl.constexpr):
     """Like `_dconcat_kernel` but builds a 5-block d_concat (5D,M):
        [d_gLlog; d_pL; d_gRlog; d_pR; d_glogit].
     Block 4 relayouts the gate input-grad d_glogit (M,D) row-major into channel-major (D,M).
@@ -182,7 +186,7 @@ def front_bwd_dW_glogit(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit
     dconc5 = torch.empty(5 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
     _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](
-        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H)
+        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, GROUP_M=get_seq_group(M))
 
     dWs = dconc5 @ xf                                            # (5H, Din) cuBLAS huge-K
     dWLg = dWs[:H].t().contiguous()
@@ -232,7 +236,8 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
 
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)   # [d_gLlog;d_pL;d_gRlog;d_pR]
     DM = H * M
-    _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](dL2, dR2, preact2, dconc, M, DM, D=H)
+    _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](
+        dL2, dR2, preact2, dconc, M, DM, D=H, GROUP_M=get_seq_group(M))
 
     # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
     # slower there — measured. dispatch confirms + self-documents).

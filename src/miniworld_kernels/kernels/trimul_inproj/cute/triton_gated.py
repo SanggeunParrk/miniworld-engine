@@ -26,6 +26,7 @@ import triton.language as tl
 from quack.gemm_interface import gemm_act
 
 from miniworld_kernels.kernels.trimul_inproj.cute.launch import prepack_lr_operand
+from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 PEAK_TBPS = 3.35
 
@@ -37,11 +38,12 @@ PEAK_TBPS = 3.35
         for nw in (4, 8)
         for ns in (2, 3, 4)
     ],
-    key=["M"],
+    key=["GROUP_M", "N"],
 )
 @triton.jit
 def _gated_gemm(x_ptr, bg_ptr, bp_ptr, out_ptr, M,
-                K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr):
+                K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr,
+                GROUP_M: tl.constexpr):
     pid = tl.program_id(0)
     offs_m = pid * BM + tl.arange(0, BM)
     offs_k = tl.arange(0, K)
@@ -61,7 +63,7 @@ def triton_gated(x, Bg, Bp):
     N = Bg.shape[1]
     out = torch.empty(M, N, device=x.device, dtype=x.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
-    _gated_gemm[grid](x, Bg, Bp, out, M, K=K, N=N)
+    _gated_gemm[grid](x, Bg, Bp, out, M, K=K, N=N, GROUP_M=get_seq_group(M))
     return out
 
 

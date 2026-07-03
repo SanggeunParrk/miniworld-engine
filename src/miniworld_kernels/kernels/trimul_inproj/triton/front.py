@@ -43,6 +43,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
 
 @triton.autotune(
     # lr kernel, plain 1-D grid over M-blocks. Each program computes BOTH halves
@@ -61,7 +63,7 @@ import triton.language as tl
         triton.Config({"BM": 64, "BK": 32}, num_warps=4, num_stages=4),
         triton.Config({"BM": 128, "BK": 64}, num_warps=4, num_stages=3),
     ],
-    key=["M"],
+    key=["GROUP_M", "D"],
 )
 @triton.jit
 def _lr_kernel(
@@ -70,6 +72,7 @@ def _lr_kernel(
     M, LL,
     K: tl.constexpr, D: tl.constexpr,
     BM: tl.constexpr, BK: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
     rm = pid * BM + tl.arange(0, BM)
@@ -117,7 +120,7 @@ def _lr_kernel(
         triton.Config({"BM": 128, "BK": 32}, num_warps=4, num_stages=3),
         triton.Config({"BM": 128, "BK": 64}, num_warps=8, num_stages=2),
     ],
-    key=["M"],
+    key=["GROUP_M", "D"],
 )
 @triton.jit
 def _gate_kernel(
@@ -126,6 +129,7 @@ def _gate_kernel(
     M,
     K: tl.constexpr, D: tl.constexpr,
     BM: tl.constexpr, BK: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
     rm = pid * BM + tl.arange(0, BM)
@@ -161,6 +165,7 @@ def trimul_front_triton(x, WL, WLg, WR, WRg, Wg):
     gate = torch.empty(M, D, device=x.device, dtype=x.dtype)          # blld
     lr_grid = lambda meta: (triton.cdiv(M, meta["BM"]),)     # noqa: E731
     g_grid = lambda meta: (triton.cdiv(M, meta["BM"]),)      # noqa: E731
-    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D)
-    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D)
+    group_m = get_seq_group(M)
+    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D, GROUP_M=group_m)
+    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D, GROUP_M=group_m)
     return lr[:, :D], lr[:, D:], gate.view(B, L, L, D)

@@ -26,6 +26,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
 
 @triton.autotune(
     configs=[
@@ -37,10 +39,11 @@ import triton.language as tl
         triton.Config({"BM": 64, "BN": 256}, num_warps=8),
         triton.Config({"BM": 128, "BN": 256}, num_warps=8),
     ],
-    key=["M", "N"],
+    key=["GROUP_M", "N"],
 )
 @triton.jit
-def _transpose_kernel(src_ptr, dst_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr):
+def _transpose_kernel(src_ptr, dst_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr,
+                      GROUP_M: tl.constexpr):
     """src (M,N) row-major -> dst (N,M) row-major. dst[n,m] = src[m,n]."""
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -62,7 +65,7 @@ def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor) -> None:
     """blld (M, 2D) row-major -> out (2D, M) row-major, in place into out_2d_m."""
     M, N = blld.shape
     grid = lambda meta: (triton.cdiv(M, meta["BM"]), triton.cdiv(N, meta["BN"]))  # noqa: E731
-    _transpose_kernel[grid](blld, out_2d_m, M, N)
+    _transpose_kernel[grid](blld, out_2d_m, M, N, GROUP_M=get_seq_group(M))
 
 
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:
