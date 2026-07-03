@@ -25,6 +25,36 @@ from __future__ import annotations
 import torch
 from quack.gemm_interface import gemm_act
 
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK: tl.constexpr):
+    """In-place: proj = proj * sigmoid(gate), elementwise over a flat buffer.
+
+    sigmoid + multiply are computed in fp32 (a single round to bf16 on store),
+    replacing torch's separate ``sigmoid`` (temp alloc) + ``mul_`` — which made
+    ~4 passes over the [B,D,L,L] tensor. This is one read of proj + one read of
+    gate + one write. Precision is not reduced (fewer intermediate roundings).
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    m = offs < n
+    p = tl.load(proj_ptr + offs, mask=m).to(tl.float32)
+    g = tl.load(gate_ptr + offs, mask=m).to(tl.float32)
+    tl.store(proj_ptr + offs, (p * tl.sigmoid(g)).to(tl.bfloat16), mask=m)
+
+
+def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor) -> None:
+    """proj *= sigmoid(gate), fused single-pass Triton kernel. In-place on proj."""
+    assert proj.is_contiguous() and gate.is_contiguous()
+    n = proj.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _gate_mul_kernel[grid](proj, gate, n, BLOCK=BLOCK)
+
+
 
 def tm1_cute_forward(
     x: torch.Tensor,  # (B, L, L, D), contiguous, bf16/fp16
@@ -105,11 +135,11 @@ def tm1_cute_forward(
         # left = sigmoid(x @ WLg) * (x @ WL)
         gemm_act(A=x_flat, B=WL, activation=None, store_preact=False, postact_out=left_view)
         gemm_act(A=x_flat, B=WLg, activation=None, store_preact=False, postact_out=gate_view)
-        left_bdll.mul_(torch.sigmoid(gate_buf))
+        _fused_gate_mul(left_bdll, gate_buf)
 
         # right = sigmoid(x @ WRg) * (x @ WR)
         gemm_act(A=x_flat, B=WR, activation=None, store_preact=False, postact_out=right_view)
         gemm_act(A=x_flat, B=WRg, activation=None, store_preact=False, postact_out=gate_view)
-        right_bdll.mul_(torch.sigmoid(gate_buf))
+        _fused_gate_mul(right_bdll, gate_buf)
         return left_bdll, right_bdll
     raise ValueError(f"unknown out_layout: {out_layout!r}")
