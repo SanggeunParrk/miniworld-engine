@@ -252,7 +252,7 @@ class TriangleMultiplication(nn.Module):
             self.to_left_gate.weight.T,
             self.to_right.weight.T,
             self.to_right_gate.weight.T,
-            out_layout="bdll_direct",
+            out_layout="bdll_sm100",
         )
         tri_out_bdij = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)
         tri_dbn = tri_out_bdij.permute(1, 0, 2, 3).reshape(d, b, l1 * l2)

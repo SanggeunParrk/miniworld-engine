@@ -142,4 +142,21 @@ def tm1_cute_forward(
         gemm_act(A=x_flat, B=WRg, activation=None, store_preact=False, postact_out=gate_view)
         _fused_gate_mul(right_bdll, gate_buf)
         return left_bdll, right_bdll
+    if out_layout == "bdll_sm100":
+        # From-scratch SM100 tcgen05 gated GEMM: out = sigmoid(x@Wg.T) * (x@Wp.T),
+        # stored M-major straight into [B, D, L, L] (zero-copy) -- replaces the two
+        # non-gated quack GEMMs + the Triton gate kernel AND the permute in one launch/side.
+        if B != 1:
+            raise NotImplementedError("bdll_sm100 currently only supports B=1")
+        from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm import gate_gemm as _sm100_gate_gemm
+
+        # gate_gemm computes A@Bp.T ; tm1 wants x@W.T with W = to_*.weight, and the
+        # WL/WLg/... passed here are W.T, so Bp = (W.T).mT = W (contiguous).
+        BLp = WL.mT.contiguous()
+        BLg = WLg.mT.contiguous()
+        BRp = WR.mT.contiguous()
+        BRg = WRg.mT.contiguous()
+        left_dll = _sm100_gate_gemm(x_flat, BLp, BLg, mmajor=True)   # (D, L*L) == [B,D,L,L]
+        right_dll = _sm100_gate_gemm(x_flat, BRp, BRg, mmajor=True)
+        return left_dll.view(B, D, L, L), right_dll.view(B, D, L, L)
     raise ValueError(f"unknown out_layout: {out_layout!r}")
