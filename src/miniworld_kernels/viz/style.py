@@ -179,6 +179,64 @@ _ALIASES: dict[str, str] = {
     "v2": "miniworld-alt2", "oursv2": "miniworld-alt2", "v3": "miniworld-alt2",
 }
 
+# --------------------------------------------------------------------------- #
+# Kernel-level function-benchmark variants (benchmarks/kernels/<op>/).
+# --------------------------------------------------------------------------- #
+# Each developed OR deprecated implementation of an op is its own CSV row. Register a stable
+# identity + colour for every one so sibling variants that share a substring the canonical
+# heuristics collapse (`cute`/`miniworld`) never overwrite each other in a single figure.
+# (identity, display, colour). Triton kernels → blues; cute/quack → golds; TE → green;
+# deprecated/negative-result variants → muted grey/orange.
+_KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
+    # dual_gemm_epil (front) + gemm_gate/tm2 + gemm_epil (LN+linear)
+    "trimulfronttriton": ("trimul-front-triton", "Triton front", "#2E6FDB"),
+    "tritontm1": ("triton-tm1", "Triton tm1", "#5B8FF9"),
+    "tritongated": ("triton-gated", "Triton gated (dep)", "#7FB0FF"),
+    "trimulinprojcute": ("trimul-inproj-cute", "cute front", "#D4AF37"),
+    "tm1cute": ("tm1-cute", "cute tm1", "#F2C94C"),
+    "trimulfrontsm100": ("trimul-front-sm100", "cute SM100 (dep)", "#8A6A14"),
+    "layernormlineartriton": ("layernorm-linear-triton", "Triton LN+linear", "#2E6FDB"),
+    "layernormlinearcute": ("layernorm-linear-cute", "cute LN+linear M1", "#D4AF37"),
+    "layernormlinearcutefused": ("layernorm-linear-cute-fused", "cute LN+linear M2", "#F2C94C"),
+    "layernormlinearte": ("layernorm-linear-te", "TE-style", "#3F6B1B"),
+    "tm2cute": ("tm2-cute", "cute tm2", "#D4AF37"),
+    "tritontm2": ("triton-tm2", "Triton tm2", "#2E6FDB"),
+    # transition_b2b
+    "tritontransitionfused": ("triton-transition-fused", "Triton transition", "#2E6FDB"),
+    "cutetransitionfused": ("cute-transition-fused", "cute transition", "#D4AF37"),
+    "transitionb2bktiled": ("transition-b2b-ktiled", "Triton k-tiled (unver)", "#7FB0FF"),
+    # layernorm (+ bwd)
+    "tritonlayernorm": ("triton-layernorm", "Triton LN", "#2E6FDB"),
+    "quackcute": ("quack-cute", "quack cute", "#D4AF37"),
+    "tritonlayernormlowreg": ("triton-layernorm-lowreg", "Triton LN low-reg (dep)", "#7A86A1"),
+    "tritonpersistent": ("triton-persistent", "Triton persistent", "#11A6A0"),
+    # adaln (+ bwd)
+    "adalninference": ("adaln-inference", "Triton adaLN inf", "#2E6FDB"),
+    "tritonadaln": ("triton-adaln", "Triton adaLN", "#5B8FF9"),
+    "adalnfused3": ("adaln-fused3", "Triton adaLN fused3", "#7FB0FF"),
+    "adalntrain": ("adaln-train", "Triton adaLN train", "#5B8FF9"),
+    # attentions
+    "tritontriattn": ("triton-tri-attn", "Triton tri-attn", "#2E6FDB"),
+    "tritontriattnminiworld": ("triton-tri-attn-miniworld", "Triton tri-attn (old)", "#7A86A1"),
+    "tritontriattnperf": ("triton-tri-attn-perf", "Triton tri-attn (perf)", "#9AA7BF"),
+    "tritonbiasattn": ("triton-bias-attn", "Triton bias-attn", "#2E6FDB"),
+    "biasonlyfused": ("bias-only-fused", "Triton bias fused (dep)", "#C66A12"),
+    "tritonaugattn": ("triton-aug-attn", "Triton aug-attn", "#2E6FDB"),
+    "augattncomputeefficient": ("aug-attn-compute-efficient", "Triton aug (comp-eff)", "#7A86A1"),
+    # ln_mask, cond_transition, misc bwd
+    "fusedlnmask": ("fused-ln-mask", "fused LN+mask", "#D4AF37"),
+    "tritoncondtransition": ("triton-cond-transition", "Triton cond-transition", "#2E6FDB"),
+    "gateelembwd": ("gate-elem-bwd", "Triton gate bwd", "#2E6FDB"),
+    "frontbwdfused": ("front-bwd-fused", "Triton front bwd", "#2E6FDB"),
+}
+for _k, (_ident, _disp, _col) in _KERNEL_VARIANTS.items():
+    _ALIASES.setdefault(_k, _ident)
+    DISPLAY.setdefault(_ident, _disp)
+    PALETTE.setdefault(_ident, _col)
+    LINESTYLE.setdefault(_ident, "-")
+    if _ident not in ORDER:
+        ORDER.append(_ident)
+
 _NORM_RE = re.compile(r"[\s_\-./]+")
 
 
