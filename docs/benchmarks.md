@@ -27,14 +27,19 @@ with one job. Nothing else belongs at the target root.
 A target holds **no Python at all** — only `configs/`, `artifacts/`, `profiles/`.
 
 Rules of thumb:
-- **Every** benchmark/profiling `.py` (bench runner, plot renderer, nsys
-  capture-replay harness, diagnostic driver) lives in `benchmarks/runners/`,
-  never inside a target. Example: `runners/nsys_trimul_capture_replay.py`.
+- **`benchmarks/` contains no target-specific Python.** The ONLY Python is the shared,
+  kernel/module-agnostic harness in `benchmarks/runners/` (`bench.py`, `plot_csv.py`). No
+  per-kernel/per-module bench scripts, no nsys capture-replay scripts, no `diagnostics/`
+  drivers anywhere under `benchmarks/`.
+- **Profiling (nsys/ncu) is instrumented in `src/`, not as a benchmarks script.** If a kernel
+  needs profiling or logging, add the nsys/ncu hooks to that kernel's own
+  `src/miniworld_kernels/...` code and drive it through the normal harness — do not drop a
+  one-off capture script under `benchmarks/`. Capture outputs still land in the target's
+  `profiles/`.
 - Profiler capture files go in the target's `profiles/`, never `artifacts/`.
 
-Do not add benchmark code under `src/`. Do not add archive folders or repro
-source trees under a target. Do not add curated markdown reports under
-`benchmarks/`; write durable explanations under `docs/` and keep generated
+Do not add archive folders or repro source trees under a target. Do not add curated markdown
+reports under `benchmarks/`; write durable explanations under `docs/` and keep generated
 tables/plots under the target's `artifacts/`.
 
 ## Hard Rule: All Benchmarks Run Compiled
