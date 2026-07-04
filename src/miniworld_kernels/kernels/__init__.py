@@ -8,7 +8,9 @@ the canonical (``main`` = psk/benchmark) Triton entry point for that op.
 
 from __future__ import annotations
 
+from .adaln.triton.inference import adaln_inference
 from .adaln.triton.main import triton_adaptive_layer_norm
+from .adaln.triton.training import adaln_train
 from .augmented_attention.triton.main import triton_augmented_attention_pair_bias
 from .bias_only_attention.triton.gate_out import fused_gate_out, sigmoid_gate_fused
 from .conditioned_transition.triton.interface import (
@@ -40,6 +42,8 @@ def cute_transition_fused(*args, **kwargs):
 
 
 __all__ = [
+    "adaln_inference",
+    "adaln_train",
     "cond_transition_inference_dispatch",
     "cond_transition_train",
     "cuda_transition",

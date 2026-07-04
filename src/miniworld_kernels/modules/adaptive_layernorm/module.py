@@ -4,7 +4,7 @@ import torch.nn as nn
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
-from miniworld_kernels.kernels import triton_adaptive_layer_norm
+from miniworld_kernels.kernels import adaln_inference, adaln_train
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -44,7 +44,10 @@ class AdaptiveLayerNorm(nn.Module):
             return torch.sigmoid(scale) * x_norm + bias
 
         if self.implementation == ImplementationType.TRITON:
-            return triton_adaptive_layer_norm(
+            # training → save-for-backward autograd path; inference → d-aware fused/materialize.
+            # (The legacy single fused `triton_adaptive_layer_norm` compile-fails at d≥384.)
+            fn = adaln_train if (self.training or x.requires_grad) else adaln_inference
+            return fn(
                 x,
                 cond,
                 self.ln_cond.weight,

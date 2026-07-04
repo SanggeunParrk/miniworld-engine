@@ -65,9 +65,9 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 @triton.autotune(configs=_EPI_CONFIGS, key=["N", "DT"])
 @triton.jit
 def _epilogue_train_kernel(
-    X, SB, Y, MeanX, RstdX, Gate, M, N, eps,
+    X, SB, Y, MeanX, RstdX, Gate, ScaleBias, M, N, eps,
     sx0, sx1, ss0, ss1, sy0, sy1, sg0, sg1,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr, HAS_SB: tl.constexpr,
 ):
     row = tl.program_id(0)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -83,6 +83,8 @@ def _epilogue_train_kernel(
     x_hat = xc * rstd[:, None]
     scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
     bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
+    if HAS_SB:  # fold the scale-bias (β for the scale half) add here — free vs a full (M,2N) add pass
+        scale += tl.load(ScaleBias + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
     gate = tl.sigmoid(scale)
     y = gate * x_hat + bias
     tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
@@ -91,7 +93,7 @@ def _epilogue_train_kernel(
     tl.store(RstdX + rm, rstd, mask=rmask)
 
 
-def _epilogue_train(x, sb, eps):
+def _epilogue_train(x, sb, eps, scale_bias=None):
     M, N = x.shape
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
     gate = torch.empty(M, N, device=x.device, dtype=x.dtype)
@@ -99,10 +101,10 @@ def _epilogue_train(x, sb, eps):
     rstd = torch.empty(M, dtype=torch.float32, device=x.device)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
     _epilogue_train_kernel[grid](
-        x, sb, y, mean, rstd, gate, M, N, eps,
+        x, sb, y, mean, rstd, gate, scale_bias, M, N, eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1),
-        BLOCK_N=triton.next_power_of_2(N), DT=x.element_size(),
+        BLOCK_N=triton.next_power_of_2(N), DT=x.element_size(), HAS_SB=scale_bias is not None,
     )
     return y, mean, rstd, gate
 
@@ -269,10 +271,10 @@ class AdaLNTrainFn(torch.autograd.Function):
         cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond)
 
         w_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
-        b_cat = torch.cat([scale_bias, scale_bias.new_zeros(nx)], dim=0)
-        sb = _mm(cond_aff, w_cat.t()) + b_cat                          # (M, 2NX)
+        sb = _mm(cond_aff, w_cat.t())                                  # (M, 2NX) raw [scale|bias]
 
-        y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x)
+        # scale_bias (β for the scale half) is folded into the epilogue — no full (M,2NX) add pass.
+        y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias)
 
         ctx.save_for_backward(x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
                               cond_ln_weight, scale_weight, bias_weight)
