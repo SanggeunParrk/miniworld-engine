@@ -33,6 +33,31 @@ from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
+USE_SAVEDXN_SPLIT_BWD = os.getenv("TRANSITION_SAVEDXN_SPLIT_BWD", "0") == "1"
+
+
+def get_seq_group(length: int) -> int:
+    """Bucket flattened LxL rows so autotune follows the L sweep without per-M noise."""
+    group_lengths = [
+        32 * 32,
+        64 * 64,
+        128 * 128,
+        256 * 256,
+        384 * 384,
+        48 * 128,
+        48 * 256,
+        48 * 384,
+        48 * 512,
+        48 * 1024,
+        48 * 2048,
+        48 * 3072,
+        48 * 4096,
+    ]
+    for group_idx, group_length in enumerate(sorted(group_lengths)):
+        if length <= group_length:
+            return group_idx
+    return len(group_lengths) - 1
+
 
 if AUTOTUNE:
     _configs = [
@@ -54,12 +79,12 @@ else:
 
 
 # fmt: off
-@triton.autotune(configs=_configs, key=["ND", "K"])
+@triton.autotune(configs=_configs, key=["GROUP_M", "ND", "K", "SAVE_XN"])
 @triton.jit
 def _transition_expand_gate_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, out_ptr, xn_ptr,
-    M, ND, K,
+    M, ND, K, GROUP_M: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,   # Wa, Wb share layout: (ND, K) row-major -> stride_wn=K, stride_wk=1
     stride_om, stride_on,
@@ -145,7 +170,7 @@ def transition_expand_gate(
     _transition_expand_gate_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), expand, xn,
-        M, ND, K,
+        M, ND, K, get_seq_group(M),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         expand.stride(0), expand.stride(1),
@@ -165,12 +190,12 @@ _b2b_configs = [
 
 
 # fmt: off
-@triton.autotune(configs=_b2b_configs, key=["ND", "K", "D"])
+@triton.autotune(configs=_b2b_configs, key=["GROUP_M", "ND", "K", "D", "SAVE_XN"])
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr, xn_ptr,
-    M, ND, K: tl.constexpr, D: tl.constexpr,
+    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
@@ -264,7 +289,7 @@ def transition_b2b(
     _transition_b2b_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
-        M, ND, K, D,
+        M, ND, K, D, get_seq_group(M),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),
@@ -306,12 +331,12 @@ else:
 
 
 # fmt: off
-@triton.autotune(configs=_b2b_kt_configs, key=["ND", "K", "D"])
+@triton.autotune(configs=_b2b_kt_configs, key=["GROUP_M", "ND", "K", "D"])
 @triton.jit
 def _transition_b2b_ktiled_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr,
-    M, ND, K, D: tl.constexpr,
+    M, ND, K, D: tl.constexpr, GROUP_M: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
@@ -389,7 +414,7 @@ def transition_b2b_ktiled(
     _transition_b2b_ktiled_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out,
-        M, ND, K, D,
+        M, ND, K, D, get_seq_group(M),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),
@@ -422,6 +447,7 @@ if AUTOTUNE:
     ]
 else:
     _egb_configs = [
+        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=4),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
@@ -429,18 +455,22 @@ else:
 
 
 # fmt: off
-@triton.autotune(configs=_egb_configs, key=["ND", "K"])
+@triton.autotune(
+    configs=_egb_configs,
+    key=["GROUP_M", "ND", "K", "NORMALIZE", "STORE_H", "STACK_DAB"],
+)
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,
-    h_ptr, dA_ptr, dB_ptr, xn_ptr,
-    M, ND, K,
+    h_ptr, dA_ptr, dB_ptr, dAB_ptr, xn_ptr,
+    M, ND, K, GROUP_M: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_gm, stride_gn,    # grad_expand / h / dA / dB: (M, ND) row-major
+    stride_abm, stride_abn,  # dAB: (M, 2*ND) row-major, [dA | dB]
     stride_nm, stride_nk,    # xn out: (M, K) row-major
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    NORMALIZE: tl.constexpr,
+    NORMALIZE: tl.constexpr, STORE_H: tl.constexpr, STACK_DAB: tl.constexpr,
 ):
     # Recompute a=xn@Wa, b=xn@Wb ONCE (tile M,ND; loop K). Emits:
     #   h  = silu(a)*b                  (for dWs = go^T @ h)
@@ -490,9 +520,24 @@ def _transition_expand_gatebwd_kernel(
     goff = rows[:, None] * stride_gm + cols[None, :] * stride_gn
     gmask = rmask[:, None] & cmask[None, :]
     ge = tl.load(ge_ptr + goff, mask=gmask, other=0.0).to(tl.float32)
-    tl.store(h_ptr + goff, (silu * b).to(et), mask=gmask)
-    tl.store(dA_ptr + goff, (ge * b * (sig + silu * (1.0 - sig))).to(et), mask=gmask)
-    tl.store(dB_ptr + goff, (ge * silu).to(et), mask=gmask)
+    if STORE_H:
+        tl.store(h_ptr + goff, (silu * b).to(et), mask=gmask)
+    dA = (ge * b * (sig + silu * (1.0 - sig))).to(et)
+    dB = (ge * silu).to(et)
+    if STACK_DAB:
+        tl.store(
+            dAB_ptr + rows[:, None] * stride_abm + cols[None, :] * stride_abn,
+            dA,
+            mask=gmask,
+        )
+        tl.store(
+            dAB_ptr + rows[:, None] * stride_abm + (cols[None, :] + ND) * stride_abn,
+            dB,
+            mask=gmask,
+        )
+    else:
+        tl.store(dA_ptr + goff, dA, mask=gmask)
+        tl.store(dB_ptr + goff, dB, mask=gmask)
 # fmt: on
 
 
@@ -508,18 +553,21 @@ def _transition_expand_gatebwd(x2, rstd, c1, gamma, beta, wa, wb, grad_expand):
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
-        h, dA, dB, xn,
-        M, ND, K,
+        h, dA, dB, dA, xn,
+        M, ND, K, get_seq_group(M),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        dA.stride(0), dA.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=True,
+        STORE_H=True,
+        STACK_DAB=False,
     )
     return h, dA, dB, xn
 
 
-def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand):
+def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool = True):
     """Version B: reuse the SAVED xn (no normalize, no emit) + recompute a,b once -> (h, dA, dB).
 
     ``xn`` is the (M, K) normalized x emitted and saved by the forward kernel. The gatebwd
@@ -528,34 +576,61 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand):
     """
     M, K = xn.shape
     ND = wa.shape[0]
-    h = torch.empty_like(grad_expand)
+    h = torch.empty_like(grad_expand) if store_h else grad_expand
     dA = torch.empty_like(grad_expand)
     dB = torch.empty_like(grad_expand)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
         wa.contiguous(), wb.contiguous(), grad_expand,
-        h, dA, dB, xn,               # xn_ptr unused (no emit) — pass xn itself as filler
-        M, ND, K,
+        h, dA, dB, dA, xn,           # dAB/xn_ptr unused — pass existing tensors as filler
+        M, ND, K, get_seq_group(M),
         xn.stride(0), xn.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        dA.stride(0), dA.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=False,
+        STORE_H=store_h,
+        STACK_DAB=False,
     )
-    return h, dA, dB
+    return (h, dA, dB) if store_h else (dA, dB)
+
+
+def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand):
+    """Version B stacked: emit h and dAB=[dA | dB] for two larger GEMMs downstream."""
+    M, K = xn.shape
+    ND = wa.shape[0]
+    h = torch.empty_like(grad_expand)
+    dAB = torch.empty(M, ND * 2, device=xn.device, dtype=grad_expand.dtype)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    _transition_expand_gatebwd_kernel[grid](
+        xn, xn, xn, xn, xn,
+        wa.contiguous(), wb.contiguous(), grad_expand,
+        h, dAB, dAB, dAB, xn,
+        M, ND, K, get_seq_group(M),
+        xn.stride(0), xn.stride(1),
+        wa.stride(0), wa.stride(1),
+        grad_expand.stride(0), grad_expand.stride(1),
+        dAB.stride(0), dAB.stride(1),
+        xn.stride(0), xn.stride(1),
+        NORMALIZE=False,
+        STORE_H=True,
+        STACK_DAB=True,
+    )
+    return h, dAB
 
 
 # fmt: off
 @triton.autotune(
     configs=[triton.Config({"BLOCK_M": bm}, num_warps=nw)
              for bm in (1, 2, 4, 8, 16) for nw in (2, 4, 8)],
-    key=["K"], reset_to_zero=["dg_ptr", "db_ptr"],
+    key=["GROUP_M", "K"], reset_to_zero=["dg_ptr", "db_ptr"],
 )
 @triton.jit
 def _transition_ln_bwd_kernel(
     dxn_ptr, x_ptr, rstd_ptr, c1_ptr, g_ptr, dx_ptr, dg_ptr, db_ptr,
-    M, K,
+    M, K, GROUP_M: tl.constexpr,
     stride_m, stride_k,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
@@ -600,7 +675,7 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma):
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
     _transition_ln_bwd_kernel[grid](
         dxn, x2, rstd, c1, gamma.contiguous(), dx, dgamma, dbeta,
-        M, K, x2.stride(0), x2.stride(1),
+        M, K, get_seq_group(M), x2.stride(0), x2.stride(1),
         BLOCK_K=triton.next_power_of_2(K),
     )
     return dx, dgamma, dbeta
@@ -721,10 +796,19 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         grad_expand = go @ squeeze_weight         # dh  [M, ND]
         # ONE fused kernel recomputes a,b once -> h (for dWs), dA, dB (SwiGLU gate bwd).
         if ctx.has_xn:
-            # Version B: reuse the saved xn directly (no inline-normalize, no emit).
-            h, dA, dB = _transition_expand_gatebwd_savedxn(
-                xn_saved, expand_a_weight, expand_b_weight, grad_expand,
-            )
+            if USE_SAVEDXN_SPLIT_BWD:
+                # Default-off comparator for d=128: avoids materializing dAB and the
+                # per-backward stacked-weight copy, at the cost of split GEMMs below.
+                h, dA, dB = _transition_expand_gatebwd_savedxn(
+                    xn_saved, expand_a_weight, expand_b_weight, grad_expand,
+                )
+                dAB = None
+            else:
+                # Version B: reuse saved xn and emit stacked dAB=[dA | dB]. This keeps the
+                # math identical but replaces dWa/dWb and dA@Wa+dB@Wb with two larger GEMMs.
+                h, dAB = _transition_expand_gatebwd_savedxn_stacked(
+                    xn_saved, expand_a_weight, expand_b_weight, grad_expand,
+                )
             xn = xn_saved
         else:
             # Version A: normalize x inline from saved stats + emit xn for the wgrad GEMMs.
@@ -733,9 +817,47 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
                 expand_a_weight, expand_b_weight, grad_expand,
             )
         dWs = go.t() @ h                          # [D, ND]
-        dWa = dA.t() @ xn                         # [ND, K]
-        dWb = dB.t() @ xn
-        d_xn = dA @ expand_a_weight + dB @ expand_b_weight  # grad to normalized x [M, K]
+        if ctx.has_xn:
+            if USE_SAVEDXN_SPLIT_BWD:
+                dWa = dA.t() @ xn
+                dWb = dB.t() @ xn
+                d_xn = dA @ expand_a_weight + dB @ expand_b_weight
+            else:
+                w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)
+                dWab = dAB.t() @ xn
+                dWa = dWab[: expand_a_weight.shape[0]]
+                dWb = dWab[expand_a_weight.shape[0] :]
+                if (
+                    os.getenv("TRANSITION_DAB_LNBWD", "0") == "1"
+                    and K <= 128
+                    and torch.cuda.get_device_capability(x2.device)[0] >= 9
+                ):
+                    from miniworld_kernels.kernels.transition.cute.dab_lnbwd import (
+                        transition_dab_lnbwd_cute,
+                    )
+
+                    dx = transition_dab_lnbwd_cute(
+                        dAB, w_ab, x2, ln_weight, rstd, c1,
+                    )
+                    db_ab = dAB.sum(0)
+                    # xn = gamma*xhat + beta, so dAB.T@xhat can be recovered from
+                    # dAB.T@xn when gamma is nonzero. This path is experimental and gated.
+                    t_xhat = (
+                        dWab.float() - db_ab.float()[:, None] * ln_bias.float()[None, :]
+                    ) / ln_weight.float()[None, :]
+                    dgamma = (w_ab.float() * t_xhat).sum(0)
+                    dbeta = db_ab.float() @ w_ab.float()
+                    return (
+                        dx.reshape(orig_shape),
+                        dgamma.to(ln_weight.dtype),
+                        dbeta.to(ln_bias.dtype),
+                        dWa, dWb, dWs, None, None, None,
+                    )
+                d_xn = dAB @ w_ab
+        else:
+            dWa = dA.t() @ xn                         # [ND, K]
+            dWb = dB.t() @ xn
+            d_xn = dA @ expand_a_weight + dB @ expand_b_weight  # grad to normalized x [M, K]
 
         # LayerNorm backward (Triton kernel from saved stats: dx, dgamma, dbeta)
         dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight)

@@ -28,14 +28,17 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
 
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
-    key=["n_elem"],
+    key=["GROUP_M", "N"],
 )
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, n_elem,
-                     BLK: tl.constexpr, SAVE_GATE: tl.constexpr):
+                     N: tl.constexpr, BLK: tl.constexpr, SAVE_GATE: tl.constexpr,
+                     GROUP_M: tl.constexpr):
     """Elementwise (1D, D-general): gate = sigmoid(glogit); y = proj ⊙ gate; [save gate]."""
     off = tl.program_id(0) * BLK + tl.arange(0, BLK)
     mask = off < n_elem
@@ -53,13 +56,13 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, n_elem,
         for nw in (4, 8)
         for ns in (2, 3, 4)
     ],
-    key=["M", "N"],
+    key=["GROUP_M", "N"],
 )
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)
     dproj_ptr, dglogit_ptr,        # (M, N) out
-    M, N: tl.constexpr, BM: tl.constexpr,
+    M, N: tl.constexpr, BM: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     """Fused elementwise: d_proj = dy⊙gate ; d_glogit = dy⊙proj⊙gate⊙(1-gate).
     One pass over (dy, proj, gate)."""
@@ -93,7 +96,8 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False):
         else proj_flat  # dummy (kernel won't write it)
     n_elem = M * N
     grid = lambda meta: (triton.cdiv(n_elem, meta["BLK"]),)  # noqa: E731
-    _gate_mul_kernel[grid](glogit, proj_flat, y, gate, n_elem, SAVE_GATE=return_gate)
+    _gate_mul_kernel[grid](glogit, proj_flat, y, gate, n_elem, N=N,
+                           SAVE_GATE=return_gate, GROUP_M=get_seq_group(M))
     return (y, gate) if return_gate else y
 
 
@@ -140,7 +144,8 @@ def gate_elem_bwd_ew(dy, proj, gate):
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
     grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
-    _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, M, N=N)
+    _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, M, N=N,
+                                   GROUP_M=get_seq_group(M))
     return d_proj, d_glogit
 
 
@@ -156,7 +161,8 @@ def gate_elem_bwd(dy, x_n, proj, gate, Wg):
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
     grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
-    _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, M, N=N)
+    _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, M, N=N,
+                                   GROUP_M=get_seq_group(M))
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
     dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS
     return d_proj, dx_gate, dWg

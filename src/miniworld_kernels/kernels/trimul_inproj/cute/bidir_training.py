@@ -101,8 +101,13 @@ class BidirBackHalf(torch.autograd.Function):
             return _quack_gemm_act(d_glogit, Wg_t, C=dxn_front, activation=None,
                                    store_preact=False)[1]
 
-        def _dxn_cublas():  # cuBLAS: addmm fuses the dx_gate add (wins at small L)
-            return torch.addmm(dconcT @ W_stack, d_glogit, Wg_t)
+        def _dxn_cublas():  # cuBLAS: accumulate the dx_gate add IN-PLACE. Out-of-place
+            # torch.addmm(C, A, B) stages β·C by copying C (a full (M,D)=268MB DtoD memcpy) into
+            # the output before the GEMM; seeding the buffer with the gate term and accumulating
+            # dconcᵀ@W_stack in-place removes that copy.
+            dx = torch.mm(d_glogit, Wg_t)
+            dx.addmm_(dconcT, W_stack)
+            return dx
 
         # dispatch: cuBLAS wins small L (quack launch overhead), cute ≈/wins large L.
         dx_n = dispatch.pick("dxn", (M, 4 * H + D, D),
@@ -112,10 +117,12 @@ class BidirBackHalf(torch.autograd.Function):
 
 @torch.compiler.disable
 def bidir_forward(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
-                  ln_out_w, ln_out_b, eps, b_lr, h):
+                  ln_out_w, ln_out_b, eps, b_lr, h, row_scale=None):
     _bdll_patch.apply()
     _gate_mul_patch.apply()
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps)         # LN_in (repo triton, autograd)
+    # AF pair-mask folded into LN_in (FREE): x_n = LN(pair)*rs -> masked left/right=0; the rs grad
+    # folds into the LN backward (no separate (M,D) multiply). rs=None -> plain LN.
+    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps, row_scale=row_scale)
     return BidirBackHalf.apply(x_n, WL, WLg, WR, WRg, Wg, Wp_nn, ln_out_w, ln_out_b, b_lr, eps, h)
 
 
@@ -139,8 +146,12 @@ class BidirV6TriMul(nn.Module):
         self.ln_out_b = nn.Parameter(b.ln_out.bias.detach().clone())
         self.eps = b.ln_pair.eps
 
-    def forward(self, pair):
+    def forward(self, pair, mask=None):
         b_lr = prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg)
+        row_scale = None
+        if mask is not None:
+            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)        # [B, L, L]
+            row_scale = m.reshape(-1).to(pair.dtype)           # [M]
         return bidir_forward(pair, self.WL, self.WLg, self.WR, self.WRg, self.Wg, self.Wp_nn,
                              self.ln_in_w, self.ln_in_b, self.ln_out_w, self.ln_out_b,
-                             self.eps, b_lr, self.h)
+                             self.eps, b_lr, self.h, row_scale)

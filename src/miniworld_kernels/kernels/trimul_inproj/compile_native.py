@@ -18,6 +18,9 @@ from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused
     layernorm_linear_cute_fused,
 )
 from miniworld_kernels.kernels.trimul_inproj.cute.launch import prepack_lr_operand
+from miniworld_kernels.kernels.trimul_inproj.triton.front import trimul_front_triton
+from miniworld_kernels.kernels.trimul_inproj.triton.back import trimul_back_triton
+from miniworld_kernels.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
 
 
 def _ln(x, w, b, eps, layout):
@@ -170,23 +173,31 @@ class TriMulCompile(torch.nn.Module):
         self.ln_out_w, self.ln_out_b = b.ln_out.weight, b.ln_out.bias
         self.eps = b.ln_pair.eps
         self.D = self.WL.shape[0]
+        # Prepack the sm_100 front B-operands ONCE (interleaved [WLᵀ|WRᵀ], [WLgᵀ|WRgᵀ])
+        # so the hot path skips the per-call cat/transpose.
+        from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
+            prepack_lr_operand_sm100,
+        )
+        self._front_packed = prepack_lr_operand_sm100(self.WL, self.WLg, self.WR, self.WRg)
 
     def forward(self, pair, mask=None):
         B, L, _, D = pair.shape
-        # LN_in: triton (faster than cuequiv, no transpose needed); LN_out keeps cuequiv
-        # for its fused bdij->bijd transpose. both autograd-aware.
-        x_n = triton_layernorm(pair.reshape(B * L * L, D), self.ln_in_w, self.ln_in_b, self.eps).view(B, L, L, D)
+        # B200 (sm_100): LN_in (+ optional pair-mask) fused in ONE triton kernel
+        # (fused_ln_mask, ~0.09ms@L=1024, ~75% HBM peak) — replaces a separate
+        # triton LN + a torch mask multiply. No cuequiv.
         if mask is not None:
-            m2 = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).unsqueeze(-1).to(x_n.dtype)
-            x_n = x_n * m2
-        # b_lr built here (differentiable) so weight grads flow via autograd
-        b_lr = prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg)
-        lr, _preact = _front(x_n, b_lr)  # (B,2D,L,L), (B,4D,L,L)
-        left_b, right_b = lr[:, :self.D], lr[:, self.D:]
+            m2 = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).to(pair.dtype)  # (B,L,L)
+            x_n = fused_ln_mask(pair, self.ln_in_w, self.ln_in_b, m2, self.eps)
+        else:
+            x_n = triton_layernorm(pair.reshape(B * L * L, D), self.ln_in_w, self.ln_in_b, self.eps).view(B, L, L, D)
+        # front: custom sm_100 bdll-direct gated GEMM (M-major t2r + epilogue-fused
+        # gate-mul, 2 quack tcgen05 GEMMs, no transpose) — beats the triton front
+        # (0.448 vs 0.543ms@1024). left/right come out [B,D,L,L] bdll directly.
+        from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
+            trimul_front_sm100_fused,
+        )
+        left_b, right_b = trimul_front_sm100_fused(x_n, packed=self._front_packed)
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)       # (B,D,L,L)
-        # back-half: autograd-native (cuequiv LN_out fuses bdij->bijd transpose) — its
-        # cuequiv LN backward is far faster than a manual torch LN bwd. The fused-cute
-        # back (_back) is faster forward but needs a fast bwd kernel (B3) to win full mode.
-        out_n = _ln(tri, self.ln_out_w, self.ln_out_b, self.eps, "bdij->bijd")  # (B,L,L,D)
-        gate = torch.sigmoid(x_n @ self.Wg)
-        return (out_n @ self.Wp) * gate
+        # back-half: existing triton kernel (LN_out + proj + gate-mul), no cuequiv.
+        return trimul_back_triton(tri, x_n, self.Wp, self.Wg,
+                                  self.ln_out_w, self.ln_out_b, self.eps)

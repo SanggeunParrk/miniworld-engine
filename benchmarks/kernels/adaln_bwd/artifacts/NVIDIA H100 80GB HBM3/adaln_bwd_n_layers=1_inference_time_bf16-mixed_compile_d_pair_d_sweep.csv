@@ -1,0 +1,52 @@
+run_name,target_kind,target,device,torch_version,cuda_version,metric,unit,mode,compiled,cudagraph,precision,allow_tf32,sweep_axis,implementation,implementation_type,ln_implementation,input_dtype,parameter_dtype,execution_path,reference,output_max_abs,output_rel_frob,output_cosine,grad_max_abs,grad_rel_frob,grad_cosine,n_layers,n_augment,mask_prob,seq_len,tokens,batch_size,d_pair,d_single,d_single_token,d_single_atom,d_pair_atom,status,error,value
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,0.0,0.9999999403953552,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.4622880071401596
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,adaln_train,adaln_train,,bfloat16,bfloat16,kernels.adaln.triton.training,module.reference.torch,,,,,0.0031433412805199623,0.9999951124191284,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.25305598974227905
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,,,,0.001629867940209806,0.9999986886978149,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.507856011390686
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
+            bias += tl.dot(cond_aff, bias_w)
+
+        scale += scale_b[None, :]
+
+        if USE_BF16:
+            scale = scale.to(tl.bfloat16)
+            bias = bias.to(tl.bfloat16)
+        elif USE_FP16:
+            scale = scale.to(tl.float16)
+            bias = bias.to(tl.float16)
+
+        gate = tl.sigmoid(scale)
+               ^",
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,0.0,0.9999998807907104,1,32,0.0,384,147456,1,256,384,768,128,16,ok,,0.6982719898223877
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,adaln_train,adaln_train,,bfloat16,bfloat16,kernels.adaln.triton.training,module.reference.torch,,,,,0.0031344364397227764,0.9999950528144836,1,32,0.0,384,147456,1,256,384,768,128,16,ok,,0.5486080050468445
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,,,,0.0015827559400349855,0.9999987483024597,1,32,0.0,384,147456,1,256,384,768,128,16,ok,,0.8617760241031647
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,384,147456,1,256,384,768,128,16,failed,"CompilationError: at 150:15:
+            bias += tl.dot(cond_aff, bias_w)
+
+        scale += scale_b[None, :]
+
+        if USE_BF16:
+            scale = scale.to(tl.bfloat16)
+            bias = bias.to(tl.bfloat16)
+        elif USE_FP16:
+            scale = scale.to(tl.float16)
+            bias = bias.to(tl.float16)
+
+        gate = tl.sigmoid(scale)
+               ^",
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,0.0,0.9999997019767761,1,32,0.0,384,147456,1,512,384,768,128,16,ok,,1.2120000123977661
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,adaln_train,adaln_train,,bfloat16,bfloat16,kernels.adaln.triton.training,module.reference.torch,,,,,0.003150970907881856,0.9999949336051941,1,32,0.0,384,147456,1,512,384,768,128,16,ok,,1.0785599946975708
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,,,,0.001543319900520146,0.9999986290931702,1,32,0.0,384,147456,1,512,384,768,128,16,ok,,1.48636794090271
+adaln_bwd_n_layers=1_inference_time_bf16-mixed_compile_d_pair_v1,kernel,adaln_bwd,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,disabled,bf16-mixed,True,d_pair,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,384,147456,1,512,384,768,128,16,failed,"CompilationError: at 150:15:
+            bias += tl.dot(cond_aff, bias_w)
+
+        scale += scale_b[None, :]
+
+        if USE_BF16:
+            scale = scale.to(tl.bfloat16)
+            bias = bias.to(tl.bfloat16)
+        elif USE_FP16:
+            scale = scale.to(tl.float16)
+            bias = bias.to(tl.float16)
+
+        gate = tl.sigmoid(scale)
+               ^",

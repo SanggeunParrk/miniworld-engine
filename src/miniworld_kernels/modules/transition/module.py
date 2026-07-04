@@ -1,8 +1,10 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/transition.py
+import os
 from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
@@ -14,6 +16,38 @@ from miniworld_kernels.modules.exceptions import (
 from miniworld_kernels.modules.primitives import LayerNorm, Linear
 
 from ..ops import swish_gate
+
+
+_LARGE_D_TRAINING_ENV = "MINIWORLD_TRANSITION_LARGE_D_TRAINING"
+_CUTE_BACKWARD_ENV = "MINIWORLD_TRANSITION_CUTE_BACKWARD_BACKEND"
+
+
+def _large_d_training_backend_from_env() -> str | None:
+    value = os.getenv(_LARGE_D_TRAINING_ENV, "fallback").strip().lower()
+    fallback_values = {"", "0", "false", "off", "fallback", "torch", "pytorch"}
+    triton_values = {"1", "true", "yes", "on", "cute_triton", "cute-triton", "hybrid"}
+    cute_values = {"cute", "all_cute", "all-cute"}
+    if value in fallback_values:
+        return None
+    if value in triton_values:
+        return "triton"
+    if value in cute_values:
+        return "cute"
+    msg = (
+        f"{_LARGE_D_TRAINING_ENV} must be one of fallback, cute_triton, or cute; "
+        f"got {value!r}"
+    )
+    raise ValueError(msg)
+
+
+def _explicit_cute_backward_backend() -> str:
+    value = os.getenv(_CUTE_BACKWARD_ENV, "triton").strip().lower()
+    if value in {"triton", "hybrid", "cute_triton", "cute-triton"}:
+        return "triton"
+    if value in {"cute", "all_cute", "all-cute"}:
+        return "cute"
+    msg = f"{_CUTE_BACKWARD_ENV} must be one of triton or cute; got {value!r}"
+    raise ValueError(msg)
 
 
 @contextmanager
@@ -69,11 +103,7 @@ class Transition(nn.Module):
     def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
         """Forward pass."""
         if self.implementation == ImplementationType.PYTORCH:
-            x = self.ln_in(x)
-            a = self.expand_a(x)
-            b = self.expand_b(x)
-            x = swish_gate(a, b)
-            return self.squeeze(x)
+            return self._torch_forward(x)
 
         if self.implementation == ImplementationType.CUDA:
             x = self.ln_in(x)
@@ -89,23 +119,16 @@ class Transition(nn.Module):
             ImplementationType.TRITON,
             ImplementationType.CUEQUIVARIANCE,
         }:
-            # Fully fused: LayerNorm is folded into the expand kernel (no separate ln_in).
-            # d-aware dispatch: the GEMMs are bandwidth/latency-bound (thin-K) at
-            # d_hidden<=128 where triton's lean b2b wins, and compute-bound at d_hidden>=256
-            # where quack SM90 WGMMA (cute) pulls ahead (the win grows with d). Route to the
-            # faster backend by d_hidden. See transition-b2b-forward-verdict.
-            if self.d_hidden >= 256:
-                return kernels.cute_transition_fused(
-                    x,
-                    self.ln_in.weight,
-                    self.ln_in.bias,
-                    self.expand_a.weight,
-                    self.expand_b.weight,
-                    self.squeeze.weight,
-                    self.n,
-                    self.ln_in.eps,
-                )
-            return kernels.triton_transition_fused(
+            is_training = self.training and torch.is_grad_enabled()
+            if is_training:
+                return self._training_forward(x)
+            return self._inference_forward(x)
+
+        if self.implementation == ImplementationType.CUTE:
+            # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
+            # explicit selection). Same fused structure; LN folded into the cute expand.
+            backward_backend = _explicit_cute_backward_backend()
+            return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
                 self.ln_in.bias,
@@ -114,11 +137,14 @@ class Transition(nn.Module):
                 self.squeeze.weight,
                 self.n,
                 self.ln_in.eps,
+                backward_backend=backward_backend,
             )
 
-        if self.implementation == ImplementationType.CUTE:
-            # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
-            # explicit selection). Same fused structure; LN folded into the cute expand.
+        raise InvalidImplementationError(self.implementation)
+
+    def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward-only dispatch: no tensors are saved for backward."""
+        if self.d_hidden >= 256:
             return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
@@ -129,5 +155,72 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
             )
+        return kernels.triton_transition_fused(
+            x,
+            self.ln_in.weight,
+            self.ln_in.bias,
+            self.expand_a.weight,
+            self.expand_b.weight,
+            self.squeeze.weight,
+            self.n,
+            self.ln_in.eps,
+            save_xn=False,
+        )
 
-        raise InvalidImplementationError(self.implementation)
+    def _training_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Training dispatch: route to kernels with an explicit backward contract."""
+        if (
+            self.implementation == ImplementationType.CUEQUIVARIANCE
+            and self.d_hidden >= 256
+        ):
+            backward_backend = _large_d_training_backend_from_env()
+            if backward_backend is not None:
+                return kernels.cute_transition_fused(
+                    x,
+                    self.ln_in.weight,
+                    self.ln_in.bias,
+                    self.expand_a.weight,
+                    self.expand_b.weight,
+                    self.squeeze.weight,
+                    self.n,
+                    self.ln_in.eps,
+                    backward_backend=backward_backend,
+                )
+            # Current cute backward is still slower than compiled PyTorch for wide
+            # training shapes; keep MiniWorld dispatch performance non-regressive.
+            return self._torch_forward(x)
+        if self.d_hidden >= 256:
+            return kernels.cute_transition_fused(
+                x,
+                self.ln_in.weight,
+                self.ln_in.bias,
+                self.expand_a.weight,
+                self.expand_b.weight,
+                self.squeeze.weight,
+                self.n,
+                self.ln_in.eps,
+            )
+        return kernels.triton_transition_fused(
+            x,
+            self.ln_in.weight,
+            self.ln_in.bias,
+            self.expand_a.weight,
+            self.expand_b.weight,
+            self.squeeze.weight,
+            self.n,
+            self.ln_in.eps,
+            save_xn=True,
+        )
+
+    def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.layer_norm(
+            x,
+            (self.d_hidden,),
+            self.ln_in.weight,
+            self.ln_in.bias,
+            self.ln_in.eps,
+        )
+        a = self.expand_a(x)
+        b = self.expand_b(x)
+        x = swish_gate(a, b)
+        return self.squeeze(x)

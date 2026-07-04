@@ -62,10 +62,10 @@ Speedup vs pytorch / vs others:
 | stage                                            | ms     |
 |--------------------------------------------------|-------:|
 | 1. `fused_ln_mask` (LN_in + mask in one Triton kernel) | 0.23  |
-| 2. `tm1_cute_forward(out_layout="bdll_direct")` (two `GemmGatedSm90` launches → `[B,D,L,L]`) | 0.43  |
+| 2. tm1 cute direct-BDLL launch (two `GemmGatedSm90` launches -> `[B,D,L,L]`) | 0.43  |
 | 3. `einsum("bdik,bdjk->bdij", left, right)` (cuBLAS bmm) | 0.45  |
 | 4. cuequiv `layer_norm_transpose(dbn->bnd)` (LN_out + permute back) | 0.34  |
-| 5. `tm2_cute_forward` (`fused_sigmoid_gated_dual_gemm_dual_x`)        | 0.29  |
+| 5. tm2 cute gated dual-GEMM launch (`fused_sigmoid_gated_dual_gemm_dual_x`) | 0.29  |
 | **total**                                        | **~1.74** |
 
 (Measured aggregate via `do_bench` lands at 1.71 ms — the per-stage sum
@@ -81,23 +81,54 @@ includes small per-call overhead that disappears under do_bench timing.)
 | fold LN_out + post-permute into cuequiv `dbn->bnd`   |     2.00  | −1.45 |
 | fuse LN_in + per-row mask into one Triton kernel     |     1.70  | −0.30 |
 
-## Files
+## Benchmark Files
 
-```
-trimul/
-├── reference.py         # pure PyTorch trimul (math reference)
-├── interface.py         # triangle_multiplicative_update_cute placeholder
-├── bench.py             # 5-way bench (in main FA pixi env)
-```
+Runtime code:
 
-triangle_multiplication/tm1/cute/
-└── bench_trimul.py      # the actual 4-way (pytorch/nv-triton/cuequiv/cute) full-TriMul bench
-                         #   running in the isolated cute env (cu128 torch + cutlass-dsl + quack)
-```
+- `src/miniworld_kernels/modules/triangle_multiplication/`
+- `src/miniworld_kernels/kernels/tm1/`
+- `src/miniworld_kernels/kernels/tm2/`
+- `src/miniworld_kernels/kernels/fused_ln_mask/`
 
-Run it with:
+Benchmark code and generated results:
+
+- `benchmarks/modules/triangle_multiplication/configs/bench.yaml`
+- `benchmarks/modules/triangle_multiplication/artifacts/`
+- `benchmarks/runners/bench.py`
+- `submits/run_bench.sbatch`
+
+Run the unified compiled benchmark with:
 
 ```bash
-cd triangle_multiplication/tm1/cute
-pixi run python bench_trimul.py
+sbatch submits/run_bench.sbatch
+```
+
+The trimul CSV and SVG figures are generated under
+`benchmarks/modules/triangle_multiplication/artifacts/<GPU name>/`.
+
+The unified runner writes benchmark CSVs only; `submits/run_bench.sbatch` then
+renders SVGs from those CSVs as a separate step. Current trimul runs generate
+both inference and training CSVs:
+
+- `triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_seq_len_L_sweep.csv`
+- `triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_d_pair_d_sweep.csv`
+- `triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_seq_len_L_sweep.csv`
+- `triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_d_pair_d_sweep.csv`
+
+Those CSVs contain method, dimensions, dtype/precision, mode, metric, device,
+compile flag, sweep axis, status/error, and value. Render grouped bar plots from
+them with short output names. If `--name` is omitted, the renderer includes the
+mode automatically:
+
+The trimul d sweep uses the canonical channel widths `d_pair=128,256,512` at
+fixed `L=384`; do not use an arithmetic range that inserts `d_pair=384`.
+
+```bash
+python benchmarks/runners/plot_csv.py \
+  benchmarks/modules/triangle_multiplication/artifacts/<GPU name>/triangle_multiplication_n_layers=1_inference_time_bf16-mixed_compile_seq_len_L_sweep.csv \
+  benchmarks/modules/triangle_multiplication/artifacts/<GPU name>
+
+python benchmarks/runners/plot_csv.py \
+  benchmarks/modules/triangle_multiplication/artifacts/<GPU name>/triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_d_pair_d_sweep.csv \
+  benchmarks/modules/triangle_multiplication/artifacts/<GPU name>
 ```

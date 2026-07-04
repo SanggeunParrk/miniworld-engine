@@ -5,7 +5,7 @@ path in the repo (``benchmarks/runners/plot_bench.py`` and
 ``benchmarks/runners/bench.py``) so that a
 backend always gets the same colour, label and ordering across every figure.
 This is what makes the benchmark figures publication-coherent: a reader (or a
-paper reviewer) sees "ours" in the same hot colour in every plot, and the
+paper reviewer) sees "MiniWorld" in the same gold colour in every plot, and the
 NVIDIA baselines in the same greens, regardless of which figure they look at.
 
 See ``style.py`` for the actual definitions.

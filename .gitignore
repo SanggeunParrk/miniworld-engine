@@ -18,13 +18,24 @@ dist/
 # profiling / large artifacts
 *.nsys-rep
 *.ncu-rep
+*.sqlite
 *.tar.gz
 *.so
+
+# profiler capture outputs live in <target>/profiles/ (siblings of artifacts/); keep the dir, drop captures
+benchmarks/**/profiles/*
+!benchmarks/**/profiles/.gitkeep
 
 # generated benchmark/profiling artifacts
 benchmarks/**/artifacts/**
 !benchmarks/**/artifacts/**/
 !benchmarks/**/artifacts/**/.gitkeep
+!benchmarks/**/artifacts/**/*.csv
+!benchmarks/**/artifacts/**/*.svg
+!benchmarks/**/artifacts/**/*.png
+!benchmarks/**/artifacts/**/*.pdf
+!benchmarks/**/artifacts/**/*.txt
+!benchmarks/**/artifacts/**/*.json
 benchmark/logs/
 benchmark/
 config/

@@ -120,6 +120,9 @@ class TriangleMultiplication(nn.Module):
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
 
+        if implementation == ImplementationType.CUTE:
+            _load_cute_fns()
+
     def _kernel_tm1(self, pair: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.implementation == ImplementationType.PYTORCH:
             left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))

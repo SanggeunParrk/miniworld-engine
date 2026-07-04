@@ -42,7 +42,14 @@ def tm2_cute_forward(
     orig_shape = x_gate.shape
     x1 = x_gate.reshape(-1, D)
     x2 = x_out_normed.reshape(-1, D)
-    out = fused_sigmoid_gated_dual_gemm_dual_x(x1, x2, Wg_nk, Wp_nk, mask=mask_arg)
+    out = fused_sigmoid_gated_dual_gemm_dual_x(
+        x1,
+        x2,
+        Wg_nk,
+        Wp_nk,
+        mask=mask_arg,
+        precision=0,
+    )
     return out.view(orig_shape)
 
 

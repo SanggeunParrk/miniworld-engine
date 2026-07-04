@@ -22,8 +22,14 @@ def get_seq_group(length: int) -> int:
 
 
 fwd_configs = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 2),  # 128 at H100
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 3),  # 256,384,512 at H100
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 2),
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 8, 3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 4, 3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 8, 3),
 ]
 
 bwd_preprocess_configs = [
@@ -33,8 +39,14 @@ bwd_preprocess_configs = [
 ]
 
 bwd_configs = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 3),  # 128,384 at H100
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, 8, 3),  # 256,512 at H100
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 3),
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 128}, 4, 3),
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 256}, 8, 3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, 8, 3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 4, 3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, 8, 3),
 ]
 
 

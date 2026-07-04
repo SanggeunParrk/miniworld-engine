@@ -61,7 +61,7 @@ tm1/
 ├── interface.py     # tm1_cute: thin Python wrapper, dispatches to cute/
 └── cute/            # isolated CuTeDSL env
     ├── pixi.toml         # cu128 torch + nvidia-cutlass-dsl==4.4.2 + quack==0.3.11
-    ├── launch.py         # tm1_cute_forward: 3 out_layout modes (blld/bdll/bdll_direct)
+    ├── launch.py         # tm1 cute launcher: 3 out_layout modes (blld/bdll/bdll_direct)
     ├── verify.py         # bf16/fp16 correctness, 6 shapes
     ├── _verify_direct.py # bdll_direct path: B=1, L∈{32..1024}
     ├── bench.py          # 4-way tm1 bench (pt/tn/cu_blld/cu_bdll/cu_bdll_direct)
@@ -76,8 +76,8 @@ tm1/
 
 * **Patched `quack.gemm_act`** — two sed edits to drop the
   `is_n_major_c()` assert on postact and to honor a detected M-major
-  layout for the gated path. With those, our `tm1_cute_forward(...,
-  out_layout="bdll_direct")` hands the GEMM an M-major postact view
+  layout for the gated path. With those, the tm1 cute launcher using
+  `out_layout="bdll_direct"` hands the GEMM an M-major postact view
   whose backing storage is `[B, D, L, L]` — kernel writes land directly
   there, no follow-up `permute().contiguous()`.
 

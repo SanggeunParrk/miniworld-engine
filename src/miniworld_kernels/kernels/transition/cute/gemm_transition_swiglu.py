@@ -298,6 +298,7 @@ def transition_expand_swiglu_cute(
     eps: float,
     *,
     prefolded: tuple[Tensor, Tensor, Tensor] | None = None,
+    stats: tuple[Tensor, Tensor] | None = None,
     config: GemmConfig | None = None,
 ) -> Tensor:
     """LayerNorm(x) -> SwiGLU(x@Wa, x@Wb) -> expand (M, N). Stats via the triton pass."""
@@ -315,7 +316,7 @@ def transition_expand_swiglu_cute(
         from miniworld_kernels.kernels.transition.triton.fold import fold_swiglu_triton
 
         B, S, B2 = fold_swiglu_triton(Wa, Wb, ln_weight, ln_bias, w2_dtype=x2.dtype)
-    rstd, c1 = stats_triton(x2, eps)
+    rstd, c1 = stats if stats is not None else stats_triton(x2, eps)
     rstd2 = rstd.contiguous().view(1, M)
     c12 = c1.contiguous().view(1, M)
     S2 = S.contiguous().view(1, 2 * N)

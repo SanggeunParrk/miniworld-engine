@@ -26,11 +26,11 @@ def _cfgs():
     return out
 
 
-@triton.autotune(configs=_cfgs(), key=["L"])
+@triton.autotune(configs=_cfgs(), key=["L", "D"])
 @triton.jit
 def _bmm_gated_kernel(
     dtri, rhs, gLlog, pL, d_p, d_glog,
-    L, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    L, D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -63,5 +63,5 @@ def fused_bmm_gated(dtri, rhs, gLlog, pL):
     d_p = torch.empty_like(dtri)
     d_glog = torch.empty_like(dtri)
     grid = lambda meta: (triton.cdiv(L, meta["BM"]), triton.cdiv(L, meta["BN"]), D)  # noqa: E731
-    _bmm_gated_kernel[grid](dtri, rhs, gLlog, pL, d_p, d_glog, L)
+    _bmm_gated_kernel[grid](dtri, rhs, gLlog, pL, d_p, d_glog, L, D=D)
     return d_p, d_glog

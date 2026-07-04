@@ -7,13 +7,18 @@ Replaces
 
 with one HBM pass:
 
-    fused_ln_mask(x, weight, bias, mask) # target ~0.20 ms
+    fused_ln_mask(x, weight, bias, mask) # B200: ~0.090 ms at L=1024
 
 ``x`` is (B, L, L, D); ``mask`` is a 2D pair mask shaped (B, L, L) (one scalar
 per output row). Math:
 
     row_norm = LayerNorm(x[b, r, c, :], over D axis; weight, bias, eps)
     out[b, r, c, :] = row_norm * mask[b, r, c]
+
+The kernel is bandwidth-bound (read x + write out, ~512 MB at L=1024). On B200
+the tile is autotuned; the winning shape across L is BLOCK_M=8 with a single
+warp (i.e. ~8 rows / warp, two 128-bit bf16 loads per row), which saturates
+HBM at ~6 TB/s. Configs are kept and the reduction stays in fp32.
 """
 
 from __future__ import annotations
@@ -23,6 +28,17 @@ import triton
 import triton.language as tl
 
 
+def _configs():
+    cfgs = []
+    # BLOCK_M / num_warps pairs that keep ~8 rows per warp do best on B200;
+    # cover the neighbourhood so autotune adapts to other GPUs / shapes too.
+    for block_m in (1, 2, 4, 8, 16, 32):
+        for num_warps in (1, 2, 4, 8):
+            cfgs.append(triton.Config({"BLOCK_M": block_m}, num_warps=num_warps))
+    return cfgs
+
+
+@triton.autotune(configs=_configs(), key=["M", "D"])
 @triton.jit
 def _fused_ln_mask_kernel(
     x_ptr,
@@ -40,11 +56,12 @@ def _fused_ln_mask_kernel(
     mask_m = offs_m < M
     offs_d = tl.arange(0, D)
 
-    # Load x (BLOCK_M, D) → fp32
+    # Load x (BLOCK_M, D) → fp32. D=128 bf16 is a contiguous 256-byte row, so
+    # each row is two coalesced 128-bit loads.
     x_ptrs = x_ptr + offs_m[:, None] * D + offs_d[None, :]
     x = tl.load(x_ptrs, mask=mask_m[:, None], other=0.0).to(tl.float32)
 
-    # LayerNorm over D
+    # LayerNorm over D (fp32 reduction)
     mean = tl.sum(x, axis=1) / D
     diff = x - mean[:, None]
     var = tl.sum(diff * diff, axis=1) / D
@@ -80,10 +97,7 @@ def fused_ln_mask(
     mask_flat = mask.reshape(M).to(x.dtype).contiguous()
     out = torch.empty_like(x_flat)
 
-    # BLOCK_M=4 keeps register pressure manageable at D=128; LN is HBM-bound
-    # so the tile size barely matters above ~2.
-    BLOCK_M = 4
-    grid = (triton.cdiv(M, BLOCK_M),)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
     _fused_ln_mask_kernel[grid](
         x_flat,
         mask_flat,
@@ -92,8 +106,6 @@ def fused_ln_mask(
         out,
         M,
         D,
-        BLOCK_M,
-        eps,
-        num_warps=4,
+        EPS=eps,
     )
     return out.view(B, L1, L2, D)
