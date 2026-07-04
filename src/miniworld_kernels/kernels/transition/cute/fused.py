@@ -91,6 +91,10 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         eps: float,
         backward_backend: str = "triton",
     ) -> Float[torch.Tensor, "... d"]:
+        if backward_backend not in {"triton", "cute"}:
+            msg = f"backward_backend must be 'triton' or 'cute', got {backward_backend!r}"
+            raise ValueError(msg)
+
         orig_shape = x.shape
         K = orig_shape[-1]
         x2 = x.reshape(-1, K)

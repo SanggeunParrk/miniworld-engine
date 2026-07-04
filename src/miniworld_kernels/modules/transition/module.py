@@ -1,4 +1,5 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/transition.py
+import os
 from contextlib import contextmanager
 
 import torch
@@ -15,6 +16,38 @@ from miniworld_kernels.modules.exceptions import (
 from miniworld_kernels.modules.primitives import LayerNorm, Linear
 
 from ..ops import swish_gate
+
+
+_LARGE_D_TRAINING_ENV = "MINIWORLD_TRANSITION_LARGE_D_TRAINING"
+_CUTE_BACKWARD_ENV = "MINIWORLD_TRANSITION_CUTE_BACKWARD_BACKEND"
+
+
+def _large_d_training_backend_from_env() -> str | None:
+    value = os.getenv(_LARGE_D_TRAINING_ENV, "fallback").strip().lower()
+    fallback_values = {"", "0", "false", "off", "fallback", "torch", "pytorch"}
+    triton_values = {"1", "true", "yes", "on", "cute_triton", "cute-triton", "hybrid"}
+    cute_values = {"cute", "all_cute", "all-cute"}
+    if value in fallback_values:
+        return None
+    if value in triton_values:
+        return "triton"
+    if value in cute_values:
+        return "cute"
+    msg = (
+        f"{_LARGE_D_TRAINING_ENV} must be one of fallback, cute_triton, or cute; "
+        f"got {value!r}"
+    )
+    raise ValueError(msg)
+
+
+def _explicit_cute_backward_backend() -> str:
+    value = os.getenv(_CUTE_BACKWARD_ENV, "triton").strip().lower()
+    if value in {"triton", "hybrid", "cute_triton", "cute-triton"}:
+        return "triton"
+    if value in {"cute", "all_cute", "all-cute"}:
+        return "cute"
+    msg = f"{_CUTE_BACKWARD_ENV} must be one of triton or cute; got {value!r}"
+    raise ValueError(msg)
 
 
 @contextmanager
@@ -94,6 +127,7 @@ class Transition(nn.Module):
         if self.implementation == ImplementationType.CUTE:
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
             # explicit selection). Same fused structure; LN folded into the cute expand.
+            backward_backend = _explicit_cute_backward_backend()
             return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
@@ -103,6 +137,7 @@ class Transition(nn.Module):
                 self.squeeze.weight,
                 self.n,
                 self.ln_in.eps,
+                backward_backend=backward_backend,
             )
 
         raise InvalidImplementationError(self.implementation)
@@ -138,6 +173,19 @@ class Transition(nn.Module):
             self.implementation == ImplementationType.CUEQUIVARIANCE
             and self.d_hidden >= 256
         ):
+            backward_backend = _large_d_training_backend_from_env()
+            if backward_backend is not None:
+                return kernels.cute_transition_fused(
+                    x,
+                    self.ln_in.weight,
+                    self.ln_in.bias,
+                    self.expand_a.weight,
+                    self.expand_b.weight,
+                    self.squeeze.weight,
+                    self.n,
+                    self.ln_in.eps,
+                    backward_backend=backward_backend,
+                )
             # Current cute backward is still slower than compiled PyTorch for wide
             # training shapes; keep MiniWorld dispatch performance non-regressive.
             return self._torch_forward(x)
