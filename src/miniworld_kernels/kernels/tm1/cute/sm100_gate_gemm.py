@@ -3,6 +3,7 @@ Two tcgen05 MMAs (proj, gate) into two TMEM accumulators + fused GLU epilogue.
 A:(M,K), Bp:(N,K), Bg:(N,K) -> out:(M,N), bf16.
 """
 from __future__ import annotations
+import cuda.bindings.driver as _cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.cute.math as cmath
@@ -159,7 +160,7 @@ class GateGemm:
         tmem.free(tmem_ptr)
 
     @cute.jit
-    def __call__(self, mA, mBp, mBg, mC):
+    def __call__(self, mA, mBp, mBg, mC, stream):
         M = mA.shape[0]
         m_blocks = M // self.tile_m
         tiled_mma = sm100_utils.make_trivial_tiled_mma(
@@ -201,7 +202,7 @@ class GateGemm:
         self.kernel(tma_atom_a, tma_a, tma_atom_bp, tma_bp, tma_atom_bg, tma_bg, mC,
                     a_smem_layout, b_smem_layout, sC_layout, tiled_mma, epi_tile,
                     a_cta_layout, b_cta_layout, cluster_layout_vmnk, tCtAcc_fake
-        ).launch(grid=[m_blocks, 1, 1], block=[self.threads_per_cta, 1, 1])
+        ).launch(grid=[m_blocks, 1, 1], block=[self.threads_per_cta, 1, 1], stream=stream)
 
 
 _CACHE = {}
@@ -221,7 +222,13 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
         mC = from_dlpack(C, assumed_align=16).mark_layout_dynamic(leading_dim=1)
         ret = C
     key = (M, N, K, mmajor)
+    # Launch on PyTorch's *current* CUDA stream so the kernel is enqueued where
+    # torch expects it (and is captured by torch.cuda.graph). Passing the default
+    # stream (the previous no-`stream=` behavior) made the kernel invisible to
+    # CUDA-graph capture -> it was silently dropped on replay. The stream is a
+    # runtime arg to the compiled callable, so one compile serves every stream.
+    strm = _cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     if key not in _CACHE:
-        _CACHE[key] = cute.compile(GateGemm(N, K), mA, mBp, mBg, mC)
-    _CACHE[key](mA, mBp, mBg, mC)
+        _CACHE[key] = cute.compile(GateGemm(N, K), mA, mBp, mBg, mC, strm)
+    _CACHE[key](mA, mBp, mBg, mC, strm)
     return ret
