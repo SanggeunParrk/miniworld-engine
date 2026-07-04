@@ -100,9 +100,10 @@ def _cond_affine_kernel(
              aff.to(CondAff.dtype.element_ty), mask=mask)
 
 
-def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float) -> torch.Tensor:
+def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
+                 out_dtype: torch.dtype | None = None) -> torch.Tensor:
     M, N = cond.shape
-    aff = torch.empty(M, N, device=cond.device, dtype=cond.dtype)
+    aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
     _cond_affine_kernel[grid](
         cond, aff, lnw, M, N, eps,
@@ -394,9 +395,15 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
     """Dispatch: small d (≤256) → single fused kernel; token d (>256) → LN-folded cute GEMM
     (kernel A) + fused epilogue (kernel B), which beats the materialize path 1.12-1.21x by
     dropping the cond_aff HBM round-trip. ``kw`` (weight_cat/bias_cat/prefolded) is forwarded so
-    a caller with fixed weights can prefold once."""
+    a caller with fixed weights can prefold once.
+
+    lnfold's cute GEMM (quack SM90) is 16/8-bit ONLY, so fp32 falls back to materialize+cuBLAS —
+    there is no fast fused fp32/TF32 GEMM here (triton's TF32 GEMM is ~0.5× cuBLAS)."""
     if x.shape[-1] <= 256:  # noqa: PLR2004
         return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                      bias_weight, eps_x, eps_cond)
-    return adaln_inference_lnfold(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                  bias_weight, eps_x, eps_cond, **kw)
+    if x.dtype in (torch.float16, torch.bfloat16):
+        return adaln_inference_lnfold(x, cond, cond_ln_weight, scale_weight, scale_bias,
+                                      bias_weight, eps_x, eps_cond, **kw)
+    return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias,
+                                       bias_weight, eps_x, eps_cond, **kw)
