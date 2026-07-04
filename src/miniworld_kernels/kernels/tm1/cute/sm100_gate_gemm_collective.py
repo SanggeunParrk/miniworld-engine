@@ -1,4 +1,4 @@
-"""v15: gated dual-B GEMM built on CUTLASS's tuned Blackwell persistent collective.
+"""v16: gated dual-B GEMM built on CUTLASS's tuned Blackwell persistent collective.
 
 out = sigmoid(A@Bg.T) * (A@Bp.T), stored M-major straight into [B,D,L,L] (zero-copy).
 A:(M,K) bf16, Bp/Bg:(N,K) bf16 -> out:(M,N) bf16, fp32 accumulate.
@@ -495,14 +495,39 @@ class GatedPersistentGemmKernel(PersistentDenseGemmKernel):
 
         subtile_cnt = cute.size(tTR_tAccP.shape, mode=[3])
         num_prev_subtiles = num_tiles_executed * subtile_cnt
-        for subtile_idx in range(subtile_cnt):
-            cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, subtile_idx)], tTR_rAccP)
-            p = tiled_copy_r2s.retile(tTR_rAccP).load()
-            if const_expr(self.proj_only or not self.epi_gate):
+
+        # v16: software-pipelined epilogue. The dominant epilogue stall (ncu) is
+        # long-scoreboard on the tcgen05 t2r (TMEM->reg) loads that feed the
+        # sigmoid; issuing subtile k+1's t2r loads *before* computing subtile k
+        # overlaps that latency with subtile k's sigmoid math + async TMA C-store.
+        # Double-buffered register fragments (2x 32 fp32/thread). Occupancy is
+        # smem/TMEM-capped (not register-capped) so the extra regs are free.
+        # range_constexpr => python-unrolled loop so the double-buffer index is a
+        # compile-time constant.
+        gate_on = not (self.proj_only or not self.epi_gate)
+        rAccP = [tTR_rAccP, cute.make_fragment_like(tTR_rAccP)]
+        rAccG = [tTR_rAccG, cute.make_fragment_like(tTR_rAccG)]
+
+        # prologue: prefetch subtile 0's accumulators
+        cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, 0)], rAccP[0])
+        if const_expr(gate_on):
+            cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, 0)], rAccG[0])
+
+        for subtile_idx in cutlass.range_constexpr(subtile_cnt):
+            cur = subtile_idx % 2
+            # issue next subtile's t2r loads early so they overlap this subtile's
+            # sigmoid compute + async TMA store (hides t2r long-scoreboard latency)
+            if subtile_idx + 1 < subtile_cnt:
+                nxt = (subtile_idx + 1) % 2
+                cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, subtile_idx + 1)], rAccP[nxt])
+                if const_expr(gate_on):
+                    cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, subtile_idx + 1)], rAccG[nxt])
+
+            p = tiled_copy_r2s.retile(rAccP[cur]).load()
+            if const_expr(not gate_on):
                 ov = p
             else:
-                cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, subtile_idx)], tTR_rAccG)
-                g = tiled_copy_r2s.retile(tTR_rAccG).load()
+                g = tiled_copy_r2s.retile(rAccG[cur]).load()
                 if const_expr(self.no_exp):
                     ov = p * g
                 elif const_expr(self.sig_mode == "tanh"):
