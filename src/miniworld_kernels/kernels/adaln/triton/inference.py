@@ -43,6 +43,10 @@ def set_fp32_matmul_precision(mode: str) -> None:
 # bf16 operands (fp32 accumulate) for the fp32 GEMM — ~1.6× faster than TF32, cos≈0.9999.
 _GEMM_BF16 = False
 
+# Cache for adaln_inference_lnfold's prefolded GEMM operands, keyed on (fixed) weight identities +
+# dtype. Inference weights are static, so folding once and reusing avoids a per-forward fold pass.
+_LNFOLD_CACHE: dict = {}
+
 
 def set_gemm_bf16(flag: bool) -> None:
     """Enable bf16 operands (fp32 accumulate) for the GEMM on fp32 inputs (faster, cos≈0.9999)."""
@@ -188,6 +192,69 @@ def adaln_inference_materialize(
     return y.reshape(orig_x_shape)
 
 
+def adaln_inference_lnfold(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    cond_ln_weight: torch.Tensor,   # lnw, (NC,)
+    scale_weight: torch.Tensor,     # (NX, NC)
+    scale_bias: torch.Tensor,       # (NX,)
+    bias_weight: torch.Tensor,      # (NX, NC)
+    eps_x: float,
+    eps_cond: float,
+    *,
+    weight_cat: torch.Tensor | None = None,   # cached cat([Wscale,Wbias],0) (2NX,NC)
+    bias_cat: torch.Tensor | None = None,       # cached cat([scale_b,0])    (2NX,)
+    prefolded=None,                             # cached fold_for_gemm(weight_cat, lnw, 0, bias_cat)
+) -> torch.Tensor:
+    """Inference adaLN via FUSED LN(cond)+GEMM (kernel A, cute layernorm_linear) + fused epilogue
+    (kernel B, _adaln_epilogue). The cond LayerNorm is folded into the GEMM prologue, so cond_aff
+    never hits HBM — the materialize pass of ``adaln_inference_materialize`` is gone. Best at token
+    d (>=256); LOSES to materialize at atom d=128 (cute stats+launch overhead > the small
+    materialize saving there). Weights fixed → prefold once and pass ``weight_cat``/``prefolded``."""
+    from miniworld_kernels.kernels.layernorm_linear.cute import fold_for_gemm, layernorm_linear
+
+    orig_x_shape = x.shape
+    nx = orig_x_shape[-1]
+    x2d = x.reshape(-1, nx)
+    cond2d = cond.reshape(-1, cond.shape[-1])
+    if x2d.stride(-1) != 1:
+        x2d = x2d.contiguous()
+    if cond2d.stride(-1) != 1:
+        cond2d = cond2d.contiguous()
+
+    # Prefold the (fixed-weight) GEMM operands ONCE. Doing it per call adds a ~(2NX,NC) fold pass
+    # every forward (captured & re-run on each cudagraph replay) which erases the win — so cache it
+    # keyed on the weight identities + dtype (inference weights are static). Callers may also pass
+    # weight_cat/bias_cat/prefolded explicitly to bypass the cache.
+    if prefolded is None and weight_cat is None:
+        key = (scale_weight.data_ptr(), bias_weight.data_ptr(), scale_bias.data_ptr(),
+               cond_ln_weight.data_ptr(), x.dtype)
+        hit = _LNFOLD_CACHE.get(key)
+        if hit is None:
+            weight_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
+            bias_cat = torch.cat([scale_bias, scale_bias.new_zeros(nx)], dim=0)  # (2NX,)
+            ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)             # cond LN: no bias
+            prefolded = fold_for_gemm(weight_cat, cond_ln_weight, ln_bias, bias_cat, w2_dtype=x.dtype)
+            _LNFOLD_CACHE[key] = (weight_cat, bias_cat, prefolded)
+        else:
+            weight_cat, bias_cat, prefolded = hit
+    else:
+        if weight_cat is None:
+            weight_cat = torch.cat([scale_weight, bias_weight], dim=0)
+        if bias_cat is None:
+            bias_cat = torch.cat([scale_bias, scale_bias.new_zeros(nx)], dim=0)
+        if prefolded is None:
+            ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)
+            prefolded = fold_for_gemm(weight_cat, cond_ln_weight, ln_bias, bias_cat, w2_dtype=x.dtype)
+    ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)
+
+    # kernel A: [scale|bias] = LN(cond) @ [Wscale|Wbias]ᵀ + [scale_b|0], LN folded into prologue.
+    sb = layernorm_linear(cond2d, cond_ln_weight, ln_bias, weight_cat, bias_cat, eps_cond,
+                          prefolded=prefolded)                              # (M, 2NX)
+    y = _adaln_epilogue(x2d, sb, eps_x)                                     # kernel B
+    return y.reshape(orig_x_shape)
+
+
 # ───────────────── single-fused inference kernel (best at small d, e.g. atom d=128) ─────────────
 # One kernel: LN(cond)·lnw, in-kernel GEMM → scale,bias, LN(x), sigmoid-gate → Y. Writes ONLY Y
 # (no x_hat/cond_norm/gate/rstd saves), so it strips the backward-materialization traffic the
@@ -324,9 +391,12 @@ def adaln_inference_fused(
 
 def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                     eps_x, eps_cond, **kw):
-    """Dispatch: small d (≤256) → single fused kernel; large d → materialize+cuBLAS."""
+    """Dispatch: small d (≤256) → single fused kernel; token d (>256) → LN-folded cute GEMM
+    (kernel A) + fused epilogue (kernel B), which beats the materialize path 1.12-1.21x by
+    dropping the cond_aff HBM round-trip. ``kw`` (weight_cat/bias_cat/prefolded) is forwarded so
+    a caller with fixed weights can prefold once."""
     if x.shape[-1] <= 256:  # noqa: PLR2004
         return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                      bias_weight, eps_x, eps_cond)
-    return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                       bias_weight, eps_x, eps_cond, **kw)
+    return adaln_inference_lnfold(x, cond, cond_ln_weight, scale_weight, scale_bias,
+                                  bias_weight, eps_x, eps_cond, **kw)

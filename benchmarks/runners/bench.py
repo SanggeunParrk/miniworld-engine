@@ -1615,6 +1615,15 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
         from miniworld_kernels.kernels.adaln.triton.inference import adaln_inference
         kfn = lambda x, c: adaln_inference(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
         path = "kernels.adaln.triton.inference"
+    elif implementation == "adaln_lnfold":
+        from miniworld_kernels.kernels.adaln.triton.inference import adaln_inference_lnfold
+        from miniworld_kernels.kernels.layernorm_linear.cute import fold_for_gemm
+        _wcat = torch.cat([sw, bw], dim=0).contiguous()
+        _bcat = torch.cat([sb, sb.new_zeros(D)], dim=0).contiguous()
+        _pf = fold_for_gemm(_wcat, clw, clw.new_zeros(clw.shape), _bcat, w2_dtype=dtype)
+        kfn = lambda x, c: adaln_inference_lnfold(  # noqa: E731
+            x, c, clw, sw, sb, bw, ex, ec, weight_cat=_wcat, bias_cat=_bcat, prefolded=_pf)
+        path = "kernels.adaln.triton.inference.lnfold"
     elif implementation == "triton_adaln":
         from miniworld_kernels.kernels import triton_adaptive_layer_norm
         kfn = lambda x, c: triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
