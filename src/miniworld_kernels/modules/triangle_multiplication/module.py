@@ -11,6 +11,10 @@ from jaxtyping import Bool, Float
 
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.modules.triangle_multiplication.dispatch import (
+    resolve_impl as _resolve_trimul_impl,
+    resolve_out_layout as _resolve_trimul_out_layout,
+)
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -94,7 +98,8 @@ class TriangleMultiplication(nn.Module):
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
-        self.implementation = implementation
+        # 'miniworld' (auto) -> concrete backend for the running GPU arch.
+        self.implementation = _resolve_trimul_impl(implementation)
         self.ln_implementation = ln_implementation
         direction = "outgoing" if outgoing else "incoming"
         self.nvtx_enabled = False
@@ -225,8 +230,6 @@ class TriangleMultiplication(nn.Module):
 
         Requires the cute env (cutlass-dsl + quack). Outgoing direction only.
         """
-        if not self.outgoing:
-            raise InvalidImplementationError(self.implementation)
         tm1_cute_forward, tm2_cute_forward, fused_ln_mask, layer_norm_transpose = (
             _load_cute_fns()
         )
@@ -255,9 +258,12 @@ class TriangleMultiplication(nn.Module):
             self.to_left_gate.weight.T,
             self.to_right.weight.T,
             self.to_right_gate.weight.T,
-            out_layout="bdll_sm100",
+            out_layout=_resolve_trimul_out_layout(pair.device),
         )
-        tri_out_bdij = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)
+        if self.outgoing:
+            tri_out_bdij = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)
+        else:
+            tri_out_bdij = torch.einsum("bdki,bdkj->bdij", left_bdll, right_bdll)
         tri_dbn = tri_out_bdij.permute(1, 0, 2, 3).reshape(d, b, l1 * l2)
         out = layer_norm_transpose(
             tri_dbn, ln_out_w, ln_out_b, eps=self.ln_out.eps, layout="dbn->bnd"

@@ -20,6 +20,10 @@ import torch.nn as nn
 from jaxtyping import Bool, Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.modules.triangle_multiplication.dispatch import (
+    resolve_impl as _resolve_trimul_impl,
+    resolve_out_layout as _resolve_trimul_out_layout,
+)
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -39,7 +43,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        self.implementation = implementation
+        # 'miniworld' (auto) -> concrete backend for the running GPU arch.
+        self.implementation = _resolve_trimul_impl(implementation)
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
         d2 = 2 * self.d_hidden
@@ -125,7 +130,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 self.to_left_gate.weight[sl].T.contiguous(),
                 self.to_right.weight[sl].T.contiguous(),
                 self.to_right_gate.weight[sl].T.contiguous(),
-                out_layout="bdll_sm100",
+                out_layout=_resolve_trimul_out_layout(pair.device),
             )
 
         left_out, right_out = _front(slice(0, h))          # outgoing half, [B,h,L,L]
