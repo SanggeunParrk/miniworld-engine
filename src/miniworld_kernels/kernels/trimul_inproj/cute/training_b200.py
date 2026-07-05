@@ -48,9 +48,24 @@ from miniworld_kernels.kernels.layernorm_linear.cute.dgrad_lnbwd_sm100 import dg
 from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100 import (
     _transpose_kernel, get_seq_group,
 )
+from miniworld_kernels.kernels.layernorm.compile_native import _dispatch_bwd as _ln_opt_bwd
 
 _USE_FUSED_DGRAD = os.environ.get("MINIWORLD_TRAIN_DGRAD_FUSED", "1") != "0"
 _USE_FAST_PERMUTE = os.environ.get("MINIWORLD_TRAIN_FAST_PERMUTE", "1") != "0"
+
+_ONES_CACHE = {}
+
+
+def _colsum(x2d):
+    """Fast (M,D)->(D,) column sum as a cuBLAS GEMV (ones @ x), which is coalesced and
+    much faster than torch reduce_kernel .sum(0) for large M. fp32 acc, bf16 out."""
+    M = x2d.shape[0]
+    key = (M, x2d.device, x2d.dtype)
+    ones = _ONES_CACHE.get(key)
+    if ones is None:
+        ones = torch.ones(1, M, device=x2d.device, dtype=x2d.dtype)
+        _ONES_CACHE[key] = ones
+    return (ones @ x2d).squeeze(0)
 
 
 def _fast_T(src):
@@ -121,7 +136,7 @@ _LN_CFGS = [
 
 @triton.autotune(configs=_LN_CFGS, key=["D"])
 @triton.jit
-def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, M, D: tl.constexpr, eps,
+def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, Mean, M, D: tl.constexpr, eps,
                    BLOCK_M: tl.constexpr):
     # One program does BLOCK_M rows, full D columns; LN over D. fp32 stats.
     rm = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -140,6 +155,7 @@ def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, M, D: tl.constexpr, eps,
     tl.store(Y + off, y.to(Y.dtype.element_ty), mask=mmask[:, None])
     tl.store(Xhat + off, xhat.to(Xhat.dtype.element_ty), mask=mmask[:, None])
     tl.store(Rstd + rm, rstd, mask=mmask)
+    tl.store(Mean + rm, mean, mask=mmask)
 
 
 def _ln_fwd_fused(x, w, b, eps):
@@ -150,10 +166,11 @@ def _ln_fwd_fused(x, w, b, eps):
     y = torch.empty_like(xf)
     xhat = torch.empty_like(xf)
     rstd = torch.empty(M, device=x.device, dtype=torch.float32)
+    mean = torch.empty(M, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
-    _ln_fwd_kernel[grid](xf, w, b, y, rstd, xhat, M, D=D, eps=float(eps))
+    _ln_fwd_kernel[grid](xf, w, b, y, rstd, xhat, mean, M, D=D, eps=float(eps))
     shp = x.shape
-    return (y.view(shp), None, rstd.view(shp[:-1]), xhat.view(shp))
+    return (y.view(shp), mean.view(shp[:-1]), rstd.view(shp[:-1]), xhat.view(shp))
 
 
 @triton.autotune(configs=_LN_CFGS, key=["D"])
@@ -200,7 +217,7 @@ class TriMulB200Fn(torch.autograd.Function):
 
         # -- LN_in (fp32 stats saved, faithful to training.py _ln_fwd) --
         _lnf = _ln_fwd_fused if _USE_FUSE_LN else _ln_fwd
-        x_n, _, rstd_in, xhat_in = _lnf(pair, ln_in_w, ln_in_b, eps)
+        x_n, mean_in, rstd_in, _xhat_in = _lnf(pair, ln_in_w, ln_in_b, eps)
         if mask2d is not None:
             x_n = x_n * mask2d
 
@@ -220,7 +237,7 @@ class TriMulB200Fn(torch.autograd.Function):
         proj = out_n @ Wp
         y = proj * gate
 
-        ctx.save_for_backward(x_n, xhat_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
+        ctx.save_for_backward(x_n, pair, mean_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
                               left_b, right_b, xhat_out, rstd_out, ln_out_w,
                               out_n, gate, proj)
         ctx.ln_in_w = ln_in_w
@@ -231,7 +248,7 @@ class TriMulB200Fn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        (x_n, xhat_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
+        (x_n, pair, mean_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
          left_b, right_b, xhat_out, rstd_out, ln_out_w, out_n, gate, proj) = ctx.saved_tensors
         ln_in_w = ctx.ln_in_w
         B, L, D = ctx.shape
@@ -261,7 +278,7 @@ class TriMulB200Fn(torch.autograd.Function):
             d_tri_lld = d_tri_lld_flat.view(B, L, L, D)
             # LN_out affine grads from T (== _ln_bwd dw/db, no d_out_n materialize):
             T = dpf.t() @ xho                                       # (D, D)
-            db_proj = dpf.sum(0)                                    # (D,)
+            db_proj = _colsum(dpf)                                 # (D,) fast GEMV column-sum
             dBln_out = db_proj @ Wpt                                # (D,)
             dWln_out = (Wpt * T).sum(0)                             # (D,)
         else:
@@ -296,8 +313,10 @@ class TriMulB200Fn(torch.autograd.Function):
             dx_n = dx_n * ctx.mask2d
 
         # -- (4) LN_in bwd (saved stats, NO recompute; pure LN-bwd, no GEMM to fuse) --
-        _lnb = _ln_bwd_fused if _USE_FUSE_LN else _ln_bwd
-        dx, dWln_in, dBln_in = _lnb(dx_n, xhat_in, rstd_in, ln_in_w)
+        # LN_in bwd WHOLESALE via the arch-agnostic optimized layernorm backward
+        # (dx + dw + db in fused triton atomic/partial/persistent, dispatch-cached),
+        # replacing the split (triton _ln_bwd_dx + torch .sum(0) dw/db reduces).
+        dx, dWln_in, dBln_in = _ln_opt_bwd(dx_n, pair, ln_in_w, mean_in, rstd_in)
 
         return (dx, dWL, dWLg, dWR, dWRg, dWg, dWp,
                 dWln_in, dBln_in, dWln_out, dBln_out, None, None, None)
