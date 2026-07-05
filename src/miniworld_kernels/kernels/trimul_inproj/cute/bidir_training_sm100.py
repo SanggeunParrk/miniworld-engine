@@ -53,9 +53,9 @@ class BidirBackHalfSm100(torch.autograd.Function):
         left, right, preact = trimul_front_sm100_train(x_n, b_lr, H)  # bdll, 0 transposes
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
-        o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))   # outgoing: O = L @ Rᵀ
-        o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])    # incoming: O = Lᵀ @ R
-        tri = torch.cat([o_out, o_in], dim=0)               # (H, L, L)
+        tri = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)  # (H, L, L)
+        torch.bmm(lf[:h], rf[:h].transpose(1, 2), out=tri[:h])   # outgoing: O = L @ RT
+        torch.bmm(lf[h:].transpose(1, 2), rf[h:], out=tri[h:])   # incoming: O = LT @ R
         view = tri.reshape(H, M).t()                        # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
         y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True)
@@ -87,12 +87,14 @@ class BidirBackHalfSm100(torch.autograd.Function):
         # contraction bwd (contiguous-grad formulas), split outgoing/incoming
         d_o_out, d_o_in = d_tri[:h], d_tri[h:]
         lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
-        d_lo = torch.bmm(d_o_out, ro)                     # outgoing: O=lo@roᵀ -> dl=G@R
-        d_ro = torch.bmm(d_o_out.transpose(1, 2), lo)     #                       dr=Gᵀ@L
-        d_li = torch.bmm(ri, d_o_in.transpose(1, 2))      # incoming: O=liᵀ@ri -> dl=R@Gᵀ
-        d_ri = torch.bmm(li, d_o_in)                      #                       dr=L@G
-        d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
-        d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
+        d_left = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)
+        d_right = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)
+        torch.bmm(d_o_out, ro, out=d_left[:h])            # outgoing: O=lo@roT -> dl=G@R
+        torch.bmm(ri, d_o_in.transpose(1, 2), out=d_left[h:])  # incoming: O=liT@ri -> dl=R@GT
+        torch.bmm(d_o_out.transpose(1, 2), lo, out=d_right[:h]) #                       dr=GT@L
+        torch.bmm(li, d_o_in, out=d_right[h:])            #                       dr=L@G
+        d_left = d_left.reshape(B, H, L, L)
+        d_right = d_right.reshape(B, H, L, L)
 
         # front bwd, then dxn = (dconcᵀ@W_stack) + (d_glogit@Wgᵀ) with the gate's dx_gate add
         # FUSED into one cuBLAS addmm epilogue (== v12 single-dir). dW stays cuBLAS.
