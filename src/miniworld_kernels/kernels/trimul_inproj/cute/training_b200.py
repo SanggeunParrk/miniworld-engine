@@ -110,6 +110,86 @@ def _add3(a, b, c):
     return out
 
 
+_USE_FUSE_LN = os.environ.get("MINIWORLD_TRAIN_FUSE_LN", "1") != "0"
+
+_LN_CFGS = [
+    triton.Config({"BLOCK_M": bm}, num_warps=nw)
+    for bm in (1, 2, 4, 8, 16)
+    for nw in (1, 2, 4)
+]
+
+
+@triton.autotune(configs=_LN_CFGS, key=["D"])
+@triton.jit
+def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, M, D: tl.constexpr, eps,
+                   BLOCK_M: tl.constexpr):
+    # One program does BLOCK_M rows, full D columns; LN over D. fp32 stats.
+    rm = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rd = tl.arange(0, D)
+    mmask = rm < M
+    off = rm[:, None] * D + rd[None, :]
+    x = tl.load(X + off, mask=mmask[:, None], other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=1) / D
+    xc = x - mean[:, None]
+    var = tl.sum(xc * xc, axis=1) / D
+    rstd = 1.0 / tl.sqrt(var + eps)
+    xhat = xc * rstd[:, None]
+    w = tl.load(W + rd).to(tl.float32)
+    b = tl.load(Bs + rd).to(tl.float32)
+    y = xhat * w[None, :] + b[None, :]
+    tl.store(Y + off, y.to(Y.dtype.element_ty), mask=mmask[:, None])
+    tl.store(Xhat + off, xhat.to(Xhat.dtype.element_ty), mask=mmask[:, None])
+    tl.store(Rstd + rm, rstd, mask=mmask)
+
+
+def _ln_fwd_fused(x, w, b, eps):
+    """Fused LayerNorm fwd over last dim D. Returns (y, None, rstd_fp32, xhat_bf16).
+    Drop-in for autograd._ln_fwd (mean unused by callers). fp32 stats (constraint)."""
+    xf = x.reshape(-1, x.shape[-1])
+    M, D = xf.shape
+    y = torch.empty_like(xf)
+    xhat = torch.empty_like(xf)
+    rstd = torch.empty(M, device=x.device, dtype=torch.float32)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    _ln_fwd_kernel[grid](xf, w, b, y, rstd, xhat, M, D=D, eps=float(eps))
+    shp = x.shape
+    return (y.view(shp), None, rstd.view(shp[:-1]), xhat.view(shp))
+
+
+@triton.autotune(configs=_LN_CFGS, key=["D"])
+@triton.jit
+def _ln_bwd_dx_kernel(DY, Xhat, Rstd, W, DX, M, D: tl.constexpr,
+                      BLOCK_M: tl.constexpr):
+    rm = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rd = tl.arange(0, D)
+    mmask = rm < M
+    off = rm[:, None] * D + rd[None, :]
+    dy = tl.load(DY + off, mask=mmask[:, None], other=0.0).to(tl.float32)
+    xh = tl.load(Xhat + off, mask=mmask[:, None], other=0.0).to(tl.float32)
+    rstd = tl.load(Rstd + rm, mask=mmask, other=0.0).to(tl.float32)
+    w = tl.load(W + rd).to(tl.float32)
+    dxhat = dy * w[None, :]
+    mean1 = tl.sum(dxhat, axis=1) / D
+    mean2 = tl.sum(dxhat * xh, axis=1) / D
+    dx = rstd[:, None] * (dxhat - mean1[:, None] - xh * mean2[:, None])
+    tl.store(DX + off, dx.to(DX.dtype.element_ty), mask=mmask[:, None])
+
+
+def _ln_bwd_fused(dy, xhat, rstd, w):
+    """Fused LayerNorm bwd over last dim D. Returns (dx, dw, db). dx in one fused
+    pass; dw/db are cheap (M,D)->(D,) reductions (torch). Drop-in for autograd._ln_bwd."""
+    D = dy.shape[-1]
+    dyf = dy.reshape(-1, D)
+    xhf = xhat.reshape(-1, D)
+    M = dyf.shape[0]
+    dx = torch.empty_like(dyf)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    _ln_bwd_dx_kernel[grid](dyf, xhf, rstd.reshape(-1).contiguous(), w, dx, M, D=D)
+    dw = (dyf * xhf).sum(0)
+    db = dyf.sum(0)
+    return dx.view(dy.shape), dw, db
+
+
 class TriMulB200Fn(torch.autograd.Function):
     """Save-heavy sm100 forward + manual backward (torch/cuBLAS + fused gatebwd/dgrad)."""
 
@@ -119,7 +199,8 @@ class TriMulB200Fn(torch.autograd.Function):
         B, L, _, D = pair.shape
 
         # -- LN_in (fp32 stats saved, faithful to training.py _ln_fwd) --
-        x_n, _, rstd_in, xhat_in = _ln_fwd(pair, ln_in_w, ln_in_b, eps)
+        _lnf = _ln_fwd_fused if _USE_FUSE_LN else _ln_fwd
+        x_n, _, rstd_in, xhat_in = _lnf(pair, ln_in_w, ln_in_b, eps)
         if mask2d is not None:
             x_n = x_n * mask2d
 
@@ -134,7 +215,7 @@ class TriMulB200Fn(torch.autograd.Function):
             tri_lld = tri.permute(0, 2, 3, 1).contiguous()          # (B, L, L, D)
 
         # -- back-half (computed + SAVED, == training.py) --
-        out_n, _, rstd_out, xhat_out = _ln_fwd(tri_lld, ln_out_w, ln_out_b, eps)
+        out_n, _, rstd_out, xhat_out = _lnf(tri_lld, ln_out_w, ln_out_b, eps)
         gate = torch.sigmoid(x_n @ Wg)
         proj = out_n @ Wp
         y = proj * gate
@@ -215,7 +296,8 @@ class TriMulB200Fn(torch.autograd.Function):
             dx_n = dx_n * ctx.mask2d
 
         # -- (4) LN_in bwd (saved stats, NO recompute; pure LN-bwd, no GEMM to fuse) --
-        dx, dWln_in, dBln_in = _ln_bwd(dx_n, xhat_in, rstd_in, ln_in_w)
+        _lnb = _ln_bwd_fused if _USE_FUSE_LN else _ln_bwd
+        dx, dWln_in, dBln_in = _lnb(dx_n, xhat_in, rstd_in, ln_in_w)
 
         return (dx, dWL, dWLg, dWR, dWRg, dWg, dWp,
                 dWln_in, dBln_in, dWln_out, dBln_out, None, None, None)
