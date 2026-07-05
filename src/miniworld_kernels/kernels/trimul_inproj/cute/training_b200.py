@@ -64,6 +64,52 @@ def _fast_T(src):
     return dst
 
 
+import triton.language as tl
+
+
+@triton.jit
+def _glu_bwd_kernel(dy_ptr, gate_ptr, proj_ptr, dproj_ptr, dglog_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    off = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = off < n
+    dy = tl.load(dy_ptr + off, mask=mask).to(tl.float32)
+    g = tl.load(gate_ptr + off, mask=mask).to(tl.float32)
+    p = tl.load(proj_ptr + off, mask=mask).to(tl.float32)
+    tl.store(dproj_ptr + off, (dy * g).to(tl.bfloat16), mask=mask)
+    tl.store(dglog_ptr + off, (dy * p * g * (1.0 - g)).to(tl.bfloat16), mask=mask)
+
+
+def _glu_bwd(dy, gate, proj):
+    d_proj = torch.empty_like(dy)
+    d_glog = torch.empty_like(dy)
+    n = dy.numel()
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)  # noqa: E731
+    _glu_bwd_kernel[grid](dy, gate, proj, d_proj, d_glog, n, BLOCK=2048)
+    return d_proj, d_glog
+
+
+_USE_FUSE_GLU = os.environ.get("MINIWORLD_TRAIN_FUSE_GLU", "1") != "0"
+
+
+@triton.jit
+def _add3_kernel(a_ptr, b_ptr, c_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    off = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = off < n
+    a = tl.load(a_ptr + off, mask=mask).to(tl.float32)
+    b = tl.load(b_ptr + off, mask=mask).to(tl.float32)
+    c = tl.load(c_ptr + off, mask=mask).to(tl.float32)
+    tl.store(out_ptr + off, (a + b + c).to(tl.bfloat16), mask=mask)
+
+
+def _add3(a, b, c):
+    out = torch.empty_like(a)
+    n = a.numel()
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)  # noqa: E731
+    _add3_kernel[grid](a, b, c, out, n, BLOCK=2048)
+    return out
+
+
 class TriMulB200Fn(torch.autograd.Function):
     """Save-heavy sm100 forward + manual backward (torch/cuBLAS + fused gatebwd/dgrad)."""
 
@@ -114,9 +160,12 @@ class TriMulB200Fn(torch.autograd.Function):
             return t.reshape(M, D)
 
         # -- (1) back-half (NO recompute; uses saved out_n/gate/proj/stats) --
-        d_proj = dy * gate
-        d_gate = dy * proj
-        d_glog = d_gate * gate * (1 - gate)
+        if _USE_FUSE_GLU:
+            d_proj, d_glog = _glu_bwd(dy, gate, proj)   # 1 fused pass (was 5 elementwise)
+        else:
+            d_proj = dy * gate
+            d_gate = dy * proj
+            d_glog = d_gate * gate * (1 - gate)
         dWp = flat(out_n).t() @ flat(d_proj)
         dx_n = d_glog @ Wg.t()
         dWg = flat(x_n).t() @ flat(d_glog)
@@ -157,7 +206,10 @@ class TriMulB200Fn(torch.autograd.Function):
         xnf = flat(x_n)
         dxn_L, dWL, dWLg = front_gatebwd_sm100(xnf, flat(d_left), WL, WLg)
         dxn_R, dWR, dWRg = front_gatebwd_sm100(xnf, flat(d_right), WR, WRg)
-        dx_n = dx_n + dxn_L.view_as(dx_n) + dxn_R.view_as(dx_n)
+        if _USE_FUSE_GLU:
+            dx_n = _add3(dx_n, dxn_L.view_as(dx_n), dxn_R.view_as(dx_n))  # 1 fused add (was 2)
+        else:
+            dx_n = dx_n + dxn_L.view_as(dx_n) + dxn_R.view_as(dx_n)
 
         if ctx.has_mask:
             dx_n = dx_n * ctx.mask2d
