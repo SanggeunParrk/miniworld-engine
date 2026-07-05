@@ -1,30 +1,29 @@
 """B200 TRAINING (fwd+bwd) path for trimul (outgoing).
 
-A torch.autograd.Function (``TriMulB200Fn``) whose FORWARD calls the exact B200
-fast inference kernels used by ``compile_native.TriMulCompile.forward``:
+FAITHFUL PORT of the H100 training design (``cute/training.py`` = ``TriMulInprojFn``):
+a *save-heavy* forward + a manual backward that consumes the saved tensors with
+NO recompute (mirrors ``training.py`` stage-for-stage).  Only the GEMM backend of
+the FORWARD front differs: the fast sm100 tcgen05 gated-GLU collective produces
+``left_b/right_b`` (bdll) instead of quack/WGMMA.
 
-    x_n   = fused_ln_mask(pair, ln_in_w, ln_in_b, m2, eps)   # LN_in (+ pair mask)
-            (or triton_layernorm when no mask)
-    left_b, right_b = trimul_front_sm100_fused(x_n, packed)  # bdll gated GLU GEMM
-    tri   = einsum("bdik,bdjk->bdij", left_b, right_b)        # (B, D, L, L)
-    y     = trimul_back_triton(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps)
+vs the previous B200 path (v0, git eb41ca4): that one used the max-fusion inference
+forward (fused triton back) which saved nothing, so its backward had to recompute
+the WHOLE back-half (tri einsum + LN_out fwd + gate + proj) AND the LN_in stats.
+Profiling showed that recompute + the stat-recompute were ~8 ms of the ~20 ms bwd
+at L=1024 — pure waste that H100 ``training.py`` avoids by SAVING.  This module
+restores the H100 save-heavy contract:
 
-and whose BACKWARD implements the manual gradient using the B0/B1-verified
-formulas (``autograd.py`` / ``autograd_cute.py``).  The front pL/gL/pR/gR are
-NOT exposed by the fused GLU kernel, so they are recomputed from x_n in the
-backward (one concat GEMM each, as in ``TriMulCuteFn.gated_bwd``).  Backward
-GEMMs are plain torch/cuBLAS (correctness over speed).
+  saved: x_n, xhat_in, rstd_in, left_b, right_b, xhat_out, rstd_out, out_n, gate,
+         proj  (+ weights)  ->  backward does ZERO forward recompute.
 
-CRITICAL forward-consistency notes (must match the inference forward exactly):
-  * The mask is applied multiplicatively to x_n AFTER LN_in.  The masked x_n is
-    what feeds the front AND the back-half gate.  So d(x_n) accumulates from the
-    front, the gate, AND the back-half's d_tri path; the mask multiply happens
-    on the SUMMED dx_n before LN_in backward (chain rule through `x_n*mask`).
-  * LN_in stats (mean/rstd/xhat) are recomputed in fp32 in the backward from the
-    saved `pair` input, matching `_ln_fwd` in autograd.py.
+Backward GEMMs are plain torch/cuBLAS, EXACTLY as H100 ``training.py`` (its docstring:
+"a correct manual backward with plain torch/cuBLAS GEMMs and a save-heavy forward").
+The front pL/gL/pR/gR are recomputed from x_n in the backward (one concat GEMM each),
+identical to ``training.py.gated_bwd``.
 
-This is a standalone module/Function; it edits no shared files.  B == 1, square
-L, D == 128, bf16.
+Mask: applied multiplicatively to x_n AFTER LN_in (== training.py).  dx_n accumulates
+from front + gate + back-half, then the mask multiply, then LN_in backward.
+LN stats are fp32 (``_ln_fwd``/``_ln_bwd``).  B == 1, square L, D == 128, bf16.
 """
 
 from __future__ import annotations
@@ -32,47 +31,42 @@ from __future__ import annotations
 import torch
 
 from miniworld_kernels.kernels.trimul_inproj.autograd import _ln_bwd, _ln_fwd
-from miniworld_kernels.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
     prepack_lr_operand_sm100,
     trimul_front_sm100_fused,
 )
-from miniworld_kernels.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
-from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
 
 
 class TriMulB200Fn(torch.autograd.Function):
-    """Fast B200 fwd kernels + manual backward (cuBLAS GEMMs)."""
+    """Save-heavy sm100 forward + manual backward (torch/cuBLAS), == H100 training.py."""
 
     @staticmethod
     def forward(ctx, pair, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b,
                 ln_out_w, ln_out_b, eps, packed, mask2d):
-        # mask2d: (B, L, L, 1) pair mask broadcast over D, or None.
         B, L, _, D = pair.shape
 
-        # ── LN_in (+ optional mask), exactly as the inference forward ──────────
+        # -- LN_in (fp32 stats saved, faithful to training.py _ln_fwd) --
+        x_n, _, rstd_in, xhat_in = _ln_fwd(pair, ln_in_w, ln_in_b, eps)
         if mask2d is not None:
-            m2 = mask2d.squeeze(-1).contiguous()  # (B, L, L) for the fused kernel
-            x_n = fused_ln_mask(pair, ln_in_w, ln_in_b, m2, eps)
-        else:
-            x_n = triton_layernorm(
-                pair.reshape(B * L * L, D), ln_in_w, ln_in_b, eps
-            ).view(B, L, L, D)
+            x_n = x_n * mask2d
 
-        # ── front: fused sm100 gated GLU GEMM -> bdll left/right ───────────────
+        # -- front: FAST sm100 tcgen05 gated-GLU GEMM -> bdll left/right (kept) --
         left_b, right_b = trimul_front_sm100_fused(x_n, packed=packed)
 
-        # ── bmm (channel-wise outer over k) ────────────────────────────────────
+        # -- bmm (channel-wise outer over k) --
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)  # (B, D, L, L)
+        tri_lld = tri.permute(0, 2, 3, 1).contiguous()          # (B, L, L, D)
 
-        # ── back-half: fused triton LN_out + proj + gate-mul ───────────────────
-        y = trimul_back_triton(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps)
+        # -- back-half (computed + SAVED, == training.py) --
+        out_n, _, rstd_out, xhat_out = _ln_fwd(tri_lld, ln_out_w, ln_out_b, eps)
+        gate = torch.sigmoid(x_n @ Wg)
+        proj = out_n @ Wp
+        y = proj * gate
 
-        # Save only what the manual backward needs.  pL/gL/pR/gR are recomputed
-        # from x_n (front kernel does not expose them), matching TriMulCuteFn.
-        ctx.save_for_backward(pair, x_n, WL, WLg, WR, WRg, Wg, Wp,
-                              left_b, right_b, ln_in_w, ln_in_b, ln_out_w, ln_out_b)
-        ctx.eps = eps
+        ctx.save_for_backward(x_n, xhat_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
+                              left_b, right_b, xhat_out, rstd_out, ln_out_w,
+                              out_n, gate, proj)
+        ctx.ln_in_w = ln_in_w
         ctx.has_mask = mask2d is not None
         ctx.mask2d = mask2d
         ctx.shape = (B, L, D)
@@ -80,41 +74,33 @@ class TriMulB200Fn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        (pair, x_n, WL, WLg, WR, WRg, Wg, Wp,
-         left_b, right_b, ln_in_w, ln_in_b, ln_out_w, ln_out_b) = ctx.saved_tensors
-        eps = ctx.eps
+        (x_n, xhat_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
+         left_b, right_b, xhat_out, rstd_out, ln_out_w, out_n, gate, proj) = ctx.saved_tensors
+        ln_in_w = ctx.ln_in_w
         B, L, D = ctx.shape
         M = B * L * L
 
         def flat(t):
             return t.reshape(M, D)
 
-        # Recompute the back-half forward intermediates (out_n, gate, proj) that
-        # the fused triton kernel did not save: LN_out(tri) then gate/proj.
-        tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)        # (B, D, L, L)
-        tri_lld = tri.permute(0, 2, 3, 1).contiguous()               # (B, L, L, D)
-        out_n, _, rstd_out, xhat_out = _ln_fwd(tri_lld, ln_out_w, ln_out_b, eps)
-        gate = torch.sigmoid(x_n @ Wg)
-        proj = out_n @ Wp
-
-        # ── ① back-half ────────────────────────────────────────────────────────
+        # -- (1) back-half (NO recompute; uses saved out_n/gate/proj/stats) --
         d_proj = dy * gate
         d_gate = dy * proj
         d_glog = d_gate * gate * (1 - gate)
         d_out_n = d_proj @ Wp.t()
         dWp = flat(out_n).t() @ flat(d_proj)
-        dx_n = d_glog @ Wg.t()                                       # gate -> x_n
+        dx_n = d_glog @ Wg.t()
         dWg = flat(x_n).t() @ flat(d_glog)
         d_tri_lld, dWln_out, dBln_out = _ln_bwd(d_out_n, xhat_out, rstd_out, ln_out_w)
-        d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()          # (B, D, L, L)
+        d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()      # (B, D, L, L)
 
-        # ── ② bmm bwd (bdll) ─────────────────────────────────────────────────
+        # -- (2) bmm bwd (bdll) --
         d_left_b = torch.einsum("bdij,bdjk->bdik", d_tri, right_b)
         d_right_b = torch.einsum("bdij,bdik->bdjk", d_tri, left_b)
-        d_left = d_left_b.permute(0, 2, 3, 1).contiguous()          # (B, L, L, D)
+        d_left = d_left_b.permute(0, 2, 3, 1).contiguous()      # (B, L, L, D)
         d_right = d_right_b.permute(0, 2, 3, 1).contiguous()
 
-        # ── ③ front gated-GEMM bwd — recompute pL,gL,pR,gR from x_n ───────────
+        # -- (3) front gated-GEMM bwd — recompute pL,gL,pR,gR from x_n (== training.py) --
         def gated_bwd(d_out, Wp_proj, Wg_gate):
             p = x_n @ Wp_proj
             g = torch.sigmoid(x_n @ Wg_gate)
@@ -129,25 +115,20 @@ class TriMulB200Fn(torch.autograd.Function):
         dxn_R, dWR, dWRg = gated_bwd(d_right, WR, WRg)
         dx_n = dx_n + dxn_L + dxn_R
 
-        # ── mask: x_n = LN(pair) * mask, so dx_n flows back through the mask ───
         if ctx.has_mask:
             dx_n = dx_n * ctx.mask2d
 
-        # ── ④ LN_in bwd (recompute stats in fp32 from pair) ──────────────────
-        _, _, rstd_in, xhat_in = _ln_fwd(pair, ln_in_w, ln_in_b, eps)
+        # -- (4) LN_in bwd (saved stats, NO recompute) --
         dx, dWln_in, dBln_in = _ln_bwd(dx_n, xhat_in, rstd_in, ln_in_w)
 
-        # grads match forward arg order:
-        # pair, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b,
-        # eps, packed, mask2d
         return (dx, dWL, dWLg, dWR, dWRg, dWg, dWp,
                 dWln_in, dBln_in, dWln_out, dBln_out, None, None, None)
 
 
 class TriMulB200Train(torch.nn.Module):
-    """Trainable B200 trimul (outgoing).  Forward uses the fast B200 kernels;
-    backward is the manual gradient.  Weights stored in x@W form (= weight.T).
-    bf16, B == 1, D == 128."""
+    """Trainable B200 trimul (outgoing).  Save-heavy sm100 forward + manual backward
+    (== H100 training.py).  Weights stored in x@W form (= weight.T).  bf16, B == 1,
+    D == 128."""
 
     def __init__(self, base):
         super().__init__()
@@ -166,11 +147,6 @@ class TriMulB200Train(torch.nn.Module):
         self.D = self.WL.shape[0]
 
     def _packed(self):
-        # The fused GLU forward needs the interleaved [WLg|WL|WRg|WR] B-operand.
-        # During training the weights change each step, so rebuild it from the
-        # live (detached) weights every call.  Grads w.r.t. WL/WLg/WR/WRg flow
-        # through the manual backward (gated_bwd), NOT through this buffer, so a
-        # detached rebuild is correct.
         return prepack_lr_operand_sm100(
             self.WL.detach(), self.WLg.detach(), self.WR.detach(), self.WRg.detach()
         )
