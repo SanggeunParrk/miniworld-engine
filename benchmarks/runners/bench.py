@@ -1904,6 +1904,14 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
                    "triton_persistent": _bwd_persistent_impl}[implementation]
         kfn = lambda: impl_fn(dy, x, w, mean, rstd)  # noqa: E731
         path = f"kernels.layernorm.compile_native.{implementation}"
+    elif implementation == "cuda":
+        # Hand-CUDA vectorized backward; the shipped dispatch routes bf16 128<=N<=512 here.
+        # Outside that gate the dispatch keeps triton, so report NaN (not applicable).
+        if dtype is not BF16 or not (128 <= D <= 512):
+            return as_bench_result(float("nan"))
+        from miniworld_kernels.kernels.layernorm.cuda import layer_norm_bwd_cuda
+        kfn = lambda: layer_norm_bwd_cuda(dy, x, w, mean, rstd)  # noqa: E731
+        path = "kernels.layernorm.cuda.layer_norm_bwd_cuda"
     else:
         return as_bench_result(float("nan"))
 

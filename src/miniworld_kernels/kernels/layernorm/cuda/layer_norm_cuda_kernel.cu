@@ -17,6 +17,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
 #include <algorithm>
 #include <cstdlib>
 #include <type_traits>
@@ -147,6 +148,7 @@ layer_norm_cuda_fwd(
     const int grid  = M;
     // smem: one float per warp
     const int smem_bytes = ((block + 31) / 32) * sizeof(float);
+    const auto stream = at::cuda::getCurrentCUDAStream();
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half,
@@ -154,7 +156,7 @@ layer_norm_cuda_fwd(
         x.scalar_type(),
         "layer_norm_fwd_cuda",
         [&]() {
-            layer_norm_fwd_kernel<scalar_t><<<grid, block, smem_bytes>>>(
+            layer_norm_fwd_kernel<scalar_t><<<grid, block, smem_bytes, stream>>>(
                 x.data_ptr<scalar_t>(),
                 y.data_ptr<scalar_t>(),
                 weight.data_ptr<scalar_t>(),
@@ -424,6 +426,7 @@ layer_norm_cuda_bwd(
     auto partial_dw = torch::empty({total_warps, N}, partial_opts);
     auto partial_db = torch::empty({total_warps, N}, partial_opts);
     constexpr int main_smem = 0;
+    const auto stream = at::cuda::getCurrentCUDAStream();
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half,
@@ -442,7 +445,7 @@ layer_norm_cuda_bwd(
             auto launch = [&](auto mk, auto tx) {
                 constexpr int MK = decltype(mk)::value;
                 constexpr int TX = decltype(tx)::value;
-                layer_norm_bwd_main_kernel<scalar_t, MK, TX><<<grid, block, main_smem>>>(
+                layer_norm_bwd_main_kernel<scalar_t, MK, TX><<<grid, block, main_smem, stream>>>(
                     dy_contig.data_ptr<scalar_t>(),
                     x_contig.data_ptr<scalar_t>(),
                     w_contig.data_ptr<scalar_t>(),
@@ -472,7 +475,7 @@ layer_norm_cuda_bwd(
         x_contig.scalar_type(),
         "layer_norm_bwd_reduce_cuda",
         [&]() {
-            layer_norm_bwd_reduce_kernel<scalar_t><<<N, reduce_block, reduce_smem>>>(
+            layer_norm_bwd_reduce_kernel<scalar_t><<<N, reduce_block, reduce_smem, stream>>>(
                 partial_dw.data_ptr<float>(),
                 partial_db.data_ptr<float>(),
                 dw.data_ptr<scalar_t>(),
