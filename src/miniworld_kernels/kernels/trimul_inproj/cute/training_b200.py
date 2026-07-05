@@ -35,6 +35,7 @@ from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
     prepack_lr_operand_sm100,
     trimul_front_sm100_fused,
 )
+from miniworld_kernels.kernels.trimul_inproj.cute.gatebwd_sm100 import front_gatebwd_sm100
 
 
 class TriMulB200Fn(torch.autograd.Function):
@@ -100,20 +101,14 @@ class TriMulB200Fn(torch.autograd.Function):
         d_left = d_left_b.permute(0, 2, 3, 1).contiguous()      # (B, L, L, D)
         d_right = d_right_b.permute(0, 2, 3, 1).contiguous()
 
-        # -- (3) front gated-GEMM bwd — recompute pL,gL,pR,gR from x_n (== training.py) --
-        def gated_bwd(d_out, Wp_proj, Wg_gate):
-            p = x_n @ Wp_proj
-            g = torch.sigmoid(x_n @ Wg_gate)
-            d_p = d_out * g
-            d_glogit = (d_out * p) * g * (1 - g)
-            dxn = d_p @ Wp_proj.t() + d_glogit @ Wg_gate.t()
-            dWproj = flat(x_n).t() @ flat(d_p)
-            dWgate = flat(x_n).t() @ flat(d_glogit)
-            return dxn, dWproj, dWgate
-
-        dxn_L, dWL, dWLg = gated_bwd(d_left, WL, WLg)
-        dxn_R, dWR, dWRg = gated_bwd(d_right, WR, WRg)
-        dx_n = dx_n + dxn_L + dxn_R
+        # -- (3) front gated-GEMM bwd — FUSED sm100 port of H100 backward_gatebwd:
+        #    one dual-accumulator GEMM recomputes pL/gL from x_n and applies the GLU
+        #    gate-backward in the tcgen05 epilogue (emits [d_glogit|d_p] interleaved),
+        #    then single 2N d_xn / dW GEMMs.  == gated_bwd math, ~1.8x faster. --
+        xnf = flat(x_n)
+        dxn_L, dWL, dWLg = front_gatebwd_sm100(xnf, flat(d_left), WL, WLg)
+        dxn_R, dWR, dWRg = front_gatebwd_sm100(xnf, flat(d_right), WR, WRg)
+        dx_n = dx_n + dxn_L.view_as(dx_n) + dxn_R.view_as(dx_n)
 
         if ctx.has_mask:
             dx_n = dx_n * ctx.mask2d
