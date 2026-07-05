@@ -8,24 +8,23 @@ the FORWARD front differs: the fast sm100 tcgen05 gated-GLU collective produces
 
 vs the previous B200 path (v0, git eb41ca4): that one used the max-fusion inference
 forward (fused triton back) which saved nothing, so its backward had to recompute
-the WHOLE back-half (tri einsum + LN_out fwd + gate + proj) AND the LN_in stats.
-Profiling showed that recompute + the stat-recompute were ~8 ms of the ~20 ms bwd
-at L=1024 — pure waste that H100 ``training.py`` avoids by SAVING.  This module
-restores the H100 save-heavy contract:
+the WHOLE back-half.  This module restores the H100 save-heavy contract:
 
   saved: x_n, xhat_in, rstd_in, left_b, right_b, xhat_out, rstd_out, out_n, gate,
          proj  (+ weights)  ->  backward does ZERO forward recompute.
 
-Backward GEMMs are plain torch/cuBLAS, EXACTLY as H100 ``training.py``, EXCEPT:
+Backward GEMMs are plain torch/cuBLAS, EXCEPT:
   - front gated-GEMM bwd -> FUSED sm100 backward_gatebwd port (v2, gatebwd_sm100).
   - LN_out backward (d_tri_lld = LNbwd(d_proj @ Wp.t())) -> FUSED sm100 dgrad_lnbwd
-    port (v4, dgrad_lnbwd_sm100): the projection-backward GEMM + the LN-normalize
+    port (v4/v5, dgrad_lnbwd_sm100): the projection-backward GEMM + the LN-normalize
     backward are folded into ONE tcgen05 epilogue, removing the d_out_n (M,D) HBM
-    round-trip and the separate torch _ln_bwd memory pass.  The LN_out affine grads
-    (dgamma/dbeta) are derived from T = d_proj^T @ xhat_out (== H100 dgrad_lnbwd
-    usage: dgrad emits only dx; dW/dgamma/dbeta come from the wgrad T), so d_out_n
-    is never materialized (the dgrad GEMM already computes it internally).
-    Toggle off with MINIWORLD_TRAIN_DGRAD_FUSED=0 (falls back to torch _ln_bwd).
+    round-trip and the separate torch _ln_bwd memory pass.  LN_out affine grads
+    (dgamma/dbeta) derived from T = d_proj^T @ xhat_out (dgrad emits only dx).
+    Toggle: MINIWORLD_TRAIN_DGRAD_FUSED=0.
+  - the LLD<->DLL permutes (d_tri, d_left, d_right) use a COALESCED tiled triton
+    transpose (v6) instead of torch .permute().contiguous() (an uncoalesced generic
+    copy, ~2.3 ms each at L=1024 vs ~0.16 ms tiled).  Same values, ~5 ms/iter less
+    memory traffic.  Toggle: MINIWORLD_TRAIN_FAST_PERMUTE=0.
 
 Mask: applied multiplicatively to x_n AFTER LN_in (== training.py).  dx_n accumulates
 from front + gate + back-half, then the mask multiply, then LN_in backward.
@@ -37,6 +36,7 @@ from __future__ import annotations
 import os
 
 import torch
+import triton
 
 from miniworld_kernels.kernels.trimul_inproj.autograd import _ln_bwd, _ln_fwd
 from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
@@ -45,8 +45,23 @@ from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
 )
 from miniworld_kernels.kernels.trimul_inproj.cute.gatebwd_sm100 import front_gatebwd_sm100
 from miniworld_kernels.kernels.layernorm_linear.cute.dgrad_lnbwd_sm100 import dgrad_lnbwd_sm100
+from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100 import (
+    _transpose_kernel, get_seq_group,
+)
 
 _USE_FUSED_DGRAD = os.environ.get("MINIWORLD_TRAIN_DGRAD_FUSED", "1") != "0"
+_USE_FAST_PERMUTE = os.environ.get("MINIWORLD_TRAIN_FAST_PERMUTE", "1") != "0"
+
+
+def _fast_T(src):
+    """Coalesced tiled transpose: src (M,N) row-major contiguous -> (N,M) row-major.
+    Replaces torch .permute().contiguous() (uncoalesced generic copy, ~2.3 ms per
+    L=1024 transpose) with the front tiled triton transpose (~0.16 ms). Same values."""
+    M, N = src.shape
+    dst = torch.empty(N, M, device=src.device, dtype=src.dtype)
+    grid = lambda meta: (triton.cdiv(M, meta["BM"]), triton.cdiv(N, meta["BN"]))  # noqa: E731
+    _transpose_kernel[grid](src, dst, M, N, GROUP_M=get_seq_group(M))
+    return dst
 
 
 class TriMulB200Fn(torch.autograd.Function):
@@ -67,7 +82,10 @@ class TriMulB200Fn(torch.autograd.Function):
 
         # -- bmm (channel-wise outer over k) --
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)  # (B, D, L, L)
-        tri_lld = tri.permute(0, 2, 3, 1).contiguous()          # (B, L, L, D)
+        if _USE_FAST_PERMUTE:
+            tri_lld = _fast_T(tri.reshape(D, L * L)).view(B, L, L, D)  # DLL->LLD (tiled)
+        else:
+            tri_lld = tri.permute(0, 2, 3, 1).contiguous()          # (B, L, L, D)
 
         # -- back-half (computed + SAVED, == training.py) --
         out_n, _, rstd_out, xhat_out = _ln_fwd(tri_lld, ln_out_w, ln_out_b, eps)
@@ -105,7 +123,6 @@ class TriMulB200Fn(torch.autograd.Function):
 
         if _USE_FUSED_DGRAD:
             # FUSED: d_tri_lld = LNbwd(d_proj @ Wp.t()) in the dgrad tcgen05 epilogue.
-            # No d_out_n (M,D) round-trip; the dY@W GEMM lives inside the kernel.
             dpf = flat(d_proj)
             xho = flat(xhat_out)
             Wpt = Wp.t().contiguous()                              # (D, D)
@@ -113,8 +130,6 @@ class TriMulB200Fn(torch.autograd.Function):
                 dpf, Wpt, xho, ln_out_w, rstd_out.reshape(-1))
             d_tri_lld = d_tri_lld_flat.view(B, L, L, D)
             # LN_out affine grads from T (== _ln_bwd dw/db, no d_out_n materialize):
-            #   dw[k]=sum_m d_out_n[m,k]*xhat[m,k]=(Wp.t()*T).sum(0);  T=d_proj^T@xhat
-            #   db[k]=sum_m d_out_n[m,k]=(d_proj.sum(0))@Wp.t()
             T = dpf.t() @ xho                                       # (D, D)
             db_proj = dpf.sum(0)                                    # (D,)
             dBln_out = db_proj @ Wpt                                # (D,)
@@ -122,18 +137,23 @@ class TriMulB200Fn(torch.autograd.Function):
         else:
             d_out_n = d_proj @ Wp.t()
             d_tri_lld, dWln_out, dBln_out = _ln_bwd(d_out_n, xhat_out, rstd_out, ln_out_w)
-        d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()      # (B, D, L, L)
+
+        if _USE_FAST_PERMUTE:
+            d_tri = _fast_T(d_tri_lld.reshape(M, D)).view(B, D, L, L)  # LLD->DLL (tiled)
+        else:
+            d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()      # (B, D, L, L)
 
         # -- (2) bmm bwd (bdll) --
         d_left_b = torch.einsum("bdij,bdjk->bdik", d_tri, right_b)
         d_right_b = torch.einsum("bdij,bdik->bdjk", d_tri, left_b)
-        d_left = d_left_b.permute(0, 2, 3, 1).contiguous()      # (B, L, L, D)
-        d_right = d_right_b.permute(0, 2, 3, 1).contiguous()
+        if _USE_FAST_PERMUTE:
+            d_left = _fast_T(d_left_b.reshape(D, M)).view(B, L, L, D)   # DLL->LLD (tiled)
+            d_right = _fast_T(d_right_b.reshape(D, M)).view(B, L, L, D)
+        else:
+            d_left = d_left_b.permute(0, 2, 3, 1).contiguous()      # (B, L, L, D)
+            d_right = d_right_b.permute(0, 2, 3, 1).contiguous()
 
-        # -- (3) front gated-GEMM bwd — FUSED sm100 port of H100 backward_gatebwd:
-        #    one dual-accumulator GEMM recomputes pL/gL from x_n and applies the GLU
-        #    gate-backward in the tcgen05 epilogue (emits [d_glogit|d_p] interleaved),
-        #    then single 2N d_xn / dW GEMMs.  == gated_bwd math, ~1.8x faster. --
+        # -- (3) front gated-GEMM bwd — FUSED sm100 port of H100 backward_gatebwd --
         xnf = flat(x_n)
         dxn_L, dWL, dWLg = front_gatebwd_sm100(xnf, flat(d_left), WL, WLg)
         dxn_R, dWR, dWRg = front_gatebwd_sm100(xnf, flat(d_right), WR, WRg)
