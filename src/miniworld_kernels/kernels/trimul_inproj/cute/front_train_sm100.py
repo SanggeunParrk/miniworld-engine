@@ -32,7 +32,45 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-from quack.gemm_interface import gemm_act
+from quack.gemm_interface import gemm_act, gemm_act_tuned
+from quack.gemm_config import GemmConfig
+
+
+# --- Shape-specialized front-GEMM config (v13) ---------------------------------
+# The front is a single non-gated GEMM x_flat(M=L*L, K=D=128) @ b_lr(128, 4D=512)
+# -> preact, bf16 in / fp32 acc, with an m-major postact store (postact strides
+# (1, M)), activation=None. quack's gemm_act autotuner IS shape-aware (its cache
+# key auto-appends each tensor's shape/stride/dtype), but it selects with a short
+# noisy do_bench(warmup=5, rep=25) and persists the pick to ~/.quack/cache. An
+# exhaustive per-shape sweep of the full valid sm100 config space (148 configs)
+# with CUDA-graph do_bench(warmup=25, rep=100) showed:
+#   L=384 (M=147456):  best == autotuner pick (tile256x512, cl(2,1), swap_ab, dyn)  -> ceiling
+#   L=768 (M=589824):  best == autotuner pick (same)                                -> ceiling
+#   L=1024(M=1048576): best = tile256x512, cl(2,1), NO swap_ab, dyn_persistent=False
+#                      = 260.0us vs autotuner's dyn_persistent=True 269.2us (~3.5%).
+# Pinning the swept-best config here makes the selection deterministic (independent
+# of the fragile disk autotune cache), removes the cold-start 148-config autotune,
+# and captures the small L=1024 gain. Precision is unchanged (bf16 in / fp32 acc);
+# this is config selection only. Non-sm100 devices / unknown M fall back to the
+# autotuned gemm_act path.
+_FRONT_GEMM_BASE = dict(
+    tile_m=256, tile_n=512, cluster_m=2, cluster_n=1, pingpong=False,
+    max_swizzle_size=8, device_capacity=10, use_tma_gather=False,
+)
+_FRONT_GEMM_SPEC = {
+    384 * 384:   dict(swap_ab=True,  is_dynamic_persistent=True),
+    768 * 768:   dict(swap_ab=True,  is_dynamic_persistent=True),
+    1024 * 1024: dict(swap_ab=False, is_dynamic_persistent=False),
+}
+
+
+def _front_gemm_config(M: int, device) -> "GemmConfig | None":
+    if torch.cuda.get_device_capability(device)[0] not in (10, 11):
+        return None
+    spec = _FRONT_GEMM_SPEC.get(M)
+    if spec is None:
+        return None
+    return GemmConfig(**_FRONT_GEMM_BASE, **spec)
 
 
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:
@@ -86,7 +124,14 @@ def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     # (1) non-gated m-major GEMM: preact[4H,L,L] written straight into the bdll buffer (no permute)
     preact = torch.empty(B, 4 * H, L, L, device=x_n.device, dtype=x_n.dtype)
     preact_view = preact.view(4 * H, M).T  # (M,4H) strides (1,M) -> m-major store
-    gemm_act(A=x_flat, B=b_lr, activation=None, store_preact=False, postact_out=preact_view)
+    _cfg = _front_gemm_config(M, x_n.device)
+    if _cfg is None:
+        gemm_act(A=x_flat, B=b_lr, activation=None, store_preact=False, postact_out=preact_view)
+    else:
+        # Explicit config injection = bypass @autotune, same as gemm_act_out's
+        # partial(gemm_act_tuned.fn, config=None) idiom. CUDA-graph safe (no bench).
+        gemm_act_tuned.fn(x_flat, b_lr, None, preact_view, None, None, None,
+                          None, None, False, config=_cfg)
     # (2) GLU -> left/right [2H,L,L] bdll (contiguous)
     lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
     grid = lambda meta: (triton.cdiv(H * M, meta["BLK"]),)  # noqa: E731
