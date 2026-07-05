@@ -137,13 +137,14 @@ _LN_CFGS = [
 @triton.autotune(configs=_LN_CFGS, key=["D"])
 @triton.jit
 def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, Mean, M, D: tl.constexpr, eps,
-                   BLOCK_M: tl.constexpr):
+                   sxm, sxd, BLOCK_M: tl.constexpr):
     # One program does BLOCK_M rows, full D columns; LN over D. fp32 stats.
     rm = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     rd = tl.arange(0, D)
     mmask = rm < M
-    off = rm[:, None] * D + rd[None, :]
-    x = tl.load(X + off, mask=mmask[:, None], other=0.0).to(tl.float32)
+    xoff = rm[:, None] * sxm + rd[None, :] * sxd   # input may be M-major (strided) view
+    ooff = rm[:, None] * D + rd[None, :]           # contiguous (M,D) output
+    x = tl.load(X + xoff, mask=mmask[:, None], other=0.0).to(tl.float32)
     mean = tl.sum(x, axis=1) / D
     xc = x - mean[:, None]
     var = tl.sum(xc * xc, axis=1) / D
@@ -152,24 +153,30 @@ def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, Mean, M, D: tl.constexpr, eps,
     w = tl.load(W + rd).to(tl.float32)
     b = tl.load(Bs + rd).to(tl.float32)
     y = xhat * w[None, :] + b[None, :]
-    tl.store(Y + off, y.to(Y.dtype.element_ty), mask=mmask[:, None])
-    tl.store(Xhat + off, xhat.to(Xhat.dtype.element_ty), mask=mmask[:, None])
+    tl.store(Y + ooff, y.to(Y.dtype.element_ty), mask=mmask[:, None])
+    tl.store(Xhat + ooff, xhat.to(Xhat.dtype.element_ty), mask=mmask[:, None])
     tl.store(Rstd + rm, rstd, mask=mmask)
     tl.store(Mean + rm, mean, mask=mmask)
 
 
-def _ln_fwd_fused(x, w, b, eps):
-    """Fused LayerNorm fwd over last dim D. Returns (y, None, rstd_fp32, xhat_bf16).
-    Drop-in for autograd._ln_fwd (mean unused by callers). fp32 stats (constraint)."""
-    xf = x.reshape(-1, x.shape[-1])
-    M, D = xf.shape
-    y = torch.empty_like(xf)
-    xhat = torch.empty_like(xf)
+def _ln_fwd_fused(x, w, b, eps, out_shape=None):
+    """Fused LayerNorm fwd over last dim D. Returns (y, mean, rstd_fp32, xhat_bf16),
+    all CONTIGUOUS (M,D)-backed. `x` may be a strided 2D (M,D) view (e.g. an M-major
+    view of a DLL tensor) — the kernel reads it with explicit strides, so NO transpose
+    copy is needed to feed LN. fp32 stats (constraint)."""
+    if x.dim() == 2:
+        x2d = x                       # possibly-strided (M,D) view (NO copy)
+    else:
+        x2d = x.reshape(-1, x.shape[-1])
+    M, D = x2d.shape
+    y = torch.empty(M, D, device=x.device, dtype=x.dtype)
+    xhat = torch.empty(M, D, device=x.device, dtype=x.dtype)
     rstd = torch.empty(M, device=x.device, dtype=torch.float32)
     mean = torch.empty(M, device=x.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
-    _ln_fwd_kernel[grid](xf, w, b, y, rstd, xhat, mean, M, D=D, eps=float(eps))
-    shp = x.shape
+    _ln_fwd_kernel[grid](x2d, w, b, y, rstd, xhat, mean, M, D=D, eps=float(eps),
+                         sxm=x2d.stride(0), sxd=x2d.stride(1))
+    shp = out_shape if out_shape is not None else x.shape
     return (y.view(shp), mean.view(shp[:-1]), rstd.view(shp[:-1]), xhat.view(shp))
 
 
@@ -226,13 +233,18 @@ class TriMulB200Fn(torch.autograd.Function):
 
         # -- bmm (channel-wise outer over k) --
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)  # (B, D, L, L)
-        if _USE_FAST_PERMUTE:
-            tri_lld = _fast_T(tri.reshape(D, L * L)).view(B, L, L, D)  # DLL->LLD (tiled)
-        else:
-            tri_lld = tri.permute(0, 2, 3, 1).contiguous()          # (B, L, L, D)
 
         # -- back-half (computed + SAVED, == training.py) --
-        out_n, _, rstd_out, xhat_out = _lnf(tri_lld, ln_out_w, ln_out_b, eps)
+        # LN_out reads tri (DLL) via an M-major strided VIEW (tri.reshape(D,M).t()); the
+        # fused LN kernel consumes the strides directly (m contiguous -> coalesced), so the
+        # DLL->LLD transpose copy is ELIMINATED (out_n/xhat written contiguous (M,D)).
+        if _USE_FAST_PERMUTE:
+            tri_mv = tri.reshape(D, L * L).t()                       # (M, D) m-major view
+            out_n, _, rstd_out, xhat_out = _lnf(tri_mv, ln_out_w, ln_out_b, eps,
+                                                out_shape=(B, L, L, D))
+        else:
+            tri_lld = tri.permute(0, 2, 3, 1).contiguous()
+            out_n, _, rstd_out, xhat_out = _lnf(tri_lld, ln_out_w, ln_out_b, eps)
         gate = torch.sigmoid(x_n @ Wg)
         proj = out_n @ Wp
         y = proj * gate
@@ -294,16 +306,19 @@ class TriMulB200Fn(torch.autograd.Function):
         d_left_b = torch.einsum("bdij,bdjk->bdik", d_tri, right_b)
         d_right_b = torch.einsum("bdij,bdik->bdjk", d_tri, left_b)
         if _USE_FAST_PERMUTE:
-            d_left = _fast_T(d_left_b.reshape(D, M)).view(B, L, L, D)   # DLL->LLD (tiled)
-            d_right = _fast_T(d_right_b.reshape(D, M)).view(B, L, L, D)
+            # (M,D) M-major strided VIEWS of the DLL einsum outputs — fed straight into
+            # front_gatebwd_sm100, whose _cdup_interleave reads them with a col stride
+            # (fuses the transpose into the interleave copy). No separate transpose.
+            d_left = d_left_b.reshape(D, M).t()    # (M, D) strided view
+            d_right = d_right_b.reshape(D, M).t()
         else:
             d_left = d_left_b.permute(0, 2, 3, 1).contiguous()      # (B, L, L, D)
             d_right = d_right_b.permute(0, 2, 3, 1).contiguous()
 
         # -- (3) front gated-GEMM bwd — FUSED sm100 port of H100 backward_gatebwd --
         xnf = flat(x_n)
-        dxn_L, dWL, dWLg = front_gatebwd_sm100(xnf, flat(d_left), WL, WLg)
-        dxn_R, dWR, dWRg = front_gatebwd_sm100(xnf, flat(d_right), WR, WRg)
+        dxn_L, dWL, dWLg = front_gatebwd_sm100(xnf, d_left, WL, WLg)   # d_left already (M,D)
+        dxn_R, dWR, dWRg = front_gatebwd_sm100(xnf, d_right, WR, WRg)
         if _USE_FUSE_GLU:
             dx_n = _add3(dx_n, dxn_L.view_as(dx_n), dxn_R.view_as(dx_n))  # 1 fused add (was 2)
         else:

@@ -119,7 +119,7 @@ def front_gatebwd_sm100(xn: Tensor, d_out: Tensor, Wproj: Tensor, Wgate: Tensor)
     c1 = torch.zeros(1, M, dtype=torch.float32, device=dev)
     S = torch.zeros(1, 2 * N, dtype=torch.float32, device=dev)
     B2 = torch.zeros(1, 2 * N, dtype=torch.float32, device=dev)
-    C = _cdup_interleave(d_out.contiguous())
+    C = _cdup_interleave(d_out)  # d_out may be a strided view; _cdup reads it with col stride
     dAB = torch.empty(M, 2 * N, dtype=xn.dtype, device=dev)  # [d_glogit | d_p] interleaved
     h = torch.empty(M, N, dtype=xn.dtype, device=dev)        # recomputed fwd (unused)
     _gate_bwd_sm100(xn, Bw, dAB, h, C, rstd, c1, S, B2, "glu", cfg)

@@ -66,7 +66,7 @@ from quack.gemm_tvm_ffi_utils import (
 
 # fmt: off
 @triton.jit
-def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, som, BM: tl.constexpr, BN: tl.constexpr):
+def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BM: tl.constexpr, BN: tl.constexpr):
     # Duplicate grad_expand (M,N) -> interleaved (M,2N): out[m,2j]=out[m,2j+1]=ge[m,j], so the
     # C operand aligns to the [a|b]-interleaved accumulator. Coalesced via tl.interleave (a
     # single contiguous 2*BN store), ~2x faster than the eager expand().reshape().contiguous().
@@ -75,7 +75,7 @@ def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, som, BM: tl.constexpr, 
     rows = pidm * BM + tl.arange(0, BM)
     cn = pidn * BN + tl.arange(0, BN)
     rm = rows < M
-    v = tl.load(g_ptr + rows[:, None] * sgm + cn[None, :], mask=rm[:, None] & (cn < N)[None, :], other=0.0)
+    v = tl.load(g_ptr + rows[:, None] * sgm + cn[None, :] * sgn, mask=rm[:, None] & (cn < N)[None, :], other=0.0)
     vi = tl.interleave(v, v)  # (BM, 2*BN) = [v0, v0, v1, v1, ...]
     co = pidn * 2 * BN + tl.arange(0, 2 * BN)
     tl.store(o_ptr + rows[:, None] * som + co[None, :], vi, mask=rm[:, None] & (co < N2)[None, :])
@@ -83,10 +83,12 @@ def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, som, BM: tl.constexpr, 
 
 
 def _cdup_interleave(ge: Tensor) -> Tensor:
+    # ge may be a strided/transposed VIEW (col stride != 1); the kernel reads it with an
+    # explicit col stride, fusing an upstream transpose into this (already-present) copy.
     M, N = ge.shape
     o = torch.empty(M, 2 * N, device=ge.device, dtype=ge.dtype)
     _cdup_interleave_kernel[(triton.cdiv(M, 64), triton.cdiv(N, 128))](
-        ge, o, M, N, 2 * N, ge.stride(0), o.stride(0), BM=64, BN=128
+        ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0), BM=64, BN=128
     )
     return o
 
