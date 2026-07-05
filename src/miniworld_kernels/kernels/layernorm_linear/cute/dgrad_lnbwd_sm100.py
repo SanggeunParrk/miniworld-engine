@@ -134,14 +134,25 @@ class _DgradLNBwdSm100(GemmDefaultEpiMixin, GemmSm100):
         c1buf = epi_loop_tensors["mC1red"]
         inv_k = params.inv_k
         nfrag = cute.size(tRS_rD)
-        dxhat = cute.make_rmem_tensor_like(tRS_rD, Float32)
-        xh = cute.make_rmem_tensor_like(tRS_rD, Float32)
+        # v11 (impl-only, math bit-identical). Leaner epilogue: the two extra full-size fp32 rmem
+        # tensors (`dxhat`, `xh`) are eliminated so the epilogue holds only the framework
+        # fragments (tRS_rD fp32 + tRS_rC bf16).
+        #   (1) dxhat = acc*gamma is folded into tRS_rD IN PLACE (tRS_rD is acc_dtype=Float32).
+        #   (2) xh (=xhat as fp32) is never materialized: the SM100 packed colvec_reduce needs
+        #       fp32 input+rScale, so feed bf16 tRS_rC as the reduce *input* with an inline
+        #       bf16->fp32 transform, and use tRS_rD (=dxhat) as rScale. c1 = sum(xhat*dxhat)
+        #       is commutative so this is bit-identical. Final apply reads tRS_rC inline.
+        # NOTE (measured, ncu cache-off): this is register/spill-NEUTRAL vs v10 (255 reg, 8.78M
+        # local-ld both). The compiler already coalesced these temporaries; the 255-reg spill is
+        # structural (acc t2r/r2s round-trip fragments + tile_m=128 single-warp K-reduction),
+        # not fixable at the epilogue-source level without an algorithm change.
         for i in cutlass.range(nfrag, unroll_full=True):
-            dxhat[i] = tRS_rD[i].to(Float32) * gamma[i].to(Float32)
-            xh[i] = tRS_rC[i].to(Float32)
+            tRS_rD[i] = tRS_rD[i] * gamma[i].to(Float32)   # dxhat, in place
         # per-m partial sums over this thread's N fragment (arch-aware packed path inside)
-        colvec_reduce_accumulate(self, c2buf, dxhat)
-        colvec_reduce_accumulate(self, c1buf, dxhat, rScale=xh)
+        colvec_reduce_accumulate(self, c2buf, tRS_rD)
+        colvec_reduce_accumulate(
+            self, c1buf, tRS_rC,
+            transform_fn=lambda t: (t[0].to(Float32), t[1].to(Float32)), rScale=tRS_rD)
         # finalize across the N lanes in-register (single subtile -> ColVecReduce.end too late).
         # lanes_in_N derived from the tcgen05 t2r layout; ==1 => whole row already in one thread.
         if const_expr(self._lanes_in_N > 1):
@@ -154,7 +165,7 @@ class _DgradLNBwdSm100(GemmDefaultEpiMixin, GemmSm100):
                     c1f[j], operator.add, threads_in_group=self._lanes_in_N)
         for i in cutlass.range(nfrag, unroll_full=True):
             tRS_rD[i] = rstd[i].to(Float32) * (
-                dxhat[i] - c2buf[i] * inv_k - xh[i] * c1buf[i] * inv_k)
+                tRS_rD[i] - c2buf[i] * inv_k - tRS_rC[i].to(Float32) * c1buf[i] * inv_k)
         return None
 
 
@@ -187,6 +198,9 @@ def dgrad_lnbwd_sm100(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd:
     K = W.shape[1]
     cfg = default_config(dY.device)
     # CTA tile_n must cover K (single-subtile reduction). tile_m=128 -> 4 epi warps over M.
+    # tile_m MUST be 128: the forced full-N epilogue tile keeps the whole K-row in one warp
+    # (warps_in_N==1) so the in-visit c1/c2 reduction is a single-warp shuffle. tile_m=64 makes
+    # the tcgen05 epilogue split the row across 2 warps -> partial reduction -> wrong dx.
     tile_m = 128
     tile_mn = (tile_m, K)
     dx = torch.empty(M, K, device=dY.device, dtype=dY.dtype)
