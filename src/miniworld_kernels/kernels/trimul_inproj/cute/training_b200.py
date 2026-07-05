@@ -16,10 +16,16 @@ restores the H100 save-heavy contract:
   saved: x_n, xhat_in, rstd_in, left_b, right_b, xhat_out, rstd_out, out_n, gate,
          proj  (+ weights)  ->  backward does ZERO forward recompute.
 
-Backward GEMMs are plain torch/cuBLAS, EXACTLY as H100 ``training.py`` (its docstring:
-"a correct manual backward with plain torch/cuBLAS GEMMs and a save-heavy forward").
-The front pL/gL/pR/gR are recomputed from x_n in the backward (one concat GEMM each),
-identical to ``training.py.gated_bwd``.
+Backward GEMMs are plain torch/cuBLAS, EXACTLY as H100 ``training.py``, EXCEPT:
+  - front gated-GEMM bwd -> FUSED sm100 backward_gatebwd port (v2, gatebwd_sm100).
+  - LN_out backward (d_tri_lld = LNbwd(d_proj @ Wp.t())) -> FUSED sm100 dgrad_lnbwd
+    port (v4, dgrad_lnbwd_sm100): the projection-backward GEMM + the LN-normalize
+    backward are folded into ONE tcgen05 epilogue, removing the d_out_n (M,D) HBM
+    round-trip and the separate torch _ln_bwd memory pass.  The LN_out affine grads
+    (dgamma/dbeta) are derived from T = d_proj^T @ xhat_out (== H100 dgrad_lnbwd
+    usage: dgrad emits only dx; dW/dgamma/dbeta come from the wgrad T), so d_out_n
+    is never materialized (the dgrad GEMM already computes it internally).
+    Toggle off with MINIWORLD_TRAIN_DGRAD_FUSED=0 (falls back to torch _ln_bwd).
 
 Mask: applied multiplicatively to x_n AFTER LN_in (== training.py).  dx_n accumulates
 from front + gate + back-half, then the mask multiply, then LN_in backward.
@@ -27,6 +33,8 @@ LN stats are fp32 (``_ln_fwd``/``_ln_bwd``).  B == 1, square L, D == 128, bf16.
 """
 
 from __future__ import annotations
+
+import os
 
 import torch
 
@@ -36,10 +44,13 @@ from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
     trimul_front_sm100_fused,
 )
 from miniworld_kernels.kernels.trimul_inproj.cute.gatebwd_sm100 import front_gatebwd_sm100
+from miniworld_kernels.kernels.layernorm_linear.cute.dgrad_lnbwd_sm100 import dgrad_lnbwd_sm100
+
+_USE_FUSED_DGRAD = os.environ.get("MINIWORLD_TRAIN_DGRAD_FUSED", "1") != "0"
 
 
 class TriMulB200Fn(torch.autograd.Function):
-    """Save-heavy sm100 forward + manual backward (torch/cuBLAS), == H100 training.py."""
+    """Save-heavy sm100 forward + manual backward (torch/cuBLAS + fused gatebwd/dgrad)."""
 
     @staticmethod
     def forward(ctx, pair, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b,
@@ -88,11 +99,29 @@ class TriMulB200Fn(torch.autograd.Function):
         d_proj = dy * gate
         d_gate = dy * proj
         d_glog = d_gate * gate * (1 - gate)
-        d_out_n = d_proj @ Wp.t()
         dWp = flat(out_n).t() @ flat(d_proj)
         dx_n = d_glog @ Wg.t()
         dWg = flat(x_n).t() @ flat(d_glog)
-        d_tri_lld, dWln_out, dBln_out = _ln_bwd(d_out_n, xhat_out, rstd_out, ln_out_w)
+
+        if _USE_FUSED_DGRAD:
+            # FUSED: d_tri_lld = LNbwd(d_proj @ Wp.t()) in the dgrad tcgen05 epilogue.
+            # No d_out_n (M,D) round-trip; the dY@W GEMM lives inside the kernel.
+            dpf = flat(d_proj)
+            xho = flat(xhat_out)
+            Wpt = Wp.t().contiguous()                              # (D, D)
+            d_tri_lld_flat = dgrad_lnbwd_sm100(
+                dpf, Wpt, xho, ln_out_w, rstd_out.reshape(-1))
+            d_tri_lld = d_tri_lld_flat.view(B, L, L, D)
+            # LN_out affine grads from T (== _ln_bwd dw/db, no d_out_n materialize):
+            #   dw[k]=sum_m d_out_n[m,k]*xhat[m,k]=(Wp.t()*T).sum(0);  T=d_proj^T@xhat
+            #   db[k]=sum_m d_out_n[m,k]=(d_proj.sum(0))@Wp.t()
+            T = dpf.t() @ xho                                       # (D, D)
+            db_proj = dpf.sum(0)                                    # (D,)
+            dBln_out = db_proj @ Wpt                                # (D,)
+            dWln_out = (Wpt * T).sum(0)                             # (D,)
+        else:
+            d_out_n = d_proj @ Wp.t()
+            d_tri_lld, dWln_out, dBln_out = _ln_bwd(d_out_n, xhat_out, rstd_out, ln_out_w)
         d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()      # (B, D, L, L)
 
         # -- (2) bmm bwd (bdll) --
@@ -113,7 +142,7 @@ class TriMulB200Fn(torch.autograd.Function):
         if ctx.has_mask:
             dx_n = dx_n * ctx.mask2d
 
-        # -- (4) LN_in bwd (saved stats, NO recompute) --
+        # -- (4) LN_in bwd (saved stats, NO recompute; pure LN-bwd, no GEMM to fuse) --
         dx, dWln_in, dBln_in = _ln_bwd(dx_n, xhat_in, rstd_in, ln_in_w)
 
         return (dx, dWL, dWLg, dWR, dWRg, dWg, dWp,

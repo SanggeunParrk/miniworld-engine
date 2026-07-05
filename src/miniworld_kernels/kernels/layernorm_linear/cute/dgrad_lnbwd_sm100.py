@@ -196,7 +196,7 @@ def dgrad_lnbwd_sm100(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd:
     A_p, B_p, D_p, C_p = perm3d(A, B, Dt, C)
     a_maj, b_maj, d_maj, c_maj = get_majors(A_p, B_p, D_p, C_p)
     a_dt, b_dt, d_dt, c_dt = get_dtypes(dY, W, dx, xhat)
-    vec_dt = torch2cute_dtype_map[rstd.dtype]
+    vec_dt = torch2cute_dtype_map[torch.float32]  # fp32 LN stats (rstd/gamma) — precision + dtype-stable compile key
     cluster_mnk = (1, 1, 1)
     fn = _compile(a_dt, b_dt, d_dt, c_dt, a_maj, b_maj, d_maj, c_maj, vec_dt,
                   tile_mn, cluster_mnk, cfg.is_dynamic_persistent, dev)
