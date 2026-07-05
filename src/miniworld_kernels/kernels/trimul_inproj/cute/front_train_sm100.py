@@ -29,11 +29,21 @@ B=1, square L, bf16 in / fp32 acc / bf16 out.
 """
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
 from quack.gemm_interface import gemm_act, gemm_act_tuned
 from quack.gemm_config import GemmConfig
+
+# v14: fuse the GLU into the GEMM epilogue (kills the preact re-read + the _glu launch).
+# Opt-out via MINIWORLD_TRAIN_FRONT_FUSED=0 (falls back to the v13 gemm_act + _glu_bdll path).
+_FRONT_FUSED = os.environ.get("MINIWORLD_TRAIN_FRONT_FUSED", "1") != "0"
+
+
+def _fused_available(device) -> bool:
+    return _FRONT_FUSED and torch.cuda.get_device_capability(device)[0] in (10, 11)
 
 
 # --- Shape-specialized front-GEMM config (v13) ---------------------------------
@@ -121,8 +131,23 @@ def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     assert B == 1 and L == L2
     M = L * L
     x_flat = x_n.reshape(M, D)
-    # (1) non-gated m-major GEMM: preact[4H,L,L] written straight into the bdll buffer (no permute)
     preact = torch.empty(B, 4 * H, L, L, device=x_n.device, dtype=x_n.dtype)
+
+    if _fused_available(x_n.device):
+        # (v14) ONE fused persistent GEMM: its epilogue emits BOTH left/right[2H,L,L] (GLU)
+        # AND the raw preact[4H,L,L] (interleaved [g,p] planes) straight from the in-TMEM
+        # proj/gate accumulators — no preact HBM re-read, no separate GLU launch. Bp/Bg are
+        # the proj / gate columns of the interleaved b_lr operand.
+        from miniworld_kernels.kernels.trimul_inproj.cute.front_fused_gemm_sm100 import (
+            fused_front_gemm,
+        )
+        Bg = b_lr[:, 0::2].t().contiguous()   # (2H, D) = [WLg | WRg]  (gate weights)
+        Bp = b_lr[:, 1::2].t().contiguous()   # (2H, D) = [WL  | WR ]  (proj weights)
+        lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
+        fused_front_gemm(x_flat, Bp, Bg, lr.view(2 * H, M), preact.view(4 * H, M))
+        return lr[:, :H], lr[:, H:], preact
+
+    # (v13 fallback) non-gated m-major GEMM into the bdll preact buffer + a Triton GLU pass.
     preact_view = preact.view(4 * H, M).T  # (M,4H) strides (1,M) -> m-major store
     _cfg = _front_gemm_config(M, x_n.device)
     if _cfg is None:
@@ -132,7 +157,6 @@ def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
         # partial(gemm_act_tuned.fn, config=None) idiom. CUDA-graph safe (no bench).
         gemm_act_tuned.fn(x_flat, b_lr, None, preact_view, None, None, None,
                           None, None, False, config=_cfg)
-    # (2) GLU -> left/right [2H,L,L] bdll (contiguous)
     lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
     grid = lambda meta: (triton.cdiv(H * M, meta["BLK"]),)  # noqa: E731
     _glu_bdll_kernel[grid](preact.view(4 * H, M), lr.view(2 * H, M), H=H, M=M,
