@@ -39,12 +39,16 @@ def _use_partial_reduction(m: int, n: int) -> bool:
 # (see dispatch_cache). Escape hatch: env `MINIWORLD_LN_BWD=persistent|partial|
 # atomic` forces one path (debug / manual override), bypassing cache + heuristic.
 _LN_BWD_OVERRIDE = (os.environ.get("MINIWORLD_LN_BWD") or "").strip().lower() or None
-_VALID_BWD_PATHS = {"persistent", "partial", "atomic"}
+_VALID_BWD_PATHS = {"persistent", "partial", "atomic", "cuda"}
 _HOPPER = (9, 0)
 
 
-def _static_bwd_path(m: int, n: int) -> str:
+def _static_bwd_path(m: int, n: int, is_bf16: bool = False) -> str:
     """H100-measured heuristic; also the fallback when calibration is off/unavailable."""
+    # Hand-CUDA warp-per-row bwd beats triton 1.2-1.46x for bf16 128<=N<=512 (measured H100);
+    # N>=768 / fp32 stay on triton (persistent is already near HBM roofline there).
+    if is_bf16 and 128 <= n <= 512:
+        return "cuda"
     if n >= 384:
         return "persistent"
     if _use_partial_reduction(m, n):
@@ -65,15 +69,16 @@ def _resolve_bwd_path(
     if _LN_BWD_OVERRIDE in _VALID_BWD_PATHS:
         return _LN_BWD_OVERRIDE
 
+    is_bf16 = x.dtype == torch.bfloat16
     mode = dispatch_cache.autotune_mode()
     if mode == "off":
-        return _static_bwd_path(m, n)
+        return _static_bwd_path(m, n, is_bf16)
 
     device = x.device
     cc = torch.cuda.get_device_capability(device)
     # H100 is already measured -> trust the static heuristic (unless explicitly forced).
     if mode != "force" and cc == _HOPPER:
-        return _static_bwd_path(m, n)
+        return _static_bwd_path(m, n, is_bf16)
 
     mb = dispatch_cache.mbucket(m)
     cached = dispatch_cache.lookup(device, n, mb)
@@ -82,14 +87,16 @@ def _resolve_bwd_path(
 
     # Don't run a timing sweep while a CUDA graph is capturing.
     if torch.cuda.is_current_stream_capturing():
-        return _static_bwd_path(m, n)
+        return _static_bwd_path(m, n, is_bf16)
 
     # Calibrate: time the three correct paths on the real tensors, cache the winner.
     impls = {"atomic": _bwd_atomic_impl, "partial": _bwd_partial_impl, "persistent": _bwd_persistent_impl}
+    if is_bf16 and 128 <= n <= 512:
+        impls["cuda"] = _bwd_cuda_impl
     times = {name: _time_bwd_path(fn, dy, x, weight, mean, rstd) for name, fn in impls.items()}
     best = min(times, key=times.get)
     if times[best] == float("inf"):  # nothing ran (shouldn't happen) -> heuristic
-        return _static_bwd_path(m, n)
+        return _static_bwd_path(m, n, is_bf16)
     dispatch_cache.store(device, n, mb, best, times)
     return best
 
@@ -221,6 +228,18 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
     return dx_2d.view_as(x), dw, db
 
 
+def _bwd_cuda_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Hand-CUDA warp-per-row backward (register column-partials, no atomics/no spill). Beats triton
+    1.2-1.46x for bf16 128<=N<=512 on H100. Lazy import so `compile_native` never triggers the nvcc
+    build unless this path is actually selected."""
+    from .cuda import layer_norm_bwd_cuda
+
+    x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+    dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
+    dx_2d, dw, db = layer_norm_bwd_cuda(dy_2d, x_2d, weight, mean, rstd)
+    return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
+
+
 @torch.library.custom_op("miniworld_layernorm::atomic_bwd", mutates_args=())
 def _atomic_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     return _bwd_atomic_impl(dy, x, weight, mean, rstd)
@@ -246,6 +265,8 @@ def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Ten
     m = x.numel() // x.shape[-1]
     n = x.shape[-1]
     path = _resolve_bwd_path(m, n, dy, x, weight, mean, rstd)
+    if path == "cuda":
+        return _bwd_cuda_impl(dy, x, weight, mean, rstd)
     if path == "persistent":
         return _bwd_persistent_impl(dy, x, weight, mean, rstd)
     if path == "partial":
