@@ -63,9 +63,12 @@ def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)
     dproj_ptr, dglogit_ptr,        # (M, N) out
     M, N: tl.constexpr, BM: tl.constexpr, GROUP_M: tl.constexpr,
+    FROM_PREACT: tl.constexpr = False,
 ):
     """Fused elementwise: d_proj = dy⊙gate ; d_glogit = dy⊙proj⊙gate⊙(1-gate).
-    One pass over (dy, proj, gate)."""
+    One pass over (dy, proj, gate). If FROM_PREACT, `gate_ptr` holds the PREACT
+    (glogit=x_n@Wg) instead of gate, and gate=sigmoid(preact) is recomputed here —
+    lets the fused fwd (gate_elem_quack_fused) save preact instead of gate."""
     pid = tl.program_id(0)
     rm = pid * BM + tl.arange(0, BM)
     rn = tl.arange(0, N)
@@ -74,6 +77,8 @@ def _gate_elem_bwd_ew_kernel(
     dy = tl.load(dy_ptr + off, mask=mmask, other=0.0).to(tl.float32)
     proj = tl.load(proj_ptr + off, mask=mmask, other=0.0).to(tl.float32)
     gate = tl.load(gate_ptr + off, mask=mmask, other=0.0).to(tl.float32)
+    if FROM_PREACT:
+        gate = tl.sigmoid(gate)
     dproj = dy * gate
     dglogit = dy * proj * gate * (1.0 - gate)
     tl.store(dproj_ptr + off, dproj.to(dproj_ptr.dtype.element_ty), mask=mmask)
@@ -135,17 +140,19 @@ def gate_elem_quack_fused(x_n, proj, Wg, *, return_preact: bool = False):
     return (y.reshape(M, N), preact) if return_preact else y.reshape(M, N)
 
 
-def gate_elem_bwd_ew(dy, proj, gate):
+def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False):
     """Just the GateElem bwd ELEMENTWISE (no GEMMs): returns (d_proj, d_glogit), both (M,N).
     For the merged BidirBackHalf, which fuses dx_gate (=d_glogit@Wgᵀ) into the dxn GEMM and
-    does dWg itself — so it wants d_glogit raw, not gate_elem_bwd's dx_gate/dWg."""
+    does dWg itself — so it wants d_glogit raw, not gate_elem_bwd's dx_gate/dWg.
+    If from_preact, `gate` is actually the saved preact (glogit) and gate=σ(preact) is
+    recomputed in-kernel (fused fwd path saves preact, not gate)."""
     M, N = dy.reshape(-1, dy.shape[-1]).shape
     dy, proj, gate = dy.reshape(M, N), proj.reshape(M, N), gate.reshape(M, N)
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
     grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, M, N=N,
-                                   GROUP_M=get_seq_group(M))
+                                   GROUP_M=get_seq_group(M), FROM_PREACT=from_preact)
     return d_proj, d_glogit
 
 

@@ -35,7 +35,7 @@ from miniworld_kernels.kernels.trimul_inproj.cute.front_train_sm100 import (
 )
 from miniworld_kernels.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import (
-    gate_elem_bwd_ew, gate_elem_triton,
+    gate_elem_bwd_ew, gate_elem_quack_fused,
 )
 
 
@@ -58,24 +58,27 @@ class BidirBackHalfSm100(torch.autograd.Function):
         torch.bmm(lf[h:].transpose(1, 2), rf[h:], out=tri[h:])   # incoming: O = LT @ R
         view = tri.reshape(H, M).t()                        # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
-        y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True)
+        # FUSED gate: y = sigmoid(x_n@Wg)⊙proj in ONE quack launch (no glogit HBM round-trip,
+        # no separate _gate_mul). Saves the PREACT (glogit); bwd recomputes gate=σ(preact).
+        y, gate_src = gate_elem_quack_fused(x_n.reshape(M, D), proj, Wg, return_preact=True)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-                              preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
+                              preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate_src, proj)
         ctx.eps, ctx.h = eps, h
         return y.reshape(B, L, L, D)
 
     @staticmethod
     def backward(ctx, gy):
         (x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-         preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
+         preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate_src, proj) = ctx.saved_tensors
         B, L, _, D = x_n.shape
         M = B * L * L
         h = ctx.h
         H = 2 * h
         gy = gy.reshape(M, D)
 
-        # ② gate bwd (elementwise; dx_gate add is fused into the dxn addmm below)
-        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate)
+        # ② gate bwd (elementwise; dx_gate add is fused into the dxn addmm below).
+        # gate_src is the saved PREACT (glogit); recompute gate=σ(preact) in-kernel.
+        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate_src, from_preact=True)
         dWg = x_n.reshape(M, D).t() @ d_glogit                     # (D,D) huge-K -> cuBLAS
 
         # ① LN_out + @Wp bwd
