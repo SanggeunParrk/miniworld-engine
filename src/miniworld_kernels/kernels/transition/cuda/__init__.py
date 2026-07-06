@@ -35,3 +35,29 @@ transition_b2b_cuda = load(
 def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws):
     """Fused LN + SwiGLU expand + squeeze forward for fixed AF3 transition shapes."""
     return transition_b2b_cuda.transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws)
+
+
+def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps):
+    """Module-facing wrapper: LN stats (same ``stats_triton`` as the triton b2b path) +
+    the hand-CUDA fused b2b forward. Fixed shapes only (K=128, ND=512, D=128 = d_hidden=128,
+    n=4); the caller must gate on shape/dtype/M%128 before dispatching here.
+
+    Weight layouts match ``nn.Linear.weight`` directly: ``wa``/``wb`` are ``[ND, K]`` and
+    ``ws`` is ``[D, ND]`` — no transpose needed.
+    """
+    from miniworld_kernels.kernels.layernorm_linear.triton.stats import stats_triton
+
+    k = x.shape[-1]
+    x2 = x.reshape(-1, k).contiguous()
+    rstd, c1 = stats_triton(x2, eps)
+    out = transition_b2b_cuda.transition_b2b_fwd(
+        x2,
+        rstd,
+        c1,
+        ln_weight.contiguous(),
+        ln_bias.contiguous(),
+        wa.contiguous(),
+        wb.contiguous(),
+        ws.contiguous(),
+    )
+    return out.reshape(*x.shape[:-1], out.shape[-1])
