@@ -122,6 +122,15 @@ __device__ __forceinline__ void smem_store_u128(void* ptr, uint4 value) {
     );
 }
 
+__device__ __forceinline__ void smem_store_u32(void* ptr, uint32_t value) {
+    asm volatile(
+        "st.shared.u32 [%0], %1;\n"
+        :
+        : "r"(smem_addr_u32(ptr)), "r"(value)
+        : "memory"
+    );
+}
+
 __device__ __forceinline__ void global_store_u128(void* ptr, uint4 value, bool pred) {
     asm volatile(
         "{ .reg .pred p;\n"
@@ -133,6 +142,13 @@ __device__ __forceinline__ void global_store_u128(void* ptr, uint4 value, bool p
           "r"(static_cast<int>(pred))
         : "memory"
     );
+}
+
+__device__ __forceinline__ int output_shuffle_idx(int m, int n) {
+    constexpr int kOutShuffleSwizzleGranularity = 8;
+    constexpr int kOutShuffleSwizzleMask = (kD / kOutShuffleSwizzleGranularity) - 1;
+    const int row_swizzle = (m & kOutShuffleSwizzleMask) * kOutShuffleSwizzleGranularity;
+    return m * kD + (n ^ row_swizzle);
 }
 
 template <class MMA, class Layout0>
@@ -517,12 +533,27 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     static_assert(WG_M * kD <= cosize_v<decltype(lXn)>, "output shuffle tile must fit in pXnWg");
     static_assert((kD % kXVecElems) == 0, "output vectorization requires D divisible by 8");
     static_assert((kXVecElems * sizeof(BF)) == sizeof(uint4), "output vector must be 128-bit");
+    static_assert((kD / kXVecElems) == 16, "output swizzle assumes sixteen 8-bf16 chunks per row");
+    union OutPair {
+        uint32_t u32;
+        BF bf[2];
+    };
 
     CUTE_UNROLL
-    for (int i = 0; i < size(out_acc); ++i) {
+    for (int i = 0; i < size(out_acc); i += 2) {
         const int m = get<0>(tCOut(i));
         const int n = get<1>(tCOut(i));
-        pOutShuffle[m * kD + n] = static_cast<BF>(out_acc(i));
+        const int m_next = get<0>(tCOut(i + 1));
+        const int n_next = get<1>(tCOut(i + 1));
+        if (m_next == m && n_next == n + 1 && (n % 2) == 0) {
+            OutPair pair;
+            pair.bf[0] = static_cast<BF>(out_acc(i));
+            pair.bf[1] = static_cast<BF>(out_acc(i + 1));
+            smem_store_u32(pOutShuffle + output_shuffle_idx(m, n), pair.u32);
+        } else {
+            pOutShuffle[output_shuffle_idx(m, n)] = static_cast<BF>(out_acc(i));
+            pOutShuffle[output_shuffle_idx(m_next, n_next)] = static_cast<BF>(out_acc(i + 1));
+        }
     }
     __syncthreads();
 
@@ -533,7 +564,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
         const int n = (vec - m * kOutVecsPerRow) * kXVecElems;
         const int64_t row = static_cast<int64_t>(wg_row0 + m);
         const bool valid = row < M;
-        uint4 out_vec = smem_load_u128(pOutShuffle + m * kD + n);
+        uint4 out_vec = smem_load_u128(pOutShuffle + output_shuffle_idx(m, n));
         __nv_bfloat16* dst = valid ? out_raw + row * kD + n : out_raw;
         global_store_u128(dst, out_vec, valid);
     }
