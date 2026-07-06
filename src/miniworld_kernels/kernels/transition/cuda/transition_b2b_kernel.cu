@@ -29,7 +29,7 @@ constexpr int kD = 128;
 constexpr int kWarpgroupM = 64;
 constexpr int kWarpgroups = 2;
 constexpr int kBlockM = kWarpgroups * kWarpgroupM;
-constexpr int kBn = 64;
+constexpr int kBn = 128;
 constexpr int kWarpgroupThreads = 128;
 constexpr int kThreads = kWarpgroups * kWarpgroupThreads;
 constexpr int kPipelineStages = 2;
@@ -55,12 +55,12 @@ constexpr int kDynamicSmemBytes =
 static_assert(kPipelineStages == 2, "Triton b2b schedule uses a 2-stage weight pipeline");
 static_assert(kWarpgroups == 2, "cooperative CTA expects exactly two consumer warpgroups");
 static_assert(kND % kBn == 0, "ND must be divisible by BLOCK_N");
-static_assert(kTmaWeightTransactionBytes == 49152, "expected 48 KiB wa/wb/ws TMA transaction per stage");
-static_assert(kTensorSmemBytes == 131072, "expected tensor smem with two private xn tiles");
-static_assert(kPipelineStorageOffsetBytes == 131072, "expected 16B-aligned weight pipeline storage offset");
+static_assert(kTmaWeightTransactionBytes == 98304, "expected 96 KiB wa/wb/ws TMA transaction per stage");
+static_assert(kTensorSmemBytes == 229376, "expected tensor smem with two private xn tiles");
+static_assert(kPipelineStorageOffsetBytes == 229376, "expected 16B-aligned weight pipeline storage offset");
 static_assert(kPipelineStorageSmemBytes == 32, "expected 32B PipelineTmaAsync<2> storage");
-static_assert(kDynamicSmemBytes == 131104, "expected tensor smem plus one pipeline mbarrier set");
-static_assert(kDynamicSmemBytes <= 150 * 1024, "dynamic smem should keep the 2-WG CTA comfortably under H100's cap");
+static_assert(kDynamicSmemBytes == 229408, "expected tensor smem plus one pipeline mbarrier set");
+static_assert(kDynamicSmemBytes <= 227 * 1024, "dynamic smem should fit H100 opt-in shared memory");
 
 inline void check_cuda(cudaError_t error, const char* message) {
     TORCH_CHECK(error == cudaSuccess, message, ": ", cudaGetErrorString(error));
@@ -398,7 +398,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     }
     __syncthreads();
 
-    using MmaExpandOp = SM90_64x64x16_F32BF16BF16_SS<GMMA::Major::K, GMMA::Major::K>;
+    using MmaExpandOp = SM90_64x128x16_F32BF16BF16_SS<GMMA::Major::K, GMMA::Major::K>;
     using MmaSqueezeOp = SM90_64x128x16_F32BF16BF16_RS<GMMA::Major::K, GMMA::Major::K>;
     TiledMMA mmaE = make_tiled_mma(MmaExpandOp{});
     TiledMMA mmaS = make_tiled_mma(MmaSqueezeOp{});
