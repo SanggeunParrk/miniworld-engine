@@ -36,6 +36,17 @@ AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
 USE_SAVEDXN_SPLIT_BWD = os.getenv("TRANSITION_SAVEDXN_SPLIT_BWD", "0") == "1"
 
 
+def _cuda_b2b_train_enabled() -> bool:
+    """Use the fast inference b2b CUDA kernel for the TRAINING forward too (Version A / save_xn=False:
+    saves no xn, backward recomputes it). Same env toggle as the inference dispatch."""
+    return os.getenv("MINIWORLD_TRANSITION_CUDA_B2B", "1").strip().lower() not in {"0", "false", "off"}
+_TRANSITION_LNBWD_PRIVATIZE_REPLICAS = 64
+
+
+def _transition_fuse_stats_enabled() -> bool:
+    return os.getenv("MINIWORLD_TRANSITION_FUSE_STATS", "").strip().lower() in {"1", "true", "on"}
+
+
 def get_seq_group(length: int) -> int:
     """Bucket flattened LxL rows so autotune follows the L sweep without per-M noise."""
     group_lengths = [
@@ -190,19 +201,19 @@ _b2b_configs = [
 
 
 # fmt: off
-@triton.autotune(configs=_b2b_configs, key=["GROUP_M", "ND", "K", "D", "SAVE_XN"])
+@triton.autotune(configs=_b2b_configs, key=["GROUP_M", "ND", "K", "D", "SAVE_XN", "FUSE_STATS"])
 @triton.jit
 def _transition_b2b_kernel(
-    x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
+    x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr, xn_ptr,
-    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M: tl.constexpr,
+    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M: tl.constexpr, EPS: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
     stride_om, stride_od,
     stride_nm, stride_nk,    # xn out: (M, K) row-major (only used when SAVE_XN)
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    SAVE_XN: tl.constexpr,
+    SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr,
 ):
     # Back-to-back: one program owns BLOCK_M rows and ALL of ND. It builds the gated h
     # tile-by-tile and ACCUMULATES the squeeze out[BM, D] += h_chunk @ Ws[:, chunk]^T, so
@@ -217,8 +228,18 @@ def _transition_b2b_kernel(
         x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
         mask=row_mask[:, None] & k_mask[None, :], other=0.0,
     ).to(tl.float32)
-    rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
-    c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
+    if FUSE_STATS:
+        inv_k = 1.0 / K
+        mean = tl.sum(x, axis=1) * inv_k
+        x_centered = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
+        var = tl.sum(x_centered * x_centered, axis=1) * inv_k
+        rstd = tl.rsqrt(var + EPS)
+        c1 = mean * rstd
+        tl.store(rstd_out_ptr + rows, rstd, mask=row_mask)
+        tl.store(c1_out_ptr + rows, c1, mask=row_mask)
+    else:
+        rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
+        c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
     g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
     beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
     xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
@@ -268,6 +289,7 @@ def transition_b2b(
     eps: float,
     stats: tuple[torch.Tensor, torch.Tensor] | None = None,  # (rstd, c1) precomputed
     save_xn: bool = False,
+    fuse_stats: bool | None = None,
 ):
     """Fully fused LN + SwiGLU expand + squeeze -> out (M, D). h never hits HBM.
 
@@ -278,18 +300,29 @@ def transition_b2b(
 
     ``save_xn`` (Version B): also emit the normalized x (M, K) via a single in-kernel store
     for backward reuse. Returns ``(out, xn)`` then; else just ``out``.
+
+    With ``fuse_stats=True`` (or ``MINIWORLD_TRANSITION_FUSE_STATS=1/true/on``), the
+    kernel computes and stores the LayerNorm stats on-chip. Then returns
+    ``(out, rstd, c1, xn)`` when ``save_xn`` else ``(out, rstd, c1)``.
     """
     M, K = x2.shape
     ND = wa.shape[0]
     D = ws.shape[0]
-    rstd, c1 = stats if stats is not None else stats_triton(x2, eps)
+    fuse_stats = _transition_fuse_stats_enabled() if fuse_stats is None else fuse_stats
+    if fuse_stats:
+        if stats is not None:
+            raise ValueError("transition_b2b(fuse_stats=True) computes stats in-kernel; do not pass stats")
+        rstd = torch.empty(M, device=x2.device, dtype=torch.float32)
+        c1 = torch.empty(M, device=x2.device, dtype=torch.float32)
+    else:
+        rstd, c1 = stats if stats is not None else stats_triton(x2, eps)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else out
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
     _transition_b2b_kernel[grid](
-        x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
+        x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
-        M, ND, K, D, get_seq_group(M),
+        M, ND, K, D, get_seq_group(M), eps,
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),
@@ -297,7 +330,10 @@ def transition_b2b(
         xn.stride(0), xn.stride(1),
         BLOCK_K=triton.next_power_of_2(K),
         SAVE_XN=save_xn,
+        FUSE_STATS=fuse_stats,
     )
+    if fuse_stats:
+        return (out, rstd, c1, xn) if save_xn else (out, rstd, c1)
     return (out, xn) if save_xn else out
 
 
@@ -567,6 +603,36 @@ def _transition_expand_gatebwd(x2, rstd, c1, gamma, beta, wa, wb, grad_expand):
     return h, dA, dB, xn
 
 
+def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_expand):
+    """Version A stacked: normalize x inline + recompute a,b once -> (h, dAB=[dA|dB], xn).
+
+    Same kernel as the split Version A but with STACK_DAB=True, so the downstream weight/input
+    grads use the SAME two larger GEMMs (dWab, dAB@w_ab) as Version B — only the gate-bwd stage
+    differs between the versions (recompute xn here vs reuse saved xn).
+    """
+    M, K = x2.shape
+    ND = wa.shape[0]
+    h = torch.empty_like(grad_expand)
+    dAB = torch.empty(M, ND * 2, device=x2.device, dtype=grad_expand.dtype)
+    xn = torch.empty_like(x2)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    _transition_expand_gatebwd_kernel[grid](
+        x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
+        wa.contiguous(), wb.contiguous(), grad_expand,
+        h, dAB, dAB, dAB, xn,
+        M, ND, K, get_seq_group(M),
+        x2.stride(0), x2.stride(1),
+        wa.stride(0), wa.stride(1),
+        grad_expand.stride(0), grad_expand.stride(1),
+        dAB.stride(0), dAB.stride(1),
+        xn.stride(0), xn.stride(1),
+        NORMALIZE=True,
+        STORE_H=True,
+        STACK_DAB=True,
+    )
+    return h, dAB, xn
+
+
 def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool = True):
     """Version B: reuse the SAVED xn (no normalize, no emit) + recompute a,b once -> (h, dA, dB).
 
@@ -632,7 +698,10 @@ def _transition_ln_bwd_kernel(
     dxn_ptr, x_ptr, rstd_ptr, c1_ptr, g_ptr, dx_ptr, dg_ptr, db_ptr,
     M, K, GROUP_M: tl.constexpr,
     stride_m, stride_k,
+    dg_stride_replica, dg_stride_k,
+    db_stride_replica, db_stride_k,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    NUM_REPLICAS: tl.constexpr, PRIVATIZE_DGDB: tl.constexpr,
 ):
     # LayerNorm backward consuming the SAVED stats (rstd, c1=mean*rstd), one pass over K:
     #   x_hat = x*rstd - c1 = (x-mean)*rstd ; wdy = gamma*dxn
@@ -661,23 +730,68 @@ def _transition_ln_bwd_kernel(
     tl.store(dx_ptr + off, dx.to(dx_ptr.dtype.element_ty), mask=mask)
     pdg = tl.sum(dxn * x_hat, axis=0)
     pdb = tl.sum(dxn, axis=0)
-    tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
-    tl.atomic_add(db_ptr + k, pdb, mask=kmask)
+    if PRIVATIZE_DGDB:
+        replica = pid % NUM_REPLICAS
+        tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask)
+        tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask)
+    else:
+        tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
+        tl.atomic_add(db_ptr + k, pdb, mask=kmask)
 # fmt: on
 
 
 def _transition_ln_bwd(dxn, x2, rstd, c1, gamma):
     """LayerNorm backward from saved stats -> (dx, dgamma, dbeta)."""
     M, K = x2.shape
+    # Fastest path: hand-CUDA warp-per-row LN backward (register column-partials -> no atomics/no
+    # spill, persistent grid SM*WAVES, vectorized loads). ~1.10x over privatized-Triton at K=128
+    # (326 vs 358us, cos 1.0). Needs bf16/fp16 + K<=512 + contiguous + weight dtype == x dtype.
+    # CUDA takes `mean`; recover it from c1=mean*rstd. Any mismatch -> graceful Triton fallback.
+    if (
+        os.getenv("MINIWORLD_TRANSITION_LNBWD_CUDA", "1").strip().lower()
+        not in {"0", "false", "off"}
+        and x2.dtype in (torch.float16, torch.bfloat16)
+        and gamma.dtype == x2.dtype
+        and K <= 512
+        and x2.is_contiguous()
+        and dxn.is_contiguous()
+    ):
+        try:
+            from miniworld_kernels.kernels.layernorm.cuda import layer_norm_bwd_cuda
+
+            mean = c1 / rstd
+            return layer_norm_bwd_cuda(dxn, x2, gamma, mean, rstd)
+        except Exception:  # noqa: BLE001 (build unavailable / dtype edge) -> Triton fallback
+            pass
     dx = torch.empty_like(x2)
-    dgamma = torch.zeros(K, device=x2.device, dtype=torch.float32)
-    dbeta = torch.zeros(K, device=x2.device, dtype=torch.float32)
+    # Default ON: privatizing dgamma/dbeta atomics across N replicas cuts atomic contention
+    # (measured 1.31x @L=1024, ncu confirmed membar was the top stall). Set to 0/false/off to
+    # restore the single-accumulator atomic path.
+    privatize_dgdb = os.getenv(
+        "MINIWORLD_TRANSITION_LNBWD_PRIVATIZE", "1").strip().lower() not in {"0", "false", "off"}
+    if privatize_dgdb:
+        num_replicas = _TRANSITION_LNBWD_PRIVATIZE_REPLICAS
+        dgamma_acc = torch.zeros((num_replicas, K), device=x2.device, dtype=torch.float32)
+        dbeta_acc = torch.zeros((num_replicas, K), device=x2.device, dtype=torch.float32)
+    else:
+        num_replicas = 1
+        dgamma_acc = torch.zeros(K, device=x2.device, dtype=torch.float32)
+        dbeta_acc = torch.zeros(K, device=x2.device, dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
     _transition_ln_bwd_kernel[grid](
-        dxn, x2, rstd, c1, gamma.contiguous(), dx, dgamma, dbeta,
+        dxn, x2, rstd, c1, gamma.contiguous(), dx, dgamma_acc, dbeta_acc,
         M, K, get_seq_group(M), x2.stride(0), x2.stride(1),
+        dgamma_acc.stride(0), dgamma_acc.stride(-1),
+        dbeta_acc.stride(0), dbeta_acc.stride(-1),
         BLOCK_K=triton.next_power_of_2(K),
+        NUM_REPLICAS=num_replicas, PRIVATIZE_DGDB=privatize_dgdb,
     )
+    if privatize_dgdb:
+        dgamma = dgamma_acc.sum(dim=0)
+        dbeta = dbeta_acc.sum(dim=0)
+    else:
+        dgamma = dgamma_acc
+        dbeta = dbeta_acc
     return dx, dgamma, dbeta
 
 
@@ -729,20 +843,59 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
             squeeze_weight = squeeze_weight.to(dtype)
         x2 = x2.contiguous()
 
-        # LN stats computed once and reused: by the forward kernel AND saved for the
-        # separate backward (so backward never recomputes mean/rstd).
-        rstd, c1 = stats_triton(x2, eps)
-
         xn = None
         if K <= _B2B_MAX_K:
             # Back-to-back fused: squeeze folded in, h never materialized in HBM.
-            res = transition_b2b(
-                x2, ln_weight, ln_bias,
-                expand_a_weight, expand_b_weight, squeeze_weight, eps,
-                stats=(rstd, c1), save_xn=save_xn,
-            )
-            out, xn = res if save_xn else (res, None)
+            if (
+                (not save_xn)
+                and _cuda_b2b_train_enabled()
+                and K == 128 and n == 4
+                and x2.dtype == torch.bfloat16
+                and x2.is_cuda
+                and x2.shape[0] % 128 == 0
+            ):
+                # Single memory-light training path: reuse the FAST inference b2b CUDA kernel
+                # (~1.29x vs triton) for the forward. Version A (save_xn=False) saves no xn, so
+                # the backward recomputes it — the CUDA kernel emits nothing beyond `out`.
+                # stats are needed by the backward anyway, so stats_triton is not extra work.
+                rstd, c1 = stats_triton(x2, eps)
+                try:
+                    from miniworld_kernels.kernels.transition.cuda import transition_b2b_fwd
+                    out = transition_b2b_fwd(
+                        x2, rstd, c1,
+                        ln_weight.contiguous(), ln_bias.contiguous(),
+                        expand_a_weight.contiguous(), expand_b_weight.contiguous(),
+                        squeeze_weight.contiguous(),
+                    )
+                except Exception:  # noqa: BLE001  build unavailable -> triton fallback
+                    out = transition_b2b(
+                        x2, ln_weight, ln_bias,
+                        expand_a_weight, expand_b_weight, squeeze_weight, eps,
+                        stats=(rstd, c1), save_xn=False, fuse_stats=False,
+                    )
+            elif _transition_fuse_stats_enabled():
+                res = transition_b2b(
+                    x2, ln_weight, ln_bias,
+                    expand_a_weight, expand_b_weight, squeeze_weight, eps,
+                    save_xn=save_xn, fuse_stats=True,
+                )
+                if save_xn:
+                    out, rstd, c1, xn = res
+                else:
+                    out, rstd, c1 = res
+            else:
+                # LN stats computed once and reused: by the forward kernel AND saved for the
+                # separate backward (so backward never recomputes mean/rstd).
+                rstd, c1 = stats_triton(x2, eps)
+                res = transition_b2b(
+                    x2, ln_weight, ln_bias,
+                    expand_a_weight, expand_b_weight, squeeze_weight, eps,
+                    stats=(rstd, c1), save_xn=save_xn, fuse_stats=False,
+                )
+                out, xn = res if save_xn else (res, None)
         else:
+            # The expand kernel tiles K, so it keeps the separate stats pass.
+            rstd, c1 = stats_triton(x2, eps)
             res = transition_expand_gate(
                 x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
                 stats=(rstd, c1), save_xn=save_xn,
@@ -793,75 +946,74 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         if go.dtype != dt:
             go = go.to(dt)
 
-        grad_expand = go @ squeeze_weight         # dh  [M, ND]
-        # ONE fused kernel recomputes a,b once -> h (for dWs), dA, dB (SwiGLU gate bwd).
+        grad_expand = go @ squeeze_weight         # (1) dh  [M, ND]
+
+        # (2) gate backward is the ONLY stage that differs between Version A/B:
+        #   B (has_xn):   reuse the saved xn (no re-normalize).
+        #   A (recompute): re-normalize x from saved stats inline.
+        # Both emit stacked dAB=[dA|dB] so stages (3)(4)(5)(6) below are version-INDEPENDENT.
+        # USE_SAVEDXN_SPLIT_BWD keeps the old split comparator (has_xn only, default off).
+        if ctx.has_xn and USE_SAVEDXN_SPLIT_BWD:
+            h, dA, dB = _transition_expand_gatebwd_savedxn(
+                xn_saved, expand_a_weight, expand_b_weight, grad_expand,
+            )
+            xn = xn_saved
+            dWs = go.t() @ h
+            dWa = dA.t() @ xn
+            dWb = dB.t() @ xn
+            d_xn = dA @ expand_a_weight + dB @ expand_b_weight
+            dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight)
+            return (
+                dx.reshape(orig_shape),
+                dgamma.to(ln_weight.dtype),
+                dbeta.to(ln_bias.dtype),
+                dWa, dWb, dWs, None, None, None,
+            )
+
         if ctx.has_xn:
-            if USE_SAVEDXN_SPLIT_BWD:
-                # Default-off comparator for d=128: avoids materializing dAB and the
-                # per-backward stacked-weight copy, at the cost of split GEMMs below.
-                h, dA, dB = _transition_expand_gatebwd_savedxn(
-                    xn_saved, expand_a_weight, expand_b_weight, grad_expand,
-                )
-                dAB = None
-            else:
-                # Version B: reuse saved xn and emit stacked dAB=[dA | dB]. This keeps the
-                # math identical but replaces dWa/dWb and dA@Wa+dB@Wb with two larger GEMMs.
-                h, dAB = _transition_expand_gatebwd_savedxn_stacked(
-                    xn_saved, expand_a_weight, expand_b_weight, grad_expand,
-                )
+            h, dAB = _transition_expand_gatebwd_savedxn_stacked(
+                xn_saved, expand_a_weight, expand_b_weight, grad_expand,
+            )
             xn = xn_saved
         else:
-            # Version A: normalize x inline from saved stats + emit xn for the wgrad GEMMs.
-            h, dA, dB, xn = _transition_expand_gatebwd(
+            h, dAB, xn = _transition_expand_gatebwd_stacked(
                 x2, rstd, c1, ln_weight, ln_bias,
                 expand_a_weight, expand_b_weight, grad_expand,
             )
-        dWs = go.t() @ h                          # [D, ND]
-        if ctx.has_xn:
-            if USE_SAVEDXN_SPLIT_BWD:
-                dWa = dA.t() @ xn
-                dWb = dB.t() @ xn
-                d_xn = dA @ expand_a_weight + dB @ expand_b_weight
-            else:
-                w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)
-                dWab = dAB.t() @ xn
-                dWa = dWab[: expand_a_weight.shape[0]]
-                dWb = dWab[expand_a_weight.shape[0] :]
-                if (
-                    os.getenv("TRANSITION_DAB_LNBWD", "0") == "1"
-                    and K <= 128
-                    and torch.cuda.get_device_capability(x2.device)[0] >= 9
-                ):
-                    from miniworld_kernels.kernels.transition.cute.dab_lnbwd import (
-                        transition_dab_lnbwd_cute,
-                    )
 
-                    dx = transition_dab_lnbwd_cute(
-                        dAB, w_ab, x2, ln_weight, rstd, c1,
-                    )
-                    db_ab = dAB.sum(0)
-                    # xn = gamma*xhat + beta, so dAB.T@xhat can be recovered from
-                    # dAB.T@xn when gamma is nonzero. This path is experimental and gated.
-                    t_xhat = (
-                        dWab.float() - db_ab.float()[:, None] * ln_bias.float()[None, :]
-                    ) / ln_weight.float()[None, :]
-                    dgamma = (w_ab.float() * t_xhat).sum(0)
-                    dbeta = db_ab.float() @ w_ab.float()
-                    return (
-                        dx.reshape(orig_shape),
-                        dgamma.to(ln_weight.dtype),
-                        dbeta.to(ln_bias.dtype),
-                        dWa, dWb, dWs, None, None, None,
-                    )
-                d_xn = dAB @ w_ab
-        else:
-            dWa = dA.t() @ xn                         # [ND, K]
-            dWb = dB.t() @ xn
-            d_xn = dA @ expand_a_weight + dB @ expand_b_weight  # grad to normalized x [M, K]
+        # (3)(4)(5)(6) SHARED across versions (stacked): two larger GEMMs + LN bwd.
+        dWs = go.t() @ h                          # (3) [D, ND]
+        w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)
+        dWab = dAB.t() @ xn                        # (4) fuses dWa,dWb -> [2*ND, K]
+        dWa = dWab[: expand_a_weight.shape[0]]
+        dWb = dWab[expand_a_weight.shape[0] :]
+        if (
+            os.getenv("TRANSITION_DAB_LNBWD", "0") == "1"
+            and K <= 128
+            and torch.cuda.get_device_capability(x2.device)[0] >= 9
+        ):
+            from miniworld_kernels.kernels.transition.cute.dab_lnbwd import (
+                transition_dab_lnbwd_cute,
+            )
 
-        # LayerNorm backward (Triton kernel from saved stats: dx, dgamma, dbeta)
+            dx = transition_dab_lnbwd_cute(dAB, w_ab, x2, ln_weight, rstd, c1)
+            db_ab = dAB.sum(0)
+            # xn = gamma*xhat + beta, so dAB.T@xhat is recovered from dAB.T@xn. Experimental/gated.
+            t_xhat = (
+                dWab.float() - db_ab.float()[:, None] * ln_bias.float()[None, :]
+            ) / ln_weight.float()[None, :]
+            dgamma = (w_ab.float() * t_xhat).sum(0)
+            dbeta = db_ab.float() @ w_ab.float()
+            return (
+                dx.reshape(orig_shape),
+                dgamma.to(ln_weight.dtype),
+                dbeta.to(ln_bias.dtype),
+                dWa, dWb, dWs, None, None, None,
+            )
+        d_xn = dAB @ w_ab                          # (5) fuses dA@Wa + dB@Wb -> [M, K]
+
+        # (6) LayerNorm backward from saved stats -> dx, dgamma, dbeta (hand-CUDA at d<=512 bf16).
         dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight)
-
         return (
             dx.reshape(orig_shape),
             dgamma.to(ln_weight.dtype),

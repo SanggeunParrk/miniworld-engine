@@ -228,6 +228,10 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
             )
+        # Single training path (Version A / save_xn=False): forward uses the fast inference b2b
+        # CUDA kernel (d=128/n=4, via triton_transition_fused's internal dispatch) and saves NO
+        # xn; the backward recomputes xn from saved stats (stacked, ~tie with the old save_xn=True
+        # path) while using less memory. Falls back to the triton b2b forward when ineligible.
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight,
@@ -237,7 +241,7 @@ class Transition(nn.Module):
             self.squeeze.weight,
             self.n,
             self.ln_in.eps,
-            save_xn=True,
+            save_xn=False,
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
