@@ -122,6 +122,19 @@ __device__ __forceinline__ void smem_store_u128(void* ptr, uint4 value) {
     );
 }
 
+__device__ __forceinline__ void global_store_u128(void* ptr, uint4 value, bool pred) {
+    asm volatile(
+        "{ .reg .pred p;\n"
+        "  setp.ne.b32 p, %5, 0;\n"
+        "  @p st.global.v4.b32 [%0], {%1, %2, %3, %4};\n"
+        "}\n"
+        :
+        : "l"(ptr), "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w),
+          "r"(static_cast<int>(pred))
+        : "memory"
+    );
+}
+
 template <class MMA, class Layout0>
 CUTE_HOST_DEVICE auto convert_layout_acc_Aregs(Layout0 acc_layout) {
     using Traits = MMA_Traits<MMA>;
@@ -499,13 +512,30 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     warpgroup_wait<0>();
     warpgroup_fence_operand(out_acc);
 
+    BF* pOutShuffle = pXnWg;
+    static_assert(kD == kK, "pXn reuse assumes the output tile and xn tile have equal row width");
+    static_assert(WG_M * kD <= cosize_v<decltype(lXn)>, "output shuffle tile must fit in pXnWg");
+    static_assert((kD % kXVecElems) == 0, "output vectorization requires D divisible by 8");
+    static_assert((kXVecElems * sizeof(BF)) == sizeof(uint4), "output vector must be 128-bit");
+
     CUTE_UNROLL
     for (int i = 0; i < size(out_acc); ++i) {
         const int m = get<0>(tCOut(i));
+        const int n = get<1>(tCOut(i));
+        pOutShuffle[m * kD + n] = static_cast<BF>(out_acc(i));
+    }
+    __syncthreads();
+
+    constexpr int kOutVecsPerRow = kD / kXVecElems;
+    CUTE_UNROLL
+    for (int vec = wg_tid; vec < WG_M * kOutVecsPerRow; vec += kWarpgroupThreads) {
+        const int m = vec / kOutVecsPerRow;
+        const int n = (vec - m * kOutVecsPerRow) * kXVecElems;
         const int64_t row = static_cast<int64_t>(wg_row0 + m);
-        if (row < M) {
-            tGOut(i) = static_cast<BF>(out_acc(i));
-        }
+        const bool valid = row < M;
+        uint4 out_vec = smem_load_u128(pOutShuffle + m * kD + n);
+        __nv_bfloat16* dst = valid ? out_raw + row * kD + n : out_raw;
+        global_store_u128(dst, out_vec, valid);
     }
 #else
     (void)x_raw;
