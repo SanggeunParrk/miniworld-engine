@@ -20,6 +20,15 @@ from ..ops import swish_gate
 
 _LARGE_D_TRAINING_ENV = "MINIWORLD_TRANSITION_LARGE_D_TRAINING"
 _CUTE_BACKWARD_ENV = "MINIWORLD_TRANSITION_CUTE_BACKWARD_BACKEND"
+_CUDA_B2B_ENV = "MINIWORLD_TRANSITION_CUDA_B2B"
+
+
+def _cuda_b2b_inference_enabled() -> bool:
+    """Whether to route d=128/n=4 inference through the hand-CUDA fused b2b kernel
+    (beats the Triton b2b ~1.29x). Default on; set MINIWORLD_TRANSITION_CUDA_B2B=0 to
+    A/B against the Triton path."""
+    value = os.getenv(_CUDA_B2B_ENV, "1").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _large_d_training_backend_from_env() -> str | None:
@@ -155,6 +164,25 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
             )
+        # Hand-CUDA fused b2b beats the Triton b2b ~1.29x at the fixed AF3 shape
+        # (d_hidden=128, n=4 -> K=128, ND=512, D=128). Requires bf16 + M%128==0.
+        if (
+            _cuda_b2b_inference_enabled()
+            and self.d_hidden == 128
+            and self.n == 4
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and (x.numel() // self.d_hidden) % 128 == 0
+        ):
+            return kernels.cuda_transition_b2b(
+                x,
+                self.ln_in.weight,
+                self.ln_in.bias,
+                self.expand_a.weight,
+                self.expand_b.weight,
+                self.squeeze.weight,
+                self.ln_in.eps,
+            )
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight,
@@ -200,6 +228,10 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
             )
+        # Single training path (Version A / save_xn=False): forward uses the fast inference b2b
+        # CUDA kernel (d=128/n=4, via triton_transition_fused's internal dispatch) and saves NO
+        # xn; the backward recomputes xn from saved stats (stacked, ~tie with the old save_xn=True
+        # path) while using less memory. Falls back to the triton b2b forward when ineligible.
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight,
@@ -209,7 +241,7 @@ class Transition(nn.Module):
             self.squeeze.weight,
             self.n,
             self.ln_in.eps,
-            save_xn=True,
+            save_xn=False,
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:

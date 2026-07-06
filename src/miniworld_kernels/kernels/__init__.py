@@ -34,6 +34,16 @@ def cuda_transition(*args, **kwargs):
     return cuda_transition_impl(*args, **kwargs)
 
 
+def cuda_transition_b2b(*args, **kwargs):
+    """Lazy hand-CUDA fused b2b Transition forward (builds the .so on first call).
+
+    Fixed AF3 shapes only (d_hidden=128, n=4 -> K=128, ND=512, D=128). Beats the Triton
+    b2b forward ~1.29x at this config. Inference-only (no backward saved)."""
+    from .transition.cuda import cuda_transition_b2b as _impl
+
+    return _impl(*args, **kwargs)
+
+
 def cute_transition_fused(*args, **kwargs):
     """Lazy cute (quack SM90 WGMMA) Transition fwd+bwd entry (imports cutlass on first call)."""
     from .transition.cute.fused import cute_transition_fused as _impl
@@ -47,6 +57,7 @@ __all__ = [
     "cond_transition_inference_dispatch",
     "cond_transition_train",
     "cuda_transition",
+    "cuda_transition_b2b",
     "cute_transition_fused",
     "fused_gate_out",
     "sigmoid_gate_fused",
