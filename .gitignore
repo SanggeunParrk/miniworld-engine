@@ -36,6 +36,7 @@ benchmarks/**/artifacts/**
 !benchmarks/**/artifacts/**/*.pdf
 !benchmarks/**/artifacts/**/*.txt
 !benchmarks/**/artifacts/**/*.json
+!benchmarks/**/artifacts/**/*.md
 benchmark/logs/
 benchmark/
 config/
@@ -60,3 +61,6 @@ results/
 notion_token
 _fold_t.py
 .claude/
+
+# job logs (SLURM .out etc.) — sibling of artifacts/
+benchmarks/**/logs/
