@@ -201,7 +201,13 @@ def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias):
     dW uses the SAVED x_normed directly (TE-style) — no T-decomposition / elementwise tail."""
     dY = dY.contiguous() if dY.stride(-1) != 1 else dY
     with _fp32_matmul_ctx(dY.dtype):                      # fp32→TF32 policy for all bwd GEMMs
-        dx_normed = torch.matmul(dY, W)                   # dY@W → (M,K)
+        # dx_normed = dY@W, but PRODUCED M-MAJOR (as (Wᵀ@dYᵀ)ᵀ, strides (1,M)) so it shares the
+        # SAME contiguous axis (m) as the m-major x and the m-major dx written by _ln_bwd. With all
+        # three (M,K) operands uniform-m-major, _ln_bwd_kernel coalesces every load/store along m
+        # (no mixed row-major-DXn / m-major-X access) → 1.3-1.45x faster LN-bwd on B200. cuBLAS emits
+        # the transposed GEMM at the same cost as dY@W (transA/transB flags, +~2%). SAME values
+        # (dx/dγ/dβ cos 1.0 vs the row-major GEMM) — layout-only change, precision unchanged.
+        dx_normed = torch.matmul(W.t(), dY.t()).t()      # (dY@W) m-major → uniform LN-bwd layout
         dW = torch.matmul(dY.t(), x_normed)              # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
         db = _bias_grad(dY).to(W.dtype) if has_bias else None  # linear bias grad (cuBLAS GEMV)
     dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride())  # dx(m-major)+dγ+dβ

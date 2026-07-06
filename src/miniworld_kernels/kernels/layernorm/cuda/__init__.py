@@ -16,6 +16,12 @@ layer_norm_cuda = load(
         "-O3", "--use_fast_math",
         "-gencode=arch=compute_80,code=sm_80",
         "-gencode=arch=compute_90,code=sm_90",
+        # B200 / Blackwell (sm_100): emit SASS for sm_100 plus a compute_100 PTX
+        # fallback so the plain-CUDA kernels (shfl + vector loads, no arch-only
+        # features) load and JIT on sm_10.x. Without this the module builds but the
+        # kernel launch fails with "no kernel image is available" on B200.
+        "-gencode=arch=compute_100,code=sm_100",
+        "-gencode=arch=compute_100,code=compute_100",
     ],
     verbose=False,
 )
