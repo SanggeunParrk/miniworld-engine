@@ -37,3 +37,20 @@ above with randomized weights.
 ## Next lever
 Fuse the LN stats into the CUDA b2b kernel (cf. MINIWORLD_TRANSITION_FUSE_STATS for the Triton path) to
 close the 1.29x->1.20x gap — the kernel already loads the full-K row.
+
+## Module TRAINING A/B (H100, cudagraph=manual, bf16-mixed, d_pair=128, ms)
+CUDA b2b is **inference-only** (forward saves nothing for backward), so `_training_forward` stays on
+the Triton path. This table confirms training is UNCHANGED by the wiring (CUDA_B2B on == off).
+
+| L | miniworld (triton training) | pytorch | speedup | CUDA_B2B=0 (verify unchanged) |
+|---:|---:|---:|---:|---:|
+| 384 | 1.177 | 2.929 | 2.49x | 1.175 |
+| 512 | 2.016 | 5.094 | 2.53x | 2.017 |
+| 640 | 3.086 | 7.896 | 2.56x | 3.085 |
+| 768 | 4.375 | 11.211 | 2.56x | 4.391 |
+| 896 | 5.929 | 15.203 | 2.56x | 5.916 |
+| 1024 | 7.726 | 19.822 | 2.57x | 7.719 |
+
+Training is ~2.5-2.6x vs pytorch (all Triton). To speed up training with the CUDA b2b would need a
+training-forward variant that saves intermediates (xn / a,b) for the backward — a separate effort; the
+current kernel is forward-only.
