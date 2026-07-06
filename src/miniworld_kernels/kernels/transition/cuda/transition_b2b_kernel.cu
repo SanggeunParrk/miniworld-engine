@@ -39,13 +39,17 @@ constexpr int kExpandWeightElemsPerStage = kK * kBn + kK * kBn;
 constexpr int kWsWeightElems = kD * kBn;
 constexpr int kTmaWeightTransactionBytes =
     (kExpandWeightElemsPerStage + kWsWeightElems) * static_cast<int>(sizeof(BF));
+constexpr int kNormParamSmemBytes =
+    (2 * kK) * static_cast<int>(sizeof(BF)) +
+    (2 * kBlockM) * static_cast<int>(sizeof(float));
 constexpr int align_up(int value, int alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
 }
 using WeightPipeline = cutlass::PipelineTmaAsync<kPipelineStages>;
 constexpr int kTensorSmemBytes =
     static_cast<int>((kXnElems + kPipelineStages * kExpandWeightElemsPerStage +
-                     kPipelineStages * kWsWeightElems) * sizeof(BF));
+                     kPipelineStages * kWsWeightElems) * sizeof(BF)) +
+    kNormParamSmemBytes;
 constexpr int kPipelineStorageOffsetBytes = align_up(kTensorSmemBytes, 16);
 constexpr int kPipelineStorageSmemBytes =
     align_up(static_cast<int>(sizeof(typename WeightPipeline::SharedStorage)), 16);
@@ -56,10 +60,11 @@ static_assert(kPipelineStages == 2, "Triton b2b schedule uses a 2-stage weight p
 static_assert(kWarpgroups == 2, "cooperative CTA expects exactly two consumer warpgroups");
 static_assert(kND % kBn == 0, "ND must be divisible by BLOCK_N");
 static_assert(kTmaWeightTransactionBytes == 98304, "expected 96 KiB wa/wb/ws TMA transaction per stage");
-static_assert(kTensorSmemBytes == 229376, "expected tensor smem with two private xn tiles");
-static_assert(kPipelineStorageOffsetBytes == 229376, "expected 16B-aligned weight pipeline storage offset");
+static_assert(kNormParamSmemBytes == 1536, "expected staged LN parameter smem");
+static_assert(kTensorSmemBytes == 230912, "expected tensor smem with staged LN params");
+static_assert(kPipelineStorageOffsetBytes == 230912, "expected 16B-aligned weight pipeline storage offset");
 static_assert(kPipelineStorageSmemBytes == 32, "expected 32B PipelineTmaAsync<2> storage");
-static_assert(kDynamicSmemBytes == 229408, "expected tensor smem plus one pipeline mbarrier set");
+static_assert(kDynamicSmemBytes == 230944, "expected tensor smem plus one pipeline mbarrier set");
 static_assert(kDynamicSmemBytes <= 227 * 1024, "dynamic smem should fit H100 opt-in shared memory");
 
 inline void check_cuda(cudaError_t error, const char* message) {
@@ -277,6 +282,10 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     BF* pWa = pXn + kWarpgroups * cosize_v<decltype(lXn)>;
     BF* pWb = pWa + STAGES * cosize_v<decltype(lW)>;
     BF* pWs = pWb + STAGES * cosize_v<decltype(lW)>;
+    BF* pG = pWs + STAGES * cosize_v<decltype(lWs)>;
+    BF* pBeta = pG + kK;
+    float* pRstd = reinterpret_cast<float*>(pBeta + kK);
+    float* pC1 = pRstd + CTA_M;
     BF* pXnWg = pXn + wg_id * cosize_v<decltype(lXn)>;
 
     auto sXn = make_tensor(make_smem_ptr(pXnWg), lXn);
@@ -369,6 +378,16 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
 
     const BF* g_bf = reinterpret_cast<const BF*>(g_raw);
     const BF* beta_bf = reinterpret_cast<const BF*>(beta_raw);
+    if (tid < kK) {
+        pG[tid] = g_bf[tid];
+        pBeta[tid] = beta_bf[tid];
+    }
+    if (tid < CTA_M) {
+        const int64_t row = static_cast<int64_t>(row0 + tid);
+        pRstd[tid] = row < M ? rstd[row] : 0.0f;
+        pC1[tid] = row < M ? c1[row] : 0.0f;
+    }
+    __syncthreads();
 
     cp_async_wait<0>();
     for (int vec = wg_tid; vec < (WG_M * kK) / kXVecElems; vec += kWarpgroupThreads) {
@@ -377,8 +396,9 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
         const int k0 = idx - m * kK;
         const int64_t row = static_cast<int64_t>(wg_row0 + m);
         const bool valid = row < M;
-        const float row_rstd = valid ? rstd[row] : 0.0f;
-        const float row_c1 = valid ? c1[row] : 0.0f;
+        const int cta_m = wg_id * WG_M + m;
+        const float row_rstd = pRstd[cta_m];
+        const float row_c1 = pC1[cta_m];
         XnVec x_vec;
         XnVec xn_vec;
         x_vec.vec = smem_load_u128(&sXn(m, k0));
@@ -388,8 +408,8 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
             if (valid) {
                 const int k = k0 + i;
                 const float xv = static_cast<float>(x_vec.bf[i]);
-                const float gamma = static_cast<float>(g_bf[k]);
-                const float bias = static_cast<float>(beta_bf[k]);
+                const float gamma = static_cast<float>(pG[k]);
+                const float bias = static_cast<float>(pBeta[k]);
                 xn = (xv * row_rstd - row_c1) * gamma + bias;
             }
             xn_vec.bf[i] = static_cast<BF>(xn);
