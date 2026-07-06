@@ -47,6 +47,7 @@ class GatedPersistentGemmKernel(PersistentDenseGemmKernel):
     epi_gate = True     # side experiment: if False, run gate MMA but store proj only
     no_exp = False      # side experiment: skip sigmoid (ov=p*g) to isolate exp cost
     sig_mode = "rsqrt"  # sigmoid impl (default rsqrt: division-free, fast MUFU)
+    epi_depth = 3       # epilogue t2r software-pipeline depth (v17: 3 = k+2 prefetch; 2 == v16)
 
     def _setup_attributes(self):
         # Inherit ALL of the collective's tuned choices (mma_tiler incl. K-tiling,
@@ -504,24 +505,33 @@ class GatedPersistentGemmKernel(PersistentDenseGemmKernel):
         # smem/TMEM-capped (not register-capped) so the extra regs are free.
         # range_constexpr => python-unrolled loop so the double-buffer index is a
         # compile-time constant.
+        # v17: generalize the v16 software-pipelined epilogue to DEPTH register
+        # stages (v16 == DEPTH 2, i.e. prefetch k+1). DEPTH>2 issues subtile k+D-1's
+        # t2r loads before computing subtile k, keeping more TMEM->reg loads in flight
+        # to hide the residual long-scoreboard t2r latency at 1 CTA/SM (occupancy is
+        # TMEM-capped, not register-capped, so extra fragment buffers cost no CTA).
+        # env MW_EPI_DEPTH (default 2) => baseline preserved.
+        depth = const_expr(self.epi_depth)
         gate_on = not (self.proj_only or not self.epi_gate)
-        rAccP = [tTR_rAccP, cute.make_fragment_like(tTR_rAccP)]
-        rAccG = [tTR_rAccG, cute.make_fragment_like(tTR_rAccG)]
+        rAccP = [tTR_rAccP] + [cute.make_fragment_like(tTR_rAccP) for _ in range(depth - 1)]
+        rAccG = [tTR_rAccG] + [cute.make_fragment_like(tTR_rAccG) for _ in range(depth - 1)]
 
-        # prologue: prefetch subtile 0's accumulators
-        cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, 0)], rAccP[0])
-        if const_expr(gate_on):
-            cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, 0)], rAccG[0])
+        # prologue: prefetch the first (depth-1) subtiles' accumulators
+        for j in cutlass.range_constexpr(depth - 1):
+            if j < subtile_cnt:
+                cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, j)], rAccP[j % depth])
+                if const_expr(gate_on):
+                    cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, j)], rAccG[j % depth])
 
         for subtile_idx in cutlass.range_constexpr(subtile_cnt):
-            cur = subtile_idx % 2
-            # issue next subtile's t2r loads early so they overlap this subtile's
+            cur = subtile_idx % depth
+            # issue subtile k+depth-1's t2r loads early so they overlap this subtile's
             # sigmoid compute + async TMA store (hides t2r long-scoreboard latency)
-            if subtile_idx + 1 < subtile_cnt:
-                nxt = (subtile_idx + 1) % 2
-                cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, subtile_idx + 1)], rAccP[nxt])
+            pf = subtile_idx + depth - 1
+            if pf < subtile_cnt:
+                cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, pf)], rAccP[pf % depth])
                 if const_expr(gate_on):
-                    cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, subtile_idx + 1)], rAccG[nxt])
+                    cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, pf)], rAccG[pf % depth])
 
             p = tiled_copy_r2s.retile(rAccP[cur]).load()
             if const_expr(not gate_on):
@@ -608,6 +618,7 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
         op.epi_gate = os.environ.get("MW_NOGATE_EPI") != "1"
         op.no_exp = os.environ.get("MW_NOEXP") == "1"
         op.sig_mode = os.environ.get("MW_SIG", "rsqrt")
+        op.epi_depth = int(os.environ.get("MW_EPI_DEPTH", "3"))
         _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm)
     _CACHE[key](mA, mBp, mBg, mC, mac, strm)
     return ret
