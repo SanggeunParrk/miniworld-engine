@@ -41,7 +41,6 @@ constexpr int kWsWeightElems = kD * kBn;
 constexpr int kTmaWeightTransactionBytes =
     (kExpandWeightElemsPerStage + kWsWeightElems) * static_cast<int>(sizeof(BF));
 constexpr int kNormParamSmemBytes =
-    (2 * kK) * static_cast<int>(sizeof(BF)) +
     (2 * kBlockM) * static_cast<int>(sizeof(float));
 constexpr int align_up(int value, int alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
@@ -61,11 +60,11 @@ static_assert(kPipelineStages == 2, "Triton b2b schedule uses a 2-stage weight p
 static_assert(kWarpgroups == 2, "cooperative CTA expects exactly two consumer warpgroups");
 static_assert(kND % kBn == 0, "ND must be divisible by BLOCK_N");
 static_assert(kTmaWeightTransactionBytes == 98304, "expected 96 KiB wa/wb/ws TMA transaction per stage");
-static_assert(kNormParamSmemBytes == 1536, "expected staged LN parameter smem");
-static_assert(kTensorSmemBytes == 230912, "expected tensor smem with staged LN params");
-static_assert(kPipelineStorageOffsetBytes == 230912, "expected 16B-aligned weight pipeline storage offset");
+static_assert(kNormParamSmemBytes == 1024, "expected staged row LN parameter smem");
+static_assert(kTensorSmemBytes == 230400, "expected tensor smem without staged gamma/beta");
+static_assert(kPipelineStorageOffsetBytes == 230400, "expected 16B-aligned weight pipeline storage offset");
 static_assert(kPipelineStorageSmemBytes == 32, "expected 32B PipelineTmaAsync<2> storage");
-static_assert(kDynamicSmemBytes == 230944, "expected tensor smem plus one pipeline mbarrier set");
+static_assert(kDynamicSmemBytes == 230432, "expected tensor smem plus one pipeline mbarrier set");
 static_assert(kDynamicSmemBytes <= 227 * 1024, "dynamic smem should fit H100 opt-in shared memory");
 
 inline void check_cuda(cudaError_t error, const char* message) {
@@ -313,9 +312,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     BF* pWa = pXn + kWarpgroups * cosize_v<decltype(lXn)>;
     BF* pWb = pWa + STAGES * cosize_v<decltype(lW)>;
     BF* pWs = pWb + STAGES * cosize_v<decltype(lW)>;
-    BF* pG = pWs + STAGES * cosize_v<decltype(lWs)>;
-    BF* pBeta = pG + kK;
-    float* pRstd = reinterpret_cast<float*>(pBeta + kK);
+    float* pRstd = reinterpret_cast<float*>(pWs + STAGES * cosize_v<decltype(lWs)>);
     float* pC1 = pRstd + CTA_M;
     BF* pXnWg = pXn + wg_id * cosize_v<decltype(lXn)>;
 
@@ -383,6 +380,8 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     static_assert(kK % kXVecElems == 0, "x vectorization requires kK to be divisible by 8");
     static_assert((kXVecElems * sizeof(__nv_bfloat16)) == sizeof(uint4), "x vector must be 128-bit");
     static_assert((kXVecElems * sizeof(BF)) == sizeof(uint4), "BF x vector must be 128-bit");
+    static_assert((kWarpgroupThreads * kXVecElems) % kK == 0,
+                  "each normalization thread must keep a fixed k-slice");
     union XnVec {
         uint4 vec;
         BF bf[kXVecElems];
@@ -407,20 +406,25 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     stage_x_into_sxn();
     cp_async_fence();
 
-    const BF* g_bf = reinterpret_cast<const BF*>(g_raw);
-    const BF* beta_bf = reinterpret_cast<const BF*>(beta_raw);
-    if (tid < kK) {
-        pG[tid] = g_bf[tid];
-        pBeta[tid] = beta_bf[tid];
+    if (wg_tid < WG_M) {
+        const int64_t row = static_cast<int64_t>(wg_row0 + wg_tid);
+        const int cta_m = wg_id * WG_M + wg_tid;
+        pRstd[cta_m] = row < M ? rstd[row] : 0.0f;
+        pC1[cta_m] = row < M ? c1[row] : 0.0f;
     }
-    if (tid < CTA_M) {
-        const int64_t row = static_cast<int64_t>(row0 + tid);
-        pRstd[tid] = row < M ? rstd[row] : 0.0f;
-        pC1[tid] = row < M ? c1[row] : 0.0f;
-    }
-    __syncthreads();
+    cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
 
     cp_async_wait<0>();
+    const BF* g_bf = reinterpret_cast<const BF*>(g_raw);
+    const BF* beta_bf = reinterpret_cast<const BF*>(beta_raw);
+    const int param_k0 = (wg_tid % (kK / kXVecElems)) * kXVecElems;
+    BF gamma_reg[kXVecElems];
+    BF beta_reg[kXVecElems];
+    CUTE_UNROLL
+    for (int i = 0; i < kXVecElems; ++i) {
+        gamma_reg[i] = g_bf[param_k0 + i];
+        beta_reg[i] = beta_bf[param_k0 + i];
+    }
     for (int vec = wg_tid; vec < (WG_M * kK) / kXVecElems; vec += kWarpgroupThreads) {
         const int idx = vec * kXVecElems;
         const int m = idx / kK;
@@ -437,10 +441,9 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
         for (int i = 0; i < kXVecElems; ++i) {
             float xn = 0.0f;
             if (valid) {
-                const int k = k0 + i;
                 const float xv = static_cast<float>(x_vec.bf[i]);
-                const float gamma = static_cast<float>(pG[k]);
-                const float bias = static_cast<float>(pBeta[k]);
+                const float gamma = static_cast<float>(gamma_reg[i]);
+                const float bias = static_cast<float>(beta_reg[i]);
                 xn = (xv * row_rstd - row_c1) * gamma + bias;
             }
             xn_vec.bf[i] = static_cast<BF>(xn);
