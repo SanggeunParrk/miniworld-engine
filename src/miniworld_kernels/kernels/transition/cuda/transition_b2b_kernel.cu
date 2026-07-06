@@ -14,6 +14,7 @@
 #include <cute/atom/copy_traits_sm90_tma.hpp>
 #include <cute/algorithm/prefetch.hpp>
 #include <cute/algorithm/gemm.hpp>
+#include <cutlass/arch/barrier.h>
 #include <cutlass/numeric_types.h>
 #include <cutlass/pipeline/sm90_pipeline.hpp>
 
@@ -288,6 +289,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     const int tid = threadIdx.x;
     const int wg_id = tid / kWarpgroupThreads;
     const int wg_tid = tid - wg_id * kWarpgroupThreads;
+    const int wg_barrier_id = wg_id + 1;
     const int row0 = blockIdx.x * CTA_M;
     const int wg_row0 = row0 + wg_id * WG_M;
 
@@ -445,7 +447,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
         }
         smem_store_u128(&sXn(m, k0), xn_vec.vec);
     }
-    __syncthreads();
+    cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
 
     using MmaExpandOp = SM90_64x128x16_F32BF16BF16_SS<GMMA::Major::K, GMMA::Major::K>;
     using MmaSqueezeOp = SM90_64x128x16_F32BF16BF16_RS<GMMA::Major::K, GMMA::Major::K>;
@@ -555,7 +557,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
             pOutShuffle[output_shuffle_idx(m_next, n_next)] = static_cast<BF>(out_acc(i + 1));
         }
     }
-    __syncthreads();
+    cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
 
     constexpr int kOutVecsPerRow = kD / kXVecElems;
     CUTE_UNROLL
