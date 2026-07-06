@@ -65,9 +65,16 @@ def _epi_visit_subtile_actmul(self, params, epi_loop_tensors, tRS_rD, tRS_rC=Non
 
 
 def apply() -> None:
-    """Patch GemmActSm90.epi_visit_subtile to do act(A@B)⊙C when C is present. Idempotent."""
+    """Patch GemmActSm{90,100,120}.epi_visit_subtile to do act(A@B)⊙C when C is present.
+    Idempotent. B200 (sm100) uses GemmActSm100, which does NOT subclass GemmActSm90
+    (its MRO branches through GemmSm100), so patching only Sm90 left the fused gate
+    running the STOCK additive-C epilogue on sm100 (y = act(A@B + C), preact = A@B + C).
+    Shadow the method on every concrete arch class present (mirrors `_bdll_patch`)."""
     global _APPLIED
     if _APPLIED:
         return
-    _ga.GemmActSm90.epi_visit_subtile = _epi_visit_subtile_actmul
+    for cls_name in ("GemmActSm90", "GemmActSm100", "GemmActSm120"):
+        cls = getattr(_ga, cls_name, None)
+        if cls is not None:
+            cls.epi_visit_subtile = _epi_visit_subtile_actmul
     _APPLIED = True
