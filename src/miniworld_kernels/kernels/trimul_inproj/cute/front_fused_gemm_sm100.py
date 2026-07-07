@@ -57,6 +57,13 @@ class FusedPreactGemmKernel(GatedPersistentGemmKernel):
     # rsqrt is bit-accurate enough (left/right cos >=0.9999 vs fp32 ref, verified).
     sig_mode = "rsqrt"
     num_ab_stage_front = 2
+    # When True the epilogue stores (lr, sg=σ(gate)) [2 stores] instead of (lr, gate, proj)
+    # [3 stores]. The backward reconstructs the GLU grads from lr + sg alone:
+    #   d_proj = d_out·σ(gate) ;  d_glogit = d_out·lr·(1-σ(gate))   (proj not needed).
+    # -> forward drops the proj plane (−1/3 of stores) AND the backward reads sg[2H] instead of
+    # preact[4H]. σ(gate) is already computed here (= r·r on the rsqrt path). `cpe` carries sg;
+    # `cpo` is unused (still set up, never stored).
+    store_sigmoid = False
 
     def _setup_attributes(self):
         # The front GEMM is K=D=128 -> a SINGLE k-tile, so a deep AB (load<->MMA) pipeline
@@ -526,9 +533,11 @@ class FusedPreactGemmKernel(GatedPersistentGemmKernel):
         cute.copy(tiled_copy_t2r, tTR_tAccP[(None, None, None, 0)], rAccP[0])
         cute.copy(tiled_copy_t2r, tTR_tAccG[(None, None, None, 0)], rAccG[0])
 
-        # running smem-buffer counter; advances by 3 per subtile (3 stores) so the manual
-        # buffer index stays in lock-step with the c_pipeline commit/acquire count.
-        store_ctr = num_prev_subtiles * 3
+        # running smem-buffer counter; advances by #stores per subtile so the manual buffer
+        # index stays lock-step with the c_pipeline commit/acquire count (2 = lr+sg for the
+        # store_sigmoid path, else 3 = lr+gate+proj).
+        sstride = 2 if const_expr(self.store_sigmoid) else 3
+        store_ctr = num_prev_subtiles * sstride
 
         for subtile_idx in cutlass.range_constexpr(subtile_cnt):
             cur = subtile_idx % 2
@@ -542,35 +551,42 @@ class FusedPreactGemmKernel(GatedPersistentGemmKernel):
             if const_expr(self.sig_mode == "rsqrt"):
                 d = 1.0 + cmath.exp2(g * (-1.4426950408889634))
                 r = cmath.rsqrt(d)
-                ov = p * r * r
+                sg = r * r                       # σ(gate)
+                ov = p * sg
             else:  # "exact": exp-based sigmoid with IEEE divide (matches tl.sigmoid)
-                ov = p * (1.0 / (1.0 + cmath.exp2(g * (-1.4426950408889634))))
+                sg = 1.0 / (1.0 + cmath.exp2(g * (-1.4426950408889634)))
+                ov = p * sg
 
-            # Fill 3 distinct smem buffers (lr, gate, proj) from the same reg fragment,
-            # ONE fence + ONE barrier pair, then issue 3 overlapping TMA stores. This keeps
-            # the epilogue short enough that the persistent scheduler hides it under the next
-            # tile's mainloop (per-store barriers serialized it -> 4x regression).
-            b0 = (store_ctr + subtile_idx * 3 + 0) % self.num_c_stage
-            b1 = (store_ctr + subtile_idx * 3 + 1) % self.num_c_stage
-            b2 = (store_ctr + subtile_idx * 3 + 2) % self.num_c_stage
+            # Fill the store buffers (lr[+sg | +gate,proj]) from reg fragments, ONE fence + ONE
+            # barrier pair, then issue the overlapping TMA stores. Keeping the epilogue short lets
+            # the persistent scheduler hide it under the next tile's mainloop (per-store barriers
+            # serialized it -> 4x regression).
+            b0 = (store_ctr + subtile_idx * sstride + 0) % self.num_c_stage
+            b1 = (store_ctr + subtile_idx * sstride + 1) % self.num_c_stage
             tRS_rC.store(ov.to(self.c_dtype))
             cute.copy(tiled_copy_r2s, tRS_rC, tRS_sC[(None, None, None, b0)])
-            tRS_rC.store(g.to(self.c_dtype))
-            cute.copy(tiled_copy_r2s, tRS_rC, tRS_sC[(None, None, None, b1)])
-            tRS_rC.store(p.to(self.c_dtype))
-            cute.copy(tiled_copy_r2s, tRS_rC, tRS_sC[(None, None, None, b2)])
+            if const_expr(self.store_sigmoid):
+                tRS_rC.store(sg.to(self.c_dtype))
+                cute.copy(tiled_copy_r2s, tRS_rC, tRS_sC[(None, None, None, b1)])
+            else:
+                b2 = (store_ctr + subtile_idx * sstride + 2) % self.num_c_stage
+                tRS_rC.store(g.to(self.c_dtype))
+                cute.copy(tiled_copy_r2s, tRS_rC, tRS_sC[(None, None, None, b1)])
+                tRS_rC.store(p.to(self.c_dtype))
+                cute.copy(tiled_copy_r2s, tRS_rC, tRS_sC[(None, None, None, b2)])
             cute.arch.fence_proxy("async.shared", space="cta")
             epilog_sync_barrier.arrive_and_wait()
             if warp_idx == self.epilogue_warp_id[0]:
                 cute.copy(tma_atom_c, bSG_sC[(None, b0)], bSG_gC[(None, subtile_idx)])
+                c_pipeline.producer_commit()
+                c_pipeline.producer_acquire()
                 cute.copy(tma_atom_cpe, bSG_sCpe[(None, b1)], bSG_gCpe[(None, subtile_idx)])
-                cute.copy(tma_atom_cpo, bSG_sCpo[(None, b2)], bSG_gCpo[(None, subtile_idx)])
                 c_pipeline.producer_commit()
                 c_pipeline.producer_acquire()
-                c_pipeline.producer_commit()
-                c_pipeline.producer_acquire()
-                c_pipeline.producer_commit()
-                c_pipeline.producer_acquire()
+                if const_expr(not self.store_sigmoid):
+                    cute.copy(tma_atom_cpo, bSG_sCpo[(None, b2)], bSG_gCpo[(None, subtile_idx)])
+                    c_pipeline.producer_commit()
+                    c_pipeline.producer_acquire()
             epilog_sync_barrier.arrive_and_wait()
 
         epilog_sync_barrier.arrive_and_wait()
@@ -617,3 +633,43 @@ def fused_front_gemm(A, Bp, Bg, lr, preact):
         op.K = int(K)
         _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mCpe, mCpo, mac, strm)
     _CACHE[key](mA, mBp, mBg, mC, mCpe, mCpo, mac, strm)
+
+
+class FusedSigGemmKernel(FusedPreactGemmKernel):
+    """store_sigmoid variant: the epilogue writes (lr[2H,M], sg=σ(gate)[2H,M]) — NO proj plane.
+    The backward (`front_bwd_dW_sig`) reconstructs the GLU grads from lr + sg alone:
+        d_proj = d_out·sg ;  d_glogit = d_out·lr·(1-sg).
+    ~1/3 fewer forward store bytes than the preact[4H] path; sg is carried in the `cpe` slot and
+    the `cpo` slot is unused (still set up, never stored)."""
+
+    store_sigmoid = True
+
+
+_CACHE_SIG = {}
+
+
+def fused_front_gemm_sig(A, Bp, Bg, lr, sg):
+    """lr[2H,M] = σ(A@Bg.T)·(A@Bp.T);  sg[2H,M] = σ(A@Bg.T). Both (2H,M) contiguous (M-major).
+    A:(M,K) bf16; Bp/Bg:(2H,K) bf16. Writes in place. Replaces preact[4H] with sg[2H]."""
+    M, K = A.shape
+    N, _ = Bp.shape
+
+    def _mark(t3, leading_dim):
+        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
+
+    mA = _mark(A.detach().unsqueeze(0), 2)
+    mBp = _mark(Bp.detach().unsqueeze(0), 2)
+    mBg = _mark(Bg.detach().unsqueeze(0), 2)
+    mC = _mark(lr.t().unsqueeze(0), 1)             # (1, M, 2H) M-major
+    mSg = _mark(sg.t().unsqueeze(0), 1)            # (1, M, 2H) M-major  (carried as cpe; cpo unused)
+    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    key = (M, N, K)
+    if key not in _CACHE_SIG:
+        op = FusedSigGemmKernel(
+            acc_dtype=Float32, use_2cta_instrs=False,
+            mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
+        )
+        op.K = int(K)
+        _CACHE_SIG[key] = cute.compile(op, mA, mBp, mBg, mC, mSg, mSg, mac, strm)
+    _CACHE_SIG[key](mA, mBp, mBg, mC, mSg, mSg, mac, strm)

@@ -120,6 +120,29 @@ def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLK: tl.constexpr):
     tl.store(lr + HM + idx, (tl.sigmoid(gR) * pR).to(et), mask=mask)   # right plane d
 
 
+def trimul_front_sm100_train_sig(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
+    """σ(gate) front: returns (left_bdll, right_bdll, sg_bdll) where sg = σ(gate) [B,2H,L,L].
+    Same left/right as trimul_front_sm100_train, but the backward-only tensor is sg[2H] (σ(gate))
+    instead of preact[4H] (raw gate+proj logits) — ~1/3 fewer front store bytes. The backward
+    (`front_bwd_dW_sig`) reconstructs the GLU grads from (left, right, sg). Requires the fused
+    sm100 kernel (no v13 fallback)."""
+    assert x_n.dim() == 4 and x_n.is_cuda and x_n.is_contiguous()
+    B, L, L2, D = x_n.shape
+    assert B == 1 and L == L2
+    assert _fused_available(x_n.device), "sig front requires the fused sm100 kernel (cap 10/11)"
+    M = L * L
+    x_flat = x_n.reshape(M, D)
+    from miniworld_kernels.kernels.trimul_inproj.cute.front_fused_gemm_sm100 import (
+        fused_front_gemm_sig,
+    )
+    Bg = b_lr[:, 0::2].t().contiguous()   # (2H, D) = [WLg | WRg]
+    Bp = b_lr[:, 1::2].t().contiguous()   # (2H, D) = [WL  | WR ]
+    lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
+    sg = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
+    fused_front_gemm_sig(x_flat, Bp, Bg, lr.view(2 * H, M), sg.view(2 * H, M))
+    return lr[:, :H], lr[:, H:], sg
+
+
 def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     """SM100 v6-faithful front. Returns (left_bdll, right_bdll, preact_bdll):
       left/right : (B, H, L, L) contiguous  (== left.reshape(H,L,L) is a free view)
