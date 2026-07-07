@@ -1,0 +1,8 @@
+=== BASELINE (maxnreg=None) ===
+L=384 0.0524 ms cos=0.999999 BEST=BLOCK_M: 32, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None
+L=768 0.1774 ms cos=0.999999 BEST=BLOCK_M: 64, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None
+L=1024 0.3042 ms cos=0.999999 BEST=BLOCK_M: 64, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None
+=== WITH maxnreg configs (93 total) ===
+L=384 0.0524 ms cos=0.999999 (1.002x vs base) BEST=BLOCK_M: 32, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: 96
+L=768 0.1690 ms cos=0.999999 (1.050x vs base) BEST=BLOCK_M: 64, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: 168
+L=1024 0.2837 ms cos=0.999999 (1.072x vs base) BEST=BLOCK_M: 64, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: 168

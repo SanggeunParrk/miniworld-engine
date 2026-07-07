@@ -77,6 +77,17 @@ def _fp32_matmul_ctx(dtype):
 _LN_CONFIGS = [
     triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
     for bm in (8, 16, 32, 64, 128) for nw in (4, 8, 16) for ns in (2, 3, 4)
+] + [
+    # maxnreg-capped variants (te_ln_bwd_b200 v2). The m-major LN_out backward
+    # (`_ln_bwd_kernel`) hits 255 regs/thread -> only 2 resident blocks/SM (occupancy-bound,
+    # not bandwidth: DRAM ~26%). Capping registers ~168 (= the contiguous LN_in case's reg
+    # count, which reaches 3 blocks/SM) trades a few spills for the 3rd resident block ->
+    # higher warp occupancy -> hides the load->reduce->dx latency chain. Measured +5-7% on
+    # `_ln_bwd_kernel` @ L=768/1024 (bf16, uniform m-major); precision-neutral (register
+    # ALLOCATION only, math identical, dx/dγ/dβ cos 0.999999). The autotuner keeps None when
+    # the cap doesn't win (e.g. the fwd `_ln_mat_kernel` and small L), so this only adds.
+    triton.Config({"BLOCK_M": bm}, num_warps=4, num_stages=ns, maxnreg=mr)
+    for bm in (32, 64, 128) for ns in (2, 4) for mr in (128, 168)
 ]
 
 
