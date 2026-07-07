@@ -196,28 +196,19 @@ class Transition(nn.Module):
         )
 
     def _training_forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Training dispatch: route to kernels with an explicit backward contract."""
-        if (
-            self.implementation == ImplementationType.CUEQUIVARIANCE
-            and self.d_hidden >= 256
-        ):
-            backward_backend = _large_d_training_backend_from_env()
-            if backward_backend is not None:
-                return kernels.cute_transition_fused(
-                    x,
-                    self.ln_in.weight,
-                    self.ln_in.bias,
-                    self.expand_a.weight,
-                    self.expand_b.weight,
-                    self.squeeze.weight,
-                    self.n,
-                    self.ln_in.eps,
-                    backward_backend=backward_backend,
-                )
-            # Current cute backward is still slower than compiled PyTorch for wide
-            # training shapes; keep MiniWorld dispatch performance non-regressive.
-            return self._torch_forward(x)
-        if self.d_hidden >= 256:
+        """Training dispatch: fastest kernel per d (transition has NO cuequivariance kernel).
+
+        Every path carries a real backward; measured fwd+bwd on H100 (L=384, bf16):
+          d=128  b2b(+VersionA) 0.96ms  <  cute+tritonbwd 1.10  <  torch 1.73
+          d=256  b2b 2.40 ~= cute+tritonbwd 2.39  <  torch 3.13
+          d=512  cute+tritonbwd 6.90  <  torch 7.52   (b2b fwd OOMs smem at d=512)
+        Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
+        """
+        if self.d_hidden >= 512:
+            # d=512: b2b fusion can't fit smem (xn+weights+accumulator) and h round-trip is not
+            # the bottleneck (compute-bound) -> cute split (expand + cuBLAS squeeze). The triton
+            # (Version A style) backward beats the cute backend AND torch; env can override.
+            backward_backend = _large_d_training_backend_from_env() or "triton"
             return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
@@ -227,11 +218,12 @@ class Transition(nn.Module):
                 self.squeeze.weight,
                 self.n,
                 self.ln_in.eps,
+                backward_backend=backward_backend,
             )
-        # Single training path (Version A / save_xn=False): forward uses the fast inference b2b
-        # CUDA kernel (d=128/n=4, via triton_transition_fused's internal dispatch) and saves NO
-        # xn; the backward recomputes xn from saved stats (stacked, ~tie with the old save_xn=True
-        # path) while using less memory. Falls back to the triton b2b forward when ineligible.
+        # d<=256 (Version A / save_xn=False): forward uses the fast hand-CUDA b2b kernel
+        # (d in {128,256}, n==4, via triton_transition_fused's internal dispatch) and saves NO
+        # xn; the shape-general backward recomputes xn from saved stats while using less memory.
+        # Falls back to the split path when b2b is ineligible.
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight,

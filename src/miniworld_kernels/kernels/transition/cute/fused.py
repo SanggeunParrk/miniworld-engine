@@ -124,8 +124,10 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         )
         out = torch.matmul(expand, squeeze_weight.T)
 
+        # Recompute-all training policy: do NOT save the (M, ND) expand/h activation — it is
+        # re-derived in the backward (store_h=True) to keep the training memory footprint minimal.
         ctx.save_for_backward(
-            x2, rstd, c1, ln_weight, ln_bias, expand,
+            x2, rstd, c1, ln_weight, ln_bias,
             expand_a_weight, expand_b_weight, squeeze_weight,
         )
         ctx.n = n
@@ -139,7 +141,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor):
         (
             x2, rstd, c1, ln_weight, ln_bias,
-            expand, expand_a_weight, expand_b_weight, squeeze_weight,
+            expand_a_weight, expand_b_weight, squeeze_weight,
         ) = ctx.saved_tensors
         orig_shape = ctx.orig_shape
         dt = x2.dtype
@@ -171,10 +173,11 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         else:
             # Avoid the cute path's huge duplicated C operand (M, 2N); this costs one extra
             # cuBLAS GEMM but removes a bandwidth-heavy materialization at wide d.
-            dA, dB = _transition_expand_gatebwd_savedxn(
-                xn, expand_a_weight, expand_b_weight, grad_expand, store_h=False
+            # Recompute h here (store_h=True) instead of saving it in the forward.
+            h, dA, dB = _transition_expand_gatebwd_savedxn(
+                xn, expand_a_weight, expand_b_weight, grad_expand, store_h=True
             )
-            dWs = go.t() @ expand
+            dWs = go.t() @ h
             dWa = dA.t() @ xn
             dWb = dB.t() @ xn
             d_xn = dA @ expand_a_weight + dB @ expand_b_weight
