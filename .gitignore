@@ -36,6 +36,7 @@ benchmarks/**/artifacts/**
 !benchmarks/**/artifacts/**/*.pdf
 !benchmarks/**/artifacts/**/*.txt
 !benchmarks/**/artifacts/**/*.json
+!benchmarks/**/artifacts/**/*.md
 benchmark/logs/
 benchmark/
 config/
@@ -46,6 +47,7 @@ src/**/benchmark/
 _ct_tmp/
 _trans_tmp/
 experiments/
+scratchpad_ncu/
 third_party/ct_cutlass_workbench/*.out
 third_party/ct_cutlass_workbench/*.so
 
@@ -60,3 +62,6 @@ results/
 notion_token
 _fold_t.py
 .claude/
+
+# job logs (SLURM .out etc.) — sibling of artifacts/
+benchmarks/**/logs/

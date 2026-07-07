@@ -7,6 +7,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <type_traits>
 
 #include <cute/tensor.hpp>
 #include <cute/atom/mma_atom.hpp>
@@ -24,48 +25,41 @@ using namespace cute;
 
 using BF = cutlass::bfloat16_t;
 
-constexpr int kK = 128;
-constexpr int kND = 512;
-constexpr int kD = 128;
 constexpr int kWarpgroupM = 64;
 constexpr int kWarpgroups = 2;
 constexpr int kBlockM = kWarpgroups * kWarpgroupM;
 constexpr int kBn = 128;
+constexpr int kDn = 128;
 constexpr int kWarpgroupThreads = 128;
 constexpr int kThreads = kWarpgroups * kWarpgroupThreads;
 constexpr int kPipelineStages = 2;
+constexpr int kPipelineStagesD256 = 1;
 
-constexpr int kXnElems = kBlockM * kK;
-constexpr int kExpandWeightElemsPerStage = kK * kBn + kK * kBn;
-constexpr int kWsWeightElems = kD * kBn;
-constexpr int kTmaWeightTransactionBytes =
-    (kExpandWeightElemsPerStage + kWsWeightElems) * static_cast<int>(sizeof(BF));
-constexpr int kNormParamSmemBytes =
-    (2 * kBlockM) * static_cast<int>(sizeof(float));
 constexpr int align_up(int value, int alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
 }
-using WeightPipeline = cutlass::PipelineTmaAsync<kPipelineStages>;
-constexpr int kTensorSmemBytes =
-    static_cast<int>((kXnElems + kPipelineStages * kExpandWeightElemsPerStage +
-                     kPipelineStages * kWsWeightElems) * sizeof(BF)) +
-    kNormParamSmemBytes;
-constexpr int kPipelineStorageOffsetBytes = align_up(kTensorSmemBytes, 16);
-constexpr int kPipelineStorageSmemBytes =
-    align_up(static_cast<int>(sizeof(typename WeightPipeline::SharedStorage)), 16);
-constexpr int kDynamicSmemBytes =
-    kPipelineStorageOffsetBytes + kPipelineStorageSmemBytes;
 
-static_assert(kPipelineStages == 2, "Triton b2b schedule uses a 2-stage weight pipeline");
+template <int CTA_M, int K, int D, int BN, int STAGES>
+struct B2BSmem {
+    using WeightPipeline = cutlass::PipelineTmaAsync<STAGES>;
+    static constexpr int kXnElems = CTA_M * K;
+    static constexpr int kExpandWeightElemsPerStage = K * BN + K * BN;
+    static constexpr int kWsWeightElemsPerStage = D * BN;
+    static constexpr int kTmaWeightTransactionBytes =
+        (kExpandWeightElemsPerStage + kWsWeightElemsPerStage) * static_cast<int>(sizeof(BF));
+    static constexpr int kNormParamSmemBytes = (2 * CTA_M) * static_cast<int>(sizeof(float));
+    static constexpr int kTensorSmemBytes =
+        static_cast<int>((kXnElems + STAGES * kExpandWeightElemsPerStage +
+                         STAGES * kWsWeightElemsPerStage) * sizeof(BF)) +
+        kNormParamSmemBytes;
+    static constexpr int kPipelineStorageOffsetBytes = align_up(kTensorSmemBytes, 16);
+    static constexpr int kPipelineStorageSmemBytes =
+        align_up(static_cast<int>(sizeof(typename WeightPipeline::SharedStorage)), 16);
+    static constexpr int kDynamicSmemBytes =
+        kPipelineStorageOffsetBytes + kPipelineStorageSmemBytes;
+};
+
 static_assert(kWarpgroups == 2, "cooperative CTA expects exactly two consumer warpgroups");
-static_assert(kND % kBn == 0, "ND must be divisible by BLOCK_N");
-static_assert(kTmaWeightTransactionBytes == 98304, "expected 96 KiB wa/wb/ws TMA transaction per stage");
-static_assert(kNormParamSmemBytes == 1024, "expected staged row LN parameter smem");
-static_assert(kTensorSmemBytes == 230400, "expected tensor smem without staged gamma/beta");
-static_assert(kPipelineStorageOffsetBytes == 230400, "expected 16B-aligned weight pipeline storage offset");
-static_assert(kPipelineStorageSmemBytes == 32, "expected 32B PipelineTmaAsync<2> storage");
-static_assert(kDynamicSmemBytes == 230432, "expected tensor smem plus one pipeline mbarrier set");
-static_assert(kDynamicSmemBytes <= 227 * 1024, "dynamic smem should fit H100 opt-in shared memory");
 
 inline void check_cuda(cudaError_t error, const char* message) {
     TORCH_CHECK(error == cudaSuccess, message, ": ", cudaGetErrorString(error));
@@ -144,11 +138,12 @@ __device__ __forceinline__ void global_store_u128(void* ptr, uint4 value, bool p
     );
 }
 
+template <int DN>
 __device__ __forceinline__ int output_shuffle_idx(int m, int n) {
     constexpr int kOutShuffleSwizzleGranularity = 8;
-    constexpr int kOutShuffleSwizzleMask = (kD / kOutShuffleSwizzleGranularity) - 1;
+    constexpr int kOutShuffleSwizzleMask = (DN / kOutShuffleSwizzleGranularity) - 1;
     const int row_swizzle = (m & kOutShuffleSwizzleMask) * kOutShuffleSwizzleGranularity;
-    return m * kD + (n ^ row_swizzle);
+    return m * DN + (n ^ row_swizzle);
 }
 
 template <class MMA, class Layout0>
@@ -268,7 +263,18 @@ __global__ __launch_bounds__(128, 4) void transition_b2b_scalar_kernel(
 #endif
 }
 
-template <int CTA_M, int WG_M, int BN, int STAGES, class TmaWa, class TmaWb, class TmaWs>
+template <
+    int CTA_M,
+    int WG_M,
+    int K,
+    int ND,
+    int D,
+    int BN,
+    int DN,
+    int STAGES,
+    class TmaWa,
+    class TmaWb,
+    class TmaWs>
 __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     const __nv_bfloat16* __restrict__ x_raw,
     const float* __restrict__ rstd,
@@ -285,6 +291,18 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     __grid_constant__ TmaWs const tma_ws
 ) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    using Smem = B2BSmem<CTA_M, K, D, BN, STAGES>;
+    using KernelWeightPipeline = typename Smem::WeightPipeline;
+    static_assert(ND % BN == 0, "ND must be divisible by BLOCK_N");
+    static_assert(D % DN == 0, "D must be divisible by output tile width DN");
+    static_assert(K % 8 == 0, "K must be divisible by 8 for vectorized normalization");
+    static_assert(DN % 8 == 0, "DN must be divisible by 8 for vectorized output");
+    static_assert(DN == 128, "SM90_64x128x16 squeeze atom expects a 128-column output tile");
+    static_assert(D / DN == 1 || D / DN == 2, "transition_b2b expects one or two output D tiles");
+    static_assert(Smem::kDynamicSmemBytes <= 227 * 1024,
+                  "dynamic smem should fit H100 opt-in shared memory");
+    constexpr int kNumDTiles = D / DN;
+
     const int tid = threadIdx.x;
     const int wg_id = tid / kWarpgroupThreads;
     const int wg_tid = tid - wg_id * kWarpgroupThreads;
@@ -296,15 +314,15 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     (void)wb_raw;
     (void)ws_raw;
     auto mOut = make_tensor(make_gmem_ptr(reinterpret_cast<BF*>(out_raw)),
-                            make_shape(M, Int<kD>{}),
-                            make_stride(Int<kD>{}, Int<1>{}));
+                            make_shape(M, Int<D>{}),
+                            make_stride(Int<D>{}, Int<1>{}));
 
     auto lXn = tile_to_shape(GMMA::Layout_K_SW128_Atom<BF>{},
-                             make_shape(Int<WG_M>{}, Int<kK>{}));
+                             make_shape(Int<WG_M>{}, Int<K>{}));
     auto lW = tile_to_shape(GMMA::Layout_K_SW128_Atom<BF>{},
-                            make_shape(Int<BN>{}, Int<kK>{}));
+                            make_shape(Int<BN>{}, Int<K>{}));
     auto lWs = tile_to_shape(GMMA::Layout_K_SW128_Atom<BF>{},
-                             make_shape(Int<kD>{}, Int<BN>{}));
+                             make_shape(Int<D>{}, Int<BN>{}));
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
     BF* s_base = reinterpret_cast<BF*>(smem_raw);
@@ -327,46 +345,41 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
         return make_tensor(make_smem_ptr(pWs + stage * cosize_v<decltype(lWs)>), lWs);
     };
 
-    using KernelWeightPipeline = cutlass::PipelineTmaAsync<STAGES>;
-    static_assert(cute::is_same_v<KernelWeightPipeline, WeightPipeline>);
     auto* weight_pipe_storage = reinterpret_cast<typename KernelWeightPipeline::SharedStorage*>(
-        smem_raw + kPipelineStorageOffsetBytes
+        smem_raw + Smem::kPipelineStorageOffsetBytes
     );
     typename KernelWeightPipeline::Params weight_pipe_params;
-    weight_pipe_params.transaction_bytes = kTmaWeightTransactionBytes;
+    weight_pipe_params.transaction_bytes = Smem::kTmaWeightTransactionBytes;
     weight_pipe_params.role = KernelWeightPipeline::ThreadCategory::ProducerConsumer;
     weight_pipe_params.is_leader = tid == 0;
     weight_pipe_params.num_consumers = kThreads;
     KernelWeightPipeline weight_pipe(*weight_pipe_storage, weight_pipe_params, Shape<_1, _1, _1>{});
-    typename KernelWeightPipeline::PipelineState tma_producer_state =
-        cutlass::make_producer_start_state<KernelWeightPipeline>();
-    typename KernelWeightPipeline::PipelineState tma_consumer_state;
 
     __syncthreads();
 
-    auto tmaWaTensor = tma_wa.get_tma_tensor(make_shape(Int<kND>{}, Int<kK>{}));
-    auto tmaWbTensor = tma_wb.get_tma_tensor(make_shape(Int<kND>{}, Int<kK>{}));
-    auto tmaWsTensor = tma_ws.get_tma_tensor(make_shape(Int<kD>{}, Int<kND>{}));
+    auto tmaWaTensor = tma_wa.get_tma_tensor(make_shape(Int<ND>{}, Int<K>{}));
+    auto tmaWbTensor = tma_wb.get_tma_tensor(make_shape(Int<ND>{}, Int<K>{}));
+    auto tmaWsTensor = tma_ws.get_tma_tensor(make_shape(Int<D>{}, Int<ND>{}));
     auto tmaWaSlice = tma_wa.get_slice(Int<0>{});
     auto tmaWbSlice = tma_wb.get_slice(Int<0>{});
     auto tmaWsSlice = tma_ws.get_slice(Int<0>{});
 
-    auto issue_tma_weight_stage = [&](int stage, int nd_base) {
+    auto issue_tma_weight_stage = [&](auto& producer_state, int stage, int nd_base) {
         if (tid == 0) {
-            weight_pipe.producer_acquire(tma_producer_state);
+            weight_pipe.producer_acquire(producer_state);
             using BarrierType = typename KernelWeightPipeline::ProducerBarrierType;
-            BarrierType* tma_barrier = weight_pipe.producer_get_barrier(tma_producer_state);
+            BarrierType* tma_barrier = weight_pipe.producer_get_barrier(producer_state);
 
-            auto gWa = local_tile(tmaWaTensor, make_shape(Int<BN>{}, Int<kK>{}), make_coord(nd_base / BN, 0));
-            auto gWb = local_tile(tmaWbTensor, make_shape(Int<BN>{}, Int<kK>{}), make_coord(nd_base / BN, 0));
-            auto gWs = local_tile(tmaWsTensor, make_shape(Int<kD>{}, Int<BN>{}), make_coord(0, nd_base / BN));
+            auto gWa = local_tile(tmaWaTensor, make_shape(Int<BN>{}, Int<K>{}), make_coord(nd_base / BN, 0));
+            auto gWb = local_tile(tmaWbTensor, make_shape(Int<BN>{}, Int<K>{}), make_coord(nd_base / BN, 0));
+            auto gWs = local_tile(tmaWsTensor, make_shape(Int<D>{}, Int<BN>{}), make_coord(0, nd_base / BN));
 
             copy(tma_wa.with(*tma_barrier), tmaWaSlice.partition_S(gWa), tmaWaSlice.partition_D(sWa(stage)));
             copy(tma_wb.with(*tma_barrier), tmaWbSlice.partition_S(gWb), tmaWbSlice.partition_D(sWb(stage)));
             copy(tma_ws.with(*tma_barrier), tmaWsSlice.partition_S(gWs), tmaWsSlice.partition_D(sWs(stage)));
             // PipelineTmaAsync: producer_acquire set expect_tx; the TMA copies auto-arrive on the
             // barrier with their transaction bytes -> no explicit producer_commit needed.
-            ++tma_producer_state;
+            ++producer_state;
         }
     };
 
@@ -377,10 +390,10 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     }
 
     static constexpr int kXVecElems = 8;
-    static_assert(kK % kXVecElems == 0, "x vectorization requires kK to be divisible by 8");
+    static_assert(K % kXVecElems == 0, "x vectorization requires K to be divisible by 8");
     static_assert((kXVecElems * sizeof(__nv_bfloat16)) == sizeof(uint4), "x vector must be 128-bit");
     static_assert((kXVecElems * sizeof(BF)) == sizeof(uint4), "BF x vector must be 128-bit");
-    static_assert((kWarpgroupThreads * kXVecElems) % kK == 0,
+    static_assert((kWarpgroupThreads * kXVecElems) % K == 0,
                   "each normalization thread must keep a fixed k-slice");
     union XnVec {
         uint4 vec;
@@ -388,21 +401,24 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     };
 
     auto stage_x_into_sxn = [&]() {
-        for (int vec = wg_tid; vec < (WG_M * kK) / kXVecElems; vec += kWarpgroupThreads) {
+        for (int vec = wg_tid; vec < (WG_M * K) / kXVecElems; vec += kWarpgroupThreads) {
             const int idx = vec * kXVecElems;
-            const int m = idx / kK;
-            const int k0 = idx - m * kK;
+            const int m = idx / K;
+            const int k0 = idx - m * K;
             const int64_t row = static_cast<int64_t>(wg_row0 + m);
             const bool valid = row < M;
-            const __nv_bfloat16* src = valid ? x_raw + row * kK + k0 : x_raw;
+            const __nv_bfloat16* src = valid ? x_raw + row * K + k0 : x_raw;
             cp_async_16(&sXn(m, k0), src, valid);
         }
     };
 
+    typename KernelWeightPipeline::PipelineState first_d_tma_producer_state =
+        cutlass::make_producer_start_state<KernelWeightPipeline>();
     CUTE_UNROLL
     for (int stage = 0; stage < STAGES - 1; ++stage) {
-        issue_tma_weight_stage(stage, stage * BN);
+        issue_tma_weight_stage(first_d_tma_producer_state, stage, stage * BN);
     }
+
     stage_x_into_sxn();
     cp_async_fence();
 
@@ -417,7 +433,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     cp_async_wait<0>();
     const BF* g_bf = reinterpret_cast<const BF*>(g_raw);
     const BF* beta_bf = reinterpret_cast<const BF*>(beta_raw);
-    const int param_k0 = (wg_tid % (kK / kXVecElems)) * kXVecElems;
+    const int param_k0 = (wg_tid % (K / kXVecElems)) * kXVecElems;
     BF gamma_reg[kXVecElems];
     BF beta_reg[kXVecElems];
     CUTE_UNROLL
@@ -425,10 +441,10 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
         gamma_reg[i] = g_bf[param_k0 + i];
         beta_reg[i] = beta_bf[param_k0 + i];
     }
-    for (int vec = wg_tid; vec < (WG_M * kK) / kXVecElems; vec += kWarpgroupThreads) {
+    for (int vec = wg_tid; vec < (WG_M * K) / kXVecElems; vec += kWarpgroupThreads) {
         const int idx = vec * kXVecElems;
-        const int m = idx / kK;
-        const int k0 = idx - m * kK;
+        const int m = idx / K;
+        const int k0 = idx - m * K;
         const int64_t row = static_cast<int64_t>(wg_row0 + m);
         const bool valid = row < M;
         const int cta_m = wg_id * WG_M + m;
@@ -452,126 +468,166 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     }
     cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
 
-    using MmaExpandOp = SM90_64x128x16_F32BF16BF16_SS<GMMA::Major::K, GMMA::Major::K>;
+    using MmaExpandOp = std::conditional_t<
+        BN == 64,
+        SM90_64x64x16_F32BF16BF16_SS<GMMA::Major::K, GMMA::Major::K>,
+        SM90_64x128x16_F32BF16BF16_SS<GMMA::Major::K, GMMA::Major::K>>;
     using MmaSqueezeOp = SM90_64x128x16_F32BF16BF16_RS<GMMA::Major::K, GMMA::Major::K>;
     TiledMMA mmaE = make_tiled_mma(MmaExpandOp{});
     TiledMMA mmaS = make_tiled_mma(MmaSqueezeOp{});
     auto thrE = mmaE.get_slice(wg_tid);
     auto thrS = mmaS.get_slice(wg_tid);
 
-    auto gOut = local_tile(mOut, make_shape(Int<WG_M>{}, Int<kD>{}),
-                           make_coord(blockIdx.x * kWarpgroups + wg_id, 0));
-    auto cOut = make_identity_tensor(make_shape(Int<WG_M>{}, Int<kD>{}));
-    auto tGOut = thrS.partition_C(gOut);
+    auto cOut = make_identity_tensor(make_shape(Int<WG_M>{}, Int<DN>{}));
     auto tCOut = thrS.partition_C(cOut);
-    auto out_acc = thrS.make_fragment_C(tGOut);
-    clear(out_acc);
-    warpgroup_fence_operand(out_acc);
+    auto gOut0 = local_tile(mOut, make_shape(Int<WG_M>{}, Int<DN>{}),
+                            make_coord(blockIdx.x * kWarpgroups + wg_id, 0));
+    auto tGOut0 = thrS.partition_C(gOut0);
+    auto out_acc0 = thrS.make_fragment_C(tGOut0);
+    clear(out_acc0);
+    warpgroup_fence_operand(out_acc0);
 
-    CUTE_NO_UNROLL
-    for (int nd_base = 0, chunk = 0; nd_base < kND; nd_base += BN, ++chunk) {
-        const int read_stage = chunk % STAGES;
-        const int write_stage = (chunk + STAGES - 1) % STAGES;
-        const int prefetch_nd = nd_base + (STAGES - 1) * BN;
-
-        if (prefetch_nd < kND) {
-            issue_tma_weight_stage(write_stage, prefetch_nd);
-        }
-        weight_pipe.consumer_wait(tma_consumer_state);
-
-        auto a_acc = partition_fragment_C(mmaE, make_shape(Int<WG_M>{}, Int<BN>{}));
-        auto b_acc = partition_fragment_C(mmaE, make_shape(Int<WG_M>{}, Int<BN>{}));
-        clear(a_acc);
-        clear(b_acc);
-
-        auto tXnA = thrE.make_fragment_A(thrE.partition_A(sXn));
-        auto tWaB = thrE.make_fragment_B(thrE.partition_B(sWa(read_stage)));
-        auto tWbB = thrE.make_fragment_B(thrE.partition_B(sWb(read_stage)));
-
-        warpgroup_fence_operand(a_acc);
-        warpgroup_arrive();
-        cute::gemm(mmaE, tXnA, tWaB, a_acc);
-        warpgroup_commit_batch();
-
-        warpgroup_fence_operand(b_acc);
-        warpgroup_arrive();
-        cute::gemm(mmaE, tXnA, tWbB, b_acc);
-        warpgroup_commit_batch();
-        warpgroup_wait<0>();
-        warpgroup_fence_operand(a_acc);
-        warpgroup_fence_operand(b_acc);
-
-        auto h_acc = make_fragment_like(a_acc);
+    auto store_output_tile = [&](auto& out_acc, int d_tile) {
+        BF* pOutShuffle = pWa + wg_id * (WG_M * DN);
+        static_assert(kWarpgroups * WG_M * DN <= cosize_v<decltype(lW)>,
+                      "output shuffle tiles must fit in one pWa stage after the ND loop");
+        static_assert((DN % kXVecElems) == 0, "output vectorization requires DN divisible by 8");
+        static_assert((kXVecElems * sizeof(BF)) == sizeof(uint4), "output vector must be 128-bit");
+        static_assert((DN / kXVecElems) >= 1, "output swizzle requires at least one vector per row");
+        union OutPair {
+            uint32_t u32;
+            BF bf[2];
+        };
 
         CUTE_UNROLL
-        for (int i = 0; i < size(a_acc); ++i) {
-            const float a = a_acc(i);
-            const float b = b_acc(i);
-            h_acc(i) = a * sigmoidf_fast(a) * b;
+        for (int i = 0; i < size(out_acc); i += 2) {
+            const int m = get<0>(tCOut(i));
+            const int n = get<1>(tCOut(i));
+            const int m_next = get<0>(tCOut(i + 1));
+            const int n_next = get<1>(tCOut(i + 1));
+            if (m_next == m && n_next == n + 1 && (n % 2) == 0) {
+                OutPair pair;
+                pair.bf[0] = static_cast<BF>(out_acc(i));
+                pair.bf[1] = static_cast<BF>(out_acc(i + 1));
+                smem_store_u32(pOutShuffle + output_shuffle_idx<DN>(m, n), pair.u32);
+            } else {
+                pOutShuffle[output_shuffle_idx<DN>(m, n)] = static_cast<BF>(out_acc(i));
+                pOutShuffle[output_shuffle_idx<DN>(m_next, n_next)] = static_cast<BF>(out_acc(i + 1));
+            }
         }
+        cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
 
-        auto h_bf = make_fragment_like<BF>(h_acc);
+        constexpr int kOutVecsPerRow = DN / kXVecElems;
         CUTE_UNROLL
-        for (int i = 0; i < size(h_acc); ++i) {
-            h_bf(i) = static_cast<BF>(h_acc(i));
+        for (int vec = wg_tid; vec < WG_M * kOutVecsPerRow; vec += kWarpgroupThreads) {
+            const int m = vec / kOutVecsPerRow;
+            const int n = (vec - m * kOutVecsPerRow) * kXVecElems;
+            const int64_t row = static_cast<int64_t>(wg_row0 + m);
+            const bool valid = row < M;
+            uint4 out_vec = smem_load_u128(pOutShuffle + output_shuffle_idx<DN>(m, n));
+            __nv_bfloat16* dst = valid ? out_raw + row * D + d_tile * DN + n : out_raw;
+            global_store_u128(dst, out_vec, valid);
         }
-
-        auto h_frag = make_tensor(h_bf.data(), convert_layout_acc_Aregs<MmaSqueezeOp>(a_acc.layout()));
-        auto tWsB = thrS.make_fragment_B(thrS.partition_B(sWs(read_stage)));
-        CUTE_STATIC_ASSERT_V(size<2>(h_frag) == size<2>(tWsB));
-        auto h_frag_regs = recast<uint32_t>(h_frag(_, _, Int<0>{}));
-        static constexpr int kSqueezeRegNumA = extent<typename MmaSqueezeOp::ARegisters>::value;
-        CUTE_STATIC_ASSERT_V(size(h_frag_regs) == Int<kSqueezeRegNumA>{});
-
-        warpgroup_arrive();
-        cute::gemm(mmaS, h_frag, tWsB, out_acc);
-        warpgroup_commit_batch();
-        weight_pipe.consumer_release(tma_consumer_state);
-        ++tma_consumer_state;
-    }
-
-    warpgroup_wait<0>();
-    warpgroup_fence_operand(out_acc);
-
-    BF* pOutShuffle = pXnWg;
-    static_assert(kD == kK, "pXn reuse assumes the output tile and xn tile have equal row width");
-    static_assert(WG_M * kD <= cosize_v<decltype(lXn)>, "output shuffle tile must fit in pXnWg");
-    static_assert((kD % kXVecElems) == 0, "output vectorization requires D divisible by 8");
-    static_assert((kXVecElems * sizeof(BF)) == sizeof(uint4), "output vector must be 128-bit");
-    static_assert((kD / kXVecElems) == 16, "output swizzle assumes sixteen 8-bf16 chunks per row");
-    union OutPair {
-        uint32_t u32;
-        BF bf[2];
+        cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
     };
 
-    CUTE_UNROLL
-    for (int i = 0; i < size(out_acc); i += 2) {
-        const int m = get<0>(tCOut(i));
-        const int n = get<1>(tCOut(i));
-        const int m_next = get<0>(tCOut(i + 1));
-        const int n_next = get<1>(tCOut(i + 1));
-        if (m_next == m && n_next == n + 1 && (n % 2) == 0) {
-            OutPair pair;
-            pair.bf[0] = static_cast<BF>(out_acc(i));
-            pair.bf[1] = static_cast<BF>(out_acc(i + 1));
-            smem_store_u32(pOutShuffle + output_shuffle_idx(m, n), pair.u32);
-        } else {
-            pOutShuffle[output_shuffle_idx(m, n)] = static_cast<BF>(out_acc(i));
-            pOutShuffle[output_shuffle_idx(m_next, n_next)] = static_cast<BF>(out_acc(i + 1));
-        }
-    }
-    cutlass::arch::NamedBarrier::arrive_and_wait(kWarpgroupThreads, wg_barrier_id);
+    auto run_nd_loop = [&](auto& out_acc_first, auto& out_acc_second) {
+        typename KernelWeightPipeline::PipelineState tma_producer_state = first_d_tma_producer_state;
+        typename KernelWeightPipeline::PipelineState tma_consumer_state;
 
-    constexpr int kOutVecsPerRow = kD / kXVecElems;
-    CUTE_UNROLL
-    for (int vec = wg_tid; vec < WG_M * kOutVecsPerRow; vec += kWarpgroupThreads) {
-        const int m = vec / kOutVecsPerRow;
-        const int n = (vec - m * kOutVecsPerRow) * kXVecElems;
-        const int64_t row = static_cast<int64_t>(wg_row0 + m);
-        const bool valid = row < M;
-        uint4 out_vec = smem_load_u128(pOutShuffle + output_shuffle_idx(m, n));
-        __nv_bfloat16* dst = valid ? out_raw + row * kD + n : out_raw;
-        global_store_u128(dst, out_vec, valid);
+        CUTE_NO_UNROLL
+        for (int nd_base = 0, chunk = 0; nd_base < ND; nd_base += BN, ++chunk) {
+            const int read_stage = chunk % STAGES;
+            const int write_stage = (chunk + STAGES - 1) % STAGES;
+            const int prefetch_nd = nd_base + (STAGES - 1) * BN;
+
+            if (prefetch_nd < ND) {
+                issue_tma_weight_stage(tma_producer_state, write_stage, prefetch_nd);
+            }
+            weight_pipe.consumer_wait(tma_consumer_state);
+
+            auto a_acc = partition_fragment_C(mmaE, make_shape(Int<WG_M>{}, Int<BN>{}));
+            auto b_acc = partition_fragment_C(mmaE, make_shape(Int<WG_M>{}, Int<BN>{}));
+            clear(a_acc);
+            clear(b_acc);
+
+            auto tXnA = thrE.make_fragment_A(thrE.partition_A(sXn));
+            auto tWaB = thrE.make_fragment_B(thrE.partition_B(sWa(read_stage)));
+            auto tWbB = thrE.make_fragment_B(thrE.partition_B(sWb(read_stage)));
+
+            warpgroup_fence_operand(a_acc);
+            warpgroup_arrive();
+            cute::gemm(mmaE, tXnA, tWaB, a_acc);
+            warpgroup_commit_batch();
+
+            warpgroup_fence_operand(b_acc);
+            warpgroup_arrive();
+            cute::gemm(mmaE, tXnA, tWbB, b_acc);
+            warpgroup_commit_batch();
+            warpgroup_wait<0>();
+            warpgroup_fence_operand(a_acc);
+            warpgroup_fence_operand(b_acc);
+
+            auto h_acc = make_fragment_like(a_acc);
+
+            CUTE_UNROLL
+            for (int i = 0; i < size(a_acc); ++i) {
+                const float a = a_acc(i);
+                const float b = b_acc(i);
+                h_acc(i) = a * sigmoidf_fast(a) * b;
+            }
+
+            auto h_bf = make_fragment_like<BF>(h_acc);
+            CUTE_UNROLL
+            for (int i = 0; i < size(h_acc); ++i) {
+                h_bf(i) = static_cast<BF>(h_acc(i));
+            }
+
+            auto h_frag = make_tensor(h_bf.data(), convert_layout_acc_Aregs<MmaSqueezeOp>(a_acc.layout()));
+            auto sWs0 = local_tile(sWs(read_stage), make_shape(Int<DN>{}, Int<BN>{}), make_coord(0, 0));
+            auto tWsB0 = thrS.make_fragment_B(thrS.partition_B(sWs0));
+            CUTE_STATIC_ASSERT_V(size<2>(h_frag) == size<2>(tWsB0));
+            auto h_frag_regs = recast<uint32_t>(h_frag(_, _, Int<0>{}));
+            static constexpr int kSqueezeRegNumA = extent<typename MmaSqueezeOp::ARegisters>::value;
+            CUTE_STATIC_ASSERT_V(size(h_frag_regs) == Int<kSqueezeRegNumA>{});
+
+            warpgroup_arrive();
+            cute::gemm(mmaS, h_frag, tWsB0, out_acc_first);
+            warpgroup_commit_batch();
+
+            if constexpr (kNumDTiles == 2) {
+                auto sWs1 = local_tile(sWs(read_stage), make_shape(Int<DN>{}, Int<BN>{}), make_coord(1, 0));
+                auto tWsB1 = thrS.make_fragment_B(thrS.partition_B(sWs1));
+                CUTE_STATIC_ASSERT_V(size<2>(h_frag) == size<2>(tWsB1));
+                warpgroup_arrive();
+                cute::gemm(mmaS, h_frag, tWsB1, out_acc_second);
+                warpgroup_commit_batch();
+            }
+
+            weight_pipe.consumer_release(tma_consumer_state);
+            ++tma_consumer_state;
+        }
+    };
+
+    if constexpr (kNumDTiles == 2) {
+        auto gOut1 = local_tile(mOut, make_shape(Int<WG_M>{}, Int<DN>{}),
+                                make_coord(blockIdx.x * kWarpgroups + wg_id, 1));
+        auto tGOut1 = thrS.partition_C(gOut1);
+        auto out_acc1 = thrS.make_fragment_C(tGOut1);
+        clear(out_acc1);
+        warpgroup_fence_operand(out_acc1);
+
+        run_nd_loop(out_acc0, out_acc1);
+        warpgroup_wait<0>();
+        warpgroup_fence_operand(out_acc0);
+        warpgroup_fence_operand(out_acc1);
+        store_output_tile(out_acc0, 0);
+        store_output_tile(out_acc1, 1);
+    } else {
+        run_nd_loop(out_acc0, out_acc0);
+        warpgroup_wait<0>();
+        warpgroup_fence_operand(out_acc0);
+        store_output_tile(out_acc0, 0);
     }
 #else
     (void)x_raw;
@@ -636,21 +692,33 @@ void check_transition_b2b_inputs(
     TORCH_CHECK(rstd.scalar_type() == torch::ScalarType::Float, "rstd must be fp32");
     TORCH_CHECK(c1.scalar_type() == torch::ScalarType::Float, "c1 must be fp32");
 
-    TORCH_CHECK(x.dim() == 2 && x.size(1) == kK, "x must have shape (M, 128)");
+    TORCH_CHECK(x.dim() == 2, "x must have shape (M, K)");
+    const int64_t K = x.size(1);
+    TORCH_CHECK(K == 128 || K == 256, "transition_b2b CUDA path supports K=128 or K=256");
     TORCH_CHECK(rstd.dim() == 1 && rstd.size(0) == x.size(0), "rstd must have shape (M,)");
     TORCH_CHECK(c1.dim() == 1 && c1.size(0) == x.size(0), "c1 must have shape (M,)");
-    TORCH_CHECK(g.dim() == 1 && g.size(0) == kK, "g must have shape (128,)");
-    TORCH_CHECK(beta.dim() == 1 && beta.size(0) == kK, "beta must have shape (128,)");
-    TORCH_CHECK(wa.dim() == 2 && wa.size(0) == kND && wa.size(1) == kK, "wa must have shape (512, 128)");
-    TORCH_CHECK(wb.sizes() == wa.sizes(), "wb must have shape (512, 128)");
-    TORCH_CHECK(ws.dim() == 2 && ws.size(0) == kD && ws.size(1) == kND, "ws must have shape (128, 512)");
+    TORCH_CHECK(g.dim() == 1 && g.size(0) == K, "g must have shape (K,)");
+    TORCH_CHECK(beta.dim() == 1 && beta.size(0) == K, "beta must have shape (K,)");
+    TORCH_CHECK(wa.dim() == 2 && wa.size(1) == K, "wa must have shape (ND, K)");
+    TORCH_CHECK(wb.sizes() == wa.sizes(), "wb must have shape (ND, K)");
+    TORCH_CHECK(ws.dim() == 2, "ws must have shape (D, ND)");
+    const int64_t ND = wa.size(0);
+    const int64_t D = ws.size(0);
+    TORCH_CHECK(ws.size(1) == ND, "ws must have shape (D, ND)");
+    TORCH_CHECK(D == K, "transition_b2b CUDA path requires D == K");
+    TORCH_CHECK(ND == 4 * K, "transition_b2b CUDA path requires n=4, i.e. ND == 4*K");
+    TORCH_CHECK(
+        (K == 128 && ND == 512 && D == 128) || (K == 256 && ND == 1024 && D == 256),
+        "transition_b2b CUDA path supports (K,ND,D) = (128,512,128) or (256,1024,256)"
+    );
 }
 
 }  // namespace b2b_detail
 
 using namespace b2b_detail;
 
-torch::Tensor transition_b2b_fwd(
+template <int K, int ND, int D, int CTA_M, int WG_M, int BN, int DN, int STAGES>
+void launch_transition_b2b_kernel(
     const torch::Tensor& x,
     const torch::Tensor& rstd,
     const torch::Tensor& c1,
@@ -658,43 +726,39 @@ torch::Tensor transition_b2b_fwd(
     const torch::Tensor& beta,
     const torch::Tensor& wa,
     const torch::Tensor& wb,
-    const torch::Tensor& ws
+    const torch::Tensor& ws,
+    torch::Tensor& out,
+    int64_t M,
+    cudaStream_t stream
 ) {
-    check_transition_b2b_inputs(x, rstd, c1, g, beta, wa, wb, ws);
+    using Smem = B2BSmem<CTA_M, K, D, BN, STAGES>;
+    static_assert(Smem::kDynamicSmemBytes <= 227 * 1024,
+                  "dynamic smem should fit H100 opt-in shared memory");
 
-    c10::cuda::CUDAGuard device_guard(x.device());
-    auto out = torch::empty({x.size(0), kD}, x.options());
-    const int64_t M = x.size(0);
-    if (M == 0) {
-        return out;
-    }
-    TORCH_CHECK(M % kBlockM == 0, "transition_b2b CUDA path requires M to be divisible by 128");
-
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     auto lW = tile_to_shape(GMMA::Layout_K_SW128_Atom<BF>{},
-                            make_shape(Int<kBn>{}, Int<kK>{}));
+                            make_shape(Int<BN>{}, Int<K>{}));
     auto lWs = tile_to_shape(GMMA::Layout_K_SW128_Atom<BF>{},
-                             make_shape(Int<kD>{}, Int<kBn>{}));
+                             make_shape(Int<D>{}, Int<BN>{}));
     auto mWaTma = make_tensor(make_gmem_ptr(reinterpret_cast<const BF*>(wa.data_ptr<at::BFloat16>())),
-                              make_shape(Int<kND>{}, Int<kK>{}),
-                              make_stride(Int<kK>{}, Int<1>{}));
+                              make_shape(Int<ND>{}, Int<K>{}),
+                              make_stride(Int<K>{}, Int<1>{}));
     auto mWbTma = make_tensor(make_gmem_ptr(reinterpret_cast<const BF*>(wb.data_ptr<at::BFloat16>())),
-                              make_shape(Int<kND>{}, Int<kK>{}),
-                              make_stride(Int<kK>{}, Int<1>{}));
+                              make_shape(Int<ND>{}, Int<K>{}),
+                              make_stride(Int<K>{}, Int<1>{}));
     auto mWsTma = make_tensor(make_gmem_ptr(reinterpret_cast<const BF*>(ws.data_ptr<at::BFloat16>())),
-                              make_shape(Int<kD>{}, Int<kND>{}),
-                              make_stride(Int<kND>{}, Int<1>{}));
+                              make_shape(Int<D>{}, Int<ND>{}),
+                              make_stride(Int<ND>{}, Int<1>{}));
     auto tma_wa = make_tma_copy(SM90_TMA_LOAD{}, mWaTma, lW,
-                                make_shape(Int<kBn>{}, Int<kK>{}), Int<1>{});
+                                make_shape(Int<BN>{}, Int<K>{}), Int<1>{});
     auto tma_wb = make_tma_copy(SM90_TMA_LOAD{}, mWbTma, lW,
-                                make_shape(Int<kBn>{}, Int<kK>{}), Int<1>{});
+                                make_shape(Int<BN>{}, Int<K>{}), Int<1>{});
     auto tma_ws = make_tma_copy(SM90_TMA_LOAD{}, mWsTma, lWs,
-                                make_shape(Int<kD>{}, Int<kBn>{}), Int<1>{});
+                                make_shape(Int<D>{}, Int<BN>{}), Int<1>{});
 
     auto* kernel = transition_b2b_rs_wgmma_kernel<
-        kBlockM, kWarpgroupM, kBn, kPipelineStages, decltype(tma_wa), decltype(tma_wb), decltype(tma_ws)>;
+        CTA_M, WG_M, K, ND, D, BN, DN, STAGES, decltype(tma_wa), decltype(tma_wb), decltype(tma_ws)>;
     check_cuda(
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kDynamicSmemBytes),
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Smem::kDynamicSmemBytes),
         "transition_b2b_rs_wgmma_kernel dynamic shared-memory attribute failed"
     );
     check_cuda(
@@ -702,9 +766,9 @@ torch::Tensor transition_b2b_fwd(
         "transition_b2b_rs_wgmma_kernel shared-memory carveout attribute failed"
     );
 
-    const dim3 grid(static_cast<unsigned int>((M + kBlockM - 1) / kBlockM));
+    const dim3 grid(static_cast<unsigned int>((M + CTA_M - 1) / CTA_M));
     const dim3 block(kThreads);
-    kernel<<<grid, block, kDynamicSmemBytes, stream>>>(
+    kernel<<<grid, block, Smem::kDynamicSmemBytes, stream>>>(
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
         rstd.data_ptr<float>(),
         c1.data_ptr<float>(),
@@ -720,6 +784,45 @@ torch::Tensor transition_b2b_fwd(
         tma_ws
     );
     check_cuda(cudaGetLastError(), "transition_b2b_rs_wgmma_kernel launch failed");
+}
+
+torch::Tensor transition_b2b_fwd(
+    const torch::Tensor& x,
+    const torch::Tensor& rstd,
+    const torch::Tensor& c1,
+    const torch::Tensor& g,
+    const torch::Tensor& beta,
+    const torch::Tensor& wa,
+    const torch::Tensor& wb,
+    const torch::Tensor& ws
+) {
+    check_transition_b2b_inputs(x, rstd, c1, g, beta, wa, wb, ws);
+
+    c10::cuda::CUDAGuard device_guard(x.device());
+    const int64_t K = x.size(1);
+    const int64_t ND = wa.size(0);
+    const int64_t D = ws.size(0);
+    auto out = torch::empty({x.size(0), D}, x.options());
+    const int64_t M = x.size(0);
+    if (M == 0) {
+        return out;
+    }
+    TORCH_CHECK(M % kBlockM == 0, "transition_b2b CUDA path requires M to be divisible by 128");
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    if (K == 128 && ND == 512 && D == 128) {
+        launch_transition_b2b_kernel<
+            128, 512, 128, kBlockM, kWarpgroupM, kBn, kDn, kPipelineStages>(
+            x, rstd, c1, g, beta, wa, wb, ws, out, M, stream
+        );
+    } else if (K == 256 && ND == 1024 && D == 256) {
+        launch_transition_b2b_kernel<
+            256, 1024, 256, kBlockM, kWarpgroupM, 64, kDn, kPipelineStagesD256>(
+            x, rstd, c1, g, beta, wa, wb, ws, out, M, stream
+        );
+    } else {
+        TORCH_CHECK(false, "unsupported transition_b2b CUDA shape");
+    }
     return out;
 }
 

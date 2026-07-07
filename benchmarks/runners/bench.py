@@ -974,8 +974,12 @@ def bench_transition(
         item.grad = None
 
     if spec.impl == ImplementationType.CUEQUIVARIANCE:
-        if not is_inference_mode(conf.mode) and conf.d_pair >= 256:
-            execution_path = "module.reference.torch.dispatch_fallback"
+        # transition has no cuequivariance kernel; MiniWorld dispatches to the fastest per d.
+        # Training now runs real kernels (no torch fallback): d<=256 b2b, d=512 cute fwd+triton bwd.
+        if not is_inference_mode(conf.mode) and conf.d_pair >= 512:
+            execution_path = "kernels.transition.cute.forward+triton.backward"
+        elif not is_inference_mode(conf.mode) and conf.d_pair >= 256:
+            execution_path = "kernels.transition.triton.fused"
         else:
             execution_path = (
                 "kernels.transition.cute.fused"

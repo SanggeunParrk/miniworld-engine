@@ -844,36 +844,40 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         x2 = x2.contiguous()
 
         xn = None
-        if K <= _B2B_MAX_K:
-            # Back-to-back fused: squeeze folded in, h never materialized in HBM.
-            if (
-                (not save_xn)
-                and _cuda_b2b_train_enabled()
-                and K == 128 and n == 4
-                and x2.dtype == torch.bfloat16
-                and x2.is_cuda
-                and x2.shape[0] % 128 == 0
-            ):
-                # Single memory-light training path: reuse the FAST inference b2b CUDA kernel
-                # (~1.29x vs triton) for the forward. Version A (save_xn=False) saves no xn, so
-                # the backward recomputes it — the CUDA kernel emits nothing beyond `out`.
-                # stats are needed by the backward anyway, so stats_triton is not extra work.
-                rstd, c1 = stats_triton(x2, eps)
-                try:
-                    from miniworld_kernels.kernels.transition.cuda import transition_b2b_fwd
-                    out = transition_b2b_fwd(
-                        x2, rstd, c1,
-                        ln_weight.contiguous(), ln_bias.contiguous(),
-                        expand_a_weight.contiguous(), expand_b_weight.contiguous(),
-                        squeeze_weight.contiguous(),
-                    )
-                except Exception:  # noqa: BLE001  build unavailable -> triton fallback
-                    out = transition_b2b(
-                        x2, ln_weight, ln_bias,
-                        expand_a_weight, expand_b_weight, squeeze_weight, eps,
-                        stats=(rstd, c1), save_xn=False, fuse_stats=False,
-                    )
-            elif _transition_fuse_stats_enabled():
+        # Memory-light training path: reuse the FAST inference hand-CUDA b2b forward (fused
+        # squeeze, h never in HBM) for d<=256 where it fits smem (d=128 ~1.29x vs triton,
+        # d=256 confirmed). Version A (save_xn=False) saves no xn, so the shape-general
+        # backward recomputes it — the CUDA kernel emits nothing beyond `out`. stats are needed
+        # by the backward anyway, so stats_triton is not extra work. This gate is INDEPENDENT of
+        # _B2B_MAX_K (the triton-b2b smem bound); on any failure we fall back to the split.
+        cuda_b2b_ok = (
+            (not save_xn)
+            and _cuda_b2b_train_enabled()
+            and n == 4
+            and K in (128, 256)
+            and x2.dtype == torch.bfloat16
+            and x2.is_cuda
+            and x2.shape[0] % 128 == 0
+        )
+        if cuda_b2b_ok:
+            rstd, c1 = stats_triton(x2, eps)
+            try:
+                from miniworld_kernels.kernels.transition.cuda import transition_b2b_fwd
+                out = transition_b2b_fwd(
+                    x2, rstd, c1,
+                    ln_weight.contiguous(), ln_bias.contiguous(),
+                    expand_a_weight.contiguous(), expand_b_weight.contiguous(),
+                    squeeze_weight.contiguous(),
+                )
+            except Exception:  # noqa: BLE001  build unavailable -> split fallback (always fits)
+                expand = transition_expand_gate(
+                    x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
+                    stats=(rstd, c1), save_xn=False,
+                )
+                out = torch.matmul(expand, squeeze_weight.T)
+        elif K <= _B2B_MAX_K:
+            # Back-to-back fused (triton): squeeze folded in, h never materialized in HBM.
+            if _transition_fuse_stats_enabled():
                 res = transition_b2b(
                     x2, ln_weight, ln_bias,
                     expand_a_weight, expand_b_weight, squeeze_weight, eps,
