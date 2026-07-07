@@ -31,9 +31,9 @@ import torch.nn as nn
 from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
 from miniworld_kernels.kernels.layernorm_linear.te_style import _te_backward, _te_forward
 from miniworld_kernels.kernels.trimul_inproj.cute.front_train_sm100 import (
-    prepack_lr_operand_sm100, trimul_front_sm100_train,
+    prepack_lr_operand_sm100, trimul_front_sm100_train_sig,
 )
-from miniworld_kernels.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
+from miniworld_kernels.kernels.trimul_inproj.triton.back_fused import front_bwd_dW_sig
 from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew, gate_elem_triton,
 )
@@ -50,7 +50,7 @@ class BidirBackHalfSm100(torch.autograd.Function):
         B, L, _, D = x_n.shape
         M = B * L * L
         H = 2 * h
-        left, right, preact = trimul_front_sm100_train(x_n, b_lr, H)  # bdll, 0 transposes
+        left, right, sg = trimul_front_sm100_train_sig(x_n, b_lr, H)  # bdll, 0 transposes; sg=σ(gate)
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
         tri = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)  # (H, L, L)
@@ -60,14 +60,14 @@ class BidirBackHalfSm100(torch.autograd.Function):
         proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
         y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-                              preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
+                              sg, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h = eps, h
         return y.reshape(B, L, L, D)
 
     @staticmethod
     def backward(ctx, gy):
         (x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-         preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
+         sg, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
         B, L, _, D = x_n.shape
         M = B * L * L
         h = ctx.h
@@ -98,8 +98,8 @@ class BidirBackHalfSm100(torch.autograd.Function):
 
         # front bwd, then dxn = (dconcᵀ@W_stack) + (d_glogit@Wgᵀ) with the gate's dx_gate add
         # FUSED into one cuBLAS addmm epilogue (== v12 single-dir). dW stays cuBLAS.
-        dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
-            d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+        dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW_sig(
+            d_left, d_right, lf, rf, sg, x_n, WL, WLg, WR, WRg)
         dx_n = torch.mm(d_glogit, Wg.t())                         # (M, D) gate term
         dx_n.addmm_(dconc.t(), W_stack)                           # += dconcᵀ@W_stack, in-place
         dx_n = dx_n.reshape(B, L, L, D)
