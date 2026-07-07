@@ -47,6 +47,7 @@ src/**/benchmark/
 _ct_tmp/
 _trans_tmp/
 experiments/
+scratchpad_ncu/
 third_party/ct_cutlass_workbench/*.out
 third_party/ct_cutlass_workbench/*.so
 
