@@ -77,6 +77,17 @@ def _fp32_matmul_ctx(dtype):
 _LN_CONFIGS = [
     triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
     for bm in (8, 16, 32, 64, 128) for nw in (4, 8, 16) for ns in (2, 3, 4)
+] + [
+    # maxnreg-capped variants (te_ln_bwd_b200 v2). The m-major LN_out backward
+    # (`_ln_bwd_kernel`) hits 255 regs/thread -> only 2 resident blocks/SM (occupancy-bound,
+    # not bandwidth: DRAM ~26%). Capping registers ~168 (= the contiguous LN_in case's reg
+    # count, which reaches 3 blocks/SM) trades a few spills for the 3rd resident block ->
+    # higher warp occupancy -> hides the load->reduce->dx latency chain. Measured +5-7% on
+    # `_ln_bwd_kernel` @ L=768/1024 (bf16, uniform m-major); precision-neutral (register
+    # ALLOCATION only, math identical, dx/dγ/dβ cos 0.999999). The autotuner keeps None when
+    # the cap doesn't win (e.g. the fwd `_ln_mat_kernel` and small L), so this only adds.
+    triton.Config({"BLOCK_M": bm}, num_warps=4, num_stages=ns, maxnreg=mr)
+    for bm in (32, 64, 128) for ns in (2, 4) for mr in (128, 168)
 ]
 
 
@@ -201,7 +212,13 @@ def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias):
     dW uses the SAVED x_normed directly (TE-style) — no T-decomposition / elementwise tail."""
     dY = dY.contiguous() if dY.stride(-1) != 1 else dY
     with _fp32_matmul_ctx(dY.dtype):                      # fp32→TF32 policy for all bwd GEMMs
-        dx_normed = torch.matmul(dY, W)                   # dY@W → (M,K)
+        # dx_normed = dY@W, but PRODUCED M-MAJOR (as (Wᵀ@dYᵀ)ᵀ, strides (1,M)) so it shares the
+        # SAME contiguous axis (m) as the m-major x and the m-major dx written by _ln_bwd. With all
+        # three (M,K) operands uniform-m-major, _ln_bwd_kernel coalesces every load/store along m
+        # (no mixed row-major-DXn / m-major-X access) → 1.3-1.45x faster LN-bwd on B200. cuBLAS emits
+        # the transposed GEMM at the same cost as dY@W (transA/transB flags, +~2%). SAME values
+        # (dx/dγ/dβ cos 1.0 vs the row-major GEMM) — layout-only change, precision unchanged.
+        dx_normed = torch.matmul(W.t(), dY.t()).t()      # (dY@W) m-major → uniform LN-bwd layout
         dW = torch.matmul(dY.t(), x_normed)              # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
         db = _bias_grad(dY).to(W.dtype) if has_bias else None  # linear bias grad (cuBLAS GEMV)
     dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride())  # dx(m-major)+dγ+dβ

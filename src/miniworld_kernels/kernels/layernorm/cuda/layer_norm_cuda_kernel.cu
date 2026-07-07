@@ -259,6 +259,9 @@ __global__ void layer_norm_bwd_main_kernel(
 
         scalar_t x_vals[MAX_K];
         scalar_t dy_vals[MAX_K];
+        // Cache w*dy per column so the dx pass reuses it instead of reloading W and
+        // recomputing the product (this bwd is SM-issue-bound on sm100, not DRAM-bound).
+        float wdy_vals[MAX_K];
 
         // Coalesced vector loads. N % EPT == 0 for every launched (N, TX_BYTES) combo, so a
         // transaction whose base column is in range never overshoots N.
@@ -292,6 +295,7 @@ __global__ void layer_norm_bwd_main_kernel(
                     const float dy_v = (float)dy_vals[k];
                     const float xhat = (x_v - mean) * rstd;
                     const float wdy = (float)wp.s[e] * dy_v;
+                    wdy_vals[k] = wdy;
                     sum_wdy += wdy;
                     sum_wdy_xhat += wdy * xhat;
                 }
@@ -307,8 +311,6 @@ __global__ void layer_norm_bwd_main_kernel(
         for (int v = 0; v < NV_MAX; ++v) {
             const int col0 = (v * 32 + lane) * EPT;
             if (col0 < N) {
-                Pack wp;
-                wp.vec = *reinterpret_cast<const VecT*>(W + col0);
                 Pack dxp;
 #pragma unroll
                 for (int e = 0; e < EPT; ++e) {
@@ -316,7 +318,7 @@ __global__ void layer_norm_bwd_main_kernel(
                     const float x_v = (float)x_vals[k];
                     const float dy_v = (float)dy_vals[k];
                     const float xhat = (x_v - mean) * rstd;
-                    const float wdy = (float)wp.s[e] * dy_v;
+                    const float wdy = wdy_vals[k];
                     const float dx_v = (wdy - (xhat * c1 + c2)) * rstd;
                     dxp.s[e] = (scalar_t)dx_v;
                     acc_dw[k] += dy_v * xhat;

@@ -1,0 +1,27 @@
+==PROF== Connected to process 2426806 (/home/snu_hwle/psk/miniworld-kernels/.pixi/envs/default/bin/python3.12)
+==PROF== Profiling "layer_norm_bwd_main_kernel": 0%....50%....100% - 10 passes
+done D 128 L 1024
+==PROF== Disconnected from process 2426806
+[2426806] python3.12@127.0.0.1
+  void layer_norm_bwd_main_kernel<BFloat16, 4, 8>(const T1 *, const T1 *, const T1 *, const float *, const float *, T1 *, float *, float *, int, int) (1184, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 10.0
+
+    NVTX Push/Pop Stack for Thread 2426806:
+      <default domain>
+        <0,PROFILE>
+    Section: Command line profiler metrics
+    -------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                              Metric Unit Metric Value
+    -------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                 %        28.54
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed                   %        37.99
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio          sector         5.20
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio          sector         8.28
+    launch__occupancy_limit_registers                                              block            9
+    launch__occupancy_limit_shared_mem                                             block           32
+    launch__occupancy_limit_warps                                                  block           16
+    launch__registers_per_thread                                         register/thread           55
+    launch__waves_per_multiprocessor                                                             0.89
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                   %        63.05
+    sm__warps_active.avg.pct_of_peak_sustained_active                                  %        45.32
+    -------------------------------------------------------------------- --------------- ------------
+

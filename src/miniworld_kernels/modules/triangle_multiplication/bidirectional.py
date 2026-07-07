@@ -107,6 +107,17 @@ class BidirectionalTriangleMultiplication(nn.Module):
         by the incoming einsum (no input transpose needed since we control the einsum).
         Same math as the pytorch reference; bf16 in / fp32 acc / bf16 out.
         """
+        import os as _os
+        major = (
+            torch.cuda.get_device_capability(pair.device)[0]
+            if torch.cuda.is_available() else 0
+        )
+        _free_default = "1" if major >= 10 else "0"
+        if mask is None and _os.environ.get(
+            "MINIWORLD_TRIMUL_CUEQUIV_FREE", _free_default
+        ) != "0":
+            return self._forward_cute_free(pair)
+
         from miniworld_kernels.modules.triangle_multiplication.module import _load_cute_fns
 
         tm1_cute_forward, _tm2, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
@@ -149,3 +160,31 @@ class BidirectionalTriangleMultiplication(nn.Module):
         gate = torch.sigmoid(x.reshape(M, d) @ self.to_gate.weight.T)
         proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T
         return (gate * proj).view(b, l1, l2, d)
+
+    def _forward_cute_free(self, pair: torch.Tensor) -> torch.Tensor:
+        """CUEQUIV-FREE sm100 (B200) bidirectional path — the current sm100 kernels.
+
+        Mirrors the single-direction ``TriangleMultiplication._forward_cute_free``
+        (triton LN_in -> tm1 ``bdll_sm100`` front -> cuBLAS einsum -> sm100
+        LayerNormLinear + triton gate_elem), applied to BOTH directions with a
+        SHARED back-half over the 2h concatenation. NO cuequiv / quack LN. B=1.
+        """
+        from miniworld_kernels.kernels.trimul_inproj.cute.bidirectional_sm100 import (
+            bidirectional_trimul_sm100,
+        )
+        from miniworld_kernels.modules.triangle_multiplication.module import (
+            _load_cute_fns,
+        )
+
+        tm1_cute_forward, _tm2, _flm, _lnt = _load_cute_fns()
+        out_layout = _resolve_trimul_out_layout(pair.device)
+        return bidirectional_trimul_sm100(
+            pair,
+            self.to_left.weight, self.to_left_gate.weight,
+            self.to_right.weight, self.to_right_gate.weight,
+            self.to_gate.weight, self.to_out.weight,
+            self.ln_pair.weight, self.ln_pair.bias,
+            self.ln_out.weight, self.ln_out.bias,
+            self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
+            tm1_cute_forward, out_layout,
+        )
