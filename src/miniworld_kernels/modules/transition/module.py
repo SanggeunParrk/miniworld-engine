@@ -153,22 +153,13 @@ class Transition(nn.Module):
 
     def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward-only dispatch: no tensors are saved for backward."""
-        if self.d_hidden >= 256:
-            return kernels.cute_transition_fused(
-                x,
-                self.ln_in.weight,
-                self.ln_in.bias,
-                self.expand_a.weight,
-                self.expand_b.weight,
-                self.squeeze.weight,
-                self.n,
-                self.ln_in.eps,
-            )
-        # Hand-CUDA fused b2b beats the Triton b2b ~1.29x at the fixed AF3 shape
-        # (d_hidden=128, n=4 -> K=128, ND=512, D=128). Requires bf16 + M%128==0.
+        # Hand-CUDA fused b2b beats cute at d_hidden=128 (~2.07x) and d_hidden=256 (~1.21x)
+        # for the AF3 shape (n=4 -> K=ND/4=D). Requires bf16 + n==4 + M%128==0. d_hidden=512
+        # is hardware-limited for full fusion (smem cannot co-hold xn+weights+accumulator at
+        # K=D=512) -> cute's non-fused tiled GEMM wins there, so it falls through below.
         if (
             _cuda_b2b_inference_enabled()
-            and self.d_hidden == 128
+            and self.d_hidden in (128, 256)
             and self.n == 4
             and x.is_cuda
             and x.dtype == torch.bfloat16
@@ -181,6 +172,17 @@ class Transition(nn.Module):
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
+                self.ln_in.eps,
+            )
+        if self.d_hidden >= 256:
+            return kernels.cute_transition_fused(
+                x,
+                self.ln_in.weight,
+                self.ln_in.bias,
+                self.expand_a.weight,
+                self.expand_b.weight,
+                self.squeeze.weight,
+                self.n,
                 self.ln_in.eps,
             )
         return kernels.triton_transition_fused(
