@@ -27,10 +27,14 @@ layer_norm_cuda = load(
 )
 
 
-def layer_norm_bwd_cuda(dy, x, weight, mean, rstd):
+def layer_norm_bwd_cuda(dy, x, weight, mean, rstd, row_scale=None):
     """Standalone CUDA LayerNorm backward candidate.
 
     Signature matches compile_native._bwd_persistent_impl:
     (dy, x, weight, mean, rstd) -> (dx, dw, db).
+
+    Optional ``row_scale`` [M] folds a per-row scale into the backward of
+    ``y = LN(x) * row_scale`` (AF triangle pair-mask). The incoming grad is
+    scaled by row_scale per row; dx/dw/db all follow (matches the triton path).
     """
-    return layer_norm_cuda.layer_norm_bwd(dy, x, weight, mean, rstd)
+    return layer_norm_cuda.layer_norm_bwd(dy, x, weight, mean, rstd, row_scale)
