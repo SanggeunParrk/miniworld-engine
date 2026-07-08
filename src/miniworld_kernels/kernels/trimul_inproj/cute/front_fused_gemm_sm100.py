@@ -39,6 +39,7 @@ from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import from_dlpack
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 
+from quack.cute_dsl_utils import get_max_active_clusters
 from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import (
     GatedPersistentGemmKernel,
 )
@@ -622,7 +623,7 @@ def fused_front_gemm(A, Bp, Bg, lr, preact):
     mCpe = _mark(pe.t().unsqueeze(0), 1)        # (1, M, N), M contiguous, N-stride 2M
     mCpo = _mark(po.t().unsqueeze(0), 1)
 
-    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, N, K)
     if key not in _CACHE:
@@ -662,7 +663,7 @@ def fused_front_gemm_sig(A, Bp, Bg, lr, sg):
     mBg = _mark(Bg.detach().unsqueeze(0), 2)
     mC = _mark(lr.t().unsqueeze(0), 1)             # (1, M, 2H) M-major
     mSg = _mark(sg.t().unsqueeze(0), 1)            # (1, M, 2H) M-major  (carried as cpe; cpo unused)
-    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, N, K)
     if key not in _CACHE_SIG:
