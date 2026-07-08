@@ -257,12 +257,10 @@ class TriangleAttention(nn.Module):
                 query = self.to_query(pair)
                 key = self.to_key(pair)
 
-                query = rearrange(
-                    query, "B L L2 (H D) -> B H L L2 D", H=self.n_head
-                ).contiguous()
-                key = rearrange(
-                    key, "B L L2 (H D) -> B H L L2 D", H=self.n_head
-                ).contiguous()
+                # v4 stride-native: no .contiguous() -- kernels consume strided q/k views
+                # via make_block_ptr (bias is made contiguous inside the Function, cheap).
+                query = rearrange(query, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
+                key = rearrange(key, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
 
                 if self.use_qk_norm:
                     query = self.norm_query(query)
