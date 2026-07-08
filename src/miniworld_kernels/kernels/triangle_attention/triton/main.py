@@ -382,7 +382,12 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         # A: allocate dq/dk/dv in the PROJECTION layout [B,L,L2,H*D] and hand the kernels
         # strided (B,H,L,L2,D) views of them. The kernels write strided (q-group), so the
         # module's rearrange-backward becomes a FREE view -> no grad-transpose copy.
-        dq_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=torch.float32)
+        # dq stored bf16 (was fp32 — a vestige of the original atomic-add dq, which needed an
+        # fp32 accumulator buffer; FA2 split removed the atomics). The kernel accumulates dq in
+        # fp32 registers and stores once, exactly like dk/dv, so bf16 out is precision-neutral
+        # (matches the cuBLAS/pytorch ref which also stores bf16 grads). Kills the fp32->bf16
+        # cast copy of the returned query grad.
+        dq_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
         dk_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
         dv_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
         dq = rearrange(dq_proj, "B L L2 (H D) -> B H L L2 D", H=H)
