@@ -590,6 +590,18 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
     M, K = A.shape
     N, K2 = Bp.shape
 
+    # Pad the GEMM's M (= flattened L*L) up to a multiple of the MMA tile (128). At inference
+    # L is arbitrary, so M = L*L is often not tile-aligned; the persistent kernel's partial
+    # last tile (tiny remainder, e.g. L=449 -> M%128==1) reads/writes out of bounds and, once
+    # the caching allocator has served non-zero memory, leaks NaN. Padding removes the partial
+    # tile entirely (the pad rows are zeros -> finite -> sliced off). Aligned M (training's
+    # nice crops) is a no-op. Also shrinks the kernel cache (keys land on 128-multiples).
+    _M_orig = M
+    _TILE_M = 128
+    if M % _TILE_M != 0:
+        M = (M + _TILE_M - 1) // _TILE_M * _TILE_M
+        A = torch.nn.functional.pad(A, (0, 0, 0, M - _M_orig))
+
     def _mark(t3, leading_dim):
         # (L,X,Y) torch tensor -> marked cute tensor; __call__ permutes to MNKL at trace time.
         return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
@@ -626,4 +638,8 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
         op.epi_depth = int(os.environ.get("MW_EPI_DEPTH", "3"))
         _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm)
     _CACHE[key](mA, mBp, mBg, mC, mac, strm)
+    if M != _M_orig:
+        # slice off the padded rows; .contiguous() so the mmajor zero-copy [B,D,L,L]
+        # reshape downstream still sees a dense (N, M_orig) / (M_orig, N) buffer.
+        ret = (ret[:, :_M_orig] if mmajor else ret[:_M_orig]).contiguous()
     return ret
