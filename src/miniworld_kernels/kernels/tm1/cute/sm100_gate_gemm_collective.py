@@ -33,6 +33,11 @@ from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from miniworld_kernels.kernels.tm1.cute._blackwell_dense_gemm import (
     PersistentDenseGemmKernel,
 )
+# Memoized occupancy query (== the wrapper every training kernel uses). The raw
+# `utils.HardwareInfo().get_max_active_clusters(...)` JIT-compiles a probe kernel on
+# EVERY call; @lru_cache makes it a one-time device-constant lookup. Same returned int
+# -> identical kernel launch/numerics. Fixes the ~900ms/iter eager launch overhead.
+from quack.cute_dsl_utils import get_max_active_clusters
 from cutlass.utils.gemm.sm100 import (
     epilogue_tmem_copy_and_partition,
     epilogue_smem_copy_and_partition,
@@ -605,7 +610,7 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
         mC = _mark(c3, 2)           # (L, M, N)
         ret = C
 
-    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, N, K, mmajor)
     if key not in _CACHE:

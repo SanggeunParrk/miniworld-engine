@@ -32,6 +32,9 @@ import cutlass.cute as cute
 import cutlass.utils as cutils
 from cutlass import Float32
 from cutlass.cute.runtime import from_dlpack
+# Memoized occupancy query (raw HardwareInfo probe JIT-recompiles every call). Same int
+# returned -> identical launch/numerics; removes the per-call eager compile overhead.
+from quack.cute_dsl_utils import get_max_active_clusters
 
 from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import (
     GatedPersistentGemmKernel,
@@ -110,7 +113,7 @@ def proj_gemm_sm100(A: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:
     mBp = _mark(Wp.detach().unsqueeze(0), 2)    # (1, N, K), K contiguous
     C = torch.empty(M, N, device=A.device, dtype=torch.bfloat16)
     mC = _mark(C.unsqueeze(0), 2)               # (1, M, N), N contiguous
-    mac = cutils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, N, K)
     if key not in _PROJ_CACHE:
