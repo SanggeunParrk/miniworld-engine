@@ -38,11 +38,16 @@ def bidirectional_trimul_sm100(
     ln_in_w, ln_in_b, ln_out_w, ln_out_b,
     eps_in, eps_out, h,
     tm1_cute_forward, out_layout,
+    row_scale=None,
 ):
-    """pair:(B,L,L,d) -> y:(B,L,L,d). B=1. h = d_hidden per direction."""
+    """pair:(B,L,L,d) -> y:(B,L,L,d). B=1. h = d_hidden per direction.
+
+    ``row_scale`` [M] (AF pair-mask folded into LN_in): zeros x at masked pair rows,
+    so the front produces 0 there and the trimul k-contraction sums only valid k
+    (== masking left/right). Lets the fast free path serve masked/padded inputs."""
     b, l1, l2, d = pair.shape
     x = triton_layernorm(
-        pair.reshape(b * l1 * l2, d), ln_in_w, ln_in_b, eps_in
+        pair.reshape(b * l1 * l2, d), ln_in_w, ln_in_b, eps_in, row_scale=row_scale
     ).view(b, l1, l2, d)
 
     def _front(sl):

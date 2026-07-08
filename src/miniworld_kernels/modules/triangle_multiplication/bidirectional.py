@@ -191,10 +191,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
             if torch.cuda.is_available() else 0
         )
         _free_default = "1" if major >= 10 else "0"
-        if mask is None and _os.environ.get(
+        if _os.environ.get(
             "MINIWORLD_TRIMUL_CUEQUIV_FREE", _free_default
         ) != "0":
-            return self._forward_cute_free(pair)
+            # free path now folds the pair-mask into LN_in (row_scale), so it serves
+            # masked/padded inputs too — no longer gated on `mask is None`.
+            return self._forward_cute_free(pair, mask)
 
         from miniworld_kernels.modules.triangle_multiplication.module import _load_cute_fns
 
@@ -239,13 +241,18 @@ class BidirectionalTriangleMultiplication(nn.Module):
         proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T
         return (gate * proj).view(b, l1, l2, d)
 
-    def _forward_cute_free(self, pair: torch.Tensor) -> torch.Tensor:
+    def _forward_cute_free(
+        self, pair: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """CUEQUIV-FREE sm100 (B200) bidirectional path — the current sm100 kernels.
 
         Mirrors the single-direction ``TriangleMultiplication._forward_cute_free``
         (triton LN_in -> tm1 ``bdll_sm100`` front -> cuBLAS einsum -> sm100
         LayerNormLinear + triton gate_elem), applied to BOTH directions with a
         SHARED back-half over the 2h concatenation. NO cuequiv / quack LN. B=1.
+
+        ``mask`` [B, L] (residue mask) is folded into LN_in as a per-row scale
+        (row_scale = mask_i & mask_j over the M=L*L rows) — free masking on the fast path.
         """
         from miniworld_kernels.kernels.trimul_inproj.cute.bidirectional_sm100 import (
             bidirectional_trimul_sm100,
@@ -256,6 +263,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         tm1_cute_forward, _tm2, _flm, _lnt = _load_cute_fns()
         out_layout = _resolve_trimul_out_layout(pair.device)
+        row_scale = None
+        if mask is not None:
+            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)        # [B, L, L]
+            row_scale = m.reshape(-1).to(pair.dtype)           # [M]
         return bidirectional_trimul_sm100(
             pair,
             self.to_left.weight, self.to_left_gate.weight,
@@ -265,4 +276,5 @@ class BidirectionalTriangleMultiplication(nn.Module):
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
             tm1_cute_forward, out_layout,
+            row_scale=row_scale,
         )
