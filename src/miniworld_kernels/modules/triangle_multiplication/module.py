@@ -171,6 +171,12 @@ class TriangleMultiplication(nn.Module):
                 return self._forward_cuequivariance(pair, mask)
 
             if self.implementation == ImplementationType.CUTE:
+                # The cute inference path (_forward_cute) is forward-only (no saved
+                # stats / no autograd graph). Under grad (training), dispatch to the
+                # autograd-capable sm100/sm90 v6 merged training kernel instead —
+                # keeping all backend selection inside the module.
+                if torch.is_grad_enabled():
+                    return self._forward_cute_train(pair, mask)
                 return self._forward_cute(pair, mask)
 
             pair = self.ln_pair(pair)
@@ -217,6 +223,40 @@ class TriangleMultiplication(nn.Module):
             p_out_weight=self.to_out.weight,
             g_out_weight=self.to_gate.weight,
         )
+
+    def _forward_cute_train(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """MINIWORLD (ours) TRAINING path: the v6 merged trimul training kernel
+        (fwd+bwd, autograd-capable) — sm_100 ``V6TriMulMergedSm100`` on Blackwell,
+        else sm90 ``V6TriMulMerged``. Built lazily from this module's own weights and
+        cached (the cute inference kernels have no backward). bf16."""
+        impl = getattr(self, "_train_impl", None)
+        if impl is None:
+            direction = "out" if self.outgoing else "in"
+            major = (
+                torch.cuda.get_device_capability(pair.device)[0]
+                if torch.cuda.is_available()
+                else 0
+            )
+            if major >= 10:
+                # v6_merged sm100 — the faster single-direction training kernel
+                # (cuBLAS-centric merged backward; beats train_b200 v14 by 1.3x+ at
+                # L<=1024). Baseline for further optimization.
+                from miniworld_kernels.kernels.trimul_inproj.cute.v6_training_merged_sm100 import (  # noqa: E501
+                    V6TriMulMergedSm100 as _Impl,
+                )
+            else:
+                from miniworld_kernels.kernels.trimul_inproj.cute.v6_training_merged import (  # noqa: E501
+                    V6TriMulMerged as _Impl,
+                )
+            # Built from this module's params (copied into the kernel's packed
+            # layout); a benchmark/forward-eval wrapper, not a param-sharing one.
+            impl = _Impl(self, direction=direction).to(pair.device)
+            self._train_impl = impl
+        return impl(pair, mask)
 
     def _forward_cute(
         self,

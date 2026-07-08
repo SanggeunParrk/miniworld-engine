@@ -284,8 +284,10 @@ def _attn_bwd_dqdkdv(
     DQ,
     M,
     D,
-    stride_tok,
-    stride_d,
+    q_stride_tok,     # Q (q-group, strided) token/d strides
+    q_stride_d,
+    o_stride_tok,     # DO/DQ (o-group, contiguous) token/d strides
+    o_stride_d,
     H,
     N_CTX,
     BLOCK_M: tl.constexpr,
@@ -300,9 +302,9 @@ def _attn_bwd_dqdkdv(
     offs_m = start_m + tl.arange(0, BLOCK_M)
     offs_n = start_n + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_D)
-    qT_ptrs = Q + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
-    do_ptrs = DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d
-    dqT_ptrs = DQ + offs_m[None, :] * stride_tok + offs_k[:, None] * stride_d
+    qT_ptrs = Q + offs_m[None, :] * q_stride_tok + offs_k[:, None] * q_stride_d
+    do_ptrs = DO + offs_m[:, None] * o_stride_tok + offs_k[None, :] * o_stride_d
+    dqT_ptrs = DQ + offs_m[None, :] * o_stride_tok + offs_k[:, None] * o_stride_d
     biasT_ptrs = Bias + offs_m[None, :] * stride_bm + offs_n[:, None] * stride_bn
     dbiasT_ptrs = DBias + offs_m[None, :] * stride_bm + offs_n[:, None] * stride_bn
     m_ptrs = M + offs_m
@@ -339,9 +341,9 @@ def _attn_bwd_dqdkdv(
         dqT_to_add = dqT_to_add * (qk_scale / 1.44269504)
         tl.atomic_add(dqT_ptrs, dqT_to_add, qT_mask)
 
-        qT_ptrs += BLOCK_M * stride_tok
-        do_ptrs += BLOCK_M * stride_tok
-        dqT_ptrs += BLOCK_M * stride_tok
+        qT_ptrs += BLOCK_M * q_stride_tok
+        do_ptrs += BLOCK_M * o_stride_tok
+        dqT_ptrs += BLOCK_M * o_stride_tok
         biasT_ptrs += BLOCK_M * stride_bm
         dbiasT_ptrs += BLOCK_M * stride_bm
         m_ptrs += BLOCK_M
@@ -368,16 +370,23 @@ def _attn_bwd(
     dbias_ptr,
     m_ptr,
     d_ptr,
-    stride_z,
-    stride_h,
-    stride_tok,
-    stride_d,
+    qs_z,          # q/k/v STRIDED 5D strides (B, H, Lrow, tok=Lseq, D)
+    qs_h,
+    qs_lrow,
+    qs_tok,
+    qs_d,
+    os_z,          # o-group merged-contiguous strides (B, HL, tok, D)
+    os_h,
+    os_tok,
+    os_d,
     bias_stride_z,
     bias_stride_h,
     bias_stride_m,
     bias_stride_n,
+    dbias_hl,      # dbias merged HL-dim stride (per-row output, contiguous B,HL,L,L)
     H: tl.constexpr,
     N_CTX,
+    HL,
     HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -388,22 +397,27 @@ def _attn_bwd(
 
     bhid = tl.program_id(2).to(tl.int64)
     off_chz = bhid * N_CTX
-    adj = stride_h * (bhid % H) + stride_z * (bhid // H)
+    # decompose merged batch bhid in [0, B*HL) -> (b, h, i_row); HL = H*N_CTX (square L)
+    b = bhid // HL
+    hl = bhid % HL
+    h = hl // N_CTX
+    i_row = hl % N_CTX
+    adj_q = b * qs_z + h * qs_h + i_row * qs_lrow   # q/k/v strided 5D offset
+    adj_o = bhid * os_h                             # o-group contiguous merged offset
     pid = tl.program_id(0)
 
-    q_ptr += adj
-    k_ptr += adj
-    v_ptr += adj
-    do_ptr += adj
-    dq_ptr += adj
-    dk_ptr += adj
-    dv_ptr += adj
+    q_ptr += adj_q
+    k_ptr += adj_q
+    v_ptr += adj_q
+    do_ptr += adj_o
+    dq_ptr += adj_o
+    dk_ptr += adj_o
+    dv_ptr += adj_o
     m_ptr += off_chz
     d_ptr += off_chz
 
-    offset_bias = bias_stride_h * (bhid % H) + bias_stride_z * (bhid // H)
-    bias_ptr = bias_ptr + offset_bias
-    dbias_ptr = dbias_ptr + offset_bias
+    bias_ptr = bias_ptr + b * bias_stride_z + h * bias_stride_h   # broadcast over row
+    dbias_ptr = dbias_ptr + bhid * dbias_hl                       # per-row output
 
     offs_k = tl.arange(0, BLOCK_D)
 
@@ -413,8 +427,8 @@ def _attn_bwd(
     dv = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
     dk = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
 
-    k_ptr = k_ptr + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
-    v_ptr = v_ptr + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
+    k_ptr = k_ptr + offs_n[:, None] * qs_tok + offs_k[None, :] * qs_d
+    v_ptr = v_ptr + offs_n[:, None] * qs_tok + offs_k[None, :] * qs_d
 
     k = tl.load(
         k_ptr,
@@ -442,8 +456,10 @@ def _attn_bwd(
         dq_ptr,
         m_ptr,
         d_ptr,
-        stride_tok,
-        stride_d,
+        qs_tok,        # Q (q-group) token/d strides
+        qs_d,
+        os_tok,        # DO/DQ (o-group) token/d strides
+        os_d,
         H,
         N_CTX,
         BLOCK_M,
@@ -456,9 +472,9 @@ def _attn_bwd(
         stride_bn=bias_stride_n,
     )
 
-    dv_ptrs = dv_ptr + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
+    dv_ptrs = dv_ptr + offs_n[:, None] * os_tok + offs_k[None, :] * os_d
     dk = dk * sm_scale
-    dk_ptrs = dk_ptr + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
+    dk_ptrs = dk_ptr + offs_n[:, None] * os_tok + offs_k[None, :] * os_d
 
     tl.store(
         dv_ptrs,
@@ -490,11 +506,13 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         #     v = v.to(dtype)
         #     bias = bias.to(dtype)
 
-        q, k, v, bias = [x.contiguous() for x in (q, k, v, bias)]
+        # Strided-friendly: _attn_fwd indexes q/k/v/bias via explicit strides (passed below),
+        # so we consume the module's strided (B,H,L,L2,D) transpose views directly — no
+        # .contiguous() copy. Output/m are freshly allocated contiguous.
         B, H, L, _, D = q.shape
 
         sm_scale = D**-0.5
-        out = torch.empty_like(q)
+        out = torch.empty(B, H, L, L, D, device=q.device, dtype=q.dtype)
         m = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
 
         grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * H, L]
@@ -531,56 +549,38 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         if grad_output.dtype != q.dtype:
             grad_output = grad_output.to(q.dtype)
 
-        q, k, v, out, grad_output = [
-            rearrange(x, "B H L L2 D -> B (H L) L2 D")
-            for x in (q, k, v, out, grad_output)
-        ]
-        bias = repeat(bias, "B H L L2 -> B (H L3) L L2", L3=bias.shape[2])
-        m = rearrange(m, "B H L L2 -> B (H L) L2")
-
-        B, HL, L, D = q.shape
+        # q/k/v stay STRIDED 5D (transpose views) — consumed via explicit 5D strides in-kernel
+        # (no (H L) merge copy). The o-group (out/grad_output/dq/dk/dv) is contiguous, so its
+        # (H L) merge is a FREE view. bias is read BROADCAST over the query-row (no `repeat`).
+        B, H, L, _, D = q.shape                       # square pair: rows == seq == L
+        HL = H * L
         sm_scale = D**-0.5
-        delta = torch.empty_like(m)
+        grad_output = grad_output.contiguous()
+        out_m = rearrange(out, "B H L L2 D -> B (H L) L2 D")          # free view (contiguous)
+        do_m = rearrange(grad_output, "B H L L2 D -> B (H L) L2 D")   # free view (contiguous)
+        m_m = rearrange(m, "B H L L2 -> B (H L) L2")
+        delta = torch.empty_like(m_m)
 
         grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * HL, 1]
-        _attn_bwd_preprocess[grid](
-            out,
-            grad_output,
-            delta,
-            B,
-            HL,
-            L,
-            D,
-            BLOCK_D=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+        _attn_bwd_preprocess[grid](           # out_m/do_m contiguous -> unchanged kernel
+            out_m, do_m, delta, B, HL, L, D,
+            BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
         )
 
-        dq = torch.zeros_like(q, dtype=torch.float32)
-        dv = torch.empty_like(v)
-        dk = torch.empty_like(k)
-        dbias = torch.empty_like(bias)
+        dq = torch.zeros(B, HL, L, D, device=q.device, dtype=torch.float32)  # o-group contiguous
+        dk = torch.empty(B, HL, L, D, device=q.device, dtype=v.dtype)
+        dv = torch.empty(B, HL, L, D, device=q.device, dtype=v.dtype)
+        dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)  # per-row, reduced below
 
         grid = lambda META: [triton.cdiv(L, META["BLOCK_N"]), 1, B * HL]
         _attn_bwd[grid](
-            q,
-            k,
-            v,
-            bias,
-            sm_scale,
-            grad_output,
-            dq,
-            dk,
-            dv,
-            dbias,
-            m,
-            delta,
-            *q.stride(),
-            *bias.stride(),
-            HL,
-            L,
-            D,
-            BLOCK_D=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            q, k, v, bias, sm_scale, do_m, dq, dk, dv, dbias, m_m, delta,
+            *q.stride(),        # q 5D strides: (B, H, Lrow, Lseq/tok, D)  [k,v share pattern]
+            *do_m.stride(),     # o-group merged strides: (B, HL, tok, D)  [dq/dk/dv share]
+            *bias.stride(),     # bias 5D-ish strides: (B, H, m, n)  broadcast over row
+            L * L,              # dbias HL-dim stride (contiguous B,HL,L,L)
+            H, L, HL, D,
+            BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
         )
 
         dq = rearrange(dq, "B (H L) L2 D -> B H L L2 D", L=L)
