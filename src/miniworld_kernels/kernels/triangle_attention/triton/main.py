@@ -125,34 +125,28 @@ def _attn_fwd(
 @triton.autotune(configs=bwd_preprocess_configs, key=["GROUP_N", "H", "HEAD_DIM"])
 @triton.jit
 def _attn_bwd_preprocess(
-    o,
-    DO,
-    Delta,
-    Z,
-    H: tl.constexpr,
-    N_CTX,
-    HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    GROUP_N: tl.constexpr,
+    o, DO, Delta,
+    ds_z, ds_h, ds_lrow, ds_tok, ds_d,
+    HL, Z, H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr, GROUP_N: tl.constexpr,
 ):
+    # C: `o` (fwd out) contiguous merged (B,HL,L,D); `DO` (grad_output) STRIDED 5D
+    # (B,H,Lrow,tok,D) view over [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_hz = tl.program_id(1).to(tl.int64)
     off_n = tl.arange(0, BLOCK_D)
-
     o_ptr = o + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
-    do_ptr = DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
-
+    b = off_hz // HL
+    hl = off_hz % HL
+    h = hl // N_CTX
+    i_row = hl % N_CTX
+    do_base = DO + b * ds_z + h * ds_h + i_row * ds_lrow
+    do_ptr = do_base + off_m[:, None] * ds_tok + off_n[None, :] * ds_d
     mask_m = (off_m[:, None] < N_CTX) & (off_n[None, :] < HEAD_DIM)
-    mask_delta = off_m < N_CTX
-
-    o = tl.load(o_ptr, mask=mask_m, other=0.0).to(tl.float32)
+    oo = tl.load(o_ptr, mask=mask_m, other=0.0).to(tl.float32)
     do = tl.load(do_ptr, mask=mask_m, other=0.0).to(tl.float32)
-
-    delta = tl.sum(o * do, axis=1)
-
-    delta_ptr = Delta + off_hz * N_CTX + off_m
-    tl.store(delta_ptr, delta, mask=mask_delta)
+    delta = tl.sum(oo * do, axis=1)
+    tl.store(Delta + off_hz * N_CTX + off_m, delta, mask=off_m < N_CTX)
 
 
 @triton.autotune(configs=bwd_configs, key=["GROUP_N", "H", "HEAD_DIM"])
@@ -160,7 +154,7 @@ def _attn_bwd_preprocess(
 def _attn_bwd_dkdv(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
     qs_z, qs_h, qs_lrow, qs_tok, qs_d,
-    os_z, os_h, os_tok, os_d,
+    ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     bs_z, bs_h, bs_m, bs_n,
     dbias_hl,
     H: tl.constexpr, N_CTX, HL, HEAD_DIM: tl.constexpr,
@@ -176,14 +170,14 @@ def _attn_bwd_dkdv(
     h = hl // N_CTX
     i_row = hl % N_CTX
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
-    adj_o = bhid * os_h
+    adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
     pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
-    do_base = do_ptr + adj_o
-    dk_base = dk_ptr + adj_o
-    dv_base = dv_ptr + adj_o
+    do_base = do_ptr + adj_do
+    dk_base = dk_ptr + adj_q   # A: dq/dk/dv written in projection layout (q-group strided)
+    dv_base = dv_ptr + adj_q
     b_base = bias_ptr + b * bs_z + h * bs_h
     dbias_base = dbias_ptr + bhid * dbias_hl
     m_ptr += off_chz
@@ -197,7 +191,7 @@ def _attn_bwd_dkdv(
     # qT transposed [D, BLOCK_M]
     QT_bp = tl.make_block_ptr(base=q_base, shape=(HEAD_DIM, N_CTX), strides=(qs_d, qs_tok),
                               offsets=(0, 0), block_shape=(BLOCK_D, BLOCK_M), order=(0, 1))
-    DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(os_tok, os_d),
+    DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(ds_tok, ds_d),
                               offsets=(0, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
     # biasT transposed [BLOCK_N key, BLOCK_M query]: bias mem is [query, key] (bs_m, bs_n)
     BT_bp = tl.make_block_ptr(base=b_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m),
@@ -205,9 +199,9 @@ def _attn_bwd_dkdv(
     # dbiasT [BLOCK_N key, BLOCK_M query] view into dbias[query,key] (strides swapped)
     DBT_bp = tl.make_block_ptr(base=dbias_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m),
                                offsets=(start_n, 0), block_shape=(BLOCK_N, BLOCK_M), order=(0, 1))
-    DK_bp = tl.make_block_ptr(base=dk_base, shape=(N_CTX, HEAD_DIM), strides=(os_tok, os_d),
+    DK_bp = tl.make_block_ptr(base=dk_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
                               offsets=(start_n, 0), block_shape=(BLOCK_N, BLOCK_D), order=(1, 0))
-    DV_bp = tl.make_block_ptr(base=dv_base, shape=(N_CTX, HEAD_DIM), strides=(os_tok, os_d),
+    DV_bp = tl.make_block_ptr(base=dv_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
                               offsets=(start_n, 0), block_shape=(BLOCK_N, BLOCK_D), order=(1, 0))
 
     offs_n = start_n + tl.arange(0, BLOCK_N)
@@ -256,7 +250,7 @@ def _attn_bwd_dkdv(
 def _attn_bwd_dq(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,
     qs_z, qs_h, qs_lrow, qs_tok, qs_d,
-    os_z, os_h, os_tok, os_d,
+    ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     bs_z, bs_h, bs_m, bs_n,
     H: tl.constexpr, N_CTX, HL, HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr, GROUP_N: tl.constexpr,
@@ -269,13 +263,13 @@ def _attn_bwd_dq(
     h = hl // N_CTX
     i_row = hl % N_CTX
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
-    adj_o = bhid * os_h
+    adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
     pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
-    do_base = do_ptr + adj_o
-    dq_base = dq_ptr + adj_o
+    do_base = do_ptr + adj_do
+    dq_base = dq_ptr + adj_q   # A: dq written in projection layout (q-group strided)
     b_base = bias_ptr + b * bs_z + h * bs_h
     m_ptr += off_chz
     d_ptr += off_chz
@@ -283,9 +277,9 @@ def _attn_bwd_dq(
 
     Q_bp = tl.make_block_ptr(base=q_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
                              offsets=(start_m, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
-    DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(os_tok, os_d),
+    DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(ds_tok, ds_d),
                               offsets=(start_m, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
-    DQ_bp = tl.make_block_ptr(base=dq_base, shape=(N_CTX, HEAD_DIM), strides=(os_tok, os_d),
+    DQ_bp = tl.make_block_ptr(base=dq_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
                               offsets=(start_m, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
     K_bp = tl.make_block_ptr(base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
                              offsets=(0, 0), block_shape=(BLOCK_N, BLOCK_D), order=(1, 0))
@@ -366,28 +360,34 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         B, H, L, _, D = q.shape
         HL = H * L
         sm_scale = D**-0.5
-        grad_output = grad_output.contiguous()
+        # C: consume grad_output STRIDED (no .contiguous). out (our fwd alloc) is contiguous.
         out_m = rearrange(out, "B H L L2 D -> B (H L) L2 D")          # free view (contiguous)
-        do_m = rearrange(grad_output, "B H L L2 D -> B (H L) L2 D")   # free view (contiguous)
         m_m = rearrange(m, "B H L L2 -> B (H L) L2")
         delta = torch.empty_like(m_m)
 
         grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * HL, 1]
         _attn_bwd_preprocess[grid](
-            out_m, do_m, delta, B, HL, L, D,
+            out_m, grad_output, delta,
+            *grad_output.stride(), HL, B, HL, L, D,
             BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
         )
 
-        dq = torch.empty(B, HL, L, D, device=q.device, dtype=torch.float32)  # o-group contiguous
-        dk = torch.empty(B, HL, L, D, device=q.device, dtype=v.dtype)
-        dv = torch.empty(B, HL, L, D, device=q.device, dtype=v.dtype)
+        # A: allocate dq/dk/dv in the PROJECTION layout [B,L,L2,H*D] and hand the kernels
+        # strided (B,H,L,L2,D) views of them. The kernels write strided (q-group), so the
+        # module's rearrange-backward becomes a FREE view -> no grad-transpose copy.
+        dq_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=torch.float32)
+        dk_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
+        dv_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
+        dq = rearrange(dq_proj, "B L L2 (H D) -> B H L L2 D", H=H)
+        dk = rearrange(dk_proj, "B L L2 (H D) -> B H L L2 D", H=H)
+        dv = rearrange(dv_proj, "B L L2 (H D) -> B H L L2 D", H=H)
         dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)  # per-row, reduced below
 
         grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_N"]), 1, B * HL]
         _attn_bwd_dkdv[grid_kv](
-            q, k, v, bias, sm_scale, do_m, dk, dv, dbias, m_m, delta,
+            q, k, v, bias, sm_scale, grad_output, dk, dv, dbias, m_m, delta,
             *q.stride(),        # q strided 5D  [k,v share]
-            *do_m.stride(),     # o-group merged (B,HL,tok,D)  [dk/dv share]
+            *grad_output.stride(),  # do STRIDED 5D (B,H,Lrow,tok,D)
             *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
             L * L,              # dbias HL-dim stride
             HL, L, HL, D,
@@ -395,17 +395,16 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         )
         grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M"]), 1, B * HL]
         _attn_bwd_dq[grid_q](
-            q, k, v, bias, sm_scale, do_m, dq, m_m, delta,
+            q, k, v, bias, sm_scale, grad_output, dq, m_m, delta,
             *q.stride(),
-            *do_m.stride(),
+            *grad_output.stride(),
             *bias.stride(),
             HL, L, HL, D,
             BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
         )
 
-        dq = rearrange(dq, "B (H L) L2 D -> B H L L2 D", L=L)
-        dk = rearrange(dk, "B (H L) L2 D -> B H L L2 D", L=L)
-        dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)
+        # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;
+        # the module's rearrange-backward is a free view (data already in projection layout).
         dbias = reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
         return dq, dk, dv, dbias
 
