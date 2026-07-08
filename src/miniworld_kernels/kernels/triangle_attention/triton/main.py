@@ -126,20 +126,22 @@ def _attn_fwd(
 @triton.jit
 def _attn_bwd_preprocess(
     o, DO, Delta,
+    os_z, os_h, os_lrow, os_tok, os_d,
     ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     HL, Z, H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr, GROUP_N: tl.constexpr,
 ):
-    # C: `o` (fwd out) contiguous merged (B,HL,L,D); `DO` (grad_output) STRIDED 5D
-    # (B,H,Lrow,tok,D) view over [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
+    # B+C: both `o` (fwd out) and `DO` (grad_output) are STRIDED 5D (B,H,Lrow,tok,D) views
+    # over projection-layout [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_hz = tl.program_id(1).to(tl.int64)
     off_n = tl.arange(0, BLOCK_D)
-    o_ptr = o + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
     b = off_hz // HL
     hl = off_hz % HL
     h = hl // N_CTX
     i_row = hl % N_CTX
+    o_base = o + b * os_z + h * os_h + i_row * os_lrow
+    o_ptr = o_base + off_m[:, None] * os_tok + off_n[None, :] * os_d
     do_base = DO + b * ds_z + h * ds_h + i_row * ds_lrow
     do_ptr = do_base + off_m[:, None] * ds_tok + off_n[None, :] * ds_d
     mask_m = (off_m[:, None] < N_CTX) & (off_n[None, :] < HEAD_DIM)
@@ -335,14 +337,18 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         bias = bias.contiguous()
         B, H, L, _, D = q.shape
         sm_scale = D**-0.5
-        out = torch.empty(B, H, L, L, D, device=q.device, dtype=q.dtype)
+        # B: write `out` into PROJECTION layout [B,L,L2,H*D] via a strided (B,H,L,L2,D) view
+        # (head_dim stride-1 -> coalesced write, free like q/k/v). The module's rearrange-back
+        # "B H L L2 D -> B L L2 (H D)" is then a FREE view -> kills the ~0.2 ms fwd out copy.
+        out_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=q.dtype)
+        out = rearrange(out_proj, "B L L2 (H D) -> B H L L2 D", H=H)
         m = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
 
         grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * H, L]
         _attn_fwd[grid](
             q, k, v, bias, sm_scale, m, out,
             *q.stride(),      # q strided 5D (B,H,Lrow,tok,D)  [k,v share pattern]
-            *out.stride(),    # o-group contiguous (B,H,Lrow,tok,D)
+            *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
             *bias.stride(),   # bias contiguous (B,H,m,n)
             *m.stride(),
             B, H, L, D, BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
@@ -360,14 +366,15 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         B, H, L, _, D = q.shape
         HL = H * L
         sm_scale = D**-0.5
-        # C: consume grad_output STRIDED (no .contiguous). out (our fwd alloc) is contiguous.
-        out_m = rearrange(out, "B H L L2 D -> B (H L) L2 D")          # free view (contiguous)
+        # B+C: consume both out and grad_output STRIDED 5D (no .contiguous); preprocess reads
+        # each via its own explicit strides.
         m_m = rearrange(m, "B H L L2 -> B (H L) L2")
         delta = torch.empty_like(m_m)
 
         grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * HL, 1]
         _attn_bwd_preprocess[grid](
-            out_m, grad_output, delta,
+            out, grad_output, delta,
+            *out.stride(),           # out STRIDED 5D (projection layout)
             *grad_output.stride(), HL, B, HL, L, D,
             BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
         )
