@@ -33,6 +33,10 @@ from jaxtyping import Bool, Float
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels.kernels.bias_only_attention import dispatch as _bo_dispatch
+from miniworld_kernels.modules.dispatch import (
+    KernelBackend,
+    resolve_triangle_attention,
+)
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -54,7 +58,9 @@ class BidirectionalTriangleAttention(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        self.implementation = implementation
+        # 'miniworld' (auto) -> the TRITON family (fused bidir attention kernels).
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_triangle_attention(self.implementation)
         self.n_head = n_head
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
@@ -66,7 +72,7 @@ class BidirectionalTriangleAttention(nn.Module):
 
         d2 = 2 * self.d_hidden
 
-        self.ln_pair = LayerNorm(d_pair, implementation=implementation)
+        self.ln_pair = LayerNorm(d_pair, implementation=self.implementation)
         # Doubled-width value/bias projections: [starting | ending] channels.
         self.to_value = Linear(d_pair, d2, bias=False, init="glorot")
         self.to_bias = Linear(d_pair, 2 * n_head, bias=False, init="default")
@@ -79,7 +85,7 @@ class BidirectionalTriangleAttention(nn.Module):
 
     # ── shared machinery (bias-only fusion, reused from TriangleAttention) ──────────
     def _layernorm(self, pair: torch.Tensor) -> torch.Tensor:
-        if self.implementation == ImplementationType.TRITON and _bo_dispatch.use_kernels(
+        if self._backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
             pair.shape[1]
         ):
             return kernels.layernorm_kernel(
@@ -136,7 +142,7 @@ class BidirectionalTriangleAttention(nn.Module):
         """One-direction (starting-frame) triangle self-attention: q,k,v [B,H,L,L,D],
         bias [B,H,L,L] -> out [B,H,L,L,D]. PYTORCH = the reference einsum; TRITON reuses the
         single-direction fused kernel (consumes strided q/k/v; bias made contiguous inside)."""
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             return kernels.triton_triangle_attention_pair_bias(q, k, v, bias)
         scale = q.shape[-1] ** -0.5
         attn = torch.einsum("bhijd,bhikd->bhijk", q * scale, k)
@@ -159,7 +165,7 @@ class BidirectionalTriangleAttention(nn.Module):
         directions run the v7 kernels writing straight into a shared concat buffer (no
         transpose/cat/split materialization). PYTORCH below is the reference einsum."""
         H = self.n_head
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             from miniworld_kernels.kernels.triangle_attention.triton.bidirectional import (
                 bidir_triangle_attention_pair_bias,
             )
@@ -221,8 +227,8 @@ class BidirectionalTriangleAttention(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass."""
-        if self.implementation == ImplementationType.PYTORCH:
+        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        if self._backend == KernelBackend.PYTORCH:
             pln = self.ln_pair(pair)
             if self.use_self_attention:
                 out = self._attend_sa(pln, mask)
@@ -230,7 +236,7 @@ class BidirectionalTriangleAttention(nn.Module):
                 out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
             return self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             # Inference max-fusion (LN folded into the projections), gated like the
             # single-dir path: needs L past the kernel crossover and the concat
             # projection narrow enough to stay tensor-core-friendly. Bias-only only

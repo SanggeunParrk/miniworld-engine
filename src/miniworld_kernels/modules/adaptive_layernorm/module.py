@@ -5,6 +5,7 @@ from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels.kernels import adaln_inference, adaln_train
+from miniworld_kernels.modules.dispatch import KernelBackend, resolve_adaptive_layernorm
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -23,7 +24,9 @@ class AdaptiveLayerNorm(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        self.implementation = implementation
+        self.implementation = ImplementationType(implementation)
+        # 'miniworld' (auto) -> the TRITON family (the only fused adaln kernel).
+        self._backend = resolve_adaptive_layernorm(self.implementation)
         self.ln_in = nn.LayerNorm(d_hidden, elementwise_affine=False)
         self.ln_cond = nn.LayerNorm(d_cond, bias=False)
         self.to_scale = Linear(d_cond, d_hidden, init="gating")
@@ -35,15 +38,15 @@ class AdaptiveLayerNorm(nn.Module):
         x: Float[torch.Tensor, "* d_hidden"],
         cond: Float[torch.Tensor, "* d_cond"],
     ) -> Float[torch.Tensor, "* d_hidden"]:
-        """Forward pass."""
-        if self.implementation == ImplementationType.PYTORCH:
+        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        if self._backend == KernelBackend.PYTORCH:
             x_norm = self.ln_in(x)
             cond_norm = self.ln_cond(cond)
             scale = self.to_scale(cond_norm)
             bias = self.to_bias(cond_norm)
             return torch.sigmoid(scale) * x_norm + bias
 
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
             # (The legacy single fused `triton_adaptive_layer_norm` compile-fails at d≥384.)
             fn = adaln_train if (self.training or x.requires_grad) else adaln_inference

@@ -14,6 +14,7 @@ from torch import Size
 from torch.nn.parameter import Parameter
 
 from miniworld_kernels import kernels
+from miniworld_kernels.modules.dispatch import KernelBackend, resolve_layernorm
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -93,7 +94,10 @@ class LayerNorm(nn.LayerNorm):
         self.normalized_shape = tuple(normalized_shape)  # type: ignore[arg-type]
         self.eps = eps
         self.elementwise_affine = elementwise_affine
-        self.implementation = implementation
+        self.implementation = ImplementationType(implementation)
+        # Resolve the public option (incl. MINIWORLD auto) to a concrete internal
+        # backend once; forward dispatches on this, never on ImplementationType.
+        self._backend = resolve_layernorm(self.implementation)
         if self.elementwise_affine:
             self.weight = Parameter(
                 torch.empty(self.normalized_shape, **factory_kwargs)
@@ -111,23 +115,18 @@ class LayerNorm(nn.LayerNorm):
         self.reset_parameters()
 
     def forward(self, input: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:  # noqa: A002
-        """Forward pass."""
-        if self.implementation == ImplementationType.PYTORCH:
+        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        backend = self._backend
+        if backend == KernelBackend.PYTORCH:
             return super().forward(input)
-        if self.implementation in {
-            ImplementationType.TRITON,
-            ImplementationType.CUEQUIVARIANCE,
-        }:
+        if backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             return kernels.triton_layernorm(
                 input,
                 self.weight,
                 self.bias,
                 self.eps,
             )
-        if self.implementation in {
-            ImplementationType.MINIWORLD,
-            ImplementationType.CUDA,
-        }:
+        if backend == KernelBackend.CUDA:
             # miniworld = our auto-routing LayerNorm: forward fused triton (HBM-bound,
             # at the bandwidth wall) + backward auto-dispatched per shape
             # (persistent / partial / atomic). See kernels/layernorm.

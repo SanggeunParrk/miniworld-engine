@@ -75,10 +75,15 @@ def _lr_kernel(
     GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    rm = pid * BM + tl.arange(0, BM)
+    # int64 M-index: bdll store offset is (D+rd)*LL + m with LL=L*L, so at large L
+    # (e.g. L>=4096 at D=128, or d_pair=512 sooner) the flat offset exceeds int32.
+    # Promote the row index and LL to int64 — mirrors the hardened backward
+    # (trimul_inproj/triton/back_fused.py). tl.dot loads stay tile-local.
+    rm = pid.to(tl.int64) * BM + tl.arange(0, BM).to(tl.int64)
     rk = tl.arange(0, BK)
     r2d = tl.arange(0, 2 * D)
     rd = tl.arange(0, D)
+    LL = LL.to(tl.int64)
     mmask = rm < M
 
     # ---- left half: wlr cols [0:2D) interleaved [g0 p0 g1 p1 ...] ----
@@ -132,7 +137,8 @@ def _gate_kernel(
     GROUP_M: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    rm = pid * BM + tl.arange(0, BM)
+    # int64 M-index (gate store is m*D+d, M=L*L): matches _lr_kernel hardening.
+    rm = pid.to(tl.int64) * BM + tl.arange(0, BM).to(tl.int64)
     rk = tl.arange(0, BK)
     rd = tl.arange(0, D)
     mmask = rm < M

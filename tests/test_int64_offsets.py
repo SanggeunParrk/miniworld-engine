@@ -1,0 +1,48 @@
+"""Static guard: Triton kernels whose flat offset scales with the logical
+sequence length ``M = B*L*L`` must promote the M-index to int64, or they issue
+illegal memory accesses once ``M*stride`` exceeds 2**31 at large L.
+
+This locks in the int64 hardening (so a refactor can't silently drop it) and
+documents the one deliberate exception — the transition triton family, which is
+on the B200 hot path and is left int32 because (a) it is provably int32-safe at
+the shapes in use (L<=1024, d<=512 keeps M*stride < 2**31) and (b) adding int64
+there risks the "no perf regression" bar. Revisit only with a benchmark.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "miniworld_kernels" / "kernels"
+
+# (file, must-contain snippet) — the M-index promotion that keeps large-L offsets int64.
+_HARDENED = [
+    ("trimul_inproj/triton/front.py", ".to(tl.int64)"),
+    ("trimul_inproj/triton/back_fused.py", ".to(tl.int64)"),
+    ("trimul_inproj/triton/gate_elem.py", ".to(tl.int64)"),
+    ("tm1/triton/main.py", "tl.arange(0, BLOCK_M).to(tl.int64)"),
+    ("tm2/triton/main.py", "tl.arange(0, BLOCK_M).to(tl.int64)"),
+]
+
+# Known int32-offset kernels intentionally left as-is (hot path, int32-safe at
+# current shapes). Documented so the guard is a conscious allowlist, not silence.
+_KNOWN_INT32_HOT = [
+    "transition/triton/fused.py",
+]
+
+
+@pytest.mark.parametrize("rel,snippet", _HARDENED)
+def test_m_index_is_int64(rel: str, snippet: str):
+    text = (_SRC / rel).read_text()
+    assert snippet in text, (
+        f"{rel} lost its int64 M-index promotion ({snippet!r}); large-L offsets "
+        f"will overflow int32. See tests/test_int64_offsets.py."
+    )
+
+
+def test_known_int32_hot_files_exist():
+    """Sanity: the documented exceptions still exist (rename -> update the note)."""
+    for rel in _KNOWN_INT32_HOT:
+        assert (_SRC / rel).exists(), f"documented int32 hot file moved: {rel}"

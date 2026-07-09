@@ -7,6 +7,10 @@ from jaxtyping import Bool, Float
 
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels import kernels
+from miniworld_kernels.modules.dispatch import (
+    KernelBackend,
+    resolve_augmented_attention,
+)
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -50,7 +54,9 @@ class AugmentedAttentionPairBias(nn.Module):
         super().__init__()
         self.n_head = n_head
         self.use_qk_norm = use_qk_norm
-        self.implementation = implementation
+        self.implementation = ImplementationType(implementation)
+        # 'miniworld' (auto) -> the TRITON attention kernel (the only fused one).
+        self._backend = resolve_augmented_attention(self.implementation)
 
         d_hidden = d_single // n_head
 
@@ -79,7 +85,7 @@ class AugmentedAttentionPairBias(nn.Module):
         bias: torch.Tensor,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.implementation == ImplementationType.PYTORCH:
+        if self._backend == KernelBackend.PYTORCH:
             query.mul_(query.shape[-1] ** -0.5)
             attention = torch.einsum("abihd,abjhd->abhij", query, key)
             bias = bias.permute(0, 3, 1, 2).contiguous()  # (B, H, L, L)
@@ -92,7 +98,7 @@ class AugmentedAttentionPairBias(nn.Module):
             attention = F.softmax(attention, dim=-1)
             return torch.einsum("abhij,abjhd->abihd", attention, value)
 
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             return kernels.triton_augmented_attention_pair_bias(
                 query,
                 key,

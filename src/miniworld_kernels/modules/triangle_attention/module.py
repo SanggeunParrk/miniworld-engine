@@ -14,6 +14,10 @@ from jaxtyping import Bool, Float
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels.kernels.bias_only_attention import dispatch as _bo_dispatch
+from miniworld_kernels.modules.dispatch import (
+    KernelBackend,
+    resolve_triangle_attention,
+)
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -72,13 +76,12 @@ class TriangleAttention(nn.Module):
         self.starting = starting
         self.use_self_attention = use_self_attention
         self.use_qk_norm = use_qk_norm
-        # 'miniworld' (ours, auto) resolves to the triton path: the repo's only
+        # 'miniworld' (ours, auto) resolves to the TRITON family: the repo's only
         # tensor-core triangle-attention kernels are the triton ones (which
-        # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolving
-        # here keeps all backend selection inside the module, not in the caller.
-        if implementation == ImplementationType.MINIWORLD:
-            implementation = ImplementationType.TRITON
-        self.implementation = implementation
+        # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolution
+        # lives in modules.dispatch; forward routes on self._backend.
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_triangle_attention(self.implementation)
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
         self.nvtx_name = f"triangle_attention/{position}"
@@ -112,14 +115,14 @@ class TriangleAttention(nn.Module):
         value: torch.Tensor,
         bias: torch.Tensor,
     ) -> torch.Tensor:
-        if self.implementation == ImplementationType.PYTORCH:
+        if self._backend == KernelBackend.PYTORCH:
             query.mul_(query.shape[-1] ** -0.5)
             attention = torch.einsum("bhijd,bhikd->bhijk", query, key)
             attention = attention + bias[:, :, None, :, :]
             attention = F.softmax(attention, dim=-1)
             return torch.einsum("bhijk,bhikd->bhijd", attention, value)
 
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             return kernels.triton_triangle_attention_pair_bias(
                 query,
                 key,
@@ -127,7 +130,7 @@ class TriangleAttention(nn.Module):
                 bias,
             )
 
-        if self.implementation == ImplementationType.CUEQUIVARIANCE:
+        if self._backend == KernelBackend.CUEQUIVARIANCE:
             q = rearrange(query, "B H L1 L2 D -> B L1 H L2 D")
             k = rearrange(key, "B H L1 L2 D -> B L1 H L2 D")
             v = rearrange(value, "B H L1 L2 D -> B L1 H L2 D")
@@ -144,7 +147,7 @@ class TriangleAttention(nn.Module):
         wins at large L but its dispatch overhead regresses at small L, so fall
         back to torch's native LayerNorm below the per-GPU threshold (see dispatch).
         """
-        if self.implementation == ImplementationType.TRITON and _bo_dispatch.use_kernels(
+        if self._backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
             pair.shape[1]
         ):
             return kernels.layernorm_kernel(
@@ -238,7 +241,7 @@ class TriangleAttention(nn.Module):
             if (
                 not self.use_self_attention
                 and not torch.is_grad_enabled()
-                and self.implementation == ImplementationType.TRITON
+                and self._backend == KernelBackend.TRITON
                 and _bo_dispatch.use_kernels(pair.shape[1])
                 and _bo_dispatch.use_infer_concat(self.to_value.weight.shape[0])
             ):
@@ -280,7 +283,7 @@ class TriangleAttention(nn.Module):
             # sigmoid_gate is elementwise and materializes a contiguous result, so
             # an explicit .contiguous() on this transpose view is redundant.
             out = rearrange(out, "B H L L2 D -> B L L2 (H D)")
-            if self.implementation == ImplementationType.TRITON and _bo_dispatch.use_kernels(
+            if self._backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
                 pair.shape[1]
             ):
                 # Fuse sigmoid(to_gate(pair)) * out + the to_out projection (gated
@@ -315,13 +318,10 @@ class TrianglePairAttention(nn.Module):
         self.starting = starting
         self.use_self_attention = use_self_attention
         self.use_qk_norm = use_qk_norm
-        # 'miniworld' (ours, auto) resolves to the triton path: the repo's only
-        # tensor-core triangle-attention kernels are the triton ones (which
-        # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolving
-        # here keeps all backend selection inside the module, not in the caller.
-        if implementation == ImplementationType.MINIWORLD:
-            implementation = ImplementationType.TRITON
-        self.implementation = implementation
+        # This variant's forward is the pure-torch pair-attention contraction
+        # regardless of backend; resolution is kept for API consistency.
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_triangle_attention(self.implementation)
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
         self.nvtx_name = f"triangle_attention/{position}"

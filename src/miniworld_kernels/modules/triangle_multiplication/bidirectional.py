@@ -21,9 +21,11 @@ from cuequivariance_torch import triangle_multiplicative_update
 from jaxtyping import Bool, Float
 
 from miniworld_kernels._typecheck import typecheck
-from miniworld_kernels.modules.triangle_multiplication.dispatch import (
-    resolve_impl as _resolve_trimul_impl,
-    resolve_out_layout as _resolve_trimul_out_layout,
+from miniworld_kernels.modules import dispatch as _dispatch
+from miniworld_kernels.modules.dispatch import (
+    KernelBackend,
+    resolve_triangle_multiplication,
+    trimul_out_layout as _resolve_trimul_out_layout,
 )
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
@@ -44,20 +46,22 @@ class BidirectionalTriangleMultiplication(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        # 'miniworld' (auto) -> concrete backend for the running GPU arch.
-        self.implementation = _resolve_trimul_impl(implementation)
+        # 'miniworld' (auto) -> concrete backend for the running GPU arch. Public
+        # option kept on self.implementation; forward routes on self._backend.
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_triangle_multiplication(self.implementation)
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
         d2 = 2 * self.d_hidden
 
-        self.ln_pair = LayerNorm(d_pair, implementation=implementation)
+        self.ln_pair = LayerNorm(d_pair, implementation=self.implementation)
         # Doubled-width left/right projections: [outgoing | incoming] channels.
         self.to_left = Linear(d_pair, d2, bias=False, init="default")
         self.to_left_gate = Linear(d_pair, d2, bias=False, init="zero")
         self.to_right = Linear(d_pair, d2, bias=False, init="default")
         self.to_right_gate = Linear(d_pair, d2, bias=False, init="zero")
 
-        self.ln_out = LayerNorm(d2, implementation=implementation)
+        self.ln_out = LayerNorm(d2, implementation=self.implementation)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
 
@@ -67,17 +71,17 @@ class BidirectionalTriangleMultiplication(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass."""
-        if self.implementation == ImplementationType.CUEQUIVARIANCE:
+        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        if self._backend == KernelBackend.CUEQUIVARIANCE:
             return self._forward_cuequivariance(pair, mask)
-        if self.implementation == ImplementationType.CUTE:
+        if self._backend == KernelBackend.CUTE:
             # Inference: forward-only fused sm100 kernels. Training (grad): the
             # v6-faithful fused bidirectional training kernel (BidirV6TriMulSm100,
             # trimul_bidir_b200 v4), wired here so dispatch stays inside the module.
             if torch.is_grad_enabled():
                 return self._forward_cute_train(pair, mask)
             return self._forward_cute(pair, mask)
-        if self.implementation != ImplementationType.PYTORCH:
+        if self._backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
 
         pair = self.ln_pair(pair)
@@ -154,12 +158,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         lazily from this module's own weights and cached. bf16, B=1."""
         impl = getattr(self, "_bidir_train_impl", None)
         if impl is None:
-            major = (
-                torch.cuda.get_device_capability(pair.device)[0]
-                if torch.cuda.is_available()
-                else 0
-            )
-            if major >= 10:
+            if _dispatch.is_sm100(pair.device):
                 from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training_sm100 import (  # noqa: E501
                     BidirV6TriMulSm100 as _Impl,
                 )
@@ -187,11 +186,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         Same math as the pytorch reference; bf16 in / fp32 acc / bf16 out.
         """
         import os as _os
-        major = (
-            torch.cuda.get_device_capability(pair.device)[0]
-            if torch.cuda.is_available() else 0
-        )
-        _free_default = "1" if major >= 10 else "0"
+        _free_default = "1" if _dispatch.is_sm100(pair.device) else "0"
         if _os.environ.get(
             "MINIWORLD_TRIMUL_CUEQUIV_FREE", _free_default
         ) != "0":

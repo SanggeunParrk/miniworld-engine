@@ -26,22 +26,17 @@ Env overrides (debug / manual pin):
 
 from __future__ import annotations
 
-import os
-
 import torch
 
+from miniworld_kernels.modules import dispatch as _dispatch
 from miniworld_kernels.modules.exceptions import ImplementationType
 
+# Backwards-compatible shim: the trimul arch policy now lives in the central
+# ``modules.dispatch`` (single source of truth for capability + the B200/H100
+# family choice). These wrappers preserve the historical ImplementationType/str
+# return signatures for the existing callers and benchmarks.
 
-def _capability(device: torch.device | None = None) -> tuple[int, int]:
-    if not torch.cuda.is_available():
-        return (0, 0)
-    idx = None
-    if device is not None and device.type == "cuda":
-        idx = device.index
-    if idx is None:
-        idx = torch.cuda.current_device()
-    return torch.cuda.get_device_capability(idx)
+_capability = _dispatch.capability
 
 
 def resolve_impl(
@@ -50,19 +45,13 @@ def resolve_impl(
 ) -> ImplementationType:
     """Resolve the ``miniworld`` (auto) implementation to a concrete backend.
 
-    Non-``miniworld`` requests pass through unchanged.
+    Non-``miniworld`` requests pass through unchanged. Delegates to
+    :func:`modules.dispatch.resolve_triangle_multiplication` and re-expresses the
+    result as an ``ImplementationType`` for historical callers.
     """
     if requested != ImplementationType.MINIWORLD:
         return requested
-    override = os.environ.get("MINIWORLD_TRIMUL_IMPL")
-    if override:
-        return ImplementationType(override.strip().lower())
-    major, _ = _capability(device)
-    # Hopper (sm_90) and Blackwell (sm_100) both run a cute path; the exact cute
-    # kernel is chosen per-arch by resolve_out_layout(). Older archs -> triton.
-    if major >= 9:
-        return ImplementationType.CUTE
-    return ImplementationType.TRITON
+    return ImplementationType(_dispatch.resolve_triangle_multiplication(requested, device).value)
 
 
 def resolve_out_layout(device: torch.device | None = None) -> str:
@@ -71,10 +60,4 @@ def resolve_out_layout(device: torch.device | None = None) -> str:
     sm_100 → ``bdll_sm100`` (our from-scratch tcgen05 gate GEMM);
     else    → ``bdll_direct`` (quack M-major, the H100/pre-existing path).
     """
-    override = os.environ.get("MINIWORLD_TRIMUL_OUT_LAYOUT")
-    if override:
-        return override.strip()
-    major, _ = _capability(device)
-    if major >= 10:
-        return "bdll_sm100"
-    return "bdll_direct"
+    return _dispatch.trimul_out_layout(device)

@@ -49,7 +49,8 @@ def fused_sigmoid_gate2_fwd_kernel(
     row_start = pid_m * BLOCK_M
     col_start = pid_n * BLOCK_N
 
-    offs_m = row_start + tl.arange(0, BLOCK_M)
+    # int64 M-index: offs_m*N (M=B*L*L) overflows int32 at large logical L.
+    offs_m = row_start + tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = col_start + tl.arange(0, BLOCK_N)
 
     A_tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
@@ -114,7 +115,8 @@ def fused_sigmoid_gate2_bwd_kernel(
     row_start = pid_m * BLOCK_M
     col_start = pid_n * BLOCK_N
 
-    offs_m = row_start + tl.arange(0, BLOCK_M)
+    # int64 M-index: offs_m*N (M=B*L*L) overflows int32 at large logical L.
+    offs_m = row_start + tl.arange(0, BLOCK_M).to(tl.int64)
     offs_n = col_start + tl.arange(0, BLOCK_N)
 
     A_tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)

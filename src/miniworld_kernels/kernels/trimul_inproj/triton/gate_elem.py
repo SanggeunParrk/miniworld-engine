@@ -40,7 +40,9 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, n_elem,
                      N: tl.constexpr, BLK: tl.constexpr, SAVE_GATE: tl.constexpr,
                      GROUP_M: tl.constexpr):
     """Elementwise (1D, D-general): gate = sigmoid(glogit); y = proj ⊙ gate; [save gate]."""
-    off = tl.program_id(0) * BLK + tl.arange(0, BLK)
+    # int64 flat offset: n_elem = M*N = B*L*L*N exceeds int32 at large L (e.g. L>=2048,
+    # N=512). Promote so every load/store offset is int64.
+    off = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
     mask = off < n_elem
     g = tl.sigmoid(tl.load(glogit_ptr + off, mask=mask, other=0.0).to(tl.float32))
     p = tl.load(proj_ptr + off, mask=mask, other=0.0).to(tl.float32)
@@ -70,7 +72,8 @@ def _gate_elem_bwd_ew_kernel(
     (glogit=x_n@Wg) instead of gate, and gate=sigmoid(preact) is recomputed here —
     lets the fused fwd (gate_elem_quack_fused) save preact instead of gate."""
     pid = tl.program_id(0)
-    rm = pid * BM + tl.arange(0, BM)
+    # int64 M-index: off = m*N + n with M=B*L*L overflows int32 at large L.
+    rm = pid.to(tl.int64) * BM + tl.arange(0, BM).to(tl.int64)
     rn = tl.arange(0, N)
     mmask = rm[:, None] < M
     off = rm[:, None] * N + rn[None, :]

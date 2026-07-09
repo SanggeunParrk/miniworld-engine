@@ -26,6 +26,10 @@ from jaxtyping import Float
 
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.modules.dispatch import (
+    KernelBackend,
+    resolve_conditioned_transition,
+)
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -59,7 +63,10 @@ class ConditionedTransition(nn.Module):
         self.d_hidden = d_hidden
         self.d_cond = d_cond
         self.n = n
-        self.implementation = implementation
+        self.implementation = ImplementationType(implementation)
+        # 'miniworld' (auto) -> the TRITON fused family (inference d_hidden
+        # sub-dispatch lives in the kernel); CUEQUIVARIANCE shares that path.
+        self._backend = resolve_conditioned_transition(self.implementation)
 
         self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.float32)
         self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.float32)
@@ -88,10 +95,10 @@ class ConditionedTransition(nn.Module):
 
         Flattens leading dims to (M, d_hidden) for the kernels; AdaLN is out of scope.
         """
-        if self.implementation == ImplementationType.PYTORCH:
+        if self._backend == KernelBackend.PYTORCH:
             return self._reference(x, cond)
 
-        if self.implementation in {ImplementationType.TRITON, ImplementationType.CUEQUIVARIANCE}:
+        if self._backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]
             x2 = x.reshape(-1, d)
             cond2 = cond.reshape(-1, cond.shape[-1])

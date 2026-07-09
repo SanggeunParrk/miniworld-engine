@@ -9,6 +9,8 @@ from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels import kernels
+from miniworld_kernels.modules import dispatch as _dispatch
+from miniworld_kernels.modules.dispatch import KernelBackend, resolve_transition
 from miniworld_kernels.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -93,17 +95,16 @@ class Transition(nn.Module):
         super().__init__()
         self.d_hidden = d_hidden
         self.n = n
-        # 'miniworld' (ours, auto) resolves to the triton-family path, which itself
+        # 'miniworld' (ours, auto) resolves to the TRITON family, which itself
         # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
         # d in {128,256} & n==4, cute split for d>=512, else triton). Transition has
         # no cuequivariance kernel, so CUEQUIVARIANCE shares that same auto path.
-        # Dispatch lives here (inside the module), never in the caller.
-        if implementation == ImplementationType.MINIWORLD:
-            implementation = ImplementationType.TRITON
-        self.implementation = implementation
+        # Resolution lives in modules.dispatch; forward routes on self._backend.
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_transition(self.implementation)
 
         self.ln_in = LayerNorm(
-            d_hidden, implementation=implementation, dtype=torch.bfloat16
+            d_hidden, implementation=self.implementation, dtype=torch.bfloat16
         )
         self.expand_a = Linear(
             d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.bfloat16
@@ -117,11 +118,11 @@ class Transition(nn.Module):
 
     @typecheck
     def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
-        """Forward pass."""
-        if self.implementation == ImplementationType.PYTORCH:
+        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        if self._backend == KernelBackend.PYTORCH:
             return self._torch_forward(x)
 
-        if self.implementation == ImplementationType.CUDA:
+        if self._backend == KernelBackend.CUDA:
             x = self.ln_in(x)
             return kernels.cuda_transition(
                 x,
@@ -131,16 +132,16 @@ class Transition(nn.Module):
                 self.n,
             )
 
-        if self.implementation in {
-            ImplementationType.TRITON,
-            ImplementationType.CUEQUIVARIANCE,
+        if self._backend in {
+            KernelBackend.TRITON,
+            KernelBackend.CUEQUIVARIANCE,
         }:
             is_training = self.training and torch.is_grad_enabled()
             if is_training:
                 return self._training_forward(x)
             return self._inference_forward(x)
 
-        if self.implementation == ImplementationType.CUTE:
+        if self._backend == KernelBackend.CUTE:
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
             # explicit selection). Same fused structure; LN folded into the cute expand.
             backward_backend = _explicit_cute_backward_backend()
@@ -160,12 +161,20 @@ class Transition(nn.Module):
 
     def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward-only dispatch: no tensors are saved for backward."""
+        if _dispatch.is_sm100(x.device) and self.d_hidden >= 512:  # noqa: PLR2004
+            # No fused sm_100 kernel fits d>=512 (b2b smem-OOMs; cute is SM90-only).
+            # Fall back to the correct torch reference rather than crash (non-AF3 shape).
+            return self._torch_forward(x)
         # Hand-CUDA fused b2b beats cute at d_hidden=128 (~2.07x) and d_hidden=256 (~1.21x)
         # for the AF3 shape (n=4 -> K=ND/4=D). Requires bf16 + n==4 + M%128==0. d_hidden=512
         # is hardware-limited for full fusion (smem cannot co-hold xn+weights+accumulator at
         # K=D=512) -> cute's non-fused tiled GEMM wins there, so it falls through below.
         if (
             _cuda_b2b_inference_enabled()
+            # Hand-CUDA b2b hardcodes Hopper (sm_90a) cutlass includes and does not
+            # build on Blackwell (sm_100) -> skip and fall through to the cute/triton
+            # path (correctness-guard: never route to a backend that can't run here).
+            and not _dispatch.is_sm100(x.device)
             and self.d_hidden in (128, 256)
             and self.n == 4
             and x.is_cuda
@@ -181,7 +190,10 @@ class Transition(nn.Module):
                 self.squeeze.weight,
                 self.ln_in.eps,
             )
-        if self.d_hidden >= 256:
+        # cute_transition_fused is the quack SM90 (H100) WGMMA path; it asserts
+        # SM90-only, so on Blackwell (sm_100) route the wide-d case to the triton
+        # family too (its split path handles any d) — correctness-guard fallback.
+        if self.d_hidden >= 256 and not _dispatch.is_sm100(x.device):
             return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
@@ -213,10 +225,14 @@ class Transition(nn.Module):
           d=512  cute+tritonbwd 6.90  <  torch 7.52   (b2b fwd OOMs smem at d=512)
         Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
         """
-        if self.d_hidden >= 512:
+        if _dispatch.is_sm100(x.device) and self.d_hidden >= 512:  # noqa: PLR2004
+            # No fused sm_100 kernel fits d>=512; correct torch fallback (non-AF3 shape).
+            return self._torch_forward(x)
+        if self.d_hidden >= 512 and not _dispatch.is_sm100(x.device):
             # d=512: b2b fusion can't fit smem (xn+weights+accumulator) and h round-trip is not
             # the bottleneck (compute-bound) -> cute split (expand + cuBLAS squeeze). The triton
             # (Version A style) backward beats the cute backend AND torch; env can override.
+            # SM90 (H100) only; on Blackwell the triton family (below) carries d=512 too.
             backward_backend = _large_d_training_backend_from_env() or "triton"
             return kernels.cute_transition_fused(
                 x,
