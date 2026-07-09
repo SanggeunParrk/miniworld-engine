@@ -93,6 +93,13 @@ class Transition(nn.Module):
         super().__init__()
         self.d_hidden = d_hidden
         self.n = n
+        # 'miniworld' (ours, auto) resolves to the triton-family path, which itself
+        # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
+        # d in {128,256} & n==4, cute split for d>=512, else triton). Transition has
+        # no cuequivariance kernel, so CUEQUIVARIANCE shares that same auto path.
+        # Dispatch lives here (inside the module), never in the caller.
+        if implementation == ImplementationType.MINIWORLD:
+            implementation = ImplementationType.TRITON
         self.implementation = implementation
 
         self.ln_in = LayerNorm(

@@ -9,6 +9,7 @@ from .adaptive_layernorm import AdaptiveLayerNorm
 from .augmented_attention import AugmentedAttentionPairBias
 from .conditioned_transition import ConditionedTransition
 from .exceptions import ImplementationType, InvalidImplementationError
+from .pairformer import Pairformer, PairformerBlock, PairformerConfig
 from .primitives import Dropout, LayerNorm, Linear
 from .transition import Transition
 from .triangle_attention import TriangleAttention, TrianglePairAttention
@@ -23,6 +24,9 @@ __all__ = [
     "InvalidImplementationError",
     "LayerNorm",
     "Linear",
+    "Pairformer",
+    "PairformerBlock",
+    "PairformerConfig",
     "Transition",
     "TriangleAttention",
     "TriangleMultiplication",

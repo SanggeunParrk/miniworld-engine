@@ -1,0 +1,20 @@
+Section: GPU Speed Of Light Throughput
+Memory Throughput                 %        49.64
+DRAM Throughput                   %        42.97
+Duration                         us       731.10
+L1/TEX Cache Throughput           %        53.83
+L2 Cache Throughput               %        37.70
+Compute (SM) Throughput           %        29.41
+OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+Memory Throughput                           Tbyte/s         2.86
+number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+higher-throughput equivalent, the achieved FP32 performance could be increased by up to 50% (relative to its  
+Registers Per Thread             register/thread             122
+Section: Occupancy
+Overall GPU Occupancy                     %         0.29
+Cluster Occupancy                         %         3.12
+Theoretical Occupancy                     %         9.38
+Achieved Occupancy                        %         9.34
+The 1.50 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+hardware maximum of 16. This kernel's theoretical occupancy (9.4%) is limited by the required amount of       

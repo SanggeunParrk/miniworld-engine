@@ -220,6 +220,7 @@ __global__ void layer_norm_bwd_main_kernel(
     const scalar_t* __restrict__ W,        // [N]
     const float*    __restrict__ Mean,     // [M]
     const float*    __restrict__ Rstd,     // [M]
+    const float*    __restrict__ RS,       // [M] per-row scale (mask fold), or nullptr
     scalar_t*       __restrict__ DX,       // [M, N]
     float*          __restrict__ PartDW,   // [gridDim.x * 4, N]
     float*          __restrict__ PartDB,   // [gridDim.x * 4, N]
@@ -256,9 +257,15 @@ __global__ void layer_norm_bwd_main_kernel(
         scalar_t* __restrict__ dx = DX + row * N;
         const float mean = Mean[row];
         const float rstd = Rstd[row];
+        // Backward of y = LN(x)*rs: scale the incoming grad by the per-row rs (uniform across
+        // the warp, no divergence). dx/dw/db all follow from the scaled dy, matching triton.
+        const float rs = (RS != nullptr) ? RS[row] : 1.0f;
 
         scalar_t x_vals[MAX_K];
         scalar_t dy_vals[MAX_K];
+        // Cache w*dy per column so the dx pass reuses it instead of reloading W and
+        // recomputing the product (this bwd is SM-issue-bound on sm100, not DRAM-bound).
+        float wdy_vals[MAX_K];
 
         // Coalesced vector loads. N % EPT == 0 for every launched (N, TX_BYTES) combo, so a
         // transaction whose base column is in range never overshoots N.
@@ -289,9 +296,10 @@ __global__ void layer_norm_bwd_main_kernel(
                 for (int e = 0; e < EPT; ++e) {
                     const int k = v * EPT + e;
                     const float x_v = (float)x_vals[k];
-                    const float dy_v = (float)dy_vals[k];
+                    const float dy_v = (float)dy_vals[k] * rs;
                     const float xhat = (x_v - mean) * rstd;
                     const float wdy = (float)wp.s[e] * dy_v;
+                    wdy_vals[k] = wdy;
                     sum_wdy += wdy;
                     sum_wdy_xhat += wdy * xhat;
                 }
@@ -307,16 +315,14 @@ __global__ void layer_norm_bwd_main_kernel(
         for (int v = 0; v < NV_MAX; ++v) {
             const int col0 = (v * 32 + lane) * EPT;
             if (col0 < N) {
-                Pack wp;
-                wp.vec = *reinterpret_cast<const VecT*>(W + col0);
                 Pack dxp;
 #pragma unroll
                 for (int e = 0; e < EPT; ++e) {
                     const int k = v * EPT + e;
                     const float x_v = (float)x_vals[k];
-                    const float dy_v = (float)dy_vals[k];
+                    const float dy_v = (float)dy_vals[k] * rs;
                     const float xhat = (x_v - mean) * rstd;
-                    const float wdy = (float)wp.s[e] * dy_v;
+                    const float wdy = wdy_vals[k];
                     const float dx_v = (wdy - (xhat * c1 + c2)) * rstd;
                     dxp.s[e] = (scalar_t)dx_v;
                     acc_dw[k] += dy_v * xhat;
@@ -387,7 +393,8 @@ layer_norm_cuda_bwd(
     torch::Tensor x,        // [..., N]
     torch::Tensor weight,   // [N]
     torch::Tensor mean,     // [M], fp32
-    torch::Tensor rstd)     // [M], fp32
+    torch::Tensor rstd,     // [M], fp32
+    c10::optional<torch::Tensor> rowscale)  // [M], fp32, or None (per-row mask fold)
 {
     TORCH_CHECK(dy.is_cuda(),     "dy must be a CUDA tensor");
     TORCH_CHECK(x.is_cuda(),      "x must be a CUDA tensor");
@@ -414,6 +421,15 @@ layer_norm_cuda_bwd(
     TORCH_CHECK(N > 0 && N <= 1024, "LayerNorm CUDA backward supports 1 <= N <= 1024");
     TORCH_CHECK(mean_contig.numel() == M, "mean must have shape [M]");
     TORCH_CHECK(rstd_contig.numel() == M, "rstd must have shape [M]");
+
+    // Optional per-row scale (mask fold): y = LN(x)*rs. fp32 [M]; nullptr disables it.
+    const float* rs_ptr = nullptr;
+    torch::Tensor rs_contig;
+    if (rowscale.has_value() && rowscale->defined()) {
+        rs_contig = rowscale->to(torch::kFloat32).contiguous();
+        TORCH_CHECK(rs_contig.numel() == M, "rowscale must have shape [M]");
+        rs_ptr = rs_contig.data_ptr<float>();
+    }
 
     auto dx_2d = torch::empty_like(dy_contig);
     auto dw = torch::empty_like(w_contig);
@@ -451,6 +467,7 @@ layer_norm_cuda_bwd(
                     w_contig.data_ptr<scalar_t>(),
                     mean_contig.data_ptr<float>(),
                     rstd_contig.data_ptr<float>(),
+                    rs_ptr,
                     dx_2d.data_ptr<scalar_t>(),
                     partial_dw.data_ptr<float>(),
                     partial_db.data_ptr<float>(),
@@ -509,5 +526,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("x"),
         py::arg("weight"),
         py::arg("mean"),
-        py::arg("rstd"));
+        py::arg("rstd"),
+        py::arg("rowscale") = c10::optional<torch::Tensor>());
 }

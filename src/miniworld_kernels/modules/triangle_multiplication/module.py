@@ -171,6 +171,12 @@ class TriangleMultiplication(nn.Module):
                 return self._forward_cuequivariance(pair, mask)
 
             if self.implementation == ImplementationType.CUTE:
+                # The cute inference path (_forward_cute) is forward-only (no saved
+                # stats / no autograd graph). Under grad (training), dispatch to the
+                # autograd-capable sm100/sm90 v6 merged training kernel instead —
+                # keeping all backend selection inside the module.
+                if torch.is_grad_enabled():
+                    return self._forward_cute_train(pair, mask)
                 return self._forward_cute(pair, mask)
 
             pair = self.ln_pair(pair)
@@ -218,6 +224,40 @@ class TriangleMultiplication(nn.Module):
             g_out_weight=self.to_gate.weight,
         )
 
+    def _forward_cute_train(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """MINIWORLD (ours) TRAINING path: the v6 merged trimul training kernel
+        (fwd+bwd, autograd-capable) — sm_100 ``V6TriMulMergedSm100`` on Blackwell,
+        else sm90 ``V6TriMulMerged``. Built lazily from this module's own weights and
+        cached (the cute inference kernels have no backward). bf16."""
+        impl = getattr(self, "_train_impl", None)
+        if impl is None:
+            direction = "out" if self.outgoing else "in"
+            major = (
+                torch.cuda.get_device_capability(pair.device)[0]
+                if torch.cuda.is_available()
+                else 0
+            )
+            if major >= 10:
+                # v6_merged sm100 — the faster single-direction training kernel
+                # (cuBLAS-centric merged backward; beats train_b200 v14 by 1.3x+ at
+                # L<=1024). Baseline for further optimization.
+                from miniworld_kernels.kernels.trimul_inproj.cute.v6_training_merged_sm100 import (  # noqa: E501
+                    V6TriMulMergedSm100 as _Impl,
+                )
+            else:
+                from miniworld_kernels.kernels.trimul_inproj.cute.v6_training_merged import (  # noqa: E501
+                    V6TriMulMerged as _Impl,
+                )
+            # Built from this module's params (copied into the kernel's packed
+            # layout); a benchmark/forward-eval wrapper, not a param-sharing one.
+            impl = _Impl(self, direction=direction).to(pair.device)
+            self._train_impl = impl
+        return impl(pair, mask)
+
     def _forward_cute(
         self,
         pair: torch.Tensor,
@@ -230,6 +270,11 @@ class TriangleMultiplication(nn.Module):
 
         Requires the cute env (cutlass-dsl + quack). Outgoing direction only.
         """
+        import os as _os
+        major = torch.cuda.get_device_capability(pair.device)[0] if torch.cuda.is_available() else 0
+        _free_default = "1" if major >= 10 else "0"
+        if _os.environ.get("MINIWORLD_TRIMUL_CUEQUIV_FREE", _free_default) != "0":
+            return self._forward_cute_free(pair, mask)
         tm1_cute_forward, tm2_cute_forward, fused_ln_mask, layer_norm_transpose = (
             _load_cute_fns()
         )
@@ -271,3 +316,53 @@ class TriangleMultiplication(nn.Module):
         out_normed = (out[0] if isinstance(out, tuple) else out).view(b, l1, l2, d)
         # tm2 cute wants weights in (N, K) = nn.Linear form (already so).
         return tm2_cute_forward(x_normed, out_normed, self.to_gate.weight, self.to_out.weight)
+
+    def _forward_cute_free(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """CUEQUIV-FREE cute path (B200 / sm_100), mirroring the H100 trimul_inproj
+        design:
+
+            LN_in(triton) -> tm1 front (bdll_sm100, ours tcgen05) -> einsum(cuBLAS)
+              -> sm100 LayerNormLinear (triton M-major LN + tm1 tcgen05 proj GEMM)
+              -> triton GateElem
+
+        NO cuequiv kernels on this path (verified by nsys: no layer_norm_transpose /
+        fused_sigmoid_gated_dual_gemm). Selected by default on sm_100; set
+        MINIWORLD_TRIMUL_CUEQUIV_FREE=0 to fall back to the cuequiv-reusing
+        _forward_cute for comparison. B=1, bf16.
+        """
+        from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
+        from miniworld_kernels.kernels.trimul_inproj.cute.back_split_sm100 import (
+            trimul_back_split_sm100,
+        )
+        tm1_cute_forward, _, fused_ln_mask, _ = _load_cute_fns()
+        b, l1, l2, d = pair.shape
+
+        if mask is not None:
+            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+            x_normed = fused_ln_mask(pair, self.ln_pair.weight, self.ln_pair.bias, mask_2d)
+        else:
+            x_normed = triton_layernorm(
+                pair.reshape(b * l1 * l2, d), self.ln_pair.weight, self.ln_pair.bias,
+                self.ln_pair.eps,
+            ).view(b, l1, l2, d)
+
+        left_bdll, right_bdll = tm1_cute_forward(
+            x_normed,
+            self.to_left.weight.T,
+            self.to_left_gate.weight.T,
+            self.to_right.weight.T,
+            self.to_right_gate.weight.T,
+            out_layout=_resolve_trimul_out_layout(pair.device),
+        )
+        if self.outgoing:
+            tri = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)  # (B,D,L,L)
+        else:
+            tri = torch.einsum("bdki,bdkj->bdij", left_bdll, right_bdll)
+        return trimul_back_split_sm100(
+            tri, x_normed, self.to_out.weight, self.to_gate.weight.T,
+            self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
+        )

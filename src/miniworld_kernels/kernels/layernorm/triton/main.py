@@ -30,6 +30,16 @@ def get_seq_group(length: int) -> int:
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "layernorm"
 
+# Opt-in: route the LN backward (dx/dw/db) through the hand-CUDA warp-per-row kernel for the regime
+# where it beats the triton atomic path STANDALONE (bf16, 128<=N<=512, contiguous, no per-row
+# scale) — measured ~1.1x over the triton atomic bwd on B200. DEFAULT OFF because the win is
+# e2e-NEUTRAL in the trimul training graph: LN_in bwd is ~7% of the step and the CUDA path's second
+# (reduce) kernel launch eats the ~12% compute win at these M (verified graph-time delta within
+# run-to-run noise at L=384/768/1024). Enabling also forces the one-time nvcc JIT build on first
+# `triton_layernorm` import. Set MINIWORLD_LN_IN_CUDA=1 to use it (kernels/layernorm/cuda/ now
+# gencodes sm_80/90/100 + PTX so the ext loads and runs on B200).
+_LN_CUDA_BWD_ENABLED = os.environ.get("MINIWORLD_LN_IN_CUDA", "0") != "0"
+
 
 configs = [
     triton.Config({"BLOCK_M": block_m}, num_warps=num_warps, num_stages=num_stages)
@@ -283,11 +293,33 @@ class TritonLayerNormFunction(torch.autograd.Function):
         M, N = x.shape
         dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
 
+        has_rs = ctx.has_rowscale
+
+        # Hand-CUDA warp-per-row backward (register column-partials, no atomics/shared/spill).
+        # It now supports the row_scale (AF pair-mask) fold: the CUDA kernel scales the incoming
+        # grad by rs per row (dx/dw/db follow, cos=1.0 vs triton). Measured B200 (M=L², N=128,
+        # fwd+bwd of triton_layernorm):
+        #   MASKED (has_rs): CUDA beats triton 1.17x @L512, 1.28x @L1024 — triton pays a real
+        #                    rowscale penalty (+26% bwd) that the CUDA path (one FMA) avoids.
+        #   DENSE  (no rs):  ~neutral (1.00x @L512, 1.07x @L1024) and slightly SLOWER at L384.
+        # So auto-take CUDA for the masked path (always wins), but keep dense behind the opt-in
+        # env flag. Lazy import so the nvcc JIT build only triggers when this path is taken; any
+        # build/run failure falls through to triton.
+        if (x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _LN_CUDA_BWD_ENABLED)):
+            try:
+                from ..cuda import layer_norm_bwd_cuda
+                dx_c, dw_c, db_c = layer_norm_bwd_cuda(
+                    dy_2d, x.contiguous(), weight, mean, rstd,
+                    row_scale=rs if has_rs else None,
+                )
+                return (dx_c.view(ctx.input_shape), dw_c.float(), db_c.float(), None, None)
+            except Exception:  # noqa: BLE001 - portable triton fallback on any CUDA-path failure
+                pass
+
         # allocate output
         dx_2d = torch.empty_like(dy_2d)
         dw = torch.zeros(N, dtype=torch.float32, device=x.device)
         db = torch.zeros(N, dtype=torch.float32, device=x.device)
-        has_rs = ctx.has_rowscale
 
         # fmt: off
         grid = lambda META: [triton.cdiv(M, META["BLOCK_M"])]

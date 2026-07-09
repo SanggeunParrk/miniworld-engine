@@ -72,6 +72,12 @@ class TriangleAttention(nn.Module):
         self.starting = starting
         self.use_self_attention = use_self_attention
         self.use_qk_norm = use_qk_norm
+        # 'miniworld' (ours, auto) resolves to the triton path: the repo's only
+        # tensor-core triangle-attention kernels are the triton ones (which
+        # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolving
+        # here keeps all backend selection inside the module, not in the caller.
+        if implementation == ImplementationType.MINIWORLD:
+            implementation = ImplementationType.TRITON
         self.implementation = implementation
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
@@ -257,8 +263,9 @@ class TriangleAttention(nn.Module):
                 query = self.to_query(pair)
                 key = self.to_key(pair)
 
-                # v4 stride-native: no .contiguous() -- kernels consume strided q/k views
-                # via make_block_ptr (bias is made contiguous inside the Function, cheap).
+                # No .contiguous(): the triton attention kernel consumes these strided
+                # (B,H,L,L2,D) views directly via explicit strides (head_dim D is stride-1,
+                # so loads stay coalesced) — the transpose copy was pure overhead.
                 query = rearrange(query, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
                 key = rearrange(key, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
 
@@ -308,6 +315,12 @@ class TrianglePairAttention(nn.Module):
         self.starting = starting
         self.use_self_attention = use_self_attention
         self.use_qk_norm = use_qk_norm
+        # 'miniworld' (ours, auto) resolves to the triton path: the repo's only
+        # tensor-core triangle-attention kernels are the triton ones (which
+        # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolving
+        # here keeps all backend selection inside the module, not in the caller.
+        if implementation == ImplementationType.MINIWORLD:
+            implementation = ImplementationType.TRITON
         self.implementation = implementation
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False

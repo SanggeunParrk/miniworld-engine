@@ -861,20 +861,36 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         )
         if cuda_b2b_ok:
             rstd, c1 = stats_triton(x2, eps)
-            try:
-                from miniworld_kernels.kernels.transition.cuda import transition_b2b_fwd
-                out = transition_b2b_fwd(
-                    x2, rstd, c1,
-                    ln_weight.contiguous(), ln_bias.contiguous(),
-                    expand_a_weight.contiguous(), expand_b_weight.contiguous(),
-                    squeeze_weight.contiguous(),
-                )
-            except Exception:  # noqa: BLE001  build unavailable -> split fallback (always fits)
-                expand = transition_expand_gate(
-                    x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
-                    stats=(rstd, c1), save_xn=False,
-                )
-                out = torch.matmul(expand, squeeze_weight.T)
+            out = None
+            if torch.cuda.get_device_capability(x2.device)[0] == 10:
+                # B200 sm_100: the hand-CUDA sm90 b2b can't build (Hopper wgmma/TMA); use the
+                # cutlass-DSL sm100 forward. Version A backward (below) is arch-agnostic and
+                # recomputes xn from the saved stats, so it works unchanged with this forward.
+                try:
+                    from miniworld_kernels.kernels.transition.cute.b2b_fwd_sm100 import (
+                        transition_b2b_sm100_ln,
+                    )
+                    out = transition_b2b_sm100_ln(
+                        x2, ln_weight, ln_bias,
+                        expand_a_weight, expand_b_weight, squeeze_weight, eps,
+                    )
+                except Exception:  # noqa: BLE001  DSL unavailable -> fall through
+                    out = None
+            if out is None:
+                try:
+                    from miniworld_kernels.kernels.transition.cuda import transition_b2b_fwd
+                    out = transition_b2b_fwd(
+                        x2, rstd, c1,
+                        ln_weight.contiguous(), ln_bias.contiguous(),
+                        expand_a_weight.contiguous(), expand_b_weight.contiguous(),
+                        squeeze_weight.contiguous(),
+                    )
+                except Exception:  # noqa: BLE001  build unavailable -> split fallback (always fits)
+                    expand = transition_expand_gate(
+                        x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
+                        stats=(rstd, c1), save_xn=False,
+                    )
+                    out = torch.matmul(expand, squeeze_weight.T)
         elif K <= _B2B_MAX_K:
             # Back-to-back fused (triton): squeeze folded in, h never materialized in HBM.
             if _transition_fuse_stats_enabled():
@@ -951,6 +967,40 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
             go = go.to(dt)
 
         grad_expand = go @ squeeze_weight         # (1) dh  [M, ND]
+
+        # sm100 (B200) Version A: the tuned sm100 gate-backward kernel replaces the slow
+        # Triton _transition_expand_gatebwd (which was ~50% of the training step). xn is
+        # recomputed from the saved LN stats (Version A) — it is needed by the wgrad GEMMs
+        # anyway. Falls through to the Triton path if the DSL kernel is unavailable.
+        if (not ctx.has_xn) and torch.cuda.get_device_capability(x2.device)[0] == 10:
+            _sm100_ok = True
+            try:
+                from miniworld_kernels.kernels.transition.cute.gatebwd_sm100 import (
+                    transition_expand_gatebwd_sm100,
+                )
+            except Exception:  # noqa: BLE001
+                _sm100_ok = False
+            if _sm100_ok:
+                # Recompute xn with the tuned LN kernel (~13µs, matches the forward's
+                # transition_b2b_sm100_ln); a torch stats-formula recompute is ~15x slower
+                # (fp32 intermediates + many passes).
+                from miniworld_kernels.kernels.layernorm.interface import layernorm_kernel
+                xn = layernorm_kernel(x2, ln_weight, ln_bias, ctx.eps)
+                h, dA, dB = transition_expand_gatebwd_sm100(
+                    xn, expand_a_weight.contiguous(), expand_b_weight.contiguous(),
+                    grad_expand,
+                )
+                dWs = go.t() @ h
+                dWa = dA.t() @ xn
+                dWb = dB.t() @ xn
+                d_xn = dA @ expand_a_weight + dB @ expand_b_weight
+                dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight)
+                return (
+                    dx.reshape(orig_shape),
+                    dgamma.to(ln_weight.dtype),
+                    dbeta.to(ln_bias.dtype),
+                    dWa, dWb, dWs, None, None, None,
+                )
 
         # (2) gate backward is the ONLY stage that differs between Version A/B:
         #   B (has_xn):   reuse the saved xn (no re-normalize).

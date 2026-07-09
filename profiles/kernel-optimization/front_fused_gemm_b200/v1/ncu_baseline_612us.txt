@@ -1,0 +1,23 @@
+Section: GPU Speed Of Light Throughput
+Memory Throughput                 %        60.43
+DRAM Throughput                   %        52.74
+Duration                         us       612.90
+L1/TEX Cache Throughput           %        65.37
+L2 Cache Throughput               %        44.94
+Compute (SM) Throughput           %        35.81
+Memory Throughput                           Tbyte/s         3.51
+The memory access pattern for shared stores might not be optimal and causes on average a 49870.6 - way bank   
+conflict across all 296 shared store requests.This results in 2178041 bank conflicts,  which represent        
+number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+Warp Cycles Per Issued Instruction             cycle         4.26
+used data to shared memory. This stall type represents about 33.4% of the total average of 4.3 cycles         
+higher-throughput equivalent, the achieved FP32 performance could be increased by up to 50% (relative to its  
+Registers Per Thread             register/thread             132
+Section: Occupancy
+Overall GPU Occupancy                     %         0.29
+Cluster Occupancy                         %         3.12
+Block Limit Shared Mem                block            1
+Theoretical Occupancy                     %         9.38
+Achieved Occupancy                        %         9.33
+The 1.50 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+hardware maximum of 16. This kernel's theoretical occupancy (9.4%) is limited by the required amount of       
