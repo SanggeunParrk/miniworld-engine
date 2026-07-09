@@ -14,6 +14,7 @@ from jaxtyping import Bool, Float
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels.kernels.bias_only_attention import dispatch as _bo_dispatch
+from miniworld_kernels.modules import dispatch as _dispatch
 from miniworld_kernels.modules.dispatch import (
     KernelBackend,
     resolve_triangle_attention,
@@ -114,15 +115,16 @@ class TriangleAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         bias: torch.Tensor,
+        backend: KernelBackend,
     ) -> torch.Tensor:
-        if self._backend == KernelBackend.PYTORCH:
+        if backend == KernelBackend.PYTORCH:
             query.mul_(query.shape[-1] ** -0.5)
             attention = torch.einsum("bhijd,bhikd->bhijk", query, key)
             attention = attention + bias[:, :, None, :, :]
             attention = F.softmax(attention, dim=-1)
             return torch.einsum("bhijk,bhikd->bhijd", attention, value)
 
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             return kernels.triton_triangle_attention_pair_bias(
                 query,
                 key,
@@ -130,7 +132,7 @@ class TriangleAttention(nn.Module):
                 bias,
             )
 
-        if self._backend == KernelBackend.CUEQUIVARIANCE:
+        if backend == KernelBackend.CUEQUIVARIANCE:
             q = rearrange(query, "B H L1 L2 D -> B L1 H L2 D")
             k = rearrange(key, "B H L1 L2 D -> B L1 H L2 D")
             v = rearrange(value, "B H L1 L2 D -> B L1 H L2 D")
@@ -139,7 +141,7 @@ class TriangleAttention(nn.Module):
 
         raise InvalidImplementationError(self.implementation)
 
-    def _layernorm(self, pair: torch.Tensor) -> torch.Tensor:
+    def _layernorm(self, pair: torch.Tensor, backend: KernelBackend) -> torch.Tensor:
         """LayerNorm via this repo's standalone kernel for the TRITON impl.
 
         Uses ``kernels.layernorm_kernel`` (the repo's own developed LayerNorm, not
@@ -147,7 +149,7 @@ class TriangleAttention(nn.Module):
         wins at large L but its dispatch overhead regresses at small L, so fall
         back to torch's native LayerNorm below the per-GPU threshold (see dispatch).
         """
-        if self._backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
+        if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
             pair.shape[1]
         ):
             return kernels.layernorm_kernel(
@@ -230,6 +232,11 @@ class TriangleAttention(nn.Module):
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass."""
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+            # Degrade to the pytorch reference (with a warning) on a dtype the fused
+            # triton kernels can't run; bf16 (production) keeps the fast path.
+            backend = _dispatch.guard_dtype(
+                self._backend, pair.dtype, op="TriangleAttention"
+            )
             if not self.starting:
                 pair = rearrange(pair, "B I J D -> B J I D").contiguous()
             assert pair.is_contiguous()
@@ -241,7 +248,7 @@ class TriangleAttention(nn.Module):
             if (
                 not self.use_self_attention
                 and not torch.is_grad_enabled()
-                and self._backend == KernelBackend.TRITON
+                and backend == KernelBackend.TRITON
                 and _bo_dispatch.use_kernels(pair.shape[1])
                 and _bo_dispatch.use_infer_concat(self.to_value.weight.shape[0])
             ):
@@ -250,7 +257,7 @@ class TriangleAttention(nn.Module):
                     out = rearrange(out, "B J I D -> B I J D").contiguous()
                 return out
 
-            pair = self._layernorm(pair)
+            pair = self._layernorm(pair, backend)
             value = self.to_value(pair)
             bias = self.to_bias(pair)
 
@@ -276,14 +283,14 @@ class TriangleAttention(nn.Module):
                     query = self.norm_query(query)
                     key = self.norm_key(key)
 
-                out = self._kernel_triangle_attention(query, key, value, bias)
+                out = self._kernel_triangle_attention(query, key, value, bias, backend)
             else:
                 out = self._kernel_bias_only_attention(value, bias)
 
             # sigmoid_gate is elementwise and materializes a contiguous result, so
             # an explicit .contiguous() on this transpose view is redundant.
             out = rearrange(out, "B H L L2 D -> B L L2 (H D)")
-            if self._backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
+            if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
                 pair.shape[1]
             ):
                 # Fuse sigmoid(to_gate(pair)) * out + the to_out projection (gated

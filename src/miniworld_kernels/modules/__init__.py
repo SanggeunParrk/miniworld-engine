@@ -8,20 +8,31 @@ belong to the fusion units under ``miniworld_kernels.kernels``.
 from .adaptive_layernorm import AdaptiveLayerNorm
 from .augmented_attention import AugmentedAttentionPairBias
 from .conditioned_transition import ConditionedTransition
+from .dispatch import KernelBackend
 from .exceptions import ImplementationType, InvalidImplementationError
 from .pairformer import Pairformer, PairformerBlock, PairformerConfig
 from .primitives import Dropout, LayerNorm, Linear
 from .transition import Transition
-from .triangle_attention import TriangleAttention, TrianglePairAttention
-from .triangle_multiplication import TriangleMultiplication
+from .triangle_attention import (
+    BidirectionalTriangleAttention,
+    TriangleAttention,
+    TrianglePairAttention,
+)
+from .triangle_multiplication import (
+    BidirectionalTriangleMultiplication,
+    TriangleMultiplication,
+)
 
 __all__ = [
     "AdaptiveLayerNorm",
     "AugmentedAttentionPairBias",
+    "BidirectionalTriangleAttention",
+    "BidirectionalTriangleMultiplication",
     "ConditionedTransition",
     "Dropout",
     "ImplementationType",
     "InvalidImplementationError",
+    "KernelBackend",
     "LayerNorm",
     "Linear",
     "Pairformer",

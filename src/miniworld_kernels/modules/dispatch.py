@@ -36,6 +36,7 @@ policy silently — see the per-op resolvers.
 from __future__ import annotations
 
 import os
+import warnings
 
 import torch
 
@@ -221,6 +222,50 @@ def resolve_triangle_multiplication(
     if override:
         return to_kernel_backend(ImplementationType(override.strip().lower()))
     return KernelBackend.CUTE if is_sm90plus(device) else KernelBackend.TRITON
+
+
+# --------------------------------------------------------------------------- #
+# dtype correctness-guard
+#
+# The fused kernels (triton / cute / hand-CUDA) are bf16-only. If a module is
+# asked to run a fast backend on an input dtype the kernel can't handle, we must
+# fall back to a dtype-agnostic path (the pytorch reference) rather than hand the
+# wrong dtype to the kernel — a wrong backend for the dtype is a correctness bug,
+# a slower one is not. PYTORCH / CUEQUIVARIANCE are treated as dtype-agnostic
+# (the reference handles any dtype; an explicit cuequiv request is the caller's
+# own choice). Extend _FAST_KERNEL_DTYPES if a kernel gains fp16/fp32 support.
+# --------------------------------------------------------------------------- #
+_FAST_KERNEL_DTYPES = frozenset({torch.bfloat16})
+_DTYPE_AGNOSTIC = frozenset({KernelBackend.PYTORCH, KernelBackend.CUEQUIVARIANCE})
+_dtype_warned: set[tuple[str, str, str]] = set()
+
+
+def backend_supports_dtype(backend: KernelBackend, dtype: torch.dtype) -> bool:
+    """True if ``backend`` can run inputs of ``dtype``. Fused kernels are bf16-only."""
+    if backend in _DTYPE_AGNOSTIC:
+        return True
+    return dtype in _FAST_KERNEL_DTYPES
+
+
+def guard_dtype(
+    backend: KernelBackend, dtype: torch.dtype, *, op: str
+) -> KernelBackend:
+    """Return ``backend`` if it can run ``dtype``, else fall back to PYTORCH with a
+    one-time warning. Used at the top of a module's forward so an unsupported dtype
+    degrades to the (correct, slower) reference instead of crashing in a bf16 kernel.
+    """
+    if backend_supports_dtype(backend, dtype):
+        return backend
+    key = (op, backend.value, str(dtype))
+    if key not in _dtype_warned:
+        _dtype_warned.add(key)
+        warnings.warn(
+            f"{op}: the '{backend.value}' fast path is bf16-only but got {dtype}; "
+            f"falling back to the PyTorch reference (slower). Cast inputs to "
+            f"torch.bfloat16 to use the fused kernels.",
+            stacklevel=3,
+        )
+    return KernelBackend.PYTORCH
 
 
 def trimul_out_layout(device: torch.device | None = None) -> str:

@@ -33,6 +33,7 @@ from jaxtyping import Bool, Float
 from miniworld_kernels import kernels
 from miniworld_kernels._typecheck import typecheck
 from miniworld_kernels.kernels.bias_only_attention import dispatch as _bo_dispatch
+from miniworld_kernels.modules import dispatch as _dispatch
 from miniworld_kernels.modules.dispatch import (
     KernelBackend,
     resolve_triangle_attention,
@@ -84,8 +85,8 @@ class BidirectionalTriangleAttention(nn.Module):
             self.to_key = Linear(d_pair, d2, bias=False, init="glorot")
 
     # ── shared machinery (bias-only fusion, reused from TriangleAttention) ──────────
-    def _layernorm(self, pair: torch.Tensor) -> torch.Tensor:
-        if self._backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
+    def _layernorm(self, pair: torch.Tensor, backend: KernelBackend) -> torch.Tensor:
+        if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
             pair.shape[1]
         ):
             return kernels.layernorm_kernel(
@@ -137,12 +138,17 @@ class BidirectionalTriangleAttention(nn.Module):
         return rearrange(out, "B G L L2 D -> B L L2 (G D)")  # [B, L, L, 2*d_hidden]
 
     def _attn_one(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        bias: torch.Tensor,
+        backend: KernelBackend,
     ) -> torch.Tensor:
         """One-direction (starting-frame) triangle self-attention: q,k,v [B,H,L,L,D],
         bias [B,H,L,L] -> out [B,H,L,L,D]. PYTORCH = the reference einsum; TRITON reuses the
         single-direction fused kernel (consumes strided q/k/v; bias made contiguous inside)."""
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             return kernels.triton_triangle_attention_pair_bias(q, k, v, bias)
         scale = q.shape[-1] ** -0.5
         attn = torch.einsum("bhijd,bhikd->bhijk", q * scale, k)
@@ -151,7 +157,7 @@ class BidirectionalTriangleAttention(nn.Module):
         return torch.einsum("bhijk,bhikd->bhijd", attn, v)
 
     def _attend_sa(
-        self, pln: torch.Tensor, mask: torch.Tensor | None
+        self, pln: torch.Tensor, mask: torch.Tensor | None, backend: KernelBackend
     ) -> torch.Tensor:
         """Self-attention (Q/K/V) bidirectional attend on the split channels -> [B,L,L,2*d_hidden].
 
@@ -165,7 +171,7 @@ class BidirectionalTriangleAttention(nn.Module):
         directions run the v7 kernels writing straight into a shared concat buffer (no
         transpose/cat/split materialization). PYTORCH below is the reference einsum."""
         H = self.n_head
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             from miniworld_kernels.kernels.triangle_attention.triton.bidirectional import (
                 bidir_triangle_attention_pair_bias,
             )
@@ -190,7 +196,7 @@ class BidirectionalTriangleAttention(nn.Module):
         qs, ks, vs, bs = q[:, :H], k[:, :H], v[:, :H], bias[:, :H]
         if mask is not None:
             bs = bs.masked_fill(~mask[:, None, None, :], float("-inf"))
-        out_s = self._attn_one(qs, ks, vs, bs)
+        out_s = self._attn_one(qs, ks, vs, bs, backend)
 
         # ending: (i<->j)-transpose the projected tensors -> starting-frame, attend, transpose back
         qe = q[:, H:].transpose(2, 3)
@@ -199,7 +205,7 @@ class BidirectionalTriangleAttention(nn.Module):
         be = bias[:, H:].transpose(2, 3)
         if mask is not None:
             be = be.masked_fill(~mask[:, None, None, :], float("-inf"))
-        out_e = self._attn_one(qe, ke, ve, be).transpose(2, 3)
+        out_e = self._attn_one(qe, ke, ve, be, backend).transpose(2, 3)
 
         out = torch.cat([out_s, out_e], dim=1)  # [B, 2H, L, L, D]
         return rearrange(out, "B G L L2 D -> B L L2 (G D)")
@@ -227,16 +233,20 @@ class BidirectionalTriangleAttention(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
-        if self._backend == KernelBackend.PYTORCH:
+        """Forward pass. Routes on the resolved internal backend, degrading to the
+        pytorch reference (with a warning) on a dtype the fused kernels can't run."""
+        backend = _dispatch.guard_dtype(
+            self._backend, pair.dtype, op="BidirectionalTriangleAttention"
+        )
+        if backend == KernelBackend.PYTORCH:
             pln = self.ln_pair(pair)
             if self.use_self_attention:
-                out = self._attend_sa(pln, mask)
+                out = self._attend_sa(pln, mask, backend)
             else:
                 out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
             return self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             # Inference max-fusion (LN folded into the projections), gated like the
             # single-dir path: needs L past the kernel crossover and the concat
             # projection narrow enough to stay tensor-core-friendly. Bias-only only
@@ -249,9 +259,9 @@ class BidirectionalTriangleAttention(nn.Module):
             ):
                 return self._inference(pair, mask)
 
-            pln = self._layernorm(pair)
+            pln = self._layernorm(pair, backend)
             if self.use_self_attention:
-                out = self._attend_sa(pln, mask)
+                out = self._attend_sa(pln, mask, backend)
             else:
                 out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
             return self._gate_out(self.to_gate(pln), out)

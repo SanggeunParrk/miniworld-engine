@@ -132,13 +132,15 @@ class TriangleMultiplication(nn.Module):
         if implementation == ImplementationType.CUTE:
             _load_cute_fns()
 
-    def _kernel_tm1(self, pair: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self._backend == KernelBackend.PYTORCH:
+    def _kernel_tm1(
+        self, pair: torch.Tensor, backend: KernelBackend
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if backend == KernelBackend.PYTORCH:
             left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
             right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
             return left, right
 
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             return kernels.triton_tm1(
                 pair,
                 self.to_left.weight.T,
@@ -149,11 +151,13 @@ class TriangleMultiplication(nn.Module):
 
         raise InvalidImplementationError(self.implementation)
 
-    def _kernel_tm2(self, pair: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-        if self._backend == KernelBackend.PYTORCH:
+    def _kernel_tm2(
+        self, pair: torch.Tensor, out: torch.Tensor, backend: KernelBackend
+    ) -> torch.Tensor:
+        if backend == KernelBackend.PYTORCH:
             return sigmoid_gate(self.to_gate(pair), self.to_out(out))
 
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             return kernels.triton_tm2(
                 pair,
                 out,
@@ -169,12 +173,16 @@ class TriangleMultiplication(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass."""
+        """Forward pass. Routes on the resolved internal backend, degrading to the
+        pytorch reference (with a warning) on a dtype the fused kernels can't run."""
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
-            if self._backend == KernelBackend.CUEQUIVARIANCE:
+            backend = _dispatch.guard_dtype(
+                self._backend, pair.dtype, op="TriangleMultiplication"
+            )
+            if backend == KernelBackend.CUEQUIVARIANCE:
                 return self._forward_cuequivariance(pair, mask)
 
-            if self._backend == KernelBackend.CUTE:
+            if backend == KernelBackend.CUTE:
                 # The cute inference path (_forward_cute) is forward-only (no saved
                 # stats / no autograd graph). Under grad (training), dispatch to the
                 # autograd-capable sm100/sm90 v6 merged training kernel instead —
@@ -184,7 +192,7 @@ class TriangleMultiplication(nn.Module):
                 return self._forward_cute(pair, mask)
 
             pair = self.ln_pair(pair)
-            left, right = self._kernel_tm1(pair)
+            left, right = self._kernel_tm1(pair, backend)
 
             if mask is not None:
                 mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
@@ -197,7 +205,7 @@ class TriangleMultiplication(nn.Module):
                 out = torch.einsum("bkid,bkjd->bijd", left, right)
 
             out = self.ln_out(out)
-            return self._kernel_tm2(pair, out)
+            return self._kernel_tm2(pair, out, backend)
 
     def _forward_cuequivariance(
         self,

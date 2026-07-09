@@ -118,11 +118,14 @@ class Transition(nn.Module):
 
     @typecheck
     def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
-        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
-        if self._backend == KernelBackend.PYTORCH:
+        """Forward pass. Routes on the resolved internal backend (``_backend``),
+        degrading to the pytorch reference (with a warning) on a dtype the fused
+        kernels can't run."""
+        backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
+        if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x)
 
-        if self._backend == KernelBackend.CUDA:
+        if backend == KernelBackend.CUDA:
             x = self.ln_in(x)
             return kernels.cuda_transition(
                 x,
@@ -132,7 +135,7 @@ class Transition(nn.Module):
                 self.n,
             )
 
-        if self._backend in {
+        if backend in {
             KernelBackend.TRITON,
             KernelBackend.CUEQUIVARIANCE,
         }:
@@ -141,7 +144,7 @@ class Transition(nn.Module):
                 return self._training_forward(x)
             return self._inference_forward(x)
 
-        if self._backend == KernelBackend.CUTE:
+        if backend == KernelBackend.CUTE:
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
             # explicit selection). Same fused structure; LN folded into the cute expand.
             backward_backend = _explicit_cute_backward_backend()
@@ -262,6 +265,9 @@ class Transition(nn.Module):
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
+        # This module's weights are pinned bf16; match the input to them so the
+        # reference runs even when reached as a dtype-fallback from a non-bf16 input.
+        x = x.to(self.ln_in.weight.dtype)
         x = F.layer_norm(
             x,
             (self.d_hidden,),

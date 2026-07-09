@@ -71,17 +71,21 @@ class BidirectionalTriangleMultiplication(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass. Routes on the resolved internal backend (``_backend``)."""
-        if self._backend == KernelBackend.CUEQUIVARIANCE:
+        """Forward pass. Routes on the resolved internal backend, degrading to the
+        pytorch reference (with a warning) on a dtype the fused kernels can't run."""
+        backend = _dispatch.guard_dtype(
+            self._backend, pair.dtype, op="BidirectionalTriangleMultiplication"
+        )
+        if backend == KernelBackend.CUEQUIVARIANCE:
             return self._forward_cuequivariance(pair, mask)
-        if self._backend == KernelBackend.CUTE:
+        if backend == KernelBackend.CUTE:
             # Inference: forward-only fused sm100 kernels. Training (grad): the
             # v6-faithful fused bidirectional training kernel (BidirV6TriMulSm100,
             # trimul_bidir_b200 v4), wired here so dispatch stays inside the module.
             if torch.is_grad_enabled():
                 return self._forward_cute_train(pair, mask)
             return self._forward_cute(pair, mask)
-        if self._backend != KernelBackend.PYTORCH:
+        if backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
 
         pair = self.ln_pair(pair)
