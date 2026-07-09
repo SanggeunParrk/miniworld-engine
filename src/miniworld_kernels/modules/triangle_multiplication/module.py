@@ -258,6 +258,7 @@ class TriangleMultiplication(nn.Module):
             self._train_impl = impl
         return impl(pair, mask)
 
+    @torch.compiler.disable
     def _forward_cute(
         self,
         pair: torch.Tensor,
@@ -317,6 +318,7 @@ class TriangleMultiplication(nn.Module):
         # tm2 cute wants weights in (N, K) = nn.Linear form (already so).
         return tm2_cute_forward(x_normed, out_normed, self.to_gate.weight, self.to_out.weight)
 
+    @torch.compiler.disable
     def _forward_cute_free(
         self,
         pair: torch.Tensor,

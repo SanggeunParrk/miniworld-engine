@@ -171,6 +171,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             self._bidir_train_impl = impl
         return impl(pair, mask)
 
+    @torch.compiler.disable
     def _forward_cute(
         self,
         pair: torch.Tensor,
@@ -241,6 +242,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T
         return (gate * proj).view(b, l1, l2, d)
 
+    @torch.compiler.disable
     def _forward_cute_free(
         self, pair: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
