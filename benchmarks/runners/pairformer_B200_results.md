@@ -38,13 +38,16 @@ a markdown table rather than a CSV/SVG artifact.
 
 | mode | L | pytorch | cuequiv | **ours** | ours vs cuequiv | ours vs pytorch |
 |------|---|--------:|--------:|---------:|:---------------:|:---------------:|
-| inference | 256 | 4.608 | 3.245 | **4.442** | 0.73× | 1.04× |
-| inference | 384 | 17.883 | 8.190 | **11.640** | 0.70× | 1.54× |
-| inference | 512 | 32.275 | 15.866 | **24.710** | 0.64× | 1.31× |
-| training  | 256/384/512 | — | — | ⚠️ crash | — | — |
+| inference | 256 | 4.608 | 3.244 | **2.461** | 1.32× | 1.87× |
+| inference | 384 | 17.890 | 8.184 | **5.485** | 1.49× | 3.26× |
+| inference | 512 | 32.277 | 15.864 | **10.708** | 1.48× | 3.01× |
+| training  | 256 | 13.726 | 14.011 | **10.135** | 1.38× | 1.35× |
+| training  | 384 | 47.764 | 35.473 | **21.458** | 1.65× | 2.23× |
+| training  | 512 | 85.618 | 67.392 | **39.968** | 1.69× | 2.14× |
 
-**full training crashes** (all L on the current heap) in the triangle-attention backward:
-`_attn_bwd` writes the per-row `dbias` out of bounds (`triton/main.py:336`, verified via
-compute-sanitizer) — a pre-existing tri-attn memory bug (independent of trimul / transition / the
-inference-opt commits), exposed once the caching allocator makes the overrun land on an unmapped
-page. Tracked separately; out of the trimul/bidir + transition scope.
+**Re-measured on current `main`** with the reworked triangle-attention backward (`_attn_bwd`:
+FA2 two-kernel split + stride-native `make_block_ptr` + bf16 `dq`, `8f4a42e`…`2604fc7`). The earlier
+`dbias` out-of-bounds write that crashed full training — and the slow, losing inference numbers the
+old `_attn_bwd` produced — are gone: **full now completes training and beats both baselines across
+every shape**, up to 1.49× (inference) / 1.69× (training) vs cuEquivariance. Regenerated with
+`pairformer_compare.py --variant full --compile` (compile-on canonical) on 2026-07-09.
