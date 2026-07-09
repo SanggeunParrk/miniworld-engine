@@ -156,6 +156,7 @@ def _attn_bwd_preprocess(
 def _attn_bwd_dkdv(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
     qs_z, qs_h, qs_lrow, qs_tok, qs_d,
+    gs_z, gs_h, gs_lrow, gs_tok, gs_d,
     ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     bs_z, bs_h, bs_m, bs_n,
     dbias_hl,
@@ -172,14 +173,15 @@ def _attn_bwd_dkdv(
     h = hl // N_CTX
     i_row = hl % N_CTX
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
+    adj_g = b * gs_z + h * gs_h + i_row * gs_lrow   # grad-group layout (may differ from q)
     adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
     pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
     do_base = do_ptr + adj_do
-    dk_base = dk_ptr + adj_q   # A: dq/dk/dv written in projection layout (q-group strided)
-    dv_base = dv_ptr + adj_q
+    dk_base = dk_ptr + adj_g   # dq/dk/dv written in grad-group layout (decoupled from q strides)
+    dv_base = dv_ptr + adj_g
     b_base = bias_ptr + b * bs_z + h * bs_h
     dbias_base = dbias_ptr + bhid * dbias_hl
     m_ptr += off_chz
@@ -201,9 +203,9 @@ def _attn_bwd_dkdv(
     # dbiasT [BLOCK_N key, BLOCK_M query] view into dbias[query,key] (strides swapped)
     DBT_bp = tl.make_block_ptr(base=dbias_base, shape=(N_CTX, N_CTX), strides=(bs_n, bs_m),
                                offsets=(start_n, 0), block_shape=(BLOCK_N, BLOCK_M), order=(0, 1))
-    DK_bp = tl.make_block_ptr(base=dk_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
+    DK_bp = tl.make_block_ptr(base=dk_base, shape=(N_CTX, HEAD_DIM), strides=(gs_tok, gs_d),
                               offsets=(start_n, 0), block_shape=(BLOCK_N, BLOCK_D), order=(1, 0))
-    DV_bp = tl.make_block_ptr(base=dv_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
+    DV_bp = tl.make_block_ptr(base=dv_base, shape=(N_CTX, HEAD_DIM), strides=(gs_tok, gs_d),
                               offsets=(start_n, 0), block_shape=(BLOCK_N, BLOCK_D), order=(1, 0))
 
     offs_n = start_n + tl.arange(0, BLOCK_N)
@@ -252,6 +254,7 @@ def _attn_bwd_dkdv(
 def _attn_bwd_dq(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,
     qs_z, qs_h, qs_lrow, qs_tok, qs_d,
+    gs_z, gs_h, gs_lrow, gs_tok, gs_d,
     ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     bs_z, bs_h, bs_m, bs_n,
     H: tl.constexpr, N_CTX, HL, HEAD_DIM: tl.constexpr,
@@ -265,13 +268,14 @@ def _attn_bwd_dq(
     h = hl // N_CTX
     i_row = hl % N_CTX
     adj_q = b * qs_z + h * qs_h + i_row * qs_lrow
+    adj_g = b * gs_z + h * gs_h + i_row * gs_lrow   # grad-group layout (may differ from q)
     adj_do = b * ds_z + h * ds_h + i_row * ds_lrow
     pid = tl.program_id(0)
     q_base = q_ptr + adj_q
     k_base = k_ptr + adj_q
     v_base = v_ptr + adj_q
     do_base = do_ptr + adj_do
-    dq_base = dq_ptr + adj_q   # A: dq written in projection layout (q-group strided)
+    dq_base = dq_ptr + adj_g   # dq written in grad-group layout (decoupled from q strides)
     b_base = bias_ptr + b * bs_z + h * bs_h
     m_ptr += off_chz
     d_ptr += off_chz
@@ -281,7 +285,7 @@ def _attn_bwd_dq(
                              offsets=(start_m, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
     DO_bp = tl.make_block_ptr(base=do_base, shape=(N_CTX, HEAD_DIM), strides=(ds_tok, ds_d),
                               offsets=(start_m, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
-    DQ_bp = tl.make_block_ptr(base=dq_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
+    DQ_bp = tl.make_block_ptr(base=dq_base, shape=(N_CTX, HEAD_DIM), strides=(gs_tok, gs_d),
                               offsets=(start_m, 0), block_shape=(BLOCK_M, BLOCK_D), order=(1, 0))
     K_bp = tl.make_block_ptr(base=k_base, shape=(N_CTX, HEAD_DIM), strides=(qs_tok, qs_d),
                              offsets=(0, 0), block_shape=(BLOCK_N, BLOCK_D), order=(1, 0))
@@ -398,7 +402,8 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_N"]), 1, B * HL]
         _attn_bwd_dkdv[grid_kv](
             q, k, v, bias, sm_scale, grad_output, dk, dv, dbias, m_m, delta,
-            *q.stride(),        # q strided 5D  [k,v share]
+            *q.stride(),        # q strided 5D  [k,v share] — READ layout
+            *dk.stride(),       # grad-group WRITE layout (may differ from q, e.g. concat split-view)
             *grad_output.stride(),  # do STRIDED 5D (B,H,Lrow,tok,D)
             *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
             L * L,              # dbias HL-dim stride
@@ -409,6 +414,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         _attn_bwd_dq[grid_q](
             q, k, v, bias, sm_scale, grad_output, dq, m_m, delta,
             *q.stride(),
+            *dq.stride(),       # grad-group WRITE layout
             *grad_output.stride(),
             *bias.stride(),
             HL, L, HL, D,

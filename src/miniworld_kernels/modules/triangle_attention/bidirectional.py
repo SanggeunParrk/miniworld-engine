@@ -50,6 +50,7 @@ class BidirectionalTriangleAttention(nn.Module):
         n_head: int = 4,
         *,
         d_hidden: int | None = None,
+        use_self_attention: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
@@ -57,6 +58,7 @@ class BidirectionalTriangleAttention(nn.Module):
         self.n_head = n_head
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
+        self.use_self_attention = use_self_attention
 
         if self.d_hidden % n_head != 0:
             msg = f"d_hidden ({self.d_hidden}) must be divisible by n_head ({n_head})"
@@ -70,6 +72,10 @@ class BidirectionalTriangleAttention(nn.Module):
         self.to_bias = Linear(d_pair, 2 * n_head, bias=False, init="default")
         self.to_gate = Linear(d_pair, d2, bias=False, init="gating")
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
+        if use_self_attention:
+            # Doubled-width Q/K projections: [starting | ending] channels, like value.
+            self.to_query = Linear(d_pair, d2, bias=False, init="glorot")
+            self.to_key = Linear(d_pair, d2, bias=False, init="glorot")
 
     # ── shared machinery (bias-only fusion, reused from TriangleAttention) ──────────
     def _layernorm(self, pair: torch.Tensor) -> torch.Tensor:
@@ -124,6 +130,74 @@ class BidirectionalTriangleAttention(nn.Module):
         out = torch.cat([out_s, out_e], dim=1)  # [B, 2H, L, L, D]
         return rearrange(out, "B G L L2 D -> B L L2 (G D)")  # [B, L, L, 2*d_hidden]
 
+    def _attn_one(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor
+    ) -> torch.Tensor:
+        """One-direction (starting-frame) triangle self-attention: q,k,v [B,H,L,L,D],
+        bias [B,H,L,L] -> out [B,H,L,L,D]. PYTORCH = the reference einsum; TRITON reuses the
+        single-direction fused kernel (consumes strided q/k/v; bias made contiguous inside)."""
+        if self.implementation == ImplementationType.TRITON:
+            return kernels.triton_triangle_attention_pair_bias(q, k, v, bias)
+        scale = q.shape[-1] ** -0.5
+        attn = torch.einsum("bhijd,bhikd->bhijk", q * scale, k)
+        attn = attn + bias[:, :, None, :, :]
+        attn = F.softmax(attn, dim=-1)
+        return torch.einsum("bhijk,bhikd->bhijd", attn, v)
+
+    def _attend_sa(
+        self, pln: torch.Tensor, mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Self-attention (Q/K/V) bidirectional attend on the split channels -> [B,L,L,2*d_hidden].
+
+        Both directions use ONE LayerNorm'd pair and the doubled q/k/v/bias projections. The
+        ENDING direction is the transpose-dual of STARTING: run the SAME single-direction
+        attention on the (i<->j)-transposed ending-half tensors and transpose the result back
+        (identical to what the single-dir module does via `rearrange(pair, "B I J D -> B J I D")`,
+        but expressed on the already-projected tensors so the input pair is never transposed).
+
+        TRITON routes through the fused ``bidir_triangle_attention_pair_bias`` Function: both
+        directions run the v7 kernels writing straight into a shared concat buffer (no
+        transpose/cat/split materialization). PYTORCH below is the reference einsum."""
+        H = self.n_head
+        if self.implementation == ImplementationType.TRITON:
+            from miniworld_kernels.kernels.triangle_attention.triton.bidirectional import (
+                bidir_triangle_attention_pair_bias,
+            )
+
+            q = self.to_query(pln)
+            k = self.to_key(pln)
+            v = self.to_value(pln)
+            bias = self.to_bias(pln)  # [B, L, L, 2*n_head]
+            if mask is not None:
+                # starting half masks over the key axis (j); ending half over i (its dual).
+                bs = bias[..., :H].masked_fill(~mask[:, None, :, None], float("-inf"))
+                be = bias[..., H:].masked_fill(~mask[:, :, None, None], float("-inf"))
+                bias = torch.cat([bs, be], dim=-1)
+            return bidir_triangle_attention_pair_bias(q, k, v, bias, H)  # [B, L, L, 2*d_hidden]
+
+        q = rearrange(self.to_query(pln), "B L L2 (G D) -> B G L L2 D", G=2 * H)
+        k = rearrange(self.to_key(pln), "B L L2 (G D) -> B G L L2 D", G=2 * H)
+        v = rearrange(self.to_value(pln), "B L L2 (G D) -> B G L L2 D", G=2 * H)
+        bias = rearrange(self.to_bias(pln), "B L L2 G -> B G L L2", G=2 * H)
+
+        # starting
+        qs, ks, vs, bs = q[:, :H], k[:, :H], v[:, :H], bias[:, :H]
+        if mask is not None:
+            bs = bs.masked_fill(~mask[:, None, None, :], float("-inf"))
+        out_s = self._attn_one(qs, ks, vs, bs)
+
+        # ending: (i<->j)-transpose the projected tensors -> starting-frame, attend, transpose back
+        qe = q[:, H:].transpose(2, 3)
+        ke = k[:, H:].transpose(2, 3)
+        ve = v[:, H:].transpose(2, 3)
+        be = bias[:, H:].transpose(2, 3)
+        if mask is not None:
+            be = be.masked_fill(~mask[:, None, None, :], float("-inf"))
+        out_e = self._attn_one(qe, ke, ve, be).transpose(2, 3)
+
+        out = torch.cat([out_s, out_e], dim=1)  # [B, 2H, L, L, D]
+        return rearrange(out, "B G L L2 D -> B L L2 (G D)")
+
     def _inference(self, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
         """Inference-only max-fusion: fold LN into the [value|bias|gate] concat
         projection (pln never materializes), then the two einsums and gate+to_out."""
@@ -150,22 +224,30 @@ class BidirectionalTriangleAttention(nn.Module):
         """Forward pass."""
         if self.implementation == ImplementationType.PYTORCH:
             pln = self.ln_pair(pair)
-            out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
+            if self.use_self_attention:
+                out = self._attend_sa(pln, mask)
+            else:
+                out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
             return self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
         if self.implementation == ImplementationType.TRITON:
             # Inference max-fusion (LN folded into the projections), gated like the
             # single-dir path: needs L past the kernel crossover and the concat
-            # projection narrow enough to stay tensor-core-friendly.
+            # projection narrow enough to stay tensor-core-friendly. Bias-only only
+            # (the fold packs value|bias|gate; self-attention adds Q/K).
             if (
-                not torch.is_grad_enabled()
+                not self.use_self_attention
+                and not torch.is_grad_enabled()
                 and _bo_dispatch.use_kernels(pair.shape[1])
                 and _bo_dispatch.use_infer_concat(self.to_value.weight.shape[0])
             ):
                 return self._inference(pair, mask)
 
             pln = self._layernorm(pair)
-            out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
+            if self.use_self_attention:
+                out = self._attend_sa(pln, mask)
+            else:
+                out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
             return self._gate_out(self.to_gate(pln), out)
 
         raise InvalidImplementationError(self.implementation)
