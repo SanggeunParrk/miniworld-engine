@@ -8,23 +8,64 @@ the canonical (``main`` = psk/benchmark) Triton entry point for that op.
 
 from __future__ import annotations
 
-from .adaln.triton.inference import adaln_inference
-from .adaln.triton.main import triton_adaptive_layer_norm
-from .adaln.triton.training import adaln_train
-from .augmented_attention.triton.main import triton_augmented_attention_pair_bias
-from .bias_only_attention.triton.gate_out import fused_gate_out, sigmoid_gate_fused
-from .conditioned_transition.triton.interface import (
-    cond_transition_inference_dispatch,
-)
-from .conditioned_transition.triton.training import cond_transition_train
-from .bias_only_attention.triton.main import triton_bias_only_attention
-from .layernorm.interface import layernorm_kernel
-from .layernorm.triton.main import triton_layernorm
-from .transition.triton.fused import triton_transition_fused
-from .transition.triton.main import triton_transition
-from .triangle_attention.triton.main import triton_triangle_attention_pair_bias
-from .tm1.triton.main import triton_tm1
-from .tm2.triton.main import triton_tm2
+from importlib import import_module
+
+_LAZY_EXPORTS = {
+    "adaln_inference": (".adaln.triton.inference", "adaln_inference"),
+    "adaln_train": (".adaln.triton.training", "adaln_train"),
+    "cond_transition_inference_dispatch": (
+        ".conditioned_transition.triton.interface",
+        "cond_transition_inference_dispatch",
+    ),
+    "cond_transition_train": (
+        ".conditioned_transition.triton.training",
+        "cond_transition_train",
+    ),
+    "fused_gate_out": (".bias_only_attention.triton.gate_out", "fused_gate_out"),
+    "layernorm_kernel": (".layernorm.interface", "layernorm_kernel"),
+    "sigmoid_gate_fused": (
+        ".bias_only_attention.triton.gate_out",
+        "sigmoid_gate_fused",
+    ),
+    "triton_adaptive_layer_norm": (
+        ".adaln.triton.main",
+        "triton_adaptive_layer_norm",
+    ),
+    "triton_augmented_attention_pair_bias": (
+        ".augmented_attention.triton.main",
+        "triton_augmented_attention_pair_bias",
+    ),
+    "triton_bias_only_attention": (
+        ".bias_only_attention.triton.main",
+        "triton_bias_only_attention",
+    ),
+    "triton_layernorm": (".layernorm.triton.main", "triton_layernorm"),
+    "triton_tm1": (".tm1.triton.main", "triton_tm1"),
+    "triton_tm2": (".tm2.triton.main", "triton_tm2"),
+    "triton_transition": (".transition.triton.main", "triton_transition"),
+    "triton_transition_fused": (
+        ".transition.triton.fused",
+        "triton_transition_fused",
+    ),
+    "triton_triangle_attention_pair_bias": (
+        ".triangle_attention.triton.main",
+        "triton_triangle_attention_pair_bias",
+    ),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _LAZY_EXPORTS[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 
 def cuda_transition(*args, **kwargs):
