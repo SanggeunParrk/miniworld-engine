@@ -1,0 +1,55 @@
+run_name,target_kind,target,device,torch_version,cuda_version,metric,unit,mode,compiled,cudagraph,precision,allow_tf32,sweep_axis,implementation,implementation_type,ln_implementation,input_dtype,parameter_dtype,execution_path,reference,output_max_abs,output_rel_frob,output_cosine,grad_max_abs,grad_rel_frob,grad_cosine,n_layers,n_augment,mask_prob,seq_len,tokens,batch_size,d_pair,d_single,d_single_token,d_single_atom,d_pair_atom,status,error,value
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,pytorch,pytorch,,float32,float32,pytorch,pytorch,0.001081228256225586,6.341039261315018e-05,0.9999998807907104,0.0010908246040344238,0.00011727964738383889,1.0,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,3.9892799854278564
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"CompilationError: at 34:12:
+    Gate and projection K-loops run simultaneously; a single pass over the
+    K dimension produces both accumulators, halving HBM reads of ``xn``.
+
+    When TRANSPOSE_OUT=True outputs are written as (N, M) instead of (M, N),
+    which lets the caller reshape directly to (D, B, I, J) without an extra copy.
+    """"""
+    pid = tl.program_id(0).to(tl.int64)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    xn_bp = tl.make_block_ptr(
+            ^
+Block pointers only support 32 bit `offsets/block_shape`, add a `.to(tl.int32)` or use regular indexing for 64 bit support",
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,cuequivariance,cuequivariance,,float32,float32,cuequivariance,pytorch,0.0009664595127105713,8.552167128073052e-05,1.0,0.001312255859375,0.0001510404545115307,1.0,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,2.14083194732666
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,miniworld,miniworld,,bfloat16,bfloat16,miniworld.v6_training_merged,pytorch,0.02849555015563965,0.005794040858745575,0.9999831914901733,0.03925132751464844,0.006651715841144323,0.9999777674674988,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.6224319934844971
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,pytorch,pytorch,,float32,float32,pytorch,pytorch,0.0006927028298377991,6.908644718350843e-05,0.9999998807907104,0.0008555054664611816,0.00012062763562425971,0.9999999403953552,1,32,0.0,384,147456,1,256,384,768,128,16,ok,,6.991151809692383
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,384,147456,1,256,384,768,128,16,failed,"CompilationError: at 34:12:
+    Gate and projection K-loops run simultaneously; a single pass over the
+    K dimension produces both accumulators, halving HBM reads of ``xn``.
+
+    When TRANSPOSE_OUT=True outputs are written as (N, M) instead of (M, N),
+    which lets the caller reshape directly to (D, B, I, J) without an extra copy.
+    """"""
+    pid = tl.program_id(0).to(tl.int64)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    xn_bp = tl.make_block_ptr(
+            ^
+Block pointers only support 32 bit `offsets/block_shape`, add a `.to(tl.int32)` or use regular indexing for 64 bit support",
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,cuequivariance,cuequivariance,,float32,float32,cuequivariance,pytorch,0.0008026435971260071,9.354070789413527e-05,0.9999998807907104,0.0009849071502685547,0.0001529836154077202,1.0,1,32,0.0,384,147456,1,256,384,768,128,16,ok,,7.175936222076416
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,miniworld,miniworld,,bfloat16,bfloat16,miniworld.v6_training_merged,pytorch,0.03200054168701172,0.00578866433352232,0.9999833703041077,0.03906893730163574,0.00662576500326395,0.9999780058860779,1,32,0.0,384,147456,1,256,384,768,128,16,ok,,1.1272640228271484
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,pytorch,pytorch,,float32,float32,pytorch,pytorch,0.0005537271499633789,7.703206210862845e-05,1.0000001192092896,0.0008173584938049316,0.00012620777124539018,1.0,1,32,0.0,384,147456,1,512,384,768,128,16,ok,,14.070783615112305
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,384,147456,1,512,384,768,128,16,failed,"CompilationError: at 34:12:
+    Gate and projection K-loops run simultaneously; a single pass over the
+    K dimension produces both accumulators, halving HBM reads of ``xn``.
+
+    When TRANSPOSE_OUT=True outputs are written as (N, M) instead of (M, N),
+    which lets the caller reshape directly to (D, B, I, J) without an extra copy.
+    """"""
+    pid = tl.program_id(0).to(tl.int64)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    xn_bp = tl.make_block_ptr(
+            ^
+Block pointers only support 32 bit `offsets/block_shape`, add a `.to(tl.int32)` or use regular indexing for 64 bit support",
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,cuequivariance,cuequivariance,,float32,float32,cuequivariance,pytorch,0.0007818937301635742,0.00011495615035528317,1.0000001192092896,0.001193225383758545,0.000176260233274661,1.0,1,32,0.0,384,147456,1,512,384,768,128,16,ok,,21.27464008331299
+triangle_multiplication_n_layers=1_training_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,triangle_multiplication,NVIDIA B200,2.10.0+cu128,12.8,time,ms,training,True,manual,bf16-mixed,True,d_pair,miniworld,miniworld,,bfloat16,bfloat16,miniworld.v6_training_merged,pytorch,0.030614376068115234,0.005780252628028393,0.9999833703041077,0.04221534729003906,0.006610095500946045,0.9999781847000122,1,32,0.0,384,147456,1,512,384,768,128,16,ok,,2.5832319259643555

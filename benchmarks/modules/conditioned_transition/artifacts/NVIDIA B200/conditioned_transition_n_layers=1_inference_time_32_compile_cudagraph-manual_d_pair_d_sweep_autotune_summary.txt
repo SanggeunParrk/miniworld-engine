@@ -1,0 +1,39 @@
+Triton autotune summary
+miniworld_kernels.kernels.conditioned_transition.triton.composed._expand_swiglu_kernel
+  candidate_configs=5
+    candidate[1] BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
+    candidate[2] BLOCK_K=64, BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=3
+    candidate[3] BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, num_warps=8, num_stages=3
+    candidate[4] BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=4
+    candidate[5] BLOCK_K=128, BLOCK_M=128, BLOCK_N=128, num_warps=8, num_stages=3
+  no cache entries captured
+
+miniworld_kernels.kernels.conditioned_transition.triton.composed._squeeze_gate_kernel
+  candidate_configs=9
+    candidate[1] BLOCK_D=64, BLOCK_K=64, BLOCK_M=64, num_warps=4, num_stages=3
+    candidate[2] BLOCK_D=64, BLOCK_K=64, BLOCK_M=128, num_warps=4, num_stages=3
+    candidate[3] BLOCK_D=128, BLOCK_K=64, BLOCK_M=128, num_warps=8, num_stages=3
+    candidate[4] BLOCK_D=128, BLOCK_K=128, BLOCK_M=64, num_warps=4, num_stages=4
+    candidate[5] BLOCK_D=128, BLOCK_K=128, BLOCK_M=128, num_warps=8, num_stages=3
+    candidate[6] BLOCK_D=64, BLOCK_K=64, BLOCK_M=32, num_warps=4, num_stages=4
+    candidate[7] BLOCK_D=128, BLOCK_K=128, BLOCK_M=32, num_warps=4, num_stages=4
+    candidate[8] BLOCK_D=32, BLOCK_K=128, BLOCK_M=64, num_warps=4, num_stages=4
+    candidate[9] BLOCK_D=64, BLOCK_K=128, BLOCK_M=32, num_warps=4, num_stages=3
+  no cache entries captured
+
+miniworld_kernels.kernels.conditioned_transition.triton.inference._cond_transition_inference_kernel
+  candidate_configs=4
+    candidate[1] BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=2
+    candidate[2] BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=2
+    candidate[3] BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=2
+    candidate[4] BLOCK_M=128, BLOCK_N=128, num_warps=8, num_stages=3
+  no cache entries captured
+
+miniworld_kernels.kernels.conditioned_transition.triton.training._b2b_fwd_train_kernel
+  candidate_configs=5
+    candidate[1] BLOCK_M=64, BLOCK_N=32, num_warps=4, num_stages=2
+    candidate[2] BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=2
+    candidate[3] BLOCK_M=128, BLOCK_N=64, num_warps=8, num_stages=2
+    candidate[4] BLOCK_M=256, BLOCK_N=64, num_warps=8, num_stages=2
+    candidate[5] BLOCK_M=128, BLOCK_N=32, num_warps=4, num_stages=2
+  no cache entries captured

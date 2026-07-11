@@ -1,0 +1,67 @@
+run_name,target_kind,target,device,torch_version,cuda_version,metric,unit,mode,compiled,cudagraph,precision,allow_tf32,sweep_axis,implementation,implementation_type,ln_implementation,input_dtype,parameter_dtype,execution_path,reference,output_max_abs,output_rel_frob,output_cosine,grad_max_abs,grad_rel_frob,grad_cosine,n_layers,n_augment,mask_prob,seq_len,tokens,batch_size,d_pair,d_single,d_single_token,d_single_atom,d_pair_atom,status,error,value
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.5239999890327454
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,ValueError: Unknown implementation spec: 'dtv1',
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
+
+from user code:
+   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+    raise InvalidImplementationError(self.implementation)
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
+",
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,bfloat16,bfloat16,kernels.augmented_attention.triton.main,module.reference.torch,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.3092159926891327
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,0.7879359722137451
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,512,262144,1,128,384,768,128,16,failed,ValueError: Unknown implementation spec: 'dtv1',
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,512,262144,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
+
+from user code:
+   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+    raise InvalidImplementationError(self.implementation)
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
+",
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,bfloat16,bfloat16,kernels.augmented_attention.triton.main,module.reference.torch,,,,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,0.45715200901031494
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,1.147871971130371
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,640,409600,1,128,384,768,128,16,failed,ValueError: Unknown implementation spec: 'dtv1',
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,640,409600,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
+
+from user code:
+   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+    raise InvalidImplementationError(self.implementation)
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
+",
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,bfloat16,bfloat16,kernels.augmented_attention.triton.main,module.reference.torch,,,,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,0.6134399771690369
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,1.4720959663391113
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,768,589824,1,128,384,768,128,16,failed,ValueError: Unknown implementation spec: 'dtv1',
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,768,589824,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
+
+from user code:
+   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+    raise InvalidImplementationError(self.implementation)
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
+",
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,bfloat16,bfloat16,kernels.augmented_attention.triton.main,module.reference.torch,,,,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,0.7975520193576813
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,1.9937599897384644
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,896,802816,1,128,384,768,128,16,failed,ValueError: Unknown implementation spec: 'dtv1',
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,896,802816,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
+
+from user code:
+   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+    raise InvalidImplementationError(self.implementation)
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
+",
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,bfloat16,bfloat16,kernels.augmented_attention.triton.main,module.reference.torch,,,,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,0.9973280131816864
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,,,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,2.36844801902771
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,dtv1,dtv1,,,,,,,,,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,failed,ValueError: Unknown implementation spec: 'dtv1',
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
+
+from user code:
+   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+    raise InvalidImplementationError(self.implementation)
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
+",
+augmented_attention_token_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,module,augmented_attention_token,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,bfloat16,bfloat16,kernels.augmented_attention.triton.main,module.reference.torch,,,,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,1.280832052230835
