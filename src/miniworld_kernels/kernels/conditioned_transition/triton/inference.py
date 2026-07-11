@@ -76,7 +76,7 @@ def _cond_transition_inference_kernel(
         )
         a = tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
         b = tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
-        h = a * tl.sigmoid(a) * b  # (BM, BN) fp32
+        h = (a * tl.sigmoid(a) * b).to(x.dtype)  # cast to operand dtype -> squeeze dot works in bf16 (no-op for fp32)
         ws_t = tl.load(  # (BN, D): Ws[d, cols]^T
             ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
             mask=col_mask[:, None], other=0.0,
