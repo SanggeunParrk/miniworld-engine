@@ -1,9 +1,13 @@
 # Third Party
 
-External source checkouts and vendored dependencies belong here, preferably as
-submodules or documented external checkouts.
+External dependencies for this repo are consumed as **pip packages**, not git
+submodules, so a parent project (e.g. team-gm) that vendors miniworld-kernels as
+a submodule doesn't inherit a recursive-clone of large upstreams.
 
-The current `_ct_cutlass/cutlass` path is an embedded git repository recorded by
-the checkpoint commit as a gitlink. That is migration debt: either convert it to
-a real submodule with a URL, or remove the checkout and keep only the local
-kernel sources that this repository owns.
+- **CUTLASS / CuTeDSL**: the `.cute` kernel backends use the `nvidia-cutlass-dsl`
+  wheel (plus `quack-kernels`), pinned in the `[cute]` optional-dependency group
+  in `pyproject.toml`. The former `ct_cutlass_workbench/cutlass` git submodule
+  (an uninitialized, unreferenced gitlink — migration debt) has been removed.
+
+Add new externals as pinned pip dependencies (an extra in `pyproject.toml`)
+rather than submodules whenever a wheel exists.
