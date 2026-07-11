@@ -1,7 +1,0 @@
-run_name,target_kind,target,device,torch_version,cuda_version,metric,unit,mode,compiled,cudagraph,precision,allow_tf32,sweep_axis,implementation,implementation_type,ln_implementation,input_dtype,parameter_dtype,execution_path,reference,output_max_abs,output_rel_frob,output_cosine,grad_max_abs,grad_rel_frob,grad_cosine,n_layers,n_augment,mask_prob,seq_len,tokens,batch_size,d_pair,d_single,d_single_token,d_single_atom,d_pair_atom,status,error,value
-bias_only_attention_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_repro_force_cached,module,bias_only_attention,NVIDIA H100 80GB HBM3,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,miniworld,miniworld,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"AcceleratorError: CUDA error: operation failed due to a previous error during capture
-Search for `cudaErrorStreamCaptureInvalidated' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
-CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
-For debugging consider passing CUDA_LAUNCH_BLOCKING=1
-Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
-",

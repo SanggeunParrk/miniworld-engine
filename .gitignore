@@ -27,11 +27,15 @@ benchmarks/**/profiles/*
 !benchmarks/**/profiles/.gitkeep
 
 # generated benchmark/profiling artifacts
+# Generated benchmark data + figures are NOT tracked (kernel-library convention:
+# ship the bench scripts, regenerate results, keep curated tables in docs). This
+# keeps the repo lean for consumers that vendor it as a submodule.
 benchmarks/**/artifacts/**
 !benchmarks/**/artifacts/**/
 !benchmarks/**/artifacts/**/.gitkeep
-!benchmarks/**/artifacts/**/*.csv
-!benchmarks/**/artifacts/**/*.svg
+benchmarks/**/plots/**
+!benchmarks/**/plots/**/
+!benchmarks/**/plots/**/.gitkeep
 !benchmarks/**/artifacts/**/*.png
 !benchmarks/**/artifacts/**/*.pdf
 !benchmarks/**/artifacts/**/*.txt
