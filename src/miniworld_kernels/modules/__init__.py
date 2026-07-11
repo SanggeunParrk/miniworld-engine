@@ -3,6 +3,11 @@
 Each op is its own folder (``modules/<op>/``) holding the connecting nn.Module +
 reference + its benchmark results. No triton/cute/cuda backends live here — those
 belong to the fusion units under ``miniworld_kernels.kernels``.
+
+NOTE: this namespace is an INTERNAL reference / benchmark harness that
+composes the kernels. It is NOT the consumed public contract (that is
+``miniworld_kernels.kernels``); it imports the full backend + baseline
+stack and may change without a semver bump.
 """
 
 from .adaptive_layernorm import AdaptiveLayerNorm
