@@ -17,6 +17,11 @@ The public surface is frozen and enforced by `tests/test_public_api.py`.
   `dev`). A parent consuming `miniworld_kernels.kernels` no longer inherits
   lightning / hydra / cuequivariance / scipy / cutlass.
 
+- Moved 21 unreferenced dev/probe/experiment kernel files (perf probes,
+  autotune/tile sweeps, micro-benchmarks, superseded variants) out of the
+  importable `src/` package into `research/` (convention: `src/` ships only
+  the canonical path). Verified 0 importers + contract & numerical suites green.
+
 ### Fixed
 - Repo-wide int64 promotion of Triton `program_id` / loop-index pointer offsets
   (raw-indexing kernels), fixing an illegal-memory-access at large `L`
