@@ -27,6 +27,11 @@ The public surface is frozen and enforced by `tests/test_public_api.py`.
 ### Added
 - Public API contract test (`tests/test_public_api.py`): freezes the
   `kernels` surface and asserts the package import is side-effect-free.
+- Numerical correctness suite (`tests/test_numerical.py`): each op's fused
+  MINIWORLD backend vs the PyTorch reference (forward + input gradient),
+  GPU-gated, asserting the fused path is actually engaged (no silent
+  dtype-degrade). Promotes the benchmark cosine checks into an enforced
+  correctness gate.
 
 ## [0.1.0]
 - Initial consolidation of AF3-style op kernels (triangle multiplication,
