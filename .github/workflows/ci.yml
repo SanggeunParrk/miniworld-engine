@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; newer pushes cancel older ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: lint + types + contract (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false  # nested cutlass submodule is not needed for CPU checks
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling + package (no heavy backends)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pyright pytest
+          # editable install WITHOUT deps: the contract/guard tests import only the
+          # lazy `miniworld_kernels.kernels` surface (no torch/triton needed), so a
+          # CPU runner stays fast and free of the GPU stack.
+          pip install -e . --no-deps
+
+      - name: Lint (ruff)
+        run: ruff check src benchmarks submits
+
+      - name: Type smoke (pyright)
+        # pyproject sets typeCheckingMode=off + reportMissingImports=warning, so this
+        # is an import/syntax smoke check (missing torch/triton -> warnings, not errors).
+        run: pyright
+
+      - name: Public API contract + static guards
+        # CPU-only subset: frozen kernel surface, side-effect-free import, and the
+        # int64-offset static guard. The numerical suite (tests/test_numerical.py) and
+        # the entrypoint-resolution test need a GPU / the triton backend and run on an
+        # allocated GPU node via `pixi run test-gpu` (see README / pixi tasks).
+        run: >
+          pytest -q
+          tests/test_public_api.py
+          tests/test_lazy_kernel_exports.py
+          tests/test_int64_offsets.py

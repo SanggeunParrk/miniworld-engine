@@ -16,8 +16,13 @@ the same commit — that is the point of this test.
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
+
+import pytest
+
+_HAS_TRITON = importlib.util.find_spec("triton") is not None
 
 # Frozen public surface of miniworld_kernels.kernels (== its __all__).
 _CONTRACT = frozenset(
@@ -61,6 +66,9 @@ def test_public_kernel_surface_is_frozen() -> None:
     )
 
 
+@pytest.mark.skipif(
+    not _HAS_TRITON, reason="resolving kernel entrypoints needs the triton backend"
+)
 def test_every_public_name_resolves() -> None:
     """Each advertised name must actually resolve (lazily) to a callable."""
     from miniworld_kernels import kernels

@@ -32,6 +32,10 @@ The public surface is frozen and enforced by `tests/test_public_api.py`.
   GPU-gated, asserting the fused path is actually engaged (no silent
   dtype-degrade). Promotes the benchmark cosine checks into an enforced
   correctness gate.
+- CI (`.github/workflows/ci.yml`): ruff + pyright + CPU contract/guard tests
+  on every push/PR (nested cutlass submodule skipped, package installed
+  `--no-deps`). GPU numerical suite runs via `pixi run test-gpu` on an
+  allocated node.
 
 ## [0.1.0]
 - Initial consolidation of AF3-style op kernels (triangle multiplication,
