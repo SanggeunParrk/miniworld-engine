@@ -4,21 +4,29 @@ version = "0.1.0"
 requires-python = ">=3.10"
 description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
 dependencies = [
-  # kernels + module layers
+  # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
+  # inherits when it consumes miniworld-kernels as a submodule / dependency:
+  # only what `miniworld_kernels.kernels.*` needs to import and run its Triton
+  # entry points. Bench harness, comparison baselines, and the CuTeDSL backend
+  # are optional extras below so the parent never drags them in.
   "torch>=2.8",
   "triton",
   "einops",
   "jaxtyping",
   "numpy",
-  "scipy",
-  # cuequivariance baselines (CUEQUIVARIANCE implementation path)
-  "cuequivariance-torch>=0.9,<0.10",
-  # single bench harness (benchmarks/runners/bench.py, team-gm hydra style)
-  "hydra-core",
-  "lightning",
-  "omegaconf",
-  "pydantic",
 ]
+
+[project.optional-dependencies]
+# CuTeDSL / quack backends (the .cute kernel paths). cutlass ships as the
+# `nvidia-cutlass-dsl` wheel — no git submodule needed (see third_party/).
+cute = ["nvidia-cutlass-dsl==4.4.2", "quack-kernels==0.3.11"]
+# Comparison baselines only (CUEQUIVARIANCE impl path + reference helpers).
+# NOT required to use the miniworld kernels.
+baselines = ["cuequivariance-torch>=0.9,<0.10", "scipy"]
+# Benchmark harness (benchmarks/runners/bench.py, team-gm hydra style) + plots.
+bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
+# Dev: tests, lint, type smoke-check.
+dev = ["pytest", "ruff", "pyright"]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -165,19 +173,19 @@ pybind11 = "*"
 extra-index-urls = ["https://download.pytorch.org/whl/cu128"]
 no-build-isolation = ["transformer-engine-torch"]
 
-# [project.dependencies] (torch, triton, cuequivariance-torch, hydra, lightning,
-# einops, jaxtyping, numpy, scipy, ...) are picked up automatically. Add the
-# backends that don't belong in the published package's runtime deps:
+# The dev environment installs the package WITH ALL EXTRAS so the full bench +
+# baseline + cute + dev stack is present here, even though the published
+# `[project.dependencies]` core stays lean for downstream consumers (team-gm).
+# `[project.dependencies]` (torch, triton, einops, jaxtyping, numpy) plus every
+# extra (cute/baselines/bench/dev) are pulled via the editable install below.
 [tool.pixi.pypi-dependencies]
-miniworld-kernels = { path = ".", editable = true }
+miniworld-kernels = { path = ".", editable = true, extras = ["cute", "baselines", "bench", "dev"] }
+# Transformer Engine (cu12) is dev-only and needs the special no-build-isolation
+# handling above, so it stays an explicit pixi dep rather than a package extra.
 transformer-engine = { version = "*", extras = ["pytorch", "core-cu12"] }
 transformer-engine-cu12 = "*"
-nvidia-cutlass-dsl = "==4.4.2"
-quack-kernels = "==0.3.11"
+# cu12 ops backend for the cuequivariance baseline (pairs with the [baselines] extra).
 cuequivariance-ops-torch-cu12 = "*"
-matplotlib = "*"
-ruff = "*"
-pyright = "*"
 
 [tool.pixi.activation.env]
 PYTHONNOUSERSITE = "1"
