@@ -1,8 +1,8 @@
 # Third Party
 
 External dependencies for this repo are consumed as **pip packages**, not git
-submodules, so a parent project (e.g. team-gm) that vendors miniworld-kernels as
-a submodule doesn't inherit a recursive-clone of large upstreams.
+submodules, so anything that vendors this repo doesn't inherit a recursive-clone
+of large upstreams.
 
 - **CUTLASS / CuTeDSL**: the `.cute` kernel backends use the `nvidia-cutlass-dsl`
   wheel (plus `quack-kernels`), pinned in the `[cute]` optional-dependency group

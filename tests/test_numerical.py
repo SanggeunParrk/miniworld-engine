@@ -4,8 +4,7 @@ For each op we build the same module twice — once with the fused ``MINIWORLD``
 backend, once with the ``PYTORCH`` reference — sync their weights, and assert the
 fused forward (and input gradient) match the reference within a bf16-appropriate
 tolerance. This promotes the ad-hoc cosine checks in the benchmark harness into
-an enforced correctness suite (the guarantee team-gm relies on when it bumps the
-pinned commit).
+an enforced correctness suite.
 
 GPU-only: the fused kernels are Triton/CUDA, so the whole module skips without
 CUDA. We also assert the MINIWORLD instance actually resolved to a non-PyTorch

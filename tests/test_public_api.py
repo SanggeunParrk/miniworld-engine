@@ -1,14 +1,14 @@
-"""Public API contract for ``miniworld_kernels.kernels``.
+"""Public API guarantees for ``miniworld_kernels.kernels``.
 
-This package is consumed by a parent project (team-gm) as a submodule/dependency
-that pins a specific commit. The **kernels** namespace is therefore a *contract*:
+The **kernels** namespace is the supported surface, so this test pins two
+properties:
 
-  1. Its set of public names is frozen — adding/removing one is a conscious,
-     semver-relevant change that must update ``_CONTRACT`` here (and CHANGELOG).
+  1. Its set of public names is stable — adding/removing one is a conscious
+     change that must update ``_CONTRACT`` here (and CHANGELOG).
   2. ``import miniworld_kernels.kernels`` must stay cheap and side-effect-free:
      importing it must NOT pull triton / cutlass / cuequivariance / lightning /
      hydra into ``sys.modules``. Heavy backends load lazily on first *access*,
-     so a parent can import the package on a CPU/login node without a GPU stack.
+     so the package can be imported on a CPU/login node without a GPU stack.
 
 If you intend to change the surface, update ``_CONTRACT`` and the CHANGELOG in
 the same commit — that is the point of this test.

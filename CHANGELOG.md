@@ -1,11 +1,10 @@
 # Changelog
 
-All notable changes to the **public contract** (`miniworld_kernels.kernels`) are
-recorded here. This project is consumed by team-gm as a pinned submodule, so
-surface changes are semver-relevant. Format loosely follows
+Notable changes to the public API (`miniworld_kernels.kernels`) are recorded
+here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-The public surface is frozen and enforced by `tests/test_public_api.py`.
+The public surface is enforced by `tests/test_public_api.py`.
 
 ## [Unreleased]
 
@@ -14,7 +13,7 @@ The public surface is frozen and enforced by `tests/test_public_api.py`.
   (`torch`, `triton`, `einops`, `jaxtyping`, `numpy`). Benchmark harness,
   comparison baselines, the CuTeDSL backend, and dev tooling moved to
   `[project.optional-dependencies]` extras (`bench`, `baselines`, `cute`,
-  `dev`). A parent consuming `miniworld_kernels.kernels` no longer inherits
+  `dev`). Installing the package for `miniworld_kernels.kernels` no longer pulls
   lightning / hydra / cuequivariance / scipy / cutlass.
 
 - Moved 21 unreferenced dev/probe/experiment kernel files (perf probes,
@@ -45,4 +44,4 @@ The public surface is frozen and enforced by `tests/test_public_api.py`.
 ## [0.1.0]
 - Initial consolidation of AF3-style op kernels (triangle multiplication,
   transition, triangle/bias/augmented attention, layernorm, adaLN) with
-  Triton / CuTeDSL / CUDA backends, out of team-gm + FlashAttentionBias.
+  Triton / CuTeDSL / CUDA backends.

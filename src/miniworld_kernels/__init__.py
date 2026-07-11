@@ -1,22 +1,21 @@
 """miniworld-kernels — hand-optimized GPU kernels for AF3-style ops.
 
-Public contract
----------------
-The supported surface for downstream consumers (e.g. team-gm, which pins this
-as a submodule) is the **kernels** namespace::
+Public API
+----------
+The supported surface is the **kernels** namespace::
 
     from miniworld_kernels import kernels
     y = kernels.triton_transition_fused(...)
 
 ``miniworld_kernels.kernels`` is intentionally cheap and side-effect-free to
 import (no triton/cutlass/cuequivariance loaded until a kernel is first
-accessed). Its public names are frozen and covered by
+accessed). Its public names are stable and covered by
 ``tests/test_public_api.py``.
 
-``miniworld_kernels.modules`` (Pairformer, Transition, ...) is an *internal*
-reference / benchmark harness that composes these kernels. It is NOT part of the
-consumed contract, pulls the full backend + baseline stack at import, and may
-change without a semver bump.
+``miniworld_kernels.modules`` (Pairformer, Transition, ...) is an internal
+reference / benchmark harness that composes these kernels. It is not part of the
+supported surface, pulls the full backend + baseline stack at import, and may
+change at any time.
 
 Importing this top-level package must stay side-effect-free: do not import
 ``.kernels`` or ``.modules`` here.
