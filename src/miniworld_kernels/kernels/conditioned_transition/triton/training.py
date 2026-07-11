@@ -44,8 +44,8 @@ def _swiglu_fwd_kernel(
     row = offs // ND
     col = offs % ND
     idx = row * stride_m + col * stride_n
-    a = tl.load(a_ptr + idx, mask=mask)
-    b = tl.load(b_ptr + idx, mask=mask)
+    a = tl.load(a_ptr + idx, mask=mask).to(tl.float32)
+    b = tl.load(b_ptr + idx, mask=mask).to(tl.float32)
     h = a * tl.sigmoid(a) * b
     tl.store(h_ptr + offs, h, mask=mask)   # h is contiguous (M, ND)
 
@@ -55,8 +55,8 @@ def _gate_fwd_kernel(out_ptr, scale_ptr, y_ptr, n_elem, BLOCK: tl.constexpr):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_elem
-    out = tl.load(out_ptr + offs, mask=mask)
-    scale = tl.load(scale_ptr + offs, mask=mask)
+    out = tl.load(out_ptr + offs, mask=mask).to(tl.float32)
+    scale = tl.load(scale_ptr + offs, mask=mask).to(tl.float32)
     y = tl.sigmoid(scale) * out
     tl.store(y_ptr + offs, y, mask=mask)
 
@@ -84,9 +84,9 @@ def _gate_bwd_kernel(out_ptr, scale_ptr, dy_ptr, dout_ptr, dscale_ptr, n_elem, B
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_elem
-    out = tl.load(out_ptr + offs, mask=mask)
-    scale = tl.load(scale_ptr + offs, mask=mask)
-    dy = tl.load(dy_ptr + offs, mask=mask)
+    out = tl.load(out_ptr + offs, mask=mask).to(tl.float32)
+    scale = tl.load(scale_ptr + offs, mask=mask).to(tl.float32)
+    dy = tl.load(dy_ptr + offs, mask=mask).to(tl.float32)
     sg = tl.sigmoid(scale)
     tl.store(dout_ptr + offs, sg * dy, mask=mask)
     tl.store(dscale_ptr + offs, out * sg * (1.0 - sg) * dy, mask=mask)
@@ -106,9 +106,9 @@ def _swiglu_bwd_kernel(
     mask = offs < M * ND
     row = offs // ND
     col = offs % ND
-    a = tl.load(a_ptr + row * stride_m + col * stride_n, mask=mask)
-    b = tl.load(b_ptr + row * stride_m + col * stride_n, mask=mask)
-    dh = tl.load(dh_ptr + row * stride_dhm + col * stride_dhn, mask=mask)
+    a = tl.load(a_ptr + row * stride_m + col * stride_n, mask=mask).to(tl.float32)
+    b = tl.load(b_ptr + row * stride_m + col * stride_n, mask=mask).to(tl.float32)
+    dh = tl.load(dh_ptr + row * stride_dhm + col * stride_dhn, mask=mask).to(tl.float32)
     sa = tl.sigmoid(a)
     silu = a * sa
     silu_prime = sa * (1.0 + a * (1.0 - sa))  # sa + silu*(1 - sa)
@@ -324,6 +324,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ND = wa.shape[0]
         wcat = torch.cat([wa, wb], dim=0)         # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
+        if x.dtype == torch.bfloat16 and mode == "fused":
+            mode = "cublas"  # bf16 fused b2b train kernel is broken (dtype/spill); use cuBLAS split
         if mode == "fused":
             y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc)
         else:  # "cublas": cat-merged expand (one GEMM) + cuBLAS GEMMs + triton elementwise
