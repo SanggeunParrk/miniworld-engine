@@ -45,7 +45,7 @@ def layer_norm_fwd_lowreg(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offset_row = tl.arange(0, BLOCK_M) + row * BLOCK_M
     row_mask = (offset_row < M)[:, None]
     offset_col = tl.arange(0, BLOCK_N)

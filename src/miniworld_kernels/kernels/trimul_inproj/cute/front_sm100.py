@@ -45,8 +45,8 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
 def _transpose_kernel(src_ptr, dst_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr,
                       GROUP_M: tl.constexpr):
     """src (M,N) row-major -> dst (N,M) row-major. dst[n,m] = src[m,n]."""
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
     rm = pid_m * BM + tl.arange(0, BM)
     rn = pid_n * BN + tl.arange(0, BN)
     src = tl.load(

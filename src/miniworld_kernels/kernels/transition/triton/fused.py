@@ -89,8 +89,43 @@ else:
     ]
 
 
+def _expand_early_prune(configs, named_args, **kwargs):
+    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE they are
+    compiled/benched. The expand kernel stages wa+wb tiles ``[BLOCK_K, BLOCK_N]`` (BLOCK_K =
+    next_pow2(K); K is NOT tiled) across ``num_stages``, plus the single ``[BLOCK_M, BLOCK_K]``
+    xn tile, all bf16. Autotune's bench-time OutOfResources pruning is unsafe under CUDA-graph
+    capture -- the failing bench fires DURING capture and fatally poisons the stream (seen at
+    d>=256: a 430KB/856KB config OOMs mid-capture). Pruning up front keeps only capturable
+    configs so the fused path (and its sm100 gatebwd backward) is usable at d=256 under cudagraph."""
+    import triton as _triton
+
+    K = named_args["K"] if "K" in named_args else kwargs.get("K")
+    if K is None:
+        return list(configs)
+    bk = _triton.next_power_of_2(int(K))
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- fall back to a conservative sm100 smem budget
+        limit = 227 * 1024
+
+    def _smem(c):
+        bm = c.kwargs["BLOCK_M"]
+        bn = c.kwargs["BLOCK_N"]
+        # num_stages copies of the pipelined wa+wb tiles + the single xn tile (bf16 = 2 B)
+        return c.num_stages * 2 * bk * bn * 2 + bm * bk * 2
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
+
+
 # fmt: off
-@triton.autotune(configs=_configs, key=["GROUP_M", "ND", "K", "SAVE_XN"])
+@triton.autotune(
+    configs=_configs,
+    key=["GROUP_M", "ND", "K", "SAVE_XN"],
+    prune_configs_by={"early_config_prune": _expand_early_prune},
+)
 @triton.jit
 def _transition_expand_gate_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
@@ -105,7 +140,7 @@ def _transition_expand_gate_kernel(
 ):
     # One program owns BLOCK_M rows and ALL of ND: LayerNorm is applied ONCE per row and
     # the normalized tile is reused for both the A and B projections across the N-loop.
-    pid_m = tl.program_id(0)
+    pid_m = tl.program_id(0).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     k = tl.arange(0, BLOCK_K)
     row_mask = rows < M
@@ -218,7 +253,7 @@ def _transition_b2b_kernel(
     # Back-to-back: one program owns BLOCK_M rows and ALL of ND. It builds the gated h
     # tile-by-tile and ACCUMULATES the squeeze out[BM, D] += h_chunk @ Ws[:, chunk]^T, so
     # the (M, ND) intermediate h never touches HBM. Only valid when K fits one BLOCK_K.
-    pid_m = tl.program_id(0)
+    pid_m = tl.program_id(0).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     k = tl.arange(0, BLOCK_K)
     row_mask = rows < M
@@ -382,7 +417,7 @@ def _transition_b2b_ktiled_kernel(
     # One program owns BLOCK_M rows and ALL of ND. Inner k-loop keeps weight tiles
     # [BLOCK_K, BLOCK_N] (bounded smem at any d); squeeze accumulated in out_acc across the
     # N-chunk loop; h never leaves regs. No atomics.
-    pid_m = tl.program_id(0)
+    pid_m = tl.program_id(0).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     row_mask = rows < M
     rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
@@ -518,8 +553,8 @@ def _transition_expand_gatebwd_kernel(
     #     wgrad GEMMs. No separate normalize pass, no saved xn needed.
     #   NORMALIZE=False (Version B): x_ptr is ALREADY the saved xn; load it directly, skip
     #     the normalize math AND the xn emit (the caller already holds xn).
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < M
@@ -707,7 +742,7 @@ def _transition_ln_bwd_kernel(
     #   x_hat = x*rstd - c1 = (x-mean)*rstd ; wdy = gamma*dxn
     #   dx = rstd*(wdy - mean_k(wdy) - x_hat*mean_k(wdy*x_hat))
     #   dgamma += sum_m(dxn*x_hat) ; dbeta += sum_m(dxn)   (atomic over M-blocks)
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     k = tl.arange(0, BLOCK_K)
     rmask = rows < M
@@ -850,14 +885,22 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         # backward recomputes it — the CUDA kernel emits nothing beyond `out`. stats are needed
         # by the backward anyway, so stats_triton is not extra work. This gate is INDEPENDENT of
         # _B2B_MAX_K (the triton-b2b smem bound); on any failure we fall back to the split.
+        _is_sm100 = torch.cuda.get_device_capability(x2.device)[0] == 10  # noqa: PLR2004
         cuda_b2b_ok = (
             (not save_xn)
-            and _cuda_b2b_train_enabled()
             and n == 4
-            and K in (128, 256)
             and x2.dtype == torch.bfloat16
             and x2.is_cuda
             and x2.shape[0] % 128 == 0
+            and (
+                # sm_100, d>=256 ONLY: the cutlass-DSL b2b_fwd_sm100 forward fits smem
+                # (the triton b2b/expand OOMs at d>=256) and keeps the fast gatebwd_sm100
+                # backward usable there (~1.4-1.5x vs the legacy split). d=128 is DELIBERATELY
+                # excluded: the triton b2b path below is faster at d=128 (602us vs 725us
+                # training step, the AF3 shape) -- routing it to the cute fwd was a regression.
+                (_is_sm100 and K in (256, 512))
+                or (_cuda_b2b_train_enabled() and K in (128, 256))
+            )
         )
         if cuda_b2b_ok:
             rstd, c1 = stats_triton(x2, eps)

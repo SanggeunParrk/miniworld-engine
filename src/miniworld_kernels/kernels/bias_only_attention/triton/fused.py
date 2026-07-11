@@ -56,8 +56,8 @@ def _bias_only_gemm(
     BLOCK_K: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    pid_j = tl.program_id(0)
-    pid_i = tl.program_id(1)
+    pid_j = tl.program_id(0).to(tl.int64)
+    pid_i = tl.program_id(1).to(tl.int64)
     off_zh = tl.program_id(2).to(tl.int64)
     off_z = off_zh // H
     off_h = off_zh % H

@@ -38,7 +38,7 @@ def _xn_recompute_kernel(
     # xn = (x*rstd - c1)*gamma + beta from saved stats. One bandwidth-bound pass (read x,
     # write xn). Replaces the eager fp32 layer_norm recompute, which materialized several
     # (M,K) fp32 temporaries and was ~10x slower.
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BM + tl.arange(0, BM)
     k = tl.arange(0, BK)
     rm = rows < M

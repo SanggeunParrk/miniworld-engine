@@ -49,7 +49,7 @@ def _cond_transition_inference_kernel(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
+    pid_m = tl.program_id(0).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     row_mask = rows < M
     k = tl.arange(0, BLOCK_K)

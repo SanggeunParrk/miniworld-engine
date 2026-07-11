@@ -74,7 +74,7 @@ def _lr_kernel(
     BM: tl.constexpr, BK: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     # int64 M-index: bdll store offset is (D+rd)*LL + m with LL=L*L, so at large L
     # (e.g. L>=4096 at D=128, or d_pair=512 sooner) the flat offset exceeds int32.
     # Promote the row index and LL to int64 — mirrors the hardened backward
@@ -136,7 +136,7 @@ def _gate_kernel(
     BM: tl.constexpr, BK: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     # int64 M-index (gate store is m*D+d, M=L*L): matches _lr_kernel hardening.
     rm = pid.to(tl.int64) * BM + tl.arange(0, BM).to(tl.int64)
     rk = tl.arange(0, BK)

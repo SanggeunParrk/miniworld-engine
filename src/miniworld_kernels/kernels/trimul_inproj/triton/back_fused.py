@@ -21,7 +21,7 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
 
 @triton.jit
 def _dx_kernel(d_lr, preact, W, dx, M, D: tl.constexpr, BM: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rm = pid * BM + tl.arange(0, BM)
     mm = rm < M
     rd = tl.arange(0, D)
@@ -53,7 +53,7 @@ def _dx_kernel(d_lr, preact, W, dx, M, D: tl.constexpr, BM: tl.constexpr):
 
 @triton.jit
 def _dw_kernel(d_lr, preact, x_n, dW, M, D: tl.constexpr, BK: tl.constexpr, NPROG: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rd = tl.arange(0, D)
     D2 = 2 * D
     aLg = tl.zeros((D, D), tl.float32)

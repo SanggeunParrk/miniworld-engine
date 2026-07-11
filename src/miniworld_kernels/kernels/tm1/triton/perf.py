@@ -69,7 +69,7 @@ def fused_sigmoid_gate_fwd_kernel(
     GROUP_M: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
@@ -161,7 +161,7 @@ def fused_sigmoid_gate_bwd_kernel(
     GROUP_M: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n

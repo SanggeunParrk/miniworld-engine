@@ -98,7 +98,7 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     BLOCK_NX: tl.constexpr,
     BLOCK_NC: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     row_mask = rows < M
 
@@ -259,7 +259,7 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
     BLOCK_NX: tl.constexpr,
     BLOCK_NC: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     row_mask = rows < M
 
@@ -455,8 +455,8 @@ def adaln_bwd_weight_kernel(
     BLOCK_NX: tl.constexpr,
     BLOCK_NC: tl.constexpr,
 ):
-    pid_x = tl.program_id(0)
-    pid_c = tl.program_id(1)
+    pid_x = tl.program_id(0).to(tl.int64)
+    pid_c = tl.program_id(1).to(tl.int64)
 
     x_cols = pid_x * BLOCK_NX + tl.arange(0, BLOCK_NX)
     c_cols = pid_c * BLOCK_NC + tl.arange(0, BLOCK_NC)
@@ -545,7 +545,7 @@ def adaln_bwd_lnw_kernel(
     BLOCK_NX: tl.constexpr,
     BLOCK_NC: tl.constexpr,
 ):
-    pid_c = tl.program_id(0)
+    pid_c = tl.program_id(0).to(tl.int64)
     c_cols = pid_c * BLOCK_NC + tl.arange(0, BLOCK_NC)
     c_mask = c_cols < NC
 

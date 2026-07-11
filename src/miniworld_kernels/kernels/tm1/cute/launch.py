@@ -38,7 +38,7 @@ def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK: tl.constexpr):
     ~4 passes over the [B,D,L,L] tensor. This is one read of proj + one read of
     gate + one write. Precision is not reduced (fewer intermediate roundings).
     """
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     m = offs < n
     p = tl.load(proj_ptr + offs, mask=m).to(tl.float32)

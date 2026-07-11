@@ -32,7 +32,7 @@ _LAZY_EXPORTS = {
         "triton_adaptive_layer_norm",
     ),
     "triton_augmented_attention_pair_bias": (
-        ".augmented_attention.triton.main",
+        ".augmented_attention",
         "triton_augmented_attention_pair_bias",
     ),
     "triton_bias_only_attention": (

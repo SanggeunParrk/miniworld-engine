@@ -41,8 +41,8 @@ def _expand_swiglu_kernel(
     stride_hm, stride_hn,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
@@ -108,8 +108,8 @@ def _squeeze_gate_kernel(
     BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_d = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_d = tl.program_id(1).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     dcols = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
     row_mask = rows < M

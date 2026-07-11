@@ -38,7 +38,7 @@ def _swiglu_fwd_kernel(
     stride_m, stride_n,      # a, b: (M, ND), possibly strided views
     BLOCK: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < M * ND
     row = offs // ND
@@ -52,7 +52,7 @@ def _swiglu_fwd_kernel(
 
 @triton.jit
 def _gate_fwd_kernel(out_ptr, scale_ptr, y_ptr, n_elem, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_elem
     out = tl.load(out_ptr + offs, mask=mask)
@@ -81,7 +81,7 @@ def _gate(out, scale):
 # --- backward elementwise (fused) ----------------------------------------------------
 @triton.jit
 def _gate_bwd_kernel(out_ptr, scale_ptr, dy_ptr, dout_ptr, dscale_ptr, n_elem, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_elem
     out = tl.load(out_ptr + offs, mask=mask)
@@ -101,7 +101,7 @@ def _swiglu_bwd_kernel(
     BLOCK: tl.constexpr,
 ):
     # Packs da into dab[:, :ND] and db into dab[:, ND:] so the expand-bwd is one GEMM.
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < M * ND
     row = offs // ND
@@ -189,7 +189,7 @@ def _b2b_fwd_train_kernel(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
+    pid_m = tl.program_id(0).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     row_mask = rows < M
     k = tl.arange(0, BLOCK_K)

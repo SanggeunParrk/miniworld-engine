@@ -21,7 +21,7 @@ _LN_CFG = [triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
 @triton.jit
 def _ln_kernel(X, Y, W, M, N, eps, sx0, sx1, sy0, sy1,
               HAS_W: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)
@@ -68,7 +68,7 @@ def _gemm_gate_kernel(
     DT: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     num_pid_in_group = GROUP_M * num_pid_n
@@ -129,7 +129,7 @@ def _gemm_gate_train_kernel(
     DT: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     num_pid_m = tl.cdiv(M, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     num_pid_in_group = GROUP_M * num_pid_n
@@ -184,7 +184,7 @@ def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b):
 def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                      sy0, sy1, sxn0, sxn1, sg0, sg1, sds0, sds1, sdx0, sdx1,
                      BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)

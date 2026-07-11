@@ -32,9 +32,9 @@ def _bmm_gated_kernel(
     dtri, rhs, gLlog, pL, d_p, d_glog,
     L, D: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    d = tl.program_id(2)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
+    d = tl.program_id(2).to(tl.int64)
     rm = pid_m * BM + tl.arange(0, BM)
     rn = pid_n * BN + tl.arange(0, BN)
     rk = tl.arange(0, BK)

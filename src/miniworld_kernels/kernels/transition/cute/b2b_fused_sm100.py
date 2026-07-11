@@ -31,6 +31,7 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+from quack.cute_dsl_utils import get_max_active_clusters
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import from_dlpack
@@ -982,7 +983,7 @@ def transition_b2b_fused_sm100(xn, wa, wb, ws):
     out = torch.empty(M, D, device=xn.device, dtype=torch.bfloat16)
     mOut = _mark(out.unsqueeze(0), 2)
 
-    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)  # memoized: avoid per-call CUTLASS-DSL probe recompile
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, K, ND, D)
     if key not in _CACHE:

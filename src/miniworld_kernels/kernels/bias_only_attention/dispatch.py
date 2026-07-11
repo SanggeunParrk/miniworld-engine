@@ -118,7 +118,12 @@ def _calibrate_gate(d_hidden: int, n_out: int, M: int, device: torch.device,
         return fused_gate_out(g, o, wo)
 
     def t(fn):
-        return triton.testing.do_bench(fn, warmup=10, rep=50, quantiles=[0.5])[0]
+        # do_bench returns a list for `quantiles=` on older Triton but a bare float
+        # on Triton >= 3.x; accept both (a stray `[0]` on the float raised TypeError,
+        # which made every calibration fail -> static fallback re-ran do_bench on every
+        # forward, dominating runtime).
+        r = triton.testing.do_bench(fn, warmup=10, rep=50, quantiles=[0.5])
+        return float(r[0] if isinstance(r, (list, tuple)) else r)
 
     tf, ts = t(fused), t(split)
     return ("fused" if tf <= ts else "split"), {"fused": tf, "split": ts}
@@ -147,7 +152,9 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
         return cached["choice"] == "fused"
     try:
         choice, times = _calibrate_gate(d_hidden, n_out, M, device, dtype)
-        _store(idx, key, choice, times)
-        return choice == "fused"
-    except Exception:  # noqa: BLE001 -- any failure -> safe static fallback
-        return static
+    except Exception:  # noqa: BLE001 -- calibration failed -> fall back to the static
+        # choice, but still CACHE it so we don't re-run (and re-fail) the calibration
+        # do_bench on every forward.
+        choice, times = ("fused" if static else "split"), {}
+    _store(idx, key, choice, times)
+    return choice == "fused"

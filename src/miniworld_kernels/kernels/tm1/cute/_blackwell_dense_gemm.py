@@ -36,6 +36,7 @@ import cutlass.cute as cute
 import cutlass.cute.testing as testing
 import cutlass.utils as utils
 from cutlass.utils import is_fp8_dtype, create_cute_tensor_for_fp8
+from quack.cute_dsl_utils import get_max_active_clusters
 import cutlass.pipeline as pipeline
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 from cutlass.cute.nvgpu import cpasync, tcgen05
@@ -1595,9 +1596,9 @@ def run(
     current_stream = cuda.CUstream(torch_stream.cuda_stream)
 
     # Check if configuration can be implemented
-    max_active_clusters = utils.HardwareInfo().get_max_active_clusters(
+    max_active_clusters = get_max_active_clusters(
         cluster_shape_mn[0] * cluster_shape_mn[1]
-    )
+    )  # memoized: avoid per-call CUTLASS-DSL probe recompile
 
     # Run and verify BMM with torch
     a_f32, b_f32, c_f32, a_storage, b_storage, c_storage = prepare_tensors(

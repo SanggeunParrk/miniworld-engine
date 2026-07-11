@@ -52,7 +52,7 @@ def transition_fwd_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(n * N, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
@@ -115,7 +115,7 @@ def transition_bwd_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(n * N, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n

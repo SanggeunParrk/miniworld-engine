@@ -56,7 +56,7 @@ def _back_kernel(
     K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rm = pid * BM + tl.arange(0, BM)
     rk = tl.arange(0, K)
     mmask = rm[:, None] < M

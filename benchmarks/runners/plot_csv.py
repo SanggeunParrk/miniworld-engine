@@ -225,7 +225,14 @@ def plot_speedup(rows: list[dict[str, str]], out: Path, title: str, baseline: st
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("csv_path", type=Path)
-    parser.add_argument("output_dir", type=Path)
+    parser.add_argument(
+        "output_dir",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Where to write the SVGs. Default: the CSV's sibling plots/<gpu>/ dir "
+        "(raw CSVs live under artifacts/<gpu>/; figures go to plots/<gpu>/).",
+    )
     parser.add_argument("--name", default=None)
     parser.add_argument("--title", default=None)
     parser.add_argument("--metric", default=None)
@@ -233,6 +240,17 @@ def main() -> None:
     parser.add_argument("--baseline", default=BASELINE)
     parser.add_argument("--x-field", choices=("seq_len", "d_pair"), default=None)
     args = parser.parse_args()
+
+    if args.output_dir is None:
+        # Default the figures next to (but separate from) the raw data: CSVs live under
+        # <bench>/artifacts/<gpu>/, figures go to <bench>/plots/<gpu>/. Fall back to the
+        # CSV's own directory when it is not under an artifacts/ tree.
+        csv_dir = args.csv_path.resolve().parent
+        args.output_dir = (
+            Path(str(csv_dir).replace("/artifacts/", "/plots/"))
+            if "/artifacts/" in str(csv_dir)
+            else csv_dir
+        )
 
     rows = filtered_rows(read_rows(args.csv_path), args.metric, args.mode)
     if not rows:

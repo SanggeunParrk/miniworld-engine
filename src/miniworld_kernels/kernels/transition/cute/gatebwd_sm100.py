@@ -36,6 +36,7 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+from quack.cute_dsl_utils import get_max_active_clusters
 from cutlass import BFloat16, Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import from_dlpack
@@ -736,7 +737,7 @@ import triton.language as tl
 
 @triton.jit
 def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLK: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLK + tl.arange(0, BLK)
     m = offs < N
     ge = tl.load(ge_ptr + offs, mask=m)          # read grad once
@@ -776,7 +777,7 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
     mDA = _mark(dA.unsqueeze(0), 2)
     mDB = _mark(dB.unsqueeze(0), 2)
 
-    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)  # memoized: avoid per-call CUTLASS-DSL probe recompile
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, ND, K)
     if key not in _CACHE:

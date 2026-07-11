@@ -39,7 +39,7 @@ def _fold_kernel(
     stride_bn, stride_bk,   # B is (2N, K)
     BLOCK_J: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     j = pid * BLOCK_J + tl.arange(0, BLOCK_J)        # (BLOCK_J,) over N
     k = tl.arange(0, BLOCK_K)                         # (BLOCK_K,) over K
     j_mask = j < N

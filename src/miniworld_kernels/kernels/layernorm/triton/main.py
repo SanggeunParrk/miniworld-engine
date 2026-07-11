@@ -74,7 +74,7 @@ def layer_norm_fwd_fused(
     GROUP_M: tl.constexpr, HAS_ROWSCALE: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offset_row = tl.arange(0, BLOCK_M) + row * BLOCK_M
     row_mask = offset_row < M
 
@@ -137,7 +137,7 @@ def layer_norm_fwd_fused_recal(
     GROUP_M: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     offset_row = tl.arange(0, BLOCK_M) + row * BLOCK_M
     row_mask = offset_row < M
 
@@ -184,7 +184,7 @@ def layer_norm_bwd_dx_fused(
     GROUP_M: tl.constexpr, HAS_ROWSCALE: tl.constexpr,
 ):
     # Map the program id to the elements of X, DX, and DY it should compute.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
 
     offset_row = tl.arange(0, BLOCK_M) + row * BLOCK_M
     row_mask = offset_row < M

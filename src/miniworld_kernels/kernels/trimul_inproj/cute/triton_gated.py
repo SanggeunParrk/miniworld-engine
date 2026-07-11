@@ -44,7 +44,7 @@ PEAK_TBPS = 3.35
 def _gated_gemm(x_ptr, bg_ptr, bp_ptr, out_ptr, M,
                 K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr,
                 GROUP_M: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs_m = pid * BM + tl.arange(0, BM)
     offs_k = tl.arange(0, K)
     offs_n = tl.arange(0, N)

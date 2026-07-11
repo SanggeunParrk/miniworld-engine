@@ -32,7 +32,7 @@ def _stats_kernel(
     stride_xm, stride_xk,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = tl.arange(0, BLOCK_K)
     row_mask = rows < M

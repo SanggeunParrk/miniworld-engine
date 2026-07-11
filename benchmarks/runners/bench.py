@@ -520,23 +520,24 @@ def bench_triangle_multiplication(
                     layer.load_state_dict(state)
                 return
             if raw_implementation == MINIWORLD_IMPL:
-                layers = []
-                for state in layer_states:
-                    base = base_cls(conf.d_pair)
-                    base.load_state_dict(state)
-                    if bidirectional:
-                        from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training import (
-                            BidirV6TriMul,
+                # Use the real production module (implementation=MINIWORLD): its per-GPU
+                # dispatch runs the sm100-native cute path on B200 (tcgen05 front + split
+                # sm100 out-projection), correct at every d. The prior hand-wired wrappers
+                # (MiniWorld*Inference/Training, BidirV6TriMul) called the H100 quack /
+                # back_split kernels, which are numerically WRONG on sm_100 (out-cosine
+                # ~0.05-0.7 vs pytorch) and assert "SM90 only" at d>=256.
+                # cute path is bf16-only (asserts on fp32 weights); pin bf16 like the
+                # old wrappers did. load_state_dict casts the fp32 reference state.
+                self.layers = nn.ModuleList(
+                    [
+                        base_cls(conf.d_pair, implementation=ImplementationType.MINIWORLD).to(
+                            torch.bfloat16,
                         )
-                        layers.append(BidirV6TriMul(base.to(torch.bfloat16)))
-                    else:
-                        layer_cls = (
-                            MiniWorldTriangleMultiplicationInference
-                            if is_inference_mode(conf.mode)
-                            else MiniWorldTriangleMultiplicationTraining
-                        )
-                        layers.append(layer_cls(base))
-                self.layers = nn.ModuleList(layers)
+                        for _ in layer_states
+                    ],
+                )
+                for layer, state in zip(self.layers, layer_states, strict=True):
+                    layer.load_state_dict(state)
                 return
 
             spec = parse_implementation_spec(raw_implementation)
@@ -1755,7 +1756,9 @@ def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_aug_attn":
         from miniworld_kernels.kernels import triton_augmented_attention_pair_bias
-        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b)  # noqa: E731
+        # memory-efficient backend explicitly (the dispatch wrapper now defaults to
+        # compute-efficient); keeps this row distinct from aug_attn_compute_efficient.
+        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b, compute_efficient=False)  # noqa: E731
         path = "kernels.augmented_attention.triton.main"
     elif implementation == "aug_attn_compute_efficient":
         from miniworld_kernels.kernels.augmented_attention.triton.compute_efficient import (
@@ -1792,9 +1795,9 @@ def bench_kernel_ln_mask(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "fused_ln_mask":
-        from miniworld_kernels.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
+        from miniworld_kernels.kernels.fused_ln_mask.triton.main import fused_ln_mask
         kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)  # noqa: E731
-        path = "kernels.fused_ln_mask.cute"
+        path = "kernels.fused_ln_mask.triton"
     else:
         return as_bench_result(float("nan"))
 
@@ -2478,7 +2481,28 @@ def main(cfg: DictConfig) -> None:
     bench_func = KERNEL_MAP[conf.kernel]
 
     torch.backends.cuda.matmul.allow_tf32 = conf.allow_tf32
-    fabric = Fabric(accelerator="cuda", devices=1, precision=fabric_precision(conf.precision))
+    # Benchmark harness must measure the RAW module/kernel, NOT a training-framework wrapper.
+    # Lightning Fabric's setup_module wrapper + fabric.backward add ~110us/step of GPU work
+    # (input/output/grad casts+copies) that has nothing to do with the kernel under test and
+    # both inflates absolute latency and COMPRESSES the speedup ratios. The models are already
+    # placed on-device and cast to the right dtype by each bench (bf16 or fp32), so Fabric's
+    # precision/placement is redundant here. Use a no-op shim: setup_module -> identity,
+    # backward -> tensor.backward. (Kernel benches never touched fabric; this fixes the module
+    # benches to the same raw-measurement standard.)
+    class _NoFabric:
+        @staticmethod
+        def launch() -> None:
+            pass
+
+        @staticmethod
+        def setup_module(module):  # noqa: ANN001, ANN205
+            return module
+
+        @staticmethod
+        def backward(tensor, gradient):  # noqa: ANN001, ANN205
+            tensor.backward(gradient)
+
+    fabric = _NoFabric()
     fabric.launch()
 
     bench_args = [

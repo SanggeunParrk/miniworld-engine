@@ -98,7 +98,7 @@ def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N, eps,
                    sx0, sx1, sn0, sn1,
                    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, GROUP_M: tl.constexpr,
                    DT: tl.constexpr):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)
@@ -145,7 +145,7 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
     # atomic per program) sped up CONTIGUOUS large-d (d512 0.96→1.07x) but CATASTROPHICALLY
     # regressed m-major d=256 (2.45→0.45x — the strided x/dx access interacts badly with the
     # strided loop), so it was reverted. Keep this simple form (good on both layouts).
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = tl.arange(0, BLOCK_M) + row * BLOCK_M
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)

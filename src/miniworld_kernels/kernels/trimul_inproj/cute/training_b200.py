@@ -84,7 +84,7 @@ import triton.language as tl
 
 @triton.jit
 def _glu_bwd_kernel(dy_ptr, gate_ptr, proj_ptr, dproj_ptr, dglog_ptr, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     off = pid * BLOCK + tl.arange(0, BLOCK)
     mask = off < n
     dy = tl.load(dy_ptr + off, mask=mask).to(tl.float32)
@@ -108,7 +108,7 @@ _USE_FUSE_GLU = os.environ.get("MINIWORLD_TRAIN_FUSE_GLU", "1") != "0"
 
 @triton.jit
 def _add3_kernel(a_ptr, b_ptr, c_ptr, out_ptr, n, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     off = pid * BLOCK + tl.arange(0, BLOCK)
     mask = off < n
     a = tl.load(a_ptr + off, mask=mask).to(tl.float32)
@@ -139,7 +139,7 @@ _LN_CFGS = [
 def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, Mean, M, D: tl.constexpr, eps,
                    sxm, sxd, BLOCK_M: tl.constexpr):
     # One program does BLOCK_M rows, full D columns; LN over D. fp32 stats.
-    rm = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rm = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     rd = tl.arange(0, D)
     mmask = rm < M
     xoff = rm[:, None] * sxm + rd[None, :] * sxd   # input may be M-major (strided) view
@@ -184,7 +184,7 @@ def _ln_fwd_fused(x, w, b, eps, out_shape=None):
 @triton.jit
 def _ln_bwd_dx_kernel(DY, Xhat, Rstd, W, DX, M, D: tl.constexpr,
                       BLOCK_M: tl.constexpr):
-    rm = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    rm = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     rd = tl.arange(0, D)
     mmask = rm < M
     off = rm[:, None] * D + rd[None, :]

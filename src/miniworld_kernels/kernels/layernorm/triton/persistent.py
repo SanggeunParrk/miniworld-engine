@@ -50,7 +50,7 @@ def _ln_bwd_persistent(
     M, N: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     G = tl.num_programs(0)
 
     offs_n = tl.arange(0, BLOCK_N)

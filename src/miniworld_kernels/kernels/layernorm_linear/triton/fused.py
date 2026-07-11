@@ -45,7 +45,7 @@ def _lnl_fwd_kernel(
     # One program owns BLOCK_M rows and ALL of N: LayerNorm is computed ONCE per row
     # and reused across the N-loop (vs recomputing it per (M,N) tile, which re-reads X
     # and tanks large-K throughput). Grid is 1-D over M-blocks.
-    pid_m = tl.program_id(0)
+    pid_m = tl.program_id(0).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     k = tl.arange(0, BLOCK_K)
     row_mask = rows < M

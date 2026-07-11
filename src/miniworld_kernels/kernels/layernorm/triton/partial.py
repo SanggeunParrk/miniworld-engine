@@ -37,7 +37,7 @@ def _layer_norm_bwd_dx_partials(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs_n = tl.arange(0, BLOCK_N)
     col_mask = offs_n < N
 

@@ -167,9 +167,9 @@ def _attn_fwd(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    start_m = tl.program_id(0)
+    start_m = tl.program_id(0).to(tl.int64)
     off_hz = tl.program_id(1).to(tl.int64)
-    start_d = tl.program_id(2)
+    start_d = tl.program_id(2).to(tl.int64)
     off_z = off_hz // H
     off_h = off_hz % H
     off_a = off_z // B
@@ -260,7 +260,7 @@ def _attn_bwd_preprocess(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_hz = tl.program_id(1).to(tl.int64)
     off_n = tl.arange(0, BLOCK_D)
 
@@ -400,7 +400,7 @@ def _attn_bwd(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     aid = tl.program_id(1).to(tl.int64)
     bhid = tl.program_id(2).to(tl.int64)
     bid = bhid // H

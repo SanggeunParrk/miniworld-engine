@@ -67,8 +67,8 @@ def _fwd_expand_swiglu_kernel(
     stride_abm, stride_abn,  # ab: (M, 2*ND) packed [a | b]
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
@@ -121,8 +121,8 @@ def _fwd_squeeze_gate_kernel(
     BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr,
     BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_d = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_d = tl.program_id(1).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     dcols = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
     row_mask = rows < M
@@ -195,7 +195,7 @@ def _fwd_squeeze_gate(h, cond, ws, wsc, bsc):
 # --- gate-bwd: dout = sg*dy ; dscale = out*sg*(1-sg)*dy  (one HBM pass over (M,D)) ---
 @triton.jit
 def _gate_bwd_kernel(out_ptr, scale_ptr, dy_ptr, dout_ptr, dscale_ptr, n_elem, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n_elem
     out = tl.load(out_ptr + offs, mask=mask)
@@ -246,7 +246,7 @@ def _dgemm_kernel(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     # L2-friendly grouped (swizzled) program ordering — standard triton matmul scheduling.
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     grid_m = tl.cdiv(M, BLOCK_M)
     grid_n = tl.cdiv(N, BLOCK_N)
     width = GROUP_M * grid_n
@@ -305,8 +305,8 @@ def _dx_fused_kernel(
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     # dx[m,:] = sum_n da[m,n]*Wa[n,:] + db[m,n]*Wb[n,:]   (BLOCK_D tiles the ND axis)
-    pid_m = tl.program_id(0)
-    pid_k = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_k = tl.program_id(1).to(tl.int64)
     rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     kk = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)   # output feature (K=d_hidden) tile
     row_mask = rows < M
@@ -370,7 +370,7 @@ def _dh_gatebwd_kernel(
     stride_dhm, stride_dhn,     # dh:(M, ND)
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     grid_m = tl.cdiv(M, BLOCK_M); grid_n = tl.cdiv(ND, BLOCK_N)
     width = GROUP_M * grid_n
     group_id = pid // width; first_m = group_id * GROUP_M
@@ -431,7 +431,7 @@ def _dx_swiglubwd_kernel(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     # dx[m,:] = sum_{j in 2ND} dab[m,j] * Wcat[j,:]   (j tiled by BLOCK_K = the reduction)
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     grid_m = tl.cdiv(M, BLOCK_M); grid_n = tl.cdiv(K, BLOCK_N)
     width = GROUP_M * grid_n
     group_id = pid // width; first_m = group_id * GROUP_M
@@ -494,7 +494,7 @@ def _swiglu_bwd_pack_kernel(
     stride_dhm, stride_dhn, stride_abm, stride_abn, stride_pm, stride_pn,
     BLOCK: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < M * ND
     row = offs // ND
@@ -543,8 +543,8 @@ def _wgrad_kernel(
     BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_M: tl.constexpr,
 ):
     # dW[n,k] = sum_m G[m,n] * X[m,k]
-    pid_n = tl.program_id(0)
-    pid_k = tl.program_id(1)
+    pid_n = tl.program_id(0).to(tl.int64)
+    pid_k = tl.program_id(1).to(tl.int64)
     ns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     ks = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
     n_mask = ns < N

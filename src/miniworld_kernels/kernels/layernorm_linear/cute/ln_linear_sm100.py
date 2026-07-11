@@ -59,7 +59,7 @@ from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import (
 @triton.jit
 def _ln_mmajor_kernel(X, Y, W, B, M, K: tl.constexpr, eps,
                       BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rk = tl.arange(0, BLOCK_K)
     mmask = rm < M

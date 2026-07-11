@@ -30,7 +30,7 @@ from ..layernorm.triton.main import get_seq_group, layer_norm_bwd_dx_fused
 @triton.jit
 def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = tl.arange(0, BLOCK_K)
     rm = rows < M
@@ -66,7 +66,7 @@ def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
 @triton.jit
 def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                  BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     cols = tl.arange(0, BLOCK_K)
     rm = rows < M

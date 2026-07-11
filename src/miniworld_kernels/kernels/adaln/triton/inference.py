@@ -83,7 +83,7 @@ def _cond_affine_kernel(
     sc0, sc1, sa0, sa1,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)
@@ -122,7 +122,7 @@ def _adaln_epilogue_kernel(
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr,
 ):
     # SB is (M, 2N): cols [0:N] = scale (incl. scale_b), [N:2N] = bias.
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)
@@ -279,7 +279,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     USE_LOW: tl.constexpr, DT: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_NX: tl.constexpr, BLOCK_NC: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     row_mask = rows < M
 

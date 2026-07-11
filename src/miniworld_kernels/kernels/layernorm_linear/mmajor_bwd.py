@@ -52,7 +52,7 @@ def _ln_bwd_mmajor_kernel(
     M, N: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, VEC_HINT: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NP = tl.num_programs(0)
 
     offs_n = tl.arange(0, BLOCK_N)

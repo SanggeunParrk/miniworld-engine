@@ -70,8 +70,8 @@ def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BM: tl.conste
     # Duplicate grad_expand (M,N) -> interleaved (M,2N): out[m,2j]=out[m,2j+1]=ge[m,j], so the
     # C operand aligns to the [a|b]-interleaved accumulator. Coalesced via tl.interleave (a
     # single contiguous 2*BN store), ~2x faster than the eager expand().reshape().contiguous().
-    pidm = tl.program_id(0)
-    pidn = tl.program_id(1)
+    pidm = tl.program_id(0).to(tl.int64)
+    pidn = tl.program_id(1).to(tl.int64)
     rows = pidm * BM + tl.arange(0, BM)
     cn = pidn * BN + tl.arange(0, BN)
     rm = rows < M

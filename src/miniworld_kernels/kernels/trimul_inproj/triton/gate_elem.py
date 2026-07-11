@@ -71,7 +71,7 @@ def _gate_elem_bwd_ew_kernel(
     One pass over (dy, proj, gate). If FROM_PREACT, `gate_ptr` holds the PREACT
     (glogit=x_n@Wg) instead of gate, and gate=sigmoid(preact) is recomputed here —
     lets the fused fwd (gate_elem_quack_fused) save preact instead of gate."""
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     # int64 M-index: off = m*N + n with M=B*L*L overflows int32 at large L.
     rm = pid.to(tl.int64) * BM + tl.arange(0, BM).to(tl.int64)
     rn = tl.arange(0, N)

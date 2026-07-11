@@ -146,9 +146,9 @@ def _attn_fwd(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    start_m = tl.program_id(0)
+    start_m = tl.program_id(0).to(tl.int64)
     off_hz = tl.program_id(1).to(tl.int64)
-    start_d = tl.program_id(2)
+    start_d = tl.program_id(2).to(tl.int64)
     off_z = off_hz // H
     off_h = off_hz % H
     off_a = off_z // B
@@ -243,7 +243,7 @@ def _attn_bwd_preprocess(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_z = tl.program_id(1).to(tl.int64)
     off_h = tl.program_id(2).to(tl.int64)
 
@@ -390,7 +390,7 @@ def _attn_bwd(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     aid = tl.program_id(1).to(tl.int64)
     bhid = tl.program_id(2).to(tl.int64)
     bid = bhid // H
@@ -493,10 +493,11 @@ def _dq_reduce(
     N_ELEM,  # 한 split 내 총 element 수 (= A*B*L*H*D)
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < N_ELEM
 
+    stride_split = stride_split.to(tl.int64)
     acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
     for s in range(num_splits):
         ptr = DQ_Expand + s * stride_split + offs

@@ -52,7 +52,7 @@ def _dgrad_lnbwd_kernel(
     s_dym, s_dyn, s_wn, s_wk, s_xm, s_xk, s_dxm, s_dxk,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
     rm = rows < M
     k = tl.arange(0, BLOCK_K)
@@ -131,8 +131,8 @@ def _xnorm_wgrad_kernel(
     s_dym, s_dyn, s_xm, s_xk, s_dwn, s_dwk,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
-    pid_n = tl.program_id(0)
-    pid_k = tl.program_id(1)
+    pid_n = tl.program_id(0).to(tl.int64)
+    pid_k = tl.program_id(1).to(tl.int64)
     nn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     kk = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
     nmask = nn < N

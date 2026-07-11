@@ -69,7 +69,7 @@ def _epilogue_train_kernel(
     sx0, sx1, ss0, ss1, sy0, sy1, sg0, sg1,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr, HAS_SB: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)
@@ -119,7 +119,7 @@ def _bwd_x_kernel(
     sy0, sy1, sx0, sx1, sg0, sg1, sd0, sd1, sdx0, sdx1,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     cols = tl.arange(0, BLOCK_N)
@@ -186,7 +186,7 @@ def _dgrad_condln_kernel(
     sd0, sd1, sw0, sw1, sc0, sc1, sdc0, sdc1,
     BLOCK_M: tl.constexpr, BLOCK_NC: tl.constexpr, BLOCK_K: tl.constexpr, DT: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
     rmask = rm < M
     nc = tl.arange(0, BLOCK_NC)

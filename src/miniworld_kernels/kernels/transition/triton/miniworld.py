@@ -50,7 +50,7 @@ def transition_fwd_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     row_start = pid * BLOCK_M
     offs_m = row_start + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, n * N)
@@ -98,7 +98,7 @@ def transition_bwd_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     row_start = pid * BLOCK_M
     offs_m = row_start + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, n * N)

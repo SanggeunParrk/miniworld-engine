@@ -164,10 +164,10 @@ class Transition(nn.Module):
 
     def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward-only dispatch: no tensors are saved for backward."""
-        if _dispatch.is_sm100(x.device) and self.d_hidden >= 512:  # noqa: PLR2004
-            # No fused sm_100 kernel fits d>=512 (b2b smem-OOMs; cute is SM90-only).
-            # Fall back to the correct torch reference rather than crash (non-AF3 shape).
-            return self._torch_forward(x)
+        # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> the cute
+        # b2b_fwd_sm100 forward (fits smem + correct + cudagraph-capturable at every d; see
+        # fused.py's cuda_b2b_ok gate). The legacy split (_old_triton_forward) is retained
+        # only as an explicit fallback and is no longer on the default sm100 path.
         # Hand-CUDA fused b2b beats cute at d_hidden=128 (~2.07x) and d_hidden=256 (~1.21x)
         # for the AF3 shape (n=4 -> K=ND/4=D). Requires bf16 + n==4 + M%128==0. d_hidden=512
         # is hardware-limited for full fusion (smem cannot co-hold xn+weights+accumulator at
@@ -228,9 +228,11 @@ class Transition(nn.Module):
           d=512  cute+tritonbwd 6.90  <  torch 7.52   (b2b fwd OOMs smem at d=512)
         Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
         """
-        if _dispatch.is_sm100(x.device) and self.d_hidden >= 512:  # noqa: PLR2004
-            # No fused sm_100 kernel fits d>=512; correct torch fallback (non-AF3 shape).
-            return self._torch_forward(x)
+        # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> cute
+        # b2b_fwd_sm100 forward + the sm100 gatebwd (Version A) backward. Verified fwd+bwd
+        # cos=1.0 and cudagraph-capturable at every d; ~1.49x faster fwd+bwd than the legacy
+        # split at d=256 (1.45 vs 2.16ms cudagraph). d=512 now also keeps gatebwd instead of
+        # the split's legacy backward. (_old_triton_forward retained only as a fallback.)
         if self.d_hidden >= 512 and not _dispatch.is_sm100(x.device):
             # d=512: b2b fusion can't fit smem (xn+weights+accumulator) and h round-trip is not
             # the bottleneck (compute-bound) -> cute split (expand + cuBLAS squeeze). The triton
@@ -248,10 +250,9 @@ class Transition(nn.Module):
                 self.ln_in.eps,
                 backward_backend=backward_backend,
             )
-        # d<=256 (Version A / save_xn=False): forward uses the fast hand-CUDA b2b kernel
-        # (d in {128,256}, n==4, via triton_transition_fused's internal dispatch) and saves NO
-        # xn; the shape-general backward recomputes xn from saved stats while using less memory.
-        # Falls back to the split path when b2b is ineligible.
+        # d<=256 (Version A / save_xn=False): fused forward (b2b / sm100 cute fwd) + the
+        # sm100 gatebwd backward (recomputes xn from saved stats, less memory). On sm_100
+        # only d=128 reaches here (d>=256 took the split branch above); the AF3 shape.
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight,
@@ -262,6 +263,20 @@ class Transition(nn.Module):
             self.n,
             self.ln_in.eps,
             save_xn=False,
+        )
+
+    def _old_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Legacy split triton transition (ln_in + triton_transition): the shape-general
+        path used on sm_100 for d>=256, where the fused kernels don't fit (b2b/cute are
+        Hopper-only, triton_transition_fused smem-OOMs). Carries a real backward, so it
+        serves both inference and training."""
+        x = self.ln_in(x)
+        return kernels.triton_transition(
+            x,
+            self.expand_a.weight,
+            self.expand_b.weight,
+            self.squeeze.weight,
+            self.n,
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:

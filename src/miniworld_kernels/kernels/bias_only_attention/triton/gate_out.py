@@ -50,8 +50,8 @@ def _gate_out_fwd(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid_m = tl.program_id(0).to(tl.int64)
+    pid_n = tl.program_id(1).to(tl.int64)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
@@ -107,7 +107,7 @@ def _dgrad_epi(
     """Fuses the dgrad GEMM d_a = grad_out @ wo with the gate-backward epilogue:
     d_a is never materialized, gate/out_r are read once. One kernel replaces the
     cuBLAS dgrad + a separate elementwise pass."""
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     rm = pid * BM + tl.arange(0, BM)
     rn = tl.arange(0, N)
     rh = tl.arange(0, DH)
@@ -208,7 +208,7 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 )
 @triton.jit
 def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLK: tl.constexpr):
-    off = tl.program_id(0) * BLK + tl.arange(0, BLK)
+    off = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK)
     m = off < n
     g = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
     o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
@@ -221,7 +221,7 @@ def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLK: tl.constexpr):
 )
 @triton.jit
 def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLK: tl.constexpr):
-    off = tl.program_id(0) * BLK + tl.arange(0, BLK)
+    off = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK)
     m = off < n
     da = tl.load(da_ptr + off, mask=m, other=0.0).to(tl.float32)
     s = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))

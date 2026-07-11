@@ -156,9 +156,9 @@ def _attn_fwd(
     GROUP_N: tl.constexpr,
 ):
     tl.static_assert(BLOCK_D >= HEAD_DIM)
-    start_m = tl.program_id(0)
-    off_hz = tl.program_id(1)
-    off_t = tl.program_id(2)
+    start_m = tl.program_id(0).to(tl.int64)
+    off_hz = tl.program_id(1).to(tl.int64)
+    off_t = tl.program_id(2).to(tl.int64)
     off_z = off_hz // H
     off_h = off_hz % H
     qkv_offset = (
@@ -273,8 +273,8 @@ def _attn_bwd_preprocess(
     BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
-    off_hz = tl.program_id(1)
+    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_hz = tl.program_id(1).to(tl.int64)
     off_n = tl.arange(0, BLOCK_D)
 
     o_ptr = O + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
@@ -410,10 +410,10 @@ def _attn_bwd(
 ):
     tl.static_assert(BLOCK_D >= HEAD_DIM)
 
-    bhid = tl.program_id(2)
+    bhid = tl.program_id(2).to(tl.int64)
     off_chz = (bhid * N_CTX).to(tl.int64)
     adj = (stride_h * (bhid % H) + stride_z * (bhid // H)).to(tl.int64)
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
 
     # offset pointers for batch/head
     Q += adj

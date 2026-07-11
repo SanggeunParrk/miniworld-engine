@@ -31,6 +31,7 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+from quack.cute_dsl_utils import get_max_active_clusters
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync
 from cutlass.cute.runtime import from_dlpack
@@ -162,7 +163,9 @@ def swiglu_expand_gemm(xn, wb, wa):
     h = torch.empty(M, N, device=xn.device, dtype=torch.bfloat16)
     mC = _mark(h.unsqueeze(0), 2)             # (1, M, N), N contiguous -> row-major [M,N]
 
-    mac = utils.HardwareInfo().get_max_active_clusters(1)
+    mac = get_max_active_clusters(1)  # memoized: HardwareInfo().get_max_active_clusters
+    # JIT-recompiles a probe kernel on every call (~35ms eager); the memoized helper is
+    # device-constant so the compiled op cache (_CACHE) is the only per-shape cost.
     strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
     key = (M, N, K)
     if key not in _CACHE:

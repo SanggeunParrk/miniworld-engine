@@ -122,7 +122,7 @@ def _attn_fwd(
     GROUP_N: tl.constexpr,
 ):
     tl.static_assert(BLOCK_D >= HEAD_DIM)
-    start_m = tl.program_id(0)
+    start_m = tl.program_id(0).to(tl.int64)
     off_hz = tl.program_id(1).to(tl.int64)
     off_t = tl.program_id(2).to(tl.int64)
     off_z = off_hz // H
@@ -203,7 +203,7 @@ def _attn_bwd_preprocess(
     BLOCK_D: tl.constexpr,
     GROUP_N: tl.constexpr,
 ):
-    off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_hz = tl.program_id(1).to(tl.int64)
     off_n = tl.arange(0, BLOCK_D)
 
@@ -313,7 +313,7 @@ def _attn_bwd(
     bhid = tl.program_id(2).to(tl.int64)
     off_chz = bhid * N_CTX
     adj = stride_h * (bhid % H) + stride_z * (bhid // H)
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
 
     v_ptr += adj
     do_ptr += adj
