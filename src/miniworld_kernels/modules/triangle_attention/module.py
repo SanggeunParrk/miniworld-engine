@@ -219,7 +219,7 @@ class TriangleAttention(nn.Module):
         value = rearrange(value.view(B, L, L, dv), "B L L2 (H D) -> B H L L2 D", H=H)
         bias = rearrange(bias.view(B, L, L, db), "B L L2 H -> B H L L2")
         if mask is not None:
-            bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
+            bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
         out = self._kernel_bias_only_attention(value, bias)
         out = rearrange(out, "B H L L2 D -> B L L2 (H D)")
         return self._gate_out(gate.view(B, L, L, dv), out)
@@ -267,7 +267,7 @@ class TriangleAttention(nn.Module):
             value = rearrange(value, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
             bias = rearrange(bias, "B L L2 H -> B H L L2")
             if mask is not None:
-                bias = bias.masked_fill(~mask[:, None, None, :], float("-inf"))
+                bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
 
             if self.use_self_attention:
                 query = self.to_query(pair)
@@ -364,7 +364,7 @@ class TrianglePairAttention(nn.Module):
             value.shape[0], value.shape[1], value.shape[2], self.n_head, -1
         )
         if mask is not None:
-            bias = bias.masked_fill(~mask[:, None, :, None], float("-inf"))
+            bias = bias.masked_fill(~mask[:, None, :, None], torch.finfo(bias.dtype).min)
 
         attention = F.softmax(bias, dim=-2)
         out = torch.einsum("bjkh,bikhd->bijhd", attention, value).contiguous()

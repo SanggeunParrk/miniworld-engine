@@ -215,6 +215,7 @@ def _attn_fwd(
         N_CTX,
     )
 
+    l_i = tl.maximum(l_i, 1e-30)  # guard fully-masked rows: finite 0 output, no 0/0 NaN
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
     m_ptrs = M + off_hz * N_CTX + start_m * BLOCK_M + tl.arange(0, BLOCK_M)

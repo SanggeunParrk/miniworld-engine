@@ -115,6 +115,7 @@ def _attn_fwd(
         V_bp = tl.advance(V_bp, (BLOCK_N, 0))
         B_bp = tl.advance(B_bp, (0, BLOCK_N))
 
+    l_i = tl.where(l_i > 0.0, l_i, 1.0)  # guard fully-masked rows (l_i=0): finite 0 output, no 0/0 NaN
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
     m_base = m_ptr + off_z * ms_z + off_h * ms_h + off_t * ms_lrow
