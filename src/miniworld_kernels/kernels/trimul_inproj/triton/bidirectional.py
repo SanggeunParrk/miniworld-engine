@@ -67,6 +67,7 @@ def _bidir_front_kernel(
     M, LL,
     K: tl.constexpr, H2: tl.constexpr,
     BM: tl.constexpr, BK: tl.constexpr, GROUP_M: tl.constexpr,
+    SAVE_PREACT: tl.constexpr = True,
 ):
     pid = tl.program_id(0)
     rm = pid * BM + tl.arange(0, BM)
@@ -92,8 +93,9 @@ def _bidir_front_kernel(
         w_ptrs += BK * W4
     g, p = tl.split(tl.reshape(acc, (BM, H2, 2)))               # (BM,H2) each: gLlog, pL
     # preact rows [0 : 2*H2), interleaved [g0,p0,...] (transpose (BM,H2) like front.py)
-    tl.store(preact_ptr + r2g[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smask)
-    tl.store(preact_ptr + r2p[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smask)
+    if SAVE_PREACT:
+        tl.store(preact_ptr + r2g[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smask)
+        tl.store(preact_ptr + r2p[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smask)
     outl = tl.sigmoid(g) * p                                    # (BM, H2)
     tl.store(left_ptr + rh[:, None] * LL + rm[None, :], tl.trans(outl).to(et), mask=smask)
 
@@ -108,15 +110,18 @@ def _bidir_front_kernel(
         w_ptrs += BK * W4
     g, p = tl.split(tl.reshape(acc, (BM, H2, 2)))
     # preact rows [2*H2 : 4*H2)
-    tl.store(preact_ptr + (2 * H2 + r2g[:, None]) * M + rm[None, :], tl.trans(g).to(et), mask=smask)
-    tl.store(preact_ptr + (2 * H2 + r2p[:, None]) * M + rm[None, :], tl.trans(p).to(et), mask=smask)
+    if SAVE_PREACT:
+        tl.store(preact_ptr + (2 * H2 + r2g[:, None]) * M + rm[None, :], tl.trans(g).to(et), mask=smask)
+        tl.store(preact_ptr + (2 * H2 + r2p[:, None]) * M + rm[None, :], tl.trans(p).to(et), mask=smask)
     outr = tl.sigmoid(g) * p
     tl.store(right_ptr + rh[:, None] * LL + rm[None, :], tl.trans(outr).to(et), mask=smask)
 
 
-def bidir_front_triton(x_n, WL, WLg, WR, WRg):
+def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     """x_n:(B,L,L,K); WL/WLg/WR/WRg:(K, 2h) x@W form. Returns
-    left,right:(B,2h,L,L) bdll and preact:(4*2h, M) interleaved (front_bwd_dW layout)."""
+    left,right:(B,2h,L,L) bdll and preact:(4*2h, M) interleaved (front_bwd_dW layout).
+    ``save_preact=False`` (inference) skips the preact tensor + its stores — the
+    backward-only side output cute's forward-only front also omits."""
     B, L, L2, K = x_n.shape
     assert B == 1 and L == L2
     H2 = WL.shape[1]                       # per-side hidden = 2*d_hidden
@@ -128,13 +133,14 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg):
     Wlr = torch.cat([left_w, right_w], dim=1).contiguous()      # (K, 4*H2)
     left = torch.empty(B, H2, L, L, device=x_n.device, dtype=x_n.dtype)
     right = torch.empty(B, H2, L, L, device=x_n.device, dtype=x_n.dtype)
-    preact = torch.empty(4 * H2, M, device=x_n.device, dtype=x_n.dtype)
+    preact = (torch.empty(4 * H2, M, device=x_n.device, dtype=x_n.dtype)
+              if save_preact else left)   # dummy ptr when not saving (stores guarded)
     grid = lambda meta: (triton.cdiv(M, meta["BM"]),)          # noqa: E731
     _bidir_front_kernel[grid](
         x_flat, Wlr, left, right, preact, M, M,
-        K=K, H2=H2, GROUP_M=get_seq_group(M),
+        K=K, H2=H2, GROUP_M=get_seq_group(M), SAVE_PREACT=save_preact,
     )
-    return left, right, preact
+    return left, right, (preact if save_preact else None)
 
 
 # ── merged back-half (mirror of cute BidirBackHalf), fwd + manual bwd ─────────
@@ -202,6 +208,27 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None)
 
 
+@torch.no_grad()
+def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h):
+    """Forward-only bidir back-half — the SAME kernel structure as cute's inference
+    ``bidirectional_trimul_sm100`` (front → 2 bmm → LN_out+@Wp → gate), but NO
+    autograd.Function / saved tensors and NO preact side output. This is why the
+    inference path cudagraphs at cute's speed; the merged Function (with its saves)
+    is used only under grad."""
+    B, L, _, D = x_n.shape
+    M = B * L * L
+    H = 2 * h
+    left, right, _ = bidir_front_triton(x_n, WLt, WLgt, WRt, WRgt, save_preact=False)
+    lf = left.reshape(H, L, L)
+    rf = right.reshape(H, L, L)
+    o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))            # outgoing
+    o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])            # incoming
+    tri = torch.cat([o_out, o_in], dim=0)                        # (H, L, L)
+    proj = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps)[0]
+    y = gate_elem_triton(x_n.reshape(M, D), proj, Wgt)           # gate GEMM + sigmoid·mul
+    return y.view(B, L, L, D)
+
+
 def bidirectional_trimul_triton(
     pair,                        # (B, L, L, d_pair)
     WL, WLg, WR, WRg,            # to_{left,left_gate,right,right_gate}.weight  (2h, d_pair)
@@ -213,9 +240,10 @@ def bidirectional_trimul_triton(
     mask=None,                   # (B, L) residue mask, optional (folded into LN_in like cute)
 ):
     """Faithful triton mirror of the cute bidir. Returns (B, L, L, d_pair).
-    Composition mirrors cute exactly: LN_in (triton, row_scale mask) then the merged
-    BackHalf. All-triton/cuBLAS; requires d_hidden == d_pair (as the single-dir
-    triton trimul does — the front produces per-side width 2*d_hidden)."""
+    Mirrors cute's dispatch exactly: LN_in (triton, row_scale mask), then — as cute
+    does — a forward-only path for inference (``_bidir_infer``) and the merged
+    autograd Function for training (``_BidirBackHalfTriton``). All-triton/cuBLAS;
+    requires d_hidden == d_pair (the front produces per-side width 2*d_hidden)."""
     d = pair.shape[-1]
     if d_hidden != d:
         raise ValueError(
@@ -227,11 +255,13 @@ def bidirectional_trimul_triton(
         m = mask.unsqueeze(-1) & mask.unsqueeze(-2)              # (B, L, L)
         row_scale = m.reshape(-1).to(pair.dtype)                # (M,)  folded into LN_in
     x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in, row_scale=row_scale)
-    # weights to x@W form (autograd flows the transpose back to the nn.Linear params)
+    WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
+    WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
+    if not torch.is_grad_enabled():
+        # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed.
+        return _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
+                            ln_out_w, ln_out_b, eps_out, d_hidden)
+    # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _BidirBackHalfTriton.apply(
-        x_n,
-        WL.t().contiguous(), WLg.t().contiguous(),
-        WR.t().contiguous(), WRg.t().contiguous(),
-        Wg.t().contiguous(), Wout,
-        ln_out_w, ln_out_b, eps_out, d_hidden,
+        x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, d_hidden,
     )
