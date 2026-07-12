@@ -57,13 +57,21 @@ class _UniBackHalfTriton(torch.autograd.Function):
     the front dxn GEMM). Weights x@W form; Wp is nn.Linear (N,K) form."""
 
     @staticmethod
-    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, outgoing):
+    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, outgoing, mask=None):
         B, L, _, D = x_n.shape
         M = B * L * L
         H = WL.shape[1]                                          # per-side hidden = d_hidden
         left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg)
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
+        # Mask applies to the contraction inputs (left/right) ONLY — NOT to x_n, so
+        # the output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch/cuequiv
+        # reference). mask is (B=1,L,L) -> broadcast over the H channel axis.
+        mm = None
+        if mask is not None:
+            mm = mask.reshape(L, L).to(lf.dtype)
+            lf = lf * mm
+            rf = rf * mm
         tri = _contract(lf, rf, outgoing)                        # (H, L, L)
         view = tri.reshape(H, M).t()                             # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(
@@ -71,7 +79,7 @@ class _UniBackHalfTriton(torch.autograd.Function):
         y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
-        ctx.eps, ctx.outgoing = eps, outgoing
+        ctx.eps, ctx.outgoing, ctx.mm = eps, outgoing, mm
         return y.reshape(B, L, L, D)
 
     @staticmethod
@@ -94,13 +102,18 @@ class _UniBackHalfTriton(torch.autograd.Function):
             d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
         d_tri = d_view.t().reshape(H, L, L)
 
-        # contraction bwd (single direction), cuBLAS bmm
+        # contraction bwd (single direction), cuBLAS bmm. lf/rf are the MASKED
+        # inputs (saved post-mask), so these grads are w.r.t. the masked tensors.
         if outgoing:                                             # O = lf @ rfᵀ
             d_left = torch.bmm(d_tri, rf)
             d_right = torch.bmm(d_tri.transpose(1, 2), lf)
         else:                                                    # O = lfᵀ @ rf
             d_left = torch.bmm(rf, d_tri.transpose(1, 2))
             d_right = torch.bmm(lf, d_tri)
+        # chain back through the elementwise mask (left_masked = left*mm)
+        if ctx.mm is not None:
+            d_left = d_left * ctx.mm
+            d_right = d_right * ctx.mm
         d_left = d_left.reshape(B, H, L, L)
         d_right = d_right.reshape(B, H, L, L)
 
@@ -110,11 +123,12 @@ class _UniBackHalfTriton(torch.autograd.Function):
         dx = torch.mm(d_glogit, Wg.t())                         # dx_gate  (M, D)
         dx.addmm_(dconc.t(), W_stack)                           # + dconcᵀ@W_stack (in-place)
         dx_n = dx.reshape(B, L, L, D)
-        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None)
+        # trailing Nones: eps, outgoing, mask (non-differentiable)
+        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None)
 
 
 @torch.no_grad()
-def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outgoing):
+def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outgoing, mask=None):
     """Forward-only single-direction back-half — SAME kernel structure as the merged
     Function but NO autograd.Function / saved tensors and NO preact side output, so
     it cudagraphs at cute's speed (the merged Function's saves are used only under
@@ -125,6 +139,10 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     H = left.shape[1]
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
+    if mask is not None:                                        # mask left/right only
+        mm = mask.reshape(L, L).to(lf.dtype)
+        lf = lf * mm
+        rf = rf * mm
     tri = _contract(lf, rf, outgoing)                           # (H, L, L)
     proj = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps)[0]
     y = gate_elem_triton(x_n.reshape(M, D), proj, Wgt)          # gate GEMM + sigmoid·mul
@@ -140,7 +158,7 @@ def trimul_triton(
     ln_out_w, ln_out_b,          # (d_hidden,)
     eps_in, eps_out, d_hidden,
     outgoing,                    # bool: outgoing (True) or incoming (False)
-    mask=None,                   # (B, L) residue mask, optional (folded into LN_in)
+    mask=None,                   # (B,L) residue OR (B,L,L) pair mask, optional (folded into LN_in)
 ):
     """Faithful triton mirror of the single-direction cute trimul. Returns
     (B, L, L, d_pair). Mirrors cute's dispatch exactly: LN_in (triton, row_scale
@@ -153,18 +171,24 @@ def trimul_triton(
             f"TRITON single-direction trimul requires d_hidden == d_pair "
             f"(got d_hidden={d_hidden}, d_pair={d})."
         )
-    row_scale = None
+    # The mask is applied to the contraction inputs (left/right), NOT folded into
+    # LN_in: x_n must stay unmasked so the output gate sigmoid(x_n@Wg) is unmasked
+    # (matches the pytorch/cuequiv reference). Build the (B,L,L) pair mask here.
+    m2d = None
     if mask is not None:
-        m = mask.unsqueeze(-1) & mask.unsqueeze(-2)             # (B, L, L)
-        row_scale = m.reshape(-1).to(pair.dtype)               # (M,)  folded into LN_in
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in, row_scale=row_scale)
+        if mask.dim() == 2:                                    # (B, L) residue mask
+            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)        # (B, L, L)
+        else:                                                  # (B, L, L) pair mask (cuequiv form)
+            m = mask
+        m2d = m.to(pair.dtype)                                  # (B, L, L)
+    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled():
         # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed.
         return _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
-                          ln_out_w, ln_out_b, eps_out, outgoing)
+                          ln_out_w, ln_out_b, eps_out, outgoing, mask=m2d)
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _UniBackHalfTriton.apply(
-        x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, outgoing,
+        x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, outgoing, m2d,
     )

@@ -40,6 +40,10 @@ _LAZY_EXPORTS = {
         "triton_bias_only_attention",
     ),
     "triton_layernorm": (".layernorm.triton.main", "triton_layernorm"),
+    "triangle_multiplicative_update": (
+        ".trimul_inproj.whole_op",
+        "triangle_multiplicative_update",
+    ),
     "triton_tm1": (".tm1.triton.main", "triton_tm1"),
     "triton_tm2": (".tm2.triton.main", "triton_tm2"),
     "triton_transition": (".transition.triton.main", "triton_transition"),
@@ -103,6 +107,7 @@ __all__ = [
     "fused_gate_out",
     "sigmoid_gate_fused",
     "layernorm_kernel",
+    "triangle_multiplicative_update",
     "triton_adaptive_layer_norm",
     "triton_augmented_attention_pair_bias",
     "triton_bias_only_attention",
