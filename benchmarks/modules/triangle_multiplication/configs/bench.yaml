@@ -32,6 +32,7 @@ implementations:
   - dtv1
   - cuequivariance
   - miniworld
+  - triton
 # TriangleMultiplication also accepts:
 #   triton | triton_pytorch_ln | triton_ln | cute
 mode: inference        # inference | training
