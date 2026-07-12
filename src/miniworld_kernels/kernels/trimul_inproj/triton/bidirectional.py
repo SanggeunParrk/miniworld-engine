@@ -177,7 +177,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         M = B * L * L
         h = ctx.h
         H = 2 * h
-        gy = gy.reshape(M, D)
+        gy = gy.reshape(M, D).contiguous()  # guard: autograd may hand a non-contiguous / broadcast (.sum) grad
 
         # ② gate bwd (elementwise; dx_gate folded into the dxn GEMM below)
         d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate)
