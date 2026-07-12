@@ -191,6 +191,15 @@ class TriangleMultiplication(nn.Module):
                     return self._forward_cute_train(pair, mask)
                 return self._forward_cute(pair, mask)
 
+            if backend == KernelBackend.TRITON:
+                # Fused BDLL pipeline (mirrors cute's single-direction dispatch):
+                # LN_in -> gated BDLL front (transposed store, no permute) -> ONE
+                # bmm contraction -> te-style LN_out+@Wp -> triton output gate. One
+                # code path serves inference (forward-only) and training (merged
+                # autograd Function). Requires d_hidden == d_pair. See
+                # kernels/trimul_inproj/triton/unidirectional.py.
+                return self._forward_triton(pair, mask)
+
             pair = self.ln_pair(pair)
             left, right = self._kernel_tm1(pair, backend)
 
@@ -206,6 +215,37 @@ class TriangleMultiplication(nn.Module):
 
             out = self.ln_out(out)
             return self._kernel_tm2(pair, out, backend)
+
+    @torch.compiler.disable
+    def _forward_triton(
+        self,
+        pair: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """TRITON single-direction path (fwd + autograd bwd) — the fused BDLL pipeline
+        mirroring cute's dispatch (LN_in -> gated BDLL front -> ONE bmm contraction ->
+        te-style LN_out+@Wp -> triton output gate). Same code path for inference and
+        training; the front emits left/right in channel-major BDLL directly (transposed
+        store, no permute) so the contraction lowers to a tensor-core cuBLAS bmm on
+        contiguous operands. Requires ``d_hidden == d_pair`` (the front produces per-side
+        width d_hidden). bf16 / fp32, B>=1. See
+        kernels/trimul_inproj/triton/unidirectional.py."""
+        from miniworld_kernels.kernels.trimul_inproj.triton.unidirectional import (
+            trimul_triton,
+        )
+
+        return trimul_triton(
+            pair,
+            self.to_left.weight, self.to_left_gate.weight,
+            self.to_right.weight, self.to_right_gate.weight,
+            self.to_gate.weight, self.to_out.weight,
+            self.ln_pair.weight, self.ln_pair.bias,
+            self.ln_out.weight, self.ln_out.bias,
+            self.ln_pair.eps, self.ln_out.eps,
+            self.to_left.weight.shape[0],   # d_hidden
+            self.outgoing,
+            mask=mask,
+        )
 
     def _forward_cuequivariance(
         self,
