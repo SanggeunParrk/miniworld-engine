@@ -65,7 +65,7 @@ class _SingleBackHalf(torch.autograd.Function):
         B, L, _, D = x_n.shape
         M = B * L * L
         df = ctx.direction_flag
-        gy = gy.reshape(M, D)
+        gy = gy.reshape(M, D).contiguous()  # guard: autograd may hand a non-contiguous / broadcast (.sum) grad; kernels assume contiguous
 
         # ② gate bwd (elementwise; dx_gate add is fused into the dxn addmm below)
         d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate)
