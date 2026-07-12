@@ -146,6 +146,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         return _one("outgoing", slice(0, h)) + _one("incoming", slice(h, 2 * h))
 
+    @torch.compiler.disable
     def _forward_triton(
         self,
         pair: torch.Tensor,
