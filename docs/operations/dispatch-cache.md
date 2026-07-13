@@ -114,3 +114,63 @@ Nothing to do — just run. The first training step (or first time each
 `(d, M-bucket)` is hit) calibrates and writes the cache; subsequent runs and
 re-imports read it. To pre-warm explicitly, run one inference+training pass per shape you
 care about. To inspect/clear, look at / delete the JSON under the cache dir.
+
+
+# Autotune Config Cache
+
+Separate from the LayerNorm *path* cache above: this ships the top-K tuned **Triton
+autotune configs** per `(gpu, dtype, op, shape-bucket)` so runs skip the full-grid
+autotune tax and performance is reproducible across machines. Code:
+`src/miniworld_kernels/autotune/` (`cache.py`, `build.py`).
+
+**INVARIANT:** config choice is performance-only — every config in a kernel's grid computes
+the same math — so a missing / stale / wrong cache is only ever slower, never incorrect.
+
+## How it works
+
+Each adopted kernel's `@triton.autotune` uses a `make_cache_prune(op, ...)` callback as its
+`early_config_prune` (composed OVER any device-smem safety prune). Per call it reads the
+running `(gpu, dtype, shape-bucket)` and:
+
+- **hit** → returns only the cached top-K configs (autotune picks among ~5, not the full grid).
+- **miss** (unknown GPU, unseen shape) or **stale** (the kernel's config grid changed, detected
+  by a `config_space_hash` mismatch) → warns ONCE and returns the full grid (still correct).
+
+## Cache location & format
+
+- **shipped** (committed defaults): `src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json`.
+- **runtime** (builder / RUN_AUTOTUNE output, preferred over shipped):
+  `<cache-root>/autotune/<op>/<gpu_key>.json` (same `<cache-root>` as above).
+- `gpu_key` = device name + capability (e.g. `NVIDIA A100 80GB PCIe (sm80)`); entries keyed
+  `"<dtype>|<shape-bucket>"` → list of `{kwargs, num_warps, num_stages, ms}` (top-K). A
+  `config_space_hash` field invalidates the whole file's entries when the grid changes.
+
+## Building the shipped cache (on the target GPU)
+
+    PYTHONPATH=src python -m miniworld_kernels.autotune.build --op all     # or --op <name>
+
+benches every grid config across representative shape-buckets and writes the runtime cache;
+copy `<cache-root>/autotune/*` into `src/miniworld_kernels/autotune/data/` and commit. A new
+GPU (H100/B200/…) is enabled by running this on that box and committing its JSONs. Adopted
+ops so far: `trimul_bidir_front`, `transition_split_fwd` (more as kernels wire the prune).
+
+## Controls (env)
+
+| var | values | effect |
+|---|---|---|
+| `MINIWORLD_RUN_AUTOTUNE` | `0` (default) / `1` | `1`: ignore the shipped cache and run the full autotune grid (re-tune) |
+
+An unknown GPU with no cache warns like: *"[miniworld.autotune] no tuned autotune cache for
+op '<op>' on '<gpu>' (<dtype>). Falling back to the full autotune grid — this run may be
+slower and the chosen config may be suboptimal. Build a tuned cache …"*
+
+
+# Systematic backend dispatch
+
+`modules/dispatch.py` holds one declarative table `_MINIWORLD_KNOWN_BEST : {op -> backend | 
+callable(device)->backend}` behind `resolve(op, impl, device)`. `MINIWORLD` (auto) resolves
+via the table; an op/GPU it doesn't specially recognize falls back to **TRITON** (the portable
+default for brand-new GPUs), while op/arch pairs with a measured-faster backend (e.g. trimul
+cute on Hopper+) follow that. The per-op `resolve_*` are thin wrappers over `resolve`. This is
+the single source of truth for the module-layer backend choice; kernel-internal shape/arch
+sub-dispatch still lives next to the kernels.

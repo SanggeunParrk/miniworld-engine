@@ -1,0 +1,637 @@
+{
+  "config_space_hash": "bbc98fcd6e9d",
+  "entries": {
+    "bfloat16|GM=4,H2=1024,K=512": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 4.188160181045532,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 4.191232204437256,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 5.268991947174072,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 5.340672016143799,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 512
+        },
+        "ms": 10.127871990203857,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GM=4,H2=256,K=128": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 0.4710400104522705,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 0.4864000082015991,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 0.5048320293426514,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 0.5314559936523438,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 1.9302400350570679,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=4,H2=512,K=256": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 1.248255968093872,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 1.45305597782135,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 1.5262719988822937,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 1.632256031036377,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 3.6536319255828857,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=5,H2=1024,K=512": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 7.3072638511657715,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 7.3512959480285645,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 9.149951934814453,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 9.374719619750977,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 512
+        },
+        "ms": 18.02342414855957,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GM=5,H2=256,K=128": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 0.8120319843292236,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 0.8514559864997864,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 0.9308159947395325,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 0.9308159947395325,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 3.398655891418457,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=5,H2=512,K=256": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 2.1821439266204834,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 2.500607967376709,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 2.7453439235687256,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 2.802687883377075,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 6.38156795501709,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=6,H2=1024,K=512": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 16.617472648620605,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 16.672767639160156,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 20.791296005249023,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 20.8471040725708,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 512
+        },
+        "ms": 40.29696083068848,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GM=6,H2=256,K=128": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 1.8498560190200806,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 1.896448016166687,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 2.094591975212097,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 2.110464096069336,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 7.641599893569946,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=6,H2=512,K=256": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 5.006848096847534,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 5.741568088531494,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 6.248447895050049,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 6.457344055175781,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 14.532608032226562,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=7,H2=1024,K=512": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 29.456384658813477,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 29.54751968383789,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 36.89523124694824,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 36.98431968688965,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 512
+        },
+        "ms": 71.94009399414062,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GM=7,H2=256,K=128": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 3.2040960788726807,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 3.363840103149414,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 3.7212159633636475,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 3.758080005645752,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 13.468671798706055,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GM=7,H2=512,K=256": [
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 128
+        },
+        "ms": 8.832511901855469,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 10.23692798614502,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 128
+        },
+        "ms": 11.149312019348145,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BK": 64,
+          "BM": 64,
+          "BN": 256
+        },
+        "ms": 11.437056064605713,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BK": 32,
+          "BM": 32,
+          "BN": 512
+        },
+        "ms": 25.664512634277344,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA A100 80GB PCIe (sm80)",
+  "op": "trimul_bidir_front",
+  "provenance": {
+    "built_utc": "2026-07-13T03:41:43+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
