@@ -270,10 +270,16 @@ def guard_dtype(
 
 
 def trimul_out_layout(device: torch.device | None = None) -> str:
-    """cute tm1 ``out_layout`` for the running GPU:
-    sm_100 -> ``bdll_sm100`` (our tcgen05 gate GEMM); else -> ``bdll_direct``
-    (quack M-major, the H100 / pre-existing path). Env-overridable for debug."""
+    """cute tm1 ``out_layout`` for the running GPU: ``bdll_direct`` everywhere — the
+    quack ``gemm_act`` (tcgen05) + M-major zero-copy store + triton gate path.
+
+    The hand-rolled from-scratch tcgen05 collective (``bdll_sm100``) is NOT selected:
+    its 4.4.2-era launch is incompatible with the cutlass-dsl 4.5.2 launch ABI (host
+    crash in cuLaunchKernelEx). ``bdll_direct`` runs on quack 0.5.0 / cutlass 4.5.2 and
+    is FASTER than the triton path anyway (L=384: cute 0.194 ms vs triton 0.284 ms,
+    ~1.46x; vs pytorch 1.14 ms), so the custom collective is unnecessary. Env-overridable
+    (``MINIWORLD_TRIMUL_OUT_LAYOUT``) for debug / A-B."""
     override = os.environ.get("MINIWORLD_TRIMUL_OUT_LAYOUT")
     if override:
         return override.strip()
-    return "bdll_sm100" if is_sm100(device) else "bdll_direct"
+    return "bdll_direct"

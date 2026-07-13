@@ -99,33 +99,17 @@ _PROJ_CACHE: dict = {}
 
 
 def proj_gemm_sm100(A: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:
-    """proj = A @ Wp.T.  A:(M,K) bf16 k-major, Wp:(N,K) bf16 k-major (== nn.Linear
-    weight) -> (M, N) bf16 row-major. Uses our tm1 Blackwell collective in
-    proj_only mode (the gate MMA/GLU are skipped; the dummy B is tiny)."""
-    M, K = A.shape
-    N, K2 = Wp.shape
-    assert K == K2
+    """proj = A @ Wp.T.  A:(M,K) bf16, Wp:(N,K) bf16 (== nn.Linear weight) -> (M,N) bf16.
 
-    def _mark(t3, ld):
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=ld)
+    cutlass-dsl 4.5.2 migration: the previous path drove our vendored tm1 Blackwell
+    collective (``GatedPersistentGemmKernel`` proj_only), whose 4.4.2-era launch is
+    incompatible with the 4.5.2 launch ABI (host crash in cuLaunchKernelEx). A plain
+    projection is exactly quack's maintained, 4.5.2-native GEMM, so we call that directly
+    (``gemm(A, B)`` computes ``A @ B`` with ``B`` shaped ``(K, N)``, hence ``Wp.t()``).
+    Reached lazily via the quack-compat shim (applies the RoundingMode fix)."""
+    from miniworld_kernels.kernels._quack_compat import gemm as _quack_gemm
 
-    mA = _mark(A.detach().unsqueeze(0), 2)      # (1, M, K), K contiguous
-    mBp = _mark(Wp.detach().unsqueeze(0), 2)    # (1, N, K), K contiguous
-    C = torch.empty(M, N, device=A.device, dtype=torch.bfloat16)
-    mC = _mark(C.unsqueeze(0), 2)               # (1, M, N), N contiguous
-    mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
-    key = (M, N, K)
-    if key not in _PROJ_CACHE:
-        op = GatedPersistentGemmKernel(
-            acc_dtype=Float32, use_2cta_instrs=False, mma_tiler_mn=(128, 128),
-            cluster_shape_mn=(1, 1), use_tma_store=True,
-        )
-        op.K = int(K)
-        op.proj_only = True
-        _PROJ_CACHE[key] = cute.compile(op, mA, mBp, mBp, mC, mac, strm)
-    _PROJ_CACHE[key](mA, mBp, mBp, mC, mac, strm)
-    return C
+    return _quack_gemm(A, Wp.t())
 
 
 def layernorm_linear_sm100(tri_bkll: torch.Tensor, ln_w: torch.Tensor,
