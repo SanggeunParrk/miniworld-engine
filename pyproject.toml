@@ -19,7 +19,13 @@ dependencies = [
 [project.optional-dependencies]
 # CuTeDSL / quack backends (the .cute kernel paths). cutlass ships as the
 # `nvidia-cutlass-dsl` wheel — no git submodule needed (see third_party/).
-cute = ["nvidia-cutlass-dsl==4.4.2", "quack-kernels==0.3.11"]
+# Pinned to the quack 0.5.0 / cutlass-dsl 4.5.2 set so the cute kernels coexist with
+# FlashAttention-4 (which requires quack-kernels>=0.5.0). The cute launch path was
+# migrated to cutlass-dsl 4.5.2's TVM-FFI convention; the quack-import shim
+# (kernels/_quack_compat.py) additionally keeps quack 0.3.11 importable, but the
+# supported/tested runtime is this set. Do NOT bump quack to 0.6.x: it drags torch
+# 2.10 -> 2.13 and breaks the cu130 stack.
+cute = ["nvidia-cutlass-dsl==4.5.2", "quack-kernels==0.5.0"]
 # Comparison baselines only (CUEQUIVARIANCE impl path + reference helpers).
 # NOT required to use the miniworld kernels.
 baselines = ["cuequivariance-torch>=0.9,<0.10", "scipy"]
