@@ -5,6 +5,20 @@
 `miniworld_kernels.ops.*`, and the cute-vs-triton backend choice happens *inside* the
 ops whole-op (Phase 6). No consumer code changes.
 
+> **Update (autotune batch, `f2a8529`).** The module-layer dispatch this plan's
+> Phase 6 called for now exists: `modules/dispatch.py` `_MINIWORLD_KNOWN_BEST`
+> already routes `triangle_multiplication` → **CUTE on sm90+ (Hopper/Blackwell)**,
+> Triton pre-Hopper (`_trimul_known_best`). And the new backend-agnostic autotune
+> cache (`src/miniworld_kernels/autotune/`) exposes a **CuTe `select_config` hook**
+> our ported cute kernels plug their tile/cluster configs into (worked example:
+> `trimul_front_cute`). So Phase 6 shrinks to *making cute actually run on quack
+> 0.5.0* + adding bidir to the table. **Latent consequence:** on B200 with quack
+> 0.5.0, selecting `MINIWORLD` (auto — the doc's "what production should select")
+> for trimul resolves to CUTE, i.e. the currently-broken path; consumers must pin
+> `implementation=triton` on B200 until this port lands. This raises the port's
+> priority. Note `bidirectional_triangle_multiplication` is NOT in the table (falls
+> to Triton) — Phase 6 should add its cute routing.
+
 ## Why (root cause)
 
 The cute kernels are pinned to **quack 0.3.11** (`[cute]` extra:
@@ -91,12 +105,18 @@ cute trimul + bidir correctness vs the pytorch reference (masked + unmasked, fwd
 cos ≥ 0.999 with randomised non-zero weights), then **cute vs triton performance** on
 B200 (the payoff — confirm the tcgen05 win that motivates this).
 
-### Phase 6 — integrate
+### Phase 6 — integrate (mostly pre-wired by the autotune batch)
 - Update the `[cute]` extra pin to a quack-0.5.0-compatible set.
-- Make the `ops.*` whole-ops **dispatch cute on sm100** (B200), triton fallback
-  otherwise — the original goal.
+- Module-layer dispatch is **already done** for unidirectional trimul
+  (`_MINIWORLD_KNOWN_BEST` → CUTE on sm90+). Remaining: add
+  `bidirectional_triangle_multiplication` to the table (cute on sm90+), and
+  confirm each other op's family choice once its cute path works.
+- Wire the ported cute kernels' build-time configs into the new autotune cache via
+  `select_config(op, dtype, bucket, candidates)` (falls back to `default_config`
+  on a miss); build + ship the B200 (sm100) cute config JSONs.
 - Bump the chain (miniworld-kernels → team-gm → MiniWorld); install the cute deps in the
-  consumer env (coexisting with FA4 on quack 0.5.0); verify cute runs there.
+  consumer env (coexisting with FA4 on quack 0.5.0); verify cute runs there — and that
+  `MINIWORLD` (auto) trimul on B200 no longer hits the broken path.
 
 ## Risks
 - **Phase 2** is the make-or-break unknown (gemm_interface workaround difficulty).
