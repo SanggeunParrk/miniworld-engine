@@ -92,13 +92,15 @@ class BenchConfig(BaseModel):
     # CUDA-graph the benched MODULE (host/launch overhead removed — the deployment regime for
     # graph-break cute/triton kernels). Module-scoped (optimizer/loss stay outside). Overrides
     # `compile` (capture is on the eager module). Modes:
-    #   "disabled" — no graph (compile or eager).
     #   "manual"  — manual torch.cuda.graph capture of one static shape; what BUCKETED training
-    #               uses (one graph/bucket + per-step input copy_). Works for any impl.
+    #               uses (one graph/bucket + per-step input copy_). Works for any impl. DEFAULT:
+    #               this is the deployment regime for the graph-breaking cute/triton kernels, so
+    #               it is the representative number; run cudagraph=disabled for the eager baseline.
+    #   "disabled" — no graph (compile or eager); host/launch overhead included (diagnostic).
     #   "graphed" — torch.cuda.make_graphed_callables (auto static buffers + input copy); the
     #               PAD-TO-MAX single-shape regime (e.g. fixed 384 crops / multi-GPU max-len).
     #               Training only; fabric-wrapped baselines (dtv1) may fail here (raw backward).
-    cudagraph: Literal["disabled", "manual", "graphed"] = "disabled"
+    cudagraph: Literal["disabled", "manual", "graphed"] = "manual"
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
     name_suffix: str = ""
