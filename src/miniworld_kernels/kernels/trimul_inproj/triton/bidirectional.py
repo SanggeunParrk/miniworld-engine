@@ -33,6 +33,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import make_cache_prune
 from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
 from miniworld_kernels.kernels.layernorm_linear.te_style import (
     _te_backward,
@@ -75,6 +76,27 @@ def _front_smem_prune(configs, named_args, **kwargs):  # noqa: ARG001
     return kept or [min(configs, key=_smem)]
 
 
+# Cache-narrowing prune (top-K tuned configs per gpu/dtype/shape), composed OVER the smem
+# safety prune: the cache only narrows within what _front_smem_prune already deemed launchable.
+# Extractors read constexprs reliably present in named_args; dtype defaults to bf16 (production)
+# if the tensor arg isn't introspectable. Miss / stale cache -> warn once + full grid.
+def _bidir_front_dtype(na, kw):
+    x = na.get("x_ptr") if hasattr(na, "get") else None
+    return str(getattr(x, "dtype", "torch.bfloat16")).replace("torch.", "")
+
+
+def _bidir_front_bucket(na, kw):
+    from miniworld_kernels.autotune import shape_bucket
+    get = (lambda n: na.get(n, kw.get(n))) if hasattr(na, "get") else (lambda n: kw.get(n))
+    return shape_bucket(GM=get("GROUP_M"), H2=get("H2"), K=get("K"))
+
+
+_bidir_front_prune = make_cache_prune(
+    "trimul_bidir_front",
+    dtype_of=_bidir_front_dtype, bucket_of=_bidir_front_bucket, base_prune=_front_smem_prune,
+)
+
+
 @triton.autotune(
     # BN = CHANNELS per chunk. Each chunk loads the CONTIGUOUS interleaved [BK, 2*BN] weight
     # slice (gate+proj for BN channels) in ONE coalesced GEMM, then reshape (BM, BN, 2) + split.
@@ -91,7 +113,7 @@ def _front_smem_prune(configs, named_args, **kwargs):  # noqa: ARG001
         triton.Config({"BM": 32, "BK": 32, "BN": 128}, num_warps=4, num_stages=3),
     ],
     key=["GROUP_M", "H2"],
-    prune_configs_by={"early_config_prune": _front_smem_prune},
+    prune_configs_by={"early_config_prune": _bidir_front_prune},
 )
 @triton.jit
 def _bidir_front_kernel(
