@@ -1,9 +1,14 @@
-"""Flat kernel re-export surface.
+"""Flat re-export surface for the **primitive** fusion kernels.
 
-Mirrors team-gm's ``team_gm.modules.kernels`` namespace so the vendored module
-layers (``miniworld_kernels.modules.layers.*``) can call ``kernels.triton_*``
-without knowing the per-op / per-backend folder layout. Each name resolves to
-the canonical (``main`` = psk/benchmark) Triton entry point for that op.
+This is an INTERNAL surface: the per-GEMM / LN / gate / attention fusion units out
+of which the public whole-ops (:mod:`miniworld_kernels.ops`) are built. It is also
+used by the internal benchmark/reference harness (``miniworld_kernels.modules``).
+Model code should consume ``ops.*`` (whole model-layer ops), never reach in here.
+
+Each name resolves lazily to the canonical Triton entry point for that op, without
+knowing the per-op / per-backend folder layout. Import stays side-effect-free (no
+triton/cutlass loaded until a name is first accessed); the name set is pinned by
+``tests/test_public_api.py`` for internal stability.
 """
 
 from __future__ import annotations

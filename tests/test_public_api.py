@@ -1,17 +1,17 @@
-"""Public API guarantees for ``miniworld_kernels.kernels``.
+"""Public/contract API guarantees.
 
-The **kernels** namespace is the supported surface, so this test pins two
-properties:
+``miniworld_kernels.ops`` is the **consumer contract** (whole model-layer ops);
+``miniworld_kernels.kernels`` is the **internal primitive** surface out of which the
+ops are built (also used by the benchmark harness). Both are pinned here so that:
 
-  1. Its set of public names is stable — adding/removing one is a conscious
-     change that must update ``_CONTRACT`` here (and CHANGELOG).
-  2. ``import miniworld_kernels.kernels`` must stay cheap and side-effect-free:
-     importing it must NOT pull triton / cutlass / cuequivariance / lightning /
-     hydra into ``sys.modules``. Heavy backends load lazily on first *access*,
-     so the package can be imported on a CPU/login node without a GPU stack.
+  1. Each name set is stable — adding/removing one is a conscious change that must
+     update the relevant frozen set (``_OPS_CONTRACT`` / ``_CONTRACT``) and CHANGELOG.
+  2. ``import miniworld_kernels.ops`` / ``.kernels`` stays cheap and side-effect-free:
+     importing must NOT pull triton / cutlass / cuequivariance / lightning / hydra
+     into ``sys.modules``. Heavy backends load lazily on first *call*, so the package
+     imports on a CPU/login node without a GPU stack.
 
-If you intend to change the surface, update ``_CONTRACT`` and the CHANGELOG in
-the same commit — that is the point of this test.
+If you change a surface, update its frozen set and the CHANGELOG in the same commit.
 """
 
 from __future__ import annotations

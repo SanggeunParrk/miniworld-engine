@@ -8,7 +8,21 @@ The public surface is enforced by `tests/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+- **`miniworld_kernels.ops` — the whole-op consumer contract.** Complete,
+  autograd-transparent model-layer ops (weights as arguments, backend dispatch +
+  fwd/bwd inside), consumed as a single call: `triangle_multiplicative_update`,
+  `triangle_attention`, `transition`, `conditioned_transition`,
+  `augmented_attention_pair_bias`, `layer_norm_linear`, `layer_norm`. Lazy,
+  side-effect-free import; pinned by `_OPS_CONTRACT` in `tests/test_public_api.py`.
+  Verified fwd+bwd vs the pytorch/cuequiv reference on B200 (≥0.9998).
+
 ### Changed
+- **API framing**: `ops` is now the supported **consumer** surface; `kernels` is
+  reframed as the **internal primitive** surface (per-GEMM/LN/gate/attention units)
+  out of which the ops are built — still pinned (`_CONTRACT`) for internal stability
+  but not intended for model code. `triangle_multiplicative_update` moved from
+  `kernels` to `ops` accordingly.
 - **Packaging**: runtime `[project.dependencies]` slimmed to the kernel core
   (`torch`, `triton`, `einops`, `jaxtyping`, `numpy`). Benchmark harness,
   comparison baselines, the CuTeDSL backend, and dev tooling moved to
