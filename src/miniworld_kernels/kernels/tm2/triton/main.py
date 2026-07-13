@@ -12,23 +12,59 @@ from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_d
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_multi"
 
+# Real cross-product tile search (was: 2 fwd pinned / 3 bwd configs with BLOCK_N pinned to 64).
+# BLOCK_M (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
+# all genuine tunable tiles of the `for k_start in range(0, N, BLOCK_K)` GEMM. The smem prune
+# below drops configs whose pipelined tiles overflow device shared memory before compile.
 fwd_configs = [
-    triton.Config({"BLOCK_K": 32, "BLOCK_M": 64, "BLOCK_N": 128}, 8, 3),  # 128 at H100
     triton.Config(
-        {"BLOCK_K": 32, "BLOCK_M": 64, "BLOCK_N": 128}, 4, 3
-    ),  # 256, 384 at H100
+        {"BLOCK_M": block_m, "BLOCK_K": block_k, "BLOCK_N": block_n},
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    for block_m in [64, 128]
+    for block_n in [64, 128, 256]
+    for block_k in [32, 64]
+    for num_warps in [4, 8]
+    for num_stages in [2, 3, 4]
 ]
 
 
-bwd_configs = [
-    triton.Config({"BLOCK_K": 32, "BLOCK_M": 64, "BLOCK_N": 64}, 4, 3),  # 128 at H100
-    triton.Config({"BLOCK_K": 64, "BLOCK_M": 32, "BLOCK_N": 64}, 4, 2),  # 128 at H100
-    triton.Config({"BLOCK_K": 32, "BLOCK_M": 64, "BLOCK_N": 64}, 8, 3),  # 128 at H100
-]
+bwd_configs = list(fwd_configs)
+
+
+def _tm2_smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
+    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE compile.
+
+    Both the fwd and bwd fused sigmoid-gate2 GEMMs pipeline, per k-step, TWO x tiles
+    [BLOCK_M, BLOCK_K] (x_gate, x_out) and TWO weight tiles [BLOCK_K, BLOCK_N] (W_gate, W_out)
+    -- W = 2 -- across ``num_stages`` (bf16 = 2 B). The largest cross-product tiles (e.g.
+    BLOCK_M=128, BLOCK_K=64, BLOCK_N=256, num_stages=4 ~= 384 KB) overflow A100's ~163 KB smem,
+    so prune up front: Triton's bench-time OOM pruning is unsafe under CUDA-graph capture (fires
+    mid-capture and poisons the stream). Device-aware via ``max_shared_mem``.
+    """
+    import triton as _triton
+
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- conservative sm100 budget
+        limit = 227 * 1024
+
+    def _smem(c):
+        bm = c.kwargs["BLOCK_M"]
+        bk = c.kwargs["BLOCK_K"]
+        bn = c.kwargs["BLOCK_N"]
+        return c.num_stages * (2 * bm * bk + 2 * bk * bn) * 2
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
 
 
 _tm2_fwd_prune = make_cache_prune(
     "tm2_fwd", dtype_of=tensor_dtype_of("x_gate_ptr"), bucket_of=key_bucket_of("GROUP_M", "N"),
+    base_prune=_tm2_smem_early_prune,
 )
 
 
@@ -101,6 +137,7 @@ def fused_sigmoid_gate2_fwd_kernel(
 
 _tm2_bwd_prune = make_cache_prune(
     "tm2_bwd", dtype_of=tensor_dtype_of("x_gate_ptr"), bucket_of=key_bucket_of("GROUP_M", "N"),
+    base_prune=_tm2_smem_early_prune,
 )
 
 

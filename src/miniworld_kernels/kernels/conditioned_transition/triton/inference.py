@@ -27,17 +27,70 @@ import triton.language as tl
 from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 
+# BLOCK_DC (the DC-loop tile, `for c0 in range(0, DC, BLOCK_DC)`) is now a SEARCHED knob,
+# crossed {64, 128} over the existing BLOCK_M/BLOCK_N/num_warps/num_stages combos (it used to be
+# pinned at the launch site to min(128, next_pow2(DC))). Both values are <= the old 128 cap, so
+# smem stays within the previously safe envelope.
 _cfgs = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=2),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_DC": 64}, num_warps=8, num_stages=2),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_DC": 128}, num_warps=8, num_stages=2),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_DC": 64}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_DC": 128}, num_warps=8, num_stages=3),
 ]
+
+
+def _smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
+    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE compile.
+
+    Per program the b2b inference kernel keeps a persistent x tile ``[BLOCK_M, BLOCK_K]`` (loaded
+    once outside the loops) and pipelines, across ``num_stages``: in the ND loop the expand-GEMM
+    weights wa + wb ``[BLOCK_K, BLOCK_N]`` and the squeeze weight ws_t ``[BLOCK_N, D]``; in the DC
+    loop cond ``[BLOCK_M, BLOCK_DC]`` and wsc_t ``[BLOCK_DC, D]`` (out_acc/scale are fp32 register
+    accumulators, not smem). bf16 = 2 B. Large BLOCK_M/BLOCK_N/BLOCK_DC combos overflow A100's
+    ~163 KB, so prune up front: Triton's bench-time OOM pruning is unsafe under CUDA-graph capture
+    (fires mid-capture, poisons the stream). Device-aware via ``max_shared_mem`` — sm90/sm100 keep
+    more configs. This is composed as the base_prune UNDER the cache-narrowing prune.
+    """
+    import triton as _triton
+
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- conservative sm100 budget
+        limit = 227 * 1024
+
+    def _nget(name):  # BLOCK_K is pinned at launch (=next_pow2(K)); D is a positional constexpr
+        if hasattr(named_args, "get") and name in named_args:
+            return named_args[name]
+        return kwargs.get(name)
+
+    bk = _nget("BLOCK_K")
+    d = _nget("D")
+
+    def _smem(c):
+        bm = c.kwargs["BLOCK_M"]
+        bn = c.kwargs["BLOCK_N"]
+        bdc = c.kwargs["BLOCK_DC"]
+        # The ND loop and the DC loop are SEQUENTIAL (ND completes, then DC), with disjoint
+        # buffer liveness, so Triton reuses the smem -> peak is the MAX of the two phases, not
+        # their sum. (Summing them over-prunes to a single config on A100.) x[BM,BK] is loaded
+        # once and lives only through the ND phase.
+        nd_phase = bm * bk + c.num_stages * (2 * bk * bn + bn * d)   # x + (wa,wb) + ws_t
+        dc_phase = c.num_stages * (bm * bdc + bdc * d)               # cond + wsc_t
+        return max(nd_phase, dc_phase) * 2
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
 
 
 _cond_transition_infer_prune = make_cache_prune(
     "cond_transition_infer", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("ND", "K", "D", "DC"),
+    bucket_of=key_bucket_of("ND", "K", "D", "DC"), base_prune=_smem_early_prune,
 )
 
 
@@ -146,6 +199,5 @@ def cond_transition_inference(
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
         BLOCK_K=triton.next_power_of_2(K),
-        BLOCK_DC=min(128, triton.next_power_of_2(DC)),
     )
     return out

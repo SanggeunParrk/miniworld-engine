@@ -88,25 +88,69 @@ def _expand_swiglu_kernel(
 # --- kernel B: squeeze + conditioning gate -> y:(M, D) -----------------------
 # D is tiled too (BLOCK_D, power-of-2) so D need not be a power of 2 (D=768) and the
 # (BLOCK_M, BLOCK_D) out/scale tiles stay register-sized. Grid = (M tiles, D tiles).
+# BLOCK_DC (the DC-loop tile, `for c0 in range(0, DC, BLOCK_DC)`) is now a SEARCHED knob,
+# crossed {64, 128} over the existing BLOCK_M/BLOCK_D/BLOCK_K/num_warps/num_stages combos (it used
+# to be pinned at the launch site to min(128, next_pow2(DC))). Both values are <= the old 128 cap,
+# so smem stays within the previously safe envelope.
 _cfgs_b = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 128, "BLOCK_K": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 128}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 64, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=8, num_stages=3),
     # occupancy-friendly for the token stream (small M=384-1024, D=768): smaller M/D tiles
     # -> more CTAs so all 132 SMs are busy (BM=64/BD=64 alone gives only ~72 CTAs). Keeps the
     # gate fused (unlike split-K, which would un-fuse it).
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 64}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 128, "BLOCK_K": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 32, "BLOCK_K": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 128}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 32, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 32, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 64, "BLOCK_D": 32, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 64, "BLOCK_D": 32, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=3),
+    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=3),
 ]
+
+
+def _squeeze_smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
+    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE compile.
+
+    Per program _squeeze_gate pipelines, across ``num_stages``: in the ND loop the squeeze-GEMM
+    operands h ``[BLOCK_M, BLOCK_K]`` + ws_t ``[BLOCK_K, BLOCK_D]``; in the DC loop cond
+    ``[BLOCK_M, BLOCK_DC]`` + wsc_t ``[BLOCK_DC, BLOCK_D]`` (out_acc/scale are fp32 register
+    accumulators, not smem). bf16 = 2 B. Large BLOCK_M/BLOCK_D/BLOCK_K/BLOCK_DC combos overflow
+    A100's ~163 KB, so prune up front: Triton's bench-time OOM pruning is unsafe under CUDA-graph
+    capture (fires mid-capture, poisons the stream). Device-aware via ``max_shared_mem`` —
+    sm90/sm100 keep more configs. This is composed as the base_prune UNDER the cache prune.
+    """
+    import triton as _triton
+
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- conservative sm100 budget
+        limit = 227 * 1024
+
+    def _smem(c):
+        bm = c.kwargs["BLOCK_M"]
+        bd = c.kwargs["BLOCK_D"]
+        bk = c.kwargs["BLOCK_K"]
+        bdc = c.kwargs["BLOCK_DC"]
+        return c.num_stages * (bm * bk + bk * bd + bm * bdc + bdc * bd) * 2
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
 
 
 _cond_transition_infer_squeeze_prune = make_cache_prune(
     "cond_transition_infer_squeeze", dtype_of=tensor_dtype_of("h_ptr"),
-    bucket_of=key_bucket_of("ND", "D", "DC"),
+    bucket_of=key_bucket_of("ND", "D", "DC"), base_prune=_squeeze_smem_early_prune,
 )
 
 
@@ -205,7 +249,6 @@ def _squeeze_gate(h, cond, ws, wsc, bsc):
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        BLOCK_DC=min(128, triton.next_power_of_2(DC)),
     )
     return out
 

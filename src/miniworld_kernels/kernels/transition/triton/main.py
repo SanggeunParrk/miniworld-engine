@@ -41,7 +41,7 @@ if AUTOTUNE or True:
         triton.Config({"BLOCK_M": m, "BLOCK_K": k, "BLOCK_N": n}, w, s)
         for m in [32, 64, 128, 256]
         for k in [16, 32, 64]
-        for n in [128]
+        for n in [64, 128, 256]
         for w in [4, 8]
         for s in [2, 3, 4, 5]
         # if not m * k > 32 * 64
