@@ -976,8 +976,14 @@ def bench_transition(
 
     if spec.impl == ImplementationType.CUEQUIVARIANCE:
         # transition has no cuequivariance kernel; MiniWorld dispatches to the fastest per d.
-        # Training now runs real kernels (no torch fallback): d<=256 b2b, d=512 cute fwd+triton bwd.
-        if not is_inference_mode(conf.mode) and conf.d_pair >= 512:
+        # NOTE: these labels must track modules/transition/module.py's actual routing, not just
+        # the Hopper/Blackwell assumption. On pre-Hopper (sm_80 / A100) MINIWORLD routes large d
+        # (>=256) to the shape-general split (_old_triton_forward -> kernels.transition.triton.main),
+        # NOT the cute fused path (cute is sm_90+ only and never runs here). d=128 stays fused.
+        _cap0 = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+        if _cap0 < 9 and conf.d_pair >= 256:  # noqa: PLR2004 -- pre-Hopper large-d -> split
+            execution_path = "kernels.transition.triton.main"
+        elif not is_inference_mode(conf.mode) and conf.d_pair >= 512:
             execution_path = "kernels.transition.cute.forward+triton.backward"
         elif not is_inference_mode(conf.mode) and conf.d_pair >= 256:
             execution_path = "kernels.transition.triton.fused"
