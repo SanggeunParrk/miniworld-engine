@@ -125,7 +125,11 @@ def _bidir_front_kernel(
     BM: tl.constexpr, BK: tl.constexpr, BN: tl.constexpr, GROUP_M: tl.constexpr,
     SAVE_PREACT: tl.constexpr = True,
 ):
-    pid = tl.program_id(0)
+    # int64 program id -> rm and all rm-derived store offsets are int64. Combined with the
+    # per-store int64 cast of the channel base below, this stops the preact store offset
+    # (row_base up to 4*H2, times M) from overflowing int32 at large M -- e.g. 4096 * 768^2
+    # ~ 2.4e9 > 2^31, which faulted with an illegal memory access at d=512, L>=768.
+    pid = tl.program_id(0).to(tl.int64)
     rm = pid * BM + tl.arange(0, BM)
     rk = tl.arange(0, BK)
     c2 = tl.arange(0, 2 * BN)                # contiguous interleaved (g,p) cols within a chunk
@@ -151,10 +155,10 @@ def _bidir_front_kernel(
         g, p = tl.split(tl.reshape(acc, (BM, BN, 2)))    # (BM, BN) each: gate-logit, proj
         smsk = chmask[:, None] & smask
         if SAVE_PREACT:
-            tl.store(preact_ptr + (2 * ch)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
-            tl.store(preact_ptr + (2 * ch + 1)[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smsk)
+            tl.store(preact_ptr + (2 * ch).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
+            tl.store(preact_ptr + (2 * ch + 1).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smsk)
         outl = tl.sigmoid(g) * p
-        tl.store(left_ptr + ch[:, None] * LL + rm[None, :], tl.trans(outl).to(et), mask=smsk)
+        tl.store(left_ptr + ch.to(tl.int64)[:, None] * LL + rm[None, :], tl.trans(outl).to(et), mask=smsk)
 
     # ---- RIGHT half: weight cols [2*H2 : 4*H2), out -> right_ptr, preact rows [2*H2 : 4*H2) ----
     for c0 in range(0, H2, BN):
@@ -173,10 +177,10 @@ def _bidir_front_kernel(
         g, p = tl.split(tl.reshape(acc, (BM, BN, 2)))
         smsk = chmask[:, None] & smask
         if SAVE_PREACT:
-            tl.store(preact_ptr + (2 * H2 + 2 * ch)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
-            tl.store(preact_ptr + (2 * H2 + 2 * ch + 1)[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smsk)
+            tl.store(preact_ptr + (2 * H2 + 2 * ch).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
+            tl.store(preact_ptr + (2 * H2 + 2 * ch + 1).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smsk)
         outr = tl.sigmoid(g) * p
-        tl.store(right_ptr + ch[:, None] * LL + rm[None, :], tl.trans(outr).to(et), mask=smsk)
+        tl.store(right_ptr + ch.to(tl.int64)[:, None] * LL + rm[None, :], tl.trans(outr).to(et), mask=smsk)
 
 
 def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
