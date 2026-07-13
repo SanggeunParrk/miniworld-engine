@@ -265,7 +265,12 @@ def make_cache_prune(op: str, *, dtype_of, bucket_of, base_prune=None):
         kept = [c for c in base if _sig(c) in want]
         return kept or base
 
-    prune._miniworld_op = op  # noqa: SLF001 -- introspection tag (which op a kernel tunes as)
+    # Introspection tags: the op this kernel tunes as, plus its dtype/bucket extractors. The
+    # generic capture builder reads these off a live autotuner to key captured timings the SAME
+    # way the runtime prune keys its lookup (so a built cache is guaranteed to hit).
+    prune._miniworld_op = op  # noqa: SLF001
+    prune._miniworld_dtype_of = dtype_of  # noqa: SLF001
+    prune._miniworld_bucket_of = bucket_of  # noqa: SLF001
     return prune
 
 

@@ -2,6 +2,7 @@
 # Single bench entry for miniworld-kernels. Drops the model-level
 # Pairformer / DiffusionTransformer benches; keeps the kernel-wrapping layers.
 import importlib
+import os
 import sys
 import csv
 from collections.abc import Callable
@@ -2511,6 +2512,15 @@ def main(cfg: DictConfig) -> None:
     fabric = _NoFabric()
     fabric.launch()
 
+    # Opt-in autotune-cache BUILD hook (MINIWORLD_AUTOTUNE_CAPTURE=1): instrument the Triton
+    # autotuner so every config benched during this sweep is recorded per (op, dtype, bucket)
+    # and written to the runtime cache at the end. Pair with MINIWORLD_RUN_AUTOTUNE=1 so the full
+    # grid (not a cached top-K) is benched. No-op otherwise; never affects benchmark numbers.
+    _capture_on = os.getenv("MINIWORLD_AUTOTUNE_CAPTURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if _capture_on:
+        from miniworld_kernels.autotune import capture as _capture
+        _capture.install()
+
     bench_args = [
         conf.kernel,
         f"n_layers={conf.n_layers}",
@@ -2594,6 +2604,14 @@ def main(cfg: DictConfig) -> None:
                     )
     tmp_csv_path.replace(csv_path)
     print(f"\nwrote {csv_path}")
+
+    if _capture_on:
+        print("\n[autotune-capture] captured configs:")
+        print(_capture.summary())
+        written = _capture.flush(top_k=5)
+        for op, dtype, bucket, n, fp in written:
+            print(f"  wrote {op} [{dtype}|{bucket}] ({n} configs) -> {fp}")
+        _capture.reset()
 
     autotune_summary = build_autotune_summary(
         conf.kernel,
