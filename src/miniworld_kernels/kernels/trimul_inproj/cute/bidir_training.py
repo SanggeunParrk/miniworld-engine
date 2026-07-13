@@ -62,8 +62,8 @@ class BidirBackHalf(torch.autograd.Function):
     def backward(ctx, gy):
         (x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
          preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
-        from quack.gemm_interface import gemm as _quack_gemm
-        from quack.gemm_interface import gemm_act as _quack_gemm_act
+        from miniworld_kernels.kernels._quack_compat import gemm as _quack_gemm
+        from miniworld_kernels.kernels._quack_compat import gemm_act as _quack_gemm_act
         B, L, _, D = x_n.shape
         M = B * L * L
         h = ctx.h

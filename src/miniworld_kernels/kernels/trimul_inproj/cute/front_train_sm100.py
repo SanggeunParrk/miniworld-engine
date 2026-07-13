@@ -34,7 +34,7 @@ import os
 import torch
 import triton
 import triton.language as tl
-from quack.gemm_interface import gemm_act, gemm_act_tuned
+from miniworld_kernels.kernels._quack_compat import gemm_act, gemm_act_tuned
 from quack.gemm_config import GemmConfig
 
 # v14: fuse the GLU into the GEMM epilogue (kills the preact re-read + the _glu launch).

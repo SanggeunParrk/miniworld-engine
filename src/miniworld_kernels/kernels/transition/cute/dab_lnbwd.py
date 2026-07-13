@@ -18,7 +18,7 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Float32
 
-from quack.cache_utils import COMPILE_ONLY, jit_cache
+from miniworld_kernels.kernels._quack_compat import is_compile_only, jit_cache
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from quack.cute_dsl_utils import (
     get_device_capacity,
@@ -28,7 +28,7 @@ from quack.cute_dsl_utils import (
 )
 from quack.epi_ops import ColVecLoad, ColVecReduce, RowVecLoad, colvec_reduce_accumulate
 from quack.gemm_default_epi import GemmDefaultEpiMixin
-from quack.gemm_interface import default_config
+from miniworld_kernels.kernels._quack_compat import default_config
 from quack.gemm_sm90 import GemmSm90
 from quack.gemm_tvm_ffi_utils import (
     compile_gemm_kernel,
@@ -266,7 +266,7 @@ def transition_dab_lnbwd_cute(
         cfg.is_dynamic_persistent,
         dev,
     )
-    if COMPILE_ONLY:
+    if is_compile_only():
         return dx
     tile_count_semaphore = (
         torch.zeros(1, dtype=torch.int32, device=dAB.device)

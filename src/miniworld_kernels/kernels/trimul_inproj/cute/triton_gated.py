@@ -23,7 +23,7 @@ if str(_src_root) not in _sys.path:
 import torch
 import triton
 import triton.language as tl
-from quack.gemm_interface import gemm_act
+from miniworld_kernels.kernels._quack_compat import gemm_act
 
 from miniworld_kernels.kernels.trimul_inproj.cute.launch import prepack_lr_operand
 from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group

@@ -94,7 +94,7 @@ def trimul_front_sm100_fused(
     The single fused GEMM + cheap transpose beats the two-GEMM bdll-direct variant
     (which paid a 1 GB gate store+reload round-trip) — see `trimul-sm100-front-fused-win`.
     """
-    from quack.gemm_interface import gemm_act
+    from miniworld_kernels.kernels._quack_compat import gemm_act
     from .front_sm100 import _transpose_blld_to_bdll
 
     assert x.dim() == 4 and x.is_cuda and x.is_contiguous()

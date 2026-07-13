@@ -23,7 +23,7 @@ A future custom kernel can fold the transpose into the GEMM epilogue.
 from __future__ import annotations
 
 import torch
-from quack.gemm_interface import gemm_act
+from miniworld_kernels.kernels._quack_compat import gemm_act
 
 import triton
 import triton.language as tl

@@ -53,8 +53,8 @@ from quack.gemm_sm100 import GemmSm100
 from quack.gemm_default_epi import GemmDefaultEpiMixin
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
-from quack.cache_utils import jit_cache, COMPILE_ONLY
-from quack.gemm_interface import default_config
+from miniworld_kernels.kernels._quack_compat import jit_cache, is_compile_only
+from miniworld_kernels.kernels._quack_compat import default_config
 from quack.gemm_tvm_ffi_utils import (
     get_majors, get_dtypes, perm3d, make_scheduler_args, make_varlen_args,
     make_fake_scheduler_args, make_fake_varlen_args, make_fake_gemm_tensors, compile_gemm_kernel,
@@ -214,7 +214,7 @@ def dgrad_lnbwd_sm100(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd:
     cluster_mnk = (1, 1, 1)
     fn = _compile(a_dt, b_dt, d_dt, c_dt, a_maj, b_maj, d_maj, c_maj, vec_dt,
                   tile_mn, cluster_mnk, cfg.is_dynamic_persistent, dev)
-    if COMPILE_ONLY:
+    if is_compile_only():
         return dx
     mac = get_max_active_clusters(1)
     rstd2 = rstd.float().contiguous().view(1, M)

@@ -92,7 +92,7 @@ def trimul_front_sm100(
 
     left  = sigmoid(x@WLg) * (x@WL)   ;  right = sigmoid(x@WRg) * (x@WR).
     """
-    from quack.gemm_interface import gemm_act
+    from miniworld_kernels.kernels._quack_compat import gemm_act
     try:
         from . import _bdll_patch
     except ImportError:

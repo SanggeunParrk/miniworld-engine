@@ -49,7 +49,7 @@ from quack.gemm_act import GemmGatedMixin
 from quack.activation import dgate_fn_map
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
-from quack.cache_utils import jit_cache
+from miniworld_kernels.kernels._quack_compat import jit_cache
 from quack.gemm_config import GemmConfig
 from quack.gemm_tvm_ffi_utils import (
     perm3d_single,
@@ -269,9 +269,9 @@ def gemm_dln_gatebwd(
         config.pingpong, is_dynamic_persistent, device_capacity,
     )
 
-    from quack.cache_utils import COMPILE_ONLY
+    from miniworld_kernels.kernels._quack_compat import is_compile_only
 
-    if COMPILE_ONLY:
+    if is_compile_only():
         return
 
     max_active_clusters = get_max_active_clusters(config.cluster_m * config.cluster_n)

@@ -24,8 +24,8 @@ import cutlass
 from quack.cute_dsl_utils import get_device_capacity, get_max_active_clusters, torch2cute_dtype_map
 from quack.gemm_sm100 import GemmSm100
 from quack.activation import dgate_fn_map
-from quack.cache_utils import jit_cache, COMPILE_ONLY
-from quack.gemm_interface import default_config
+from miniworld_kernels.kernels._quack_compat import jit_cache, is_compile_only
+from miniworld_kernels.kernels._quack_compat import default_config
 from quack.gemm_tvm_ffi_utils import (
     perm3d_single, get_major, make_scheduler_args, make_varlen_args,
     make_fake_scheduler_args, make_fake_varlen_args, div_for_dtype,
@@ -78,7 +78,7 @@ def _gate_bwd_sm100(xn, Bw, dAB, h, C, rstd, c1, S, B2, act_name, config):
                   postact_major, torch2cute_dtype_map[rstd.dtype],
                   (config.tile_m, config.tile_n), (config.cluster_m, config.cluster_n, 1),
                   config.pingpong, config.is_dynamic_persistent, devcap, act_name)
-    if COMPILE_ONLY:
+    if is_compile_only():
         return
     mac = get_max_active_clusters(config.cluster_m * config.cluster_n)
     sem = (torch.zeros(1, dtype=torch.int32, device=xn.device)

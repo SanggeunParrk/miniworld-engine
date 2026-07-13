@@ -66,7 +66,7 @@ def reset():
 def mm(name, A, B):
     """A @ B, dispatched cuBLAS vs quack."""
     def _q():
-        from quack.gemm_interface import gemm as qg
+        from miniworld_kernels.kernels._quack_compat import gemm as qg
         return qg(A, B)
     return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
                 [("cublas", lambda: A @ B), ("quack", _q)])
@@ -75,7 +75,7 @@ def mm(name, A, B):
 def addmm(name, C, A, B):
     """A @ B + C, dispatched cuBLAS addmm vs quack gemm_act (C-add epilogue)."""
     def _q():
-        from quack.gemm_interface import gemm_act as qga
+        from miniworld_kernels.kernels._quack_compat import gemm_act as qga
         return qga(A, B, C=C, activation=None, store_preact=False)[1]
     return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
                 [("cublas", lambda: torch.addmm(C, A, B)), ("quack", _q)])
@@ -84,7 +84,7 @@ def addmm(name, C, A, B):
 def bmm(name, A, B):
     """batched A @ B, dispatched cuBLAS torch.bmm vs quack batched gemm."""
     def _q():
-        from quack.gemm_interface import gemm as qg
+        from miniworld_kernels.kernels._quack_compat import gemm as qg
         return qg(A, B)
     return pick(name, (A.shape[0], A.shape[-2], A.shape[-1], B.shape[-1]),
                 [("cublas", lambda: torch.bmm(A, B)), ("quack", _q)])

@@ -21,7 +21,7 @@ import cutlass.cute as cute
 from cutlass import const_expr  # noqa: F401
 
 from quack.activation import gate_fn_map
-from quack.cache_utils import jit_cache, COMPILE_ONLY
+from miniworld_kernels.kernels._quack_compat import jit_cache, is_compile_only
 from quack.cute_dsl_utils import (
     torch2cute_dtype_map, get_device_capacity, get_max_active_clusters,
 )
@@ -141,7 +141,7 @@ def trimul_front_lnfold(x, Bf, S, B2, eps=1e-5, *, config, act_fn=None):
         (config.tile_m, config.tile_n), (config.cluster_m, config.cluster_n, 1),
         config.pingpong, config.is_dynamic_persistent, cap, act_fn,
     )
-    if COMPILE_ONLY:
+    if is_compile_only():
         return lr[:, :D], lr[:, D:]
     max_clusters = get_max_active_clusters(config.cluster_m * config.cluster_n)
     epi_args = GemmGatedLNBdllSm90.EpilogueArguments(

@@ -39,7 +39,7 @@ B=1 only (matches tm1's bdll_direct). Run on a COMPUTE NODE (srun), never login.
 from __future__ import annotations
 
 import torch
-from quack.gemm_interface import gemm_act
+from miniworld_kernels.kernels._quack_compat import gemm_act
 
 
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:

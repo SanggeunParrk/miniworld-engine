@@ -108,7 +108,7 @@ class GemmGatedLNSm90(GemmGatedLNMixin, GemmSm90):
 
 
 # ── vendored compile + launch (adapted from quack.gemm_act) ──────────────────
-from quack.cache_utils import jit_cache, COMPILE_ONLY  # noqa: E402
+from miniworld_kernels.kernels._quack_compat import jit_cache, is_compile_only  # noqa: E402
 from quack.compile_utils import make_fake_tensor as fake_tensor  # noqa: E402
 from quack.cute_dsl_utils import (  # noqa: E402
     get_device_capacity, get_max_active_clusters, torch2cute_dtype_map,
@@ -203,7 +203,7 @@ def dualgemm_back_cute(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, *, prepacked
         torch2cute_dtype_map[dt], torch2cute_dtype_map[dt], torch2cute_dtype_map[dt],
         torch2cute_dtype_map[torch.float32], a_major, b_major, postact_major, cap,
     )
-    if COMPILE_ONLY:
+    if is_compile_only():
         return Y.view(B, L, L, D)
     epi_args = GemmGatedLNSm90.EpilogueArguments(
         PostAct_p, mRstd=rstd.view(1, M), mC1=c1.view(1, M),

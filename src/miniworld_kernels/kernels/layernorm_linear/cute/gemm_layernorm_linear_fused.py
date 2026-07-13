@@ -40,7 +40,7 @@ from quack.epi_ops import ColVecLoad, RowVecLoad, Scalar
 from quack.rounding import RoundingMode
 from quack.gemm_config import GemmConfig
 from quack.compile_utils import make_fake_tensor as fake_tensor
-from quack.cache_utils import jit_cache
+from miniworld_kernels.kernels._quack_compat import jit_cache
 from cutlass.utils import LayoutEnum
 from quack.varlen_utils import VarlenManager, VarlenArguments
 from quack.pipeline import make_pipeline_state
@@ -847,8 +847,8 @@ def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None,
     vec_dtype = torch2cute_dtype_map[S.dtype]
     compiled_fn = _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major,
                                  vec_dtype, device_capacity, cfg, c_dtype, c_major)
-    from quack.cache_utils import COMPILE_ONLY
-    if COMPILE_ONLY:
+    from miniworld_kernels.kernels._quack_compat import is_compile_only
+    if is_compile_only():
         return
     max_active_clusters = get_max_active_clusters(cfg[2] * cfg[3])
     epi_args = GemmLNLFusedSm90.EpilogueArguments(

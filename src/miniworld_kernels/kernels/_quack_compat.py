@@ -1,0 +1,64 @@
+"""Compatibility shim for quack 0.5.0 (as forced by FlashAttention-4) on py<3.11.
+
+The cute kernels were written against quack 0.3.11. The consumer env now ships
+quack **0.5.0** because ``flash-attn-4`` requires ``quack-kernels>=0.5.0``. Two
+0.3.11 -> 0.5.0 breaks are absorbed here so the cute kernels can import their quack
+dependencies through one place instead of ``quack.gemm_interface`` / ``quack.cache_utils``
+directly:
+
+1. **``quack.gemm_interface`` fails to import on torch 2.10 + py<3.11.** Its GEMM
+   ``@torch.library.custom_op`` schemas declare ``rounding_mode: int = RoundingMode.RN``
+   (an :class:`~enum.IntEnum`). torch's ``infer_schema`` treats an ``IntEnum`` as an
+   ``int`` and serializes the default with ``str()``; on **py<3.11**
+   ``str(IntEnum.member)`` is the member *name* (``"RoundingMode.RN"``), not its value
+   (``"0"``), so the inferred schema ``SymInt rounding_mode=RoundingMode.RN`` fails
+   ``parse_schema``. (py3.11+ ``IntEnum.__str__`` already returns the value, which is why
+   quack ships fine there.) We restore that behaviour by forcing
+   ``RoundingMode.__str__`` to the int value **before** importing ``gemm_interface``.
+   This is cosmetic-only — nothing depends on ``str(RoundingMode)`` for correctness, and
+   the functions the cute kernels use (``gemm`` / ``gemm_act`` / ``gemm_act_tuned`` /
+   ``default_config``) do not touch the broken ``gemm_out`` custom op at all.
+
+2. **``quack.cache_utils`` was removed in 0.5.0.** ``jit_cache`` moved to
+   :mod:`quack.cache`; the module-level ``COMPILE_ONLY`` flag became the
+   :func:`quack.cache.is_compile_only` state accessor (so ``if COMPILE_ONLY:`` becomes
+   ``if is_compile_only():``).
+
+No ``site-packages`` are patched: this only re-exports quack symbols and adjusts one
+``__str__`` at runtime.
+"""
+
+from __future__ import annotations
+
+# --- fix 1: make gemm_interface's IntEnum-default custom_op schemas parse on py<3.11.
+from quack.rounding import RoundingMode as _RoundingMode
+
+if str(_RoundingMode.RN) != str(int(_RoundingMode.RN)):  # py<3.11 only; no-op on py3.11+
+    _RoundingMode.__str__ = lambda self: str(int(self))  # type: ignore[assignment,method-assign]
+
+# --- fix 2: cache relocation (light imports; do NOT pull gemm_interface here).
+from quack.cache import is_compile_only, jit_cache  # noqa: E402
+
+# gemm_interface is imported lazily (below) so merely needing jit_cache / is_compile_only
+# does not eagerly register every quack GEMM custom op. The RoundingMode fix above is
+# already applied, so the deferred import succeeds.
+_GEMM_INTERFACE_SYMBOLS = frozenset(
+    {"gemm", "gemm_act", "gemm_act_tuned", "default_config"}
+)
+
+__all__ = [
+    "default_config",
+    "gemm",
+    "gemm_act",
+    "gemm_act_tuned",
+    "is_compile_only",
+    "jit_cache",
+]
+
+
+def __getattr__(name: str):  # noqa: ANN202  (PEP 562: consulted by `from ... import name` too)
+    if name in _GEMM_INTERFACE_SYMBOLS:
+        import quack.gemm_interface as _gi  # RoundingMode fix already applied above
+
+        return getattr(_gi, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
