@@ -31,7 +31,8 @@ run_one() {
   echo ""
   echo "### capture bench kernel=${target} $* ###"
   pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-} MINIWORLD_RUN_AUTOTUNE=1 MINIWORLD_AUTOTUNE_CAPTURE=1; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
-    kernel="$target" implementations='[miniworld]' metric=time compile=false cudagraph=manual "$@"
+    kernel="$target" implementations='[miniworld]' metric=time \
+    compile="${CAP_COMPILE:-false}" cudagraph="${CAP_GRAPH:-manual}" "$@"
   echo "[exit=$?]"
 }
 
@@ -57,6 +58,9 @@ capture_target() {
     adaptive_layernorm)         run_matrix adaptive_layernorm "$SHAPES" ;;
     augmented_attention_token)  run_matrix augmented_attention_token "$SHAPES" ;;
     augmented_attention_atom)   run_matrix augmented_attention_atom "$ATOM_SHAPES" ;;
+    augmented)  # token + atom share augmented_attention_* op files -> run sequentially in ONE job
+      run_matrix augmented_attention_token "$SHAPES"
+      run_matrix augmented_attention_atom "$ATOM_SHAPES" ;;
     all)
       for t in transition triangle_attention bias_only_attention triangle_multiplication \
                conditioned_transition adaptive_layernorm augmented_attention_token augmented_attention_atom; do
