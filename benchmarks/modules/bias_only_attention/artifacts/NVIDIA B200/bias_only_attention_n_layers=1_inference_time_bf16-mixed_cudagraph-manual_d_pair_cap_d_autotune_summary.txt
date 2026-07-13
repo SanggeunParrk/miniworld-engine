@@ -65,9 +65,7 @@ miniworld_kernels.kernels.bias_only_attention.triton.gate_out._sigmul_bwd
     candidate[4] BLK=2048, num_warps=8, num_stages=3
     candidate[5] BLK=4096, num_warps=4, num_stages=3
     candidate[6] BLK=4096, num_warps=8, num_stages=3
-  key=(18874368, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLK=2048, num_warps=8, num_stages=3
-  key=(37748736, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLK=2048, num_warps=8, num_stages=3
-  key=(75497472, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLK=1024, num_warps=4, num_stages=3
+  no cache entries captured
 
 miniworld_kernels.kernels.bias_only_attention.triton.gate_out._sigmul_fwd
   candidate_configs=6
@@ -77,8 +75,8 @@ miniworld_kernels.kernels.bias_only_attention.triton.gate_out._sigmul_fwd
     candidate[4] BLK=2048, num_warps=8, num_stages=3
     candidate[5] BLK=4096, num_warps=4, num_stages=3
     candidate[6] BLK=4096, num_warps=8, num_stages=3
-  key=(18874368, bfloat16, bfloat16, bfloat16) -> BLK=2048, num_warps=8, num_stages=3
-  key=(37748736, bfloat16, bfloat16, bfloat16) -> BLK=2048, num_warps=8, num_stages=3
+  key=(18874368, bfloat16, bfloat16, bfloat16) -> BLK=1024, num_warps=4, num_stages=3
+  key=(37748736, bfloat16, bfloat16, bfloat16) -> BLK=1024, num_warps=4, num_stages=3
   key=(75497472, bfloat16, bfloat16, bfloat16) -> BLK=1024, num_warps=4, num_stages=3
 
 miniworld_kernels.kernels.bias_only_attention.triton.main._attn_bwd
@@ -369,8 +367,6 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
     candidate[82] BLOCK_M=64, num_warps=16, num_stages=3
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
-  key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=32, num_warps=4, num_stages=2
-  key=(256, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=16, num_warps=4, num_stages=2
   key=(512, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=8, num_warps=4, num_stages=2
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal

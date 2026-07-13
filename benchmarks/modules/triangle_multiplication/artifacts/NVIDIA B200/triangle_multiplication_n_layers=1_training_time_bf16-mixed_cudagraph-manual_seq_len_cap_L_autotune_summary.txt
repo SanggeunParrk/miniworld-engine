@@ -173,9 +173,9 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
     candidate[82] BLOCK_M=64, num_warps=16, num_stages=3
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
-  key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=2
-  key=(256, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=5
-  key=(512, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=2
+  key=(128, 10, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=4
+  key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=5
+  key=(128, 9, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=2
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal
   candidate_configs=84

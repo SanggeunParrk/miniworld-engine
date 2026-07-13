@@ -173,9 +173,9 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
     candidate[82] BLOCK_M=64, num_warps=16, num_stages=3
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
-  key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=2
+  key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=32, num_warps=4, num_stages=4
   key=(256, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=5
-  key=(512, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=2
+  key=(512, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, bfloat16) -> BLOCK_M=8, num_warps=4, num_stages=3
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal
   candidate_configs=84
@@ -567,6 +567,36 @@ miniworld_kernels.kernels.tm2.triton.main.fused_sigmoid_gate2_fwd_kernel
     candidate[70] BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, num_warps=8, num_stages=2
     candidate[71] BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, num_warps=8, num_stages=3
     candidate[72] BLOCK_K=64, BLOCK_M=128, BLOCK_N=256, num_warps=8, num_stages=4
+  no cache entries captured
+
+miniworld_kernels.kernels.trimul_inproj.triton.back_fused._dconcat5_kernel
+  candidate_configs=6
+    candidate[1] BLK=1024, num_warps=4, num_stages=3
+    candidate[2] BLK=1024, num_warps=8, num_stages=3
+    candidate[3] BLK=2048, num_warps=4, num_stages=3
+    candidate[4] BLK=2048, num_warps=8, num_stages=3
+    candidate[5] BLK=4096, num_warps=4, num_stages=3
+    candidate[6] BLK=4096, num_warps=8, num_stages=3
+  no cache entries captured
+
+miniworld_kernels.kernels.trimul_inproj.triton.back_fused._dconcat_kernel
+  candidate_configs=6
+    candidate[1] BLK=1024, num_warps=4, num_stages=3
+    candidate[2] BLK=1024, num_warps=8, num_stages=3
+    candidate[3] BLK=2048, num_warps=4, num_stages=3
+    candidate[4] BLK=2048, num_warps=8, num_stages=3
+    candidate[5] BLK=4096, num_warps=4, num_stages=3
+    candidate[6] BLK=4096, num_warps=8, num_stages=3
+  no cache entries captured
+
+miniworld_kernels.kernels.trimul_inproj.triton.back_fused._dconcat_sig_kernel
+  candidate_configs=6
+    candidate[1] BLK=1024, num_warps=4, num_stages=3
+    candidate[2] BLK=1024, num_warps=8, num_stages=3
+    candidate[3] BLK=2048, num_warps=4, num_stages=3
+    candidate[4] BLK=2048, num_warps=8, num_stages=3
+    candidate[5] BLK=4096, num_warps=4, num_stages=3
+    candidate[6] BLK=4096, num_warps=8, num_stages=3
   no cache entries captured
 
 miniworld_kernels.modules.triangle_multiplication.baseline_dtv1._input_gated_gemm_kernel
