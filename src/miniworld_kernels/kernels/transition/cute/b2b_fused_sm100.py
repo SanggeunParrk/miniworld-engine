@@ -974,7 +974,7 @@ def transition_b2b_fused_sm100(xn, wa, wb, ws):
     D, _ = ws.shape
 
     def _mark(t3, ld):
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=ld)
+        return from_dlpack(t3, assumed_align=16, enable_tvm_ffi=True).mark_layout_dynamic(leading_dim=ld)
 
     mXn = _mark(xn.detach().unsqueeze(0), 2)
     mWa = _mark(wa.detach().unsqueeze(0), 2)
@@ -984,7 +984,7 @@ def transition_b2b_fused_sm100(xn, wa, wb, ws):
     mOut = _mark(out.unsqueeze(0), 2)
 
     mac = get_max_active_clusters(1)  # memoized: avoid per-call CUTLASS-DSL probe recompile
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    strm = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     key = (M, K, ND, D)
     if key not in _CACHE:
         kt = 128 if K % 128 == 0 else K
@@ -1031,6 +1031,6 @@ def transition_b2b_fused_sm100(xn, wa, wb, ws):
         op.num_out_stage = 1
         op.defer = _defer
         op.pingpong = _pp
-        _CACHE[key] = cute.compile(op, mXn, mWa, mWb, mWs, mOut, mac, strm)
-    _CACHE[key](mXn, mWa, mWb, mWs, mOut, mac, strm)
+        _CACHE[key] = cute.compile(op, mXn, mWa, mWb, mWs, mOut, mac, strm, options="--enable-tvm-ffi")
+    _CACHE[key](mXn, mWa, mWb, mWs, mOut)
     return out

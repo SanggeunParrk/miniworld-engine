@@ -763,7 +763,7 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
     ND = wa.shape[0]
 
     def _mark(t3, leading_dim):
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
+        return from_dlpack(t3, assumed_align=16, enable_tvm_ffi=True).mark_layout_dynamic(leading_dim=leading_dim)
 
     mA = _mark(xn.detach().unsqueeze(0), 2)          # (L, M, K)
     mBp = _mark(wb.detach().unsqueeze(0), 2)         # (L, N, K)  proj = up
@@ -778,7 +778,7 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
     mDB = _mark(dB.unsqueeze(0), 2)
 
     mac = get_max_active_clusters(1)  # memoized: avoid per-call CUTLASS-DSL probe recompile
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    strm = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     key = (M, ND, K)
     if key not in _CACHE:
         op = SwiGLUGateBwdKernel(
@@ -796,9 +796,9 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
         _fused = os.environ.get("MW_SPLIT") != "1"
         op.no_grad = (not _fused) or os.environ.get("MW_NOGRAD") == "1"
         op.one_out = os.environ.get("MW_ONEOUT") == "1"
-        _CACHE[key] = (cute.compile(op, mA, mBp, mBg, mGe, mH, mDA, mDB, mac, strm), op.no_grad)
+        _CACHE[key] = (cute.compile(op, mA, mBp, mBg, mGe, mH, mDA, mDB, mac, strm, options="--enable-tvm-ffi"), op.no_grad)
     compiled, _split = _CACHE[key]
-    compiled(mA, mBp, mBg, mGe, mH, mDA, mDB, mac, strm)
+    compiled(mA, mBp, mBg, mGe, mH, mDA, mDB)
     if _split:
         # dA = grad_expand * (b*silu'(a)); dB = grad_expand * silu(a) — one fused pass
         # (grad read once) instead of two torch muls.

@@ -154,7 +154,7 @@ def swiglu_expand_gemm(xn, wb, wa):
     N, K2 = wb.shape
 
     def _mark(t3, leading_dim):
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
+        return from_dlpack(t3, assumed_align=16, enable_tvm_ffi=True).mark_layout_dynamic(leading_dim=leading_dim)
 
     mA = _mark(xn.detach().unsqueeze(0), 2)   # (L, M, K)
     mBp = _mark(wb.detach().unsqueeze(0), 2)  # (L, N, K)  proj = up
@@ -166,7 +166,7 @@ def swiglu_expand_gemm(xn, wb, wa):
     mac = get_max_active_clusters(1)  # memoized: HardwareInfo().get_max_active_clusters
     # JIT-recompiles a probe kernel on every call (~35ms eager); the memoized helper is
     # device-constant so the compiled op cache (_CACHE) is the only per-shape cost.
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    strm = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     key = (M, N, K)
     if key not in _CACHE:
         op = SwiGLUExpandKernel(
@@ -176,8 +176,8 @@ def swiglu_expand_gemm(xn, wb, wa):
         op.K = int(K)
         op.sig_mode = os.environ.get("MW_SIG", "rsqrt")
         op.epi_depth = int(os.environ.get("MW_EPI_DEPTH", "3"))
-        _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm)
-    _CACHE[key](mA, mBp, mBg, mC, mac, strm)
+        _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm, options="--enable-tvm-ffi")
+    _CACHE[key](mA, mBp, mBg, mC)
     return h
 
 

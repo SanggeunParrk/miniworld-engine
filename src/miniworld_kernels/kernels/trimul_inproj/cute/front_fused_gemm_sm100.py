@@ -608,7 +608,7 @@ def fused_front_gemm(A, Bp, Bg, lr, preact):
     N, K2 = Bp.shape
 
     def _mark(t3, leading_dim):
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
+        return from_dlpack(t3, assumed_align=16, enable_tvm_ffi=True).mark_layout_dynamic(leading_dim=leading_dim)
 
     mA = _mark(A.detach().unsqueeze(0), 2)     # (L, M, K)
     mBp = _mark(Bp.detach().unsqueeze(0), 2)   # (L, N, K)
@@ -624,7 +624,7 @@ def fused_front_gemm(A, Bp, Bg, lr, preact):
     mCpo = _mark(po.t().unsqueeze(0), 1)
 
     mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    strm = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     key = (M, N, K)
     if key not in _CACHE:
         op = FusedPreactGemmKernel(
@@ -632,8 +632,8 @@ def fused_front_gemm(A, Bp, Bg, lr, preact):
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mCpe, mCpo, mac, strm)
-    _CACHE[key](mA, mBp, mBg, mC, mCpe, mCpo, mac, strm)
+        _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mCpe, mCpo, mac, strm, options="--enable-tvm-ffi")
+    _CACHE[key](mA, mBp, mBg, mC, mCpe, mCpo)
 
 
 class FusedSigGemmKernel(FusedPreactGemmKernel):
@@ -656,7 +656,7 @@ def fused_front_gemm_sig(A, Bp, Bg, lr, sg):
     N, _ = Bp.shape
 
     def _mark(t3, leading_dim):
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
+        return from_dlpack(t3, assumed_align=16, enable_tvm_ffi=True).mark_layout_dynamic(leading_dim=leading_dim)
 
     mA = _mark(A.detach().unsqueeze(0), 2)
     mBp = _mark(Bp.detach().unsqueeze(0), 2)
@@ -664,7 +664,7 @@ def fused_front_gemm_sig(A, Bp, Bg, lr, sg):
     mC = _mark(lr.t().unsqueeze(0), 1)             # (1, M, 2H) M-major
     mSg = _mark(sg.t().unsqueeze(0), 1)            # (1, M, 2H) M-major  (carried as cpe; cpo unused)
     mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    strm = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     key = (M, N, K)
     if key not in _CACHE_SIG:
         op = FusedSigGemmKernel(
@@ -672,5 +672,5 @@ def fused_front_gemm_sig(A, Bp, Bg, lr, sg):
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        _CACHE_SIG[key] = cute.compile(op, mA, mBp, mBg, mC, mSg, mSg, mac, strm)
-    _CACHE_SIG[key](mA, mBp, mBg, mC, mSg, mSg, mac, strm)
+        _CACHE_SIG[key] = cute.compile(op, mA, mBp, mBg, mC, mSg, mSg, mac, strm, options="--enable-tvm-ffi")
+    _CACHE_SIG[key](mA, mBp, mBg, mC, mSg, mSg)
