@@ -102,6 +102,7 @@ def test_import_is_side_effect_free() -> None:
 _OPS_CONTRACT = frozenset(
     {
         "augmented_attention_pair_bias",
+        "bidirectional_triangle_multiplicative_update",
         "conditioned_transition",
         "layer_norm",
         "layer_norm_linear",

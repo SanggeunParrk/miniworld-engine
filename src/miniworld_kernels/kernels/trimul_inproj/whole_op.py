@@ -90,3 +90,48 @@ def triangle_multiplicative_update(
         outgoing,
         mask=mask,
     )
+
+
+def bidirectional_triangle_multiplicative_update(
+    x: torch.Tensor,                        # (B, L, L, d_pair)
+    mask: torch.Tensor | None = None,       # (B, L) residue mask
+    *,
+    norm_in_weight: torch.Tensor,           # (d_pair,)
+    norm_in_bias: torch.Tensor,             # (d_pair,)
+    to_left_weight: torch.Tensor,           # (2*d_hidden, d_pair)
+    to_left_gate_weight: torch.Tensor,      # (2*d_hidden, d_pair)
+    to_right_weight: torch.Tensor,          # (2*d_hidden, d_pair)
+    to_right_gate_weight: torch.Tensor,     # (2*d_hidden, d_pair)
+    norm_out_weight: torch.Tensor,          # (2*d_hidden,)
+    norm_out_bias: torch.Tensor,            # (2*d_hidden,)
+    to_out_weight: torch.Tensor,            # (d_pair, 2*d_hidden)
+    to_gate_weight: torch.Tensor,           # (d_pair, d_pair)
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """Bidirectional (outgoing+incoming, one fused block) triangle multiplicative
+    update — whole-op call. Returns ``(B, L, L, d_pair)``. Autograd-transparent:
+    grads flow to ``x`` and every weight. Backed by the TRITON bidir pipeline
+    (weights-as-args autograd Function + no-grad inference path). ``d_hidden == d_pair``
+    required. Unlike single-direction trimul there is no cuequiv equivalent, so this
+    takes the four (2·d_hidden, d_pair) projections directly.
+    """
+    from .triton.bidirectional import bidirectional_trimul_triton
+
+    d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
+    return bidirectional_trimul_triton(
+        x,
+        to_left_weight,
+        to_left_gate_weight,
+        to_right_weight,
+        to_right_gate_weight,
+        to_gate_weight,       # Wg  (d_pair, d_pair)
+        to_out_weight,        # Wout (d_pair, 2*d_hidden)
+        norm_in_weight,
+        norm_in_bias,
+        norm_out_weight,
+        norm_out_bias,
+        eps,                  # eps_in
+        eps,                  # eps_out
+        d_hidden,
+        mask=mask,
+    )

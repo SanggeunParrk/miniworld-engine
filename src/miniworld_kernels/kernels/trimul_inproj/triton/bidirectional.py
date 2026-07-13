@@ -190,13 +190,20 @@ class _BidirBackHalfTriton(torch.autograd.Function):
     folded into the front dxn GEMM). Weights x@W form; Wp is nn.Linear (N,K) form."""
 
     @staticmethod
-    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, h):
+    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, h, mask=None):
         B, L, _, D = x_n.shape
         M = B * L * L
         H = 2 * h                                                 # = WL.shape[1]
         left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg)
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
+        # Mask applies to the contraction inputs (left/right) ONLY — NOT to x_n, so the
+        # output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch reference).
+        mm = None
+        if mask is not None:
+            mm = mask.reshape(L, L).to(lf.dtype)
+            lf = lf * mm
+            rf = rf * mm
         o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))         # outgoing  lo @ roᵀ
         o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])          # incoming  liᵀ @ ri
         tri = torch.cat([o_out, o_in], dim=0)                     # (H, L, L)
@@ -206,7 +213,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
-        ctx.eps, ctx.h = eps, h
+        ctx.eps, ctx.h, ctx.mm = eps, h, mm
         return y.reshape(B, L, L, D)
 
     @staticmethod
@@ -238,6 +245,10 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         d_ri = torch.bmm(li, d_o_in)
         d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
         d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
+        # chain back through the elementwise mask (left_masked = left*mm)
+        if ctx.mm is not None:
+            d_left = d_left * ctx.mm
+            d_right = d_right * ctx.mm
 
         # front bwd: d_concat (triton) + dW (cuBLAS) + W_stack; dxn fuses the gate add
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
@@ -245,11 +256,12 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         dx = torch.mm(d_glogit, Wg.t())                          # dx_gate  (M, D)
         dx.addmm_(dconc.t(), W_stack)                            # + dconcᵀ@W_stack (in-place)
         dx_n = dx.reshape(B, L, L, D)
-        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None)
+        # trailing Nones: eps, h, mask (non-differentiable)
+        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None)
 
 
 @torch.no_grad()
-def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h):
+def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h, mask=None):
     """Forward-only bidir back-half — the SAME kernel structure as cute's inference
     ``bidirectional_trimul_sm100`` (front → 2 bmm → LN_out+@Wp → gate), but NO
     autograd.Function / saved tensors and NO preact side output. This is why the
@@ -261,6 +273,10 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h)
     left, right, _ = bidir_front_triton(x_n, WLt, WLgt, WRt, WRgt, save_preact=False)
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
+    if mask is not None:                                         # mask left/right only
+        mm = mask.reshape(L, L).to(lf.dtype)
+        lf = lf * mm
+        rf = rf * mm
     o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))            # outgoing
     o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])            # incoming
     tri = torch.cat([o_out, o_in], dim=0)                        # (H, L, L)
@@ -290,18 +306,23 @@ def bidirectional_trimul_triton(
             f"TRITON bidirectional trimul requires d_hidden == d_pair "
             f"(got d_hidden={d_hidden}, d_pair={d})."
         )
-    row_scale = None
+    # Mask applies to the contraction inputs (left/right), NOT folded into LN_in — so
+    # the output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch reference).
+    m2d = None
     if mask is not None:
-        m = mask.unsqueeze(-1) & mask.unsqueeze(-2)              # (B, L, L)
-        row_scale = m.reshape(-1).to(pair.dtype)                # (M,)  folded into LN_in
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in, row_scale=row_scale)
+        if mask.dim() == 2:                                     # (B, L) residue mask
+            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)         # (B, L, L)
+        else:                                                   # (B, L, L) pair mask
+            m = mask
+        m2d = m.to(pair.dtype)
+    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled():
         # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed.
         return _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
-                            ln_out_w, ln_out_b, eps_out, d_hidden)
+                            ln_out_w, ln_out_b, eps_out, d_hidden, mask=m2d)
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _BidirBackHalfTriton.apply(
-        x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, d_hidden,
+        x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, d_hidden, m2d,
     )

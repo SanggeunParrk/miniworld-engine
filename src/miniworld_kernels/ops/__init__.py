@@ -25,6 +25,10 @@ _LAZY_OPS = {
         "miniworld_kernels.kernels.trimul_inproj.whole_op",
         "triangle_multiplicative_update",
     ),
+    "bidirectional_triangle_multiplicative_update": (
+        "miniworld_kernels.kernels.trimul_inproj.whole_op",
+        "bidirectional_triangle_multiplicative_update",
+    ),
     "triangle_attention": (
         "miniworld_kernels.kernels.triangle_attention.whole_op",
         "triangle_attention",
@@ -68,6 +72,7 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "augmented_attention_pair_bias",
+    "bidirectional_triangle_multiplicative_update",
     "conditioned_transition",
     "layer_norm",
     "layer_norm_linear",
