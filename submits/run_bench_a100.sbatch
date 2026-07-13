@@ -88,7 +88,7 @@ run_matrix() {
   target="$1"
   impls="$2"
   extra="$3"
-  for graph_mode in manual disabled; do
+  for graph_mode in manual; do   # manual = deployment regime (default); add 'disabled' for the eager baseline
     for bench_mode in inference training; do
       run_one "$target" "$impls" mode="$bench_mode" cudagraph="$graph_mode" sweep_axis=seq_len name_suffix=L_sweep $extra
       render_latest "$target" "$bench_mode" "$graph_mode" seq_len L_sweep
