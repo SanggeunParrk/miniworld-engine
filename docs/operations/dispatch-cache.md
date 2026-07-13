@@ -118,23 +118,33 @@ care about. To inspect/clear, look at / delete the JSON under the cache dir.
 
 # Autotune Config Cache
 
-Separate from the LayerNorm *path* cache above: this ships the top-K tuned **Triton
-autotune configs** per `(gpu, dtype, op, shape-bucket)` so runs skip the full-grid
-autotune tax and performance is reproducible across machines. Code:
-`src/miniworld_kernels/autotune/` (`cache.py`, `build.py`).
+Separate from the LayerNorm *path* cache above: this ships the top-K tuned **autotune configs**
+per `(gpu, dtype, op, shape-bucket)` so runs skip the full-grid autotune tax and performance is
+reproducible across machines. It is **backend-agnostic** — one cache format + storage layer
+serves Triton, CuTe, and CUDA kernels. Code: `src/miniworld_kernels/autotune/` (`cache.py`,
+`build.py`).
 
-**INVARIANT:** config choice is performance-only — every config in a kernel's grid computes
-the same math — so a missing / stale / wrong cache is only ever slower, never incorrect.
+**INVARIANT:** config choice is performance-only — every candidate config computes the same
+math — so a missing / stale / wrong cache is only ever slower, never incorrect.
 
 ## How it works
 
-Each adopted kernel's `@triton.autotune` uses a `make_cache_prune(op, ...)` callback as its
-`early_config_prune` (composed OVER any device-smem safety prune). Per call it reads the
-running `(gpu, dtype, shape-bucket)` and:
+Two runtime entry points share the cache; a kernel uses whichever fits its backend:
 
-- **hit** → returns only the cached top-K configs (autotune picks among ~5, not the full grid).
-- **miss** (unknown GPU, unseen shape) or **stale** (the kernel's config grid changed, detected
-  by a `config_space_hash` mismatch) → warns ONCE and returns the full grid (still correct).
+- **Triton** — the kernel's `@triton.autotune` uses `make_cache_prune(op, ...)` as its
+  `early_config_prune` (composed OVER any device-smem safety prune). Per call it reads the
+  running `(gpu, dtype, shape-bucket)`, and on a **hit** returns only the cached top-K (autotune
+  picks among ~5, not the full grid); on a **miss/stale** returns the full grid.
+- **CuTe / CUDA** — these fix their tile/cluster/stage config at build time (no autotune loop),
+  so they call `select_config(op, dtype=…, bucket=…, candidates=…)` to *pick one* cached config
+  and apply its `kwargs` (`tile_m`/`tile_n`/`cluster`/`pingpong`/…); on a miss they fall back to
+  the kernel's own `default_config`.
+
+Both paths, on a **miss** (unknown GPU, unseen shape) or **stale** (the kernel's config grid
+changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back to the full grid
+/ default (still correct). A config is any of: a `triton.Config`, a plain dict of tile params
+(CuTe/CUDA, cluster shapes as tuples), or a pre-shaped `{kwargs, num_warps, num_stages}` dict —
+`as_cfg_dict` normalizes all three and `config_to_dict` serializes them JSON-safely.
 
 ## Cache location & format
 
@@ -149,10 +159,16 @@ running `(gpu, dtype, shape-bucket)` and:
 
     PYTHONPATH=src python -m miniworld_kernels.autotune.build --op all     # or --op <name>
 
-benches every grid config across representative shape-buckets and writes the runtime cache;
-copy `<cache-root>/autotune/*` into `src/miniworld_kernels/autotune/data/` and commit. A new
-GPU (H100/B200/…) is enabled by running this on that box and committing its JSONs. Adopted
-ops so far: `trimul_bidir_front`, `transition_split_fwd` (more as kernels wire the prune).
+The builder core `tune_bucket(op, gk, dtype, bucket, candidates, run_ms, csh)` is
+backend-agnostic: it benches each candidate config via a `run_ms(cfg) -> ms` closure and stores
+the top-K. Triton builders point `run_ms` at `do_bench(kernel.fn[grid])`; CuTe/CUDA builders
+sweep a list of tile/cluster **dicts** and point `run_ms` at building+running the kernel with
+that config (these require sm90+, so they skip on Ampere). Copy `<cache-root>/autotune/*` into
+`src/miniworld_kernels/autotune/data/` and commit. A new GPU (H100/B200/…) is enabled by running
+this on that box and committing its JSONs.
+
+Adopted Triton ops so far: `trimul_bidir_front`, `transition_split_fwd` (more as kernels wire
+the prune; the CuTe/CUDA sweep builders are structurally in place and populate on sm90+ boxes).
 
 ## Controls (env)
 

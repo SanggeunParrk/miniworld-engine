@@ -69,18 +69,52 @@ def shape_bucket(**dims: int) -> str:
 # --------------------------------------------------------------------------- #
 # config (de)serialization + config-space hash
 # --------------------------------------------------------------------------- #
+def as_cfg_dict(config) -> dict:
+    """Normalize a config from ANY backend to ``{kwargs, num_warps, num_stages}``.
+
+    - triton.Config: ``.kwargs`` / ``.num_warps`` / ``.num_stages``.
+    - plain dict (cute/cuda tile params, e.g. ``{"tile_m":128,"tile_n":128,"cluster":(1,1)}``):
+      the whole dict is the kwargs; num_warps/num_stages default 0 (unused off-Triton).
+      A dict already shaped ``{"kwargs":..., "num_warps":..., "num_stages":...}`` passes through.
+    """
+    if hasattr(config, "kwargs"):  # triton.Config
+        return {"kwargs": dict(config.kwargs), "num_warps": int(config.num_warps),
+                "num_stages": int(config.num_stages)}
+    if isinstance(config, dict) and "kwargs" in config:
+        return {"kwargs": dict(config["kwargs"]),
+                "num_warps": int(config.get("num_warps", 0)),
+                "num_stages": int(config.get("num_stages", 0))}
+    if isinstance(config, dict):
+        return {"kwargs": {k: v for k, v in config.items()}, "num_warps": 0, "num_stages": 0}
+    raise TypeError(f"unsupported config type: {type(config)!r}")
+
+
+def _json_safe(kwargs: dict) -> dict:
+    """cute configs may carry tuples (cluster shapes); JSON has no tuples -> lists."""
+    return {k: (list(v) if isinstance(v, tuple) else v) for k, v in kwargs.items()}
+
+
 def _sig(config) -> tuple:
-    """Hashable signature of a triton.Config: (sorted kwargs, num_warps, num_stages)."""
-    return (tuple(sorted(config.kwargs.items())), int(config.num_warps), int(config.num_stages))
+    """Hashable signature (sorted kwargs, num_warps, num_stages) for any-backend config."""
+    d = as_cfg_dict(config)
+    kw = tuple(sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+                      for k, v in d["kwargs"].items()))
+    return (kw, d["num_warps"], d["num_stages"])
 
 
 def _sig_from_dict(d: dict) -> tuple:
-    return (tuple(sorted(d["kwargs"].items())), int(d["num_warps"]), int(d["num_stages"]))
+    """Signature of a stored/JSON config dict; JSON turned tuples into lists -> re-tuple them
+    so it compares equal to a live config's ``_sig``."""
+    kw = tuple(sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+                      for k, v in d["kwargs"].items()))
+    return (kw, int(d["num_warps"]), int(d["num_stages"]))
 
 
 def config_to_dict(config, ms: float | None = None) -> dict:
-    d = {"kwargs": dict(sorted(config.kwargs.items())),
-         "num_warps": int(config.num_warps), "num_stages": int(config.num_stages)}
+    """Serialize any-backend config to a JSON-safe ``{kwargs, num_warps, num_stages[, ms]}``."""
+    c = as_cfg_dict(config)
+    d = {"kwargs": dict(sorted(_json_safe(c["kwargs"]).items())),
+         "num_warps": c["num_warps"], "num_stages": c["num_stages"]}
     if ms is not None:
         d["ms"] = float(ms)
     return d
@@ -233,3 +267,45 @@ def make_cache_prune(op: str, *, dtype_of, bucket_of, base_prune=None):
 
     prune._miniworld_op = op  # noqa: SLF001 -- introspection tag (which op a kernel tunes as)
     return prune
+
+
+# --------------------------------------------------------------------------- #
+# backend-agnostic config selection (cute / cuda: pick ONE, no autotune loop)
+# --------------------------------------------------------------------------- #
+def select_config(
+    op: str, *, dtype: str, bucket: str, candidates=None, device_index: int | None = None,
+) -> dict | None:
+    """Return the cached **best** config (``{kwargs, num_warps, num_stages}``) for the running
+    ``(gpu, dtype, shape-bucket)``, or ``None`` (warn-once) on a miss/stale cache.
+
+    This is the cute/cuda counterpart of :func:`make_cache_prune`: those backends fix their
+    tile/cluster/stage config at build time and have no Triton autotune loop, so they call this
+    to *pick one* config from the shipped cache instead of narrowing a grid. Callers apply the
+    returned ``kwargs`` (e.g. ``tile_m``/``tile_n``/``cluster``) and, on ``None``, fall back to
+    the kernel's own ``default_config``. ``candidates`` (optional) enables the same
+    ``config_space_hash`` staleness check as the Triton path.
+
+    INVARIANT (as everywhere in this module): every candidate computes the same math, so a
+    miss/stale/None result only costs speed, never correctness.
+    """
+    if run_autotune_enabled():
+        return None
+    try:
+        gk = gpu_key(device_index)
+    except Exception:  # noqa: BLE001
+        return None
+    data = _load(op, gk)
+    if data is None:
+        _warn_once(op, gk, dtype, "no tuned autotune cache")
+        return None
+    if candidates is not None and data.get("config_space_hash") != config_space_hash(candidates):
+        _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
+        return None
+    entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
+    if not entry:
+        _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
+        return None
+    best = dict(entry[0])  # fastest-first; drop the stored ms
+    best.pop("ms", None)
+    best["kwargs"] = {k: (tuple(v) if isinstance(v, list) else v) for k, v in best["kwargs"].items()}
+    return best
