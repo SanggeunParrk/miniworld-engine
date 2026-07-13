@@ -15,17 +15,21 @@ from __future__ import annotations
 from .cache import (
     config_space_hash,
     gpu_key,
+    key_bucket_of,
     make_cache_prune,
     run_autotune_enabled,
     shape_bucket,
     store_ranked_configs,
+    tensor_dtype_of,
 )
 
 __all__ = [
     "config_space_hash",
     "gpu_key",
+    "key_bucket_of",
     "make_cache_prune",
     "run_autotune_enabled",
     "shape_bucket",
     "store_ranked_configs",
+    "tensor_dtype_of",
 ]

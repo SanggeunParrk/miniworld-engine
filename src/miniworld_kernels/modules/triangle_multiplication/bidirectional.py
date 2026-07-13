@@ -21,8 +21,11 @@ from cuequivariance_torch import triangle_multiplicative_update
 from jaxtyping import Bool, Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.modules.dispatch import (
+    KernelBackend,
+    resolve_triangle_multiplication as _resolve_trimul_backend,
+)
 from miniworld_kernels.modules.triangle_multiplication.dispatch import (
-    resolve_impl as _resolve_trimul_impl,
     resolve_out_layout as _resolve_trimul_out_layout,
 )
 from miniworld_kernels.modules.exceptions import (
@@ -44,8 +47,11 @@ class BidirectionalTriangleMultiplication(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        # 'miniworld' (auto) -> concrete backend for the running GPU arch.
-        self.implementation = _resolve_trimul_impl(implementation)
+        # Keep the PUBLIC option on self.implementation (contract: modules never overwrite it
+        # with the resolved backend). 'miniworld' (auto) -> concrete backend for the running
+        # GPU arch is resolved ONCE into self._backend; forward routes on that.
+        self.implementation = ImplementationType(implementation)
+        self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
         d2 = 2 * self.d_hidden
@@ -67,23 +73,24 @@ class BidirectionalTriangleMultiplication(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass."""
-        if self.implementation == ImplementationType.CUEQUIVARIANCE:
+        """Forward pass. Routes on the resolved backend (self._backend); self.implementation
+        stays the public option."""
+        if self._backend == KernelBackend.CUEQUIVARIANCE:
             return self._forward_cuequivariance(pair, mask)
-        if self.implementation == ImplementationType.CUTE:
+        if self._backend == KernelBackend.CUTE:
             # Inference: forward-only fused sm100 kernels. Training (grad): the
             # v6-faithful fused bidirectional training kernel (BidirV6TriMulSm100,
             # trimul_bidir_b200 v4), wired here so dispatch stays inside the module.
             if torch.is_grad_enabled():
                 return self._forward_cute_train(pair, mask)
             return self._forward_cute(pair, mask)
-        if self.implementation == ImplementationType.TRITON:
+        if self._backend == KernelBackend.TRITON:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
             # autograd pieces). See kernels/trimul_inproj/triton/bidirectional.py.
             return self._forward_triton(pair, mask)
-        if self.implementation != ImplementationType.PYTORCH:
+        if self._backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
 
         pair = self.ln_pair(pair)

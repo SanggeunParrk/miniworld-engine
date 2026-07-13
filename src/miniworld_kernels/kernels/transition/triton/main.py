@@ -7,6 +7,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
 
@@ -90,9 +91,22 @@ def _smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
     return kept or [min(configs, key=_smem)]
 
 
+# Cache-narrowing prunes composed OVER the smem safety prune (see autotune package). Bucket on
+# the autotune key (GROUP_M, n, N); dtype from x (defaults bf16). Separate op ids for fwd/bwd
+# since their best tiles differ. Miss/stale -> warn once + full grid.
+_split_fwd_prune = make_cache_prune(
+    "transition_split_fwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "n", "N"), base_prune=_smem_early_prune,
+)
+_split_bwd_prune = make_cache_prune(
+    "transition_split_bwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "n", "N"), base_prune=_smem_early_prune,
+)
+
+
 @triton.autotune(
     configs=configs, key=["GROUP_M", "n", "N"],
-    prune_configs_by={"early_config_prune": _smem_early_prune},
+    prune_configs_by={"early_config_prune": _split_fwd_prune},
 )
 @triton.jit
 def transition_fwd_kernel(
@@ -156,7 +170,7 @@ def transition_fwd_kernel(
 
 @triton.autotune(
     configs=configs, key=["GROUP_M", "n", "N"],
-    prune_configs_by={"early_config_prune": _smem_early_prune},
+    prune_configs_by={"early_config_prune": _split_bwd_prune},
 )
 @triton.jit
 def transition_bwd_kernel(

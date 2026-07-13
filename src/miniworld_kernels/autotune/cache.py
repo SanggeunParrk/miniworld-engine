@@ -173,10 +173,27 @@ def _warn_once(op: str, gk: str, tag: str, reason: str) -> None:
     )
 
 
-def _get(named_args, kwargs, name):
-    if name in named_args:
+def _named_get(named_args, kwargs, name):
+    if hasattr(named_args, "get") and name in named_args:
         return named_args[name]
     return kwargs.get(name)
+
+
+def key_bucket_of(*key_names: str):
+    """Build a ``bucket_of`` from the kernel's autotune ``key`` names (constexpr dims reliably
+    present in named_args), e.g. ``key_bucket_of("GROUP_M", "n", "N")``."""
+    def f(named_args, kwargs):
+        return shape_bucket(**{k: _named_get(named_args, kwargs, k) for k in key_names})
+    return f
+
+
+def tensor_dtype_of(arg_name: str, default: str = "bfloat16"):
+    """Build a ``dtype_of`` that reads the dtype of a tensor kernel-arg (falls back to
+    ``default`` — production bf16 — if it isn't introspectable in named_args)."""
+    def f(named_args, kwargs):
+        t = named_args.get(arg_name) if hasattr(named_args, "get") else None
+        return str(getattr(t, "dtype", default)).replace("torch.", "")
+    return f
 
 
 def make_cache_prune(op: str, *, dtype_of, bucket_of, base_prune=None):
