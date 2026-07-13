@@ -1,7 +1,37 @@
 # Plan: port the CuTeDSL (cute) backend to quack 0.5.0
 
-**Status:** planned, not started.
-**Scope:** miniworld-kernels only. team-gm / MiniWorld are unaffected — they consume
+**Status:** IN PROGRESS. Phases 0–3 DONE (`a1aea37`); Phase 4 is the remaining blocker
+(a cutlass-dsl launch/stream ABI migration — larger than the quack shim).
+**Scope:** miniworld-kernels only.
+
+## Progress (2026-07-13)
+
+- **Phase 0–1 done.** Dev env = the MiniWorld consumer env's python (quack 0.5.0 /
+  torch 2.10 / cutlass-dsl 4.5.2 / B200) + `PYTHONPATH=<my>/src` — never mutates the
+  shared env. A full import probe found exactly **two** quack breaks (below) and **zero**
+  cutlass-4.5.2 drift *at import*.
+- **Phase 2–3 done** (`a1aea37`, `kernels/_quack_compat.py`): the `RoundingMode.__str__`
+  polyfill fixes the `gemm_interface` custom_op schema; `jit_cache`/`is_compile_only`
+  replace the removed `cache_utils`. **52/52 cute modules import** on quack 0.5.0 (was
+  25/52). triton + pytorch paths untouched — **trimul triton = 0.284 ms vs pytorch
+  1.14 ms (4×) at L=384 on B200**, correctness intact.
+- **Phase 4 = the real remaining blocker (cutlass-dsl 4.4.2→4.5.2 launch/stream ABI).**
+  cute modules import but cute *execution* crashes: `_forward_cute` →
+  `tm1/cute/sm100_gate_gemm_collective.py:640` `_CACHE[key](mA,mBp,mBg,mC,mac,strm)` →
+  cutlass-dsl 4.5.2 `jit_executor` `DSLRuntimeError: cannot be converted to pointer`.
+  Root cause: the last runtime arg `strm = cuda.bindings.driver.CUstream(...)` is no
+  longer pointer-packable by the 4.5.2 executor (`ctypes.c_void_p(CUstream)` fails).
+  In 4.5.2 the launch stream is NOT a packed runtime arg — quack 0.5.0 traces the launch
+  with a real stream but passes `stream=None` at the compiled-fn *call* (→ ambient/current
+  stream). Naively passing `None` at our call segfaults `cuLaunchKernelEx`, because our
+  kernels use the *old* `cute.compile(op, …, strm)` + call-with-same-args shape; the whole
+  compile+launch path must move to the 4.5.2 convention. This affects **all ~7 hand-written
+  sm100 cute launch sites** (`grep -n CUstream src/**/cute/**.py`): tm1 gate-gemm, the
+  front fused/train GEMMs, transition b2b, gatebwd, ln_linear_sm100. Each needs migrating
+  to quack 0.5.0's `compile_gemm_kernel`/`.launch` stream convention — genuine per-kernel
+  CuTeDSL work, likely multi-session. `make_trivial_tiled_mma(ab_dtype=…)` is also
+  deprecated (→ separate `a_dtype`/`b_dtype`) but only warns, not fatal.
+ team-gm / MiniWorld are unaffected — they consume
 `miniworld_kernels.ops.*`, and the cute-vs-triton backend choice happens *inside* the
 ops whole-op (Phase 6). No consumer code changes.
 
