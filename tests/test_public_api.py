@@ -37,7 +37,6 @@ _CONTRACT = frozenset(
         "fused_gate_out",
         "sigmoid_gate_fused",
         "layernorm_kernel",
-        "triangle_multiplicative_update",
         "triton_adaptive_layer_norm",
         "triton_augmented_attention_pair_bias",
         "triton_bias_only_attention",
@@ -93,5 +92,38 @@ def test_import_is_side_effect_free() -> None:
         "for h in _heavy if h in m})\n"
         "assert not leaked, f'kernels import pulled heavy backends: {leaked}'\n"
         "assert 'triton_tm1' in dir(k)\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+# Frozen public surface of miniworld_kernels.ops — the WHOLE-OP (composite,
+# weights-as-args, autograd-transparent) contract consumed by model code. Primitives
+# live in `kernels` and are NOT re-exported here. Grows as ops are added.
+_OPS_CONTRACT = frozenset({"triangle_multiplicative_update"})
+
+
+def test_ops_surface_is_frozen() -> None:
+    from miniworld_kernels import ops
+
+    surface = set(ops.__all__)
+    added = surface - _OPS_CONTRACT
+    removed = _OPS_CONTRACT - surface
+    assert not added and not removed, (
+        f"ops public surface changed (added={sorted(added)}, removed={sorted(removed)}). "
+        f"Update _OPS_CONTRACT in tests/test_public_api.py and CHANGELOG.md."
+    )
+
+
+def test_ops_import_is_side_effect_free() -> None:
+    """Importing the ops package must not pull any heavy backend (lazy on call)."""
+    heavy = ", ".join(repr(h) for h in _HEAVY)
+    code = (
+        "import sys\n"
+        "import miniworld_kernels.ops as o\n"
+        f"_heavy = ({heavy},)\n"
+        "leaked = sorted({m.split('.')[0] for m in sys.modules "
+        "for h in _heavy if h in m})\n"
+        "assert not leaked, f'ops import pulled heavy backends: {leaked}'\n"
+        "assert 'triangle_multiplicative_update' in dir(o)\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
