@@ -47,74 +47,114 @@ from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import (
 
 
 # ── FRONT forward (the one new triton kernel) ────────────────────────────────
+# ONE kernel, N-tiled over the 2*H2 output width in BN-channel chunks (contiguous
+# [BK, 2*BN] weight slice + reshape/split per chunk). BN is autotuned WITH a device-aware
+# smem prune: at small d a BN that spans the whole width in a single chunk survives and is
+# picked — identical to the original single wide GEMM — while at large d (where that would
+# OOM A100's 163KB) it is pruned and a smaller BN (more chunks, bounded smem) is used. So
+# the algorithm degrades gracefully with d instead of needing a separate kernel.
+def _front_smem_prune(configs, named_args, **kwargs):  # noqa: ARG001
+    """Drop configs whose per-chunk weight tile [BK, 2*BN] (+ x tile) exceeds device smem."""
+    import triton as _triton
+
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- conservative sm100 budget
+        limit = 227 * 1024
+
+    # Peak smem is dominated by the [BK, 2*BN] weight tile; measured ~132 B per output col
+    # for this gated-GEMM front (the full-width form needed 270336 B at 2*H2=2048, and fit at
+    # 2*H2=1024). Estimate by width (+~6% margin) — matches the observed OOM boundary, whereas
+    # a naive stages*tile product over-counts ~2x and would drop the still-fitting configs.
+    def _smem(c):
+        return int(2 * c.kwargs["BN"]) * 140
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
+
+
 @triton.autotune(
-    # The per-side accumulator is (BM, 2*H2) fp32 (H2=2*d_hidden) — a WIDE single acc,
-    # so keep BM modest (64/32) to stay within the register/tensor-memory budget
-    # (cf. back.py: wide accumulators at BM>=128 fail ptxas allocation on sm_100).
+    # BN = CHANNELS per chunk. Each chunk loads the CONTIGUOUS interleaved [BK, 2*BN] weight
+    # slice (gate+proj for BN channels) in ONE coalesced GEMM, then reshape (BM, BN, 2) + split.
+    # BN=512 spans the whole width in a SINGLE chunk at d<=256 (H2<=512) — then this is exactly
+    # the original wide GEMM. At d=512 (H2=1024) that single-chunk form OOMs, so the smem prune
+    # drops the too-wide configs and autotune falls to BN=256/128 (more, bounded chunks).
     configs=[
-        triton.Config({"BM": 64, "BK": 32}, num_warps=8, num_stages=3),
-        triton.Config({"BM": 64, "BK": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 64, "BK": 64}, num_warps=8, num_stages=2),
-        triton.Config({"BM": 32, "BK": 32}, num_warps=4, num_stages=3),
+        triton.Config({"BM": 64, "BK": 64, "BN": 512}, num_warps=8, num_stages=2),
+        triton.Config({"BM": 64, "BK": 32, "BN": 512}, num_warps=8, num_stages=3),
+        triton.Config({"BM": 32, "BK": 32, "BN": 512}, num_warps=4, num_stages=3),
+        triton.Config({"BM": 64, "BK": 64, "BN": 256}, num_warps=8, num_stages=2),
+        triton.Config({"BM": 64, "BK": 32, "BN": 256}, num_warps=8, num_stages=3),
+        triton.Config({"BM": 64, "BK": 32, "BN": 128}, num_warps=4, num_stages=3),
+        triton.Config({"BM": 32, "BK": 32, "BN": 128}, num_warps=4, num_stages=3),
     ],
     key=["GROUP_M", "H2"],
+    prune_configs_by={"early_config_prune": _front_smem_prune},
 )
 @triton.jit
 def _bidir_front_kernel(
-    x_ptr, w_ptr,               # x:(M,K)  w:(K, 4*H2) = [Lg,L interleaved | Rg,R interleaved]
-    left_ptr, right_ptr,        # each (H2, LL) channel-major (bdll plane c at c*LL + m)
-    preact_ptr,                 # (4*H2, M): [left interleaved 2*H2 rows | right interleaved 2*H2 rows]
+    x_ptr, w_ptr,
+    left_ptr, right_ptr,
+    preact_ptr,
     M, LL,
     K: tl.constexpr, H2: tl.constexpr,
-    BM: tl.constexpr, BK: tl.constexpr, GROUP_M: tl.constexpr,
+    BM: tl.constexpr, BK: tl.constexpr, BN: tl.constexpr, GROUP_M: tl.constexpr,
     SAVE_PREACT: tl.constexpr = True,
 ):
     pid = tl.program_id(0)
     rm = pid * BM + tl.arange(0, BM)
     rk = tl.arange(0, BK)
-    r2h = tl.arange(0, 2 * H2)          # interleaved (g,p) columns for H2 channels
-    rh = tl.arange(0, H2)
+    c2 = tl.arange(0, 2 * BN)                # contiguous interleaved (g,p) cols within a chunk
     mmask = rm < M
-    W4 = 4 * H2
     smask = rm[None, :] < M
-
+    W4 = 4 * H2
     et = left_ptr.dtype.element_ty
-    r2g = 2 * rh                              # even preact rows (gate logits)
-    r2p = 2 * rh + 1                          # odd  preact rows (projections)
 
-    # ---- LEFT half: weight cols [0 : 2*H2) ----
-    x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
-    w_ptrs = w_ptr + rk[:, None] * W4 + r2h[None, :]
-    acc = tl.zeros((BM, 2 * H2), dtype=tl.float32)
-    for _ in range(0, K, BK):
-        a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
-        acc = tl.dot(a, tl.load(w_ptrs), acc)
-        x_ptrs += BK
-        w_ptrs += BK * W4
-    g, p = tl.split(tl.reshape(acc, (BM, H2, 2)))               # (BM,H2) each: gLlog, pL
-    # preact rows [0 : 2*H2), interleaved [g0,p0,...] (transpose (BM,H2) like front.py)
-    if SAVE_PREACT:
-        tl.store(preact_ptr + r2g[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smask)
-        tl.store(preact_ptr + r2p[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smask)
-    outl = tl.sigmoid(g) * p                                    # (BM, H2)
-    tl.store(left_ptr + rh[:, None] * LL + rm[None, :], tl.trans(outl).to(et), mask=smask)
+    # ---- LEFT half: weight cols [0 : 2*H2), out -> left_ptr, preact rows [0 : 2*H2) ----
+    for c0 in range(0, H2, BN):
+        ch = c0 + tl.arange(0, BN)                       # channel indices this chunk
+        chmask = ch < H2
+        cols = 2 * c0 + c2                               # contiguous cols [2c0 : 2c0+2BN)
+        colmask = cols < 2 * H2
+        x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
+        w_ptrs = w_ptr + rk[:, None] * W4 + cols[None, :]
+        acc = tl.zeros((BM, 2 * BN), dtype=tl.float32)
+        for _ in range(0, K, BK):
+            a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
+            acc = tl.dot(a, tl.load(w_ptrs, mask=colmask[None, :], other=0.0), acc)
+            x_ptrs += BK
+            w_ptrs += BK * W4
+        g, p = tl.split(tl.reshape(acc, (BM, BN, 2)))    # (BM, BN) each: gate-logit, proj
+        smsk = chmask[:, None] & smask
+        if SAVE_PREACT:
+            tl.store(preact_ptr + (2 * ch)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
+            tl.store(preact_ptr + (2 * ch + 1)[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smsk)
+        outl = tl.sigmoid(g) * p
+        tl.store(left_ptr + ch[:, None] * LL + rm[None, :], tl.trans(outl).to(et), mask=smsk)
 
-    # ---- RIGHT half: weight cols [2*H2 : 4*H2) ----
-    x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
-    w_ptrs = w_ptr + 2 * H2 + rk[:, None] * W4 + r2h[None, :]
-    acc = tl.zeros((BM, 2 * H2), dtype=tl.float32)
-    for _ in range(0, K, BK):
-        a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
-        acc = tl.dot(a, tl.load(w_ptrs), acc)
-        x_ptrs += BK
-        w_ptrs += BK * W4
-    g, p = tl.split(tl.reshape(acc, (BM, H2, 2)))
-    # preact rows [2*H2 : 4*H2)
-    if SAVE_PREACT:
-        tl.store(preact_ptr + (2 * H2 + r2g[:, None]) * M + rm[None, :], tl.trans(g).to(et), mask=smask)
-        tl.store(preact_ptr + (2 * H2 + r2p[:, None]) * M + rm[None, :], tl.trans(p).to(et), mask=smask)
-    outr = tl.sigmoid(g) * p
-    tl.store(right_ptr + rh[:, None] * LL + rm[None, :], tl.trans(outr).to(et), mask=smask)
+    # ---- RIGHT half: weight cols [2*H2 : 4*H2), out -> right_ptr, preact rows [2*H2 : 4*H2) ----
+    for c0 in range(0, H2, BN):
+        ch = c0 + tl.arange(0, BN)
+        chmask = ch < H2
+        cols = 2 * H2 + 2 * c0 + c2
+        colmask = (2 * c0 + c2) < 2 * H2
+        x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
+        w_ptrs = w_ptr + rk[:, None] * W4 + cols[None, :]
+        acc = tl.zeros((BM, 2 * BN), dtype=tl.float32)
+        for _ in range(0, K, BK):
+            a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
+            acc = tl.dot(a, tl.load(w_ptrs, mask=colmask[None, :], other=0.0), acc)
+            x_ptrs += BK
+            w_ptrs += BK * W4
+        g, p = tl.split(tl.reshape(acc, (BM, BN, 2)))
+        smsk = chmask[:, None] & smask
+        if SAVE_PREACT:
+            tl.store(preact_ptr + (2 * H2 + 2 * ch)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
+            tl.store(preact_ptr + (2 * H2 + 2 * ch + 1)[:, None] * M + rm[None, :], tl.trans(p).to(et), mask=smsk)
+        outr = tl.sigmoid(g) * p
+        tl.store(right_ptr + ch[:, None] * LL + rm[None, :], tl.trans(outr).to(et), mask=smsk)
 
 
 def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
