@@ -30,14 +30,32 @@ No ``site-packages`` are patched: this only re-exports quack symbols and adjusts
 
 from __future__ import annotations
 
+# This shim supports BOTH quack 0.3.11 (the cute kernels' original pin) and quack 0.5.0
+# (forced by FA4). Everything below is version-tolerant so a 0.3.11 env is not regressed.
+
 # --- fix 1: make gemm_interface's IntEnum-default custom_op schemas parse on py<3.11.
-from quack.rounding import RoundingMode as _RoundingMode
+# (Only quack >= 0.5.0 declares those IntEnum-default custom ops; on 0.3.11 quack.rounding
+# may not exist, so this is best-effort.)
+try:
+    from quack.rounding import RoundingMode as _RoundingMode
 
-if str(_RoundingMode.RN) != str(int(_RoundingMode.RN)):  # py<3.11 only; no-op on py3.11+
-    _RoundingMode.__str__ = lambda self: str(int(self))  # type: ignore[assignment,method-assign]
+    if str(_RoundingMode.RN) != str(int(_RoundingMode.RN)):  # py<3.11 only; no-op on py3.11+
+        _RoundingMode.__str__ = lambda self: str(int(self))  # type: ignore[assignment,method-assign]
+except Exception:  # noqa: BLE001 - older quack without quack.rounding / no schema issue
+    pass
 
-# --- fix 2: cache relocation (light imports; do NOT pull gemm_interface here).
-from quack.cache import is_compile_only, jit_cache  # noqa: E402
+# --- fix 2: jit_cache / compile-only flag location (moved between 0.3.11 and 0.5.0).
+try:
+    # quack >= 0.5.0
+    from quack.cache import is_compile_only, jit_cache  # noqa: E402
+except ImportError:
+    # quack 0.3.11: jit_cache + module-level COMPILE_ONLY flag in quack.cache_utils.
+    from quack.cache_utils import jit_cache  # noqa: E402,F401
+
+    def is_compile_only() -> bool:  # noqa: D401 - read the flag live, not snapshot at import
+        import quack.cache_utils as _cu
+
+        return bool(getattr(_cu, "COMPILE_ONLY", False))
 
 # gemm_interface is imported lazily (below) so merely needing jit_cache / is_compile_only
 # does not eagerly register every quack GEMM custom op. The RoundingMode fix above is
