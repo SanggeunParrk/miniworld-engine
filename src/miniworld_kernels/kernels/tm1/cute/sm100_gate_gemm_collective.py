@@ -604,7 +604,7 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
 
     def _mark(t3, leading_dim):
         # (L,X,Y) torch tensor -> marked cute tensor; __call__ permutes to MNKL at trace time.
-        return from_dlpack(t3, assumed_align=16).mark_layout_dynamic(leading_dim=leading_dim)
+        return from_dlpack(t3, assumed_align=16, enable_tvm_ffi=True).mark_layout_dynamic(leading_dim=leading_dim)
 
     # A:(M,K) k-major, B:(N,K) k-major -> (1,X,K) with K contiguous (leading_dim=2)
     mA = _mark(A.detach().unsqueeze(0), 2)    # (L, M, K)
@@ -623,7 +623,7 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
         ret = C
 
     mac = get_max_active_clusters(1)   # memoized: no per-call probe recompile
-    strm = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+    strm = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
     key = (M, N, K, mmajor)
     if key not in _CACHE:
         op = GatedPersistentGemmKernel(
@@ -636,8 +636,8 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
         op.no_exp = os.environ.get("MW_NOEXP") == "1"
         op.sig_mode = os.environ.get("MW_SIG", "rsqrt")
         op.epi_depth = int(os.environ.get("MW_EPI_DEPTH", "3"))
-        _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm)
-    _CACHE[key](mA, mBp, mBg, mC, mac, strm)
+        _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm, options="--enable-tvm-ffi")
+    _CACHE[key](mA, mBp, mBg, mC)
     if M != _M_orig:
         # slice off the padded rows; .contiguous() so the mmajor zero-copy [B,D,L,L]
         # reshape downstream still sees a dense (N, M_orig) / (M_orig, N) buffer.

@@ -270,20 +270,21 @@ def guard_dtype(
 
 
 def trimul_out_layout(device: torch.device | None = None) -> str:
-    """cute tm1 ``out_layout`` for the running GPU: ``bdll_direct_wide`` everywhere — one
-    wide quack ``gemm_act`` (tcgen05, N=2D [gate|proj], A loaded once) M-major + a triton
-    GLU fold, producing d-major [B,D,L,L] (feeds the efficient d-major einsum; the d-last
-    ``blld`` einsum is ~9x slower).
+    """cute tm1 ``out_layout`` for the running GPU: ``bdll_sm100`` on sm_100 (the hand-rolled
+    tcgen05 dual-B gated collective — one A load, dual-TMEM proj+gate accumulators, fused GLU
+    epilogue, M-major TMA store straight into d-major [B,D,L,L]); ``bdll_direct_wide`` elsewhere
+    (one wide quack ``gemm_act`` + triton GLU fold).
 
-    The hand-rolled from-scratch tcgen05 collective (``bdll_sm100``) is NOT selected: its
-    4.4.2-era launch is incompatible with the cutlass-dsl 4.5.2 launch ABI (host crash in
-    cuLaunchKernelEx). Quack-primitive layouts on quack 0.5.0 / cutlass 4.5.2, L=384 inference:
-    ``bdll_direct_wide`` 0.184 ms, ``bdll_direct`` 0.194 ms, ``bdll`` (fused-glu + permute)
-    0.311 ms, triton 0.284 ms, pytorch 1.14 ms. All beat triton. The retired bdll_sm100 was
-    0.160 ms (fused GLU + M-major store in one epilogue — not expressible via quack's glu,
-    which rejects M-major postact); recovering that needs re-vendoring the collective onto
-    quack 0.5.0's GemmSm100. Env-overridable (``MINIWORLD_TRIMUL_OUT_LAYOUT``) for debug/A-B."""
+    The bdll_sm100 collective's launch was migrated to cutlass-dsl 4.5.2's TVM-FFI convention
+    (``make_fake_stream(use_tvm_ffi_env_stream=True)`` at compile, ``options='--enable-tvm-ffi'``,
+    ``from_dlpack(enable_tvm_ffi=True)`` tensors, and a runtime call of the data tensors only —
+    stream via env, max_active_clusters baked as Constexpr). The DEVICE kernel/algorithm is
+    unchanged; only the launch ABI moved. Result on quack 0.5.0 / cutlass 4.5.2, L=384 inference:
+    ``bdll_sm100`` 0.115 ms (fastest — beats even the old 4.4.2 bdll_sm100 at 0.160 ms),
+    ``bdll_direct_wide`` 0.184 ms, ``bdll_direct`` 0.194 ms, triton 0.284 ms, pytorch 1.14 ms.
+    d-major [B,D,L,L] feeds the efficient d-major einsum (the d-last ``blld`` einsum is ~9x
+    slower). Env-overridable (``MINIWORLD_TRIMUL_OUT_LAYOUT``) for debug/A-B."""
     override = os.environ.get("MINIWORLD_TRIMUL_OUT_LAYOUT")
     if override:
         return override.strip()
-    return "bdll_direct_wide"
+    return "bdll_sm100" if is_sm100(device) else "bdll_direct_wide"
