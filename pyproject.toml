@@ -27,6 +27,11 @@ baselines = ["cuequivariance-torch>=0.9,<0.10", "scipy"]
 bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
 # Dev: tests, lint, type smoke-check.
 dev = ["pytest", "ruff", "pyright"]
+# FlashAttention-4 (Blackwell/sm_100) — EXTERNAL CuTeDSL JIT wheel, used only as a
+# benchmark comparison backend (miniworld-kernels ships no flash kernel of its own).
+# Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
+# install with: uv pip install --prerelease=allow "flash-attn-4[cu13]"
+flash = ["flash-attn-4"]
 
 [build-system]
 requires = ["setuptools>=61"]
