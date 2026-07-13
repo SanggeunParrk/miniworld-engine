@@ -37,6 +37,14 @@ _LAZY_OPS = {
         "miniworld_kernels.kernels.conditioned_transition.whole_op",
         "conditioned_transition",
     ),
+    "augmented_attention_pair_bias": (
+        "miniworld_kernels.kernels.augmented_attention.whole_op",
+        "augmented_attention_pair_bias",
+    ),
+    "layer_norm_linear": (
+        "miniworld_kernels.kernels.layernorm_linear.pair_bias",
+        "triton_layer_norm_linear",
+    ),
 }
 
 
@@ -55,7 +63,9 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "augmented_attention_pair_bias",
     "conditioned_transition",
+    "layer_norm_linear",
     "transition",
     "triangle_attention",
     "triangle_multiplicative_update",

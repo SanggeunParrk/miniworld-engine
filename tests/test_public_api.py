@@ -101,7 +101,9 @@ def test_import_is_side_effect_free() -> None:
 # live in `kernels` and are NOT re-exported here. Grows as ops are added.
 _OPS_CONTRACT = frozenset(
     {
+        "augmented_attention_pair_bias",
         "conditioned_transition",
+        "layer_norm_linear",
         "transition",
         "triangle_attention",
         "triangle_multiplicative_update",
