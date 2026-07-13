@@ -148,12 +148,12 @@ def tm1_cute_forward(
         # non-gated quack GEMMs + the Triton gate kernel AND the permute in one launch/side.
         if B != 1:
             raise NotImplementedError("bdll_sm100 currently only supports B=1")
-        import os as _os
-        if _os.environ.get("MINIWORLD_TM1_SM100_IMPL", "collective") == "naive":
-            from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm import gate_gemm as _sm100_gate_gemm
-        else:
-            # v15: rebuilt on CUTLASS tuned Blackwell persistent collective (dual-B fused GLU).
-            from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import gate_gemm as _sm100_gate_gemm
+        # Built on CUTLASS's tuned Blackwell persistent collective (dual-B fused GLU):
+        # K-tiled mainloop, N-tiled by the persistent scheduler, dual-TMEM accumulator
+        # guarded to <=512 cols; handles the full d range. (The earlier from-scratch
+        # `naive` gate GEMM — full-K/N single buffer, d=128-only, strictly slower — was
+        # removed; the collective supersedes it.)
+        from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import gate_gemm as _sm100_gate_gemm
 
         # gate_gemm computes A@Bp.T ; tm1 wants x@W.T with W = to_*.weight, and the
         # WL/WLg/... passed here are W.T, so Bp = (W.T).mT = W (contiguous).
