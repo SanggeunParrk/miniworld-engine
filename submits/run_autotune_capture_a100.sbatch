@@ -54,6 +54,7 @@ capture_target() {
     triangle_attention)         run_matrix triangle_attention "$SHAPES" ;;
     bias_only_attention)        run_matrix bias_only_attention "$SHAPES" ;;
     triangle_multiplication)    run_matrix triangle_multiplication "$SHAPES" ;;
+    triangle_multiplication_bidirectional) run_matrix triangle_multiplication_bidirectional "$SHAPES" ;;
     conditioned_transition)     run_matrix conditioned_transition "precision=32 $SHAPES d_single_token=384" ;;
     adaptive_layernorm)         run_matrix adaptive_layernorm "$SHAPES" ;;
     augmented_attention_token)  run_matrix augmented_attention_token "$SHAPES" ;;
