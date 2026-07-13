@@ -46,6 +46,28 @@ def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK: tl.constexpr):
     tl.store(proj_ptr + offs, (p * tl.sigmoid(g)).to(tl.bfloat16), mask=m)
 
 
+@triton.jit
+def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK: tl.constexpr):
+    """out[flat < D_L2 region] = sigmoid(wide[gate half]) * wide[proj half].
+
+    ``wide`` is (2D, L, L) contiguous == gate channels [0:D] then proj channels
+    [D:2D], each (L,L). Flattened, gate elem e maps to proj elem e + D_L2. One read
+    of gate + one of proj + one write, fp32 math, single bf16 round on store."""
+    pid = tl.program_id(0).to(tl.int64)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    m = offs < D_L2
+    g = tl.load(wide_ptr + offs, mask=m).to(tl.float32)              # gate half
+    p = tl.load(wide_ptr + offs + D_L2, mask=m).to(tl.float32)       # proj half
+    tl.store(out_ptr + offs, (p * tl.sigmoid(g)).to(tl.bfloat16), mask=m)
+
+
+def _glu_wide(out: torch.Tensor, wide: torch.Tensor, D: int, L: int) -> None:
+    """out[B,D,L,L] = sigmoid(wide[:,0:D]) * wide[:,D:2D], wide is (B,2D,L,L). B=1."""
+    D_L2 = D * L * L
+    BLOCK = 1024
+    _glu_wide_kernel[(triton.cdiv(D_L2, BLOCK),)](wide, out, 2 * D_L2, D_L2, BLOCK=BLOCK)
+
+
 def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor) -> None:
     """proj *= sigmoid(gate), fused single-pass Triton kernel. In-place on proj."""
     assert proj.is_contiguous() and gate.is_contiguous()
@@ -106,6 +128,45 @@ def tm1_cute_forward(
         left_bdll = left_flat.view(B, L, L, D).permute(0, 3, 1, 2).contiguous()
         right_bdll = right_flat.view(B, L, L, D).permute(0, 3, 1, 2).contiguous()
         return left_bdll, right_bdll
+    if out_layout == "bdll_direct_wide":
+        # Like bdll_direct but ONE wide GEMM per side (N=2D, [gate|proj] concatenated) so
+        # A (=x) is loaded ONCE per side instead of twice, and there is one GEMM launch per
+        # side instead of two. act=None M-major store (no glu epilogue -> no stride-8 issue),
+        # then a triton kernel folds sigmoid(gate)*proj into [B,D,L,L]. Aims to recover the
+        # hand-rolled collective's shared-A-load / fewer-launch win via quack primitives.
+        if B != 1:
+            raise NotImplementedError("bdll_direct_wide currently only supports B=1")
+        Bcat_L = torch.cat([WLg, WL], dim=1)  # (D, 2D): gate cols [0:D], proj cols [D:2D]
+        Bcat_R = torch.cat([WRg, WR], dim=1)
+
+        def _side(Bcat: torch.Tensor) -> torch.Tensor:
+            wide = torch.empty(B, 2 * D, L, L, device=x.device, dtype=x.dtype)
+            wide_view = wide.view(2 * D, L * L).T  # (M=L*L, 2D) M-major
+            gemm_act(A=x_flat, B=Bcat, activation=None, store_preact=False, postact_out=wide_view)
+            out = torch.empty(B, D, L, L, device=x.device, dtype=x.dtype)
+            _glu_wide(out, wide, D, L)
+            return out
+
+        return _side(Bcat_L), _side(Bcat_R)
+    if out_layout == "bdll_glu":
+        # Fused gated GEMM (quack gemm_act "glu") storing the GLU result M-major straight
+        # into [B,D,L,L] (zero-copy, NO permute) — the quack-0.5.0 equivalent of the old
+        # hand-rolled bdll_sm100 collective: one A load, dual-B (interleaved [gate|proj]),
+        # fused sigmoid-gate epilogue. Recovers the fusion bdll_direct dropped (2 plain
+        # GEMMs + a separate triton gate) while keeping the zero-copy M-major store.
+        if B != 1:
+            raise NotImplementedError("bdll_glu currently only supports B=1")
+
+        def _bdll_buf():
+            t = torch.empty(B, D, L, L, device=x.device, dtype=x.dtype)
+            return t, t.view(D, L * L).T  # (storage[B,D,L,L], M-major (M=L*L,N=D) view)
+
+        left_bdll, left_view = _bdll_buf()
+        right_bdll, right_view = _bdll_buf()
+        # glu halves N: B is (D, 2D) interleaved -> postact is (M, D) = sigmoid(gate)*proj.
+        gemm_act(A=x_flat, B=B_left, activation="glu", store_preact=False, postact_out=left_view)
+        gemm_act(A=x_flat, B=B_right, activation="glu", store_preact=False, postact_out=right_view)
+        return left_bdll.view(B, D, L, L), right_bdll.view(B, D, L, L)
     if out_layout == "bdll_direct":
         # Zero-copy [B, D, L, L] store with NO transpose: pre-allocate the
         # [B, D, L, L] storage and hand the GEMM an M-major view of it

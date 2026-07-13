@@ -270,16 +270,20 @@ def guard_dtype(
 
 
 def trimul_out_layout(device: torch.device | None = None) -> str:
-    """cute tm1 ``out_layout`` for the running GPU: ``bdll_direct`` everywhere — the
-    quack ``gemm_act`` (tcgen05) + M-major zero-copy store + triton gate path.
+    """cute tm1 ``out_layout`` for the running GPU: ``bdll_direct_wide`` everywhere — one
+    wide quack ``gemm_act`` (tcgen05, N=2D [gate|proj], A loaded once) M-major + a triton
+    GLU fold, producing d-major [B,D,L,L] (feeds the efficient d-major einsum; the d-last
+    ``blld`` einsum is ~9x slower).
 
-    The hand-rolled from-scratch tcgen05 collective (``bdll_sm100``) is NOT selected:
-    its 4.4.2-era launch is incompatible with the cutlass-dsl 4.5.2 launch ABI (host
-    crash in cuLaunchKernelEx). ``bdll_direct`` runs on quack 0.5.0 / cutlass 4.5.2 and
-    is FASTER than the triton path anyway (L=384: cute 0.194 ms vs triton 0.284 ms,
-    ~1.46x; vs pytorch 1.14 ms), so the custom collective is unnecessary. Env-overridable
-    (``MINIWORLD_TRIMUL_OUT_LAYOUT``) for debug / A-B."""
+    The hand-rolled from-scratch tcgen05 collective (``bdll_sm100``) is NOT selected: its
+    4.4.2-era launch is incompatible with the cutlass-dsl 4.5.2 launch ABI (host crash in
+    cuLaunchKernelEx). Quack-primitive layouts on quack 0.5.0 / cutlass 4.5.2, L=384 inference:
+    ``bdll_direct_wide`` 0.184 ms, ``bdll_direct`` 0.194 ms, ``bdll`` (fused-glu + permute)
+    0.311 ms, triton 0.284 ms, pytorch 1.14 ms. All beat triton. The retired bdll_sm100 was
+    0.160 ms (fused GLU + M-major store in one epilogue — not expressible via quack's glu,
+    which rejects M-major postact); recovering that needs re-vendoring the collective onto
+    quack 0.5.0's GemmSm100. Env-overridable (``MINIWORLD_TRIMUL_OUT_LAYOUT``) for debug/A-B."""
     override = os.environ.get("MINIWORLD_TRIMUL_OUT_LAYOUT")
     if override:
         return override.strip()
-    return "bdll_direct"
+    return "bdll_direct_wide"
