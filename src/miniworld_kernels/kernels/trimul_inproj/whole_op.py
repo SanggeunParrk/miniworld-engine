@@ -33,6 +33,100 @@ from __future__ import annotations
 import torch
 
 
+def _cute_eligible(x: torch.Tensor) -> bool:
+    """True when the CuTeDSL trimul path should run for ``x``: Hopper+ (sm90+, where the
+    module dispatch resolves CUTE), bf16, B == 1. Any other input falls back to triton."""
+    if x.dtype != torch.bfloat16 or x.dim() != 4 or x.shape[0] != 1:
+        return False
+    try:
+        from miniworld_kernels.modules.dispatch import (
+            KernelBackend,
+            resolve_triangle_multiplication,
+        )
+        from miniworld_kernels.modules.exceptions import ImplementationType
+
+        return (
+            resolve_triangle_multiplication(ImplementationType.MINIWORLD, x.device)
+            == KernelBackend.CUTE
+        )
+    except Exception:  # noqa: BLE001 - dispatch/import hiccup -> just use triton
+        return False
+
+
+def _mask_2d(mask: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Residue mask (B, L) -> pair mask (B, L, L); a (B, L, L) mask passes through."""
+    return mask if mask.dim() == 3 else (mask.unsqueeze(-1) & mask.unsqueeze(-2))
+
+
+def _trimul_cute(
+    x, outgoing, mask,
+    w_left, w_left_gate, w_right, w_right_gate, g_out_weight, p_out_weight,
+    ln_in_w, ln_in_b, ln_out_w, ln_out_b, eps,
+):
+    """CuTeDSL trimul with weights as args (cuequiv layout bridged to the kernel layout).
+
+    Returns the updated pair, or None if the cute path can't run this shape (caller then
+    uses triton). Mirrors ``modules/triangle_multiplication`` exactly: the dedicated
+    ``bdll_sm100`` inference path under no-grad, the v6 merged autograd kernel under grad.
+    Grads reach every weight arg — WL/… are differentiable ``.t()`` views of the packed
+    inputs and the inference path's einsum/back-split are autograd-transparent too."""
+    d_hidden, d_pair = w_left.shape[-2], w_left.shape[-1]
+    if d_hidden != d_pair:  # the cute kernels require d_hidden == d_pair (AF3 config)
+        return None
+    # cuequiv nn.Linear weights -> the kernels' x@W ("...weight.T") form. Cheap D×D
+    # transposes; .contiguous() so the kernels get dense operands; both differentiable.
+    WL = w_left.t().contiguous()
+    WLg = w_left_gate.t().contiguous()
+    WR = w_right.t().contiguous()
+    WRg = w_right_gate.t().contiguous()
+    Wg = g_out_weight.t().contiguous()   # to_gate.weight.T
+    Wp = p_out_weight                    # to_out.weight (nn.Linear form; back-split wants this)
+    direction = "out" if outgoing else "in"
+
+    grad = torch.is_grad_enabled() and any(
+        t is not None and t.requires_grad
+        for t in (x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_out_w)
+    )
+    if grad:
+        from .cute.v6_training_merged_sm100 import (
+            prepack_lr_operand_sm100,
+            v6_forward_merged_sm100,
+        )
+
+        b_lr = prepack_lr_operand_sm100(WL, WLg, WR, WRg)
+        row_scale = _mask_2d(mask, x).reshape(-1).to(x.dtype) if mask is not None else None
+        return v6_forward_merged_sm100(
+            x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b,
+            eps, b_lr, direction, row_scale,
+        )
+
+    # inference (no-grad): the fast bdll_sm100 front + tcgen05 back-split
+    from miniworld_kernels.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
+    from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
+    from miniworld_kernels.kernels.tm1.cute.launch import tm1_cute_forward
+    from miniworld_kernels.kernels.trimul_inproj.cute.back_split_sm100 import (
+        trimul_back_split_sm100,
+    )
+    from miniworld_kernels.modules.triangle_multiplication.dispatch import resolve_out_layout
+
+    b, l1, l2, d = x.shape
+    if mask is not None:
+        x_n = fused_ln_mask(x, ln_in_w, ln_in_b, _mask_2d(mask, x))
+    else:
+        x_n = triton_layernorm(
+            x.reshape(b * l1 * l2, d), ln_in_w, ln_in_b, eps
+        ).view(b, l1, l2, d)
+    left, right = tm1_cute_forward(
+        x_n, WL, WLg, WR, WRg, out_layout=resolve_out_layout(x.device)
+    )
+    tri = (
+        torch.einsum("bdik,bdjk->bdij", left, right)
+        if outgoing
+        else torch.einsum("bdki,bdkj->bdij", left, right)
+    )
+    return trimul_back_split_sm100(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps)
+
+
 def triangle_multiplicative_update(
     x: torch.Tensor,                    # (B, L, L, d_pair) pair representation
     direction: str,                     # "outgoing" | "incoming"
@@ -71,6 +165,21 @@ def triangle_multiplicative_update(
     d_hidden = two_h // 2
     w_left, w_right = p_in_weight[:d_hidden], p_in_weight[d_hidden:]
     w_left_gate, w_right_gate = g_in_weight[:d_hidden], g_in_weight[d_hidden:]
+
+    # Backend dispatch: on Hopper+ (sm90+) with bf16 B=1, use the CuTeDSL (tcgen05) path —
+    # the same one modules/triangle_multiplication resolves — which is ~1.5x faster than
+    # triton on B200. Falls back to triton for any input the cute kernels don't cover
+    # (non-bf16, B>1, pre-Hopper). Grads flow to every weight arg because the unpacked
+    # weights below are differentiable slice+transpose VIEWS of the packed inputs.
+    if _cute_eligible(x):
+        out = _trimul_cute(
+            x, outgoing, mask,
+            w_left, w_left_gate, w_right, w_right_gate,
+            g_out_weight, p_out_weight,
+            norm_in_weight, norm_in_bias, norm_out_weight, norm_out_bias, eps,
+        )
+        if out is not None:
+            return out
 
     return trimul_triton(
         x,
