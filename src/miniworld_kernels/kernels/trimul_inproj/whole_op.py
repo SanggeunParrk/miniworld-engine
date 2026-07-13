@@ -127,6 +127,36 @@ def _trimul_cute(
     return trimul_back_split_sm100(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps)
 
 
+def _bidir_cute(
+    x, mask, ln_in_w, ln_in_b,
+    to_left_w, to_left_gate_w, to_right_w, to_right_gate_w,
+    ln_out_w, ln_out_b, to_out_w, to_gate_w, eps,
+):
+    """CuTeDSL bidirectional trimul with weights as args. Returns the updated pair, or None
+    if the shape isn't cute-supported (caller uses triton). Uses the same fused-bidir kernel
+    the module resolves (``bidir_forward_sm100``); it is autograd-capable (fwd+bwd), so grads
+    reach every weight arg (the .t() views are differentiable) AND ``x`` (the LN_in is a plain
+    autograd-transparent triton layernorm). Under no-grad it is forward-only."""
+    two_h, d_pair = to_left_w.shape[-2], to_left_w.shape[-1]
+    h = two_h // 2
+    if two_h % 2 != 0 or h != d_pair:  # per-direction hidden must equal d_pair (AF3 config)
+        return None
+    WL = to_left_w.t().contiguous()
+    WLg = to_left_gate_w.t().contiguous()
+    WR = to_right_w.t().contiguous()
+    WRg = to_right_gate_w.t().contiguous()
+    Wg = to_gate_w.t().contiguous()   # to_gate.weight.T (d, d)
+    Wp = to_out_w                     # to_out.weight (d, 2h) nn.Linear form
+    from .cute.bidir_training_sm100 import bidir_forward_sm100, prepack_lr_operand_sm100
+
+    b_lr = prepack_lr_operand_sm100(WL, WLg, WR, WRg)
+    row_scale = _mask_2d(mask, x).reshape(-1).to(x.dtype) if mask is not None else None
+    return bidir_forward_sm100(
+        x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b,
+        eps, b_lr, h, row_scale,
+    )
+
+
 def triangle_multiplicative_update(
     x: torch.Tensor,                    # (B, L, L, d_pair) pair representation
     direction: str,                     # "outgoing" | "incoming"
@@ -225,6 +255,18 @@ def bidirectional_triangle_multiplicative_update(
     takes the four (2·d_hidden, d_pair) projections directly.
     """
     from .triton.bidirectional import bidirectional_trimul_triton
+
+    # Backend dispatch: cute (tcgen05) on Hopper+ bf16 B=1 — the fused-bidir kernel the
+    # module resolves (~1.8x faster than triton on B200) — else triton. Grads flow to
+    # every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
+    if _cute_eligible(x):
+        out = _bidir_cute(
+            x, mask, norm_in_weight, norm_in_bias,
+            to_left_weight, to_left_gate_weight, to_right_weight, to_right_gate_weight,
+            norm_out_weight, norm_out_bias, to_out_weight, to_gate_weight, eps,
+        )
+        if out is not None:
+            return out
 
     d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
     return bidirectional_trimul_triton(
