@@ -140,101 +140,89 @@ def _coerce(impl: ImplementationType | str) -> ImplementationType:
 
 
 # --------------------------------------------------------------------------- #
-# Per-op resolvers.  Each maps the PUBLIC option (incl. MINIWORLD auto) to the
-# concrete KernelBackend the module should run.  These encode ONLY the family
-# choice made at the module layer; the exact kernel within a family (shape / arch
-# sub-dispatch) is chosen next to the kernels, unchanged.
+# MINIWORLD (auto) backend policy — SINGLE source of truth.
+#
+# One declarative table maps each op to the module-layer backend the repo knows is best,
+# per arch. A value is either a fixed ``KernelBackend`` or a ``callable(device)->KernelBackend``
+# for arch-dependent choices. An op that is absent — or a GPU the callable does not specially
+# recognize — falls back to ``_DEFAULT_BACKEND`` (TRITON), the portable path: brand-new GPUs
+# get Triton by default, while op/arch pairs the repo has developed + measured a faster
+# backend for (e.g. trimul cute on Hopper+) follow that. This encodes ONLY the module-layer
+# family choice; kernel-internal shape/arch sub-dispatch still lives next to the kernels.
+#
+# Concrete (non-MINIWORLD) requests pass straight through ``to_kernel_backend``.
 # --------------------------------------------------------------------------- #
-def resolve_transition(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """Transition: no cuequivariance kernel, so MINIWORLD (and the CUEQUIVARIANCE
-    request, which shares the same path) resolves to the TRITON family, whose
-    internal dispatch picks hand-CUDA b2b (d in {128,256}, n==4) / cute split
-    (d>=512) / triton fused per shape+mode."""
-    impl = _coerce(impl)
-    if impl == ImplementationType.MINIWORLD:
-        return KernelBackend.TRITON
-    return to_kernel_backend(impl)
+_DEFAULT_BACKEND = KernelBackend.TRITON  # unknown op / unknown GPU -> portable Triton
 
 
-def resolve_triangle_attention(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """TriangleAttention: the only tensor-core kernels are the triton ones (which
-    themselves per-GPU dispatch fused vs split), so MINIWORLD -> TRITON."""
-    impl = _coerce(impl)
-    if impl == ImplementationType.MINIWORLD:
-        return KernelBackend.TRITON
-    return to_kernel_backend(impl)
-
-
-def resolve_adaptive_layernorm(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """AdaptiveLayerNorm: only PYTORCH + TRITON exist, MINIWORLD -> TRITON."""
-    impl = _coerce(impl)
-    if impl == ImplementationType.MINIWORLD:
-        return KernelBackend.TRITON
-    return to_kernel_backend(impl)
-
-
-def resolve_conditioned_transition(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """ConditionedTransition: TRITON is the only fused family (the inference
-    d_hidden sub-dispatch lives in the kernel), MINIWORLD -> TRITON."""
-    impl = _coerce(impl)
-    if impl == ImplementationType.MINIWORLD:
-        return KernelBackend.TRITON
-    return to_kernel_backend(impl)
-
-
-def resolve_augmented_attention(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """AugmentedAttention: only PYTORCH + TRITON exist, MINIWORLD -> TRITON."""
-    impl = _coerce(impl)
-    if impl == ImplementationType.MINIWORLD:
-        return KernelBackend.TRITON
-    return to_kernel_backend(impl)
-
-
-def resolve_layernorm(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """LayerNorm (primitives): MINIWORLD is our auto-routing LayerNorm
-    (``layernorm_kernel``: fused triton forward + per-shape auto-dispatched
-    backward). It is a *distinct* kernel from the legacy vendored ``triton_layernorm``
-    (the TRITON/CUEQUIVARIANCE path), so MINIWORLD maps to the CUDA-family entry
-    (``layernorm_kernel``), matching the prior ``{MINIWORLD, CUDA}`` grouping."""
-    impl = _coerce(impl)
-    if impl == ImplementationType.MINIWORLD:
-        return KernelBackend.CUDA
-    return to_kernel_backend(impl)
-
-
-def resolve_triangle_multiplication(
-    impl: ImplementationType | str, device: torch.device | None = None
-) -> KernelBackend:
-    """TriangleMultiplication: MINIWORLD is an *architecture capability* choice
-    (not a shape crossover):
-
-      * sm_100 (B200) / sm_90 (H100) and other cute-capable archs -> CUTE (the
-        exact cute out_layout — ``bdll_sm100`` vs ``bdll_direct`` — is picked by
-        :func:`trimul_out_layout`).
-      * pre-Hopper (no tcgen05 / no supported cute GEMM) -> TRITON.
-
-    Env override ``MINIWORLD_TRIMUL_IMPL`` (debug / manual pin) still wins. A wrong
-    layout pick can only be slower, never incorrect (same bf16 in / fp32 acc math).
-    """
-    impl = _coerce(impl)
-    if impl != ImplementationType.MINIWORLD:
-        return to_kernel_backend(impl)
+def _trimul_known_best(device: torch.device | None) -> KernelBackend:
+    """trimul: cute on Hopper+ (the measured winner; out_layout via ``trimul_out_layout``),
+    Triton pre-Hopper. Env ``MINIWORLD_TRIMUL_IMPL`` pins a backend for debug/A-B."""
     override = os.environ.get("MINIWORLD_TRIMUL_IMPL")
     if override:
         return to_kernel_backend(ImplementationType(override.strip().lower()))
     return KernelBackend.CUTE if is_sm90plus(device) else KernelBackend.TRITON
+
+
+# op name -> KernelBackend | callable(device)->KernelBackend
+_MINIWORLD_KNOWN_BEST: dict[str, object] = {
+    "triangle_multiplication": _trimul_known_best,
+    # layernorm's MINIWORLD is the auto-routing layernorm_kernel (fused triton fwd +
+    # per-shape auto-dispatched backward), grouped under the CUDA-family entry.
+    "layernorm": KernelBackend.CUDA,
+    # These have no faster module-layer backend than the TRITON family (whose kernels do
+    # their own shape/arch sub-dispatch, incl. cute on Hopper+ internally). Listed
+    # explicitly so the policy is auditable rather than implicit-by-omission.
+    "transition": KernelBackend.TRITON,
+    "triangle_attention": KernelBackend.TRITON,
+    "adaptive_layernorm": KernelBackend.TRITON,
+    "conditioned_transition": KernelBackend.TRITON,
+    "augmented_attention": KernelBackend.TRITON,
+}
+
+
+def resolve(
+    op: str, impl: ImplementationType | str, device: torch.device | None = None
+) -> KernelBackend:
+    """Resolve the PUBLIC option to a concrete ``KernelBackend`` for ``op`` on ``device``.
+
+    ``MINIWORLD`` -> the known-best table (unknown op / unknown GPU -> TRITON default);
+    any concrete backend passes through unchanged. Single entry point behind the per-op
+    ``resolve_*`` wrappers kept below for the modules / benchmark harness."""
+    impl = _coerce(impl)
+    if impl != ImplementationType.MINIWORLD:
+        return to_kernel_backend(impl)
+    best = _MINIWORLD_KNOWN_BEST.get(op, _DEFAULT_BACKEND)
+    return best(device) if callable(best) else best
+
+
+# Thin per-op wrappers (stable API for the modules + benchmark harness + tests).
+def resolve_transition(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("transition", impl, device)
+
+
+def resolve_triangle_attention(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("triangle_attention", impl, device)
+
+
+def resolve_adaptive_layernorm(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("adaptive_layernorm", impl, device)
+
+
+def resolve_conditioned_transition(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("conditioned_transition", impl, device)
+
+
+def resolve_augmented_attention(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("augmented_attention", impl, device)
+
+
+def resolve_layernorm(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("layernorm", impl, device)
+
+
+def resolve_triangle_multiplication(impl, device=None):  # noqa: ANN001, ANN201
+    return resolve("triangle_multiplication", impl, device)
 
 
 # --------------------------------------------------------------------------- #
