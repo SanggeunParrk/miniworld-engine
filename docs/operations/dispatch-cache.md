@@ -157,18 +157,68 @@ changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back
 
 ## Building the shipped cache (on the target GPU)
 
+There are two builders; both write the runtime cache, which you then copy into
+`src/miniworld_kernels/autotune/data/` and commit. A new GPU (H100/B200/…) is enabled by
+running one of these on that box and committing its JSONs.
+
+**1. Capture builder (preferred — covers every wired kernel automatically).** Instead of
+hand-replicating each kernel's launch, `autotune/capture.py` instruments the Triton autotuner
+(`Autotuner._bench`) and records every `(config -> measured ms)` as it is benched during a real
+module forward/backward, keyed by the SAME `(op, dtype, bucket)` the runtime prune uses. So one
+module run populates the caches of every autotune kernel it fires. Drive it through the existing
+bench harness:
+
+    MINIWORLD_RUN_AUTOTUNE=1 MINIWORLD_AUTOTUNE_CAPTURE=1 \
+      python benchmarks/runners/bench.py kernel=<module> implementations='[miniworld]' \
+      compile=false cudagraph=manual mode=training sweep_axis=seq_len ...
+
+`RUN_AUTOTUNE=1` unlocks the full grid (no cached narrowing) so every config is benched;
+`AUTOTUNE_CAPTURE=1` installs the capture and flushes top-5 per `(op,dtype,bucket)` at the end.
+`submits/run_autotune_capture_a100.sbatch` runs this across all module targets + modes + sweeps.
+Validated against the hand builder: capture reproduces its top-1 selections (near-ties aside).
+
+**2. Explicit builder (per-kernel, for the pilot kernels).**
+
     PYTHONPATH=src python -m miniworld_kernels.autotune.build --op all     # or --op <name>
 
-The builder core `tune_bucket(op, gk, dtype, bucket, candidates, run_ms, csh)` is
-backend-agnostic: it benches each candidate config via a `run_ms(cfg) -> ms` closure and stores
-the top-K. Triton builders point `run_ms` at `do_bench(kernel.fn[grid])`; CuTe/CUDA builders
-sweep a list of tile/cluster **dicts** and point `run_ms` at building+running the kernel with
-that config (these require sm90+, so they skip on Ampere). Copy `<cache-root>/autotune/*` into
-`src/miniworld_kernels/autotune/data/` and commit. A new GPU (H100/B200/…) is enabled by running
-this on that box and committing its JSONs.
+Its core `tune_bucket(op, gk, dtype, bucket, candidates, run_ms, csh)` is backend-agnostic: it
+benches each candidate via a `run_ms(cfg) -> ms` closure and stores the top-K. Triton builders
+point `run_ms` at `do_bench(kernel.fn[grid])`.
 
-Adopted Triton ops so far: `trimul_bidir_front`, `transition_split_fwd` (more as kernels wire
-the prune; the CuTe/CUDA sweep builders are structurally in place and populate on sm90+ boxes).
+Coverage: all live Triton kernels are wired (32 op-tags across triangle_attention,
+augmented_attention, adaln, conditioned_transition, bias_only, layernorm_linear, tm1/tm2,
+transition) and populated on A100 by the capture builder.
+
+## CuTe / CUDA autotune (sm90+)
+
+CuTe/CUDA kernels have no Triton autotune loop — they fix `tile_m/tile_n/cluster/pingpong` at
+build time (e.g. `dualgemm_kernel.py`'s `_CFG` or a `default_config(dev)`). They join the SAME
+cache via the two backend-agnostic hooks; this must be built + verified on an sm90+ box (it
+cannot run on Ampere):
+
+- **runtime pick-one** — replace the hardcoded config with a cache lookup that falls back to the
+  kernel's own default on a miss (so it is a no-op until a cache is shipped):
+
+  ```python
+  from miniworld_kernels.autotune import select_config
+  CANDS = [dict(tile_m=128, tile_n=256, cluster_m=1, cluster_n=1, pingpong=False), ...]
+  def pick(dev, M, N, dtype):
+      best = select_config("trimul_front_cute", dtype=str(dtype),
+                           bucket=shape_bucket(N=N), candidates=CANDS)
+      return best["kwargs"] if best else _default_cfg(dev)   # miss/err -> default
+  ```
+
+- **sweep builder** — feed the candidate dicts + a `run_ms` that builds+runs the kernel with
+  each config into the same `tune_bucket` core:
+
+  ```python
+  run_ms = lambda cfg: do_bench(lambda: run_cute_kernel(**cfg, ...))
+  tune_bucket("trimul_front_cute", gpu_key(), dtype, bucket, CANDS, run_ms, config_space_hash(CANDS))
+  ```
+
+The cache format already stores cute configs (cluster tuples serialize to JSON lists and back);
+`as_cfg_dict` normalizes triton.Config and plain dicts uniformly. Because config choice is
+performance-only, an un-wired cute kernel simply keeps its default and loses nothing.
 
 ## Controls (env)
 
