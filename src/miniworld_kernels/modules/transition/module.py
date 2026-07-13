@@ -25,6 +25,20 @@ _CUTE_BACKWARD_ENV = "MINIWORLD_TRANSITION_CUTE_BACKWARD_BACKEND"
 _CUDA_B2B_ENV = "MINIWORLD_TRANSITION_CUDA_B2B"
 
 
+def _force_split_enabled() -> bool:
+    """Force the split path (ln_in + non-fused triton_transition) instead of the fused
+    kernels. The fused large-d path uses the bounded-smem k-tiled b2b (no OOM at d>=256),
+    but the split is the proven, shape-general fallback: set MINIWORLD_TRANSITION_FORCE_SPLIT=1
+    to A/B against it or as an escape hatch on a GPU where the fused path misbehaves. Static
+    (env, compile-safe) rather than a runtime try/except, which is fragile under torch.compile."""
+    return os.getenv("MINIWORLD_TRANSITION_FORCE_SPLIT", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _cuda_b2b_inference_enabled() -> bool:
     """Whether to route d=128/n=4 inference through the hand-CUDA fused b2b kernel
     (beats the Triton b2b ~1.29x). Default on; set MINIWORLD_TRANSITION_CUDA_B2B=0 to
@@ -164,6 +178,16 @@ class Transition(nn.Module):
 
     def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward-only dispatch: no tensors are saved for backward."""
+        if _force_split_enabled():
+            return self._old_triton_forward(x)
+        # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
+        # bounded-smem k-tiled b2b there (correct, no OOM) but it is SLOWER than the
+        # shape-general split on A100 (measured cudagraph-manual: d=256 2.28 vs 1.40 ms,
+        # d=512 10.9 vs 4.8 ms). So default large-d to the split; d=128 (the AF3 shape)
+        # still takes the fused b2b below, where it wins. is_sm90plus keeps H100/B200 on
+        # their fused/cute paths unchanged.
+        if self.d_hidden >= 256 and not _dispatch.is_sm90plus(x.device):
+            return self._old_triton_forward(x)
         # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> the cute
         # b2b_fwd_sm100 forward (fits smem + correct + cudagraph-capturable at every d; see
         # fused.py's cuda_b2b_ok gate). The legacy split (_old_triton_forward) is retained
@@ -174,10 +198,12 @@ class Transition(nn.Module):
         # K=D=512) -> cute's non-fused tiled GEMM wins there, so it falls through below.
         if (
             _cuda_b2b_inference_enabled()
-            # Hand-CUDA b2b hardcodes Hopper (sm_90a) cutlass includes and does not
-            # build on Blackwell (sm_100) -> skip and fall through to the cute/triton
+            # Hand-CUDA b2b is Hopper (sm_90a) WGMMA/TMA cutlass code: it does not
+            # build/launch on Blackwell (sm_100) NOR on pre-Hopper (sm_80 / A100).
+            # Gate on Hopper *exactly* (is_sm90) -- `not is_sm100` also matched A100
+            # and crashed it. Everything else falls through to the portable Triton
             # path (correctness-guard: never route to a backend that can't run here).
-            and not _dispatch.is_sm100(x.device)
+            and _dispatch.is_sm90(x.device)
             and self.d_hidden in (128, 256)
             and self.n == 4
             and x.is_cuda
@@ -194,9 +220,10 @@ class Transition(nn.Module):
                 self.ln_in.eps,
             )
         # cute_transition_fused is the quack SM90 (H100) WGMMA path; it asserts
-        # SM90-only, so on Blackwell (sm_100) route the wide-d case to the triton
-        # family too (its split path handles any d) — correctness-guard fallback.
-        if self.d_hidden >= 256 and not _dispatch.is_sm100(x.device):
+        # SM90-only. Route the wide-d case here on Hopper *exactly*; on Blackwell
+        # (sm_100) AND on pre-Hopper (sm_80 / A100) fall through to the triton
+        # family (its split path handles any d) — correctness-guard fallback.
+        if self.d_hidden >= 256 and _dispatch.is_sm90(x.device):
             return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight,
@@ -228,16 +255,23 @@ class Transition(nn.Module):
           d=512  cute+tritonbwd 6.90  <  torch 7.52   (b2b fwd OOMs smem at d=512)
         Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
         """
+        if _force_split_enabled():
+            return self._old_triton_forward(x)
+        # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
+        # in training too (d=256 6.3 vs 7.0 ms, d=512 20.2 vs 26.8 ms). d=128 stays fused.
+        if self.d_hidden >= 256 and not _dispatch.is_sm90plus(x.device):
+            return self._old_triton_forward(x)
         # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> cute
         # b2b_fwd_sm100 forward + the sm100 gatebwd (Version A) backward. Verified fwd+bwd
         # cos=1.0 and cudagraph-capturable at every d; ~1.49x faster fwd+bwd than the legacy
         # split at d=256 (1.45 vs 2.16ms cudagraph). d=512 now also keeps gatebwd instead of
         # the split's legacy backward. (_old_triton_forward retained only as a fallback.)
-        if self.d_hidden >= 512 and not _dispatch.is_sm100(x.device):
+        if self.d_hidden >= 512 and _dispatch.is_sm90(x.device):
             # d=512: b2b fusion can't fit smem (xn+weights+accumulator) and h round-trip is not
             # the bottleneck (compute-bound) -> cute split (expand + cuBLAS squeeze). The triton
             # (Version A style) backward beats the cute backend AND torch; env can override.
-            # SM90 (H100) only; on Blackwell the triton family (below) carries d=512 too.
+            # SM90 (H100) only; on Blackwell AND pre-Hopper (A100) the triton family (below)
+            # carries d=512 too.
             backward_backend = _large_d_training_backend_from_env() or "triton"
             return kernels.cute_transition_fused(
                 x,

@@ -61,7 +61,39 @@ else:
     ]
 
 
-@triton.autotune(configs=configs, key=["GROUP_M", "n", "N"])
+def _smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
+    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE compile.
+
+    The split transition GEMM pipelines, per k-step, an x tile [BLOCK_M, BLOCK_K] and two
+    weight tiles [BLOCK_K, BLOCK_N] (W1, W2) across ``num_stages`` (bf16 = 2 B). The largest
+    configs (e.g. BLOCK_M=256, BLOCK_K=64, num_stages=5 ~= 320 KB) overflow A100's 163 KB.
+    Triton's bench-time OOM pruning is unsafe under CUDA-graph capture (it fires mid-capture
+    and poisons the stream), and this is now A100's DEFAULT large-d route (module routes
+    pre-Hopper d>=256 here), so prune up front. Device-aware: sm_90/sm_100 keep their configs.
+    """
+    import triton as _triton
+
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- conservative sm100 budget
+        limit = 227 * 1024
+
+    def _smem(c):
+        bm = c.kwargs["BLOCK_M"]
+        bk = c.kwargs["BLOCK_K"]
+        bn = c.kwargs["BLOCK_N"]
+        return c.num_stages * (bm * bk + 2 * bk * bn) * 2
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
+
+
+@triton.autotune(
+    configs=configs, key=["GROUP_M", "n", "N"],
+    prune_configs_by={"early_config_prune": _smem_early_prune},
+)
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -122,7 +154,10 @@ def transition_fwd_kernel(
     )
 
 
-@triton.autotune(configs=configs, key=["GROUP_M", "n", "N"])
+@triton.autotune(
+    configs=configs, key=["GROUP_M", "n", "N"],
+    prune_configs_by={"early_config_prune": _smem_early_prune},
+)
 @triton.jit
 def transition_bwd_kernel(
     x_ptr,

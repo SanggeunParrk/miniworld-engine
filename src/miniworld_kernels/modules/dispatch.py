@@ -98,6 +98,19 @@ def is_sm90plus(device: torch.device | None = None) -> bool:
     return capability(device)[0] >= 9  # noqa: PLR2004
 
 
+def is_sm90(device: torch.device | None = None) -> bool:
+    """True on Hopper *exactly* (sm_9x, major == 9) — NOT Blackwell.
+
+    Distinct from :func:`is_sm90plus` (>= 9): the hand-CUDA b2b and the quack cute
+    ``transition_fused`` kernels are Hopper WGMMA/TMA (sm_90a) code that neither
+    builds/launches on pre-Hopper (sm_80 / A100) nor on Blackwell (sm_100). Guards
+    that route to those kernels must use this, not ``not is_sm100`` — otherwise
+    pre-Hopper GPUs (which are also "not sm100") get routed into a Hopper-only
+    kernel and crash. A100 falls through to the portable Triton path instead.
+    """
+    return capability(device)[0] == 9  # noqa: PLR2004
+
+
 # --------------------------------------------------------------------------- #
 # Public ImplementationType -> internal KernelBackend
 # --------------------------------------------------------------------------- #

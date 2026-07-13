@@ -402,7 +402,15 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
     if x.shape[-1] <= 256:  # noqa: PLR2004
         return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                      bias_weight, eps_x, eps_cond)
-    if x.dtype in (torch.float16, torch.bfloat16):
+    # lnfold's fused GEMM is the cute quack path imported directly from
+    # layernorm_linear.cute (SM90 WGMMA/TMA, sm_90a-only) with NO internal fallback — unlike
+    # the top-level layernorm_linear(), it does not self-dispatch by arch. So gate it on
+    # Hopper *exactly* (major == 9); on pre-Hopper (sm_80 / A100) and Blackwell (sm_100) use
+    # the portable materialize + cuBLAS path. Without this, bf16/fp16 d>256 crashes on A100.
+    if x.dtype in (torch.float16, torch.bfloat16) and (
+        torch.cuda.is_available()
+        and torch.cuda.get_device_capability(x.device)[0] == 9  # noqa: PLR2004
+    ):
         return adaln_inference_lnfold(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                       bias_weight, eps_x, eps_cond, **kw)
     return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias,

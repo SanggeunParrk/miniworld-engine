@@ -209,6 +209,33 @@ def transition_expand_gate(
     assert wa.shape[1] == K and wb.shape == wa.shape
     assert K <= 1024, "fused expand assumes K fits one BLOCK_K (next_pow2(K) <= 1024)"
 
+    # Footgun guard: this kernel loads BLOCK_K = next_pow2(K) whole, so at large K on a
+    # small-smem GPU (A100, 163KB) NO autotune config fits. The prune's `kept or [min]`
+    # fallback would otherwise hand back an oversized config and fail with a cryptic
+    # compile-time OutOfResources. Detect infeasibility here and raise an actionable error
+    # so the caller can route to the bounded-smem `transition_b2b_ktiled` (or the split)
+    # instead. Only forward-only (save_xn=False) has that alternative; save_xn=True (legacy
+    # stacked backward) genuinely needs this kernel, so only guard the reachable case.
+    if x2.is_cuda:
+        bk = triton.next_power_of_2(K)
+        try:
+            _limit = triton.runtime.driver.active.utils.get_device_properties(
+                x2.device.index if x2.device.index is not None else torch.cuda.current_device(),
+            )["max_shared_mem"]
+        except Exception:  # noqa: BLE001
+            _limit = 227 * 1024
+        _min_smem = min(
+            c.num_stages * 2 * bk * c.kwargs["BLOCK_N"] * 2 + c.kwargs["BLOCK_M"] * bk * 2
+            for c in _configs
+        )
+        if _min_smem > _limit:
+            msg = (
+                f"transition_expand_gate: no autotune config fits device shared memory at "
+                f"K={K} (min {_min_smem} B > limit {_limit} B). Use transition_b2b_ktiled "
+                f"(bounded smem) for large K on this GPU."
+            )
+            raise RuntimeError(msg)
+
     rstd, c1 = stats if stats is not None else stats_triton(x2, eps)
     expand = torch.empty(M, ND, device=x2.device, dtype=x2.dtype)
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else expand
@@ -401,8 +428,40 @@ else:
     ]
 
 
+def _b2b_kt_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
+    """Drop K-tiled configs that exceed the device shared-memory limit BEFORE compile.
+
+    Weight tiles are [BLOCK_K, BLOCK_N] for wa+wb across ``num_stages`` plus the
+    [BLOCK_M, BLOCK_K] x tile, all bf16 (2 B). Unlike the full-K-row expand kernel this
+    is BOUNDED by the config (BLOCK_K is tiled, not next_pow2(K)), so a fitting config
+    always exists -- but under CUDA-graph capture a bench-time OutOfResources poisons the
+    stream, so prune up front. The smallest config fits A100 (163KB), so ``kept`` is never
+    empty there; the ``or [min]`` is only a last-resort so autotune still has a candidate."""
+    import triton as _triton
+
+    try:
+        limit = _triton.runtime.driver.active.utils.get_device_properties(
+            torch.cuda.current_device(),
+        )["max_shared_mem"]
+    except Exception:  # noqa: BLE001 -- conservative sm100 budget
+        limit = 227 * 1024
+
+    def _smem(c):
+        bm = c.kwargs["BLOCK_M"]
+        bn = c.kwargs["BLOCK_N"]
+        bk = c.kwargs["BLOCK_K"]
+        return c.num_stages * 2 * bk * bn * 2 + bm * bk * 2
+
+    kept = [c for c in configs if _smem(c) <= limit]
+    return kept or [min(configs, key=_smem)]
+
+
 # fmt: off
-@triton.autotune(configs=_b2b_kt_configs, key=["GROUP_M", "ND", "K", "D"])
+@triton.autotune(
+    configs=_b2b_kt_configs,
+    key=["GROUP_M", "ND", "K", "D"],
+    prune_configs_by={"early_config_prune": _b2b_kt_early_prune},
+)
 @triton.jit
 def _transition_b2b_ktiled_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
@@ -885,7 +944,9 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         # backward recomputes it — the CUDA kernel emits nothing beyond `out`. stats are needed
         # by the backward anyway, so stats_triton is not extra work. This gate is INDEPENDENT of
         # _B2B_MAX_K (the triton-b2b smem bound); on any failure we fall back to the split.
-        _is_sm100 = torch.cuda.get_device_capability(x2.device)[0] == 10  # noqa: PLR2004
+        _cap_major = torch.cuda.get_device_capability(x2.device)[0]
+        _is_sm100 = _cap_major == 10  # noqa: PLR2004
+        _is_sm90 = _cap_major == 9  # noqa: PLR2004  Hopper exactly (WGMMA/TMA hand-CUDA b2b)
         cuda_b2b_ok = (
             (not save_xn)
             and n == 4
@@ -899,7 +960,11 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
                 # excluded: the triton b2b path below is faster at d=128 (602us vs 725us
                 # training step, the AF3 shape) -- routing it to the cute fwd was a regression.
                 (_is_sm100 and K in (256, 512))
-                or (_cuda_b2b_train_enabled() and K in (128, 256))
+                # Hand-CUDA b2b is Hopper (sm_90a) WGMMA/TMA -> gate on sm_90 exactly.
+                # On pre-Hopper (sm_80 / A100) this must be False so we fall through to the
+                # portable triton b2b (K<=128) / split (else) path instead of attempting a
+                # Hopper-only kernel that can't launch here (was a per-call failed-build cost).
+                or (_is_sm90 and _cuda_b2b_train_enabled() and K in (128, 256))
             )
         )
         if cuda_b2b_ok:
@@ -957,14 +1022,25 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
                 )
                 out, xn = res if save_xn else (res, None)
         else:
-            # The expand kernel tiles K, so it keeps the separate stats pass.
+            # Large K (K > _B2B_MAX_K). The full-K-row expand kernel loads BLOCK_K =
+            # next_pow2(K) and OOMs smem at d>=256 on small-smem GPUs (e.g. A100, 163KB);
+            # the K-tiled b2b keeps weight tiles [BLOCK_K, BLOCK_N] bounded at any d AND
+            # fuses the squeeze (matching the K-tiled backward), so prefer it for the
+            # forward-only path. save_xn=True still needs the materialized xn for its
+            # stacked backward, so that legacy path keeps the expand + cuBLAS squeeze.
             rstd, c1 = stats_triton(x2, eps)
-            res = transition_expand_gate(
-                x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
-                stats=(rstd, c1), save_xn=save_xn,
-            )
-            expand, xn = res if save_xn else (res, None)
-            out = torch.matmul(expand, squeeze_weight.T)
+            if not save_xn:
+                out = transition_b2b_ktiled(
+                    x2, ln_weight, ln_bias,
+                    expand_a_weight, expand_b_weight, squeeze_weight, eps,
+                )
+                xn = None
+            else:
+                expand, xn = transition_expand_gate(
+                    x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, eps,
+                    stats=(rstd, c1), save_xn=True,
+                )
+                out = torch.matmul(expand, squeeze_weight.T)
 
         if save_xn:
             ctx.save_for_backward(
