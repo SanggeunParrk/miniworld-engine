@@ -25,6 +25,10 @@ _LAZY_OPS = {
         "miniworld_kernels.kernels.trimul_inproj.whole_op",
         "triangle_multiplicative_update",
     ),
+    "triangle_attention": (
+        "miniworld_kernels.kernels.triangle_attention.whole_op",
+        "triangle_attention",
+    ),
 }
 
 
@@ -42,4 +46,4 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_LAZY_OPS))
 
 
-__all__ = ["triangle_multiplicative_update"]
+__all__ = ["triangle_attention", "triangle_multiplicative_update"]

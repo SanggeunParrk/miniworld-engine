@@ -99,7 +99,7 @@ def test_import_is_side_effect_free() -> None:
 # Frozen public surface of miniworld_kernels.ops — the WHOLE-OP (composite,
 # weights-as-args, autograd-transparent) contract consumed by model code. Primitives
 # live in `kernels` and are NOT re-exported here. Grows as ops are added.
-_OPS_CONTRACT = frozenset({"triangle_multiplicative_update"})
+_OPS_CONTRACT = frozenset({"triangle_attention", "triangle_multiplicative_update"})
 
 
 def test_ops_surface_is_frozen() -> None:
