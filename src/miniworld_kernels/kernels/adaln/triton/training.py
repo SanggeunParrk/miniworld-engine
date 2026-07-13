@@ -32,6 +32,7 @@ from ...layernorm_linear.te_style import (
     _ln_bwd,
     _ln_materialize,
 )
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 _EPI_CONFIGS = [
     triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
@@ -62,7 +63,14 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 # ───────────── forward epilogue: y = σ(scale)·LN(x) + bias, saving mean_x, rstd_x, gate ─────────
-@triton.autotune(configs=_EPI_CONFIGS, key=["N", "DT"])
+# Cache-narrowing prune: bucket on N (dtype baked into key as DT, kept as a separate cache dim).
+_adaln_train_fwd_prune = make_cache_prune(
+    "adaln_train_fwd", dtype_of=tensor_dtype_of("X"), bucket_of=key_bucket_of("N"),
+)
+
+
+@triton.autotune(configs=_EPI_CONFIGS, key=["N", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_train_fwd_prune})
 @triton.jit
 def _epilogue_train_kernel(
     X, SB, Y, MeanX, RstdX, Gate, ScaleBias, M, N, eps,
@@ -112,7 +120,13 @@ def _epilogue_train(x, sb, eps, scale_bias=None):
 # ─── backward x-pass (fused): D = [dscale | dy] AND dx = LN-bwd(dy·gate) in ONE kernel ───
 # The full row (BLOCK_N = next_pow2(NX)) is in registers, so the x LayerNorm-backward reduction
 # (no affine) is done here directly — no separate LN-bwd kernel, no dxhat buffer, no x re-read.
-@triton.autotune(configs=_EPI_CONFIGS, key=["N", "DT"])
+_adaln_train_bwd_x_prune = make_cache_prune(
+    "adaln_train_bwd_x", dtype_of=tensor_dtype_of("DY"), bucket_of=key_bucket_of("N"),
+)
+
+
+@triton.autotune(configs=_EPI_CONFIGS, key=["N", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_train_bwd_x_prune})
 @triton.jit
 def _bwd_x_kernel(
     DY, X, MeanX, RstdX, Gate, D, DX, M, N,
@@ -179,7 +193,13 @@ _DGRAD_CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_DGRAD_CONFIGS, key=["NC", "K2", "DT"], reset_to_zero=["DLNW"])
+_adaln_train_bwd_dgrad_prune = make_cache_prune(
+    "adaln_train_bwd_dgrad", dtype_of=tensor_dtype_of("D"), bucket_of=key_bucket_of("NC", "K2"),
+)
+
+
+@triton.autotune(configs=_DGRAD_CONFIGS, key=["NC", "K2", "DT"], reset_to_zero=["DLNW"],
+                 prune_configs_by={"early_config_prune": _adaln_train_bwd_dgrad_prune})
 @triton.jit
 def _dgrad_condln_kernel(
     D, Wcat, Cond, MeanC, RstdC, LNW, DCond, DLNW, M, NC, K2,

@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 
 # --- kernel A: expand + SwiGLU -> h:(M, ND) ----------------------------------
 _cfgs_a = [
@@ -30,8 +32,17 @@ _cfgs_a = [
 ]
 
 
+_cond_transition_infer_expand_prune = make_cache_prune(
+    "cond_transition_infer_expand", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("ND", "K"),
+)
+
+
 # fmt: off
-@triton.autotune(configs=_cfgs_a, key=["M", "ND", "K"])
+@triton.autotune(
+    configs=_cfgs_a, key=["M", "ND", "K"],
+    prune_configs_by={"early_config_prune": _cond_transition_infer_expand_prune},
+)
 @triton.jit
 def _expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr,
@@ -93,8 +104,17 @@ _cfgs_b = [
 ]
 
 
+_cond_transition_infer_squeeze_prune = make_cache_prune(
+    "cond_transition_infer_squeeze", dtype_of=tensor_dtype_of("h_ptr"),
+    bucket_of=key_bucket_of("ND", "D", "DC"),
+)
+
+
 # fmt: off
-@triton.autotune(configs=_cfgs_b, key=["M", "ND", "D", "DC"])
+@triton.autotune(
+    configs=_cfgs_b, key=["M", "ND", "D", "DC"],
+    prune_configs_by={"early_config_prune": _cond_transition_infer_squeeze_prune},
+)
 @triton.jit
 def _squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,

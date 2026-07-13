@@ -23,6 +23,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 _configs = [
     triton.Config({"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s)
     for bm in [64, 128]
@@ -33,7 +35,16 @@ _configs = [
 ]
 
 
-@triton.autotune(configs=_configs, key=["M", "N", "DH"])
+_bias_only_gate_out_fwd_prune = make_cache_prune(
+    "bias_only_gate_out_fwd", dtype_of=tensor_dtype_of("gate_ptr"),
+    bucket_of=key_bucket_of("N", "DH"),
+)
+
+
+@triton.autotune(
+    configs=_configs, key=["M", "N", "DH"],
+    prune_configs_by={"early_config_prune": _bias_only_gate_out_fwd_prune},
+)
 @triton.jit
 def _gate_out_fwd(
     gate_ptr,   # [M, DH]
@@ -86,10 +97,17 @@ def _gate_out_fwd(
     )
 
 
+_bias_only_gate_out_bwd_prune = make_cache_prune(
+    "bias_only_gate_out_bwd", dtype_of=tensor_dtype_of("do_ptr"),
+    bucket_of=key_bucket_of("N", "DH"),
+)
+
+
 @triton.autotune(
     configs=[triton.Config({"BM": bm}, num_warps=w, num_stages=s)
              for bm in (32, 64, 128) for w in (4, 8) for s in (2, 3, 4)],
     key=["M", "N", "DH"],
+    prune_configs_by={"early_config_prune": _bias_only_gate_out_bwd_prune},
 )
 @triton.jit
 def _dgrad_epi(
@@ -202,9 +220,16 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 
 
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
+_bias_only_sigmul_fwd_prune = make_cache_prune(
+    "bias_only_sigmul_fwd", dtype_of=tensor_dtype_of("g_ptr"),
+    bucket_of=key_bucket_of(),
+)
+
+
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=w) for b in (1024, 2048, 4096) for w in (4, 8)],
     key=["n"],
+    prune_configs_by={"early_config_prune": _bias_only_sigmul_fwd_prune},
 )
 @triton.jit
 def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLK: tl.constexpr):
@@ -215,9 +240,16 @@ def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLK: tl.constexpr):
     tl.store(a_ptr + off, (g * o).to(a_ptr.dtype.element_ty), mask=m)
 
 
+_bias_only_sigmul_bwd_prune = make_cache_prune(
+    "bias_only_sigmul_bwd", dtype_of=tensor_dtype_of("g_ptr"),
+    bucket_of=key_bucket_of(),
+)
+
+
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=w) for b in (1024, 2048, 4096) for w in (4, 8)],
     key=["n"],
+    prune_configs_by={"early_config_prune": _bias_only_sigmul_bwd_prune},
 )
 @triton.jit
 def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLK: tl.constexpr):

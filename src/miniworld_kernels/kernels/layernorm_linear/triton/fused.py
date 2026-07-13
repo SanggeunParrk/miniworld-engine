@@ -21,6 +21,13 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+_layernorm_linear_fwd_prune = make_cache_prune(
+    "layernorm_linear_fwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("N", "K"),
+)
+
 
 @triton.autotune(
     configs=[
@@ -31,6 +38,7 @@ import triton.language as tl
         for ns in (2, 3)
     ],
     key=["N", "K"],
+    prune_configs_by={"early_config_prune": _layernorm_linear_fwd_prune},
 )
 @triton.jit
 def _lnl_fwd_kernel(

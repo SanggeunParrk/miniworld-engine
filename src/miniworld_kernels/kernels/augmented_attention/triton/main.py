@@ -7,6 +7,7 @@ import triton.language as tl
 from jaxtyping import Bool, Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "augmented_attention"
 
@@ -100,7 +101,17 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-@triton.autotune(configs=fwd_configs, key=["GROUP_N", "H", "HEAD_DIM"])
+_augmented_attention_fwd_prune = make_cache_prune(
+    "augmented_attention_fwd",
+    dtype_of=tensor_dtype_of("Q"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
+@triton.autotune(
+    configs=fwd_configs, key=["GROUP_N", "H", "HEAD_DIM"],
+    prune_configs_by={"early_config_prune": _augmented_attention_fwd_prune},
+)
 @triton.jit
 def _attn_fwd(
     Q,
@@ -221,7 +232,17 @@ def _attn_fwd(
     tl.store(o_ptr, acc.to(Out.type.element_ty), mask=out_mask)
 
 
-@triton.autotune(configs=bwd_pre_configs, key=["GROUP_N", "H", "HEAD_DIM"])
+_augmented_attention_bwd_preprocess_prune = make_cache_prune(
+    "augmented_attention_bwd_preprocess",
+    dtype_of=tensor_dtype_of("O"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
+@triton.autotune(
+    configs=bwd_pre_configs, key=["GROUP_N", "H", "HEAD_DIM"],
+    prune_configs_by={"early_config_prune": _augmented_attention_bwd_preprocess_prune},
+)
 @triton.jit
 def _attn_bwd_preprocess(
     O,
@@ -344,10 +365,18 @@ def _attn_bwd_dqdkdv(
     return dk, dv
 
 
+_augmented_attention_bwd_prune = make_cache_prune(
+    "augmented_attention_bwd",
+    dtype_of=tensor_dtype_of("Q"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
 @triton.autotune(
     configs=bwd_configs,
     key=["GROUP_N", "H", "HEAD_DIM"],
     reset_to_zero=["DQ", "DBias"],
+    prune_configs_by={"early_config_prune": _augmented_attention_bwd_prune},
 )
 @triton.jit
 def _attn_bwd(

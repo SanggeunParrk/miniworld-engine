@@ -24,6 +24,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 
 _cfgs = [
     triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
@@ -33,8 +35,17 @@ _cfgs = [
 ]
 
 
+_cond_transition_infer_prune = make_cache_prune(
+    "cond_transition_infer", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("ND", "K", "D", "DC"),
+)
+
+
 # fmt: off
-@triton.autotune(configs=_cfgs, key=["ND", "K", "D", "DC"])
+@triton.autotune(
+    configs=_cfgs, key=["ND", "K", "D", "DC"],
+    prune_configs_by={"early_config_prune": _cond_transition_infer_prune},
+)
 @triton.jit
 def _cond_transition_inference_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,

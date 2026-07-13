@@ -29,6 +29,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 # fp32 matmul precision policy (shared idea with layernorm_linear/te_style).
 _FP32_MATMUL_PRECISION = "high"  # "high" → TF32 (fast); "highest" → true fp32
 
@@ -76,7 +78,13 @@ _LN_CONFIGS = [
 
 
 # ───────────────────── step 1: cond_aff = LN(cond) · lnw  (no bias) ─────────────────────
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "DT"])
+_adaln_infer_ln1_prune = make_cache_prune(
+    "adaln_infer_ln1", dtype_of=tensor_dtype_of("Cond"), bucket_of=key_bucket_of("N"),
+)
+
+
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_infer_ln1_prune})
 @triton.jit
 def _cond_affine_kernel(
     Cond, CondAff, LnW, M, N, eps,
@@ -114,7 +122,13 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
 
 
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "DT"])
+_adaln_infer_ln2_prune = make_cache_prune(
+    "adaln_infer_ln2", dtype_of=tensor_dtype_of("X"), bucket_of=key_bucket_of("N"),
+)
+
+
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_infer_ln2_prune})
 @triton.jit
 def _adaln_epilogue_kernel(
     X, SB, Y, M, N, eps,
@@ -270,7 +284,13 @@ _FUSED_CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_FUSED_CONFIGS, key=["NX", "NC", "DT"])
+_adaln_infer_fused_prune = make_cache_prune(
+    "adaln_infer_fused", dtype_of=tensor_dtype_of("X"), bucket_of=key_bucket_of("NX", "NC"),
+)
+
+
+@triton.autotune(configs=_FUSED_CONFIGS, key=["NX", "NC", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_infer_fused_prune})
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915
     X, Cond, LnW, ScaleW, ScaleB, BiasW, Y,

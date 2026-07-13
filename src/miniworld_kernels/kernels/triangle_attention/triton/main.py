@@ -8,6 +8,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_attention"
 
@@ -50,7 +51,17 @@ bwd_configs = [
 ]
 
 
-@triton.autotune(configs=fwd_configs, key=["GROUP_N", "H", "HEAD_DIM"])
+_triangle_attention_fwd_prune = make_cache_prune(
+    "triangle_attention_fwd",
+    dtype_of=tensor_dtype_of("q_ptr"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
+@triton.autotune(
+    configs=fwd_configs, key=["GROUP_N", "H", "HEAD_DIM"],
+    prune_configs_by={"early_config_prune": _triangle_attention_fwd_prune},
+)
 @triton.jit
 def _attn_fwd(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, m_ptr, out_ptr,
@@ -123,7 +134,17 @@ def _attn_fwd(
     tl.store(O_bp, acc.to(out_ptr.type.element_ty), boundary_check=(0, 1))
 
 
-@triton.autotune(configs=bwd_preprocess_configs, key=["GROUP_N", "H", "HEAD_DIM"])
+_triangle_attention_bwd_preprocess_prune = make_cache_prune(
+    "triangle_attention_bwd_preprocess",
+    dtype_of=tensor_dtype_of("o"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
+@triton.autotune(
+    configs=bwd_preprocess_configs, key=["GROUP_N", "H", "HEAD_DIM"],
+    prune_configs_by={"early_config_prune": _triangle_attention_bwd_preprocess_prune},
+)
 @triton.jit
 def _attn_bwd_preprocess(
     o, DO, Delta,
@@ -152,7 +173,17 @@ def _attn_bwd_preprocess(
     tl.store(Delta + off_hz * N_CTX + off_m, delta, mask=off_m < N_CTX)
 
 
-@triton.autotune(configs=bwd_configs, key=["GROUP_N", "H", "HEAD_DIM"])
+_triangle_attention_bwd_dkdv_prune = make_cache_prune(
+    "triangle_attention_bwd_dkdv",
+    dtype_of=tensor_dtype_of("q_ptr"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
+@triton.autotune(
+    configs=bwd_configs, key=["GROUP_N", "H", "HEAD_DIM"],
+    prune_configs_by={"early_config_prune": _triangle_attention_bwd_dkdv_prune},
+)
 @triton.jit
 def _attn_bwd_dkdv(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
@@ -250,7 +281,17 @@ def _attn_bwd_dkdv(
     tl.store(DK_bp, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.autotune(configs=bwd_configs, key=["GROUP_N", "H", "HEAD_DIM"])
+_triangle_attention_bwd_dq_prune = make_cache_prune(
+    "triangle_attention_bwd_dq",
+    dtype_of=tensor_dtype_of("q_ptr"),
+    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+)
+
+
+@triton.autotune(
+    configs=bwd_configs, key=["GROUP_N", "H", "HEAD_DIM"],
+    prune_configs_by={"early_config_prune": _triangle_attention_bwd_dq_prune},
+)
 @triton.jit
 def _attn_bwd_dq(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,

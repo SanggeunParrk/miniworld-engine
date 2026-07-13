@@ -8,6 +8,7 @@ from einops import rearrange
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_multi"
 
@@ -26,7 +27,15 @@ bwd_configs = [
 ]
 
 
-@triton.autotune(configs=fwd_configs, key=["GROUP_M", "N"])
+_tm2_fwd_prune = make_cache_prune(
+    "tm2_fwd", dtype_of=tensor_dtype_of("x_gate_ptr"), bucket_of=key_bucket_of("GROUP_M", "N"),
+)
+
+
+@triton.autotune(
+    configs=fwd_configs, key=["GROUP_M", "N"],
+    prune_configs_by={"early_config_prune": _tm2_fwd_prune},
+)
 @triton.jit
 def fused_sigmoid_gate2_fwd_kernel(
     x_gate_ptr,
@@ -90,7 +99,15 @@ def fused_sigmoid_gate2_fwd_kernel(
     )
 
 
-@triton.autotune(configs=bwd_configs, key=["GROUP_M", "N"])
+_tm2_bwd_prune = make_cache_prune(
+    "tm2_bwd", dtype_of=tensor_dtype_of("x_gate_ptr"), bucket_of=key_bucket_of("GROUP_M", "N"),
+)
+
+
+@triton.autotune(
+    configs=bwd_configs, key=["GROUP_M", "N"],
+    prune_configs_by={"early_config_prune": _tm2_bwd_prune},
+)
 @triton.jit
 def fused_sigmoid_gate2_bwd_kernel(
     x_gate_ptr,

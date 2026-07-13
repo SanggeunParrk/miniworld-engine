@@ -30,6 +30,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
@@ -120,11 +121,18 @@ def _expand_early_prune(configs, named_args, **kwargs):
     return kept or [min(configs, key=_smem)]
 
 
+# Cache-narrowing prune composed OVER the smem safety prune (runs first, inside make_cache_prune).
+_transition_expand_gate_fwd_prune = make_cache_prune(
+    "transition_expand_gate_fwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "ND", "K"), base_prune=_expand_early_prune,
+)
+
+
 # fmt: off
 @triton.autotune(
     configs=_configs,
     key=["GROUP_M", "ND", "K", "SAVE_XN"],
-    prune_configs_by={"early_config_prune": _expand_early_prune},
+    prune_configs_by={"early_config_prune": _transition_expand_gate_fwd_prune},
 )
 @triton.jit
 def _transition_expand_gate_kernel(
@@ -456,11 +464,18 @@ def _b2b_kt_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
     return kept or [min(configs, key=_smem)]
 
 
+# Cache-narrowing prune composed OVER the smem safety prune (runs first, inside make_cache_prune).
+_transition_b2b_ktiled_prune = make_cache_prune(
+    "transition_b2b_ktiled", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "ND", "K", "D"), base_prune=_b2b_kt_early_prune,
+)
+
+
 # fmt: off
 @triton.autotune(
     configs=_b2b_kt_configs,
     key=["GROUP_M", "ND", "K", "D"],
-    prune_configs_by={"early_config_prune": _b2b_kt_early_prune},
+    prune_configs_by={"early_config_prune": _transition_b2b_ktiled_prune},
 )
 @triton.jit
 def _transition_b2b_ktiled_kernel(
@@ -584,10 +599,18 @@ else:
     ]
 
 
+# Cache-narrowing prune (no smem base prune on this kernel).
+_transition_expand_gate_bwd_prune = make_cache_prune(
+    "transition_expand_gate_bwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "ND", "K"),
+)
+
+
 # fmt: off
 @triton.autotune(
     configs=_egb_configs,
     key=["GROUP_M", "ND", "K", "NORMALIZE", "STORE_H", "STACK_DAB"],
+    prune_configs_by={"early_config_prune": _transition_expand_gate_bwd_prune},
 )
 @triton.jit
 def _transition_expand_gatebwd_kernel(
@@ -781,11 +804,20 @@ def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand):
     return h, dAB
 
 
+# Cache-narrowing prune (no smem base prune). dtype from the input activation x_ptr (the
+# 2nd pointer arg), NOT the dxn_ptr grad accumulator. reset_to_zero preserved below.
+_transition_ln_bwd_prune = make_cache_prune(
+    "transition_ln_bwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "K"),
+)
+
+
 # fmt: off
 @triton.autotune(
     configs=[triton.Config({"BLOCK_M": bm}, num_warps=nw)
              for bm in (1, 2, 4, 8, 16) for nw in (2, 4, 8)],
     key=["GROUP_M", "K"], reset_to_zero=["dg_ptr", "db_ptr"],
+    prune_configs_by={"early_config_prune": _transition_ln_bwd_prune},
 )
 @triton.jit
 def _transition_ln_bwd_kernel(
