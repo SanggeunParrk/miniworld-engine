@@ -4,6 +4,15 @@
     "bfloat16|K2=256,NC=128": [
       {
         "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BLOCK_K": 32,
           "BLOCK_M": 64
         },
@@ -35,15 +44,6 @@
           "BLOCK_M": 64
         },
         "ms": 0.026623999699950218,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64
-        },
-        "ms": 0.027648000046610832,
         "num_stages": 4,
         "num_warps": 4
       }
@@ -54,17 +54,8 @@
           "BLOCK_K": 32,
           "BLOCK_M": 64
         },
-        "ms": 0.058368001133203506,
+        "ms": 0.05734400078654289,
         "num_stages": 4,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64
-        },
-        "ms": 0.058368001133203506,
-        "num_stages": 3,
         "num_warps": 8
       },
       {
@@ -72,7 +63,7 @@
           "BLOCK_K": 32,
           "BLOCK_M": 64
         },
-        "ms": 0.05939200147986412,
+        "ms": 0.058368001133203506,
         "num_stages": 3,
         "num_warps": 8
       },
@@ -81,7 +72,16 @@
           "BLOCK_K": 64,
           "BLOCK_M": 64
         },
-        "ms": 0.05939200147986412,
+        "ms": 0.058368001133203506,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64
+        },
+        "ms": 0.058368001133203506,
         "num_stages": 4,
         "num_warps": 8
       },
@@ -90,7 +90,7 @@
           "BLOCK_K": 128,
           "BLOCK_M": 64
         },
-        "ms": 0.06143999844789505,
+        "ms": 0.060416001826524734,
         "num_stages": 3,
         "num_warps": 8
       }
@@ -99,7 +99,7 @@
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "op": "adaln_train_bwd_dgrad",
   "provenance": {
-    "built_utc": "2026-07-13T09:00:28+00:00",
+    "built_utc": "2026-07-13T11:59:07+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

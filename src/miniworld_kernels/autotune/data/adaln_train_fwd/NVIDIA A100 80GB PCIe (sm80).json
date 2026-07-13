@@ -15,6 +15,14 @@
           "BLOCK_M": 8
         },
         "ms": 0.01740800030529499,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 8
+        },
+        "ms": 0.01740800030529499,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -32,14 +40,6 @@
         },
         "ms": 0.01740800030529499,
         "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.01740800030529499,
-        "num_stages": 4,
         "num_warps": 4
       }
     ],
@@ -48,7 +48,7 @@
         "kwargs": {
           "BLOCK_M": 4
         },
-        "ms": 0.02969600073993206,
+        "ms": 0.028672000393271446,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -56,15 +56,15 @@
         "kwargs": {
           "BLOCK_M": 4
         },
-        "ms": 0.02969600073993206,
+        "ms": 0.028672000393271446,
         "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK_M": 4
+          "BLOCK_M": 8
         },
-        "ms": 0.02969600073993206,
+        "ms": 0.028672000393271446,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -72,17 +72,17 @@
         "kwargs": {
           "BLOCK_M": 8
         },
-        "ms": 0.02969600073993206,
-        "num_stages": 2,
-        "num_warps": 4
+        "ms": 0.028672000393271446,
+        "num_stages": 3,
+        "num_warps": 8
       },
       {
         "kwargs": {
           "BLOCK_M": 8
         },
-        "ms": 0.02969600073993206,
-        "num_stages": 3,
-        "num_warps": 4
+        "ms": 0.028672000393271446,
+        "num_stages": 4,
+        "num_warps": 8
       }
     ],
     "bfloat16|N=512": [
@@ -131,7 +131,7 @@
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "op": "adaln_train_fwd",
   "provenance": {
-    "built_utc": "2026-07-13T08:56:22+00:00",
+    "built_utc": "2026-07-13T11:57:05+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

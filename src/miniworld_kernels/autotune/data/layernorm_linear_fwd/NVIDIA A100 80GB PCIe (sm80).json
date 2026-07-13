@@ -16,7 +16,7 @@
           "BLOCK_M": 64,
           "BLOCK_N": 64
         },
-        "ms": 0.13516800105571747,
+        "ms": 0.13414399325847626,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -25,7 +25,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 64
         },
-        "ms": 0.13619199395179749,
+        "ms": 0.13516800105571747,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -41,11 +41,11 @@
       {
         "kwargs": {
           "BLOCK_M": 64,
-          "BLOCK_N": 64
+          "BLOCK_N": 128
         },
-        "ms": 0.14847999811172485,
-        "num_stages": 3,
-        "num_warps": 8
+        "ms": 0.14745600521564484,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ],
     "bfloat16|K=256,N=516": [
@@ -54,7 +54,7 @@
           "BLOCK_M": 64,
           "BLOCK_N": 64
         },
-        "ms": 0.3604480028152466,
+        "ms": 0.35839998722076416,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -63,7 +63,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 64
         },
-        "ms": 0.3686400055885315,
+        "ms": 0.3676159977912903,
         "num_stages": 3,
         "num_warps": 8
       },
@@ -72,7 +72,7 @@
           "BLOCK_M": 64,
           "BLOCK_N": 64
         },
-        "ms": 0.3911679983139038,
+        "ms": 0.3901439905166626,
         "num_stages": 2,
         "num_warps": 8
       },
@@ -99,7 +99,7 @@
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "op": "layernorm_linear_fwd",
   "provenance": {
-    "built_utc": "2026-07-13T08:49:07+00:00",
+    "built_utc": "2026-07-13T11:57:05+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

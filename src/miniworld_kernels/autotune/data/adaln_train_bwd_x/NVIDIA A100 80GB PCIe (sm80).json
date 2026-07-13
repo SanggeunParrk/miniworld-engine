@@ -4,6 +4,14 @@
     "bfloat16|N=128": [
       {
         "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
           "BLOCK_M": 16
         },
         "ms": 0.020479999482631683,
@@ -31,15 +39,7 @@
           "BLOCK_M": 16
         },
         "ms": 0.020479999482631683,
-        "num_stages": 2,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.020479999482631683,
-        "num_stages": 3,
+        "num_stages": 4,
         "num_warps": 8
       }
     ],
@@ -70,19 +70,19 @@
       },
       {
         "kwargs": {
-          "BLOCK_M": 32
+          "BLOCK_M": 16
         },
         "ms": 0.03379200026392937,
-        "num_stages": 3,
+        "num_stages": 2,
         "num_warps": 16
       },
       {
         "kwargs": {
           "BLOCK_M": 16
         },
-        "ms": 0.03481600061058998,
-        "num_stages": 2,
-        "num_warps": 4
+        "ms": 0.03379200026392937,
+        "num_stages": 3,
+        "num_warps": 16
       }
     ],
     "bfloat16|N=512": [
@@ -90,25 +90,9 @@
         "kwargs": {
           "BLOCK_M": 16
         },
-        "ms": 0.05939200147986412,
+        "ms": 0.060416001826524734,
         "num_stages": 2,
         "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.05939200147986412,
-        "num_stages": 2,
-        "num_warps": 16
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.05939200147986412,
-        "num_stages": 3,
-        "num_warps": 16
       },
       {
         "kwargs": {
@@ -125,13 +109,29 @@
         "ms": 0.060416001826524734,
         "num_stages": 4,
         "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.060416001826524734,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.060416001826524734,
+        "num_stages": 3,
+        "num_warps": 16
       }
     ]
   },
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "op": "adaln_train_bwd_x",
   "provenance": {
-    "built_utc": "2026-07-13T09:00:28+00:00",
+    "built_utc": "2026-07-13T11:59:07+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
