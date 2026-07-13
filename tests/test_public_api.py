@@ -103,6 +103,7 @@ _OPS_CONTRACT = frozenset(
     {
         "augmented_attention_pair_bias",
         "conditioned_transition",
+        "layer_norm",
         "layer_norm_linear",
         "transition",
         "triangle_attention",
