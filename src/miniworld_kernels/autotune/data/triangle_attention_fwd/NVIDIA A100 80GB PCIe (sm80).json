@@ -1,0 +1,201 @@
+{
+  "config_space_hash": "bc5188e74dc5",
+  "entries": {
+    "bfloat16|GROUP_N=4,H=4,HEAD_DIM=128": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 1.3486080169677734,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 1.5892479419708252,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 1.7786879539489746,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 1.8647040128707886,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 1.9599360227584839,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_N=4,H=4,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.4403199851512909,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.4546560049057007,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.4761599898338318,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.5427200198173523,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.6307839751243591,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=4,H=4,HEAD_DIM=64": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.8017920255661011,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.8151040077209473,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.834559977054596,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.9047039747238159,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.9482240080833435,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=4,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 1.0004479885101318,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 1.0393600463867188,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 1.1038719415664673,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 1.2175359725952148,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 1.4069759845733643,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ]
+  },
+  "gpu": "NVIDIA A100 80GB PCIe (sm80)",
+  "op": "triangle_attention_fwd",
+  "provenance": {
+    "built_utc": "2026-07-13T08:38:14+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

@@ -1,0 +1,55 @@
+{
+  "config_space_hash": "24d222ca8a78",
+  "entries": {
+    "bfloat16|DH=128,N=128": [
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.15462400019168854,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.15462400019168854,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.15462400019168854,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.1658879965543747,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.1669120043516159,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA A100 80GB PCIe (sm80)",
+  "op": "bias_only_gate_out_bwd",
+  "provenance": {
+    "built_utc": "2026-07-13T08:44:50+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

@@ -1,0 +1,221 @@
+{
+  "config_space_hash": "99c9b78c0109",
+  "entries": {
+    "bfloat16|GROUP_N=4,H=1536,HEAD_DIM=128": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.19046400487422943,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.19251200556755066,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.19251200556755066,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_N=4,H=1536,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.06758400052785873,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.06758400052785873,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.06758400052785873,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=4,H=1536,HEAD_DIM=64": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.10751999914646149,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.10751999914646149,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.10751999914646149,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=2048,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.10547199845314026,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.10547199845314026,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.10547199845314026,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=2560,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.15360000729560852,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.15462400019168854,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.15462400019168854,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=3072,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=3584,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.2836480140686035,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.2836480140686035,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.28467199206352234,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=4096,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.36454400420188904,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64
+        },
+        "ms": 0.36454400420188904,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.36556801199913025,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA A100 80GB PCIe (sm80)",
+  "op": "triangle_attention_bwd_preprocess",
+  "provenance": {
+    "built_utc": "2026-07-13T08:44:50+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
