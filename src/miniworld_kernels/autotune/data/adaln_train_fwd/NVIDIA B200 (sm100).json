@@ -1,0 +1,139 @@
+{
+  "config_space_hash": "75cd0f056687",
+  "entries": {
+    "bfloat16|N=128": [
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 8
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 8
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 8
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|N=256": [
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.012384000234305859,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.012384000234305859,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.012384000234305859,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.012415999546647072,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.012415999546647072,
+        "num_stages": 3,
+        "num_warps": 16
+      }
+    ],
+    "bfloat16|N=512": [
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.019519999623298645,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.02035200037062168,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 4
+        },
+        "ms": 0.02038400061428547,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 2
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 2
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA B200 (sm100)",
+  "op": "adaln_train_fwd",
+  "provenance": {
+    "built_utc": "2026-07-13T16:13:43+00:00",
+    "torch": "2.10.0+cu130",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

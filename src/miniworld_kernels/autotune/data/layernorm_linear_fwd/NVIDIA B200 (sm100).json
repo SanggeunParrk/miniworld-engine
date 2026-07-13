@@ -1,0 +1,107 @@
+{
+  "config_space_hash": "46aa8c36802e",
+  "entries": {
+    "bfloat16|K=128,N=260": [
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.05536000058054924,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.05737600103020668,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.05737600103020668,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.05737600103020668,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.0655680000782013,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|K=256,N=516": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.13332799822092056,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.13519999384880066,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 128
+        },
+        "ms": 0.13519999384880066,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.13523200154304504,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.1372479945421219,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ]
+  },
+  "gpu": "NVIDIA B200 (sm100)",
+  "op": "layernorm_linear_fwd",
+  "provenance": {
+    "built_utc": "2026-07-13T15:23:54+00:00",
+    "torch": "2.10.0+cu130",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
