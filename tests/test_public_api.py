@@ -100,7 +100,12 @@ def test_import_is_side_effect_free() -> None:
 # weights-as-args, autograd-transparent) contract consumed by model code. Primitives
 # live in `kernels` and are NOT re-exported here. Grows as ops are added.
 _OPS_CONTRACT = frozenset(
-    {"transition", "triangle_attention", "triangle_multiplicative_update"}
+    {
+        "conditioned_transition",
+        "transition",
+        "triangle_attention",
+        "triangle_multiplicative_update",
+    }
 )
 
 

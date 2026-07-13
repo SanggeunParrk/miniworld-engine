@@ -33,6 +33,10 @@ _LAZY_OPS = {
         "miniworld_kernels.kernels.transition.whole_op",
         "transition",
     ),
+    "conditioned_transition": (
+        "miniworld_kernels.kernels.conditioned_transition.whole_op",
+        "conditioned_transition",
+    ),
 }
 
 
@@ -50,4 +54,9 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_LAZY_OPS))
 
 
-__all__ = ["transition", "triangle_attention", "triangle_multiplicative_update"]
+__all__ = [
+    "conditioned_transition",
+    "transition",
+    "triangle_attention",
+    "triangle_multiplicative_update",
+]
