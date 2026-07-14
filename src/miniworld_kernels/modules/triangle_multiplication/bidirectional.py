@@ -186,30 +186,50 @@ class BidirectionalTriangleMultiplication(nn.Module):
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
         """MINIWORLD (ours) TRAINING path: the v6-faithful fused-bidirectional trimul
-        training kernel (fwd+bwd, autograd-capable) — sm_100 ``BidirV6TriMulSm100`` on
-        Blackwell, else sm90 ``BidirV6TriMul``. Same kernel stack as the single-direction
+        training kernel (fwd+bwd, autograd-capable) — sm_100 ``bidir_forward_sm100`` on
+        Blackwell, else sm90 ``bidir_forward``. Same kernel stack as the single-direction
         v6 path (m-major front, te LN_out+@Wp, fused gate; 0 transposes), applied to both
-        directions with a shared 2h back-half. Beats the old v9 bidir (trimul_bidir_b200
-        v2) and even two separate single-direction v6 calls (shared LN_in + gate). Built
-        lazily from this module's own weights and cached. bf16, B=1."""
-        impl = getattr(self, "_bidir_train_impl", None)
-        if impl is None:
-            major = (
-                torch.cuda.get_device_capability(pair.device)[0]
-                if torch.cuda.is_available()
-                else 0
+        directions with a shared 2h back-half.
+
+        Calls the weights-as-args kernel with THIS module's OWN parameters by reference
+        (the ``.t().contiguous()`` transposes stay in the autograd graph), so gradients
+        flow straight back to ``self.to_left.weight`` / ``ln_pair.weight`` / … and the
+        optimizer trains them. The former ``BidirV6TriMul*`` wrapper cloned the weights
+        into fresh, first-forward-created Parameters — leaving this module's registered
+        params grad-less (dead) and the live copies invisible to an optimizer built over
+        ``model.parameters()`` before the first forward. bf16, B=1."""
+        major = (
+            torch.cuda.get_device_capability(pair.device)[0]
+            if torch.cuda.is_available()
+            else 0
+        )
+        if major >= 10:
+            from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training_sm100 import (  # noqa: E501
+                bidir_forward_sm100 as _fwd,
+                prepack_lr_operand_sm100 as _prepack,
             )
-            if major >= 10:
-                from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training_sm100 import (  # noqa: E501
-                    BidirV6TriMulSm100 as _Impl,
-                )
-            else:
-                from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training import (  # noqa: E501
-                    BidirV6TriMul as _Impl,
-                )
-            impl = _Impl(self).to(pair.device)
-            self._bidir_train_impl = impl
-        return impl(pair, mask)
+        else:
+            from miniworld_kernels.kernels.trimul_inproj.cute.bidir_training import (  # noqa: E501
+                bidir_forward as _fwd,
+                prepack_lr_operand as _prepack,
+            )
+        # By-reference (differentiable) transposes of the module's own projection weights.
+        WL = self.to_left.weight.t().contiguous()
+        WLg = self.to_left_gate.weight.t().contiguous()
+        WR = self.to_right.weight.t().contiguous()
+        WRg = self.to_right_gate.weight.t().contiguous()
+        Wg = self.to_gate.weight.t().contiguous()
+        b_lr = _prepack(WL, WLg, WR, WRg)
+        row_scale = None
+        if mask is not None:
+            m = mask.unsqueeze(-1) & mask.unsqueeze(-2)  # [B, L, L]
+            row_scale = m.reshape(-1).to(pair.dtype)     # [M]
+        return _fwd(
+            pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
+            self.ln_pair.weight, self.ln_pair.bias,
+            self.ln_out.weight, self.ln_out.bias,
+            self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
+        )
 
     @torch.compiler.disable
     def _forward_cute(
