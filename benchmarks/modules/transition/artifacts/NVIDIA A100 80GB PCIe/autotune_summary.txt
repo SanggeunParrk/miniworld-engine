@@ -86,8 +86,8 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_bwd_dx_fused
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
   key=(128, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=64, num_warps=4, num_stages=2
-  key=(256, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=32, num_warps=4, num_stages=2
-  key=(512, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=32, num_warps=8, num_stages=3
+  key=(256, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=32, num_warps=4, num_stages=4
+  key=(512, 8, bfloat16, bfloat16, float32, float32, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=32, num_warps=8, num_stages=4
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
   candidate_configs=84
@@ -176,7 +176,7 @@ miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused
     candidate[83] BLOCK_M=64, num_warps=16, num_stages=4
     candidate[84] BLOCK_M=64, num_warps=16, num_stages=5
   key=(128, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=32, num_warps=4, num_stages=2
-  key=(256, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=16, num_warps=4, num_stages=2
+  key=(256, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=16, num_warps=4, num_stages=3
   key=(512, 8, bfloat16, bfloat16, bfloat16, bfloat16, float32, float32, float32) -> BLOCK_M=4, num_warps=4, num_stages=2
 
 miniworld_kernels.kernels.layernorm.triton.main.layer_norm_fwd_fused_recal
@@ -296,6 +296,9 @@ miniworld_kernels.kernels.transition.triton.fused._transition_expand_gatebwd_ker
     candidate[2] BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, num_warps=8, num_stages=3
     candidate[3] BLOCK_K=64, BLOCK_M=128, BLOCK_N=128, num_warps=8, num_stages=3
     candidate[4] BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
+  key=(10, 1024, 256, False, True, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=4
+  key=(10, 2048, 512, False, True, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=4
+  key=(10, 512, 128, False, True, True, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=4
   key=(10, 512, 128, True, True, True, bfloat16, float32, float32, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=64, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=3
 
 miniworld_kernels.kernels.transition.triton.fused._transition_ln_bwd_kernel
@@ -607,9 +610,7 @@ miniworld_kernels.kernels.transition.triton.main.transition_bwd_kernel
     candidate[286] BLOCK_K=64, BLOCK_M=256, BLOCK_N=256, num_warps=8, num_stages=3
     candidate[287] BLOCK_K=64, BLOCK_M=256, BLOCK_N=256, num_warps=8, num_stages=4
     candidate[288] BLOCK_K=64, BLOCK_M=256, BLOCK_N=256, num_warps=8, num_stages=5
-  key=(10, 4, 128, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=4
-  key=(10, 4, 256, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=4
-  key=(10, 4, 512, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=3
+  no cache entries captured
 
 miniworld_kernels.kernels.transition.triton.main.transition_fwd_kernel
   candidate_configs=288
@@ -901,6 +902,6 @@ miniworld_kernels.kernels.transition.triton.main.transition_fwd_kernel
     candidate[286] BLOCK_K=64, BLOCK_M=256, BLOCK_N=256, num_warps=8, num_stages=3
     candidate[287] BLOCK_K=64, BLOCK_M=256, BLOCK_N=256, num_warps=8, num_stages=4
     candidate[288] BLOCK_K=64, BLOCK_M=256, BLOCK_N=256, num_warps=8, num_stages=5
-  key=(10, 4, 128, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=5
+  key=(10, 4, 128, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=3
   key=(10, 4, 256, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=32, BLOCK_M=128, BLOCK_N=64, num_warps=4, num_stages=3
   key=(10, 4, 512, bfloat16, bfloat16, bfloat16, bfloat16) -> BLOCK_K=64, BLOCK_M=64, BLOCK_N=128, num_warps=4, num_stages=3
