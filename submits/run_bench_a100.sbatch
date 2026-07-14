@@ -75,7 +75,9 @@ render_latest() {
     echo "No CSV found for target=${target}, mode=${mode}, suffix=${suffix}; skipping render"
     return 1
   fi
-  output_dir="$(dirname "$csv_path")"
+  # Figures live under <bench>/plots/<gpu>/ (NOT next to the CSVs in artifacts/) — mirror
+  # plot_csv.py's own default so the A100 launcher matches the convention.
+  output_dir="$(dirname "$csv_path" | sed 's#/artifacts/#/plots/#')"
   echo ""
   echo "############################################################"
   echo "# benchmarks/runners/plot_csv.py  csv=$csv_path"
