@@ -62,7 +62,8 @@ def _patch_postact_assert() -> None:
     src = inspect.getsource(_ga.GemmGatedMixin.epi_to_underlying_arguments)
     drops = (
         "assert self.d_layout is None or self.d_layout.is_n_major_c()",
-        "assert cutlass.utils.LayoutEnum.from_tensor(args.mPostAct).is_n_major_c()",
+        # quack 0.5.0 renamed the gated postact tensor field mPostAct -> mAuxOut.
+        "assert cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut).is_n_major_c()",
     )
     for d in drops:
         assert d in src, f"quack gated postact assert changed; review: {d!r}"
