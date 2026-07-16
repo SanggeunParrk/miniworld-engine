@@ -164,7 +164,11 @@ def trimul_triton(
     (B, L, L, d_pair). Mirrors cute's dispatch exactly: LN_in (triton, row_scale
     mask), then a forward-only path for inference (``_uni_infer``) and the merged
     autograd Function for training (``_UniBackHalfTriton``). All-triton/cuBLAS;
-    requires d_hidden == d_pair (the front produces per-side width d_hidden)."""
+    requires d_hidden == d_pair (the front produces per-side width d_hidden).
+
+    B==1 by design (inherited from the shared bidir front + bdll layout). B>1 was implemented
+    + verified correct but is slower than looping this path per batch (L2 thrashing of large
+    bdll intermediates); see docs/kernel-optimization/trimul_batch_generalization."""
     d = pair.shape[-1]
     if d_hidden != d:
         raise ValueError(

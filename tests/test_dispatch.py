@@ -134,11 +134,11 @@ def test_trimul_arch_policy(arch, monkeypatch):
 
     arch(9)  # Hopper / H100
     assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.CUTE
-    assert dispatch.trimul_out_layout() == "bdll_direct"
+    assert dispatch.trimul_out_layout() == "bdll_direct_wide"
 
     arch(8)  # pre-Hopper -> no cute GEMM -> triton
     assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.TRITON
-    assert dispatch.trimul_out_layout() == "bdll_direct"
+    assert dispatch.trimul_out_layout() == "bdll_direct_wide"
 
 
 def test_trimul_env_override_wins(arch, monkeypatch):

@@ -86,6 +86,9 @@ def _back_kernel(
 
 def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5):
     """tri_bdll:(B,D,L,L), x_n:(B,L,L,D), Wp/Wg:(D,D)=weight.T -> y:(B,L,L,D). B=1."""
+    # B==1 by design; B>1 works via a per-batch loop, which is faster than a batched single
+    # launch (L2 thrashing of large bdll intermediates). See front.py's note and
+    # docs/kernel-optimization/trimul_batch_generalization.
     B, D, L, L2 = tri_bdll.shape
     assert B == 1 and L == L2
     M = L * L

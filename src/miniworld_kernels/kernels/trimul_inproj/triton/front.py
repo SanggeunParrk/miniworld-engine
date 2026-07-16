@@ -158,6 +158,11 @@ def _gate_kernel(
 
 def trimul_front_triton(x, WL, WLg, WR, WRg, Wg):
     """x:(B,L,L,D) -> (left_bdll, right_bdll, gate_blld). B=1."""
+    # B==1 by design: bdll intermediates put batch OUTSIDE the channel dim, so the view
+    # shortcuts here assume one batch. B>1 was implemented (batched grid axis) + verified
+    # correct, but is SLOWER than looping this B==1 path per batch — the large bdll
+    # intermediates (~300 MB at B=8,L=384) thrash L2 (40 MB) when chained. Loop over B at the
+    # caller if you need it. See docs/kernel-optimization/trimul_batch_generalization.
     B, L, L2, D = x.shape
     assert B == 1 and L == L2
     M, LL = L * L, L * L

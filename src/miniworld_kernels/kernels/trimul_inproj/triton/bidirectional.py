@@ -188,6 +188,11 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     left,right:(B,2h,L,L) bdll and preact:(4*2h, M) interleaved (front_bwd_dW layout).
     ``save_preact=False`` (inference) skips the preact tensor + its stores — the
     backward-only side output cute's forward-only front also omits."""
+    # B==1 by design: bdll intermediates put batch OUTSIDE the channel dim. B>1 was implemented
+    # (batched grid axis + einsum channel-last contraction) + verified correct, but is SLOWER
+    # than looping this B==1 path per batch — the large bdll intermediates (~300 MB at B=8,L=384)
+    # thrash L2 (40 MB) when chained, so a per-batch loop (working set ~L2-sized) wins. Loop over
+    # B at the caller if needed. See docs/kernel-optimization/trimul_batch_generalization.
     B, L, L2, K = x_n.shape
     assert B == 1 and L == L2
     H2 = WL.shape[1]                       # per-side hidden = 2*d_hidden
