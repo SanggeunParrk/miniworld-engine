@@ -1,10 +1,11 @@
 """Per-GPU Triton autotune-config cache — see package docstring.
 
-Two cache roots, runtime-preferred:
-  * shipped   : ``src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json`` (committed defaults)
-  * runtime   : ``<cache-root>/autotune/<op>/<gpu_key>.json`` where cache-root is
-                ``$MINIWORLD_KERNELS_CACHE_DIR`` | ``$XDG_CACHE_HOME/miniworld_kernels`` |
-                ``~/.cache/miniworld_kernels`` (written by the builder / RUN_AUTOTUNE regen).
+ONE cache location, always: ``src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json``,
+committed to git and shipped inside the package. Reads (dispatch/prune) and writes
+(builder / RUN_AUTOTUNE regen) both target this in-repo path so a tuned cache is
+versioned with the kernels and shared across every machine that checks out the repo.
+There is deliberately NO ``$MINIWORLD_KERNELS_CACHE_DIR`` / ``$XDG_CACHE_HOME`` / ``~/.cache``
+override: a stale per-user cache must never shadow the repo's committed configs.
 
 Cache JSON schema (v1)::
 
@@ -29,7 +30,10 @@ from pathlib import Path
 import torch
 
 SCHEMA = 1
-_SHIPPED_ROOT = Path(__file__).parent / "data"
+# The one and only cache root: the in-repo ``data/`` dir, committed to git. Both reads
+# and writes go here — no env override, no ~/.cache — so a tuned cache is versioned with
+# the kernels and a stale per-user cache can never shadow the repo's committed configs.
+_CACHE_ROOT = Path(__file__).parent / "data"
 
 
 # --------------------------------------------------------------------------- #
@@ -38,14 +42,6 @@ _SHIPPED_ROOT = Path(__file__).parent / "data"
 def run_autotune_enabled() -> bool:
     """``MINIWORLD_RUN_AUTOTUNE=1`` -> ignore the cache and run the full autotune grid."""
     return os.getenv("MINIWORLD_RUN_AUTOTUNE", "0").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _runtime_root() -> Path:
-    base = os.environ.get("MINIWORLD_KERNELS_CACHE_DIR")
-    if not base:
-        xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-        base = os.path.join(xdg, "miniworld_kernels")
-    return Path(base) / "autotune"
 
 
 def gpu_key(device_index: int | None = None) -> str:
@@ -133,19 +129,17 @@ _load_cache: dict[tuple[str, str], dict | None] = {}
 
 
 def _load(op: str, gk: str) -> dict | None:
-    """Load the cache for (op, gpu). Runtime root wins over shipped. Memoized; corrupt -> None."""
+    """Load the in-repo cache for (op, gpu). Memoized; missing/corrupt -> None."""
     key = (op, gk)
     if key in _load_cache:
         return _load_cache[key]
     result = None
-    for root in (_runtime_root(), _SHIPPED_ROOT):
-        fp = root / op / f"{gk}.json"
-        if fp.exists():
-            try:
-                result = json.loads(fp.read_text())
-                break
-            except Exception:  # noqa: BLE001 -- corrupt cache -> treat as miss
-                result = None
+    fp = _CACHE_ROOT / op / f"{gk}.json"
+    if fp.exists():
+        try:
+            result = json.loads(fp.read_text())
+        except Exception:  # noqa: BLE001 -- corrupt cache -> treat as miss
+            result = None
     _load_cache[key] = result
     return result
 
@@ -154,11 +148,12 @@ def store_ranked_configs(
     op: str, gk: str, dtype: str, bucket: str, ranked: list[tuple[object, float]],
     config_space_h: str, *, top_k: int = 5,
 ) -> Path:
-    """Persist the top-K (config, ms) for (op, gpu, dtype, bucket) to the RUNTIME cache.
+    """Persist the top-K (config, ms) for (op, gpu, dtype, bucket) to the in-repo cache.
 
     ``ranked`` is a list of ``(triton.Config, median_ms)`` sorted fastest-first. Resets the
-    file's entries if the config-space hash changed (kernel grid was edited)."""
-    fp = _runtime_root() / op / f"{gk}.json"
+    file's entries if the config-space hash changed (kernel grid was edited). Writes into the
+    committed ``data/`` tree so the builder's output is ready to ``git add`` and share."""
+    fp = _CACHE_ROOT / op / f"{gk}.json"
     fp.parent.mkdir(parents=True, exist_ok=True)
     data = None
     if fp.exists():

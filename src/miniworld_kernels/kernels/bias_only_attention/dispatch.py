@@ -14,11 +14,13 @@ Three crossovers, all measured on H100 / d_pair=128:
 Only ever chooses among *correct* backends, so a stale/corrupt cache yields at worst
 a slower (never wrong) path; any error falls back to the static H100 heuristic.
 
+Calibrated choices persist to the in-repo ``autotune/data/bias_only_dispatch/`` tree
+(committed to git, shared across machines) — never ``~/.cache`` or an env-var path.
+
 Env:
   MINIWORLD_BIASONLY_AUTOTUNE = auto (default) | off | force
       off   -> never calibrate; always the static H100 thresholds
       force -> calibrate even on H100 (sm90), ignoring the static fast-path
-  MINIWORLD_KERNELS_CACHE_DIR -> cache root (shared with the other kernels)
 """
 
 from __future__ import annotations
@@ -44,6 +46,9 @@ GATE_FUSED_MAX_DH = 128
 INFER_CONCAT_MAX_DH = 256
 
 _SUBDIR = "bias_only_dispatch"
+# In-repo, committed cache root (sibling of the autotune-config data tree). Single
+# canonical location: no env override, no ~/.cache — calibrated choices live in git.
+_CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 
 def autotune_mode() -> str:
@@ -51,11 +56,7 @@ def autotune_mode() -> str:
 
 
 def _cache_dir() -> Path:
-    base = os.environ.get("MINIWORLD_KERNELS_CACHE_DIR")
-    if not base:
-        xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-        base = os.path.join(xdg, "miniworld_kernels")
-    return Path(base) / _SUBDIR
+    return _CACHE_ROOT / _SUBDIR
 
 
 def _file(idx: int) -> Path:

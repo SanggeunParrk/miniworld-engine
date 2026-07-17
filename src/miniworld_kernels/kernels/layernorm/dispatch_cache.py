@@ -11,11 +11,14 @@ The cache only ever selects among *correct* kernels, so a stale/corrupt cache ca
 never produce wrong numbers — at worst a suboptimal (but valid) path; on any error
 we fall back to the static H100 heuristic.
 
+The calibrated choices persist to the in-repo ``autotune/data/ln_bwd_dispatch/`` tree
+(committed to git, shared across machines) — never to ``~/.cache`` or an env-var path,
+so a stale per-user cache can never shadow the repo's committed choices.
+
 Controls (env):
   MINIWORLD_LN_AUTOTUNE = auto (default) | off | force
       off   -> never calibrate, always static heuristic
       force -> calibrate even on known archs (H100), ignoring the static fast-path
-  MINIWORLD_KERNELS_CACHE_DIR -> cache root (default: $XDG_CACHE_HOME or ~/.cache)
 """
 
 from __future__ import annotations
@@ -29,6 +32,9 @@ from pathlib import Path
 import torch
 
 _SUBDIR = "ln_bwd_dispatch"
+# In-repo, committed cache root (sibling of the autotune-config data tree). Single
+# canonical location: no env override, no ~/.cache — calibrated choices live in git.
+_CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 
 def autotune_mode() -> str:
@@ -36,11 +42,7 @@ def autotune_mode() -> str:
 
 
 def _cache_dir() -> Path:
-    base = os.environ.get("MINIWORLD_KERNELS_CACHE_DIR")
-    if not base:
-        xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-        base = os.path.join(xdg, "miniworld_kernels")
-    return Path(base) / _SUBDIR
+    return _CACHE_ROOT / _SUBDIR
 
 
 @functools.lru_cache(maxsize=8)

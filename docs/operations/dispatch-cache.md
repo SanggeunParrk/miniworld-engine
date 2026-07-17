@@ -1,16 +1,18 @@
 # Runtime Dispatch Caches
 
 Some kernels choose among multiple correct implementations at runtime. Those
-choices are performance policy, not benchmark output, so their caches must not
-live under any `benchmarks/**/artifacts/` directory and must not be committed.
+choices are performance policy tied to a specific GPU, so — like the autotune-config
+caches — they are committed to git and shared across machines.
 
-The persistent on-disk cache root is:
+The persistent on-disk cache root is a single, canonical, in-repo location:
 
-- `$MINIWORLD_KERNELS_CACHE_DIR`, if set
-- otherwise `$XDG_CACHE_HOME/miniworld_kernels`
-- otherwise `~/.cache/miniworld_kernels`
+- `src/miniworld_kernels/autotune/data/<subdir>/<gpu_key>.json`
 
-This keeps the repo clean when it is used directly or as a submodule.
+where `<subdir>` is `ln_bwd_dispatch`, `bias_only_dispatch`, etc. There is
+deliberately **no** `$MINIWORLD_KERNELS_CACHE_DIR` / `$XDG_CACHE_HOME` / `~/.cache`
+override: reads and writes both target this in-repo path, so a stale per-user cache
+can never shadow the repo's committed choices, and a checkout of the repo (direct or
+as a submodule) already carries the calibrated caches.
 
 ## LayerNorm Backward
 
@@ -57,7 +59,7 @@ The static heuristic (also the universal fallback) is:
 
 ## LayerNorm Cache Format
 
-- **Location:** `<cache-root>/ln_bwd_dispatch/<gpu>.json`.
+- **Location:** `src/miniworld_kernels/autotune/data/ln_bwd_dispatch/<gpu>.json` (in-repo, committed).
 - **Key:** GPU name + compute capability + Triton version
   (e.g. `NVIDIA_H100_80GB_HBM3_sm90_triton3.6.0.json`) — a driver/Triton upgrade or
   a different GPU gets its own entry.
@@ -105,15 +107,16 @@ CUDA-graph capture.
 | var | values | effect |
 |---|---|---|
 | `MINIWORLD_LN_AUTOTUNE` | `auto` (default) / `off` / `force` | `off`: static only; `force`: calibrate even on H100 |
-| `MINIWORLD_KERNELS_CACHE_DIR` | path | persistent cache root |
 | `MINIWORLD_LN_BWD` | `persistent` / `partial` / `atomic` | hard override, bypasses cache + heuristic |
 
 ## Using it on a new GPU
 
 Nothing to do — just run. The first training step (or first time each
-`(d, M-bucket)` is hit) calibrates and writes the cache; subsequent runs and
-re-imports read it. To pre-warm explicitly, run one inference+training pass per shape you
-care about. To inspect/clear, look at / delete the JSON under the cache dir.
+`(d, M-bucket)` is hit) calibrates and writes the cache under
+`src/miniworld_kernels/autotune/data/ln_bwd_dispatch/`; subsequent runs and
+re-imports read it. Commit the JSON so other machines get the calibrated choice.
+To pre-warm explicitly, run one inference+training pass per shape you care about.
+To inspect/clear, look at / delete the JSON under that in-repo dir.
 
 
 # Autotune Config Cache
@@ -148,17 +151,17 @@ changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back
 
 ## Cache location & format
 
-- **shipped** (committed defaults): `src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json`.
-- **runtime** (builder / RUN_AUTOTUNE output, preferred over shipped):
-  `<cache-root>/autotune/<op>/<gpu_key>.json` (same `<cache-root>` as above).
+- Single canonical, in-repo location (committed to git): `src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json`.
+  Reads (dispatch/prune) and writes (builder / `RUN_AUTOTUNE` regen) both target this path — no
+  `~/.cache` / env-var override — so a stale per-user cache can never shadow the committed configs.
 - `gpu_key` = device name + capability (e.g. `NVIDIA A100 80GB PCIe (sm80)`); entries keyed
   `"<dtype>|<shape-bucket>"` → list of `{kwargs, num_warps, num_stages, ms}` (top-K). A
   `config_space_hash` field invalidates the whole file's entries when the grid changes.
 
 ## Building the shipped cache (on the target GPU)
 
-There are two builders; both write the runtime cache, which you then copy into
-`src/miniworld_kernels/autotune/data/` and commit. A new GPU (H100/B200/…) is enabled by
+There are two builders; both write directly into `src/miniworld_kernels/autotune/data/`,
+so after a build you just `git add` + commit the JSONs. A new GPU (H100/B200/…) is enabled by
 running one of these on that box and committing its JSONs.
 
 **1. Capture builder (preferred — covers every wired kernel automatically).** Instead of

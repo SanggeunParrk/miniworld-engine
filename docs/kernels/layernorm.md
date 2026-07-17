@@ -114,7 +114,7 @@ on H100, so on other GPUs we **don't guess — we measure once and cache** it
   persistent / `d==256` partial-or-atomic / `d<256` atomic) — no calibration.
 - **Other GPUs:** the first time a `(d, M-bucket)` is seen, the backward times the
   three paths on the real tensors, picks the winner, and writes it to a per-GPU
-  JSON under `~/.cache/miniworld_kernels/ln_bwd_dispatch/<gpu>.json`. Later runs
+  JSON under `src/miniworld_kernels/autotune/data/ln_bwd_dispatch/<gpu>.json`. Later runs
   (and re-imports as a submodule) read the cache and dispatch instantly. The cache
   only ever selects among *correct* kernels, so it can never affect numerics — a
   stale/corrupt cache at worst picks a slower valid path, and any error falls back
@@ -124,7 +124,10 @@ Controls (env):
 
 - `MINIWORLD_LN_AUTOTUNE=auto` (default) `| off | force` — `off` always uses the
   static heuristic; `force` calibrates even on H100.
-- `MINIWORLD_KERNELS_CACHE_DIR=<path>` — cache location (default `$XDG_CACHE_HOME`).
 - `MINIWORLD_LN_BWD=persistent|partial|atomic` — hard override, bypasses cache.
+
+The calibrated path is cached in-repo at
+`src/miniworld_kernels/autotune/data/ln_bwd_dispatch/<gpu_key>.json` (committed to git);
+there is no `~/.cache` / env-var cache location.
 
 Calibration is skipped during CUDA-graph capture (falls back to static / cache).
