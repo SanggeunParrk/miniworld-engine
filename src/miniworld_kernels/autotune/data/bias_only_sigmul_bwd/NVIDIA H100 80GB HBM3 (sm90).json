@@ -1,0 +1,55 @@
+{
+  "config_space_hash": "52659416ba76",
+  "entries": {
+    "bfloat16|": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.12969599664211273,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.1297599971294403,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.12985600531101227,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.13078400492668152,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.13094399869441986,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+  "op": "bias_only_sigmul_bwd",
+  "provenance": {
+    "built_utc": "2026-07-14T16:33:52+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
