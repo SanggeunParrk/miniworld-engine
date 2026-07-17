@@ -59,8 +59,18 @@ def _stats_kernel(
     tl.store(c1_ptr + rows, mean * rstd, mask=row_mask)
 
 
+@torch.compiler.disable()
 def stats_triton(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """rstd[m], c1[m]=mean*rstd over the last dim of X (M, K). Both fp32 [M]."""
+    """rstd[m], c1[m]=mean*rstd over the last dim of X (M, K). Both fp32 [M].
+
+    ``@torch.compiler.disable()``: this is the only autotuned Triton kernel
+    (``@triton.autotune`` + ``early_config_prune``) reached on a compile-traced
+    path — the transition/attention autotuned kernels are already disabled at
+    their autograd.Function level. Without this guard, torch.compile/dynamo tries
+    to hopify the autotuner's ``early_config_prune`` closure and fails with
+    "Can't construct an AttrSource without a valid base source". Graph-breaking
+    here (eager launch) is captured normally by the manual full-model CUDA graph.
+    """
     assert x.dim() == 2 and x.is_cuda
     M, K = x.shape
     rstd = torch.empty(M, device=x.device, dtype=torch.float32)
