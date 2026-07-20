@@ -60,7 +60,7 @@ third_party/ct_cutlass_workbench/*.so
 
 # hydra run outputs (transient)
 outputs/
-results/
+/results/
 
 # secrets / local agent worktrees / scratch (added by checkpoint)
 notion_token
@@ -69,3 +69,18 @@ _fold_t.py
 
 # job logs (SLURM .out etc.) — sibling of artifacts/
 benchmarks/**/logs/
+
+# --- Curated benchmark results — TRACKED (this is the policy, not the exception) ---
+# CSV (the numbers = source of truth) is tracked for BOTH kernel and module benches.
+# Plots (PNG/PDF) are tracked for MODULE benches only; kernel benches are CSV-only.
+# Layout: benchmarks/results/{kernels,modules}/<name>/<gpu>.csv  (+ .png under modules/).
+# OVERWRITE the same path each run so git stores diffs, not new blobs. Raw logs/dumps
+# (*.out, *.so, *.ncu-rep, ...) never track here — blocked by the global rules above.
+benchmarks/results/**
+!benchmarks/results/**/
+!benchmarks/results/**/*.csv
+!benchmarks/results/**/*.md
+!benchmarks/results/**/*.json
+# plots: module benches only (kernel benches commit CSV, no PNG)
+!benchmarks/results/modules/**/*.png
+!benchmarks/results/modules/**/*.pdf
