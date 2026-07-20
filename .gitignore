@@ -30,17 +30,15 @@ benchmarks/**/profiles/*
 # Generated benchmark data + figures are NOT tracked (kernel-library convention:
 # ship the bench scripts, regenerate results, keep curated tables in docs). This
 # keeps the repo lean for consumers that vendor it as a submodule.
+# artifacts/ + plots/ are regeneratable scratch (autotune summaries, raw CSVs, figures).
+# Curated results live under benchmarks/results/ (see that dir's policy). Keep only the
+# .gitkeep dir scaffolding here; everything else (incl autotune_summary.txt) stays ignored.
 benchmarks/**/artifacts/**
 !benchmarks/**/artifacts/**/
 !benchmarks/**/artifacts/**/.gitkeep
 benchmarks/**/plots/**
 !benchmarks/**/plots/**/
 !benchmarks/**/plots/**/.gitkeep
-!benchmarks/**/artifacts/**/*.png
-!benchmarks/**/artifacts/**/*.pdf
-!benchmarks/**/artifacts/**/*.txt
-!benchmarks/**/artifacts/**/*.json
-!benchmarks/**/artifacts/**/*.md
 benchmark/logs/
 benchmark/
 config/
