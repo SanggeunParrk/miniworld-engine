@@ -26,19 +26,21 @@ dist/
 benchmarks/**/profiles/*
 !benchmarks/**/profiles/.gitkeep
 
-# generated benchmark/profiling artifacts
-# Generated benchmark data + figures are NOT tracked (kernel-library convention:
-# ship the bench scripts, regenerate results, keep curated tables in docs). This
-# keeps the repo lean for consumers that vendor it as a submodule.
-# artifacts/ + plots/ are regeneratable scratch (autotune summaries, raw CSVs, figures).
-# Curated results live under benchmarks/results/ (see that dir's policy). Keep only the
-# .gitkeep dir scaffolding here; everything else (incl autotune_summary.txt) stays ignored.
-benchmarks/**/artifacts/**
-!benchmarks/**/artifacts/**/
-!benchmarks/**/artifacts/**/.gitkeep
-benchmarks/**/plots/**
-!benchmarks/**/plots/**/
-!benchmarks/**/plots/**/.gitkeep
+# --- benchmark layout: per target, benchmarks/{modules,kernels}/<target>/ holds ---
+#   artifacts/  raw bench output (CSVs, autotune summaries)  -> SCRATCH, ignored
+#   plots/      raw plot_csv.py SVG output                    -> SCRATCH, ignored
+#   results/    CURATED results kept in git                   -> TRACKED
+# Scratch is scoped to the target level (benchmarks/*/*/{artifacts,plots}); the sibling
+# results/ dir is NOT matched, so it tracks by default. Raw dumps (*.out/*.ncu-rep/*.so)
+# stay ignored everywhere via the global rules. Policy: kernels commit CSV only (no plots).
+benchmarks/*/*/artifacts/**
+!benchmarks/*/*/artifacts/**/
+!benchmarks/*/*/artifacts/**/.gitkeep
+benchmarks/*/*/plots/**
+!benchmarks/*/*/plots/**/
+!benchmarks/*/*/plots/**/.gitkeep
+benchmarks/kernels/*/results/**/*.svg
+benchmarks/kernels/*/results/**/*.pdf
 benchmark/logs/
 benchmark/
 config/
@@ -67,20 +69,3 @@ _fold_t.py
 
 # job logs (SLURM .out etc.) — sibling of artifacts/
 benchmarks/**/logs/
-
-# --- Curated benchmark results — TRACKED (this is the policy, not the exception) ---
-# CSV (the numbers = source of truth) is tracked for BOTH kernel and module benches.
-# Plots (PNG/PDF) are tracked for MODULE benches only; kernel benches are CSV-only.
-# Layout: benchmarks/results/{kernels,modules}/<name>/<gpu>.csv  (+ .png under modules/).
-# OVERWRITE the same path each run so git stores diffs, not new blobs. Raw logs/dumps
-# (*.out, *.so, *.ncu-rep, ...) never track here — blocked by the global rules above.
-benchmarks/results/**
-!benchmarks/results/**/
-!benchmarks/results/**/*.csv
-!benchmarks/results/**/*.md
-!benchmarks/results/**/*.json
-# plots: module benches only (kernel benches commit CSV, no plots). plot_csv.py emits
-# SVG (vector/text -> delta-compresses, scales); png/pdf allowed too if hand-added.
-!benchmarks/results/modules/**/*.svg
-!benchmarks/results/modules/**/*.png
-!benchmarks/results/modules/**/*.pdf
