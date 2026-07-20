@@ -81,6 +81,8 @@ benchmarks/results/**
 !benchmarks/results/**/*.csv
 !benchmarks/results/**/*.md
 !benchmarks/results/**/*.json
-# plots: module benches only (kernel benches commit CSV, no PNG)
+# plots: module benches only (kernel benches commit CSV, no plots). plot_csv.py emits
+# SVG (vector/text -> delta-compresses, scales); png/pdf allowed too if hand-added.
+!benchmarks/results/modules/**/*.svg
 !benchmarks/results/modules/**/*.png
 !benchmarks/results/modules/**/*.pdf

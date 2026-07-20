@@ -6,20 +6,23 @@ these files are the source of truth.
 
 ## Layout
 
-Split into `kernels/` and `modules/` (mirrors `benchmarks/{kernels,modules}/`):
+Split into `kernels/` and `modules/` (mirrors `benchmarks/{kernels,modules}/`), one
+subdir per GPU, `<mode>_<axis>` files (mode ∈ inference/training, axis ∈ seq_len/d_pair):
 
 ```
-benchmarks/results/kernels/<kernel>/<gpu>.csv    # kernel benches: CSV ONLY (no plots)
-benchmarks/results/modules/<module>/<gpu>.csv    # module benches: CSV ...
-benchmarks/results/modules/<module>/<gpu>.png    #   ... + curated plot
-benchmarks/results/**/results.md                 # human-readable table (from the CSVs)
+benchmarks/results/kernels/<kernel>/<gpu>/<mode>_<axis>.csv          # kernels: CSV ONLY
+benchmarks/results/modules/<target>/<gpu>/<mode>_<axis>.csv          # modules: CSV ...
+benchmarks/results/modules/<target>/<gpu>/<mode>_<axis>_speedup.svg  #   ... + plots (SVG)
+benchmarks/results/modules/<target>/<gpu>/<mode>_<axis>_latency.svg
 ```
 
-e.g. `benchmarks/results/kernels/trimul_inproj/h100.csv` (csv only),
-`benchmarks/results/modules/transition/h100.csv` + `.../h100.png`.
+e.g. `benchmarks/results/kernels/transition_b2b/b200/inference_seq_len.csv` (csv only),
+`benchmarks/results/modules/transition/b200/inference_seq_len.csv` + `..._speedup.svg`.
+GPU slug is `b200` (sm100), `h100` (sm90), etc.
 
-**CSV is tracked for both; PNG plots are tracked for modules only.** A `.png` committed
-under `kernels/` is git-ignored on purpose — kernel benches stay CSV-only.
+**CSV is tracked for both; plots (SVG) are tracked for modules only.** An `.svg` committed
+under `kernels/` is git-ignored on purpose — kernel benches stay CSV-only. plot_csv.py emits
+SVG (vector/text: delta-compresses in git, scales cleanly).
 
 ## Rules (keep the repo lean)
 
