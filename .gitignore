@@ -30,9 +30,11 @@ benchmarks/**/profiles/*
 #   artifacts/  raw bench output (CSVs, autotune summaries)  -> SCRATCH, ignored
 #   plots/      raw plot_csv.py SVG output                    -> SCRATCH, ignored
 #   results/    CURATED results kept in git                   -> TRACKED
-# Scratch is scoped to the target level (benchmarks/*/*/{artifacts,plots}); the sibling
-# results/ dir is NOT matched, so it tracks by default. Raw dumps (*.out/*.ncu-rep/*.so)
-# stay ignored everywhere via the global rules. Policy: kernels commit CSV only (no plots).
+#               results/<gpu>/tables/*.csv  +  results/<gpu>/plots/*.svg (modules)
+# Scratch is scoped to the target level (benchmarks/*/*/{artifacts,plots}); the deeper
+# results/<gpu>/plots/ is NOT matched by that (it is 2 levels below), so curated results
+# track by default. Raw dumps (*.out/*.ncu-rep/*.so) stay ignored everywhere via the global
+# rules. Policy: kernels commit CSV only — any .svg under kernels/*/results/ is ignored.
 benchmarks/*/*/artifacts/**
 !benchmarks/*/*/artifacts/**/
 !benchmarks/*/*/artifacts/**/.gitkeep

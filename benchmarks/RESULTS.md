@@ -10,19 +10,20 @@ benchmarks/modules/<target>/
   artifacts/                 # raw bench output (CSVs, autotune summaries) — SCRATCH, git-ignored
   plots/                     # raw plot_csv.py SVG output                   — SCRATCH, git-ignored
   results/                   # curated, TRACKED
-    <gpu>/<mode>_<axis>.csv          # numbers = source of truth
-    plots/<gpu>/<mode>_<axis>_<latency|speedup>.svg
+    <gpu>/tables/<mode>_<axis>.csv                      # numbers = source of truth
+    <gpu>/plots/<mode>_<axis>_<latency|speedup>.svg
 
 benchmarks/kernels/<target>/
   artifacts/ , plots/        # scratch, git-ignored
   results/
-    <gpu>/<mode>_<axis>.csv          # kernels: CSV ONLY (no plots)
+    <gpu>/tables/<mode>_<axis>.csv                      # kernels: CSV ONLY (no plots)
 ```
 
-- `<gpu>`: `h100` (sm90), `b200` (sm100), …
+- Each `<gpu>` folder holds `tables/` (CSV) and, for modules, `plots/` (SVG) side by side.
+- `<gpu>`: `h100` (sm90), `b200` (sm100), `a100` (sm80), …
 - `<mode>`: `inference` | `training`; `<axis>`: `seq_len` | `d_pair`
 - `augmented_attention` holds two targets in one folder, so its files are prefixed
-  `atom_` / `token_` (e.g. `results/h100/atom_inference_seq_len.csv`).
+  `atom_` / `token_` (e.g. `results/h100/tables/atom_inference_seq_len.csv`).
 
 ## Rules
 
