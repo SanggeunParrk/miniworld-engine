@@ -114,6 +114,26 @@ cute kernels). cutlass-dsl + quack are in the unified env, so the same
 `pixi run --frozen ... benchmarks/runners/bench.py implementations=[cute]`
 runs it.
 
+### Ampere workstation cards (A5000 / A6000)
+
+The RTX A5000 / A6000 (GA102 = `sm_86`) are **triton-only** targets, exactly like the
+A100 (`sm_80`): the cute/cutlass paths are gated behind `sm_90+`
+(`torch.cuda.get_device_capability()[0] < 9`), so `MINIWORLD` resolves to the portable
+Triton family — no dispatch change. They live on the `cssb-master` cluster
+(`partition=gpu`, `qos=normal`, A5000=`gpu02`/24 GB, A6000=`gpu01,03-05`/48 GB), which is
+separate from the A100/H100/B200 cluster. One parameterized launcher per bench type covers
+both cards (pick the card with `--gres`; the script auto-detects it and asserts `sm_86`):
+
+```bash
+# module bench / kernel sweep / per-target / tuned-cache capture
+BENCH_TARGET=transition sbatch --gres=gpu:A6000:1 submits/run_bench_ampere.sbatch
+sbatch --gres=gpu:A5000:4 submits/run_kbench_ampere.sbatch
+CAPTURE_TARGET=all      sbatch --gres=gpu:A6000:1 submits/run_autotune_capture_ampere.sbatch
+```
+
+The A5000's 24 GB may OOM at the top of the sweep (L=1024, d=512); `bench.py` records those
+points as `status=failed` rows rather than aborting, so the CSV still shows the memory cliff.
+
 ## Status
 
 Restructured into the kernels/modules split above. The triangle_multiplication

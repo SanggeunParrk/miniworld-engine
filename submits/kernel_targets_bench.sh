@@ -6,7 +6,9 @@
 # Run inside an srun holding the GPUs.
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+# Repo-root relative to THIS script (submits/..), so it runs in whichever checkout it
+# lives in — no hardcoded absolute path that breaks when a checkout moves or is removed.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export HYDRA_FULL_ERROR=1
 
 # target -> full variant list (rows compared inside its folder)
@@ -54,12 +56,27 @@ for t in "${TASKS[@]}"; do
   i=$((i+1)); (( i % NGPU == 0 )) && wait
 done
 wait
-echo "=== bench done; rendering ==="
+echo "=== bench done; rendering + curating ==="
 DEV="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+# results/<slug>/tables slug from the card (matches results/a100 kernel layout: tables-only,
+# inference seq_len + d_pair CSVs, no plots). Unknown card -> skip curation (render only).
+case "$DEV" in
+  *A100*) SLUG=a100 ;; *A5000*) SLUG=a5000 ;; *A6000*) SLUG=a6000 ;;
+  *H100*) SLUG=h100 ;; *B200*) SLUG=b200 ;; *) SLUG="" ;;
+esac
 for k in "${TARGETS[@]}"; do
   A="benchmarks/kernels/${k}/artifacts/$DEV"
   find "$A" -maxdepth 1 -name "${k}_*_cudagraph-manual_*.csv" -print0 2>/dev/null | while IFS= read -r -d '' csv; do
     pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python benchmarks/runners/plot_csv.py "$@"' _ "$csv" "$A" >/dev/null 2>&1
   done
+  # Curate the canonical inference CSVs into results/<slug>/tables/ (source of truth = CSV).
+  if [ -n "$SLUG" ]; then
+    RT="benchmarks/kernels/${k}/results/${SLUG}/tables"; mkdir -p "$RT"
+    for axis in seq_len d_pair; do
+      sfx=L_sweep; [ "$axis" = d_pair ] && sfx=d_sweep
+      csv="$(find "$A" -maxdepth 1 -name "${k}_*_inference_time_*_cudagraph-manual_${axis}_${sfx}.csv" -printf '%T@ %p\n' 2>/dev/null | sort -nr | sed -n '1s/^[^ ]* //p')"
+      [ -n "$csv" ] && cp -f "$csv" "$RT/inference_${axis}.csv"
+    done
+  fi
 done
 echo "ALL DONE"
