@@ -8,7 +8,12 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_kernels._typecheck import typecheck
-from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_kernels.autotune import (
+    key_bucket_of,
+    make_cache_prune,
+    make_device_smem_prune,
+    tensor_dtype_of,
+)
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_attention"
 
@@ -48,6 +53,22 @@ bwd_configs = [
     triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, 8, 3),
     triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 4, 3),
     triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, 8, 3),
+    # num_stages=2 (and small-tile) variants: at HEAD_DIM=64 (d_pair=256, n_head=4) the
+    # 3-stage pipeline needs 144 KB shared memory, which exceeds the ~100 KB/SM limit of
+    # sm_86 (RTX A5000/A6000) — every 3-stage config above is unlaunchable there. These
+    # 2-stage configs fit sm_86 and give the autotuner (and the device-smem prune below)
+    # a launchable option; on A100/H100/B200 they are just extra candidates.
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 2),
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 128}, 4, 2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 2),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 2),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 8, 2),
+    # num_stages=1: needed at HEAD_DIM=128 (d_pair=512, n_head=4), where even a 2-stage
+    # pipeline exceeds sm_86's ~100 KB. Unpipelined, so smem ~= one working set; the only
+    # sm_86-launchable option at the widest head dim.
+    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 1),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 1),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 1),
 ]
 
 
@@ -173,10 +194,44 @@ def _attn_bwd_preprocess(
     tl.store(Delta + off_hz * N_CTX + off_m, delta, mask=off_m < N_CTX)
 
 
+def _next_pow2(x: int) -> int:
+    return 1 << (int(x) - 1).bit_length() if x > 1 else 1
+
+
+# Static-shared-memory estimate for the dkdv/dq backward configs, used by the device-smem
+# prune to drop unlaunchable configs BEFORE the autotuner tries (and dies on) them. The
+# kernel's smem is dominated by the num_stages-pipelined [BLOCK_M x BLOCK_D] q/do loads plus
+# the [BLOCK_N x BLOCK_M] biasT and the persistent [BLOCK_N x BLOCK_D] k/v, with BLOCK_D >=
+# HEAD_DIM. The 2.8x factor calibrates the raw tile bytes to Triton's actual allocation
+# (measured on sm_86: 147456 B at num_stages=3, HEAD_DIM=64, BLOCK_M=32, BLOCK_N=64). It only
+# needs to RANK configs by size well enough to drop the over-limit ones; make_device_smem_prune
+# always keeps the smallest as a last-resort candidate, so an imperfect estimate never empties
+# the grid.
+_SMEM_FUDGE = 2.8
+
+
+def _bwd_smem_bytes(config, named_args, kwargs) -> int | None:
+    # HEAD_DIM is a constexpr — Triton may surface it via named_args OR the meta kwargs.
+    hd = None
+    if hasattr(named_args, "get") and "HEAD_DIM" in named_args:
+        hd = named_args["HEAD_DIM"]
+    elif kwargs is not None:
+        hd = kwargs.get("HEAD_DIM")
+    if hd is None:
+        return None
+    bd = _next_pow2(int(hd))
+    bm = int(config.kwargs["BLOCK_M"])
+    bn = int(config.kwargs["BLOCK_N"])
+    ns = int(config.num_stages)
+    raw = ns * 2 * (2 * bd * bm + bn * bm) + 2 * (2 * bn * bd)  # bf16 tiles
+    return int(raw * _SMEM_FUDGE)
+
+
 _triangle_attention_bwd_dkdv_prune = make_cache_prune(
     "triangle_attention_bwd_dkdv",
     dtype_of=tensor_dtype_of("q_ptr"),
     bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+    base_prune=make_device_smem_prune(_bwd_smem_bytes),
 )
 
 
@@ -285,6 +340,7 @@ _triangle_attention_bwd_dq_prune = make_cache_prune(
     "triangle_attention_bwd_dq",
     dtype_of=tensor_dtype_of("q_ptr"),
     bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
+    base_prune=make_device_smem_prune(_bwd_smem_bytes),
 )
 
 

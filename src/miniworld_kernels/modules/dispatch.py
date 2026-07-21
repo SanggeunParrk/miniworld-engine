@@ -111,6 +111,18 @@ def is_sm90(device: torch.device | None = None) -> bool:
     return capability(device)[0] == 9  # noqa: PLR2004
 
 
+def is_sm86(device: torch.device | None = None) -> bool:
+    """True on the GA10x Ampere *workstation* cards (RTX A5000 / A6000 / A40), sm_86.
+
+    Distinct from A100 (sm_80): although both are pre-Hopper (``not is_sm90plus``), the
+    workstation parts have far less shared memory (~100 KB/SM vs A100's 164 KB) and lower
+    bf16 tensor-core / bandwidth. Some transition dispatch that favours the fused b2b at
+    small ``d`` on A100 loses to the shape-general split on sm_86, so a few routes gate on
+    this specifically to keep A100's tuned choice untouched while fixing sm_86.
+    """
+    return capability(device) == (8, 6)  # noqa: PLR2004
+
+
 # --------------------------------------------------------------------------- #
 # Public ImplementationType -> internal KernelBackend
 # --------------------------------------------------------------------------- #

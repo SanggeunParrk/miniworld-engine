@@ -225,6 +225,68 @@ def tensor_dtype_of(arg_name: str, default: str = "bfloat16"):
     return f
 
 
+_smem_limit_cache: dict[int, int] = {}
+
+
+def _device_smem_limit(device_index: int | None = None) -> int:
+    """Opt-in shared-memory bytes per block for the current CUDA device (memoized).
+
+    This is the hard ceiling a Triton kernel launch must fit under: ~99 KB on sm_86
+    (RTX A5000/A6000), ~164 KB on sm_80 (A100), ~228 KB on sm_90 (H100). A config whose
+    static shared memory exceeds it raises ``OutOfResources`` at compile — and Triton's
+    autotuner does NOT skip that gracefully (it propagates), so an over-limit config that
+    reaches the autotuner aborts the whole launch. Hence we must drop it BEFORE tuning.
+    """
+    if not torch.cuda.is_available():
+        return 1 << 30
+    idx = torch.cuda.current_device() if device_index is None else device_index
+    if idx not in _smem_limit_cache:
+        p = torch.cuda.get_device_properties(idx)
+        # shared_memory_per_block_optin is the dynamic-smem opt-in max; fall back to the
+        # static per-block figure on older pytorch that doesn't expose the optin field.
+        limit = getattr(p, "shared_memory_per_block_optin", None) or getattr(
+            p, "shared_memory_per_block", 48 * 1024
+        )
+        _smem_limit_cache[idx] = int(limit)
+    return _smem_limit_cache[idx]
+
+
+def make_device_smem_prune(smem_bytes):
+    """Build an ``early_config_prune`` that drops configs whose estimated static shared
+    memory exceeds the running device's opt-in limit.
+
+    ``smem_bytes(config, named_args) -> int`` returns a (conservative) byte estimate for one
+    ``triton.Config`` at the current shape. Compose it as the ``base_prune`` of
+    :func:`make_cache_prune` so the cache only ever narrows within launchable configs. On
+    a device that fits every config (A100/H100/B200) this is a no-op; on sm_86 it removes the
+    unlaunchable wide/high-``num_stages`` configs so a fitting one is chosen instead of the
+    launch aborting. NEVER prune to empty: if the estimate would drop everything (estimate too
+    aggressive), keep the single smallest-estimate config so the launch still has a candidate.
+    """
+
+    def prune(configs, named_args, **kwargs):
+        configs = list(configs)
+        try:
+            limit = _device_smem_limit()
+        except Exception:  # noqa: BLE001 -- never let the smem guard break a launch
+            return configs
+        kept = []
+        for c in configs:
+            try:
+                est = smem_bytes(c, named_args, kwargs)
+            except Exception:  # noqa: BLE001 -- unknown estimate -> don't drop it
+                kept.append(c)
+                continue
+            if est is None or est <= limit:
+                kept.append(c)
+        if kept:
+            return kept
+        # Everything estimated over-limit: keep the smallest so we still try to launch.
+        return [min(configs, key=lambda c: smem_bytes(c, named_args, kwargs) or 0)]
+
+    return prune
+
+
 def make_cache_prune(op: str, *, dtype_of, bucket_of, base_prune=None):
     """Build a Triton ``early_config_prune`` callback that narrows the grid to the cached
     top-K for the running (gpu, dtype, shape-bucket).

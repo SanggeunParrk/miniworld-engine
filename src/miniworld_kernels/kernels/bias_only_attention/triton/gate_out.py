@@ -23,7 +23,12 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_kernels.autotune import (
+    key_bucket_of,
+    make_cache_prune,
+    make_device_smem_prune,
+    tensor_dtype_of,
+)
 
 _configs = [
     triton.Config({"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=w, num_stages=s)
@@ -97,15 +102,35 @@ def _gate_out_fwd(
     )
 
 
+def _dgrad_smem_bytes(config, named_args, kwargs):
+    """Conservative static-smem estimate for _dgrad_epi (device-smem prune). The pipelined
+    loop loads do[BM, BN] and wo[BN, DH] in bf16; the 2.8x factor calibrates raw tile bytes
+    to Triton's real allocation. Only needs to rank configs so the over-limit ones are dropped
+    before the autotuner compiles (and dies on) them; the prune always keeps the smallest."""
+    dh = None
+    if hasattr(named_args, "__contains__") and "DH" in named_args:
+        dh = named_args["DH"]
+    elif kwargs is not None:
+        dh = kwargs.get("DH")
+    if dh is None:
+        return None
+    bm = int(config.kwargs["BM"])
+    bn = int(config.kwargs["BN"])
+    ns = int(config.num_stages)
+    raw = ns * 2 * (bm * bn + bn * int(dh))  # bf16 do[BM,BN] + wo[BN,DH]
+    return int(raw * 2.8)
+
+
 _bias_only_gate_out_bwd_prune = make_cache_prune(
     "bias_only_gate_out_bwd", dtype_of=tensor_dtype_of("do_ptr"),
     bucket_of=key_bucket_of("N", "DH"),
+    base_prune=make_device_smem_prune(_dgrad_smem_bytes),
 )
 
 
 @triton.autotune(
-    configs=[triton.Config({"BM": bm}, num_warps=w, num_stages=s)
-             for bm in (32, 64, 128) for w in (4, 8) for s in (2, 3, 4)],
+    configs=[triton.Config({"BM": bm, "BN": bn}, num_warps=w, num_stages=s)
+             for bm in (32, 64, 128) for bn in (64, 128) for w in (4, 8) for s in (2, 3)],
     key=["M", "N", "DH"],
     prune_configs_by={"early_config_prune": _bias_only_gate_out_bwd_prune},
 )
@@ -120,19 +145,30 @@ def _dgrad_epi(
     a_ptr,      # out: gated = sigmoid(gate)*r  [M, DH]  (for the d_wo GEMM)
     M, N: tl.constexpr, DH: tl.constexpr,
     s_dom, s_don, s_won, s_woh, s_gm, s_gh, s_rm, s_rh, s_om, s_oh,
-    BM: tl.constexpr,
+    BM: tl.constexpr, BN: tl.constexpr,
 ):
     """Fuses the dgrad GEMM d_a = grad_out @ wo with the gate-backward epilogue:
     d_a is never materialized, gate/out_r are read once. One kernel replaces the
-    cuBLAS dgrad + a separate elementwise pass."""
+    cuBLAS dgrad + a separate elementwise pass.
+
+    The contraction dim N is TILED (BN) and accumulated, so shared memory is bounded by
+    the [BM,BN]+[BN,DH] tiles instead of the full [N,DH] weight. The old single-shot
+    ``wo[N, DH]`` load needed ~N*DH*2 bytes of smem (e.g. 128 KB at N=DH=256), which fits
+    A100/H100 but exceeds the ~100 KB/SM of sm_86 (RTX A5000/A6000); tiling makes it
+    launchable on any GPU. Math is unchanged (same GEMM + epilogue)."""
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BM + tl.arange(0, BM)
-    rn = tl.arange(0, N)
     rh = tl.arange(0, DH)
     mm = rm[:, None] < M
-    do = tl.load(do_ptr + rm[:, None] * s_dom + rn[None, :] * s_don, mask=mm, other=0.0)
-    wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh)        # [N, DH]
-    da = tl.dot(do, wo)                                                     # [BM, DH] fp32
+    da = tl.zeros((BM, DH), dtype=tl.float32)                              # [BM, DH] acc
+    for n0 in range(0, N, BN):
+        rn = n0 + tl.arange(0, BN)
+        nmask = rn < N
+        do = tl.load(do_ptr + rm[:, None] * s_dom + rn[None, :] * s_don,
+                     mask=mm & nmask[None, :], other=0.0)                  # [BM, BN]
+        wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh,
+                     mask=nmask[:, None], other=0.0)                       # [BN, DH]
+        da = tl.dot(do, wo, da)                                           # accumulate [BM, DH]
     s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh,
                            mask=mm, other=0.0).to(tl.float32))
     r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=mm, other=0.0).to(tl.float32)

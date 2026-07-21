@@ -186,7 +186,13 @@ class Transition(nn.Module):
         # d=512 10.9 vs 4.8 ms). So default large-d to the split; d=128 (the AF3 shape)
         # still takes the fused b2b below, where it wins. is_sm90plus keeps H100/B200 on
         # their fused/cute paths unchanged.
-        if self.d_hidden >= 256 and not _dispatch.is_sm90plus(x.device):
+        # sm_86 (RTX A5000/A6000): the fused b2b/triton path loses to the shape-general split
+        # even at d=128 (measured cudagraph-manual: ~0.88-0.95x vs old_triton split, both L and
+        # d sweeps), so route ALL d to the split on sm_86. A100 (sm_80) keeps d=128 fused, where
+        # it wins, via the plain `>= 256` gate.
+        if not _dispatch.is_sm90plus(x.device) and (
+            self.d_hidden >= 256 or _dispatch.is_sm86(x.device)
+        ):
             return self._old_triton_forward(x)
         # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> the cute
         # b2b_fwd_sm100 forward (fits smem + correct + cudagraph-capturable at every d; see
@@ -258,8 +264,12 @@ class Transition(nn.Module):
         if _force_split_enabled():
             return self._old_triton_forward(x)
         # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
-        # in training too (d=256 6.3 vs 7.0 ms, d=512 20.2 vs 26.8 ms). d=128 stays fused.
-        if self.d_hidden >= 256 and not _dispatch.is_sm90plus(x.device):
+        # in training too (d=256 6.3 vs 7.0 ms, d=512 20.2 vs 26.8 ms). d=128 stays fused
+        # on A100. sm_86 (RTX A5000/A6000) also loses at d=128 (~0.91x vs split), so route
+        # ALL d to the split there too.
+        if not _dispatch.is_sm90plus(x.device) and (
+            self.d_hidden >= 256 or _dispatch.is_sm86(x.device)
+        ):
             return self._old_triton_forward(x)
         # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> cute
         # b2b_fwd_sm100 forward + the sm100 gatebwd (Version A) backward. Verified fwd+bwd
