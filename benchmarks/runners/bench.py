@@ -1379,7 +1379,7 @@ def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
 def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
     """Gated dual-GEMM in-projection (trimul front): left=(x@WL)*sigma(x@WLg), right=..., gate=sigma(x@Wg).
     Rows: pytorch, trimul_front_triton, trimul_inproj_cute, tm1_cute, triton_tm1,
-    trimul_front_sm100(dep), triton_gated(dep). Variants without a gate compare left|right only."""
+    trimul_front_sm100(dep). Variants without a gate compare left|right only."""
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
 
@@ -1442,15 +1442,6 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
             left, right = trimul_front_sm100(x, wl, wlg, wr, wrg)
             return bdll_to_md(left), bdll_to_md(right)
         path = "kernels.trimul_inproj.cute.front_sm100"
-    elif implementation == "triton_gated":
-        from miniworld_kernels.kernels.trimul_inproj.cute.triton_gated import triton_gated
-        bg = torch.cat([wlg, wrg], dim=1).contiguous()
-        bp = torch.cat([wl, wr], dim=1).contiguous()
-
-        def run(x):
-            out = triton_gated(x.reshape(L * L, D), bg, bp)
-            return out[:, :D], out[:, D:]
-        path = "kernels.trimul_inproj.cute.triton_gated"
     else:
         return as_bench_result(float("nan"))
 

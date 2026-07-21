@@ -60,16 +60,16 @@
       },
       {
         "kwargs": {
-          "BLOCK_K": 32,
+          "BLOCK_K": 64,
           "BLOCK_M": 64
         },
-        "ms": 0.058368001133203506,
+        "ms": 0.05734400078654289,
         "num_stages": 3,
         "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK_K": 64,
+          "BLOCK_K": 32,
           "BLOCK_M": 64
         },
         "ms": 0.058368001133203506,

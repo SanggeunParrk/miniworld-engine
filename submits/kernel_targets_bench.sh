@@ -11,7 +11,7 @@ export HYDRA_FULL_ERROR=1
 
 # target -> full variant list (rows compared inside its folder)
 declare -A IMPLS=(
-  [dual_gemm_epil]='[pytorch,trimul_front_triton,trimul_inproj_cute,tm1_cute,triton_tm1,trimul_front_sm100,triton_gated]'
+  [dual_gemm_epil]='[pytorch,trimul_front_triton,trimul_inproj_cute,tm1_cute,triton_tm1,trimul_front_sm100]'
   [gemm_epil]='[pytorch,layernorm_linear_triton,layernorm_linear_cute,layernorm_linear_cute_fused,layernorm_linear_te]'
   [transition_b2b]='[pytorch,triton_transition_fused,cute_transition_fused,transition_b2b_ktiled]'
   [layernorm]='[pytorch,triton_layernorm,layernorm_dispatch,quack_cute,triton_layernorm_lowreg]'

@@ -15,14 +15,6 @@
           "BLOCK_M": 8
         },
         "ms": 0.01740800030529499,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 8
-        },
-        "ms": 0.01740800030529499,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -40,49 +32,57 @@
         },
         "ms": 0.01740800030529499,
         "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.01740800030529499,
+        "num_stages": 4,
         "num_warps": 4
       }
     ],
     "bfloat16|N=256": [
       {
         "kwargs": {
-          "BLOCK_M": 4
+          "BLOCK_M": 8
         },
         "ms": 0.028672000393271446,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 2
+        },
+        "ms": 0.02969600073993206,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
+          "BLOCK_M": 2
+        },
+        "ms": 0.02969600073993206,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 2
+        },
+        "ms": 0.02969600073993206,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BLOCK_M": 4
         },
-        "ms": 0.028672000393271446,
-        "num_stages": 3,
+        "ms": 0.02969600073993206,
+        "num_stages": 2,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 8
-        },
-        "ms": 0.028672000393271446,
-        "num_stages": 4,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 8
-        },
-        "ms": 0.028672000393271446,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 8
-        },
-        "ms": 0.028672000393271446,
-        "num_stages": 4,
-        "num_warps": 8
       }
     ],
     "bfloat16|N=512": [

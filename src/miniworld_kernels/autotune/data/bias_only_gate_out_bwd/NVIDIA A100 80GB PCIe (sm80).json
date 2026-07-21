@@ -6,16 +6,8 @@
         "kwargs": {
           "BM": 32
         },
-        "ms": 0.15769599378108978,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BM": 32
-        },
-        "ms": 0.15769599378108978,
-        "num_stages": 4,
+        "ms": 0.158720001578331,
+        "num_stages": 2,
         "num_warps": 8
       },
       {
@@ -23,7 +15,15 @@
           "BM": 32
         },
         "ms": 0.158720001578331,
-        "num_stages": 2,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.158720001578331,
+        "num_stages": 4,
         "num_warps": 8
       },
       {
@@ -39,7 +39,7 @@
           "BM": 32
         },
         "ms": 0.1669120043516159,
-        "num_stages": 3,
+        "num_stages": 4,
         "num_warps": 4
       }
     ]
