@@ -88,14 +88,24 @@ def _trimul_cute(
         for t in (x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_out_w)
     )
     if grad:
-        from .cute.v6_training_merged_sm100 import (
-            prepack_lr_operand_sm100,
-            v6_forward_merged_sm100,
-        )
+        # Capability dispatch: the merged v6 training whole-op has two arch variants.
+        # Blackwell (sm100, cap major>=10) uses the tcgen05 sig-front kernel; Hopper
+        # (sm90 / H100) uses the quack bdll front. Previously this path hardcoded the
+        # sm100 variant, so on H100 it hit `sig front requires the fused sm100 kernel`.
+        if torch.cuda.get_device_capability(x.device)[0] >= 10:
+            from .cute.v6_training_merged_sm100 import (
+                prepack_lr_operand_sm100 as _prepack_lr,
+                v6_forward_merged_sm100 as _v6_forward_merged,
+            )
+        else:
+            from .cute.v6_training_merged import (
+                v6_forward_merged as _v6_forward_merged,
+            )
+            from .cute.launch import prepack_lr_operand as _prepack_lr
 
-        b_lr = prepack_lr_operand_sm100(WL, WLg, WR, WRg)
+        b_lr = _prepack_lr(WL, WLg, WR, WRg)
         row_scale = _mask_2d(mask, x).reshape(-1).to(x.dtype) if mask is not None else None
-        return v6_forward_merged_sm100(
+        return _v6_forward_merged(
             x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b,
             eps, b_lr, direction, row_scale,
         )
