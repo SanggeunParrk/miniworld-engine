@@ -2710,7 +2710,7 @@ packages:
 - pypi: .
   name: miniworld-kernels
   version: 0.1.0
-  sha256: 16be963889d0a1447c0dbccd21cc919e00dadd5ac325d24b00c8cf66a2088d70
+  sha256: b4d227794b7472aff35af6e8d299951d022e5a400a713e96d181798ba6021fb4
   requires_dist:
   - torch>=2.8
   - triton

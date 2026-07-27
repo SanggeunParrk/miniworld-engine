@@ -11,9 +11,12 @@ import triton
 
 from miniworld_kernels.kernels.mpnn_edge_tail.triton import main as edge_tail
 from miniworld_kernels.kernels.mpnn_node_message.triton import main as node_message
+from miniworld_kernels.kernels.mpnn_relative_position.triton import (
+    main as relative_position,
+)
 
 
-_MODULES = (edge_tail, node_message)
+_MODULES = (edge_tail, node_message, relative_position)
 
 
 def _autotuned_kernels() -> list[tuple[str, triton.runtime.Autotuner]]:
@@ -93,6 +96,7 @@ def test_cache_buckets_do_not_depend_on_the_row_count() -> None:
         "NEIGHBORS": 48,
         "DROPOUT": 1,
         "EDGE_WEIGHT_STRIDE": 128,
+        "BUCKET_BLOCK": 128,
         **dict.fromkeys(row_like, 262144),
     }
     for name, kernel in _autotuned_kernels():

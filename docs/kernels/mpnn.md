@@ -1178,6 +1178,59 @@ finding in this section came from those harnesses *after* `triton.autotune` had
 already reported its own best configuration as acceptable -- including the two that
 overturned a change already believed to be an improvement.
 
+### Relative-position embedding backward
+
+The sequence-offset bucket is one index per *edge* into a 66-row, 16-channel table, so
+its backward reduces 6,291,456 rows into 66 at `B=16, T=8192, K=48`. The clamp puts
+every long-range contact in the two end buckets -- measured at 33% of all edges -- so
+the reduction is as unbalanced as it can be.
+
+`F.embedding`'s backward handles that badly, and the reason is structural rather than a
+matter of the bucket count. It launches sixteen kernels: a radix sort of the index, a
+`vectorized_gather_kernel` that materialises a reordered copy of the whole gradient
+(which is where its 768 MiB of temporaries go), a partial-segment reduction, and a
+`sum_and_scatter`. `index_add_` launches one. That is the right algorithm for a
+50,000-token vocabulary and the wrong one for a 16-channel row -- and the ratio holds at
+about 6x from 66 buckets to 262,144, so it is row *width* that decides, not vocabulary.
+
+| 6,291,456 rows -> [66, 16], real index | ms | rel-err vs FP64 | reproduces | peak MiB |
+|---|---:|---:|:---:|---:|
+| `F.embedding` backward | 17.6 | 6.7e-06 | yes | 768.0 |
+| `one_hot @ W^T` (upstream's own form) | 14.5 | -- | yes | 3960.0 |
+| `index_add_` | **2.6** | 2.2e-05 | **no** | 0.8 |
+| privatised table, atomic combine | 3.6 | 2.8e-06 | **no** | 0.0 |
+| privatised table, fixed-order combine | 3.8 | **2.7e-06** | yes | **0.0** |
+
+Two of those rows are worth keeping in mind. Upstream's `one_hot(bucket) @ W^T` is the
+same function and its weight gradient is a dense GEMM with no atomics at all, which
+sounds ideal until the `[N, buckets]` one-hot is materialised -- 3960 MiB, ten times the
+gradient it consumes, because `F.one_hot` yields INT64. Converting that to an
+`nn.Embedding` was right on both axes. And the fixed-order combine is 0.15 ms slower
+than the atomic one and reproducible, which is the trade this ships on: the two end
+buckets accumulate about a million values each, and a flat FP32 chain over a million
+terms is both irreproducible and worse conditioned than P partial sums in a tree.
+
+**It does not help end to end, and that is the headline.** At `B=16` against a 1343.41 ms
+step: `index_add` 1340.04, `triton` 1357.41. An autograd boundary is a fusion boundary,
+so the reduction's 16 ms saving is paid back in elementwise work that used to fuse --
++17 ms here, and +24 ms when this was a `torch.library.custom_op`, which is opaque to
+Inductor rather than merely a boundary. The backend therefore ships `off`.
+
+It is kept because three of its properties are not visible in that comparison: under
+eager execution there is no fusion to lose and the op is a straight fivefold win, the
+kernel is 2.5x more accurate than what it replaces, and it allocates nothing against
+768 MiB.
+
+The diagnosis that started this was wrong and the correction is the useful part. The
+`embedding backward` profile category is 214 ms of a 1358 ms step, and this pass is
+about 19 ms of it. The rest is `gather_neighbors`, which gathers node values at the
+neighbour index and scatters `[B*T*K, 128]` back into `[B*T, 128]` -- 1.5 GiB into
+131,072 destinations. At that width the ranking inverts: `F.embedding`'s sort-based
+backward runs at 205 GB/s compiled while `index_add_` manages 83, and a BF16
+`index_add_` collapses to 9 GB/s because the hardware has no BF16 atomic add. The
+privatised table cannot help there either, since a `[131072, 128]` accumulator is
+67 MiB. That pass is close to its floor and is left alone.
+
 ### Fused encoder node message
 
 `kernels/mpnn_node_message/` applies the same treatment to the node half of an

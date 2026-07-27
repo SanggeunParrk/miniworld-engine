@@ -11,6 +11,7 @@ import torch.utils.checkpoint
 
 from miniworld_kernels.kernels.mpnn_edge_dropout import EdgeDropoutBackend
 from miniworld_kernels.kernels.mpnn_edge_layernorm import EdgeNormBackend
+from miniworld_kernels.kernels.mpnn_relative_position import RelativePositionBackend
 from miniworld_kernels.kernels.mpnn_edge_mlp import EdgeMLPBackend
 from miniworld_kernels.kernels.mpnn_edge_tail import EdgeTailBackend
 from miniworld_kernels.kernels.mpnn_message import MessageBackend
@@ -50,6 +51,7 @@ class ProteinMPNNConfig:
     edge_mlp_backend: EdgeMLPBackend = "auto"
     edge_norm_backend: EdgeNormBackend = "auto"
     feature_backend: FeatureBackend = "auto"
+    relative_position_backend: RelativePositionBackend = "off"
     knn_backend: KNNBackend = "cdist"
     knn_query_chunk: int = 2048
     knn_cutoff: float = 16.0
@@ -113,6 +115,11 @@ class ProteinMPNNConfig:
         if self.feature_backend not in {"auto", "pytorch", "recompute"}:
             raise ValueError(
                 "feature_backend must be one of 'auto', 'pytorch', or 'recompute'"
+            )
+        if self.relative_position_backend not in {"off", "index_add", "triton"}:
+            raise ValueError(
+                "relative_position_backend must be one of 'off', 'index_add', "
+                "or 'triton'"
             )
         if self.knn_backend not in {"cdist", "chunked", "grid_cutoff"}:
             raise ValueError(
@@ -405,6 +412,7 @@ class ProteinMPNN(nn.Module):
             k_neighbors=config.k_neighbors,
             coordinate_noise=config.coordinate_noise,
             feature_backend=config.feature_backend,
+            relative_position_backend=config.relative_position_backend,
             edge_norm_backend=config.edge_norm_backend,
             knn_backend=config.knn_backend,
             knn_query_chunk=config.knn_query_chunk,

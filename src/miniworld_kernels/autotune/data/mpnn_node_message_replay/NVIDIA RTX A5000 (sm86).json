@@ -6,7 +6,7 @@
         "kwargs": {
           "GROUPS": 8
         },
-        "ms": 1.0762239694595337,
+        "ms": 1.0321919918060303,
         "num_stages": 1,
         "num_warps": 8
       },
@@ -14,7 +14,7 @@
         "kwargs": {
           "GROUPS": 4
         },
-        "ms": 1.1110399961471558,
+        "ms": 1.0618879795074463,
         "num_stages": 1,
         "num_warps": 8
       },
@@ -22,7 +22,15 @@
         "kwargs": {
           "GROUPS": 16
         },
-        "ms": 1.112064003944397,
+        "ms": 1.062399983406067,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "GROUPS": 2
+        },
+        "ms": 1.2031999826431274,
         "num_stages": 1,
         "num_warps": 8
       },
@@ -30,17 +38,9 @@
         "kwargs": {
           "GROUPS": 8
         },
-        "ms": 1.2395520210266113,
+        "ms": 1.206272006034851,
         "num_stages": 1,
         "num_warps": 16
-      },
-      {
-        "kwargs": {
-          "GROUPS": 2
-        },
-        "ms": 1.2712960243225098,
-        "num_stages": 1,
-        "num_warps": 8
       }
     ]
   },

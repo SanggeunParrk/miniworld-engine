@@ -15,6 +15,10 @@ from miniworld_kernels.kernels.mpnn_edge_layernorm import (
     EdgeNormBackend,
     edge_layer_norm,
 )
+from miniworld_kernels.kernels.mpnn_relative_position import (
+    RelativePositionBackend,
+    relative_position_embed,
+)
 
 from ._functional import gather_neighbors
 
@@ -77,12 +81,18 @@ def _virtual_cb(backbone: torch.Tensor) -> torch.Tensor:
 class RelativePositionEmbedding(nn.Module):
     """Embedding form of the source one-hot relative-position projection."""
 
-    def __init__(self, width: int, max_relative_offset: int = 32) -> None:
+    def __init__(
+        self,
+        width: int,
+        max_relative_offset: int = 32,
+        backend: RelativePositionBackend = "off",
+    ) -> None:
         super().__init__()
         self.max_relative_offset = max_relative_offset
         self.num_buckets = 2 * max_relative_offset + 2
         self.embedding = nn.Embedding(self.num_buckets, width)
         self.bias = nn.Parameter(torch.empty(width))
+        self.backend = backend
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -112,7 +122,14 @@ class RelativePositionEmbedding(nn.Module):
             * same_chain
             + (1 - same_chain) * (2 * self.max_relative_offset + 1)
         ).long()
-        return self.embedding(bucket) + self.bias
+        # One index per *edge* into a table of a few dozen rows, so the backward is a
+        # 6-million-into-66 reduction whose cost is set by how unevenly the rows land.
+        # The clamp puts every long-range contact in the two end buckets -- a third of
+        # all edges at T=8192 -- and the compiler's reduction for that shape measured
+        # 30.8 ms per call, 16% of a B=16 step. The boundary lets a better one run.
+        return relative_position_embed(
+            bucket, self.embedding.weight, self.bias, backend=self.backend
+        )
 
 
 class BackboneFeatures(nn.Module):
@@ -181,6 +198,7 @@ class BackboneFeatures(nn.Module):
         k_neighbors: int = 30,
         coordinate_noise: float = 0.0,
         feature_backend: FeatureBackend = "auto",
+        relative_position_backend: RelativePositionBackend = "off",
         knn_backend: KNNBackend = "cdist",
         knn_query_chunk: int = 2048,
         knn_cutoff: float = 16.0,
@@ -207,7 +225,9 @@ class BackboneFeatures(nn.Module):
         if edge_norm_backend not in {"auto", "pytorch", "memory"}:
             raise ValueError(f"unknown MPNN edge norm backend: {edge_norm_backend!r}")
         self.edge_norm_backend = edge_norm_backend
-        self.relative_position = RelativePositionEmbedding(position_width)
+        self.relative_position = RelativePositionEmbedding(
+            position_width, backend=relative_position_backend
+        )
         self.edge_projection = nn.Linear(
             position_width + num_rbf * 25,
             edge_width,
