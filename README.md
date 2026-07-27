@@ -48,6 +48,7 @@ src/miniworld_kernels/
     │   ├── module.py             #     cute/cuequivariance via ImplementationType)
     │   ├── reference.py interface.py baseline_dtv1.py
     ├── triangle_attention/ transition/ adaptive_layernorm/ augmented_attention/
+    ├── mpnn/                     # frozen oracle + semantic production model/converter
     ├── exceptions.py             #   ImplementationType (pytorch/triton/cuda/cute/cuequivariance)
     ├── primitives.py ops.py      #   shared connecting utilities (LayerNorm, Linear, gates)
     └── __init__.py
@@ -93,7 +94,7 @@ srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G
 ```
 
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
-`transition`, `adaptive_layernorm`, `augmented_attention_token/atom`).
+`transition`, `adaptive_layernorm`, `augmented_attention_token/atom`, `mpnn`).
 All final benchmarks run the `torch.compile`d path; non-compiled debug probes
 are not valid final benchmark results.
 Generated results land in the selected target's `artifacts/` directory, for

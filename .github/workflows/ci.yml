@@ -23,13 +23,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install tooling + package (no heavy backends)
+      - name: Install tooling + package (CPU only)
         run: |
           python -m pip install --upgrade pip
           pip install ruff pyright pytest
-          # editable install WITHOUT deps: the contract/guard tests import only the
-          # lazy `miniworld_kernels.kernels` surface (no torch/triton needed), so a
-          # CPU runner stays fast and free of the GPU stack.
+          # MPNN reference checks need CPU PyTorch and NumPy, but no Triton/CUDA or
+          # optional comparison baselines. Keep the project itself no-deps so the
+          # GPU dependency stack is not pulled into this job.
+          pip install numpy
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e . --no-deps
 
       - name: Lint (ruff)
@@ -41,12 +43,23 @@ jobs:
         run: pyright
 
       - name: Public API contract + static guards
-        # CPU-only subset: frozen kernel surface, side-effect-free import, and the
-        # int64-offset static guard. The numerical suite (tests/test_numerical.py) and
-        # the entrypoint-resolution test need a GPU / the triton backend and run on an
-        # allocated GPU node via `pixi run test-gpu` (see README / pixi tasks).
+        # CPU-only subset: frozen kernel surface, side-effect-free import, int64
+        # guards, and ProteinMPNN reference/core numerics (CUDA cases skip here).
+        # GPU kernel numerics and direct CUDA MPNN parity run on an allocated node
+        # via `pixi run test-gpu` (see README / pixi tasks).
         run: >
           pytest -q
           tests/test_public_api.py
           tests/test_lazy_kernel_exports.py
           tests/test_int64_offsets.py
+          tests/test_mpnn_reference.py
+          tests/test_mpnn_conversion.py
+          tests/test_mpnn_numerical.py
+          tests/test_mpnn_batch.py
+          tests/test_mpnn_benchmark_workload.py
+          tests/test_mpnn_message_kernel.py
+          tests/test_mpnn_edge_mlp_kernel.py
+          tests/test_mpnn_edge_layernorm.py
+          tests/test_mpnn_encoder_node_recompute.py
+          tests/test_mpnn_transition_recompute.py
+          tests/test_mpnn_edge_dropout.py
