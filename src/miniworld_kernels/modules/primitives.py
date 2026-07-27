@@ -88,18 +88,6 @@ class _Fp32ParamsMixin:
         return super()._apply(fp32_fn, *args, **kwargs)  # type: ignore[misc]
 
 
-class RMSNorm(_Fp32ParamsMixin, nn.RMSNorm):
-    """RMSNorm with fp32-pinned affine weight (see :class:`_Fp32ParamsMixin`).
-
-    Computes in fp32 (input upcast) then restores the input dtype, so a fp32 ``weight``
-    against a bf16 activation never dtype-mismatches."""
-
-    def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
-        orig_type = x.dtype
-        out = super().forward(x.float())
-        return out.to(orig_type)
-
-
 class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
     """A LayerNorm layer with precision control (fp32-pinned affine; see mixin)."""
 
