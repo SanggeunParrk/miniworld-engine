@@ -1216,6 +1216,28 @@ so the reduction's 16 ms saving is paid back in elementwise work that used to fu
 +17 ms here, and +24 ms when this was a `torch.library.custom_op`, which is opaque to
 Inductor rather than merely a boundary. The backend therefore ships `off`.
 
+There is no boundary-free way to get it either, and that was worth checking because
+`torch.index_select`'s backward is documented as `zeros.index_add_(dim, index, grad)` --
+the exact reduction, reachable by a one-line swap with nothing opaque in the graph.
+Measured, it does not survive compilation:
+
+| 6,291,456 rows -> [66, 16], skewed | ms | peak MiB |
+|---|---:|---:|
+| `F.embedding` + bias, eager | 19.203 | 768.0 |
+| `index_select` + bias, eager | **8.969** | 768.0 |
+| `F.embedding` + bias, compiled | **6.748** | 384.2 |
+| `index_select` + bias, compiled | 7.473 | 384.2 |
+
+Inductor lowers both backwards to much the same thing, so the swap is 0.7 ms *worse*
+compiled, and the model runs compiled.
+
+That table also corrects a methodology error worth naming, because it inflated every
+estimate above it. The 18.8 ms repeatedly quoted for `F.embedding`'s backward is the
+**eager** figure; compiled it is 6.748 ms. The prize was never 16 ms, it was 3.6 -- so a
+17 ms fusion penalty was always going to swamp it. Diagnosing a compiled model with
+eager microbenchmarks is the mistake, and it is the same one that made an eager
+category profile read 1252 ms against the compiled step's 602.
+
 It is kept because three of its properties are not visible in that comparison: under
 eager execution there is no fusion to lose and the op is a straight fivefold win, the
 kernel is 2.5x more accurate than what it replaces, and it allocates nothing against
