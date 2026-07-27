@@ -115,7 +115,12 @@ def _case_augmented_attention(L=256, d_single=256, d_pair=128, n_head=16, n_aug=
 
 _CASES = {
     "transition": _case_transition,
+    # Narrow width (d=64, e.g. the AF3 template trunk): EPT > ceil(d/32) here, which is exactly
+    # the regime the LN-backward write-guard bug hit (dgamma/dbeta dropped columns). d=128/256/512
+    # had EPT == ceil(d/32) so the guard was a no-op and never exposed it. Keep d=64 covered.
+    "transition_d64": lambda: _case_transition(d=64),
     "trimul": _case_trimul,
+    "trimul_d64": lambda: _case_trimul(d=64),
     "triangle_attention": _case_triangle_attention,
     "adaptive_layernorm": _case_adaln,
     "conditioned_transition": _case_cond_transition,
@@ -152,3 +157,29 @@ def test_input_grad_matches_reference(name):
     ref(*ref_inputs).float().sum().backward()
     c = _cos(gin.grad, ref_gin.grad)
     assert c >= _GRAD_TOL.get(name, 0.99), f"{name} input-grad cosine {c:.5f} too low"
+
+
+@pytest.mark.parametrize("name", sorted(_CASES))
+def test_param_grad_matches_reference(name):
+    """PARAMETER grads (gamma/beta/projection weights) must match the reference, not just the
+    INPUT grad. The LN-backward write-guard bug produced a correct dx (input grad) but a wrong
+    dgamma, so an input-grad-only check missed it entirely. Compare every parameter's grad by
+    name (kernel vs PYTORCH reference, weights synced by _build_pair)."""
+    mw, ref, inputs, _ = _CASES[name]()
+    ref_inputs = tuple(
+        t.detach().clone().requires_grad_(t.requires_grad) if torch.is_tensor(t) else t
+        for t in inputs
+    )
+    mw(*inputs).float().sum().backward()
+    ref(*ref_inputs).float().sum().backward()
+    ref_grads = {n: p.grad for n, p in ref.named_parameters()}
+    tol = _GRAD_TOL.get(name, 0.99)
+    worst_name, worst_cos = None, 1.0
+    for n, p in mw.named_parameters():
+        rg = ref_grads.get(n)
+        if p.grad is None or rg is None:
+            continue
+        c = _cos(p.grad, rg)
+        if c < worst_cos:
+            worst_name, worst_cos = n, c
+    assert worst_cos >= tol, f"{name} param-grad cosine {worst_cos:.5f} too low @ {worst_name}"

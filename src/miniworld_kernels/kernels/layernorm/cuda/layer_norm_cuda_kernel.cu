@@ -241,7 +241,6 @@ __global__ void layer_norm_bwd_main_kernel(
     const int warp = tid >> 5;
     const int global_warp = blockIdx.x * LN_BWD_WARPS_PER_BLOCK + warp;
     const int total_warps = gridDim.x * LN_BWD_WARPS_PER_BLOCK;
-    const int K = (N + 31) >> 5;
 
     float acc_dw[MAX_K];
     float acc_db[MAX_K];
@@ -341,7 +340,13 @@ __global__ void layer_norm_bwd_main_kernel(
         for (int e = 0; e < EPT; ++e) {
             const int k = v * EPT + e;
             const int col = (v * 32 + lane) * EPT + e;
-            if (k < K && col < N) {
+            // Guard on col<N ONLY. The old `k < K` (K=(N+31)>>5=ceil(N/32)) was WRONG: it is
+            // the 32-wide group count, not the per-lane element count. When EPT>N/32 (wide
+            // vector loads, few active lanes, many elements/lane) it dropped valid columns
+            // k>=ceil(N/32) from PartDW/PartDB -> the reduce summed missing entries -> dgamma/
+            // dbeta systematically wrong (~70% off; catastrophic on low-variance rows). Each
+            // col<N maps to a unique (v,lane,e), so col<N alone writes every column exactly once.
+            if (col < N) {
                 PartDW[global_warp * N + col] = acc_dw[k];
                 PartDB[global_warp * N + col] = acc_db[k];
             }
