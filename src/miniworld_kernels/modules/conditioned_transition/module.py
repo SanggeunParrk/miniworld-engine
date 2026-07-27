@@ -68,8 +68,8 @@ class ConditionedTransition(nn.Module):
         # sub-dispatch lives in the kernel); CUEQUIVARIANCE shares that path.
         self._backend = resolve_conditioned_transition(self.implementation)
 
-        self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.float32)
-        self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.float32)
+        self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.float32)
+        self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.float32)
         self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.float32)
         self.to_scale = Linear(d_cond, d_hidden, bias=True, init="default", dtype=torch.float32)
 

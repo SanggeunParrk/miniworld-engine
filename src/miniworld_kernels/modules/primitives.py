@@ -67,8 +67,41 @@ class InitType(Enum):
 _shape_t = Union[int, list[int], Size]
 
 
-class LayerNorm(nn.LayerNorm):
-    """A LayerNorm layer with precision control."""
+class _Fp32ParamsMixin:
+    """Pin this module's floating-point params/buffers to fp32 under ANY dtype cast.
+
+    Norm affine params (gamma init 1.0, beta 0.0) stagnate when stored bf16: at value 1.0
+    the bf16 ULP is 2**-7 = 0.0078 > Adam's per-step update (~lr = 1.8e-3), so updates
+    round back to 1.0 and gamma never trains. Keeping gamma/beta fp32 (trunk stays bf16)
+    lets the update land. Overriding ``_apply`` — the funnel for ``.to``/``.bfloat16`` —
+    makes the pin survive later bulk ``.to(torch.bfloat16)`` of the parent trunk. The fused
+    kernels already upcast the norm weight to fp32 internally and return grads in the
+    parameter dtype, so a fp32 weight flows through unchanged."""
+
+    def _apply(self, fn, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        def fp32_fn(t):  # noqa: ANN001, ANN202
+            out = fn(t)
+            if isinstance(out, torch.Tensor) and out.is_floating_point():
+                out = out.to(torch.float32)
+            return out
+
+        return super()._apply(fp32_fn, *args, **kwargs)  # type: ignore[misc]
+
+
+class RMSNorm(_Fp32ParamsMixin, nn.RMSNorm):
+    """RMSNorm with fp32-pinned affine weight (see :class:`_Fp32ParamsMixin`).
+
+    Computes in fp32 (input upcast) then restores the input dtype, so a fp32 ``weight``
+    against a bf16 activation never dtype-mismatches."""
+
+    def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
+        orig_type = x.dtype
+        out = super().forward(x.float())
+        return out.to(orig_type)
+
+
+class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
+    """A LayerNorm layer with precision control (fp32-pinned affine; see mixin)."""
 
     def __init__(
         self,
@@ -113,12 +146,23 @@ class LayerNorm(nn.LayerNorm):
             self.register_parameter("bias", None)
 
         self.reset_parameters()
+        # fp32-pin affine params from construction, even when a bf16 dtype is requested
+        # (norm gamma stagnates in bf16 at 1.0; see _Fp32ParamsMixin). _apply keeps them
+        # fp32 through later .to() casts; this covers the never-cast case.
+        with torch.no_grad():
+            if self.weight is not None and self.weight.is_floating_point():
+                self.weight.data = self.weight.data.float()
+            if self.bias is not None and self.bias.is_floating_point():
+                self.bias.data = self.bias.data.float()
 
     def forward(self, input: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:  # noqa: A002
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
         backend = self._backend
         if backend == KernelBackend.PYTORCH:
-            return super().forward(input)
+            # Compute in fp32 so a fp32-pinned affine weight never dtype-mismatches a bf16
+            # activation (and for stability); restore the activation dtype.
+            orig_type = input.dtype
+            return super().forward(input.float()).to(orig_type)
         if backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             return kernels.triton_layernorm(
                 input,

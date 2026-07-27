@@ -121,10 +121,10 @@ class Transition(nn.Module):
             d_hidden, implementation=self.implementation, dtype=torch.bfloat16
         )
         self.expand_a = Linear(
-            d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.bfloat16
+            d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.bfloat16
         )
         self.expand_b = Linear(
-            d_hidden, d_hidden * n, bias=False, init="glorot", dtype=torch.bfloat16
+            d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.bfloat16
         )
         self.squeeze = Linear(
             d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.bfloat16
@@ -164,8 +164,8 @@ class Transition(nn.Module):
             backward_backend = _explicit_cute_backward_backend()
             return kernels.cute_transition_fused(
                 x,
-                self.ln_in.weight,
-                self.ln_in.bias,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
@@ -218,8 +218,8 @@ class Transition(nn.Module):
         ):
             return kernels.cuda_transition_b2b(
                 x,
-                self.ln_in.weight,
-                self.ln_in.bias,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
@@ -232,8 +232,8 @@ class Transition(nn.Module):
         if self.d_hidden >= 256 and _dispatch.is_sm90(x.device):
             return kernels.cute_transition_fused(
                 x,
-                self.ln_in.weight,
-                self.ln_in.bias,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
@@ -242,8 +242,8 @@ class Transition(nn.Module):
             )
         return kernels.triton_transition_fused(
             x,
-            self.ln_in.weight,
-            self.ln_in.bias,
+            self.ln_in.weight.to(x.dtype),
+            self.ln_in.bias.to(x.dtype),
             self.expand_a.weight,
             self.expand_b.weight,
             self.squeeze.weight,
@@ -285,8 +285,8 @@ class Transition(nn.Module):
             backward_backend = _large_d_training_backend_from_env() or "triton"
             return kernels.cute_transition_fused(
                 x,
-                self.ln_in.weight,
-                self.ln_in.bias,
+                self.ln_in.weight.to(x.dtype),
+                self.ln_in.bias.to(x.dtype),
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
@@ -299,8 +299,8 @@ class Transition(nn.Module):
         # only d=128 reaches here (d>=256 took the split branch above); the AF3 shape.
         return kernels.triton_transition_fused(
             x,
-            self.ln_in.weight,
-            self.ln_in.bias,
+            self.ln_in.weight.to(x.dtype),
+            self.ln_in.bias.to(x.dtype),
             self.expand_a.weight,
             self.expand_b.weight,
             self.squeeze.weight,
@@ -324,14 +324,13 @@ class Transition(nn.Module):
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:
-        # This module's weights are pinned bf16; match the input to them so the
-        # reference runs even when reached as a dtype-fallback from a non-bf16 input.
-        x = x.to(self.ln_in.weight.dtype)
+        # Norm affine params are fp32-pinned; cast them to the activation dtype for the
+        # reference LN so the downstream bf16 expand/squeeze get a matching activation.
         x = F.layer_norm(
             x,
             (self.d_hidden,),
-            self.ln_in.weight,
-            self.ln_in.bias,
+            self.ln_in.weight.to(x.dtype),
+            self.ln_in.bias.to(x.dtype),
             self.ln_in.eps,
         )
         a = self.expand_a(x)
