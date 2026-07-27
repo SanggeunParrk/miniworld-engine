@@ -1,0 +1,55 @@
+d_single: 384
+d_pair: 128
+d_single_token: 768
+d_single_atom: 128
+d_pair_atom: 16
+k_neighbors: 48
+batch_size: 1
+mpnn_layout: single
+mpnn_patch_size: 8
+mpnn_coordinate_grad: false
+mpnn_training_objective: output_grad
+mpnn_label_smoothing: 0.1
+mpnn_message_backend: auto
+mpnn_edge_mlp_backend: auto
+mpnn_edge_norm_backend: auto
+mpnn_edge_dropout_backend: auto
+mpnn_feature_backend: auto
+mpnn_edge_w1_recompute: off
+mpnn_encoder_node_w1_recompute: off
+mpnn_transition_recompute: off
+
+n_layers: 3
+n_augment: 1
+mask_prob: 0.0
+min_seq_len: 64
+max_seq_len: 2048
+seq_len_step: 64
+seq_len_values:
+  - 256
+  - 512
+  - 1024
+  - 1536
+  - 2048
+min_d_pair: 128
+max_d_pair: 128
+d_pair_step: 128
+d_pair_values:
+  - 64
+  - 128
+  - 256
+sweep_axis: seq_len
+sweep_seq_len: 2048
+
+kernel: mpnn
+implementations:
+  - pytorch
+  - miniworld
+mode: inference
+metric: time
+compile: true
+cudagraph: manual
+allow_tf32: true
+check_correctness: false
+precision: "bf16-mixed"
+name_suffix: "compiled_cudagraph"

@@ -27,7 +27,7 @@
 #SBATCH --time=06:00:00
 #SBATCH --output=benchmarks/modules/%x_%j.out
 
-set -uo pipefail
+set -euo pipefail
 set -f
 cd /home/psk6950/practice/miniworld-kernels
 export HYDRA_FULL_ERROR=1
@@ -73,6 +73,13 @@ stem_prefix_for() {
   esac
 }
 
+layer_count_for() {
+  case "$1" in
+    mpnn) echo "3" ;;
+    *) echo "1" ;;
+  esac
+}
+
 run_one() {
   target="$1"; shift
   impls="$1"; shift
@@ -80,13 +87,17 @@ run_one() {
   echo "############################################################"
   echo "# benchmarks/runners/bench.py  kernel=${target}  $*"
   echo "############################################################"
-  pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
-    kernel="$target" \
-    implementations="$impls" \
-    metric=time \
-    compile=true \
-    "$@"
-  echo "[exit=$?]"
+  LAST_RUN_STARTED_AT="$(date +%s.%N)"
+  if ! pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
+      kernel="$target" \
+      implementations="$impls" \
+      metric=time \
+      compile=true \
+      "$@"; then
+    echo "benchmark failed: target=${target}" >&2
+    return 1
+  fi
+  echo "[exit=0]"
 }
 
 render_latest() {
@@ -95,14 +106,17 @@ render_latest() {
   graph_mode="$3"
   sweep_axis="$4"
   suffix="$5"
+  result_prefix="${6:-}"
   module_dir="$(module_dir_for "$target")"
+  n_layers="$(layer_count_for "$target")"
   artifact_root="benchmarks/modules/${module_dir}/artifacts"
+  device_artifact_root="${artifact_root}/${DEV_NAME}"
   if [[ "$graph_mode" == "disabled" ]]; then
     run_tail="compile_${sweep_axis}_${suffix}"
   else
     run_tail="compile_cudagraph-${graph_mode}_${sweep_axis}_${suffix}"
   fi
-  csv_path="$(find "$artifact_root" -type f -name "${target}_n_layers=1_${mode}_time_*_${run_tail}.csv" -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
+  csv_path="$(find "$device_artifact_root" -type f -newermt "@${LAST_RUN_STARTED_AT}" -name "${target}_n_layers=${n_layers}_${mode}_time_*_${run_tail}.csv" -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
   if [[ -z "${csv_path}" ]]; then
     echo "No CSV found for target=${target}, mode=${mode}, suffix=${suffix}; skipping render"
     return 1
@@ -110,10 +124,16 @@ render_latest() {
   # Curate straight into results/<slug>/{tables,plots}/ with the canonical <stem> names
   # (this is what results/a100 etc. hold) so the Ampere results land in the committed layout
   # directly, not just in artifacts/<full-device-name>/.
-  stem="$(stem_prefix_for "$target")${mode}_${sweep_axis}"
+  stem="$(stem_prefix_for "$target")${result_prefix}${mode}_${sweep_axis}"
   results_dir="benchmarks/modules/${module_dir}/results/${SLUG}"
   mkdir -p "${results_dir}/tables" "${results_dir}/plots"
-  cp -f "$csv_path" "${results_dir}/tables/${stem}.csv"
+  lock_path="/tmp/miniworld-kernels-${USER}-${SLUG}-${module_dir}-${stem}.lock"
+  exec {lock_fd}>"${lock_path}"
+  flock "${lock_fd}"
+  canonical_csv="${results_dir}/tables/${stem}.csv"
+  temporary_csv="${results_dir}/tables/.${stem}.${SLURM_JOB_ID:-$$}.tmp"
+  cp "$csv_path" "$temporary_csv"
+  mv -f "$temporary_csv" "$canonical_csv"
   echo ""
   echo "############################################################"
   echo "# curate -> ${results_dir}/{tables,plots}/${stem}  (csv=$csv_path)"
@@ -121,18 +141,21 @@ render_latest() {
   pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python benchmarks/runners/plot_csv.py "$@"' _ \
     "$csv_path" "${results_dir}/plots" --name "$stem"
   echo "[exit=$?]"
+  flock -u "${lock_fd}"
 }
 
 run_matrix() {
   target="$1"
   impls="$2"
   extra="$3"
+  result_prefix="${4:-}"
+  run_id="${SLURM_JOB_ID:-manual_$$}"
   for graph_mode in manual; do   # manual = deployment regime (default); add 'disabled' for the eager baseline
     for bench_mode in inference training; do
-      run_one "$target" "$impls" mode="$bench_mode" cudagraph="$graph_mode" sweep_axis=seq_len name_suffix=L_sweep $extra
-      render_latest "$target" "$bench_mode" "$graph_mode" seq_len L_sweep
-      run_one "$target" "$impls" mode="$bench_mode" cudagraph="$graph_mode" sweep_axis=d_pair name_suffix=d_sweep $extra
-      render_latest "$target" "$bench_mode" "$graph_mode" d_pair d_sweep
+      run_one "$target" "$impls" mode="$bench_mode" cudagraph="$graph_mode" sweep_axis=seq_len name_suffix="L_sweep_${run_id}" $extra
+      render_latest "$target" "$bench_mode" "$graph_mode" seq_len "L_sweep_${run_id}" "$result_prefix"
+      run_one "$target" "$impls" mode="$bench_mode" cudagraph="$graph_mode" sweep_axis=d_pair name_suffix="d_sweep_${run_id}" $extra
+      render_latest "$target" "$bench_mode" "$graph_mode" d_pair "d_sweep_${run_id}" "$result_prefix"
     done
   done
 }
@@ -169,6 +192,27 @@ run_selected() {
     augmented_attention_atom)
       run_matrix augmented_attention_atom '[pytorch,miniworld]' 'mask_prob=0.0 min_seq_len=128 max_seq_len=384 seq_len_step=128 d_pair_values=[16,32,64] sweep_seq_len=384'
       ;;
+    mpnn)
+      # One source-faithful FP32 packed parity point. Large timing runs disable
+      # the in-run oracle to avoid retaining two complete autograd graphs.
+      smoke_id="${SLURM_JOB_ID:-manual_$$}"
+      run_one mpnn '[miniworld]' \
+        mode=training cudagraph=disabled precision=32 n_layers=3 n_augment=1 \
+        batch_size=8 mpnn_layout=packed mpnn_patch_size=8 \
+        check_correctness=true seq_len_values=[256] d_pair=128 \
+        name_suffix="packed_correctness_${smoke_id}"
+
+      # Per-sample crop ceiling. seq_len is the physical tensor length here.
+      run_matrix mpnn '[pytorch,miniworld]' \
+        'precision=bf16-mixed n_layers=3 n_augment=1 mask_prob=0.0 batch_size=1 mpnn_layout=single mpnn_patch_size=8 check_correctness=false seq_len_values=[256,512,1024,1536,2048] d_pair_values=[64,128,256] sweep_seq_len=512' \
+        'single_'
+
+      # Source training layout: physical B=1, eight equal-length logical
+      # samples concatenated to total length 8*seq_len.
+      run_matrix mpnn '[pytorch,miniworld]' \
+        'precision=32 n_layers=3 n_augment=1 mask_prob=0.0 batch_size=8 mpnn_layout=packed mpnn_patch_size=8 check_correctness=false seq_len_values=[256,384,512] d_pair_values=[64,128,256] sweep_seq_len=384' \
+        'packed_b8_'
+      ;;
     all)
       BENCH_TARGET=bias_only_attention run_selected
       BENCH_TARGET=transition run_selected
@@ -176,6 +220,7 @@ run_selected() {
       BENCH_TARGET=adaptive_layernorm run_selected
       BENCH_TARGET=augmented_attention_token run_selected
       BENCH_TARGET=augmented_attention_atom run_selected
+      BENCH_TARGET=mpnn run_selected
       ;;
     *)
       echo "Unknown BENCH_TARGET=${BENCH_TARGET}" >&2

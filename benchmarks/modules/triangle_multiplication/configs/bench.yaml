@@ -6,6 +6,21 @@ d_pair: 128
 d_single_token: 768
 d_single_atom: 128
 d_pair_atom: 16
+k_neighbors: 48
+batch_size: 1
+mpnn_layout: single
+mpnn_patch_size: 8
+mpnn_coordinate_grad: false
+mpnn_training_objective: output_grad
+mpnn_label_smoothing: 0.1
+mpnn_message_backend: auto
+mpnn_edge_mlp_backend: auto
+mpnn_edge_norm_backend: auto
+mpnn_edge_dropout_backend: auto
+mpnn_feature_backend: auto
+mpnn_edge_w1_recompute: off
+mpnn_encoder_node_w1_recompute: off
+mpnn_transition_recompute: off
 
 n_layers: 1
 n_augment: 32
@@ -13,6 +28,7 @@ mask_prob: 0.0
 min_seq_len: 384
 max_seq_len: 1024
 seq_len_step: 128
+seq_len_values: null
 min_d_pair: 128
 max_d_pair: 512
 d_pair_step: 128
@@ -40,5 +56,6 @@ metric: time           # time | memory
 compile: true
 cudagraph: disabled    # disabled | manual (bucketed capture) | graphed (make_graphed_callables, pad-to-max)
 allow_tf32: true
+check_correctness: true
 precision: "bf16-mixed"
 name_suffix: ""

@@ -233,6 +233,7 @@ module kernels:
 | `adaptive_layernorm` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmark treats `d_pair` as the AdaLN hidden/condition width so d sweeps change the real tensor shape. |
 | `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |
 | `augmented_attention_atom` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | atom path; L sweep still includes `L=384`; unsupported/OOM points stay as failed CSV rows. |
+| `mpnn` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | eval forward, training | `pytorch` is the frozen `ProteinMPNN_CSSB origin/dev@4870bca` parallel-forward implementation; `miniworld` is the semantic production model loaded through the explicit checkpoint converter. The harness labels single-crop (`B=1`), true padded batch (`[B,L,...]`), and source-style packed (`[1, sum L_i, ...]`) runs separately. `mpnn_training_objective=item_ce` measures forward + item-balanced CE + backward; the historical `output_grad` model-core workload remains available unchanged. Packed FP32 is the source-faithful layout track, while true-batch BF16 is the optimized training track. `inference` means eval-mode teacher-forced forward, not autoregressive sampling latency. See `docs/kernels/mpnn.md`. |
 
 Final plots must show a single `MiniWorld` series. If a diagnostic CSV includes
 component aliases such as `cute` plus `miniworld`, the shared plotter collapses

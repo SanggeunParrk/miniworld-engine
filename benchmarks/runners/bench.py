@@ -67,6 +67,32 @@ class BenchConfig(BaseModel):
     d_single_token: int = 768
     d_single_atom: int = 128
     d_pair_atom: int = 16
+    k_neighbors: int = 48
+    batch_size: int = 1
+    mpnn_layout: Literal["single", "batch", "packed"] = "single"
+    mpnn_patch_size: int = 8
+    mpnn_coordinate_grad: bool = False
+    mpnn_training_objective: Literal["output_grad", "item_ce"] = "output_grad"
+    mpnn_label_smoothing: float = 0.1
+    mpnn_message_backend: Literal[
+        "auto",
+        "pytorch",
+        "triton",
+        "triton_compute",
+        "triton_memory",
+    ] = "auto"
+    mpnn_edge_mlp_backend: Literal[
+        "auto",
+        "pytorch",
+        "triton_compute",
+        "triton_memory",
+    ] = "auto"
+    mpnn_edge_norm_backend: Literal["auto", "pytorch", "memory"] = "auto"
+    mpnn_edge_dropout_backend: Literal["auto", "pytorch", "bitpack"] = "auto"
+    mpnn_feature_backend: Literal["auto", "pytorch", "recompute"] = "auto"
+    mpnn_edge_w1_recompute: Literal["off", "checkpoint"] = "off"
+    mpnn_encoder_node_w1_recompute: Literal["off", "checkpoint"] = "off"
+    mpnn_transition_recompute: Literal["off", "update"] = "off"
 
     n_layers: int = 1
     n_augment: int = 32
@@ -74,6 +100,7 @@ class BenchConfig(BaseModel):
     min_seq_len: int = 64
     max_seq_len: int = 384
     seq_len_step: int = 64
+    seq_len_values: list[int] | None = None
     min_d_pair: int = 64
     max_d_pair: int = 256
     d_pair_step: int = 64
@@ -102,6 +129,7 @@ class BenchConfig(BaseModel):
     #               Training only; fabric-wrapped baselines (dtv1) may fail here (raw backward).
     cudagraph: Literal["disabled", "manual", "graphed"] = "manual"
     allow_tf32: bool = True
+    check_correctness: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
     name_suffix: str = ""
 
@@ -132,6 +160,9 @@ class BenchResult(NamedTuple):
     grad_max_abs: float | None = None
     grad_rel_frob: float | None = None
     grad_cosine: float | None = None
+    memory_baseline_allocated_mb: float | None = None
+    memory_peak_allocated_mb: float | None = None
+    memory_peak_reserved_mb: float | None = None
 
 
 def module_miniworld_spec(raw: str) -> ImplementationSpec:
@@ -157,7 +188,9 @@ def parse_implementation_spec(raw: str) -> ImplementationSpec:
     if key in {impl.value for impl in ImplementationType}:
         return ImplementationSpec(ImplementationType(key), None, key)
     if key in {"triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch"}:
-        return ImplementationSpec(ImplementationType.TRITON, ImplementationType.PYTORCH, raw)
+        return ImplementationSpec(
+            ImplementationType.TRITON, ImplementationType.PYTORCH, raw
+        )
     if key in {
         "triton_ln",
         "triton_kernel_ln",
@@ -165,13 +198,18 @@ def parse_implementation_spec(raw: str) -> ImplementationSpec:
         "triton-ln-kernel",
         "triton-ln-dispatch",
     }:
-        return ImplementationSpec(ImplementationType.TRITON, ImplementationType.CUDA, raw)
+        return ImplementationSpec(
+            ImplementationType.TRITON, ImplementationType.CUDA, raw
+        )
     msg = f"Unknown implementation spec: {raw!r}"
     raise ValueError(msg)
 
 
 def bench_memory(func: Callable, warmup: int = 3, rep: int = 10) -> dict[str, float]:
     memories = []
+    baseline_allocated = []
+    peak_allocated = []
+    peak_reserved = []
 
     for i in range(warmup + rep):
         torch.cuda.empty_cache()
@@ -187,6 +225,9 @@ def bench_memory(func: Callable, warmup: int = 3, rep: int = 10) -> dict[str, fl
 
         if i >= warmup:
             memories.append(delta_mb)
+            baseline_allocated.append(start_mem / 1024 / 1024)
+            peak_allocated.append(peak_mem / 1024 / 1024)
+            peak_reserved.append(torch.cuda.max_memory_reserved(DEVICE) / 1024 / 1024)
 
     return {
         "median_mb": float(np.median(memories)),
@@ -194,6 +235,9 @@ def bench_memory(func: Callable, warmup: int = 3, rep: int = 10) -> dict[str, fl
         "min_mb": float(np.min(memories)),
         "max_mb": float(np.max(memories)),
         "std_mb": float(np.std(memories)),
+        "median_baseline_allocated_mb": float(np.median(baseline_allocated)),
+        "median_peak_allocated_mb": float(np.median(peak_allocated)),
+        "median_peak_reserved_mb": float(np.median(peak_reserved)),
     }
 
 
@@ -231,8 +275,44 @@ def measured_result(
     execution_path: str,
     reference: str,
 ) -> BenchResult:
+    if os.getenv("MINIWORLD_TORCH_PROFILE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        for _ in range(3):
+            func()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+        ) as profile:
+            for _ in range(10):
+                func()
+            torch.cuda.synchronize()
+        print(
+            profile.key_averages().table(sort_by="self_cuda_time_total", row_limit=40),
+            flush=True,
+        )
+        trace_path = os.getenv("MINIWORLD_TORCH_PROFILE_PATH")
+        if trace_path:
+            output_path = Path(trace_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            profile.export_chrome_trace(str(output_path))
+            print(f"wrote {output_path}", flush=True)
+    memory_baseline_allocated_mb = None
+    memory_peak_allocated_mb = None
+    memory_peak_reserved_mb = None
     if conf.metric == "memory":
-        value = bench_memory(func)["median_mb"]
+        memory = bench_memory(func)
+        value = memory["median_mb"]
+        memory_baseline_allocated_mb = memory["median_baseline_allocated_mb"]
+        memory_peak_allocated_mb = memory["median_peak_allocated_mb"]
+        memory_peak_reserved_mb = memory["median_peak_reserved_mb"]
     elif conf.cudagraph == "manual":
         graph = capture_cudagraph(func, params, is_train=is_train)
         value = bench_time(graph.replay, grad_to_none=grad_to_none)["median_ms"]
@@ -251,6 +331,9 @@ def measured_result(
         parameter_dtype=parameter_dtype,
         execution_path=execution_path,
         reference=reference,
+        memory_baseline_allocated_mb=memory_baseline_allocated_mb,
+        memory_peak_allocated_mb=memory_peak_allocated_mb,
+        memory_peak_reserved_mb=memory_peak_reserved_mb,
     )
 
 
@@ -260,8 +343,9 @@ def actual_compiled_flag(conf: BenchConfig) -> bool:
     return conf.compile
 
 
-def capture_cudagraph(step: Callable, params: list, is_train: bool,
-                      warmup_iters: int = 8) -> "torch.cuda.CUDAGraph":
+def capture_cudagraph(
+    step: Callable, params: list, is_train: bool, warmup_iters: int = 8
+) -> "torch.cuda.CUDAGraph":
     """Capture `step` (the existing training_step = fwd + fabric.backward, or inference_step = fwd)
     in a per-shape CUDA graph and return it; replay reruns the captured kernels with zero
     host/launch overhead — the deployment regime for graph-break cute/triton kernels. Reusing the
@@ -297,14 +381,18 @@ def as_bench_result(value: float) -> BenchResult:
     return BenchResult(value=value)
 
 
-def tensor_metrics(actual: torch.Tensor, expected: torch.Tensor) -> tuple[float, float, float]:
+def tensor_metrics(
+    actual: torch.Tensor, expected: torch.Tensor
+) -> tuple[float, float, float]:
     actual_f = actual.detach().float().reshape(-1)
     expected_f = expected.detach().float().reshape(-1)
     diff = actual_f - expected_f
     max_abs = float(diff.abs().max().item())
     rel_frob = float(diff.norm().div(expected_f.norm().clamp_min(1e-20)).item())
     cosine = float(
-        actual_f.dot(expected_f).div(actual_f.norm() * expected_f.norm() + 1e-20).item(),
+        actual_f.dot(expected_f)
+        .div(actual_f.norm() * expected_f.norm() + 1e-20)
+        .item(),
     )
     return max_abs, rel_frob, cosine
 
@@ -436,7 +524,9 @@ class MiniWorldTriangleMultiplicationInference(nn.Module):
         pair = pair.to(torch.bfloat16)
         row_mask = None
         if mask is not None:
-            row_mask = (mask.unsqueeze(-1) & mask.unsqueeze(-2)).reshape(-1).to(pair.dtype)
+            row_mask = (
+                (mask.unsqueeze(-1) & mask.unsqueeze(-2)).reshape(-1).to(pair.dtype)
+            )
         return _miniworld_inference(
             pair,
             self.left_weight,
@@ -495,7 +585,9 @@ def bench_triangle_multiplication(
     # single-dir TriangleMultiplication, or the bidirectional (outgoing+incoming) variant — the
     # only differences are the base module, the dt-v1 baseline fn, and the miniworld layer class;
     # the whole correctness + timing (incl. CUDA-graph) tail below is shared.
-    base_cls = BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
+    base_cls = (
+        BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
+    )
     torch.manual_seed(0)
     layer_states = []
     for _ in range(conf.n_layers):
@@ -533,7 +625,9 @@ def bench_triangle_multiplication(
                 # old wrappers did. load_state_dict casts the fp32 reference state.
                 self.layers = nn.ModuleList(
                     [
-                        base_cls(conf.d_pair, implementation=ImplementationType.MINIWORLD).to(
+                        base_cls(
+                            conf.d_pair, implementation=ImplementationType.MINIWORLD
+                        ).to(
                             torch.bfloat16,
                         )
                         for _ in layer_states
@@ -546,7 +640,10 @@ def bench_triangle_multiplication(
             spec = parse_implementation_spec(raw_implementation)
             if bidirectional:
                 self.layers = nn.ModuleList(
-                    [base_cls(conf.d_pair, implementation=spec.impl) for _ in layer_states],
+                    [
+                        base_cls(conf.d_pair, implementation=spec.impl)
+                        for _ in layer_states
+                    ],
                 )
             else:
                 self.layers = nn.ModuleList(
@@ -554,7 +651,8 @@ def bench_triangle_multiplication(
                         TriangleMultiplication(
                             conf.d_pair,
                             implementation=spec.impl,
-                            ln_implementation=spec.ln_impl or ImplementationType.PYTORCH,
+                            ln_implementation=spec.ln_impl
+                            or ImplementationType.PYTORCH,
                         )
                         for _ in layer_states
                     ],
@@ -575,29 +673,45 @@ def bench_triangle_multiplication(
                 if mask is not None:
                     mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
                 p_in = torch.cat([layer.to_left.weight, layer.to_right.weight], dim=0)
-                g_in = torch.cat([layer.to_left_gate.weight, layer.to_right_gate.weight], dim=0)
+                g_in = torch.cat(
+                    [layer.to_left_gate.weight, layer.to_right_gate.weight], dim=0
+                )
                 if bidirectional:
                     pair = fused_bidirectional_dtv1(
-                        pair, mask_2d,
-                        norm_in_weight=layer.ln_pair.weight, norm_in_bias=layer.ln_pair.bias,
-                        p_in_weight=p_in, g_in_weight=g_in,
-                        norm_out_weight=layer.ln_out.weight, norm_out_bias=layer.ln_out.bias,
-                        p_out_weight=layer.to_out.weight, g_out_weight=layer.to_gate.weight,
-                        h=layer.d_hidden, eps=layer.ln_pair.eps,
+                        pair,
+                        mask_2d,
+                        norm_in_weight=layer.ln_pair.weight,
+                        norm_in_bias=layer.ln_pair.bias,
+                        p_in_weight=p_in,
+                        g_in_weight=g_in,
+                        norm_out_weight=layer.ln_out.weight,
+                        norm_out_bias=layer.ln_out.bias,
+                        p_out_weight=layer.to_out.weight,
+                        g_out_weight=layer.to_gate.weight,
+                        h=layer.d_hidden,
+                        eps=layer.ln_pair.eps,
                     )
                 else:
                     pair = fused_triangle_multiplicative_update_dtv1(
-                        pair, direction="outgoing", mask=mask_2d,
-                        norm_in_weight=layer.ln_pair.weight, norm_in_bias=layer.ln_pair.bias,
-                        p_in_weight=p_in, g_in_weight=g_in,
-                        norm_out_weight=layer.ln_out.weight, norm_out_bias=layer.ln_out.bias,
-                        p_out_weight=layer.to_out.weight, g_out_weight=layer.to_gate.weight,
+                        pair,
+                        direction="outgoing",
+                        mask=mask_2d,
+                        norm_in_weight=layer.ln_pair.weight,
+                        norm_in_bias=layer.ln_pair.bias,
+                        p_in_weight=p_in,
+                        g_in_weight=g_in,
+                        norm_out_weight=layer.ln_out.weight,
+                        norm_out_bias=layer.ln_out.bias,
+                        p_out_weight=layer.to_out.weight,
+                        g_out_weight=layer.to_gate.weight,
                         eps=layer.ln_pair.eps,
                     )
             return pair
 
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
-    if conf.compile and conf.cudagraph == "disabled":   # cudagraph captures the eager module (below)
+    if (
+        conf.compile and conf.cudagraph == "disabled"
+    ):  # cudagraph captures the eager module (below)
         model.compile()
     if implementation != MINIWORLD_IMPL:
         model = fabric.setup_module(model)
@@ -629,8 +743,15 @@ def bench_triangle_multiplication(
         fabric.backward(y, dy)
 
     def correctness() -> dict[str, float]:
-        pair_impl = pair.detach().clone().requires_grad_(not is_inference_mode(conf.mode))
-        pair_ref = pair.detach().float().clone().requires_grad_(not is_inference_mode(conf.mode))
+        pair_impl = (
+            pair.detach().clone().requires_grad_(not is_inference_mode(conf.mode))
+        )
+        pair_ref = (
+            pair.detach()
+            .float()
+            .clone()
+            .requires_grad_(not is_inference_mode(conf.mode))
+        )
         dy_ref = dy.detach().float()
         if is_inference_mode(conf.mode):
             with torch.no_grad():
@@ -666,13 +787,14 @@ def bench_triangle_multiplication(
     if conf.metric == "time" and conf.cudagraph == "manual":
         # manual capture of one static shape (bucketed-training regime); replay timed.
         graph = capture_cudagraph(
-            func, [p for p in model.parameters() if p.requires_grad],
+            func,
+            [p for p in model.parameters() if p.requires_grad],
             is_train=not is_inference_mode(conf.mode),
         )
         value = bench_time(graph.replay, grad_to_none=[])["median_ms"]
     elif conf.metric == "time" and conf.cudagraph == "graphed":
         # make_graphed_callables (pad-to-max single-shape regime): auto static buffers + copy.
-        if is_inference_mode(conf.mode):                       # fwd-only: manual no-grad capture
+        if is_inference_mode(conf.mode):  # fwd-only: manual no-grad capture
             graph = capture_cudagraph(func, [], is_train=False)
             value = bench_time(graph.replay, grad_to_none=[])["median_ms"]
         else:
@@ -690,8 +812,12 @@ def bench_triangle_multiplication(
     return BenchResult(
         value=value,
         input_dtype=str(pair.dtype).replace("torch.", ""),
-        parameter_dtype="" if parameter is None else str(parameter.dtype).replace("torch.", ""),
-        execution_path=triangle_multiplication_path(implementation, conf.mode, conf.d_pair),
+        parameter_dtype=""
+        if parameter is None
+        else str(parameter.dtype).replace("torch.", ""),
+        execution_path=triangle_multiplication_path(
+            implementation, conf.mode, conf.d_pair
+        ),
         reference=ImplementationType.PYTORCH.value,
         **accuracy,
     )
@@ -720,7 +846,9 @@ def bench_bias_only_attention(
     class MultiTriangleAttention(nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            layer_cls = OldTritonBiasOnlyAttention if is_old_triton else TriangleAttention
+            layer_cls = (
+                OldTritonBiasOnlyAttention if is_old_triton else TriangleAttention
+            )
             self.layers = nn.ModuleList(
                 [
                     layer_cls(
@@ -983,7 +1111,9 @@ def bench_transition(
         # the Hopper/Blackwell assumption. On pre-Hopper (sm_80 / A100) MINIWORLD routes large d
         # (>=256) to the shape-general split (_old_triton_forward -> kernels.transition.triton.main),
         # NOT the cute fused path (cute is sm_90+ only and never runs here). d=128 stays fused.
-        _cap0 = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+        _cap0 = (
+            torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
+        )
         if _cap0 < 9 and conf.d_pair >= 256:  # noqa: PLR2004 -- pre-Hopper large-d -> split
             execution_path = "kernels.transition.triton.main"
         elif not is_inference_mode(conf.mode) and conf.d_pair >= 512:
@@ -1019,6 +1149,518 @@ def bench_transition(
         parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
         execution_path=execution_path,
         reference="module.reference.torch",
+    )._replace(**accuracy)
+
+
+# Both the frozen reference and the production model are built with this rate.
+# The dropout policy mirror below depends on it being inside (0, 1).
+MPNN_BENCH_DROPOUT = 0.1
+
+
+def _resolved_mpnn_edge_mlp_backend(conf: BenchConfig, seq_len: int) -> str:
+    requested = conf.mpnn_edge_mlp_backend
+    if requested != "auto":
+        return requested
+    effective_k = min(conf.k_neighbors, seq_len)
+    crop_rows = conf.batch_size * seq_len * effective_k
+    calibrated = (
+        conf.d_pair == 128
+        and conf.precision in {"bf16", "bf16-mixed"}
+        and crop_rows >= 2048 * 48
+        and torch.cuda.get_device_capability(DEVICE) == (8, 6)
+    )
+    if not calibrated:
+        return "pytorch"
+    return "triton_memory" if is_inference_mode(conf.mode) else "triton_compute"
+
+
+def _resolved_mpnn_message_backend(conf: BenchConfig, seq_len: int) -> str:
+    requested = conf.mpnn_message_backend
+    supported = (
+        conf.d_pair == 128
+        and min(conf.k_neighbors, seq_len) == 48
+        and conf.precision in {"bf16", "bf16-mixed"}
+    )
+    if requested == "pytorch" or (requested == "auto" and not supported):
+        return "pytorch"
+    if is_inference_mode(conf.mode):
+        effective_k = min(conf.k_neighbors, seq_len)
+        elements = conf.batch_size * seq_len * effective_k * conf.d_pair
+        max_padded_tail = 80 * 128
+        if elements <= (2**31 - 1) - (max_padded_tail - 1):
+            return "triton_inference"
+        if requested == "triton_memory":
+            return "triton_memory"
+        return "triton_compute"
+    if requested == "triton_memory":
+        return "triton_memory"
+    return "triton_compute"
+
+
+def _resolved_mpnn_edge_norm_backend(conf: BenchConfig, seq_len: int) -> str:
+    del seq_len
+    requested = conf.mpnn_edge_norm_backend
+    supported = (
+        not is_inference_mode(conf.mode)
+        and conf.d_pair == 128
+        and conf.precision in {"bf16", "bf16-mixed"}
+    )
+    if requested == "pytorch" or not supported:
+        return "pytorch"
+    if requested == "memory":
+        return "memory"
+    # Automatic execution remains compute-oriented; memory compression is an
+    # explicit policy because it trades a few percent of step latency.
+    return "pytorch"
+
+
+def _resolved_mpnn_edge_dropout_backend(conf: BenchConfig, seq_len: int) -> str:
+    from miniworld_kernels.kernels.mpnn_edge_dropout.interface import (
+        _bitpack_shape_supported,
+    )
+
+    requested = conf.mpnn_edge_dropout_backend
+    effective_k = min(conf.k_neighbors, seq_len)
+    elements = conf.batch_size * seq_len * effective_k * conf.d_pair
+    supported = (
+        requested == "bitpack"
+        and not is_inference_mode(conf.mode)
+        and not torch.are_deterministic_algorithms_enabled()
+        # The library also requires a probability strictly inside (0, 1); the
+        # model is built with the fixed rate below, so keep the mirror honest if
+        # that value ever changes.
+        and 0.0 < MPNN_BENCH_DROPOUT < 1.0
+        and _bitpack_shape_supported(elements)
+    )
+    # Keep automatic execution compute-oriented. Compression is selected only
+    # by an explicit memory policy and otherwise resolves to native PyTorch.
+    return "bitpack" if supported else "pytorch"
+
+
+def _resolved_mpnn_feature_backend(conf: BenchConfig) -> str:
+    if is_inference_mode(conf.mode) or conf.mpnn_feature_backend == "auto":
+        return "pytorch"
+    return conf.mpnn_feature_backend
+
+
+def _resolved_mpnn_edge_w1_recompute(conf: BenchConfig, seq_len: int) -> str:
+    from miniworld_kernels.kernels.mpnn_edge_mlp.interface import (
+        _triton_shape_supported,
+    )
+    from miniworld_kernels.modules.mpnn.layers import (
+        DEFAULT_BLOCK_LINEAR_MIN_EDGES,
+    )
+
+    effective_k = min(conf.k_neighbors, seq_len)
+    edge_rows = conf.batch_size * seq_len * effective_k
+    block_linear = edge_rows >= DEFAULT_BLOCK_LINEAR_MIN_EDGES
+    preactivation_elements = edge_rows * conf.d_pair
+    bf16_compute = conf.precision in {"bf16", "bf16-mixed"}
+    kernel_supported = (
+        conf.mpnn_edge_mlp_backend == "triton_memory"
+        and _triton_shape_supported(preactivation_elements, conf.d_pair)
+    )
+    enabled = (
+        conf.mpnn_edge_w1_recompute == "checkpoint"
+        and not is_inference_mode(conf.mode)
+        and block_linear
+        and bf16_compute
+        and kernel_supported
+    )
+    return "checkpoint" if enabled else "off"
+
+
+def _resolved_mpnn_encoder_node_w1_recompute(
+    conf: BenchConfig,
+    seq_len: int,
+) -> str:
+    from miniworld_kernels.modules.mpnn.layers import (
+        DEFAULT_BLOCK_LINEAR_MIN_EDGES,
+    )
+
+    effective_k = min(conf.k_neighbors, seq_len)
+    edge_rows = conf.batch_size * seq_len * effective_k
+    block_linear = edge_rows >= DEFAULT_BLOCK_LINEAR_MIN_EDGES
+    enabled = (
+        conf.mpnn_encoder_node_w1_recompute == "checkpoint"
+        and conf.mpnn_message_backend == "triton_memory"
+        and not is_inference_mode(conf.mode)
+        and block_linear
+        and effective_k == 48
+        and conf.d_pair == 128
+        and conf.precision in {"bf16", "bf16-mixed"}
+    )
+    return "checkpoint" if enabled else "off"
+
+
+def _resolved_mpnn_transition_recompute(conf: BenchConfig) -> str:
+    enabled = conf.mpnn_transition_recompute == "update" and not is_inference_mode(
+        conf.mode
+    )
+    return "update" if enabled else "off"
+
+
+def bench_mpnn(
+    conf: BenchConfig,
+    seq_len: int,
+    implementation: str,
+    fabric: Fabric,
+):
+    """Full ProteinMPNN parallel forward/backward.
+
+    ``pytorch`` is the frozen ProteinMPNN_CSSB origin/dev reference;
+    ``miniworld`` is the independent production model loaded through the
+    explicit CSSB checkpoint converter. Both paths are compiled for final runs.
+    """
+    from benchmarks.modules.mpnn.workload import build_mpnn_workload
+    from miniworld_kernels.modules.mpnn import (
+        BackboneFeatures,
+        NaiveProteinMPNN,
+        ProteinMPNN,
+        ProteinMPNNConfig,
+        convert_cssb_state_dict,
+        load_cssb_weights,
+        production_tensor_in_reference_layout,
+        reference_to_production_key,
+    )
+
+    key = implementation.strip().lower()
+    if key == ImplementationType.PYTORCH.value:
+        execution_path = "modules.mpnn.naive"
+        feature_only = False
+    elif key == "feature_only":
+        execution_path = "modules.mpnn.knn_first_features+naive_messages"
+        feature_only = True
+    elif key == MINIWORLD_IMPL:
+        execution_path = "modules.mpnn.production"
+        feature_only = False
+    else:
+        return as_bench_result(float("nan"))
+
+    model_kwargs = dict(
+        node_features=conf.d_pair,
+        edge_features=conf.d_pair,
+        hidden_dim=conf.d_pair,
+        num_encoder_layers=conf.n_layers,
+        num_decoder_layers=conf.n_layers,
+        k_neighbors=conf.k_neighbors,
+        augment_trans=0,
+        augment_rot=0,
+        dropout=MPNN_BENCH_DROPOUT,
+    )
+    torch.manual_seed(0)
+    state_source = NaiveProteinMPNN(**model_kwargs)
+    # Upstream zero-initializes the output head. A nonzero deterministic head is
+    # required for meaningful internal gradients and numerical comparisons.
+    nn.init.normal_(state_source.W_out.weight, std=conf.d_pair**-0.5)
+    nn.init.zeros_(state_source.W_out.bias)
+    state = state_source.state_dict()
+
+    training = not is_inference_mode(conf.mode)
+    if training and conf.mpnn_training_objective == "item_ce":
+        execution_path = f"{execution_path}+item_balanced_ce"
+    if key == MINIWORLD_IMPL:
+        production_config = ProteinMPNNConfig(
+            node_width=conf.d_pair,
+            edge_width=conf.d_pair,
+            hidden_width=conf.d_pair,
+            encoder_depth=conf.n_layers,
+            decoder_depth=conf.n_layers,
+            k_neighbors=conf.k_neighbors,
+            coordinate_noise=0,
+            dropout=MPNN_BENCH_DROPOUT,
+            message_backend=conf.mpnn_message_backend,
+            edge_mlp_backend=conf.mpnn_edge_mlp_backend,
+            edge_norm_backend=conf.mpnn_edge_norm_backend,
+            edge_dropout_backend=conf.mpnn_edge_dropout_backend,
+            feature_backend=conf.mpnn_feature_backend,
+            edge_w1_recompute=conf.mpnn_edge_w1_recompute,
+            encoder_node_w1_recompute=conf.mpnn_encoder_node_w1_recompute,
+            transition_recompute=conf.mpnn_transition_recompute,
+        )
+        resolved_edge_backend = _resolved_mpnn_edge_mlp_backend(conf, seq_len)
+        resolved_edge_norm_backend = _resolved_mpnn_edge_norm_backend(conf, seq_len)
+        resolved_edge_dropout_backend = _resolved_mpnn_edge_dropout_backend(
+            conf, seq_len
+        )
+        resolved_message_backend = _resolved_mpnn_message_backend(conf, seq_len)
+        resolved_feature_backend = _resolved_mpnn_feature_backend(conf)
+        resolved_edge_w1_recompute = _resolved_mpnn_edge_w1_recompute(conf, seq_len)
+        resolved_encoder_node_w1_recompute = _resolved_mpnn_encoder_node_w1_recompute(
+            conf, seq_len
+        )
+        resolved_transition_recompute = _resolved_mpnn_transition_recompute(conf)
+        execution_path = (
+            f"{execution_path}+message_{conf.mpnn_message_backend}"
+            f"_resolved_{resolved_message_backend}"
+            f"+edge_mlp_{conf.mpnn_edge_mlp_backend}"
+            f"_resolved_{resolved_edge_backend}"
+            f"+edge_norm_{conf.mpnn_edge_norm_backend}"
+            f"_resolved_{resolved_edge_norm_backend}"
+            f"+edge_dropout_{conf.mpnn_edge_dropout_backend}"
+            f"_resolved_{resolved_edge_dropout_backend}"
+            f"+features_{conf.mpnn_feature_backend}"
+            f"_resolved_{resolved_feature_backend}"
+            f"+edge_w1_{conf.mpnn_edge_w1_recompute}"
+            f"_resolved_{resolved_edge_w1_recompute}"
+            f"+encoder_node_w1_{conf.mpnn_encoder_node_w1_recompute}"
+            f"_resolved_{resolved_encoder_node_w1_recompute}"
+            f"+transition_{conf.mpnn_transition_recompute}"
+            f"_resolved_{resolved_transition_recompute}"
+        )
+        model = ProteinMPNN(production_config).to(DEVICE)
+        load_cssb_weights(model, state, source_k_neighbors=conf.k_neighbors)
+    else:
+        model = NaiveProteinMPNN(**model_kwargs).to(DEVICE)
+        model.load_state_dict(state, strict=True)
+        if feature_only:
+            production_features = BackboneFeatures(
+                conf.d_pair,
+                k_neighbors=conf.k_neighbors,
+                coordinate_noise=0,
+                feature_backend=conf.mpnn_feature_backend,
+            ).to(DEVICE)
+            converted = convert_cssb_state_dict(state)
+            feature_state = {
+                name.removeprefix("backbone_features."): value
+                for name, value in converted.items()
+                if name.startswith("backbone_features.")
+            }
+            production_features.load_state_dict(feature_state, strict=True)
+            model.features = production_features
+    model_parameters_by_name = dict(model.named_parameters())
+    ordered_model_parameters: list[tuple[str, nn.Parameter, bool]] = []
+    for reference_name, _ in state_source.named_parameters():
+        uses_production_layout = key == MINIWORLD_IMPL or (
+            feature_only and reference_name.startswith("features.")
+        )
+        if uses_production_layout:
+            model_name = reference_to_production_key(reference_name)
+            if feature_only:
+                model_name = model_name.replace("backbone_features.", "features.", 1)
+        else:
+            model_name = reference_name
+        try:
+            parameter = model_parameters_by_name[model_name]
+        except KeyError as error:
+            raise RuntimeError(
+                f"MPNN parameter mapping failed: {reference_name!r} -> {model_name!r}"
+            ) from error
+        ordered_model_parameters.append(
+            (reference_name, parameter, uses_production_layout)
+        )
+    model.train(training)
+    ref_model = None
+    # The PyTorch row is itself the numerical reference. Avoid constructing a
+    # second identical model/graph merely to compare the reference with itself.
+    if conf.check_correctness and key != ImplementationType.PYTORCH.value:
+        ref_model = NaiveProteinMPNN(**model_kwargs).to(DEVICE)
+        ref_model.load_state_dict(state, strict=True)
+        ref_model.train(training)
+    # MPNN benefits from Inductor's pointwise/reduction fusion and from an outer
+    # static-shape CUDA graph. Both deployment transforms compose with the
+    # selected message backend.
+    if conf.compile:
+        model.compile()
+        if ref_model is not None:
+            ref_model.compile()
+    model = fabric.setup_module(model)
+    if ref_model is not None:
+        ref_model = fabric.setup_module(ref_model)
+
+    torch.manual_seed(1)
+    use_amp = conf.precision in {"bf16", "bf16-mixed"}
+    workload = build_mpnn_workload(
+        seq_len=seq_len,
+        batch_size=conf.batch_size,
+        layout=conf.mpnn_layout,
+        patch_size=conf.mpnn_patch_size,
+        k_neighbors=conf.k_neighbors,
+        training=training,
+        coordinate_grad=conf.mpnn_coordinate_grad,
+        objective=conf.mpnn_training_objective,
+        label_smoothing=conf.mpnn_label_smoothing,
+        use_amp=use_amp,
+        device=DEVICE,
+    )
+    xyz = workload.coordinates
+    uses_production_signature = key == MINIWORLD_IMPL
+
+    def call_model(
+        candidate: nn.Module,
+        coordinates: torch.Tensor,
+        *,
+        production_signature: bool,
+    ) -> torch.Tensor:
+        return workload.call_model(
+            candidate,
+            coordinates,
+            production_signature=production_signature,
+        )
+
+    def model_forward() -> torch.Tensor:
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+            return call_model(
+                model,
+                xyz,
+                production_signature=uses_production_signature,
+            )
+
+    def inference_step() -> torch.Tensor:
+        with torch.no_grad():
+            return model_forward()
+
+    def backward_output(output: torch.Tensor) -> None:
+        workload.backward(output, fabric.backward)
+
+    def training_step() -> None:
+        backward_output(model_forward())
+
+    func = inference_step if is_inference_mode(conf.mode) else training_step
+
+    def correctness() -> dict[str, float]:
+        if ref_model is None:
+            return {}
+        require_coordinate_grad = training and conf.mpnn_coordinate_grad
+        xyz_impl = xyz.detach().clone().requires_grad_(require_coordinate_grad)
+        xyz_ref = xyz.detach().clone().requires_grad_(require_coordinate_grad)
+        if is_inference_mode(conf.mode):
+            with (
+                torch.no_grad(),
+                torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp),
+            ):
+                actual = call_model(
+                    model,
+                    xyz_impl,
+                    production_signature=uses_production_signature,
+                )
+                expected = call_model(
+                    ref_model,
+                    xyz_ref,
+                    production_signature=False,
+                )
+            out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+            if out_rel > 0.02 or out_cos < 0.999:
+                msg = (
+                    "MPNN eval correctness failed: "
+                    f"relative_frobenius={out_rel:.6g}, cosine={out_cos:.6g}"
+                )
+                raise RuntimeError(msg)
+            return {
+                "output_max_abs": out_max,
+                "output_rel_frob": out_rel,
+                "output_cosine": out_cos,
+            }
+
+        # Reset RNG because both models contain dropout in training mode.
+        torch.manual_seed(37)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+            actual = call_model(
+                model,
+                xyz_impl,
+                production_signature=uses_production_signature,
+            )
+        backward_output(actual)
+        if any(p.grad is None for p in model.parameters()) or (
+            require_coordinate_grad and xyz_impl.grad is None
+        ):
+            msg = "MPNN correctness expected every input and parameter gradient"
+            raise RuntimeError(msg)
+        actual_output = actual.detach()
+        actual_input_grad = (
+            xyz_impl.grad.detach().clone() if xyz_impl.grad is not None else None
+        )
+        actual_gradient_parts = []
+        for reference_name, parameter, production_layout in ordered_model_parameters:
+            gradient = parameter.grad.detach()
+            if production_layout:
+                gradient = production_tensor_in_reference_layout(
+                    reference_name, gradient
+                )
+            actual_gradient_parts.append(gradient.float().reshape(-1))
+        actual_parameter_grad = torch.cat(actual_gradient_parts)
+        # Release the optimized autograd graph before constructing the naive
+        # one. At crop-scale shapes this keeps oracle memory out of the model
+        # peak and prevents a harness-only OOM.
+        del actual
+        xyz_impl.grad = None
+        for parameter in model.parameters():
+            parameter.grad = None
+
+        torch.manual_seed(37)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+            expected = call_model(
+                ref_model,
+                xyz_ref,
+                production_signature=False,
+            )
+        backward_output(expected)
+        if any(p.grad is None for p in ref_model.parameters()) or (
+            require_coordinate_grad and xyz_ref.grad is None
+        ):
+            msg = "MPNN correctness expected every input and parameter gradient"
+            raise RuntimeError(msg)
+        out_max, out_rel, out_cos = tensor_metrics(actual_output, expected)
+        expected_parameter_grad = torch.cat(
+            [p.grad.detach().float().reshape(-1) for p in ref_model.parameters()]
+        )
+        parameter_grad_max, parameter_grad_rel, parameter_grad_cos = tensor_metrics(
+            actual_parameter_grad, expected_parameter_grad
+        )
+        if actual_input_grad is not None and xyz_ref.grad is not None:
+            input_grad_max, input_grad_rel, input_grad_cos = tensor_metrics(
+                actual_input_grad, xyz_ref.grad
+            )
+        else:
+            input_grad_max = 0.0
+            input_grad_rel = 0.0
+            input_grad_cos = 1.0
+        if out_rel > 0.02 or out_cos < 0.999:
+            msg = (
+                "MPNN training output correctness failed: "
+                f"relative_frobenius={out_rel:.6g}, cosine={out_cos:.6g}"
+            )
+            raise RuntimeError(msg)
+        if input_grad_rel > 0.10 or input_grad_cos < 0.99:
+            msg = (
+                "MPNN training input-gradient correctness failed: "
+                f"relative_frobenius={input_grad_rel:.6g}, "
+                f"cosine={input_grad_cos:.6g}"
+            )
+            raise RuntimeError(msg)
+        if parameter_grad_rel > 0.10 or parameter_grad_cos < 0.99:
+            msg = (
+                "MPNN training parameter-gradient correctness failed: "
+                f"relative_frobenius={parameter_grad_rel:.6g}, "
+                f"cosine={parameter_grad_cos:.6g}"
+            )
+            raise RuntimeError(msg)
+        grad_max = max(input_grad_max, parameter_grad_max)
+        grad_rel = max(input_grad_rel, parameter_grad_rel)
+        grad_cos = min(input_grad_cos, parameter_grad_cos)
+        return {
+            "output_max_abs": out_max,
+            "output_rel_frob": out_rel,
+            "output_cosine": out_cos,
+            "grad_max_abs": grad_max,
+            "grad_rel_frob": grad_rel,
+            "grad_cosine": grad_cos,
+        }
+
+    accuracy = correctness()
+    reference_parameters = [] if ref_model is None else list(ref_model.parameters())
+    for item in [xyz, *list(model.parameters()), *reference_parameters]:
+        item.grad = None
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=[xyz, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(xyz.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=execution_path,
+        reference="modules.mpnn.naive",
     )._replace(**accuracy)
 
 
@@ -1280,7 +1922,9 @@ def bench_augmented_attention_atom(
     model = fabric.setup_module(model)
 
     atom_len = seq_len * 8
-    pair = torch.randn(1, atom_len, atom_len, conf.d_pair_atom, device=DEVICE, dtype=dtype)
+    pair = torch.randn(
+        1, atom_len, atom_len, conf.d_pair_atom, device=DEVICE, dtype=dtype
+    )
     single = torch.randn(
         conf.n_augment, 1, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype
     )
@@ -1323,7 +1967,9 @@ def bench_augmented_attention_atom(
 
 
 def bench_bidirectional_triangle_multiplication(conf, seq_len, implementation, fabric):
-    return bench_triangle_multiplication(conf, seq_len, implementation, fabric, bidirectional=True)
+    return bench_triangle_multiplication(
+        conf, seq_len, implementation, fabric, bidirectional=True
+    )
 
 
 # =============================================================================================
@@ -1357,21 +2003,37 @@ def _flat(items: list[torch.Tensor]) -> torch.Tensor:
 def _fwd_result(conf, kfn, args, *, acc, path, ref, dtype):
     """Time a pure forward launcher ``kfn(*args)`` (is_train=False) + attach correctness ``acc``."""
     return measured_result(
-        conf=conf, func=lambda: kfn(*args), grad_to_none=[], params=[], is_train=False,
-        input_dtype=dtype, parameter_dtype=dtype, execution_path=path, reference=ref,
+        conf=conf,
+        func=lambda: kfn(*args),
+        grad_to_none=[],
+        params=[],
+        is_train=False,
+        input_dtype=dtype,
+        parameter_dtype=dtype,
+        execution_path=path,
+        reference=ref,
     )._replace(**acc)
 
 
 def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
     """Backward-only timing via ``torch.autograd.grad`` on a pre-built forward graph ``out``.
     Cosine of leaves[0]'s grad vs ``ref_grad``. is_train=True so cudagraph capture keeps grad on."""
+
     def kfn():
         return torch.autograd.grad(out, leaves, dy, retain_graph=True)
+
     g = kfn()[0]
     acc = _acc_grad(g, ref_grad)
     return measured_result(
-        conf=conf, func=kfn, grad_to_none=[], params=[], is_train=True,
-        input_dtype=dtype, parameter_dtype=dtype, execution_path=path, reference=ref,
+        conf=conf,
+        func=kfn,
+        grad_to_none=[],
+        params=[],
+        is_train=True,
+        input_dtype=dtype,
+        parameter_dtype=dtype,
+        execution_path=path,
+        reference=ref,
     )._replace(**acc)
 
 
@@ -1403,23 +2065,33 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
         return t.permute(0, 2, 3, 1).reshape(L * L, -1)
 
     if implementation == "pytorch":
+
         def run(x):
             left, right = ref_lr(x)
             return left, right, ref_gate(x)
+
         path = "pytorch"
     elif implementation == "trimul_front_triton":
-        from miniworld_kernels.kernels.trimul_inproj.triton.front import trimul_front_triton
+        from miniworld_kernels.kernels.trimul_inproj.triton.front import (
+            trimul_front_triton,
+        )
 
         def run(x):
             left, right, gate = trimul_front_triton(x, wl, wlg, wr, wrg, wg)
             return bdll_to_md(left), bdll_to_md(right), gate.reshape(L * L, D)
+
         path = "kernels.trimul_inproj.triton.front"
     elif implementation == "trimul_inproj_cute":
-        from miniworld_kernels.kernels.trimul_inproj.cute.launch import trimul_inproj_cute_forward
+        from miniworld_kernels.kernels.trimul_inproj.cute.launch import (
+            trimul_inproj_cute_forward,
+        )
 
         def run(x):
-            left, right, gate = trimul_inproj_cute_forward(x, wl, wlg, wr, wrg, wg, compute_gate=True)
+            left, right, gate = trimul_inproj_cute_forward(
+                x, wl, wlg, wr, wrg, wg, compute_gate=True
+            )
             return bdll_to_md(left), bdll_to_md(right), gate.reshape(L * L, D)
+
         path = "kernels.trimul_inproj.cute.launch"
     elif implementation == "tm1_cute":
         from miniworld_kernels.kernels.tm1.cute.launch import tm1_cute_forward
@@ -1427,6 +2099,7 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
         def run(x):
             left, right = tm1_cute_forward(x, wl, wlg, wr, wrg, out_layout="bdll")
             return bdll_to_md(left), bdll_to_md(right)
+
         path = "kernels.tm1.cute.launch"
     elif implementation == "triton_tm1":
         from miniworld_kernels.kernels.tm1.triton.main import triton_tm1
@@ -1434,13 +2107,17 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
         def run(x):
             left, right = triton_tm1(x.reshape(L * L, D), wl, wlg, wr, wrg)
             return left.reshape(L * L, D), right.reshape(L * L, D)
+
         path = "kernels.tm1.triton.main"
     elif implementation == "trimul_front_sm100":
-        from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100 import trimul_front_sm100
+        from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100 import (
+            trimul_front_sm100,
+        )
 
         def run(x):
             left, right = trimul_front_sm100(x, wl, wlg, wr, wrg)
             return bdll_to_md(left), bdll_to_md(right)
+
         path = "kernels.trimul_inproj.cute.front_sm100"
     else:
         return as_bench_result(float("nan"))
@@ -1452,7 +2129,9 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
         outs_a.append(res[2])
         outs_e.append(ref_gate(xc))
     acc = _acc_fwd(_flat(outs_a), _flat(outs_e))
-    return _fwd_result(conf, run, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(
+        conf, run, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16"
+    )
 
 
 def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
@@ -1477,30 +2156,40 @@ def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "layernorm_linear_triton":
-        from miniworld_kernels.kernels.layernorm_linear.interface import layernorm_linear_triton
+        from miniworld_kernels.kernels.layernorm_linear.interface import (
+            layernorm_linear_triton,
+        )
+
         kfn = lambda x: layernorm_linear_triton(x, lw, lb, w, None, eps)  # noqa: E731
         path = "kernels.layernorm_linear.triton.fused"
     elif implementation == "layernorm_linear_cute":
         from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
             layernorm_linear_cute,
         )
+
         kfn = lambda x: layernorm_linear_cute(x, lw, lb, w, None, eps)  # noqa: E731
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear"
     elif implementation == "layernorm_linear_cute_fused":
         from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
             layernorm_linear_cute_fused,
         )
+
         kfn = lambda x: layernorm_linear_cute_fused(x, lw, lb, w, None, eps)  # noqa: E731
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear_fused"
     elif implementation == "layernorm_linear_te":
-        from miniworld_kernels.kernels.layernorm_linear.te_style import layernorm_linear_te_fn
+        from miniworld_kernels.kernels.layernorm_linear.te_style import (
+            layernorm_linear_te_fn,
+        )
+
         kfn = lambda x: layernorm_linear_te_fn(x, lw, lb, w, None, eps)  # noqa: E731
         path = "kernels.layernorm_linear.te_style"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(_x()), ref(_x()))
-    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(
+        conf, kfn, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16"
+    )
 
 
 def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
@@ -1511,11 +2200,19 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
-    ref_mod = Transition(D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(BF16)
+    ref_mod = (
+        Transition(D, n=n, implementation=ImplementationType.PYTORCH)
+        .to(DEVICE)
+        .to(BF16)
+    )
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
     lw, lb = ref_mod.ln_in.weight, ref_mod.ln_in.bias
-    wa, wb, wsq = ref_mod.expand_a.weight, ref_mod.expand_b.weight, ref_mod.squeeze.weight
+    wa, wb, wsq = (
+        ref_mod.expand_a.weight,
+        ref_mod.expand_b.weight,
+        ref_mod.squeeze.weight,
+    )
     eps = ref_mod.ln_in.eps
 
     def _x():
@@ -1526,22 +2223,36 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         kfn, path = (lambda x: ref_mod(x)), "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_kernels.kernels import triton_transition_fused
+
         kfn = lambda x: triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)  # noqa: E731
         path = "kernels.transition.triton.fused"
     elif implementation == "cute_transition_fused":
         from miniworld_kernels.kernels import cute_transition_fused
+
         kfn = lambda x: cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)  # noqa: E731
         path = "kernels.transition.cute.fused"
     elif implementation == "transition_b2b_ktiled":
-        from miniworld_kernels.kernels.transition.triton.fused import transition_b2b_ktiled
+        from miniworld_kernels.kernels.transition.triton.fused import (
+            transition_b2b_ktiled,
+        )
+
         kfn = lambda x: transition_b2b_ktiled(  # noqa: E731
-            x.reshape(L * L, D), lw, lb, wa, wb, wsq, eps).reshape(1, L, L, D)
+            x.reshape(L * L, D), lw, lb, wa, wb, wsq, eps
+        ).reshape(1, L, L, D)
         path = "kernels.transition.triton.fused.b2b_ktiled"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(_x()), ref_mod(_x()))
-    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="module.reference.torch", dtype="bfloat16")
+    return _fwd_result(
+        conf,
+        kfn,
+        (_x(),),
+        acc=acc,
+        path=path,
+        ref="module.reference.torch",
+        dtype="bfloat16",
+    )
 
 
 def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
@@ -1568,26 +2279,41 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
         kfn, path = ref, "torch.nn.functional.layer_norm"
     elif implementation == "triton_layernorm":
         from miniworld_kernels.kernels import triton_layernorm
+
         kfn = lambda x: triton_layernorm(x, w, b, eps)  # noqa: E731
         path = "kernels.layernorm.triton.main"
     elif implementation == "layernorm_dispatch":
         from miniworld_kernels.kernels.layernorm.interface import layernorm_kernel
+
         kfn = lambda x: layernorm_kernel(x, w, b, eps)  # noqa: E731
         path = "kernels.layernorm.interface"
     elif implementation == "quack_cute":
-        from miniworld_kernels.kernels.layernorm.cute.quack_adapter import quack_layernorm_fwd
+        from miniworld_kernels.kernels.layernorm.cute.quack_adapter import (
+            quack_layernorm_fwd,
+        )
+
         kfn = lambda x: quack_layernorm_fwd(x, w, b, eps)  # noqa: E731
         path = "kernels.layernorm.cute.quack"
     elif implementation == "triton_layernorm_lowreg":
-        from miniworld_kernels.kernels.layernorm.triton.lowreg import triton_layernorm_lowreg
+        from miniworld_kernels.kernels.layernorm.triton.lowreg import (
+            triton_layernorm_lowreg,
+        )
+
         kfn = lambda x: triton_layernorm_lowreg(x, w, b, eps)  # noqa: E731
         path = "kernels.layernorm.triton.lowreg"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(_x()), ref(_x()))
-    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path,
-                       ref="torch.nn.functional.layer_norm", dtype=tname)
+    return _fwd_result(
+        conf,
+        kfn,
+        (_x(),),
+        acc=acc,
+        path=path,
+        ref="torch.nn.functional.layer_norm",
+        dtype=tname,
+    )
 
 
 def bench_kernel_adaln(conf, seq_len, implementation, fabric):
@@ -1600,7 +2326,11 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
     torch.manual_seed(0)
-    ref_mod = AdaptiveLayerNorm(D, D, implementation=ImplementationType.PYTORCH).to(DEVICE).to(dtype)
+    ref_mod = (
+        AdaptiveLayerNorm(D, D, implementation=ImplementationType.PYTORCH)
+        .to(DEVICE)
+        .to(dtype)
+    )
     for lin in (ref_mod.to_scale, ref_mod.to_bias):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
         if lin.bias is not None:
@@ -1611,30 +2341,49 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
 
     def _xc():
         torch.manual_seed(1)
-        return (torch.randn(1, L, L, D, device=DEVICE, dtype=dtype),
-                torch.randn(1, L, L, D, device=DEVICE, dtype=dtype))
+        return (
+            torch.randn(1, L, L, D, device=DEVICE, dtype=dtype),
+            torch.randn(1, L, L, D, device=DEVICE, dtype=dtype),
+        )
 
     if implementation == "pytorch":
         kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
     elif implementation == "adaln_inference":
         from miniworld_kernels.kernels.adaln.triton.inference import adaln_inference
+
         kfn = lambda x, c: adaln_inference(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
         path = "kernels.adaln.triton.inference"
     elif implementation == "adaln_lnfold":
-        from miniworld_kernels.kernels.adaln.triton.inference import adaln_inference_lnfold
+        from miniworld_kernels.kernels.adaln.triton.inference import (
+            adaln_inference_lnfold,
+        )
         from miniworld_kernels.kernels.layernorm_linear.cute import fold_for_gemm
+
         _wcat = torch.cat([sw, bw], dim=0).contiguous()
         _bcat = torch.cat([sb, sb.new_zeros(D)], dim=0).contiguous()
         _pf = fold_for_gemm(_wcat, clw, clw.new_zeros(clw.shape), _bcat, w2_dtype=dtype)
         kfn = lambda x, c: adaln_inference_lnfold(  # noqa: E731
-            x, c, clw, sw, sb, bw, ex, ec, weight_cat=_wcat, bias_cat=_bcat, prefolded=_pf)
+            x,
+            c,
+            clw,
+            sw,
+            sb,
+            bw,
+            ex,
+            ec,
+            weight_cat=_wcat,
+            bias_cat=_bcat,
+            prefolded=_pf,
+        )
         path = "kernels.adaln.triton.inference.lnfold"
     elif implementation == "triton_adaln":
         from miniworld_kernels.kernels import triton_adaptive_layer_norm
+
         kfn = lambda x, c: triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
         path = "kernels.adaln.triton.main"
     elif implementation == "adaln_fused3":
         from miniworld_kernels.kernels.adaln.triton.fused3 import adaln_fused3
+
         kfn = lambda x, c: adaln_fused3(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
         path = "kernels.adaln.triton.fused3"
     else:
@@ -1642,7 +2391,9 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
 
     xc, cc = _xc()
     acc = _acc_fwd(kfn(xc, cc), ref_mod(xc, cc))
-    return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype=tname)
+    return _fwd_result(
+        conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype=tname
+    )
 
 
 def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
@@ -1664,24 +2415,29 @@ def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
     def ref(q, k, v, bias):
         qf, kf, vf = (t.reshape(H, L, L, dh) for t in (q, k, v))
         mask = bias.reshape(H, 1, L, L)
-        return F.scaled_dot_product_attention(qf, kf, vf, attn_mask=mask).reshape(1, H, L, L, dh)
+        return F.scaled_dot_product_attention(qf, kf, vf, attn_mask=mask).reshape(
+            1, H, L, L, dh
+        )
 
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.sdpa"
     elif implementation == "triton_tri_attn":
         from miniworld_kernels.kernels import triton_triangle_attention_pair_bias as fn
+
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
         path = "kernels.triangle_attention.triton.main"
     elif implementation == "triton_tri_attn_miniworld":
         from miniworld_kernels.kernels.triangle_attention.triton.miniworld import (
             triton_triangle_attention_pair_bias as fn,
         )
+
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
         path = "kernels.triangle_attention.triton.miniworld"
     elif implementation == "triton_tri_attn_perf":
         from miniworld_kernels.kernels.triangle_attention.triton.perf import (
             triton_triangle_attention_pair_bias as fn,
         )
+
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
         path = "kernels.triangle_attention.triton.perf"
     else:
@@ -1693,7 +2449,9 @@ def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
         acc = _acc_fwd(kfn(*qc), ref(*qc))
     except torch.cuda.OutOfMemoryError:
         torch.cuda.empty_cache()
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.sdpa", dtype="bfloat16")
+    return _fwd_result(
+        conf, kfn, mk(), acc=acc, path=path, ref="pytorch.sdpa", dtype="bfloat16"
+    )
 
 
 def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
@@ -1718,17 +2476,23 @@ def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_bias_attn":
         from miniworld_kernels.kernels import triton_bias_only_attention
+
         kfn = lambda v, b: triton_bias_only_attention(v, b)  # noqa: E731
         path = "kernels.bias_only_attention.triton.main"
     elif implementation == "bias_only_fused":
-        from miniworld_kernels.kernels.bias_only_attention.triton.fused import bias_only_fused_fwd
+        from miniworld_kernels.kernels.bias_only_attention.triton.fused import (
+            bias_only_fused_fwd,
+        )
+
         kfn = lambda v, b: bias_only_fused_fwd(v, b)  # noqa: E731
         path = "kernels.bias_only_attention.triton.fused"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16")
+    return _fwd_result(
+        conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16"
+    )
 
 
 def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
@@ -1756,21 +2520,27 @@ def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_aug_attn":
         from miniworld_kernels.kernels import triton_augmented_attention_pair_bias
+
         # memory-efficient backend explicitly (the dispatch wrapper now defaults to
         # compute-efficient); keeps this row distinct from aug_attn_compute_efficient.
-        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b, compute_efficient=False)  # noqa: E731
+        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(
+            q, k, v, b, compute_efficient=False
+        )  # noqa: E731
         path = "kernels.augmented_attention.triton.main"
     elif implementation == "aug_attn_compute_efficient":
         from miniworld_kernels.kernels.augmented_attention.triton.compute_efficient import (
             triton_augmented_attention_pair_bias as fn,
         )
+
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
         path = "kernels.augmented_attention.triton.compute_efficient"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16")
+    return _fwd_result(
+        conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16"
+    )
 
 
 def bench_kernel_ln_mask(conf, seq_len, implementation, fabric):
@@ -1796,13 +2566,16 @@ def bench_kernel_ln_mask(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch"
     elif implementation == "fused_ln_mask":
         from miniworld_kernels.kernels.fused_ln_mask.triton.main import fused_ln_mask
+
         kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)  # noqa: E731
         path = "kernels.fused_ln_mask.triton"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(
+        conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16"
+    )
 
 
 def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
@@ -1810,13 +2583,17 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     tm2_cute, triton_tm2."""
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    wg = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()  # (N,K)
+    wg = (
+        torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)
+    ).contiguous()  # (N,K)
     wp = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()
 
     def mk():
         torch.manual_seed(1)
-        return (torch.randn(1, L, L, D, device=DEVICE, dtype=BF16),
-                torch.randn(1, L, L, D, device=DEVICE, dtype=BF16))
+        return (
+            torch.randn(1, L, L, D, device=DEVICE, dtype=BF16),
+            torch.randn(1, L, L, D, device=DEVICE, dtype=BF16),
+        )
 
     def ref(xg, xo):
         return torch.sigmoid(xg @ wg.t()) * (xo @ wp.t())
@@ -1825,54 +2602,83 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch"
     elif implementation == "tm2_cute":
         from miniworld_kernels.kernels.tm2.cute.tm2_cute import tm2_cute_forward
+
         kfn = lambda xg, xo: tm2_cute_forward(xg, xo, wg, wp)  # noqa: E731
         path = "kernels.tm2.cute"
     elif implementation == "triton_tm2":
         from miniworld_kernels.kernels.tm2.triton.main import triton_tm2
-        wgt, wpt = wg.t().contiguous(), wp.t().contiguous()  # kernel computes x@W (K,N form)
+
+        wgt, wpt = (
+            wg.t().contiguous(),
+            wp.t().contiguous(),
+        )  # kernel computes x@W (K,N form)
         kfn = lambda xg, xo: triton_tm2(  # noqa: E731
-            xg.reshape(L * L, D), xo.reshape(L * L, D), wgt, wpt).reshape(1, L, L, D)
+            xg.reshape(L * L, D), xo.reshape(L * L, D), wgt, wpt
+        ).reshape(1, L, L, D)
         path = "kernels.tm2.triton.main"
     else:
         return as_bench_result(float("nan"))
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(
+        conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16"
+    )
 
 
 def bench_kernel_cond_transition_tail(conf, seq_len, implementation, fabric):
     """Post-adaLN conditioned-transition tail: out=squeeze(silu(x@Wa)*(x@Wb)); y=sigma(cond@Wsc+b)*out.
     fp32. Rows: pytorch, triton_cond_transition."""
     from miniworld_kernels import kernels
-    from miniworld_kernels.modules.conditioned_transition.module import ConditionedTransition
+    from miniworld_kernels.modules.conditioned_transition.module import (
+        ConditionedTransition,
+    )
     from miniworld_kernels.modules.exceptions import ImplementationType
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
-    ref_mod = ConditionedTransition(D, D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).float()
+    ref_mod = (
+        ConditionedTransition(D, D, n=n, implementation=ImplementationType.PYTORCH)
+        .to(DEVICE)
+        .float()
+    )
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
-    wa, wb, ws = ref_mod.expand_a.weight, ref_mod.expand_b.weight, ref_mod.squeeze.weight
+    wa, wb, ws = (
+        ref_mod.expand_a.weight,
+        ref_mod.expand_b.weight,
+        ref_mod.squeeze.weight,
+    )
     wsc, bsc = ref_mod.to_scale.weight, ref_mod.to_scale.bias
 
     def _xc():
         torch.manual_seed(1)
-        return (torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32),
-                torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32))
+        return (
+            torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32),
+            torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32),
+        )
 
     if implementation == "pytorch":
         kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
     elif implementation == "triton_cond_transition":
         raw = kernels.cond_transition_inference_dispatch
         kfn = lambda x, c: raw(  # noqa: E731
-            x.reshape(-1, D), c.reshape(-1, D), wa, wb, ws, wsc, bsc).reshape(1, L, L, D)
+            x.reshape(-1, D), c.reshape(-1, D), wa, wb, ws, wsc, bsc
+        ).reshape(1, L, L, D)
         path = "kernels.conditioned_transition.triton"
     else:
         return as_bench_result(float("nan"))
 
     xc, cc = _xc()
     acc = _acc_fwd(kfn(xc, cc), ref_mod(xc, cc))
-    return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype="float32")
+    return _fwd_result(
+        conf,
+        kfn,
+        _xc(),
+        acc=acc,
+        path=path,
+        ref="module.reference.torch",
+        dtype="float32",
+    )
 
 
 # ---- BACKWARD operations (pure-function launchers; cudagraph-safe) ----------------------------
@@ -1895,8 +2701,11 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     def torch_bwd():
         xhat = (xf - mean[:, None]) * rstd[:, None]
         dxhat = dy.float() * w.float()
-        dx = rstd[:, None] * (dxhat - dxhat.mean(-1, keepdim=True)
-                              - xhat * (dxhat * xhat).mean(-1, keepdim=True))
+        dx = rstd[:, None] * (
+            dxhat
+            - dxhat.mean(-1, keepdim=True)
+            - xhat * (dxhat * xhat).mean(-1, keepdim=True)
+        )
         dwt = (dy.float() * xhat).sum(0)
         dbt = dy.float().sum(0)
         return dx.to(dtype), dwt.to(dtype), dbt.to(dtype)
@@ -1905,10 +2714,16 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         kfn, path = torch_bwd, "pytorch"
     elif implementation in {"triton_atomic", "triton_partial", "triton_persistent"}:
         from miniworld_kernels.kernels.layernorm.compile_native import (
-            _bwd_atomic_impl, _bwd_partial_impl, _bwd_persistent_impl,
+            _bwd_atomic_impl,
+            _bwd_partial_impl,
+            _bwd_persistent_impl,
         )
-        impl_fn = {"triton_atomic": _bwd_atomic_impl, "triton_partial": _bwd_partial_impl,
-                   "triton_persistent": _bwd_persistent_impl}[implementation]
+
+        impl_fn = {
+            "triton_atomic": _bwd_atomic_impl,
+            "triton_partial": _bwd_partial_impl,
+            "triton_persistent": _bwd_persistent_impl,
+        }[implementation]
         kfn = lambda: impl_fn(dy, x, w, mean, rstd)  # noqa: E731
         path = f"kernels.layernorm.compile_native.{implementation}"
     elif implementation == "cuda":
@@ -1917,6 +2732,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         if dtype is not BF16 or not (128 <= D <= 512):
             return as_bench_result(float("nan"))
         from miniworld_kernels.kernels.layernorm.cuda import layer_norm_bwd_cuda
+
         kfn = lambda: layer_norm_bwd_cuda(dy, x, w, mean, rstd)  # noqa: E731
         path = "kernels.layernorm.cuda.layer_norm_bwd_cuda"
     else:
@@ -1924,8 +2740,15 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
 
     acc = _acc_grad(kfn()[0], torch_bwd()[0])
     return measured_result(
-        conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
-        input_dtype=tname, parameter_dtype=tname, execution_path=path, reference="pytorch",
+        conf=conf,
+        func=kfn,
+        grad_to_none=[],
+        params=[],
+        is_train=False,
+        input_dtype=tname,
+        parameter_dtype=tname,
+        execution_path=path,
+        reference="pytorch",
     )._replace(**acc)
 
 
@@ -1934,7 +2757,9 @@ def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
     gate_elem_bwd. Cosine on concatenated grads."""
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    wg = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()  # (K,N)
+    wg = (
+        torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)
+    ).contiguous()  # (K,N)
     torch.manual_seed(1)
     x_n = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
     proj = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
@@ -1952,7 +2777,10 @@ def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
     elif implementation == "gate_elem_bwd":
-        from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import gate_elem_bwd
+        from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import (
+            gate_elem_bwd,
+        )
+
         kfn = lambda: gate_elem_bwd(dy, x_n, proj, gate, wg)  # noqa: E731
         path = "kernels.trimul_inproj.triton.gate_elem"
     else:
@@ -1960,8 +2788,15 @@ def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
 
     acc = _acc_grad(_flat(list(kfn())), _flat(list(torch_bwd())))
     return measured_result(
-        conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
-        input_dtype="bfloat16", parameter_dtype="bfloat16", execution_path=path, reference="pytorch",
+        conf=conf,
+        func=kfn,
+        grad_to_none=[],
+        params=[],
+        is_train=False,
+        input_dtype="bfloat16",
+        parameter_dtype="bfloat16",
+        execution_path=path,
+        reference="pytorch",
     )._replace(**acc)
 
 
@@ -1987,22 +2822,38 @@ def bench_kernel_dual_gemm_epil_bwd(conf, seq_len, implementation, fabric):
         pR, gR = xf @ WR.float(), torch.sigmoid(xf @ WRg.float())
         d_pL, d_gL = dl * gL, dl * pL * gL * (1 - gL)
         d_pR, d_gR = dr * gR, dr * pR * gR * (1 - gR)
-        dxn = (d_pL @ WL.float().t() + d_gL @ WLg.float().t()
-               + d_pR @ WR.float().t() + d_gR @ WRg.float().t())
-        return (dxn.reshape(1, L, L, D).to(BF16), (xf.t() @ d_pL).to(BF16), (xf.t() @ d_gL).to(BF16),
-                (xf.t() @ d_pR).to(BF16), (xf.t() @ d_gR).to(BF16))
+        dxn = (
+            d_pL @ WL.float().t()
+            + d_gL @ WLg.float().t()
+            + d_pR @ WR.float().t()
+            + d_gR @ WRg.float().t()
+        )
+        return (
+            dxn.reshape(1, L, L, D).to(BF16),
+            (xf.t() @ d_pL).to(BF16),
+            (xf.t() @ d_gL).to(BF16),
+            (xf.t() @ d_pR).to(BF16),
+            (xf.t() @ d_gR).to(BF16),
+        )
 
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
     elif implementation == "front_bwd_fused":
-        from miniworld_kernels.kernels.trimul_inproj.triton.back_fused import front_bwd_fused
+        from miniworld_kernels.kernels.trimul_inproj.triton.back_fused import (
+            front_bwd_fused,
+        )
+
         xf = x_n.reshape(L * L, D)
         gLlog, pL = xf @ WLg, xf @ WL
         gRlog, pR = xf @ WRg, xf @ WR
         left_il = torch.stack([gLlog, pL], dim=-1).reshape(L * L, 2 * H)
         right_il = torch.stack([gRlog, pR], dim=-1).reshape(L * L, 2 * H)
-        preact = torch.cat([left_il, right_il], dim=-1).reshape(
-            1, L, L, 4 * H).permute(0, 3, 1, 2).contiguous()
+        preact = (
+            torch.cat([left_il, right_il], dim=-1)
+            .reshape(1, L, L, 4 * H)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
         dlb = d_left.permute(0, 3, 1, 2).contiguous()
         drb = d_right.permute(0, 3, 1, 2).contiguous()
         kfn = lambda: front_bwd_fused(dlb, drb, preact, x_n, WL, WLg, WR, WRg)  # noqa: E731
@@ -2012,8 +2863,15 @@ def bench_kernel_dual_gemm_epil_bwd(conf, seq_len, implementation, fabric):
 
     acc = _acc_grad(_flat(list(kfn())), _flat(list(torch_bwd())))
     return measured_result(
-        conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
-        input_dtype="bfloat16", parameter_dtype="bfloat16", execution_path=path, reference="pytorch",
+        conf=conf,
+        func=kfn,
+        grad_to_none=[],
+        params=[],
+        is_train=False,
+        input_dtype="bfloat16",
+        parameter_dtype="bfloat16",
+        execution_path=path,
+        reference="pytorch",
     )._replace(**acc)
 
 
@@ -2028,7 +2886,11 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
     torch.manual_seed(0)
-    ref_mod = AdaptiveLayerNorm(D, D, implementation=ImplementationType.PYTORCH).to(DEVICE).to(dtype)
+    ref_mod = (
+        AdaptiveLayerNorm(D, D, implementation=ImplementationType.PYTORCH)
+        .to(DEVICE)
+        .to(dtype)
+    )
     for lin in (ref_mod.to_scale, ref_mod.to_bias):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
         if lin.bias is not None:
@@ -2049,20 +2911,31 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
         out, path = ref_mod(x, c), "module.reference.torch"
     elif implementation == "adaln_train":
         from miniworld_kernels.kernels.adaln.triton.training import adaln_train
+
         out = adaln_train(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.training"
     elif implementation == "triton_adaln":
         from miniworld_kernels.kernels import triton_adaptive_layer_norm
+
         out = triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.main"
     elif implementation == "adaln_fused3":
         from miniworld_kernels.kernels.adaln.triton.fused3 import adaln_fused3_train
+
         out = adaln_fused3_train(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.fused3"
     else:
         return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x, c], dy, ref_dx, path=path,
-                                ref="module.reference.torch", dtype=tname)
+    return _bwd_autograd_result(
+        conf,
+        out,
+        [x, c],
+        dy,
+        ref_dx,
+        path=path,
+        ref="module.reference.torch",
+        dtype=tname,
+    )
 
 
 def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
@@ -2073,11 +2946,19 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
-    ref_mod = Transition(D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(BF16)
+    ref_mod = (
+        Transition(D, n=n, implementation=ImplementationType.PYTORCH)
+        .to(DEVICE)
+        .to(BF16)
+    )
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
     lw, lb = ref_mod.ln_in.weight, ref_mod.ln_in.bias
-    wa, wb, wsq = ref_mod.expand_a.weight, ref_mod.expand_b.weight, ref_mod.squeeze.weight
+    wa, wb, wsq = (
+        ref_mod.expand_a.weight,
+        ref_mod.expand_b.weight,
+        ref_mod.squeeze.weight,
+    )
     eps = ref_mod.ln_in.eps
     torch.manual_seed(1)
     x0 = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
@@ -2091,16 +2972,26 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
         out, path = ref_mod(x), "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_kernels.kernels import triton_transition_fused
+
         out = triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
     elif implementation == "cute_transition_fused":
         from miniworld_kernels.kernels import cute_transition_fused
+
         out = cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.cute.fused"
     else:
         return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x], dy, ref_dx, path=path,
-                                ref="module.reference.torch", dtype="bfloat16")
+    return _bwd_autograd_result(
+        conf,
+        out,
+        [x],
+        dy,
+        ref_dx,
+        path=path,
+        ref="module.reference.torch",
+        dtype="bfloat16",
+    )
 
 
 def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
@@ -2125,17 +3016,24 @@ def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         out, path = F.linear(F.layer_norm(x, (D,), lw, lb, eps), w), "pytorch.autograd"
     elif implementation == "layernorm_linear_te":
-        from miniworld_kernels.kernels.layernorm_linear.te_style import layernorm_linear_te_fn
+        from miniworld_kernels.kernels.layernorm_linear.te_style import (
+            layernorm_linear_te_fn,
+        )
+
         out = layernorm_linear_te_fn(x, lw, lb, w, None, eps)
         path = "kernels.layernorm_linear.te_style"
     elif implementation == "layernorm_linear_cute":
-        from miniworld_kernels.kernels.layernorm_linear.autograd import layernorm_linear_fn
+        from miniworld_kernels.kernels.layernorm_linear.autograd import (
+            layernorm_linear_fn,
+        )
+
         out = layernorm_linear_fn(x, lw, lb, w, None, eps)
         path = "kernels.layernorm_linear.autograd.cute"
     else:
         return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x], dy, ref_dx, path=path,
-                                ref="pytorch.autograd", dtype="bfloat16")
+    return _bwd_autograd_result(
+        conf, out, [x], dy, ref_dx, path=path, ref="pytorch.autograd", dtype="bfloat16"
+    )
 
 
 KERNEL_MAP = {
@@ -2164,6 +3062,7 @@ KERNEL_MAP = {
     "bias_only_attention": bench_bias_only_attention,
     "triangle_attention": bench_triangle_attention,
     "transition": bench_transition,
+    "mpnn": bench_mpnn,
     "conditioned_transition": bench_conditioned_transition,
     "adaptive_layernorm": bench_adaptive_layernorm,
     "augmented_attention_token": bench_augmented_attention_token,
@@ -2173,23 +3072,40 @@ KERNEL_MAP = {
 _KERNELS_ROOT = _REPO_ROOT / "benchmarks" / "kernels"
 _MODULES_ROOT = _REPO_ROOT / "benchmarks" / "modules"
 _KERNEL_TARGETS = [
-    "dual_gemm_epil", "gemm_epil", "transition_b2b", "layernorm", "adaln", "tri_attn",
-    "bias_attn", "aug_attn", "ln_mask", "gemm_gate", "cond_transition_tail",
-    "layernorm_bwd", "gate_bwd", "dual_gemm_epil_bwd", "adaln_bwd", "transition_b2b_bwd",
+    "dual_gemm_epil",
+    "gemm_epil",
+    "transition_b2b",
+    "layernorm",
+    "adaln",
+    "tri_attn",
+    "bias_attn",
+    "aug_attn",
+    "ln_mask",
+    "gemm_gate",
+    "cond_transition_tail",
+    "layernorm_bwd",
+    "gate_bwd",
+    "dual_gemm_epil_bwd",
+    "adaln_bwd",
+    "transition_b2b_bwd",
     "gemm_epil_bwd",
 ]
 TARGET_DIRS = {name: _KERNELS_ROOT / name for name in _KERNEL_TARGETS}
-TARGET_DIRS.update({
-    "triangle_multiplication": _MODULES_ROOT / "triangle_multiplication",
-    "triangle_multiplication_bidirectional": _MODULES_ROOT / "triangle_multiplication_bidirectional",
-    "bias_only_attention": _MODULES_ROOT / "bias_only_attention",
-    "triangle_attention": _MODULES_ROOT / "triangle_attention",
-    "transition": _MODULES_ROOT / "transition",
-    "conditioned_transition": _MODULES_ROOT / "conditioned_transition",
-    "adaptive_layernorm": _MODULES_ROOT / "adaptive_layernorm",
-    "augmented_attention_token": _MODULES_ROOT / "augmented_attention",
-    "augmented_attention_atom": _MODULES_ROOT / "augmented_attention",
-})
+TARGET_DIRS.update(
+    {
+        "triangle_multiplication": _MODULES_ROOT / "triangle_multiplication",
+        "triangle_multiplication_bidirectional": _MODULES_ROOT
+        / "triangle_multiplication_bidirectional",
+        "bias_only_attention": _MODULES_ROOT / "bias_only_attention",
+        "triangle_attention": _MODULES_ROOT / "triangle_attention",
+        "transition": _MODULES_ROOT / "transition",
+        "mpnn": _MODULES_ROOT / "mpnn",
+        "conditioned_transition": _MODULES_ROOT / "conditioned_transition",
+        "adaptive_layernorm": _MODULES_ROOT / "adaptive_layernorm",
+        "augmented_attention_token": _MODULES_ROOT / "augmented_attention",
+        "augmented_attention_atom": _MODULES_ROOT / "augmented_attention",
+    }
+)
 
 # Triton autotuner objects live in the per-op `triton/main.py` of each kernel.
 AUTOTUNE_MODULES = {
@@ -2364,17 +3280,52 @@ CSV_FIELDS = [
     "grad_max_abs",
     "grad_rel_frob",
     "grad_cosine",
+    "memory_baseline_allocated_mb",
+    "memory_peak_allocated_mb",
+    "memory_peak_reserved_mb",
     "n_layers",
     "n_augment",
     "mask_prob",
     "seq_len",
     "tokens",
     "batch_size",
+    "physical_batch_size",
+    "input_layout",
+    "num_segments",
+    "segment_lengths",
+    "mpnn_patch_size",
+    "mpnn_coordinate_grad",
+    "mpnn_training_objective",
+    "mpnn_label_smoothing",
+    "mpnn_message_backend",
+    "mpnn_message_resolved",
+    "mpnn_edge_mlp_backend",
+    "mpnn_edge_mlp_resolved",
+    "mpnn_edge_norm_backend",
+    "mpnn_edge_norm_resolved",
+    "mpnn_edge_dropout_backend",
+    "mpnn_edge_dropout_resolved",
+    "mpnn_feature_backend",
+    "mpnn_feature_resolved",
+    "mpnn_edge_w1_recompute",
+    "mpnn_edge_w1_resolved",
+    "mpnn_encoder_node_w1_recompute",
+    "mpnn_encoder_node_w1_resolved",
+    "mpnn_transition_recompute",
+    "mpnn_transition_resolved",
+    "loss_reduction",
+    "step_scope",
+    "valid_items",
+    "valid_tokens",
+    "items_per_second",
+    "tokens_per_second",
+    "correctness_checked",
     "d_pair",
     "d_single",
     "d_single_token",
     "d_single_atom",
     "d_pair_atom",
+    "k_neighbors",
     "status",
     "error",
     "value",
@@ -2423,6 +3374,24 @@ def csv_row(
         implementation_type = MINIWORLD_IMPL
     if implementation == OLD_TRITON_IMPL:
         implementation_type = OLD_TRITON_IMPL
+    is_mpnn = conf.kernel == "mpnn"
+    is_training = not is_inference_mode(conf.mode)
+    valid_items = conf.batch_size if is_mpnn else None
+    valid_tokens = conf.batch_size * seq_len if is_mpnn else None
+    timed_result = (
+        result is not None
+        and conf.metric == "time"
+        and result.value is not None
+        and result.value > 0
+    )
+    if not is_mpnn:
+        step_scope = ""
+    elif is_inference_mode(conf.mode):
+        step_scope = "forward"
+    elif conf.mpnn_training_objective == "item_ce":
+        step_scope = "forward+item_ce+backward"
+    else:
+        step_scope = "forward+output_grad+backward"
     return {
         "run_name": run_name,
         "target_kind": target_kind(conf.kernel),
@@ -2440,7 +3409,9 @@ def csv_row(
         "sweep_axis": conf.sweep_axis,
         "implementation": implementation,
         "implementation_type": implementation_type,
-        "ln_implementation": "" if spec is None or spec.ln_impl is None else spec.ln_impl.value,
+        "ln_implementation": ""
+        if spec is None or spec.ln_impl is None
+        else spec.ln_impl.value,
         "input_dtype": "" if result is None else result.input_dtype,
         "parameter_dtype": "" if result is None else result.parameter_dtype,
         "execution_path": "" if result is None else result.execution_path,
@@ -2451,17 +3422,121 @@ def csv_row(
         "grad_max_abs": None if result is None else result.grad_max_abs,
         "grad_rel_frob": None if result is None else result.grad_rel_frob,
         "grad_cosine": None if result is None else result.grad_cosine,
+        "memory_baseline_allocated_mb": (
+            None if result is None else result.memory_baseline_allocated_mb
+        ),
+        "memory_peak_allocated_mb": (
+            None if result is None else result.memory_peak_allocated_mb
+        ),
+        "memory_peak_reserved_mb": (
+            None if result is None else result.memory_peak_reserved_mb
+        ),
         "n_layers": conf.n_layers,
         "n_augment": conf.n_augment,
         "mask_prob": conf.mask_prob,
         "seq_len": seq_len,
-        "tokens": seq_len * seq_len,
-        "batch_size": 1,
+        "tokens": (
+            conf.batch_size * seq_len if conf.kernel == "mpnn" else seq_len * seq_len
+        ),
+        "batch_size": conf.batch_size,
+        "physical_batch_size": (
+            (1 if conf.mpnn_layout == "packed" else conf.batch_size)
+            if conf.kernel == "mpnn"
+            else ""
+        ),
+        "input_layout": conf.mpnn_layout if conf.kernel == "mpnn" else "",
+        "num_segments": conf.batch_size if conf.kernel == "mpnn" else "",
+        "segment_lengths": (
+            f"{conf.batch_size}x{seq_len}" if conf.kernel == "mpnn" else ""
+        ),
+        "mpnn_patch_size": conf.mpnn_patch_size if conf.kernel == "mpnn" else "",
+        "mpnn_coordinate_grad": (
+            conf.mpnn_coordinate_grad if conf.kernel == "mpnn" else ""
+        ),
+        "mpnn_training_objective": (conf.mpnn_training_objective if is_mpnn else ""),
+        "mpnn_label_smoothing": (
+            conf.mpnn_label_smoothing
+            if is_mpnn and is_training and conf.mpnn_training_objective == "item_ce"
+            else ""
+        ),
+        "mpnn_message_backend": conf.mpnn_message_backend if is_mpnn else "",
+        "mpnn_message_resolved": (
+            _resolved_mpnn_message_backend(conf, seq_len)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "mpnn_edge_mlp_backend": conf.mpnn_edge_mlp_backend if is_mpnn else "",
+        "mpnn_edge_mlp_resolved": (
+            _resolved_mpnn_edge_mlp_backend(conf, seq_len)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "mpnn_edge_norm_backend": conf.mpnn_edge_norm_backend if is_mpnn else "",
+        "mpnn_edge_norm_resolved": (
+            _resolved_mpnn_edge_norm_backend(conf, seq_len)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "mpnn_edge_dropout_backend": (
+            conf.mpnn_edge_dropout_backend if is_mpnn else ""
+        ),
+        "mpnn_edge_dropout_resolved": (
+            _resolved_mpnn_edge_dropout_backend(conf, seq_len)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "mpnn_feature_backend": conf.mpnn_feature_backend if is_mpnn else "",
+        "mpnn_feature_resolved": (
+            _resolved_mpnn_feature_backend(conf)
+            if is_mpnn and implementation in {MINIWORLD_IMPL, "feature_only"}
+            else ""
+        ),
+        "mpnn_edge_w1_recompute": conf.mpnn_edge_w1_recompute if is_mpnn else "",
+        "mpnn_edge_w1_resolved": (
+            _resolved_mpnn_edge_w1_recompute(conf, seq_len)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "mpnn_encoder_node_w1_recompute": (
+            conf.mpnn_encoder_node_w1_recompute if is_mpnn else ""
+        ),
+        "mpnn_encoder_node_w1_resolved": (
+            _resolved_mpnn_encoder_node_w1_recompute(conf, seq_len)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "mpnn_transition_recompute": (
+            conf.mpnn_transition_recompute if is_mpnn else ""
+        ),
+        "mpnn_transition_resolved": (
+            _resolved_mpnn_transition_recompute(conf)
+            if is_mpnn and implementation == MINIWORLD_IMPL
+            else ""
+        ),
+        "loss_reduction": (
+            "mean_tokens_per_item_then_mean_items"
+            if is_mpnn and is_training and conf.mpnn_training_objective == "item_ce"
+            else ""
+        ),
+        "step_scope": step_scope,
+        "valid_items": valid_items if is_mpnn else "",
+        "valid_tokens": valid_tokens if is_mpnn else "",
+        "items_per_second": (
+            1000.0 * valid_items / result.value if timed_result and is_mpnn else None
+        ),
+        "tokens_per_second": (
+            1000.0 * valid_tokens / result.value if timed_result and is_mpnn else None
+        ),
+        "correctness_checked": bool(
+            result is not None
+            and (result.output_rel_frob is not None or result.grad_rel_frob is not None)
+        ),
         "d_pair": conf.d_pair,
         "d_single": conf.d_single,
         "d_single_token": conf.d_single_token,
         "d_single_atom": conf.d_single_atom,
         "d_pair_atom": conf.d_pair_atom,
+        "k_neighbors": conf.k_neighbors,
         "status": status,
         "error": error,
         "value": None if result is None else result.value,
@@ -2481,6 +3556,7 @@ def main(cfg: DictConfig) -> None:
     bench_func = KERNEL_MAP[conf.kernel]
 
     torch.backends.cuda.matmul.allow_tf32 = conf.allow_tf32
+
     # Benchmark harness must measure the RAW module/kernel, NOT a training-framework wrapper.
     # Lightning Fabric's setup_module wrapper + fabric.backward add ~110us/step of GPU work
     # (input/output/grad casts+copies) that has nothing to do with the kernel under test and
@@ -2509,9 +3585,15 @@ def main(cfg: DictConfig) -> None:
     # autotuner so every config benched during this sweep is recorded per (op, dtype, bucket)
     # and written to the runtime cache at the end. Pair with MINIWORLD_RUN_AUTOTUNE=1 so the full
     # grid (not a cached top-K) is benched. No-op otherwise; never affects benchmark numbers.
-    _capture_on = os.getenv("MINIWORLD_AUTOTUNE_CAPTURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    _capture_on = os.getenv("MINIWORLD_AUTOTUNE_CAPTURE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if _capture_on:
         from miniworld_kernels.autotune import capture as _capture
+
         _capture.install()
 
     bench_args = [
@@ -2521,6 +3603,29 @@ def main(cfg: DictConfig) -> None:
         conf.metric,
         str(conf.precision),
     ]
+    if conf.kernel == "mpnn":
+        bench_args.extend(
+            (
+                f"layout-{conf.mpnn_layout}",
+                f"b{conf.batch_size}",
+                f"patch{conf.mpnn_patch_size}",
+                "coordgrad" if conf.mpnn_coordinate_grad else "paramgrad",
+                "checked" if conf.check_correctness else "unchecked",
+                f"message-{conf.mpnn_message_backend}",
+                f"edge-{conf.mpnn_edge_mlp_backend}",
+                f"edgenorm-{conf.mpnn_edge_norm_backend}",
+                f"edgedropout-{conf.mpnn_edge_dropout_backend}",
+                f"features-{conf.mpnn_feature_backend}",
+                f"edgew1-{conf.mpnn_edge_w1_recompute}",
+                f"encnodew1-{conf.mpnn_encoder_node_w1_recompute}",
+                f"transition-{conf.mpnn_transition_recompute}",
+            )
+        )
+        if conf.mpnn_training_objective != "output_grad":
+            smoothing = str(conf.mpnn_label_smoothing).replace(".", "p")
+            bench_args.extend(
+                (f"objective-{conf.mpnn_training_objective}", f"ls{smoothing}")
+            )
     if conf.compile:
         bench_args.append("compile")
     if conf.cudagraph != "disabled":
@@ -2540,10 +3645,10 @@ def main(cfg: DictConfig) -> None:
     seen_autotuners: set[str] = set()
 
     if conf.sweep_axis == "seq_len":
-        sweep_points = [
-            (seq_len, conf.d_pair)
-            for seq_len in range(conf.min_seq_len, conf.max_seq_len + 1, conf.seq_len_step)
-        ]
+        seq_len_values = conf.seq_len_values or list(
+            range(conf.min_seq_len, conf.max_seq_len + 1, conf.seq_len_step)
+        )
+        sweep_points = [(seq_len, conf.d_pair) for seq_len in seq_len_values]
     else:
         d_pair_values = conf.d_pair_values or list(
             range(conf.min_d_pair, conf.max_d_pair + 1, conf.d_pair_step),
