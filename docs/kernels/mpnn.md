@@ -1117,6 +1117,59 @@ GEMMs, and the node share of the packed-W1 block plus `embedding_dense_backward`
 `kernels/mpnn_node_message/` already implements and verifies that fusion; wiring it
 needs its backward reshaped to the two-pass form established here first.
 
+#### Where the dX pass actually spends its time
+
+Profiling the fused path alone answers the wrong question. It says
+`_edge_tail_dx_kernel` is the largest kernel in the step; it does not say whether
+the chain is cheaper than what it replaced. Profiling *both* on the same card
+does, and the answer is that it is not:
+
+| A5000, `B=8` | total | fused edge-tail kernels | everything else |
+|---|---:|---:|---:|
+| baseline | 602.63 ms | -- | 602.63 ms |
+| fused | 667.60 ms | 249.19 ms | 418.41 ms |
+
+The four fused kernels cost 249 ms to replace roughly 184 ms of separate-operation
+work -- about 1.35x -- and that difference is the whole time gap. `_edge_tail_dx`
+alone, at 116.45 ms, is two thirds of the entire baseline chain, while running at
+7% of tensor-core peak and 27% of bandwidth: neither compute nor bandwidth bound.
+
+Ablating the pass one component at a time, sweeping the full configuration grid
+per variant so a lighter variant is not judged at a configuration chosen for the
+full kernel (A5000, one 262144-row chunk, ms):
+
+| variant | clustered index | uniform index |
+|---|---:|---:|
+| full kernel | 2.987 | 3.113 |
+| minus the `grad_neighbor` scatter atomic | 2.233 | 2.240 |
+| minus the `grad_query` grouped atomic | 2.876 | 3.018 |
+| minus the three dW-operand stores | 2.119 | 2.231 |
+| minus both atomics | 2.059 | 2.108 |
+| only the three dots and the `grad_edge` store | 1.268 | 1.288 |
+
+The components are additive: 1.27 real work + 0.87 dW operands + 0.87 atomics =
+2.99, and 36 chunks of that is 108 ms against the 116.45 measured in the step.
+
+Three things in that table were not what was expected.
+
+The scatter is almost **insensitive to locality** -- a uniform random index costs
+4% more than a clustered one, not several times more. A row tile at `BLOCK_M=32`
+against `NEIGHBORS=48` holds the neighbours of a single query, and a query's k
+nearest are distinct by construction, so there are no duplicates to coalesce
+inside a tile and nothing for locality to help. The cost is raw atomic throughput:
+33.5M FP32 atomics per chunk.
+
+**The three dW-operand stores cost more than the scatter does** (0.87 against 0.75
+ms per chunk, 31.2 against 27.1 ms at `B=8`). This is the structural reason the
+fused path loses. Fusion exists so the activations are never materialised -- but
+the weight gradients need them, so the pass writes them back out for cuBLAS alone.
+The separate-operation baseline materialises them anyway and pays no such extra
+store. Weight gradients are out of scope by instruction here; the number is
+recorded because it is half the gap, not to reopen the decision.
+
+`grad_query`'s in-tile group reduction already earns its place, at 4%. It is the
+one piece of bookkeeping in this kernel that is not worth attacking.
+
 `bench_tail_kernel.py` and `bench_dweight.py` in the review scratch directory are
 the loop for any of this: they force one configuration at a time against the
 underlying JIT function and print register counts, spill counts and CTA counts,
