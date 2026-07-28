@@ -55,6 +55,46 @@ fused kernel to that path is not a fair or valid result.
   PyTorch baseline, but the principle is absolute: **no non-compiled numbers in any
   benchmark table or graph.** A non-compiled measurement is a debug probe, not a result.
 
+### How the rule is enforced (and how it was silently broken)
+
+`compile=true` used to be a request nothing honoured. Module benches call
+`model.compile()`, but the 18 `bench_kernel_*` functions build their graph by calling
+functions rather than a module, and none of them compiled anything -- while
+`actual_compiled_flag` echoed `conf.compile` straight into the CSV. Every kernel row ever
+published as `compiled=True` with a PyTorch baseline was eager, i.e. exactly the
+"meaninglessly slow baseline" this section forbids. On `mpnn_edge_tail` the gap was 89.2 ms
+eager against 48.2 ms compiled: compiling the baseline mattered more than the kernel did.
+
+Two things now hold it up:
+
+- the three shared helpers (`_fwd_result`, `_pure_bwd_result`, `_bwd_autograd_result`)
+  compile the callable they are about to time, so a kernel bench cannot forget to;
+- `BenchResult.compiled` reports what the bench ACTUALLY did and takes precedence over the
+  config in the CSV. `actual_compiled_flag` is only the fallback for benches that stay
+  silent. If a row says `compiled=True`, it was compiled.
+
+`should_compile(conf)` is the single predicate: `compile and cudagraph == "disabled"`,
+because a CUDA graph captures the eager callable and overrides `compile` (see
+`BenchConfig`). The two are mutually exclusive in effect -- asking for both gets you the
+graph, not the compiler.
+
+### Backward benches cannot be CUDA-graphed yet
+
+`cudagraph` is the default and the documented deployment regime, but every target that
+times `torch.autograd.grad` (`_bwd_autograd_result`: `adaln_bwd`, `transition_b2b_bwd`,
+`gemm_epil_bwd`, `mpnn_edge_tail`) fails capture with
+`cudaErrorStreamCaptureIsolation` -- "operation would make the legacy stream depend on a
+capturing blocking stream". The forward graph is built on the default stream, the autograd
+engine replays each backward op on the stream its forward ran on, and `capture_cudagraph`
+captures on a private side stream. Pure-function backward benches (`_pure_bwd_result`) are
+unaffected because nothing routes them back to the default stream.
+
+A failed capture also leaves the default generator registered to the dead graph, so every
+later RNG call in the process raises "Offset increment outside graph capture" -- which is
+why one bad capture used to lose an entire sweep. Run each regime in its own process until
+this is fixed. `submits/_cudagraph_autograd_repro.py` isolates the cause: moving the
+forward off the default stream is sufficient, and autograd's threading is irrelevant.
+
 ## Hard Rule: Follow The Team-GM Bench Harness
 
 Do **not** invent ad hoc benchmark methodology for this repo unless the user

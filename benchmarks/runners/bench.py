@@ -163,6 +163,9 @@ class BenchResult(NamedTuple):
     memory_baseline_allocated_mb: float | None = None
     memory_peak_allocated_mb: float | None = None
     memory_peak_reserved_mb: float | None = None
+    # What the bench ACTUALLY did, not what the config asked for. `None` means the bench
+    # did not say, and the CSV falls back to the config. See `actual_compiled_flag`.
+    compiled: bool | None = None
 
 
 def module_miniworld_spec(raw: str) -> ImplementationSpec:
@@ -274,6 +277,7 @@ def measured_result(
     parameter_dtype: str,
     execution_path: str,
     reference: str,
+    compiled: bool | None = None,
 ) -> BenchResult:
     if os.getenv("MINIWORLD_TORCH_PROFILE", "0").strip().lower() in {
         "1",
@@ -334,10 +338,27 @@ def measured_result(
         memory_baseline_allocated_mb=memory_baseline_allocated_mb,
         memory_peak_allocated_mb=memory_peak_allocated_mb,
         memory_peak_reserved_mb=memory_peak_reserved_mb,
+        compiled=compiled,
     )
 
 
+def should_compile(conf: BenchConfig) -> bool:
+    """Whether a bench should compile the callable it is about to time.
+
+    `cudagraph` captures the EAGER callable and overrides `compile` (see BenchConfig), so
+    compiling is right exactly when the graph is off. Benches that hand a compiled module
+    to capture anyway are the exception and report `compiled` themselves.
+    """
+    return conf.compile and conf.cudagraph == "disabled"
+
+
 def actual_compiled_flag(conf: BenchConfig) -> bool:
+    """Fallback for the CSV `compiled` column when a bench did not report the truth.
+
+    Prefer `BenchResult.compiled`. This only sees the config, so it cannot know whether a
+    bench actually called `.compile()` -- it used to echo `conf.compile` unconditionally,
+    which labelled every graph-captured run compiled when it ran eager.
+    """
     if conf.kernel == "transition" and conf.cudagraph != "disabled":
         return False
     return conf.compile
@@ -381,19 +402,32 @@ def as_bench_result(value: float) -> BenchResult:
     return BenchResult(value=value)
 
 
+_METRIC_CHUNK = 1 << 24
+
+
 def tensor_metrics(
     actual: torch.Tensor, expected: torch.Tensor
 ) -> tuple[float, float, float]:
     actual_f = actual.detach().float().reshape(-1)
     expected_f = expected.detach().float().reshape(-1)
-    diff = actual_f - expected_f
-    max_abs = float(diff.abs().max().item())
-    rel_frob = float(diff.norm().div(expected_f.norm().clamp_min(1e-20)).item())
-    cosine = float(
-        actual_f.dot(expected_f)
-        .div(actual_f.norm() * expected_f.norm() + 1e-20)
-        .item(),
-    )
+    max_abs = float((actual_f - expected_f).abs().max().item())
+    # FP64 accumulation, chunked so no FP64 copy of the operands is ever materialised.
+    # An FP32 dot over the 4.0e8 elements an edge-sized bench produces drifts far enough
+    # to report cosine 0.9999955 for two BITWISE-IDENTICAL tensors -- a noise floor above
+    # the differences these benches exist to detect. torch.norm's reduction is stabler
+    # than torch.dot's, which is why rel_frob looked clean while cosine did not.
+    zero = lambda: torch.zeros((), device=actual_f.device, dtype=torch.float64)
+    dot, sq_a, sq_e, sq_diff = zero(), zero(), zero(), zero()
+    for start in range(0, actual_f.numel(), _METRIC_CHUNK):
+        a = actual_f[start : start + _METRIC_CHUNK]
+        e = expected_f[start : start + _METRIC_CHUNK]
+        dot += (a * e).sum(dtype=torch.float64)
+        sq_a += (a * a).sum(dtype=torch.float64)
+        sq_e += (e * e).sum(dtype=torch.float64)
+        sq_diff += ((a - e) * (a - e)).sum(dtype=torch.float64)
+    norm_e = sq_e.sqrt()
+    rel_frob = float(sq_diff.sqrt().div(norm_e.clamp_min(1e-20)).item())
+    cosine = float(dot.div(sq_a.sqrt() * norm_e + 1e-20).item())
     return max_abs, rel_frob, cosine
 
 
@@ -710,7 +744,7 @@ def bench_triangle_multiplication(
 
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
     if (
-        conf.compile and conf.cudagraph == "disabled"
+        should_compile(conf)
     ):  # cudagraph captures the eager module (below)
         model.compile()
     if implementation != MINIWORLD_IMPL:
@@ -819,6 +853,7 @@ def bench_triangle_multiplication(
             implementation, conf.mode, conf.d_pair
         ),
         reference=ImplementationType.PYTORCH.value,
+        compiled=should_compile(conf),
         **accuracy,
     )
 
@@ -870,7 +905,7 @@ def bench_bias_only_attention(
             return pair
 
     model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
-    if conf.compile and conf.cudagraph == "disabled":
+    if should_compile(conf):
         model.compile()
     model = fabric.setup_module(model)
 
@@ -908,6 +943,7 @@ def bench_bias_only_attention(
         parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
         execution_path=execution_path,
         reference="module.reference.torch",
+        compiled=should_compile(conf),
     )
 
 
@@ -951,7 +987,7 @@ def bench_triangle_attention(
             return pair
 
     model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
-    if conf.compile and conf.cudagraph == "disabled":
+    if should_compile(conf):
         model.compile()
     model = fabric.setup_module(model)
 
@@ -986,6 +1022,7 @@ def bench_triangle_attention(
         parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
         execution_path=execution_path,
         reference="module.reference.torch",
+        compiled=should_compile(conf),
     )
 
 
@@ -1043,7 +1080,7 @@ def bench_transition(
     for layer, state in zip(model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
     model.train(not is_inference_mode(conf.mode))
-    if conf.compile and conf.cudagraph == "disabled":
+    if should_compile(conf):
         model.compile()
     model = fabric.setup_module(model)
 
@@ -1052,7 +1089,7 @@ def bench_transition(
     for layer, state in zip(ref_model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
     ref_model.train(not is_inference_mode(conf.mode))
-    if conf.compile and conf.cudagraph == "disabled":
+    if should_compile(conf):
         ref_model.compile()
     ref_model = fabric.setup_module(ref_model)
 
@@ -1149,6 +1186,7 @@ def bench_transition(
         parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
         execution_path=execution_path,
         reference="module.reference.torch",
+        compiled=should_compile(conf),
     )._replace(**accuracy)
 
 
@@ -2001,7 +2039,15 @@ def _flat(items: list[torch.Tensor]) -> torch.Tensor:
 
 
 def _fwd_result(conf, kfn, args, *, acc, path, ref, dtype):
-    """Time a pure forward launcher ``kfn(*args)`` (is_train=False) + attach correctness ``acc``."""
+    """Time a pure forward launcher ``kfn(*args)`` (is_train=False) + attach correctness ``acc``.
+
+    Compiles ``kfn`` when the config asks for it and no CUDA graph is in the way. Kernel
+    benches build their graph by calling functions rather than a module, so none of them
+    was ever compiled -- `compiled=True` in the CSV only ever meant the config asked.
+    """
+    compiled = should_compile(conf)
+    if compiled:
+        kfn = torch.compile(kfn)
     return measured_result(
         conf=conf,
         func=lambda: kfn(*args),
@@ -2012,18 +2058,79 @@ def _fwd_result(conf, kfn, args, *, acc, path, ref, dtype):
         parameter_dtype=dtype,
         execution_path=path,
         reference=ref,
+        compiled=compiled,
     )._replace(**acc)
 
 
-def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
-    """Backward-only timing via ``torch.autograd.grad`` on a pre-built forward graph ``out``.
-    Cosine of leaves[0]'s grad vs ``ref_grad``. is_train=True so cudagraph capture keeps grad on."""
+def _pure_bwd_result(conf, kfn, *, acc, path, dtype, ref="pytorch"):
+    """Time a standalone backward launcher ``kfn()`` (is_train=False) + correctness ``acc``.
+
+    Mirror of :func:`_fwd_result` for the pure-function backward kernels. Correctness is
+    scored by the caller on the eager callable; only the timed call is compiled, so the
+    comparison never depends on Inductor while the number reported does.
+    """
+    compiled = should_compile(conf)
+    return measured_result(
+        conf=conf,
+        func=torch.compile(kfn) if compiled else kfn,
+        grad_to_none=[],
+        params=[],
+        is_train=False,
+        input_dtype=dtype,
+        parameter_dtype=dtype,
+        execution_path=path,
+        reference=ref,
+        compiled=compiled,
+    )._replace(**acc)
+
+
+def _bwd_autograd_result(
+    conf, build, leaves, dy, ref_grads, *, path, ref, dtype, fwd_ref=None
+):
+    """Backward-only timing via ``torch.autograd.grad`` over the graph ``build(*leaves)``.
+
+    Takes the forward as a callable rather than a built graph so the compile decision
+    lives here, once, for every backward kernel bench: the timed region is the backward,
+    and whether that backward is Inductor's or eager autograd's is decided by compiling
+    the forward.
+
+    ``ref_grads`` is one reference gradient PER LEAF, compared as a single concatenated
+    vector. This used to score ``leaves[0]`` alone, which is invisible when there is only
+    one leaf and silently wrong the moment there is more than one: adaln_bwd has passed
+    ``[x, c]`` since it was written and never checked ``c``, and mpnn_edge_tail produces
+    ten gradients. A kernel can zero or corrupt every gradient but the first and still
+    report a perfect score, which is how the mpnn LayerNorm accumulators stayed broken.
+    The length check below makes that failure loud instead of silent.
+
+    ``fwd_ref``, when given, scores the forward against an INDEPENDENT oracle and fills
+    the ``output_*`` columns, which are otherwise empty for backward benches. A row whose
+    reference is its own implementation scores a tautological 0.0 on the gradients and
+    leaves the thing every other number rests on -- that the reference is the operation
+    at all -- unchecked.
+
+    is_train=True so cudagraph capture keeps grad on.
+    """
+    if len(ref_grads) != len(leaves):
+        msg = (
+            f"{len(leaves)} leaves but {len(ref_grads)} reference gradients; every leaf "
+            f"passed for timing must also be checked"
+        )
+        raise ValueError(msg)
+
+    compiled = should_compile(conf)
+    out = (torch.compile(build) if compiled else build)(*leaves)
+
+    acc = {}
+    if fwd_ref is not None:
+        # Scored and dropped before the backward allocates anything: at edge-sized
+        # workloads an independent forward oracle is another 805 MiB.
+        acc.update(_acc_fwd(out, fwd_ref))
+        fwd_ref = None
 
     def kfn():
         return torch.autograd.grad(out, leaves, dy, retain_graph=True)
 
-    g = kfn()[0]
-    acc = _acc_grad(g, ref_grad)
+    acc.update(_acc_grad(_flat(list(kfn())), _flat(list(ref_grads))))
     return measured_result(
         conf=conf,
         func=kfn,
@@ -2034,6 +2141,7 @@ def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
         parameter_dtype=dtype,
         execution_path=path,
         reference=ref,
+        compiled=compiled,
     )._replace(**acc)
 
 
@@ -2739,17 +2847,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         return as_bench_result(float("nan"))
 
     acc = _acc_grad(kfn()[0], torch_bwd()[0])
-    return measured_result(
-        conf=conf,
-        func=kfn,
-        grad_to_none=[],
-        params=[],
-        is_train=False,
-        input_dtype=tname,
-        parameter_dtype=tname,
-        execution_path=path,
-        reference="pytorch",
-    )._replace(**acc)
+    return _pure_bwd_result(conf, kfn, acc=acc, path=path, dtype=tname)
 
 
 def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
@@ -2787,17 +2885,7 @@ def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
         return as_bench_result(float("nan"))
 
     acc = _acc_grad(_flat(list(kfn())), _flat(list(torch_bwd())))
-    return measured_result(
-        conf=conf,
-        func=kfn,
-        grad_to_none=[],
-        params=[],
-        is_train=False,
-        input_dtype="bfloat16",
-        parameter_dtype="bfloat16",
-        execution_path=path,
-        reference="pytorch",
-    )._replace(**acc)
+    return _pure_bwd_result(conf, kfn, acc=acc, path=path, dtype="bfloat16")
 
 
 def bench_kernel_dual_gemm_epil_bwd(conf, seq_len, implementation, fabric):
@@ -2862,17 +2950,7 @@ def bench_kernel_dual_gemm_epil_bwd(conf, seq_len, implementation, fabric):
         return as_bench_result(float("nan"))
 
     acc = _acc_grad(_flat(list(kfn())), _flat(list(torch_bwd())))
-    return measured_result(
-        conf=conf,
-        func=kfn,
-        grad_to_none=[],
-        params=[],
-        is_train=False,
-        input_dtype="bfloat16",
-        parameter_dtype="bfloat16",
-        execution_path=path,
-        reference="pytorch",
-    )._replace(**acc)
+    return _pure_bwd_result(conf, kfn, acc=acc, path=path, dtype="bfloat16")
 
 
 # ---- BACKWARD operations (autograd; backward-only timing via autograd.grad) -------------------
@@ -2904,34 +2982,40 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     dy = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
     xr, cr = x0.clone().requires_grad_(True), c0.clone().requires_grad_(True)
     ref_mod(xr, cr).backward(dy)
-    ref_dx = xr.grad
+    ref_grads = [xr.grad, cr.grad]
 
     x, c = x0.clone().requires_grad_(True), c0.clone().requires_grad_(True)
     if implementation == "pytorch":
-        out, path = ref_mod(x, c), "module.reference.torch"
+        build, path = ref_mod, "module.reference.torch"
     elif implementation == "adaln_train":
         from miniworld_kernels.kernels.adaln.triton.training import adaln_train
 
-        out = adaln_train(x, c, clw, sw, sb, bw, ex, ec)
+        def build(x, c):
+            return adaln_train(x, c, clw, sw, sb, bw, ex, ec)
+
         path = "kernels.adaln.triton.training"
     elif implementation == "triton_adaln":
         from miniworld_kernels.kernels import triton_adaptive_layer_norm
 
-        out = triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)
+        def build(x, c):
+            return triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)
+
         path = "kernels.adaln.triton.main"
     elif implementation == "adaln_fused3":
         from miniworld_kernels.kernels.adaln.triton.fused3 import adaln_fused3_train
 
-        out = adaln_fused3_train(x, c, clw, sw, sb, bw, ex, ec)
+        def build(x, c):
+            return adaln_fused3_train(x, c, clw, sw, sb, bw, ex, ec)
+
         path = "kernels.adaln.triton.fused3"
     else:
         return as_bench_result(float("nan"))
     return _bwd_autograd_result(
         conf,
-        out,
+        build,
         [x, c],
         dy,
-        ref_dx,
+        ref_grads,
         path=path,
         ref="module.reference.torch",
         dtype=tname,
@@ -2969,25 +3053,29 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
 
     x = x0.clone().requires_grad_(True)
     if implementation == "pytorch":
-        out, path = ref_mod(x), "module.reference.torch"
+        build, path = ref_mod, "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_kernels.kernels import triton_transition_fused
 
-        out = triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
+        def build(x):
+            return triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
+
         path = "kernels.transition.triton.fused"
     elif implementation == "cute_transition_fused":
         from miniworld_kernels.kernels import cute_transition_fused
 
-        out = cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
+        def build(x):
+            return cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
+
         path = "kernels.transition.cute.fused"
     else:
         return as_bench_result(float("nan"))
     return _bwd_autograd_result(
         conf,
-        out,
+        build,
         [x],
         dy,
-        ref_dx,
+        [ref_dx],
         path=path,
         ref="module.reference.torch",
         dtype="bfloat16",
@@ -3014,25 +3102,141 @@ def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
 
     x = x0.clone().requires_grad_(True)
     if implementation == "pytorch":
-        out, path = F.linear(F.layer_norm(x, (D,), lw, lb, eps), w), "pytorch.autograd"
+
+        def build(x):
+            return F.linear(F.layer_norm(x, (D,), lw, lb, eps), w)
+
+        path = "pytorch.autograd"
     elif implementation == "layernorm_linear_te":
         from miniworld_kernels.kernels.layernorm_linear.te_style import (
             layernorm_linear_te_fn,
         )
 
-        out = layernorm_linear_te_fn(x, lw, lb, w, None, eps)
+        def build(x):
+            return layernorm_linear_te_fn(x, lw, lb, w, None, eps)
+
         path = "kernels.layernorm_linear.te_style"
     elif implementation == "layernorm_linear_cute":
         from miniworld_kernels.kernels.layernorm_linear.autograd import (
             layernorm_linear_fn,
         )
 
-        out = layernorm_linear_fn(x, lw, lb, w, None, eps)
+        def build(x):
+            return layernorm_linear_fn(x, lw, lb, w, None, eps)
+
         path = "kernels.layernorm_linear.autograd.cute"
     else:
         return as_bench_result(float("nan"))
     return _bwd_autograd_result(
-        conf, out, [x], dy, ref_dx, path=path, ref="pytorch.autograd", dtype="bfloat16"
+        conf, build, [x], dy, [ref_dx], path=path, ref="pytorch.autograd",
+        dtype="bfloat16",
+    )
+
+
+def bench_kernel_mpnn_edge_tail(conf, seq_len, implementation, fabric):
+    """ProteinMPNN encoder edge tail (autograd, backward-only).
+
+        out = LayerNorm(edge + dropout(W3 gelu(W2 gelu(query + edge@W1 + nbr[index]))))
+
+    One index per edge, so rows = batch * seq_len * k_neighbors and every intermediate is
+    edge-sized.  Rows: pytorch, triton_compute (three tiled GEMMs, elementwise fused into
+    their prologues and epilogues, activations saved rather than replayed).
+
+    All TEN gradients are leaves and all ten are scored -- the three inputs plus the seven
+    parameters.  That is not only coverage: the Triton backward computes the parameter
+    gradients unconditionally, so leaving the weights out of the graph charged it for
+    three GEMMs the PyTorch row never ran.  Parameters are FP32 masters cast inside the
+    reference so the cast stays in the graph, as bf16-mixed runs them; both rows return
+    BF16 so neither pays for a wider output.
+
+    ``output_*`` scores the forward against ``edge_tail_update_pytorch``, the package's
+    canonical reference.  The PyTorch row is otherwise its own oracle and scores a
+    tautological 0.0, which leaves the thing every other number depends on -- that this
+    inline reference is the edge tail at all -- unchecked.  The canonical path stays in
+    BF16 end to end where this one accumulates in FP32, so a BF16-scale difference here
+    is expected and a large one means the oracle has drifted.
+    """
+    import torch.nn.functional as F
+
+    from miniworld_kernels.kernels.mpnn_edge_tail import edge_tail_update_pytorch
+    from miniworld_kernels.kernels.mpnn_edge_tail.triton.compute import (
+        edge_tail_compute,
+    )
+
+    D = conf.d_pair
+    neighbors = min(conf.k_neighbors, seq_len)
+    nodes = conf.batch_size * seq_len
+    rows = nodes * neighbors
+    eps = 1e-5
+    torch.manual_seed(0)
+
+    def _w():
+        return torch.randn(D, D, device=DEVICE, dtype=torch.float32) * (D**-0.5)
+
+    params = (
+        _w(), _w(),
+        torch.zeros(D, device=DEVICE, dtype=torch.float32),
+        _w(),
+        torch.zeros(D, device=DEVICE, dtype=torch.float32),
+        torch.ones(D, device=DEVICE, dtype=torch.float32),
+        torch.zeros(D, device=DEVICE, dtype=torch.float32),
+    )  # w1, w2, b2, w3, b3, gamma, beta -- edge_tail_compute's parameter order
+
+    torch.manual_seed(1)
+    edge = torch.randn(rows, D, device=DEVICE, dtype=BF16)
+    query = torch.randn(nodes, D, device=DEVICE, dtype=BF16)
+    table = torch.randn(nodes, D, device=DEVICE, dtype=BF16)
+    index = torch.arange(rows, device=DEVICE) % nodes
+    groups = torch.arange(rows, device=DEVICE) // neighbors
+    dy = torch.randn(rows, D, device=DEVICE, dtype=BF16)
+
+    def leaves():
+        return [
+            t.clone().requires_grad_(True)
+            for t in (edge, query, table, *params)
+        ]
+
+    def reference(e, q, t, w1, w2, b2, w3, b3, gamma, beta):
+        pre = (
+            F.linear(e, w1.to(BF16)).float() + q[groups].float() + t[index].float()
+        ).to(BF16)
+        hidden = (
+            F.linear(F.gelu(pre.float()).to(BF16), w2.to(BF16)).float() + b2
+        ).to(BF16)
+        update = F.linear(F.gelu(hidden.float()).to(BF16), w3.to(BF16)).float() + b3
+        values = (e.float() + update).to(BF16)
+        return F.layer_norm(values.float(), (D,), gamma, beta, eps).to(BF16)
+
+    def kernel(e, q, t, w1, w2, b2, w3, b3, gamma, beta):
+        return edge_tail_compute(
+            e, q, t, index, w1, w2, b2, w3, b3, gamma, beta, eps, 0.0
+        )
+
+    ref_leaves = leaves()
+    reference(*ref_leaves).backward(dy)
+    ref_grads = [t.grad for t in ref_leaves]
+
+    if implementation == "pytorch":
+        build, path = reference, "pytorch"
+    elif implementation == "triton_compute":
+        build, path = kernel, "kernels.mpnn_edge_tail.triton.compute"
+    else:
+        return as_bench_result(float("nan"))
+
+    def canonical():
+        """Called inline so this frame never names it -- see fwd_ref in the helper."""
+        with torch.no_grad():
+            w1, w2, b2, w3, b3, gamma, beta = params
+            return edge_tail_update_pytorch(
+                edge.view(nodes, neighbors, D), query, table,
+                index.view(nodes, neighbors),
+                w1.to(BF16), w2.to(BF16), b2.to(BF16), w3.to(BF16), b3.to(BF16),
+                gamma, beta, None, eps, 0.0,
+            ).reshape(rows, D)
+
+    return _bwd_autograd_result(
+        conf, build, leaves(), dy, ref_grads, path=path, ref="pytorch.autograd",
+        dtype="bfloat16", fwd_ref=canonical(),
     )
 
 
@@ -3056,6 +3260,7 @@ KERNEL_MAP = {
     "adaln_bwd": bench_kernel_adaln_bwd,
     "transition_b2b_bwd": bench_kernel_transition_b2b_bwd,
     "gemm_epil_bwd": bench_kernel_gemm_epil_bwd,
+    "mpnn_edge_tail": bench_kernel_mpnn_edge_tail,
     # module-level benches (benchmarks/modules/<mod>/)
     "triangle_multiplication": bench_triangle_multiplication,
     "triangle_multiplication_bidirectional": bench_bidirectional_triangle_multiplication,
@@ -3089,6 +3294,7 @@ _KERNEL_TARGETS = [
     "adaln_bwd",
     "transition_b2b_bwd",
     "gemm_epil_bwd",
+    "mpnn_edge_tail",
 ]
 TARGET_DIRS = {name: _KERNELS_ROOT / name for name in _KERNEL_TARGETS}
 TARGET_DIRS.update(
@@ -3402,7 +3608,11 @@ def csv_row(
         "metric": conf.metric,
         "unit": result_unit(conf.metric),
         "mode": mode_label(conf.mode),
-        "compiled": actual_compiled_flag(conf),
+        "compiled": (
+            result.compiled
+            if result is not None and result.compiled is not None
+            else actual_compiled_flag(conf)
+        ),
         "cudagraph": conf.cudagraph,
         "precision": conf.precision,
         "allow_tf32": conf.allow_tf32,
