@@ -35,13 +35,7 @@ export HYDRA_FULL_ERROR=1
 export TRITON_CACHE_DIR="/tmp/triton_mpnn_edge_tail_${SLURM_JOB_ID:-$$}"
 
 echo "host=$(hostname) date=$(date) job=${SLURM_JOB_ID:-none}"
-pixi run --frozen python -c "
-import torch
-name = torch.cuda.get_device_name(0); cap = torch.cuda.get_device_capability(0)
-free, total = torch.cuda.mem_get_info()
-print('torch', torch.__version__, name, 'sm', cap, f'{total/2**30:.1f} GiB')
-assert cap == (8, 6), f'expected sm_86 (RTX A5000/A6000), got sm_{cap[0]}{cap[1]} ({name})'
-"
+pixi run --frozen python submits/_assert_device.py --capability 8.6 --name A5000 --name A6000 || exit 3
 
 SWEEP='[2048,4096,8192]'
 RUN_ID="${SLURM_JOB_ID:-manual_$$}"

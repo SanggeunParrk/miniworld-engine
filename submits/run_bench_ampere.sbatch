@@ -36,14 +36,7 @@ echo "host=$(hostname)  date=$(date)"
 # Sanity: confirm we actually landed on an sm_86 Ampere workstation card (A5000/A6000),
 # NOT an A100 (also cap[0]==8 but sm_80) — the cute gating is by capability, but the
 # results slug + tuned-cache key are by name, so guard the exact (8,6) + RTX Axxxx name.
-pixi run --frozen python -c "
-import torch
-name = torch.cuda.get_device_name(0)
-cap = torch.cuda.get_device_capability(0)
-print('torch', torch.__version__, name, 'sm', cap)
-assert cap == (8, 6), f'expected sm_86 (RTX A5000/A6000), got sm_{cap[0]}{cap[1]} ({name})'
-assert ('A5000' in name) or ('A6000' in name), f'unexpected Ampere card: {name}'
-"
+pixi run --frozen python submits/_assert_device.py --capability 8.6 --name A5000 --name A6000 || exit 3
 
 # results/<slug>/ slug from the allocated card (a5000 / a6000), mirroring results/a100 etc.
 # Derive from nvidia-smi (no python-in-pixi quoting pitfalls) and HARD-FAIL on an unknown

@@ -22,7 +22,7 @@ echo "host=$(hostname)  date=$(date)"
 # FAIL-FAST CUDA/sm90 gate with retry (HGX nodes can throw CUDA error 802 right after alloc).
 ok=0
 for try in 1 2 3 4 5; do
-  if pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print('torch', torch.__version__, torch.cuda.get_device_name(0), 'sm', cap, 'ngpu', torch.cuda.device_count()); assert cap[0]==9, f'expected sm_90 (H100), got sm_{cap[0]}{cap[1]}'"; then
+  if pixi run --frozen python submits/_assert_device.py --major 9; then
     ok=1; break
   fi
   echo "[cuda check try $try failed — retrying in 20s]"; sleep 20

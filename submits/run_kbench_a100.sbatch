@@ -20,7 +20,7 @@ set -f
 cd /home/psk6950/miniworld-kernels
 
 echo "host=$(hostname)  date=$(date)"
-pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print('torch', torch.__version__, torch.cuda.get_device_name(0), 'sm', cap, 'ngpu', torch.cuda.device_count()); assert cap[0]==8, f'expected sm_80 (A100), got sm_{cap[0]}{cap[1]}'"
+pixi run --frozen python submits/_assert_device.py --major 8 || exit 3
 
 # kernel_targets_bench.sh reads TARGETS_OVERRIDE and fans across $(nvidia-smi -L).
 bash submits/kernel_targets_bench.sh

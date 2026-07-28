@@ -18,7 +18,7 @@ cd /home/psk6950/miniworld-kernels
 export HYDRA_FULL_ERROR=1
 
 echo "host=$(hostname)  date=$(date)"
-pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print('torch', torch.__version__, torch.cuda.get_device_name(0), 'sm', cap); assert cap[0]==8, f'expected sm_80 (A100), got sm_{cap[0]}{cap[1]}'"
+pixi run --frozen python submits/_assert_device.py --major 8 || exit 3
 
 echo ""
 echo "############################################################"

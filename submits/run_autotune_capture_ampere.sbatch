@@ -30,13 +30,7 @@ set -f
 cd /home/psk6950/practice/miniworld-kernels
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) date=$(date) target=${CAPTURE_TARGET:-transition}"
-pixi run --frozen python -c "
-import torch
-name = torch.cuda.get_device_name(0); cap = torch.cuda.get_device_capability(0)
-print('capture on', name, 'sm', cap, torch.__version__)
-assert cap == (8, 6), f'expected sm_86 (RTX A5000/A6000), got sm_{cap[0]}{cap[1]} ({name})'
-assert ('A5000' in name) or ('A6000' in name), f'unexpected Ampere card: {name}'
-"
+pixi run --frozen python submits/_assert_device.py --capability 8.6 --name A5000 --name A6000 || exit 3
 
 run_one() {
   target="$1"; shift

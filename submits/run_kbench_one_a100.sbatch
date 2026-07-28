@@ -15,6 +15,6 @@ set -f
 cd /home/psk6950/miniworld-kernels
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) target=${BENCH_TARGET} date=$(date)"
-pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print(torch.cuda.get_device_name(0),'sm',cap); assert cap[0]==8, 'need A100 (sm80)'"
+pixi run --frozen python submits/_assert_device.py --major 8 || exit 3
 TARGETS_OVERRIDE="${BENCH_TARGET}" bash submits/kernel_targets_bench.sh
 echo "[exit=$?] KBENCH1 DONE target=${BENCH_TARGET}"

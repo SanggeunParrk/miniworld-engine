@@ -24,7 +24,7 @@ export HYDRA_FULL_ERROR=1
 
 echo "host=$(hostname)  date=$(date)"
 # Sanity: confirm we actually landed on an A100 (sm_80) before spending the budget.
-pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print('torch', torch.__version__, torch.cuda.get_device_name(0), 'sm', cap); assert cap[0]==8, f'expected sm_80 (A100), got sm_{cap[0]}{cap[1]}'"
+pixi run --frozen python submits/_assert_device.py --major 8 || exit 3
 
 # --- CPU-side correctness gate for the A100 dispatch fix (arch mocked, no kernels) ---
 echo ""
