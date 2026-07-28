@@ -1538,3 +1538,92 @@ and records whole-layer checkpointing as a separate comparison point. The
 sequence-length latency/speedup SVGs live in the sibling `plots/` directory. Raw local
 ablations and profiler traces remain under the ignored `artifacts/` and
 `profiles/` directories.
+
+## A6000 packed `B x T` benchmarks
+
+Everything above measures either `B=1` crops or the historical `L=2048` stage
+grid. This section measures the packed training layout on the grid the
+`mpnn_edge_tail` kernel bench uses, so the model number and the kernel number
+can be read against each other for once. `n_layers=3`, `d_pair=128`,
+`k_neighbors=48`, bf16-mixed (autocast BF16 over FP32 masters -- the CSV's
+`float32` dtype columns are the masters, not the arithmetic), `compile=true`
+with `cudagraph=manual`, which for `bench_mpnn` really is both: it is one of the
+five module benches that call `model.compile()` ungated.
+
+### `batch_size` is not an independent axis
+
+Packed is physical `B=1` carrying `B` logical samples concatenated to `B*T`
+nodes, so cost tracks the product and nothing else. Splitting the same node
+count differently costs the same:
+
+| nodes | `B=8` | `B=4` | step delta | peak memory |
+|---:|---:|---:|---:|---|
+| 4,096 | 52.19 ms (T=512) | 52.50 ms (T=1024) | 0.6% | -- |
+| 8,192 | 110.32 ms (T=1024) | 110.89 ms (T=2048) | 0.5% | -- |
+| 16,384 | 249.55 ms (T=2048) | 252.36 ms (T=4096) | 1.1% | 16635.4 / 16635.4 MiB |
+| 32,768 | 606.79 ms (T=4096) | 612.84 ms (T=8192) | 1.0% | 33267.6 / 33267.6 MiB |
+
+Peak memory agrees to the decimal and step time to within 1%. Sweeping
+`batch_size` separately from `seq_len` in this layout produces no new
+information; sweep the product.
+
+### Throughput falls as the product grows, while the ratio rises
+
+Both statements hold at once, and reporting only the second is how a benchmark
+flatters itself. Tokens/second, `T` fixed:
+
+| `T` | `B` | tokens | PyTorch | miniworld | speedup |
+|---:|---:|---:|---:|---:|---:|
+| 2048 | 1 | 2,048 | 77,685 | 142,364 | 1.83x |
+| 2048 | 2 | 4,096 | 77,903 | 148,898 | 1.91x |
+| 2048 | 4 | 8,192 | 73,877 | 147,885 | 2.00x |
+| 2048 | 8 | 16,384 | 65,653 | 138,372 | 2.11x |
+| 4096 | 1 | 4,096 | 76,957 | 148,252 | 1.93x |
+| 4096 | 2 | 8,192 | 72,926 | 145,778 | 2.00x |
+| 4096 | 4 | 16,384 | 64,924 | 137,591 | 2.12x |
+| 4096 | 8 | 32,768 | 54,002 | 122,419 | 2.27x |
+| 8192 | 1 | 8,192 | 71,996 | 142,237 | 1.98x |
+| 8192 | 2 | 16,384 | 64,029 | 134,563 | 2.10x |
+| 8192 | 4 | 32,768 | 53,469 | 119,870 | 2.24x |
+| 8192 | 8 | 65,536 | **OOM** | 97,750 | -- |
+
+Step time is superlinear in tokens, so throughput drops for both paths. The
+speedup rises anyway because PyTorch degrades faster: over `B=1..8` at `T=2048`,
+PyTorch loses 15% of its throughput and miniworld 3%.
+
+### Memory is what decides the top of the grid
+
+| nodes | PyTorch | miniworld | ratio |
+|---:|---:|---:|---:|
+| 8,192 | 8,318 MiB | 3,625 MiB | 2.29x |
+| 16,384 | 16,635 MiB | 7,184 MiB | 2.32x |
+| 32,768 | 33,268 MiB | 14,301 MiB | 2.33x |
+| 65,536 | **OOM** (~66 GiB) | 28,248 MiB | -- |
+
+The ratio is flat at 2.3x, which extrapolates the one missing cell: 65,536 nodes
+needs about 66 GiB under PyTorch against 28 GiB here. Compiled PyTorch cannot
+train the real 3-layer model at `B=8 T=8192` on a 48 GiB A6000 at all, so at
+that point the comparison stops being a ratio and becomes whether it runs.
+
+### Parity, and where it stops
+
+Output and gradient cosine against the PyTorch reference stay at 0.99998 with
+relative error 5-7e-03 -- BF16 autocast scale, no degradation from 2,048 to
+32,768 nodes. 65,536 nodes cannot be checked: the oracle needs the reference
+model live alongside the production one, and PyTorch already exceeds 48 GiB
+without it, so enabling the check OOMs miniworld too. The `B=8 T=8192` timing is
+therefore supported by parity up to half that node count, not measured at it.
+Cosine here comes from the FP64-accumulating `tensor_metrics`; the cosine column
+in tables predating that fix is unreliable at these sizes and must not be read
+alongside these numbers.
+
+For the edge tail alone, backward only, at the same 65,536 nodes: compiled
+PyTorch 48.2 ms against 39.3 ms, 1.24x. That is about 4% of the model step, so
+the model-level 2.66x at `n_layers=1` is overwhelmingly the other fused
+operators, not this kernel.
+
+Tracked results live under `benchmarks/modules/mpnn/results/a6000/tables/`:
+`packed_b{1,2,4,8}_training_seq_len.csv` hold the timing sweeps,
+`packed_b{4,8}_memory.csv` the absolute peaks, and `packed_b{4,8}_parity.csv`
+the correctness rows. `submits/run_mpnn_full_packed_ampere.sbatch` reproduces
+all three phases; they are separate phases because their memory ceilings differ.
