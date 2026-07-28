@@ -78,22 +78,35 @@ because a CUDA graph captures the eager callable and overrides `compile` (see
 `BenchConfig`). The two are mutually exclusive in effect -- asking for both gets you the
 graph, not the compiler.
 
-### Backward benches cannot be CUDA-graphed yet
+### Capture and the forward graph must share a stream
 
-`cudagraph` is the default and the documented deployment regime, but every target that
-times `torch.autograd.grad` (`_bwd_autograd_result`: `adaln_bwd`, `transition_b2b_bwd`,
-`gemm_epil_bwd`, `mpnn_edge_tail`) fails capture with
-`cudaErrorStreamCaptureIsolation` -- "operation would make the legacy stream depend on a
-capturing blocking stream". The forward graph is built on the default stream, the autograd
-engine replays each backward op on the stream its forward ran on, and `capture_cudagraph`
-captures on a private side stream. Pure-function backward benches (`_pure_bwd_result`) are
-unaffected because nothing routes them back to the default stream.
+A CUDA graph captures on a non-default stream, and the autograd engine replays each
+backward op on the stream its FORWARD op ran on. A bench that builds its forward graph on
+the default stream and then captures elsewhere is asking CUDA to make the legacy stream
+depend on a capturing blocking stream, which it refuses:
+`cudaErrorStreamCaptureIsolation`. Every target that times `torch.autograd.grad` did
+exactly that, so `adaln_bwd`, `transition_b2b_bwd`, `gemm_epil_bwd` and `mpnn_edge_tail`
+had never once captured -- their committed results are all `status=failed`. Pure-function
+backward benches were unaffected: nothing routes them back to the default stream.
 
-A failed capture also leaves the default generator registered to the dead graph, so every
-later RNG call in the process raises "Offset increment outside graph capture" -- which is
-why one bad capture used to lose an entire sweep. Run each regime in its own process until
-this is fixed. `submits/_cudagraph_autograd_repro.py` isolates the cause: moving the
-forward off the default stream is sufficient, and autograd's threading is irrelevant.
+`capture_stream()` is now the single non-default stream that capture and any forward graph
+it will replay both use, and `_bwd_autograd_result` builds on it whenever a graph is
+wanted. `torch.cuda.graph` is given that stream explicitly, since it otherwise picks an
+internal one and reintroduces the split.
+
+Two things to know when a capture does fail:
+
+- it leaves the default generator registered to the dead graph, so every later RNG call in
+  the process raises "Offset increment outside graph capture". One bad capture therefore
+  loses the whole sweep, and the error you see is not the error that happened. Run
+  regimes in separate processes so a failure cannot travel.
+- `submits/_cudagraph_autograd_repro.py` isolates causes one case per process. It is what
+  established that the forward's stream is necessary and sufficient here, and that
+  autograd's threading -- the more obvious suspect -- has nothing to do with it.
+
+Remaining limit: at seq_len 8192 the graphed regimes hit the 24 GiB A5000 ceiling, since a
+graph's private pool is held alongside an eager autograd graph. That is memory, not
+capture.
 
 ## Hard Rule: Follow The Team-GM Bench Harness
 

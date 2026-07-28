@@ -364,6 +364,30 @@ def actual_compiled_flag(conf: BenchConfig) -> bool:
     return conf.compile
 
 
+_CAPTURE_STREAM: "torch.cuda.Stream | None" = None
+
+
+def capture_stream() -> "torch.cuda.Stream":
+    """The one non-default stream that graph capture and its forward graph must share.
+
+    A CUDA graph captures on a non-default stream, and the autograd engine replays every
+    backward op on the stream its FORWARD op ran on. Build the forward on the default
+    stream and capture elsewhere and CUDA rejects the capture outright:
+    `cudaErrorStreamCaptureIsolation`, "operation would make the legacy stream depend on
+    a capturing blocking stream". That killed capture for every backward bench that hands
+    `_bwd_autograd_result` a graph it built earlier -- and because a dead capture leaves
+    the default generator registered to it, every later row in the process then failed on
+    RNG with "Offset increment outside graph capture" instead, which hid the cause.
+
+    Isolated in `submits/_cudagraph_autograd_repro.py`: keeping the forward off the
+    default stream is necessary AND sufficient, and autograd's threading is irrelevant.
+    """
+    global _CAPTURE_STREAM
+    if _CAPTURE_STREAM is None:
+        _CAPTURE_STREAM = torch.cuda.Stream()
+    return _CAPTURE_STREAM
+
+
 def capture_cudagraph(
     step: Callable, params: list, is_train: bool, warmup_iters: int = 8
 ) -> "torch.cuda.CUDAGraph":
@@ -377,7 +401,7 @@ def capture_cudagraph(
     if is_train:
         for p in params:
             p.grad = torch.zeros_like(p)
-    side = torch.cuda.Stream()
+    side = capture_stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
         for _ in range(warmup_iters):
@@ -389,11 +413,13 @@ def capture_cudagraph(
     torch.cuda.current_stream().wait_stream(side)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
+    # Captured on the SAME stream the forward was built on; `torch.cuda.graph` would
+    # otherwise pick an internal one of its own and reintroduce the split.
     if is_train:
-        with torch.cuda.graph(graph):
+        with torch.cuda.graph(graph, stream=side):
             step()
     else:
-        with torch.cuda.graph(graph), torch.no_grad():
+        with torch.cuda.graph(graph, stream=side), torch.no_grad():
             step()
     return graph
 
@@ -2118,7 +2144,17 @@ def _bwd_autograd_result(
         raise ValueError(msg)
 
     compiled = should_compile(conf)
-    out = (torch.compile(build) if compiled else build)(*leaves)
+    forward = torch.compile(build) if compiled else build
+    if conf.cudagraph == "disabled":
+        out = forward(*leaves)
+    else:
+        # On the capture stream, so the backward this bench times replays there rather
+        # than on the legacy default stream. See `capture_stream`.
+        side = capture_stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            out = forward(*leaves)
+        torch.cuda.current_stream().wait_stream(side)
 
     acc = {}
     if fwd_ref is not None:
