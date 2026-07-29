@@ -15,6 +15,7 @@
 #   CAPTURE_TARGET=transition sbatch --gres=gpu:A6000:1 submits/run_autotune_capture_ampere.sbatch  # validate first
 #   CAPTURE_TARGET=all        sbatch --gres=gpu:A6000:1 submits/run_autotune_capture_ampere.sbatch
 #   CAPTURE_TARGET=all        sbatch --gres=gpu:A5000:1 submits/run_autotune_capture_ampere.sbatch
+#   CAPTURE_TARGET=mpnn       sbatch --gres=gpu:A6000:1 submits/run_autotune_capture_ampere.sbatch
 #SBATCH --job-name=mwk_autotune_capture_ampere
 #SBATCH --partition=gpu
 #SBATCH --account=cssb
@@ -65,12 +66,40 @@ capture_target() {
     adaptive_layernorm)         run_matrix adaptive_layernorm "$SHAPES" ;;
     augmented_attention_token)  run_matrix augmented_attention_token "$SHAPES" ;;
     augmented_attention_atom)   run_matrix augmented_attention_atom "$ATOM_SHAPES" ;;
+    mpnn)
+      # The mpnn ops are the only ones in the shipped cache with an A5000 entry and no
+      # A6000 one, which is why the GPU tests appear to hang there: without a cache the
+      # prune is a no-op and triton/main.py benches its full grid, over 500 configs
+      # across its four kernels. Needs the fused tail explicitly on -- it is `off` by
+      # default, and mpnn_edge_tail_{project,norm,replay,dx} are only reached through it.
+      # Training only: three of the four are backward kernels.
+      # Every backend explicitly, not `auto`: the op names in the cache are per-backend
+      # (mpnn_node_message_{fwd,dx,replay,bwd} are not all reached by one of them), and a
+      # capture only writes entries for the kernels a run actually launches.
+      for edge_tail in triton triton_compute; do
+        for message in triton triton_compute triton_memory; do
+          run_one mpnn mode=training sweep_axis=seq_len name_suffix="cap_mp" \
+            precision=bf16-mixed n_layers=3 n_augment=1 mask_prob=0.0 batch_size=1 \
+            mpnn_layout=single mpnn_patch_size=8 check_correctness=false \
+            d_pair=128 k_neighbors=48 seq_len_values='[256,512,1024,2048]' \
+            sweep_seq_len=512 mpnn_edge_tail_backend="$edge_tail" \
+            mpnn_message_backend="$message"
+        done
+      done
+      # Inference too: mpnn_node_message_fwd and the relative-position backward are
+      # reached on paths training alone does not take.
+      run_one mpnn mode=inference sweep_axis=seq_len name_suffix="cap_mi" \
+        precision=bf16-mixed n_layers=3 n_augment=1 mask_prob=0.0 batch_size=1 \
+        mpnn_layout=single mpnn_patch_size=8 check_correctness=false \
+        d_pair=128 k_neighbors=48 seq_len_values='[256,512,1024,2048]' \
+        sweep_seq_len=512 ;;
     augmented)  # token + atom share augmented_attention_* op files -> run sequentially in ONE job
       run_matrix augmented_attention_token "$SHAPES"
       run_matrix augmented_attention_atom "$ATOM_SHAPES" ;;
     all)
       for t in transition triangle_attention bias_only_attention triangle_multiplication \
-               conditioned_transition adaptive_layernorm augmented_attention_token augmented_attention_atom; do
+               conditioned_transition adaptive_layernorm augmented_attention_token \
+               augmented_attention_atom mpnn; do
         capture_target "$t"
       done ;;
     *) echo "unknown CAPTURE_TARGET=$1" >&2; exit 2 ;;

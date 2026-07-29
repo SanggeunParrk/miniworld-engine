@@ -60,6 +60,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 WIDTH = 128
 
 
@@ -124,6 +126,49 @@ def _row_gemm(
     return accumulator
 
 
+# Every autotuned kernel here registers with the repository's tuned-config cache, the
+# same way :mod:`.main` does.  Without it a fresh process benches the whole grid on the
+# first launch per shape -- 54 configs for each GEMM kernel, 24 for the row kernel --
+# instead of the five the cache keeps.  A missing or stale entry warns and falls back to
+# the full grid, so the cache can only ever cost time, never correctness.
+#
+# Buckets exclude ``rows`` deliberately, following the same reasoning: the row count is
+# what BLOCK_M exists to absorb, and bucketing on it would mean one entry per batch size.
+# ``W1_ROW_STRIDE`` is in the two buckets that have it because a packed slice and a
+# standalone weight address memory differently, which is exactly the kind of thing a
+# tuned tile choice can depend on.
+_project_edge_prune = make_cache_prune(
+    "mpnn_edge_tail_compute_project_edge",
+    dtype_of=tensor_dtype_of("edge_ptr"),
+    bucket_of=key_bucket_of("WIDTH", "NEIGHBORS", "W1_ROW_STRIDE"),
+)
+_project_hidden_prune = make_cache_prune(
+    "mpnn_edge_tail_compute_project_hidden",
+    dtype_of=tensor_dtype_of("activated_ptr"),
+    bucket_of=key_bucket_of("WIDTH"),
+)
+_project_output_prune = make_cache_prune(
+    "mpnn_edge_tail_compute_project_output",
+    dtype_of=tensor_dtype_of("activated_hidden_ptr"),
+    bucket_of=key_bucket_of("WIDTH", "DROPOUT"),
+)
+_norm_backward_prune = make_cache_prune(
+    "mpnn_edge_tail_compute_norm_bwd",
+    dtype_of=tensor_dtype_of("grad_out_ptr"),
+    bucket_of=key_bucket_of("WIDTH", "DROPOUT"),
+)
+_project_backward_prune = make_cache_prune(
+    "mpnn_edge_tail_compute_project_bwd",
+    dtype_of=tensor_dtype_of("grad_out_ptr"),
+    bucket_of=key_bucket_of("WIDTH", "EMIT_BIAS"),
+)
+_edge_backward_prune = make_cache_prune(
+    "mpnn_edge_tail_compute_edge_bwd",
+    dtype_of=tensor_dtype_of("grad_preactivation_ptr"),
+    bucket_of=key_bucket_of("WIDTH", "NEIGHBORS", "W1_ROW_STRIDE"),
+)
+
+
 def _configs():
     return [
         triton.Config({"BLOCK_M": m, "BLOCK_K": k}, num_warps=w, num_stages=s)
@@ -144,7 +189,10 @@ def _elementwise_configs():
 
 
 # ---- forward -------------------------------------------------------------------------
-@triton.autotune(configs=_configs(), key=["rows"])
+@triton.autotune(
+    configs=_configs(), key=["rows"],
+    prune_configs_by={"early_config_prune": _project_edge_prune},
+)
 @triton.jit
 def _project_edge(
     edge_ptr, query_ptr, table_ptr, index_ptr, w1_ptr,
@@ -189,7 +237,10 @@ def _project_edge(
     )
 
 
-@triton.autotune(configs=_configs(), key=["rows"])
+@triton.autotune(
+    configs=_configs(), key=["rows"],
+    prune_configs_by={"early_config_prune": _project_hidden_prune},
+)
 @triton.jit
 def _project_hidden(
     activated_ptr, w2_ptr, b2_ptr, hidden_ptr, activated_hidden_ptr,
@@ -215,7 +266,10 @@ def _project_hidden(
     )
 
 
-@triton.autotune(configs=_configs(), key=["rows", "DROPOUT"])
+@triton.autotune(
+    configs=_configs(), key=["rows", "DROPOUT"],
+    prune_configs_by={"early_config_prune": _project_output_prune},
+)
 @triton.jit
 def _project_output(
     activated_hidden_ptr, w3_ptr, b3_ptr, edge_ptr, gamma_ptr, beta_ptr, seed_ptr,
@@ -263,6 +317,7 @@ def _project_output(
 @triton.autotune(
     configs=_elementwise_configs(),
     key=["rows", "DROPOUT"],
+    prune_configs_by={"early_config_prune": _norm_backward_prune},
     reset_to_zero=[
         "grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"
     ],
@@ -331,7 +386,9 @@ def _norm_backward(
 
 
 @triton.autotune(
-    configs=_configs(), key=["rows", "EMIT_BIAS"], reset_to_zero=["grad_bias_ptr"]
+    configs=_configs(), key=["rows", "EMIT_BIAS"],
+    prune_configs_by={"early_config_prune": _project_backward_prune},
+    reset_to_zero=["grad_bias_ptr"],
 )
 @triton.jit
 def _project_backward(
@@ -379,7 +436,11 @@ def _project_backward(
         )
 
 
-@triton.autotune(configs=_configs(), key=["rows"], reset_to_zero=["grad_query_ptr"])
+@triton.autotune(
+    configs=_configs(), key=["rows"],
+    prune_configs_by={"early_config_prune": _edge_backward_prune},
+    reset_to_zero=["grad_query_ptr"],
+)
 @triton.jit
 def _edge_backward(
     grad_preactivation_ptr, w1_ptr, grad_values_ptr,
