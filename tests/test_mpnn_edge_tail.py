@@ -102,7 +102,10 @@ def _leaves(batch: int, length: int, neighbors: int, *, double: bool):
     return made
 
 
-def _evaluate(made, indices, seed, probability, keep_mask, *, fused: bool):
+def _evaluate(
+    made, indices, seed, probability, keep_mask, *, fused: bool,
+    backend: str = "triton",
+):
     edge, node, packed, packed_bias = made[0], made[1], made[2], made[3]
     hidden_weight, hidden_bias, output_weight, output_bias = made[4:8]
     norm_weight, norm_bias = made[8], made[9]
@@ -125,6 +128,7 @@ def _evaluate(made, indices, seed, probability, keep_mask, *, fused: bool):
             seed,
             1e-5,
             probability,
+            backend,
         )
     return edge_tail_update_pytorch(
         edge,
@@ -149,7 +153,7 @@ def _relative_error(value: torch.Tensor, exact: torch.Tensor) -> float:
     return ((value.float() - exact.float()).abs().mean() / scale).item()
 
 
-def _compare_against_exact(batch, length, neighbors, probability):
+def _compare_against_exact(batch, length, neighbors, probability, backend="triton"):
     """Return per-quantity (fused, pytorch) errors against an FP64 evaluation."""
     indices = torch.randint(
         0, batch * length, (batch, length, neighbors), device="cuda"
@@ -165,7 +169,10 @@ def _compare_against_exact(batch, length, neighbors, probability):
     exact_leaves = _leaves(batch, length, neighbors, double=True)
 
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        fused = _evaluate(fused_leaves, indices, seed, probability, None, fused=True)
+        fused = _evaluate(
+            fused_leaves, indices, seed, probability, None, fused=True,
+            backend=backend,
+        )
         reference = _evaluate(
             torch_leaves, indices, seed, probability, keep_mask, fused=False
         )
@@ -195,14 +202,22 @@ def _compare_against_exact(batch, length, neighbors, probability):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_mpnn_edge_tail_is_no_less_accurate_than_the_pytorch_chain() -> None:
-    """The fused replay must not lose accuracy against separate BF16 operations.
+@pytest.mark.parametrize("backend", ["triton", "triton_compute"])
+def test_mpnn_edge_tail_is_no_less_accurate_than_the_pytorch_chain(
+    backend: str,
+) -> None:
+    """The fused path must not lose accuracy against separate BF16 operations.
 
     Both are compared to FP64, so this asserts a property of the kernel rather than
     agreement between two equally approximate paths.  A generous factor is allowed
     because a single quantity can be near zero and dominated by its own rounding.
+
+    Both fused backends are held to it, and the edge weight here is a SLICE of the packed
+    projection -- row stride 384, not 128. That is the shape the model actually passes,
+    and reading it at the wrong stride is worth 19-59% relative error while every test on
+    a contiguous weight still passes. Neither backend gets to inherit the other's result.
     """
-    errors, _fused, _reference = _compare_against_exact(2, 256, 48, 0.0)
+    errors, _fused, _reference = _compare_against_exact(2, 256, 48, 0.0, backend)
     failures = {
         name: pair
         for name, pair in errors.items()

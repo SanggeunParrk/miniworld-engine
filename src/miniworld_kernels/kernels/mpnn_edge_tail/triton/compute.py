@@ -24,15 +24,14 @@ Accuracy, against an FP32 reference: every one of the ten gradients lands closer
 BF16 PyTorch chain does, and the forward matches ``edge_tail_update_pytorch`` to 4.08e-3,
 the same distance the PyTorch row sits at.
 
-Not reachable from the model as written, and the reason is a contract this file does not
-meet. ``EdgeTailBackend`` hands the encoder's edge projection as a SLICE of the packed
-[128, 3*128] input projection, so its row stride is 384; ``interface.edge_tail_supported``
-only requires ``stride(1) == 1`` and :mod:`.main` therefore takes the row stride as a
-kernel argument. Every weight load here assumes a row stride of WIDTH. Wiring it up
-without that produced 19-59% relative error against FP64 -- caught by
-``test_mpnn_edge_tail_is_no_less_accurate_than_the_pytorch_chain``, and invisible to this
-kernel's own tests, which build contiguous weights. Supporting a row stride is the
-prerequisite for using this path in the model.
+Reachable from the model as ``edge_tail_backend='triton_compute'``, but only because the
+W1 loads take a row stride. The encoder hands its edge projection as a SLICE of the packed
+[128, 3*128] input projection, row stride 384; ``interface.edge_tail_supported`` requires
+only ``stride(1) == 1`` and :mod:`.main` takes the stride as a kernel argument for the
+same reason. Assuming WIDTH there produced 19-59% relative error against FP64 in the model
+while every test in this kernel's own suite passed, because those build contiguous
+weights. The accuracy test that caught it feeds the packed slice and now runs against both
+fused backends.
 
 So one GEMM per kernel, properly tiled, with the neighbouring elementwise folded into the
 prologue and epilogue instead.  Forward saves the two GEMM outputs the derivative needs
@@ -91,7 +90,7 @@ def _gelu(x):
 def _row_gemm(
     x_ptr, w_ptr, row_block, valid, columns,
     WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
-    CONTRACT_OUT: tl.constexpr,
+    CONTRACT_OUT: tl.constexpr, W_ROW_STRIDE: tl.constexpr,
 ):
     """FP32 [BLOCK_M, WIDTH] accumulator for ``x @ w``, contracted in BLOCK_K chunks.
 
@@ -99,6 +98,12 @@ def _row_gemm(
     contracts over ``in`` and backward over ``out``, so the two directions differ only
     in which of the two indices strides -- the transpose ``F.linear`` applies is done by
     addressing, never by materialising a tensor.
+
+    ``W_ROW_STRIDE`` is the distance between consecutive ``out`` rows, which is WIDTH for
+    a weight of its own and something larger for a slice of a packed projection.  It
+    multiplies whichever index walks ``out``, so one parameter covers both orientations.
+    Hardcoding WIDTH here read a packed slice at the wrong stride and produced 19-59%
+    relative error in the model while every test on contiguous weights passed.
     """
     accumulator = tl.zeros((BLOCK_M, WIDTH), tl.float32)
     for start in range(0, WIDTH, BLOCK_K):
@@ -108,9 +113,13 @@ def _row_gemm(
             mask=valid[:, None], other=0.0,
         )
         if CONTRACT_OUT:
-            right = tl.load(w_ptr + contraction[:, None] * WIDTH + columns[None, :])
+            right = tl.load(
+                w_ptr + contraction[:, None] * W_ROW_STRIDE + columns[None, :]
+            )
         else:
-            right = tl.load(w_ptr + contraction[:, None] + columns[None, :] * WIDTH)
+            right = tl.load(
+                w_ptr + contraction[:, None] + columns[None, :] * W_ROW_STRIDE
+            )
         accumulator += tl.dot(left, right.to(tl.bfloat16))
     return accumulator
 
@@ -140,7 +149,7 @@ def _elementwise_configs():
 def _project_edge(
     edge_ptr, query_ptr, table_ptr, index_ptr, w1_ptr,
     preactivation_ptr, activated_ptr,
-    rows, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
+    rows, W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """``edge @ W1 + query[group] + table[index]``, then GELU.
@@ -154,6 +163,7 @@ def _project_edge(
     accumulator = _row_gemm(
         edge_ptr, w1_ptr, row_block, valid, columns,
         WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
+        W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -192,6 +202,7 @@ def _project_hidden(
     accumulator = _row_gemm(
         activated_ptr, w2_ptr, row_block, valid, columns,
         WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
+        W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -220,6 +231,7 @@ def _project_output(
     accumulator = _row_gemm(
         activated_hidden_ptr, w3_ptr, row_block, valid, columns,
         WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
+        W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -345,6 +357,7 @@ def _project_backward(
     accumulator = _row_gemm(
         grad_out_ptr, weight_ptr, row_block, valid, columns,
         WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
+        W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -372,7 +385,7 @@ def _edge_backward(
     grad_preactivation_ptr, w1_ptr, grad_values_ptr,
     grad_edge_ptr, grad_query_ptr,
     rows, groups_total,
-    NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
+    W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """The last dX GEMM, the residual add, and the query gradient.
@@ -394,6 +407,7 @@ def _edge_backward(
     accumulator = _row_gemm(
         grad_preactivation_ptr, w1_ptr, row_block, valid, columns,
         WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
+        W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
     residual = tl.load(
@@ -433,7 +447,7 @@ def _grid(rows):
 
 
 def _launch_forward(edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
-                    seed, eps, dropout_probability):
+                    seed, eps, dropout_probability, w1_row_stride):
     """Returns ``(out, saved)``, where ``saved`` is exactly what backward reads back."""
     rows = edge.shape[0]
     dropout = dropout_probability > 0.0
@@ -451,7 +465,8 @@ def _launch_forward(edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
     grid = _grid(rows)
     _project_edge[grid](
         edge, query, table, index, w1, preactivation, activated,
-        rows, NEIGHBORS=_neighbors_of(rows, query.shape[0]), WIDTH=WIDTH,
+        rows, W1_ROW_STRIDE=w1_row_stride,
+        NEIGHBORS=_neighbors_of(rows, query.shape[0]), WIDTH=WIDTH,
     )
     _project_hidden[grid](
         activated, w2, b2, hidden, activated_hidden, rows, WIDTH=WIDTH,
@@ -470,7 +485,7 @@ def _launch_forward(edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
 
 
 def _launch_backward(grad_out, saved, edge, index, w1, w2, w3, gamma, nodes,
-                     eps, dropout_probability):
+                     eps, dropout_probability, w1_row_stride):
     preactivation, hidden, values, keep = saved
     rows = edge.shape[0]
     dropout = dropout_probability > 0.0
@@ -512,6 +527,7 @@ def _launch_backward(grad_out, saved, edge, index, w1, w2, w3, gamma, nodes,
     )
     _edge_backward[grid](
         grad_preactivation, w1, grad_values, grad_edge, grad_query, rows, nodes,
+        W1_ROW_STRIDE=w1_row_stride,
         NEIGHBORS=_neighbors_of(rows, nodes), WIDTH=WIDTH,
     )
     # ATen's sort-and-segment reduction rather than an in-kernel scatter: a row tile
@@ -527,6 +543,8 @@ def _launch_backward(grad_out, saved, edge, index, w1, w2, w3, gamma, nodes,
         grad_edge=grad_edge,
         grad_query=grad_query,
         grad_neighbor=grad_neighbor,
+        # Dense [out, in] regardless of how w1 was laid out: autograd routes it
+        # back through the slice's own view, which owns the striding.
         grad_w1=grad_preactivation.t() @ edge,
         grad_w2=grad_hidden.t() @ activated,
         grad_w3=grad_update.t() @ activated_hidden,
@@ -548,15 +566,19 @@ class _EdgeTailCompute(torch.autograd.Function):
     @staticmethod
     def forward(ctx, edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
                 seed, eps, dropout_probability):
+        # A slice of a packed projection is a legal weight here; only its LAST stride has
+        # to be 1. Read the row stride once and specialise on it.
+        w1_row_stride = w1.stride(0)
         out, saved = _launch_forward(
             edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta, seed, eps,
-            dropout_probability,
+            dropout_probability, w1_row_stride,
         )
         ctx.save_for_backward(edge, index, w1, w2, w3, gamma, *saved)
         ctx.nodes = query.shape[0]
         ctx.eps = eps
         ctx.dropout_probability = dropout_probability
         ctx.dtypes = (w1.dtype, b2.dtype, gamma.dtype)
+        ctx.w1_row_stride = w1_row_stride
         return out
 
     @staticmethod
@@ -565,7 +587,7 @@ class _EdgeTailCompute(torch.autograd.Function):
         weight_dtype, bias_dtype, norm_dtype = ctx.dtypes
         grads = _launch_backward(
             grad_out.contiguous(), saved, edge, index, w1, w2, w3, gamma,
-            ctx.nodes, ctx.eps, ctx.dropout_probability,
+            ctx.nodes, ctx.eps, ctx.dropout_probability, ctx.w1_row_stride,
         )
         return (
             grads["grad_edge"],

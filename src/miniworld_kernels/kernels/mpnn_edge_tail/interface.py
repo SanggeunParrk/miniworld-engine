@@ -10,7 +10,11 @@ import torch
 # There is no ``auto``: the fused path changes the residual dtype to BF16 and draws
 # dropout from a different Philox stream, so it is reached only from an explicit
 # policy.  ``off`` keeps the existing separate-operation encoder edge update.
-EdgeTailBackend = Literal["off", "triton"]
+# ``triton`` chains the projections in one kernel and replays them in backward, which is
+# right when the edge tensor is the binding constraint. ``triton_compute`` saves the GEMM
+# outputs instead. Both take the edge weight as a slice of the packed input projection,
+# so both read its row stride rather than assuming one.
+EdgeTailBackend = Literal["off", "triton", "triton_compute"]
 
 _WIDTH = 128
 # Backward regenerates the dropout mask from a Philox counter keyed by the flat
@@ -108,6 +112,7 @@ def edge_tail_update(
     seed: torch.Tensor,
     eps: float,
     dropout_probability: float,
+    backend: EdgeTailBackend = "triton",
 ) -> torch.Tensor:
     """Run the whole encoder edge tail through the fused Triton kernel."""
     if not edge_tail_supported(
@@ -130,6 +135,31 @@ def edge_tail_update(
             "[128, 128]/[128] parameters that are all BF16 or all FP32 under BF16 "
             "autocast, and an edge tensor addressable in signed 32-bit indexing"
         )
+    if backend == "triton_compute":
+        # The compute path is written against a flat [rows, 128] view; the contract
+        # checked above already guarantees the activations are contiguous, so these are
+        # views. `edge_weight` is deliberately NOT among them -- it arrives as a slice of
+        # the packed projection and the kernel takes its row stride.
+        width = edge_states.shape[-1]
+        from .triton.compute import edge_tail_compute
+
+        return edge_tail_compute(
+            edge_states.reshape(-1, width),
+            query_projection.reshape(-1, width),
+            neighbor_projection.reshape(-1, width),
+            flat_neighbor_indices.reshape(-1),
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+            norm_weight,
+            norm_bias,
+            eps,
+            dropout_probability,
+            seed,
+        ).reshape(edge_states.shape)
+
     # Keep Triton out of CPU and import-only users; this line is reached only by
     # supported CUDA training tensors.
     from .triton import triton_edge_tail_update

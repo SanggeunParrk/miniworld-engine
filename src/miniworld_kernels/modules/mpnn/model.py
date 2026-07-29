@@ -166,8 +166,10 @@ class ProteinMPNNConfig:
             )
         if self.transition_recompute not in {"off", "update"}:
             raise ValueError("transition_recompute must be one of 'off' or 'update'")
-        if self.edge_tail_backend not in {"off", "triton"}:
-            raise ValueError("edge_tail_backend must be one of 'off' or 'triton'")
+        if self.edge_tail_backend not in {"off", "triton", "triton_compute"}:
+            raise ValueError(
+                "edge_tail_backend must be one of 'off', 'triton', or 'triton_compute'"
+            )
         if self.node_message_backend not in {"off", "triton"}:
             raise ValueError("node_message_backend must be one of 'off' or 'triton'")
         if (
@@ -181,12 +183,12 @@ class ProteinMPNNConfig:
                 "node_message_backend='triton' subsumes encoder_node_w1_recompute; "
                 "set encoder_node_w1_recompute='off'"
             )
-        if self.edge_tail_backend == "triton" and self.edge_w1_recompute != "off":
+        if self.edge_tail_backend != "off" and self.edge_w1_recompute != "off":
             # The fused tail already replays the whole edge update in backward, so a
             # second checkpoint around part of it would be dead configuration that
             # silently never engages.
             raise ValueError(
-                "edge_tail_backend='triton' subsumes edge_w1_recompute; set "
+                "a fused edge_tail_backend subsumes edge_w1_recompute; set "
                 "edge_w1_recompute='off'"
             )
 

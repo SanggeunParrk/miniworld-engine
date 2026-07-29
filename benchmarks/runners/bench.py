@@ -95,6 +95,10 @@ class BenchConfig(BaseModel):
     mpnn_knn_backend: Literal["cdist", "chunked", "grid_cutoff", "segment"] = (
         "cdist"
     )
+    # Fused encoder edge tail. `triton` chains and replays; `triton_compute` saves the
+    # GEMM outputs. Both change the residual dtype and the dropout stream, so neither is
+    # reachable from `auto`.
+    mpnn_edge_tail_backend: Literal["off", "triton", "triton_compute"] = "off"
     mpnn_edge_w1_recompute: Literal["off", "checkpoint"] = "off"
     mpnn_encoder_node_w1_recompute: Literal["off", "checkpoint"] = "off"
     mpnn_transition_recompute: Literal["off", "update"] = "off"
@@ -1444,6 +1448,7 @@ def bench_mpnn(
             edge_dropout_backend=conf.mpnn_edge_dropout_backend,
             feature_backend=conf.mpnn_feature_backend,
             knn_backend=conf.mpnn_knn_backend,
+            edge_tail_backend=conf.mpnn_edge_tail_backend,
             edge_w1_recompute=conf.mpnn_edge_w1_recompute,
             encoder_node_w1_recompute=conf.mpnn_encoder_node_w1_recompute,
             transition_recompute=conf.mpnn_transition_recompute,
@@ -1490,6 +1495,7 @@ def bench_mpnn(
                 coordinate_noise=0,
                 feature_backend=conf.mpnn_feature_backend,
                 knn_backend=conf.mpnn_knn_backend,
+            edge_tail_backend=conf.mpnn_edge_tail_backend,
             ).to(DEVICE)
             converted = convert_cssb_state_dict(state)
             feature_state = {
@@ -3557,6 +3563,7 @@ CSV_FIELDS = [
     "mpnn_feature_backend",
     "mpnn_feature_resolved",
     "mpnn_knn_backend",
+    "mpnn_edge_tail_backend",
     "mpnn_edge_w1_recompute",
     "mpnn_edge_w1_resolved",
     "mpnn_encoder_node_w1_recompute",
@@ -3741,6 +3748,7 @@ def csv_row(
         ),
         "mpnn_feature_backend": conf.mpnn_feature_backend if is_mpnn else "",
         "mpnn_knn_backend": conf.mpnn_knn_backend,
+        "mpnn_edge_tail_backend": conf.mpnn_edge_tail_backend,
         "mpnn_feature_resolved": (
             _resolved_mpnn_feature_backend(conf)
             if is_mpnn and implementation in {MINIWORLD_IMPL, "feature_only"}

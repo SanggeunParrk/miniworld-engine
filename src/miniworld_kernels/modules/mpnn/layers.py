@@ -1069,6 +1069,7 @@ class EncoderLayer(nn.Module):
             seed,
             norm.eps,
             probability,
+            self.edge_tail_backend,
         )
 
     def _finish_reduced(
@@ -1099,7 +1100,7 @@ class EncoderLayer(nn.Module):
         edge_projection = cast(
             PackedEncoderProjection, self.edge_message.input_projection
         )
-        if self.edge_tail_backend == "triton" and block_edge_projection:
+        if self.edge_tail_backend != "off" and block_edge_projection:
             fused_edges = self._fused_edge_tail(
                 node_states,
                 edge_states,
