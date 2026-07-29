@@ -15,6 +15,7 @@ mpnn_edge_mlp_backend: auto
 mpnn_edge_norm_backend: auto
 mpnn_edge_dropout_backend: auto
 mpnn_feature_backend: auto
+mpnn_knn_backend: cdist
 mpnn_edge_w1_recompute: "off"
 mpnn_encoder_node_w1_recompute: "off"
 mpnn_transition_recompute: "off"

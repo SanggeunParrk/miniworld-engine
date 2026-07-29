@@ -90,6 +90,11 @@ class BenchConfig(BaseModel):
     mpnn_edge_norm_backend: Literal["auto", "pytorch", "memory"] = "auto"
     mpnn_edge_dropout_backend: Literal["auto", "pytorch", "bitpack"] = "auto"
     mpnn_feature_backend: Literal["auto", "pytorch", "recompute"] = "auto"
+    # Neighbour search. `segment` blocks a packed row per segment instead of
+    # running cdist over the whole concatenation; see BackboneFeatures.
+    mpnn_knn_backend: Literal["cdist", "chunked", "grid_cutoff", "segment"] = (
+        "cdist"
+    )
     mpnn_edge_w1_recompute: Literal["off", "checkpoint"] = "off"
     mpnn_encoder_node_w1_recompute: Literal["off", "checkpoint"] = "off"
     mpnn_transition_recompute: Literal["off", "update"] = "off"
@@ -1438,6 +1443,7 @@ def bench_mpnn(
             edge_norm_backend=conf.mpnn_edge_norm_backend,
             edge_dropout_backend=conf.mpnn_edge_dropout_backend,
             feature_backend=conf.mpnn_feature_backend,
+            knn_backend=conf.mpnn_knn_backend,
             edge_w1_recompute=conf.mpnn_edge_w1_recompute,
             encoder_node_w1_recompute=conf.mpnn_encoder_node_w1_recompute,
             transition_recompute=conf.mpnn_transition_recompute,
@@ -1483,6 +1489,7 @@ def bench_mpnn(
                 k_neighbors=conf.k_neighbors,
                 coordinate_noise=0,
                 feature_backend=conf.mpnn_feature_backend,
+                knn_backend=conf.mpnn_knn_backend,
             ).to(DEVICE)
             converted = convert_cssb_state_dict(state)
             feature_state = {
@@ -3549,6 +3556,7 @@ CSV_FIELDS = [
     "mpnn_edge_dropout_resolved",
     "mpnn_feature_backend",
     "mpnn_feature_resolved",
+    "mpnn_knn_backend",
     "mpnn_edge_w1_recompute",
     "mpnn_edge_w1_resolved",
     "mpnn_encoder_node_w1_recompute",
@@ -3732,6 +3740,7 @@ def csv_row(
             else ""
         ),
         "mpnn_feature_backend": conf.mpnn_feature_backend if is_mpnn else "",
+        "mpnn_knn_backend": conf.mpnn_knn_backend,
         "mpnn_feature_resolved": (
             _resolved_mpnn_feature_backend(conf)
             if is_mpnn and implementation in {MINIWORLD_IMPL, "feature_only"}

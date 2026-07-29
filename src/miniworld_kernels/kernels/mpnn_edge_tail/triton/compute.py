@@ -24,6 +24,16 @@ Accuracy, against an FP32 reference: every one of the ten gradients lands closer
 BF16 PyTorch chain does, and the forward matches ``edge_tail_update_pytorch`` to 4.08e-3,
 the same distance the PyTorch row sits at.
 
+Not reachable from the model as written, and the reason is a contract this file does not
+meet. ``EdgeTailBackend`` hands the encoder's edge projection as a SLICE of the packed
+[128, 3*128] input projection, so its row stride is 384; ``interface.edge_tail_supported``
+only requires ``stride(1) == 1`` and :mod:`.main` therefore takes the row stride as a
+kernel argument. Every weight load here assumes a row stride of WIDTH. Wiring it up
+without that produced 19-59% relative error against FP64 -- caught by
+``test_mpnn_edge_tail_is_no_less_accurate_than_the_pytorch_chain``, and invisible to this
+kernel's own tests, which build contiguous weights. Supporting a row stride is the
+prerequisite for using this path in the model.
+
 So one GEMM per kernel, properly tiled, with the neighbouring elementwise folded into the
 prologue and epilogue instead.  Forward saves the two GEMM outputs the derivative needs
 plus the pre-norm values and the dropout mask; backward reads them and recomputes only

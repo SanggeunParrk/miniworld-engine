@@ -22,6 +22,10 @@
 #
 #   BATCH=8 sbatch --gres=gpu:A6000:1 submits/run_mpnn_full_packed_ampere.sbatch
 #   BATCH=4 PHASES="time memory" sbatch --gres=gpu:A6000:1 submits/run_mpnn_full_packed_ampere.sbatch
+#
+# Set these in the environment and rely on --export=ALL. Passing them inside
+# --export=A=1,B=2 splits SWEEP on its own commas: `[256,640,2048]` arrives as `[256`
+# and hydra rejects it.
 #SBATCH --job-name=mwk_mpnn_full_packed
 #SBATCH --partition=gpu
 #SBATCH --account=cssb
@@ -45,13 +49,17 @@ LAYERS="${LAYERS:-3}"
 PHASES="${PHASES:-time parity memory}"
 SWEEP="${SWEEP:-[2048,4096,8192]}"
 PARITY_SWEEP="${PARITY_SWEEP:-[512,1024,2048,4096,8192]}"
+KNN="${KNN:-cdist}"
+TAIL="${TAIL:-off}"
+MSG="${MSG:-auto}"
 RUN_ID="${SLURM_JOB_ID:-manual_$$}"
-# The generated CSV name leaves only 21 bytes for name_suffix once
-# cudagraph-manual is in it, and OSError 36 is what you get for spending 22.
-TAG="p${BATCH}L${LAYERS}"
+# The generated CSV name already embeds every backend by name, so a suffix that
+# repeats them is both redundant and how this hit OSError 36 twice: the budget is
+# not fixed, it shrinks as the backend names get longer. The run id alone is enough
+# to find the file, and every axis is a column inside it.
 
 echo "host=$(hostname) date=$(date) job=${SLURM_JOB_ID:-none}"
-echo "BATCH=$BATCH LAYERS=$LAYERS PHASES='$PHASES'"
+echo "BATCH=$BATCH LAYERS=$LAYERS PHASES='$PHASES' KNN=$KNN TAIL=$TAIL MSG=$MSG"
 pixi run --frozen python submits/_assert_device.py --capability 8.6 --name A5000 --name A6000 || exit 3
 
 run() {  # $1=phase $2=metric $3=check $4=cudagraph $5=seq_len_values
@@ -66,10 +74,12 @@ run() {  # $1=phase $2=metric $3=check $4=cudagraph $5=seq_len_values
     n_layers="$LAYERS" n_augment=1 mask_prob=0.0 \
     batch_size="$BATCH" mpnn_layout=packed mpnn_patch_size=8 \
     d_pair=128 k_neighbors=48 \
+    mpnn_knn_backend="$KNN" mpnn_edge_tail_backend="$TAIL" \
+    mpnn_message_backend="$MSG" \
     sweep_axis=seq_len seq_len_values="$5" sweep_seq_len=8192 \
     metric="$2" check_correctness="$3" \
     compile=true cudagraph="$4" \
-    name_suffix="${TAG}${1:0:1}${RUN_ID}"
+    name_suffix="r${RUN_ID}"  # the letter keeps OmegaConf from parsing it as an int
   echo "[exit=$? phase=$1]"
 }
 
