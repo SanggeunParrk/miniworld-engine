@@ -287,3 +287,82 @@ def test_chunked_backend_leaves_the_model_output_untouched() -> None:
         torch.testing.assert_close(
             candidate(*values), reference(*values), atol=0, rtol=0
         )
+
+
+@pytest.mark.parametrize(("segments", "length"), [(2, 24), (4, 16), (3, 32)])
+def test_segment_blocked_cdist_matches_the_flattened_form_bitwise(
+    segments: int, length: int
+) -> None:
+    """Same neighbours, ``sum L**2`` work instead of ``(sum L)**2``.
+
+    A packed row discards every cross-segment pair through the mask anyway, so
+    blocking per segment may not change a single index or distance. Bitwise, not
+    approximately: the block form is only worth having if it is the same answer, and
+    a tolerance here would hide exactly the indexing mistakes it exists to catch.
+    """
+    features = _features(k_neighbors=8, knn_backend="segment")
+    total = segments * length
+    coordinates = _coordinates(1, total, seed=11)
+    mask = torch.ones(1, total)
+    lengths = torch.full((segments,), length, dtype=torch.long)
+
+    blocked = features._nearest_neighbors(coordinates, mask, lengths)
+
+    # the flattened form, reproduced here so the comparison cannot silently become
+    # blocked-versus-blocked if the dispatch changes
+    pair_mask = mask[:, None] * mask[:, :, None]
+    segment = features._segment_ids(coordinates, lengths)
+    pair_mask = pair_mask * (segment[:, None] == segment[None, :])
+    distances = torch.cdist(coordinates, coordinates) * pair_mask
+    row_max = distances.max(dim=-1, keepdim=True).values
+    adjusted = distances + (1.0 - pair_mask) * (row_max + 100.0)
+    want_distances, want_indices = torch.topk(adjusted, 8, dim=-1, largest=False)
+    want_edge_mask = torch.gather(pair_mask, 2, want_indices)
+
+    got_distances, got_indices, got_edge_mask = blocked
+    assert torch.equal(got_indices, want_indices)
+    assert torch.equal(got_distances, want_distances)
+    assert torch.equal(got_edge_mask, want_edge_mask)
+
+
+def test_segment_blocked_cdist_never_crosses_a_segment() -> None:
+    segments, length = 4, 16
+    features = _features(k_neighbors=8, knn_backend="segment")
+    total = segments * length
+    coordinates = _coordinates(1, total, seed=12)
+    lengths = torch.full((segments,), length, dtype=torch.long)
+    _, indices, _ = features._nearest_neighbors(
+        coordinates, torch.ones(1, total), lengths
+    )
+    own = torch.arange(total) // length
+    assert torch.equal(indices[0] // length, own[:, None].expand_as(indices[0]))
+
+
+def test_segment_backend_rejects_ragged_segments_loudly() -> None:
+    """Ragged lengths have no single reshape, and [12, 20] still divides evenly.
+
+    Shape arithmetic alone cannot catch that, so the check reads the lengths and is
+    therefore skipped while compiling. Eager must still refuse rather than silently
+    pair residues across two proteins.
+    """
+    features = _features(k_neighbors=4, knn_backend="segment")
+    lengths = torch.tensor([12, 20], dtype=torch.long)
+    coordinates = _coordinates(1, 32, seed=13)
+    with pytest.raises(ValueError, match="uniform segment lengths"):
+        features._nearest_neighbors(coordinates, torch.ones(1, 32), lengths)
+
+
+def test_packed_features_are_unchanged_by_the_blocked_path() -> None:
+    """End to end: the module output must not move at all."""
+    segments, length = 3, 24
+    total = segments * length
+    coordinates = _coordinates(1, total, seed=14)
+    mask = torch.ones(1, total)
+    lengths = torch.full((segments,), length, dtype=torch.long)
+
+    blocked = _features(k_neighbors=8, knn_backend="segment")._nearest_neighbors(
+        coordinates, mask, lengths
+    )
+    flattened = _features(k_neighbors=8)._nearest_neighbors(coordinates, mask, lengths)
+    for got, want in zip(blocked, flattened, strict=True):
+        assert torch.equal(got, want)

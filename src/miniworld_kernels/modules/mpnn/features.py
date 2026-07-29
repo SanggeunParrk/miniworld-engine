@@ -24,7 +24,7 @@ from ._functional import gather_neighbors
 
 
 FeatureBackend = Literal["auto", "pytorch", "recompute"]
-KNNBackend = Literal["cdist", "chunked", "grid_cutoff"]
+KNNBackend = Literal["cdist", "chunked", "grid_cutoff", "segment"]
 
 
 @dataclass(frozen=True)
@@ -213,7 +213,7 @@ class BackboneFeatures(nn.Module):
         if feature_backend not in {"auto", "pytorch", "recompute"}:
             raise ValueError(f"unknown MPNN feature backend: {feature_backend!r}")
         self.feature_backend = feature_backend
-        if knn_backend not in {"cdist", "chunked", "grid_cutoff"}:
+        if knn_backend not in {"cdist", "chunked", "grid_cutoff", "segment"}:
             raise ValueError(f"unknown MPNN knn backend: {knn_backend!r}")
         if knn_query_chunk <= 0:
             raise ValueError("knn_query_chunk must be positive")
@@ -264,6 +264,10 @@ class BackboneFeatures(nn.Module):
         residue_mask: torch.Tensor,
         segment_lengths: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.knn_backend == "segment" and segment_lengths is not None:
+            return self._nearest_neighbors_segment_blocked(
+                alpha_carbon, residue_mask, segment_lengths
+            )
         if self.knn_backend == "grid_cutoff":
             return self._nearest_neighbors_grid(
                 alpha_carbon, residue_mask, segment_lengths
@@ -305,6 +309,98 @@ class BackboneFeatures(nn.Module):
         )
         edge_mask = torch.gather(pair_mask, 2, neighbor_indices)
         return distances, neighbor_indices, edge_mask
+
+    def _nearest_neighbors_segment_blocked(
+        self,
+        alpha_carbon: torch.Tensor,
+        residue_mask: torch.Tensor,
+        segment_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One distance block per packed segment instead of one over the whole row.
+
+        A packed row is S segments concatenated, and the pair mask already says every
+        cross-segment pair is discarded -- but ``cdist`` over the flattened row computes
+        all of them first, so the cost is ``(sum L)**2`` where the answer needs only
+        ``sum L**2``. For S equal-length segments that is S times the work.
+
+        Time only, not peak memory. Measured on an A6000 over a 3-layer packed step at
+        S=8: 118.4 -> 104.0 ms at 16,384 residues, 267.7 -> 212.0 at 32,768, and
+        670.4 -> 444.7 at 65,536 -- but the peak did not move by a single byte at any of
+        the three. Without ``coordinate_noise`` gradients the coordinates do not require
+        grad, so ``cdist`` saves nothing for backward and the distance matrix is a
+        transient that the layers' edge tensors already dominate. Shrinking it 8x is
+        worth real time and no memory, so this backend does not raise the ceiling on how
+        long a packed row can be.
+
+        Reshaping to ``[S, L, 3]`` gives the same neighbours bit for bit. Within a
+        segment the masked distances are untouched, and the row maximum is unchanged
+        because the cross-segment entries the flattened form keeps are zeroed before the
+        max is taken. Indices come back segment-local and are shifted by the offset.
+
+        Opt-in rather than automatic, and not because automatic would be wrong: deciding
+        it per call means reading ``segment_lengths``, and this module deliberately never
+        does. ``_segment_ids`` passes ``output_size`` to ``repeat_interleave`` for the
+        same reason. A data-dependent branch here breaks ``fullgraph=True`` compilation
+        of the packed path, which is a tested guarantee.
+
+        Requires uniform segment lengths. Ragged rows have no single reshape, so use
+        ``cdist``; the check below is skipped while compiling because it would reintroduce
+        exactly the graph break this backend is arranged to avoid.
+        """
+        segments = segment_lengths.numel()
+        total = alpha_carbon.shape[1]
+        if alpha_carbon.shape[0] != 1:
+            msg = "the segment backend is only defined for physical batch size 1"
+            raise ValueError(msg)
+        if segments < 1 or total % segments:
+            msg = (
+                f"segment backend needs uniform segments: {total} residues do not "
+                f"divide into {segments} segments"
+            )
+            raise ValueError(msg)
+        length = total // segments
+        if not torch.compiler.is_compiling():
+            lengths = segment_lengths.to(alpha_carbon.device)
+            if int(lengths.min()) != length or int(lengths.max()) != length:
+                msg = (
+                    "segment backend requires uniform segment lengths; got "
+                    f"min={int(lengths.min())} max={int(lengths.max())} for {length=}"
+                )
+                raise ValueError(msg)
+
+        coordinates = alpha_carbon.reshape(segments, length, 3)
+        mask = residue_mask.reshape(segments, length)
+        pair_mask = mask[:, None, :] * mask[:, :, None]
+        # `cdist`'s default only switches to the matmul expansion once a point set
+        # exceeds 25, so a block can land on the direct form where the flattened row
+        # took the expansion, and the two then disagree by far more than rounding:
+        # 5.5e-3 on distances of order 10. `cdist` is the default backend precisely
+        # because it reproduces the frozen reference bit for bit, so the mode is pinned
+        # to whatever the FLATTENED length would have chosen, not to whatever is better.
+        distances = torch.cdist(
+            coordinates,
+            coordinates,
+            compute_mode=(
+                "use_mm_for_euclid_dist"
+                if total > 25
+                else "donot_use_mm_for_euclid_dist"
+            ),
+        ) * pair_mask
+        row_max = distances.max(dim=-1, keepdim=True).values
+        adjusted = distances + (1.0 - pair_mask) * (row_max + 100.0)
+        neighbors = min(self.k_neighbors, length)
+        distances, local_indices = torch.topk(
+            adjusted, neighbors, dim=-1, largest=False
+        )
+        edge_mask = torch.gather(pair_mask, 2, local_indices)
+        offsets = (
+            torch.arange(segments, device=alpha_carbon.device) * length
+        )[:, None, None]
+        return (
+            distances.reshape(1, total, neighbors),
+            (local_indices + offsets).reshape(1, total, neighbors),
+            edge_mask.reshape(1, total, neighbors),
+        )
 
     def _nearest_neighbors_chunked(
         self,

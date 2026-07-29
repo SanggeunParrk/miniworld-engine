@@ -121,9 +121,10 @@ class ProteinMPNNConfig:
                 "relative_position_backend must be one of 'off', 'index_add', "
                 "or 'triton'"
             )
-        if self.knn_backend not in {"cdist", "chunked", "grid_cutoff"}:
+        if self.knn_backend not in {"cdist", "chunked", "grid_cutoff", "segment"}:
             raise ValueError(
-                "knn_backend must be one of 'cdist', 'chunked', or 'grid_cutoff'"
+                "knn_backend must be one of 'cdist', 'chunked', 'grid_cutoff', "
+                "or 'segment'"
             )
         if self.knn_query_chunk <= 0:
             raise ValueError("knn_query_chunk must be positive")
