@@ -1,0 +1,107 @@
+{
+  "config_space_hash": "90a222fc0150",
+  "entries": {
+    "bfloat16|EMIT_BIAS=0,WIDTH=128": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.11673600226640701,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64
+        },
+        "ms": 0.12083200365304947,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M": 64
+        },
+        "ms": 0.12441599741578102,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M": 64
+        },
+        "ms": 0.12492799758911133,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.12595200538635254,
+        "num_stages": 1,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|EMIT_BIAS=1,WIDTH=128": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.1382399946451187,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M": 64
+        },
+        "ms": 0.14336000382900238,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.1443839967250824,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.14643199741840363,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64
+        },
+        "ms": 0.14745600521564484,
+        "num_stages": 1,
+        "num_warps": 8
+      }
+    ]
+  },
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "op": "mpnn_edge_tail_compute_project_bwd",
+  "provenance": {
+    "built_utc": "2026-07-29T06:17:00+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

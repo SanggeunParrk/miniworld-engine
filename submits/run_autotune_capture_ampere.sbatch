@@ -67,32 +67,32 @@ capture_target() {
     augmented_attention_token)  run_matrix augmented_attention_token "$SHAPES" ;;
     augmented_attention_atom)   run_matrix augmented_attention_atom "$ATOM_SHAPES" ;;
     mpnn)
-      # The mpnn ops are the only ones in the shipped cache with an A5000 entry and no
-      # A6000 one, which is why the GPU tests appear to hang there: without a cache the
-      # prune is a no-op and triton/main.py benches its full grid, over 500 configs
-      # across its four kernels. Needs the fused tail explicitly on -- it is `off` by
-      # default, and mpnn_edge_tail_{project,norm,replay,dx} are only reached through it.
-      # Training only: three of the four are backward kernels.
-      # Every backend explicitly, not `auto`: the op names in the cache are per-backend
-      # (mpnn_node_message_{fwd,dx,replay,bwd} are not all reached by one of them), and a
-      # capture only writes entries for the kernels a run actually launches.
+      # Only the fused edge tail. It is `off` by default, so it has to be named here, and
+      # both implementations are captured because they are separate kernels with separate
+      # ops -- triton/main.py chains and replays, triton/compute.py saves.
+      #
+      # Nothing else in the mpnn family is worth capturing. `mpnn_node_message_*` and
+      # `mpnn_relative_position_bwd` are registered, and they DO have A5000 entries, but
+      # they hang off `node_message_backend` / `relative_position_backend`, which are
+      # separate switches from `message_backend` and default to `off`. Sweeping
+      # `message_backend` reaches no registered op at all -- across many A6000 runs at
+      # auto/triton/triton_compute/triton_memory, the only "no tuned autotune cache"
+      # warnings ever raised were the four edge-tail ops. A cache for a kernel nothing
+      # runs is dead weight in the repo.
+      # Shapes matter more here than anywhere else in this file, because the buckets
+      # for these ops exclude `rows` on purpose -- there is ONE entry per
+      # (dtype, WIDTH, NEIGHBORS), so whatever shape a capture runs at is the shape the
+      # whole cache is tuned for. A capture at batch_size=1 seq_len<=2048 overwrote the
+      # committed A5000 entries with timings 5x smaller and a different ranking, which
+      # is a re-tune for a workload nobody runs, not an improvement. Re-run at the shape
+      # you care about, and do not assume a bigger sweep is a safer one.
       for edge_tail in triton triton_compute; do
-        for message in triton triton_compute triton_memory; do
-          run_one mpnn mode=training sweep_axis=seq_len name_suffix="cap_mp" \
-            precision=bf16-mixed n_layers=3 n_augment=1 mask_prob=0.0 batch_size=1 \
-            mpnn_layout=single mpnn_patch_size=8 check_correctness=false \
-            d_pair=128 k_neighbors=48 seq_len_values='[256,512,1024,2048]' \
-            sweep_seq_len=512 mpnn_edge_tail_backend="$edge_tail" \
-            mpnn_message_backend="$message"
-        done
-      done
-      # Inference too: mpnn_node_message_fwd and the relative-position backward are
-      # reached on paths training alone does not take.
-      run_one mpnn mode=inference sweep_axis=seq_len name_suffix="cap_mi" \
-        precision=bf16-mixed n_layers=3 n_augment=1 mask_prob=0.0 batch_size=1 \
-        mpnn_layout=single mpnn_patch_size=8 check_correctness=false \
-        d_pair=128 k_neighbors=48 seq_len_values='[256,512,1024,2048]' \
-        sweep_seq_len=512 ;;
+        run_one mpnn mode=training sweep_axis=seq_len name_suffix="cap_mp" \
+          precision=bf16-mixed n_layers=3 n_augment=1 mask_prob=0.0 batch_size=1 \
+          mpnn_layout=single mpnn_patch_size=8 check_correctness=false \
+          d_pair=128 k_neighbors=48 seq_len_values='[256,512,1024,2048]' \
+          sweep_seq_len=512 mpnn_edge_tail_backend="$edge_tail"
+      done ;;
     augmented)  # token + atom share augmented_attention_* op files -> run sequentially in ONE job
       run_matrix augmented_attention_token "$SHAPES"
       run_matrix augmented_attention_atom "$ATOM_SHAPES" ;;
