@@ -173,6 +173,7 @@ class TriangleMultiplication(nn.Module):
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
         add_residual: bool = False,
+        dropout_p: float = 0.0,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass. Routes on the resolved internal backend, degrading to the
         pytorch reference (with a warning) on a dtype the fused kernels can't run.
@@ -186,7 +187,12 @@ class TriangleMultiplication(nn.Module):
                 self._backend, pair.dtype, op="TriangleMultiplication"
             )
             _pair_in = pair  # original (pre-LN) input == the residual; torch path rebinds `pair`
-            def _r(out):  # explicit residual add for paths that don't fold it in-kernel
+            # row-broadcast dropout scale (== drop_row mask/(1-p), [B,1,L,D]); training only.
+            _ds = (self._make_drop_row_scale(pair, dropout_p)
+                   if dropout_p and dropout_p > 0.0 and torch.is_grad_enabled() else None)
+            def _r(out):  # explicit residual+dropout for paths that don't fold it in-kernel
+                if _ds is not None:
+                    out = out * _ds
                 return out + _pair_in if add_residual else out
 
             if backend == KernelBackend.CUEQUIVARIANCE:
@@ -198,7 +204,8 @@ class TriangleMultiplication(nn.Module):
                 # autograd-capable sm100/sm90 v6 merged training kernel instead —
                 # keeping all backend selection inside the module.
                 if torch.is_grad_enabled():
-                    return _r(self._forward_cute_train(pair, mask))
+                    # training: fuse residual + row-broadcast dropout into the v6 back (sm90).
+                    return self._forward_cute_train(pair, mask, add_residual, _ds)
                 return self._forward_cute(pair, mask, add_residual)
 
             if backend == KernelBackend.TRITON:
@@ -289,18 +296,31 @@ class TriangleMultiplication(nn.Module):
             g_out_weight=self.to_gate.weight,
         )
 
+    def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
+        """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p), broadcast
+        over the i-index — matches modules.primitives.Dropout for the pair track."""
+        b, _l1, l2, d = pair.shape
+        keep = torch.rand(b, 1, l2, d, device=pair.device, dtype=pair.dtype) > p
+        return keep.to(pair.dtype) / (1.0 - p)
+
     def _forward_cute_train(
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
+        add_residual: bool = False,
+        dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """MINIWORLD (ours) TRAINING path: the v6 merged trimul training kernel
         (fwd+bwd, autograd-capable) — sm_100 ``V6TriMulMergedSm100`` on Blackwell,
         else sm90 ``V6TriMulMerged``. Built lazily from this module's own weights and
-        cached (the cute inference kernels have no backward). bf16."""
+        cached (the cute inference kernels have no backward). bf16.
+
+        ``add_residual`` / ``dropscale`` fuse the pairformer residual+dropout into the sm90 v6
+        back; on sm100 (no fused path yet) they are applied explicitly."""
         impl = getattr(self, "_train_impl", None)
         if impl is None:
             direction = "out" if self.outgoing else "in"
+            self._train_fused = not _dispatch.is_sm100(pair.device)  # sm90 v6 fuses residual+dropout
             if _dispatch.is_sm100(pair.device):
                 # v6_merged sm100 — the faster single-direction training kernel
                 # (cuBLAS-centric merged backward; beats train_b200 v14 by 1.3x+ at
@@ -316,7 +336,13 @@ class TriangleMultiplication(nn.Module):
             # layout); a benchmark/forward-eval wrapper, not a param-sharing one.
             impl = _Impl(self, direction=direction).to(pair.device)
             self._train_impl = impl
-        return impl(pair, mask)
+        if self._train_fused:
+            return impl(pair, mask, add_residual=add_residual, dropscale=dropscale)
+        # sm100 v6 (tcgen05): no fused residual+dropout path -> apply explicitly.
+        out = impl(pair, mask)
+        if dropscale is not None:
+            out = out * dropscale
+        return out + pair if add_residual else out
 
     @torch.compiler.disable
     def _forward_cute(
