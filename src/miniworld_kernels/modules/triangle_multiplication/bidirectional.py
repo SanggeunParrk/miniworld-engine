@@ -99,7 +99,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # v6-faithful fused bidirectional training kernel (residual+dropout fused in the gate).
             if torch.is_grad_enabled():
                 return self._forward_cute_train(pair, mask, add_residual, _ds)
-            return _r(self._forward_cute(pair, mask))
+            return self._forward_cute(pair, mask, add_residual)  # inference: residual fused in-gate
         if self._backend == KernelBackend.TRITON:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
@@ -268,6 +268,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None = None,
+        add_residual: bool = False,
     ) -> torch.Tensor:
         """CUTE bidirectional path: compose the single-direction tm1 ``bdll_sm100``
         gate-GEMM+einsum for BOTH directions (outgoing on the first ``d_hidden``
@@ -289,9 +290,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
         ) != "0":
             # free path now folds the pair-mask into LN_in (row_scale), so it serves
             # masked/padded inputs too — no longer gated on `mask is None`.
-            return self._forward_cute_free(pair, mask)
+            return self._forward_cute_free(pair, mask, add_residual)
 
         from miniworld_kernels.modules.triangle_multiplication.module import _load_cute_fns
+        from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
 
         tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
         b, l1, l2, d = pair.shape
@@ -329,14 +331,18 @@ class BidirectionalTriangleMultiplication(nn.Module):
             eps=self.ln_out.eps, layout="dbn->bnd")
         out_normed = (oo[0] if isinstance(oo, tuple) else oo).view(b, l1, l2, 2 * h)
 
-        # shared back: sigmoid(x @ to_gate.T) * (out_normed @ to_out.T)  (gate K=d, out K=2h)
-        gate = torch.sigmoid(x.reshape(M, d) @ self.to_gate.weight.T)
-        proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T
-        return (gate * proj).view(b, l1, l2, d)
+        # shared back: sigmoid(x @ to_gate.T) * (out_normed @ to_out.T)  (gate K=d, out K=2h).
+        # Fuse the residual (== module input pair) into the gate store via gate_elem_triton — the
+        # proj GEMM stays cuBLAS, the sigmoid·mul·+residual is one triton pass.
+        proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T           # (M, d) cuBLAS
+        y = gate_elem_triton(
+            x.reshape(M, d), proj, self.to_gate.weight.T,
+            residual=(pair.reshape(M, d) if add_residual else None), seq_len=l1)
+        return y.view(b, l1, l2, d)
 
     @torch.compiler.disable
     def _forward_cute_free(
-        self, pair: torch.Tensor, mask: torch.Tensor | None = None
+        self, pair: torch.Tensor, mask: torch.Tensor | None = None, add_residual: bool = False,
     ) -> torch.Tensor:
         """CUEQUIV-FREE sm100 (B200) bidirectional path — the current sm100 kernels.
 
@@ -361,7 +367,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if mask is not None:
             m = mask.unsqueeze(-1) & mask.unsqueeze(-2)        # [B, L, L]
             row_scale = m.reshape(-1).to(pair.dtype)           # [M]
-        return bidirectional_trimul_sm100(
+        out = bidirectional_trimul_sm100(
             pair,
             self.to_left.weight, self.to_left_gate.weight,
             self.to_right.weight, self.to_right_gate.weight,
@@ -372,3 +378,4 @@ class BidirectionalTriangleMultiplication(nn.Module):
             tm1_cute_forward, out_layout,
             row_scale=row_scale,
         )
+        return out + pair if add_residual else out  # sm100 bidir: explicit residual (no fuse yet)
