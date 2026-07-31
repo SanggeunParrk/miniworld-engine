@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from cuequivariance_torch import triangle_multiplicative_update
 from jaxtyping import Bool, Float
 
 from miniworld_kernels._typecheck import typecheck
@@ -127,6 +126,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         (``2*d_hidden``) projections. Not bit-identical to the fused formulation
         (the fused path shares one LayerNorm over the 2h concat); it is the
         representative cuequiv cost/quality for a bidirectional update."""
+        # cuequiv backend (opt-in): lazy import so the default miniworld path never needs cuequiv.
+        from cuequivariance_torch import triangle_multiplicative_update
+
         h = self.d_hidden
         mask_2d = None
         if mask is not None:
@@ -261,7 +263,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         from miniworld_kernels.modules.triangle_multiplication.module import _load_cute_fns
 
-        tm1_cute_forward, _tm2, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
+        tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
         b, l1, l2, d = pair.shape
         h = self.d_hidden
         M = b * l1 * l2
@@ -323,7 +325,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             _load_cute_fns,
         )
 
-        tm1_cute_forward, _tm2, _flm, _lnt = _load_cute_fns()
+        tm1_cute_forward, _flm, _lnt = _load_cute_fns()
         out_layout = _resolve_trimul_out_layout(pair.device)
         row_scale = None
         if mask is not None:

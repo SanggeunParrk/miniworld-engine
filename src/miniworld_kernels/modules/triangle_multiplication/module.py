@@ -6,7 +6,6 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
-from cuequivariance_torch import triangle_multiplicative_update
 from jaxtyping import Bool, Float
 
 from miniworld_kernels import kernels
@@ -55,9 +54,10 @@ def _load_cute_fns():
     from miniworld_kernels.kernels.layernorm.transpose import layer_norm_transpose
     from fused_ln_mask import fused_ln_mask  # pyright: ignore[reportMissingImports]
     from launch import tm1_cute_forward  # pyright: ignore[reportMissingImports]
-    from tm2_cute import tm2_cute_forward  # pyright: ignore[reportMissingImports]
 
-    _CUTE_FNS = (tm1_cute_forward, tm2_cute_forward, fused_ln_mask, layer_norm_transpose)
+    # NOTE: tm2 (cuequiv-backed gated GEMM) is NOT imported here — the default cute path is
+    # cuequiv-free. The legacy cuequiv tm2 path lazy-imports it itself (see _forward_cute).
+    _CUTE_FNS = (tm1_cute_forward, fused_ln_mask, layer_norm_transpose)
     return _CUTE_FNS
 
 
@@ -252,6 +252,9 @@ class TriangleMultiplication(nn.Module):
         pair: torch.Tensor,
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        # cuequiv backend (opt-in): lazy import so the default miniworld path never needs cuequiv.
+        from cuequivariance_torch import triangle_multiplicative_update
+
         mask_2d = None
         if mask is not None:
             mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
@@ -319,12 +322,15 @@ class TriangleMultiplication(nn.Module):
         Requires the cute env (cutlass-dsl + quack). Outgoing direction only.
         """
         import os as _os
-        _free_default = "1" if _dispatch.is_sm100(pair.device) else "0"
-        if _os.environ.get("MINIWORLD_TRIMUL_CUEQUIV_FREE", _free_default) != "0":
+        # cuequiv-FREE by default on every cute GPU now that the sm90 back-half
+        # (trimul_back_triton) is wired below — our kernels end-to-end, no cuequiv gate.
+        # Set MINIWORLD_TRIMUL_CUEQUIV_FREE=0 to A/B against the legacy cuequiv tm2 path.
+        if _os.environ.get("MINIWORLD_TRIMUL_CUEQUIV_FREE", "1") != "0":
             return self._forward_cute_free(pair, mask)
-        tm1_cute_forward, tm2_cute_forward, fused_ln_mask, layer_norm_transpose = (
-            _load_cute_fns()
-        )
+        tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
+        # Legacy cuequiv gate — lazy-imported ONLY on this opt-in (env=0) A/B path so the
+        # default cuequiv-free path never loads cuequiv.
+        from miniworld_kernels.kernels.tm2.cute.tm2_cute import tm2_cute_forward
         x = pair
         b, l1, l2, d = x.shape
         ln_in_w, ln_in_b = self.ln_pair.weight, self.ln_pair.bias
@@ -383,10 +389,7 @@ class TriangleMultiplication(nn.Module):
         _forward_cute for comparison. B=1, bf16.
         """
         from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
-        from miniworld_kernels.kernels.trimul_inproj.cute.back_split_sm100 import (
-            trimul_back_split_sm100,
-        )
-        tm1_cute_forward, _, fused_ln_mask, _ = _load_cute_fns()
+        tm1_cute_forward, fused_ln_mask, _lnt = _load_cute_fns()
         b, l1, l2, d = pair.shape
 
         if mask is not None:
@@ -410,7 +413,18 @@ class TriangleMultiplication(nn.Module):
             tri = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)  # (B,D,L,L)
         else:
             tri = torch.einsum("bdki,bdkj->bdij", left_bdll, right_bdll)
-        return trimul_back_split_sm100(
-            tri, x_normed, self.to_out.weight, self.to_gate.weight.T,
+        # Back-half (LN_out + proj + output-gate), all ours. sm100 keeps its tcgen05-tuned
+        # split; sm90 uses the fused triton back (also folds LN_out -> no dbn->bnd LN needed).
+        if _dispatch.is_sm100(pair.device):
+            from miniworld_kernels.kernels.trimul_inproj.cute.back_split_sm100 import (
+                trimul_back_split_sm100,
+            )
+            return trimul_back_split_sm100(
+                tri, x_normed, self.to_out.weight, self.to_gate.weight.T,
+                self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
+            )
+        from miniworld_kernels.kernels.trimul_inproj.triton.back import trimul_back_triton
+        return trimul_back_triton(
+            tri, x_normed, self.to_out.weight.T, self.to_gate.weight.T,
             self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
         )
