@@ -67,28 +67,45 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
 
     @typecheck
+    def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
+        """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p)."""
+        b, _l1, l2, d = pair.shape
+        keep = torch.rand(b, 1, l2, d, device=pair.device, dtype=pair.dtype) > p
+        return keep.to(pair.dtype) / (1.0 - p)
+
     def forward(
         self,
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
+        add_residual: bool = False,
+        dropout_p: float = 0.0,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass. Routes on the resolved backend (self._backend); self.implementation
-        stays the public option."""
+        stays the public option. ``add_residual``/``dropout_p`` fold the pairformer
+        residual + row-broadcast dropout into the training gate (fused) / apply them explicitly
+        on inference & the non-fused backends."""
+        _pair_in = pair
+        _ds = (self._make_drop_row_scale(pair, dropout_p)
+               if dropout_p and dropout_p > 0.0 and torch.is_grad_enabled() else None)
+        def _r(out):
+            if _ds is not None:
+                out = out * _ds
+            return out + _pair_in if add_residual else out
+
         if self._backend == KernelBackend.CUEQUIVARIANCE:
-            return self._forward_cuequivariance(pair, mask)
+            return _r(self._forward_cuequivariance(pair, mask))
         if self._backend == KernelBackend.CUTE:
             # Inference: forward-only fused sm100 kernels. Training (grad): the
-            # v6-faithful fused bidirectional training kernel (BidirV6TriMulSm100,
-            # trimul_bidir_b200 v4), wired here so dispatch stays inside the module.
+            # v6-faithful fused bidirectional training kernel (residual+dropout fused in the gate).
             if torch.is_grad_enabled():
-                return self._forward_cute_train(pair, mask)
-            return self._forward_cute(pair, mask)
+                return self._forward_cute_train(pair, mask, add_residual, _ds)
+            return _r(self._forward_cute(pair, mask))
         if self._backend == KernelBackend.TRITON:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
             # autograd pieces). See kernels/trimul_inproj/triton/bidirectional.py.
-            return self._forward_triton(pair, mask)
+            return _r(self._forward_triton(pair, mask))
         if self._backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
 
@@ -111,7 +128,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         out = torch.cat([out_outgoing, out_incoming], dim=-1)
 
         out = self.ln_out(out)
-        return sigmoid_gate(self.to_gate(pair), self.to_out(out))
+        return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
 
     def _forward_cuequivariance(
         self,
@@ -186,6 +203,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
+        add_residual: bool = False,
+        dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """MINIWORLD (ours) TRAINING path: the v6-faithful fused-bidirectional trimul
         training kernel (fwd+bwd, autograd-capable) — sm_100 ``bidir_forward_sm100`` on
@@ -226,12 +245,23 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if mask is not None:
             m = mask.unsqueeze(-1) & mask.unsqueeze(-2)  # [B, L, L]
             row_scale = m.reshape(-1).to(pair.dtype)     # [M]
-        return _fwd(
+        if major < 10:  # sm90 bidir_forward fuses residual+dropout in the gate
+            return _fwd(
+                pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
+                self.ln_pair.weight, self.ln_pair.bias,
+                self.ln_out.weight, self.ln_out.bias,
+                self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
+                add_residual=add_residual, dropscale=dropscale,
+            )
+        out = _fwd(
             pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
             self.ln_pair.weight, self.ln_pair.bias,
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
         )
+        if dropscale is not None:  # sm100 bidir: apply residual+dropout explicitly
+            out = out * dropscale
+        return out + pair if add_residual else out
 
     @torch.compiler.disable
     def _forward_cute(

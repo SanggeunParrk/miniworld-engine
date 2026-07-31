@@ -139,8 +139,9 @@ class PairformerBlock(nn.Module):
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass (residual updates, pair track only)."""
         if self.tri_multi is not None:
-            # bidirectional trimul: residual+dropout fusion not wired yet -> keep the explicit form.
-            pair = pair + self.drop_row(self.tri_multi(pair, mask))
+            # bidirectional trimul: fold residual + row-broadcast dropout into the op (fused in the
+            # training gate; applied in-module on inference / non-fused backends).
+            pair = self.tri_multi(pair, mask, add_residual=True, dropout_p=self.drop_row.p_drop)
         else:
             # single-dir: fold the residual + row-broadcast dropout into the trimul op (kernel adds
             # the input + applies the drop_row mask in the gate/back epilogue — no separate ops).
