@@ -131,23 +131,34 @@ class Transition(nn.Module):
         )
 
     @typecheck
-    def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
+    def forward(
+        self, x: Float[torch.Tensor, "*"], add_residual: bool = False
+    ) -> Float[torch.Tensor, "*"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``),
         degrading to the pytorch reference (with a warning) on a dtype the fused
-        kernels can't run."""
+        kernels can't run.
+
+        ``add_residual`` folds the post-transition residual add ``y = transition(x) + x``
+        (the residual is this module's own input ``x``) into the op — in-kernel on the fast
+        b2b/triton paths (free, it reuses the already-loaded input tile), an explicit add on
+        the other paths. Lets the caller (e.g. the pairformer block) drop the separate
+        elementwise-add kernel + its M×D round-trip. Default off keeps standalone / benchmark
+        behaviour unchanged."""
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
-            return self._torch_forward(x)
+            out = self._torch_forward(x)
+            return out + x if add_residual else out
 
         if backend == KernelBackend.CUDA:
-            x = self.ln_in(x)
-            return kernels.cuda_transition(
-                x,
+            xln = self.ln_in(x)
+            out = kernels.cuda_transition(
+                xln,
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
                 self.n,
             )
+            return out + x if add_residual else out
 
         if backend in {
             KernelBackend.TRITON,
@@ -155,14 +166,14 @@ class Transition(nn.Module):
         }:
             is_training = self.training and torch.is_grad_enabled()
             if is_training:
-                return self._training_forward(x)
-            return self._inference_forward(x)
+                return self._training_forward(x, add_residual)
+            return self._inference_forward(x, add_residual)
 
         if backend == KernelBackend.CUTE:
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
             # explicit selection). Same fused structure; LN folded into the cute expand.
             backward_backend = _explicit_cute_backward_backend()
-            return kernels.cute_transition_fused(
+            out = kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight.to(x.dtype),
                 self.ln_in.bias.to(x.dtype),
@@ -173,13 +184,17 @@ class Transition(nn.Module):
                 self.ln_in.eps,
                 backward_backend=backward_backend,
             )
+            return out + x if add_residual else out
 
         raise InvalidImplementationError(self.implementation)
 
-    def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _inference_forward(self, x: torch.Tensor, add_residual: bool = False) -> torch.Tensor:
         """Forward-only dispatch: no tensors are saved for backward."""
+        def _r(out):  # explicit residual add for paths that don't fold it in-kernel
+            return out + x if add_residual else out
+
         if _force_split_enabled():
-            return self._old_triton_forward(x)
+            return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
         # bounded-smem k-tiled b2b there (correct, no OOM) but it is SLOWER than the
         # shape-general split on A100 (measured cudagraph-manual: d=256 2.28 vs 1.40 ms,
@@ -193,7 +208,7 @@ class Transition(nn.Module):
         if not _dispatch.is_sm90plus(x.device) and (
             self.d_hidden >= 256 or _dispatch.is_sm86(x.device)
         ):
-            return self._old_triton_forward(x)
+            return _r(self._old_triton_forward(x))
         # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> the cute
         # b2b_fwd_sm100 forward (fits smem + correct + cudagraph-capturable at every d; see
         # fused.py's cuda_b2b_ok gate). The legacy split (_old_triton_forward) is retained
@@ -224,13 +239,14 @@ class Transition(nn.Module):
                 self.expand_b.weight,
                 self.squeeze.weight,
                 self.ln_in.eps,
+                add_residual=add_residual,
             )
         # cute_transition_fused is the quack SM90 (H100) WGMMA path; it asserts
         # SM90-only. Route the wide-d case here on Hopper *exactly*; on Blackwell
         # (sm_100) AND on pre-Hopper (sm_80 / A100) fall through to the triton
         # family (its split path handles any d) — correctness-guard fallback.
         if self.d_hidden >= 256 and _dispatch.is_sm90(x.device):
-            return kernels.cute_transition_fused(
+            return _r(kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight.to(x.dtype),
                 self.ln_in.bias.to(x.dtype),
@@ -239,7 +255,7 @@ class Transition(nn.Module):
                 self.squeeze.weight,
                 self.n,
                 self.ln_in.eps,
-            )
+            ))
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight.to(x.dtype),
@@ -250,9 +266,10 @@ class Transition(nn.Module):
             self.n,
             self.ln_in.eps,
             save_xn=False,
+            add_residual=add_residual,
         )
 
-    def _training_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _training_forward(self, x: torch.Tensor, add_residual: bool = False) -> torch.Tensor:
         """Training dispatch: fastest kernel per d (transition has NO cuequivariance kernel).
 
         Every path carries a real backward; measured fwd+bwd on H100 (L=384, bf16):
@@ -261,8 +278,11 @@ class Transition(nn.Module):
           d=512  cute+tritonbwd 6.90  <  torch 7.52   (b2b fwd OOMs smem at d=512)
         Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
         """
+        def _r(out):  # explicit residual add for paths that don't fold it in-kernel
+            return out + x if add_residual else out
+
         if _force_split_enabled():
-            return self._old_triton_forward(x)
+            return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
         # in training too (d=256 6.3 vs 7.0 ms, d=512 20.2 vs 26.8 ms). d=128 stays fused
         # on A100. sm_86 (RTX A5000/A6000) also loses at d=128 (~0.91x vs split), so route
@@ -270,7 +290,7 @@ class Transition(nn.Module):
         if not _dispatch.is_sm90plus(x.device) and (
             self.d_hidden >= 256 or _dispatch.is_sm86(x.device)
         ):
-            return self._old_triton_forward(x)
+            return _r(self._old_triton_forward(x))
         # sm_100 (B200): ALL d (128/256/512) go through the fused path below -> cute
         # b2b_fwd_sm100 forward + the sm100 gatebwd (Version A) backward. Verified fwd+bwd
         # cos=1.0 and cudagraph-capturable at every d; ~1.49x faster fwd+bwd than the legacy
@@ -283,7 +303,7 @@ class Transition(nn.Module):
             # SM90 (H100) only; on Blackwell AND pre-Hopper (A100) the triton family (below)
             # carries d=512 too.
             backward_backend = _large_d_training_backend_from_env() or "triton"
-            return kernels.cute_transition_fused(
+            return _r(kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight.to(x.dtype),
                 self.ln_in.bias.to(x.dtype),
@@ -293,7 +313,7 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
                 backward_backend=backward_backend,
-            )
+            ))
         # d<=256 (Version A / save_xn=False): fused forward (b2b / sm100 cute fwd) + the
         # sm100 gatebwd backward (recomputes xn from saved stats, less memory). On sm_100
         # only d=128 reaches here (d>=256 took the split branch above); the AF3 shape.
@@ -307,6 +327,7 @@ class Transition(nn.Module):
             self.n,
             self.ln_in.eps,
             save_xn=False,
+            add_residual=add_residual,
         )
 
     def _old_triton_forward(self, x: torch.Tensor) -> torch.Tensor:

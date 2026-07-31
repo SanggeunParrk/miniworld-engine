@@ -146,7 +146,9 @@ class PairformerBlock(nn.Module):
         if self.tri_atten_starting is not None:
             pair = pair + self.drop_row(self.tri_atten_starting(pair, mask))
             pair = pair + self.drop_col(self.tri_atten_ending(pair, mask))
-        pair = pair + self.transition_pair(pair)
+        # Residual add folded into the transition op (its own input is the residual): the
+        # kernel adds x in the squeeze epilogue, dropping the separate elementwise-add kernel.
+        pair = self.transition_pair(pair, add_residual=True)
         return pair
 
 

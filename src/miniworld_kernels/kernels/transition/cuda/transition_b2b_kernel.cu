@@ -286,6 +286,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     const __nv_bfloat16* __restrict__ ws_raw,
     __nv_bfloat16* __restrict__ out_raw,
     const int64_t M,
+    const bool add_residual,
     __grid_constant__ TmaWa const tma_wa,
     __grid_constant__ TmaWb const tma_wb,
     __grid_constant__ TmaWs const tma_ws
@@ -525,6 +526,20 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
             const int64_t row = static_cast<int64_t>(wg_row0 + m);
             const bool valid = row < M;
             uint4 out_vec = smem_load_u128(pOutShuffle + output_shuffle_idx<DN>(m, n));
+            // Fuse the post-transition residual add: y = transition(x) + x. The residual is
+            // the kernel's OWN pre-LN input x_raw (module never mutates it before
+            // `pair + transition(pair)`), D == K so it shares out_raw's row-major layout —
+            // one coalesced 128-bit load at the same (row, col) + a bf16x2 add before store.
+            if (add_residual && valid) {
+                const uint4 res_vec =
+                    *reinterpret_cast<const uint4*>(x_raw + row * D + d_tile * DN + n);
+                __nv_bfloat162* o = reinterpret_cast<__nv_bfloat162*>(&out_vec);
+                const __nv_bfloat162* r = reinterpret_cast<const __nv_bfloat162*>(&res_vec);
+                #pragma unroll
+                for (int t = 0; t < 4; ++t) {
+                    o[t] = __hadd2(o[t], r[t]);
+                }
+            }
             __nv_bfloat16* dst = valid ? out_raw + row * D + d_tile * DN + n : out_raw;
             global_store_u128(dst, out_vec, valid);
         }
@@ -640,6 +655,7 @@ __global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
     (void)ws_raw;
     (void)out_raw;
     (void)M;
+    (void)add_residual;
     (void)tma_wa;
     (void)tma_wb;
     (void)tma_ws;
@@ -729,6 +745,7 @@ void launch_transition_b2b_kernel(
     const torch::Tensor& ws,
     torch::Tensor& out,
     int64_t M,
+    bool add_residual,
     cudaStream_t stream
 ) {
     using Smem = B2BSmem<CTA_M, K, D, BN, STAGES>;
@@ -779,6 +796,7 @@ void launch_transition_b2b_kernel(
         reinterpret_cast<const __nv_bfloat16*>(ws.data_ptr<at::BFloat16>()),
         reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
         M,
+        add_residual,
         tma_wa,
         tma_wb,
         tma_ws
@@ -794,9 +812,13 @@ torch::Tensor transition_b2b_fwd(
     const torch::Tensor& beta,
     const torch::Tensor& wa,
     const torch::Tensor& wb,
-    const torch::Tensor& ws
+    const torch::Tensor& ws,
+    bool add_residual
 ) {
     check_transition_b2b_inputs(x, rstd, c1, g, beta, wa, wb, ws);
+    if (add_residual) {
+        TORCH_CHECK(x.is_contiguous(), "transition_b2b residual fuse requires contiguous x");
+    }
 
     c10::cuda::CUDAGuard device_guard(x.device());
     const int64_t K = x.size(1);
@@ -813,12 +835,12 @@ torch::Tensor transition_b2b_fwd(
     if (K == 128 && ND == 512 && D == 128) {
         launch_transition_b2b_kernel<
             128, 512, 128, kBlockM, kWarpgroupM, kBn, kDn, kPipelineStages>(
-            x, rstd, c1, g, beta, wa, wb, ws, out, M, stream
+            x, rstd, c1, g, beta, wa, wb, ws, out, M, add_residual, stream
         );
     } else if (K == 256 && ND == 1024 && D == 256) {
         launch_transition_b2b_kernel<
             256, 1024, 256, kBlockM, kWarpgroupM, 64, kDn, kPipelineStagesD256>(
-            x, rstd, c1, g, beta, wa, wb, ws, out, M, stream
+            x, rstd, c1, g, beta, wa, wb, ws, out, M, add_residual, stream
         );
     } else {
         TORCH_CHECK(false, "unsupported transition_b2b CUDA shape");
@@ -827,5 +849,8 @@ torch::Tensor transition_b2b_fwd(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("transition_b2b_fwd", &transition_b2b_fwd, "Fused transition b2b forward (CUDA)");
+    m.def("transition_b2b_fwd", &transition_b2b_fwd, "Fused transition b2b forward (CUDA)",
+          pybind11::arg("x"), pybind11::arg("rstd"), pybind11::arg("c1"), pybind11::arg("g"),
+          pybind11::arg("beta"), pybind11::arg("wa"), pybind11::arg("wb"), pybind11::arg("ws"),
+          pybind11::arg("add_residual") = false);
 }
