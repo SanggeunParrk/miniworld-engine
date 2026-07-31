@@ -172,15 +172,25 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
+        add_residual: bool = False,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass. Routes on the resolved internal backend, degrading to the
-        pytorch reference (with a warning) on a dtype the fused kernels can't run."""
+        pytorch reference (with a warning) on a dtype the fused kernels can't run.
+
+        ``add_residual`` folds the pairformer residual ``pair + trimul(pair)`` (the residual
+        is this module's own input) into the op — in-kernel on the sm90 cute inference back
+        (trimul_back_triton), an explicit add elsewhere. Default off keeps standalone/bench
+        behaviour unchanged. Dropout stays outside (inference: identity; training: v6 path)."""
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             backend = _dispatch.guard_dtype(
                 self._backend, pair.dtype, op="TriangleMultiplication"
             )
+            _pair_in = pair  # original (pre-LN) input == the residual; torch path rebinds `pair`
+            def _r(out):  # explicit residual add for paths that don't fold it in-kernel
+                return out + _pair_in if add_residual else out
+
             if backend == KernelBackend.CUEQUIVARIANCE:
-                return self._forward_cuequivariance(pair, mask)
+                return _r(self._forward_cuequivariance(pair, mask))
 
             if backend == KernelBackend.CUTE:
                 # The cute inference path (_forward_cute) is forward-only (no saved
@@ -188,8 +198,8 @@ class TriangleMultiplication(nn.Module):
                 # autograd-capable sm100/sm90 v6 merged training kernel instead —
                 # keeping all backend selection inside the module.
                 if torch.is_grad_enabled():
-                    return self._forward_cute_train(pair, mask)
-                return self._forward_cute(pair, mask)
+                    return _r(self._forward_cute_train(pair, mask))
+                return self._forward_cute(pair, mask, add_residual)
 
             if backend == KernelBackend.TRITON:
                 # Fused BDLL pipeline (mirrors cute's single-direction dispatch):
@@ -198,7 +208,7 @@ class TriangleMultiplication(nn.Module):
                 # code path serves inference (forward-only) and training (merged
                 # autograd Function). Requires d_hidden == d_pair. See
                 # kernels/trimul_inproj/triton/unidirectional.py.
-                return self._forward_triton(pair, mask)
+                return _r(self._forward_triton(pair, mask))
 
             pair = self.ln_pair(pair)
             left, right = self._kernel_tm1(pair, backend)
@@ -214,7 +224,7 @@ class TriangleMultiplication(nn.Module):
                 out = torch.einsum("bkid,bkjd->bijd", left, right)
 
             out = self.ln_out(out)
-            return self._kernel_tm2(pair, out, backend)
+            return _r(self._kernel_tm2(pair, out, backend))
 
     @torch.compiler.disable
     def _forward_triton(
@@ -313,6 +323,7 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
+        add_residual: bool = False,
     ) -> torch.Tensor:
         """CuTeDSL path: connects the tm1 / tm2 / fused-LN cute kernels.
 
@@ -326,7 +337,8 @@ class TriangleMultiplication(nn.Module):
         # (trimul_back_triton) is wired below — our kernels end-to-end, no cuequiv gate.
         # Set MINIWORLD_TRIMUL_CUEQUIV_FREE=0 to A/B against the legacy cuequiv tm2 path.
         if _os.environ.get("MINIWORLD_TRIMUL_CUEQUIV_FREE", "1") != "0":
-            return self._forward_cute_free(pair, mask)
+            return self._forward_cute_free(pair, mask, add_residual)
+        _res = pair if add_residual else None  # legacy cuequiv path: explicit residual add
         tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
         # Legacy cuequiv gate — lazy-imported ONLY on this opt-in (env=0) A/B path so the
         # default cuequiv-free path never loads cuequiv.
@@ -368,13 +380,15 @@ class TriangleMultiplication(nn.Module):
         )
         out_normed = (out[0] if isinstance(out, tuple) else out).view(b, l1, l2, d)
         # tm2 cute wants weights in (N, K) = nn.Linear form (already so).
-        return tm2_cute_forward(x_normed, out_normed, self.to_gate.weight, self.to_out.weight)
+        out = tm2_cute_forward(x_normed, out_normed, self.to_gate.weight, self.to_out.weight)
+        return out + _res if _res is not None else out
 
     @torch.compiler.disable
     def _forward_cute_free(
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
+        add_residual: bool = False,
     ) -> torch.Tensor:
         """CUEQUIV-FREE cute path (B200 / sm_100), mirroring the H100 trimul_inproj
         design:
@@ -419,12 +433,14 @@ class TriangleMultiplication(nn.Module):
             from miniworld_kernels.kernels.trimul_inproj.cute.back_split_sm100 import (
                 trimul_back_split_sm100,
             )
-            return trimul_back_split_sm100(
+            out = trimul_back_split_sm100(
                 tri, x_normed, self.to_out.weight, self.to_gate.weight.T,
                 self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
             )
+            return out + pair if add_residual else out  # sm100 back: explicit residual (no fuse yet)
         from miniworld_kernels.kernels.trimul_inproj.triton.back import trimul_back_triton
         return trimul_back_triton(
             tri, x_normed, self.to_out.weight.T, self.to_gate.weight.T,
             self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
+            residual=(pair if add_residual else None),  # FUSED residual add in the store epilogue
         )

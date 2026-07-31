@@ -43,7 +43,7 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
         triton.Config({"BM": 64, "BN": 32}, num_warps=4, num_stages=2),
         triton.Config({"BM": 64, "BN": 64}, num_warps=8, num_stages=2),
     ],
-    key=["GROUP_M", "K", "N"],
+    key=["GROUP_M", "K", "N", "ADD_RESIDUAL"],
 )
 @triton.jit
 def _back_kernel(
@@ -52,9 +52,10 @@ def _back_kernel(
     wp_ptr, wg_ptr,    # (D, D) = to_out.weight.T, to_gate.weight.T  (K=in, N=out)
     lnw_ptr, lnb_ptr,  # (D,)
     y_ptr,    # (M, D) row-major
+    res_ptr,  # (M, D) row-major residual (== the module input pair); read iff ADD_RESIDUAL
     M, eps,
     K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    GROUP_M: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BM + tl.arange(0, BM)
@@ -80,12 +81,23 @@ def _back_kernel(
         wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :])
         proj = tl.dot(norm, wp)                                  # (BM, BN)
         gate = tl.sigmoid(tl.dot(xn, wg))                        # (BM, BN)
-        y = (proj * gate).to(y_ptr.dtype.element_ty)
+        acc = proj * gate
+        if ADD_RESIDUAL:
+            # Fuse the pairformer residual add y = pair + trimul(pair): the residual is the
+            # module's own (pre-LN) input, added in the same coalesced store. No dropout here
+            # (inference: dropout is identity; training uses the v6 kernel).
+            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask, other=0.0).to(tl.float32)
+            acc = acc + res
+        y = acc.to(y_ptr.dtype.element_ty)
         tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask)
 
 
-def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5):
-    """tri_bdll:(B,D,L,L), x_n:(B,L,L,D), Wp/Wg:(D,D)=weight.T -> y:(B,L,L,D). B=1."""
+def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None):
+    """tri_bdll:(B,D,L,L), x_n:(B,L,L,D), Wp/Wg:(D,D)=weight.T -> y:(B,L,L,D). B=1.
+
+    ``residual`` (optional, [B,L,L,D] == the module input pair): fuses the pairformer
+    residual add ``y = pair + trimul(pair)`` into the store epilogue. None -> plain trimul.
+    """
     # B==1 by design; B>1 works via a per-batch loop, which is faster than a batched single
     # launch (L2 thrashing of large bdll intermediates). See front.py's note and
     # docs/kernel-optimization/trimul_batch_generalization.
@@ -95,8 +107,10 @@ def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5):
     tri_dm = tri_bdll.reshape(D, M)            # (D, M) contiguous, channel-major
     xn_flat = x_n.reshape(M, D)
     y = torch.empty(M, D, device=x_n.device, dtype=x_n.dtype)
+    add_residual = residual is not None
+    res_flat = residual.reshape(M, D).contiguous() if add_residual else y  # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
-                       ln_w.contiguous(), ln_b.contiguous(), y, M, float(eps),
-                       K=D, N=D, GROUP_M=get_seq_group(M))
+                       ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
+                       K=D, N=D, GROUP_M=get_seq_group(M), ADD_RESIDUAL=add_residual)
     return y.view(B, L, L, D)
