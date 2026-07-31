@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 from torch import Tensor
-from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
+from miniworld_kernels.kernels.layernorm.transpose import layer_norm_transpose
 
 from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
 from miniworld_kernels.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (

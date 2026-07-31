@@ -52,7 +52,7 @@ def _load_cute_fns():
     ):
         if str(d) not in sys.path:
             sys.path.insert(0, str(d))
-    from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
+    from miniworld_kernels.kernels.layernorm.transpose import layer_norm_transpose
     from fused_ln_mask import fused_ln_mask  # pyright: ignore[reportMissingImports]
     from launch import tm1_cute_forward  # pyright: ignore[reportMissingImports]
     from tm2_cute import tm2_cute_forward  # pyright: ignore[reportMissingImports]

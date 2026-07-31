@@ -43,7 +43,11 @@ _LN_CUDA_BWD_ENABLED = os.environ.get("MINIWORLD_LN_IN_CUDA", "0") != "0"
 
 configs = [
     triton.Config({"BLOCK_M": block_m}, num_warps=num_warps, num_stages=num_stages)
-    for block_m in [1, 2, 4, 8, 16, 32, 64]
+    # BLOCK_M up to 256: at small M (e.g. L=256 -> 65k rows) the cuequiv LN wins by picking
+    # ~110 rows/program (targeting ~592 blocks = 4/SM); our old cap of 64 forced >1000 tiny
+    # blocks there. 128/256 let the autotuner match that bigger-block sweet spot (autotune drops
+    # any config that spills / OOMs registers, so the wide range is safe).
+    for block_m in [1, 2, 4, 8, 16, 32, 64, 128]
     for num_warps in [4, 8, 16]
     for num_stages in [2, 3, 4, 5]
 ]
