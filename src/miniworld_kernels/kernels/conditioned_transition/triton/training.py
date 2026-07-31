@@ -28,6 +28,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 # autograd Functions cannot be @typecheck'd cleanly; keep precision policy explicit.
 
 
@@ -169,7 +171,14 @@ _cfgs_b2b = [
 
 
 # fmt: off
-@triton.autotune(configs=_cfgs_b2b, key=["ND", "K", "D", "DC"])
+_cond_transition_training_b2b_fwd_prune = make_cache_prune(
+    "cond_transition_training_b2b_fwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("ND", "K", "D", "DC"),
+)
+
+
+@triton.autotune(configs=_cfgs_b2b, key=["ND", "K", "D", "DC"],
+                 prune_configs_by={"early_config_prune": _cond_transition_training_b2b_fwd_prune})
 @triton.jit
 def _b2b_fwd_train_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr,

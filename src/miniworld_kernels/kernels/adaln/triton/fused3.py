@@ -12,12 +12,21 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 # ── K1 / K2: row-wise LayerNorm (full row per program, BLOCK_N = next_pow2(d)) ──────────────
 _LN_CFG = [triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
            for bm in (1, 2, 4, 8, 16) for nw in (4, 8, 16) for ns in (2, 3, 4)]
 
 
-@triton.autotune(configs=_LN_CFG, key=["N", "HAS_W", "DT"])
+_adaln_fused3_ln_prune = make_cache_prune(
+    "adaln_fused3_ln", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("N", "HAS_W", "DT"),
+)
+
+
+@triton.autotune(configs=_LN_CFG, key=["N", "HAS_W", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_fused3_ln_prune})
 @triton.jit
 def _ln_kernel(X, Y, W, M, N, eps, sx0, sx1, sy0, sy1,
               HAS_W: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr):
@@ -60,7 +69,14 @@ _GEMM_CFG = [
 ]
 
 
-@triton.autotune(configs=_GEMM_CFG, key=["N", "K", "DT"])
+_adaln_fused3_gemm_gate_prune = make_cache_prune(
+    "adaln_fused3_gemm_gate", dtype_of=tensor_dtype_of("Xn"),
+    bucket_of=key_bucket_of("N", "K", "DT"),
+)
+
+
+@triton.autotune(configs=_GEMM_CFG, key=["N", "K", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_fused3_gemm_gate_prune})
 @triton.jit
 def _gemm_gate_kernel(
     Xn, Cn, Ws, Wb, Sb, Y, M, N, K,
@@ -121,7 +137,14 @@ def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b):
 
 
 # ── training: K3 variant that also stores gate=sigmoid(scale); + backward elementwise ──────────
-@triton.autotune(configs=_GEMM_CFG, key=["N", "K", "DT"])
+_adaln_fused3_gemm_gate_train_prune = make_cache_prune(
+    "adaln_fused3_gemm_gate_train", dtype_of=tensor_dtype_of("Xn"),
+    bucket_of=key_bucket_of("N", "K", "DT"),
+)
+
+
+@triton.autotune(configs=_GEMM_CFG, key=["N", "K", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_fused3_gemm_gate_train_prune})
 @triton.jit
 def _gemm_gate_train_kernel(
     Xn, Cn, Ws, Wb, Sb, Y, Gate, M, N, K,
@@ -179,7 +202,14 @@ def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b):
     return y, gate
 
 
-@triton.autotune(configs=_LN_CFG, key=["N", "DT"])
+_adaln_fused3_bwd_elem_prune = make_cache_prune(
+    "adaln_fused3_bwd_elem", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("N", "DT"),
+)
+
+
+@triton.autotune(configs=_LN_CFG, key=["N", "DT"],
+                 prune_configs_by={"early_config_prune": _adaln_fused3_bwd_elem_prune})
 @triton.jit
 def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                      sy0, sy1, sxn0, sxn1, sg0, sg1, sds0, sds1, sdx0, sdx1,

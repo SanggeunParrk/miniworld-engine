@@ -32,8 +32,16 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 
 # ============================== 1+4 : dgrad + LN-backward ==============================
+_layernorm_linear_fused_bwd_dgrad_lnbwd_prune = make_cache_prune(
+    "layernorm_linear_fused_bwd_dgrad_lnbwd", dtype_of=tensor_dtype_of("dY_ptr"),
+    bucket_of=key_bucket_of("N", "K"),
+)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_warps=nw, num_stages=ns)
@@ -43,6 +51,7 @@ import triton.language as tl
         for ns in (2, 3)
     ],
     key=["N", "K"],
+    prune_configs_by={"early_config_prune": _layernorm_linear_fused_bwd_dgrad_lnbwd_prune},
 )
 @triton.jit
 def _dgrad_lnbwd_kernel(
@@ -113,6 +122,12 @@ def dgrad_lnbwd(dY, W, x, gamma, mean, rstd):
 
 
 # ============================== 2+3 : x_normed prologue + wgrad ==============================
+_layernorm_linear_fused_bwd_xnorm_wgrad_prune = make_cache_prune(
+    "layernorm_linear_fused_bwd_xnorm_wgrad", dtype_of=tensor_dtype_of("dY_ptr"),
+    bucket_of=key_bucket_of("N", "K"),
+)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_N": bn, "BLOCK_K": bk, "BLOCK_M": bm}, num_warps=nw, num_stages=ns)
@@ -123,6 +138,7 @@ def dgrad_lnbwd(dY, W, x, gamma, mean, rstd):
         for ns in (2, 3)
     ],
     key=["N", "K"],
+    prune_configs_by={"early_config_prune": _layernorm_linear_fused_bwd_xnorm_wgrad_prune},
 )
 @triton.jit
 def _xnorm_wgrad_kernel(

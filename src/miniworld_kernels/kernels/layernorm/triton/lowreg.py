@@ -23,6 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from .main import get_seq_group
 
 # Same autotune grid as the shipped fwd, so the comparison is config-fair: any
@@ -36,7 +37,14 @@ _lowreg_configs = [
 
 
 # fmt: off
-@triton.autotune(configs=_lowreg_configs, key=["N", "GROUP_M"])
+_layernorm_lowreg_fwd_prune = make_cache_prune(
+    "layernorm_lowreg_fwd", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("N", "GROUP_M"),
+)
+
+
+@triton.autotune(configs=_lowreg_configs, key=["N", "GROUP_M"],
+                 prune_configs_by={"early_config_prune": _layernorm_lowreg_fwd_prune})
 @triton.jit
 def layer_norm_fwd_lowreg(
     X, Y, W, B, Mean, Rstd,

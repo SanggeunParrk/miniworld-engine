@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 
 def _cfgs():
     out = []
@@ -26,7 +28,14 @@ def _cfgs():
     return out
 
 
-@triton.autotune(configs=_cfgs(), key=["L", "D"])
+_trimul_fused_bmm_ew_prune = make_cache_prune(
+    "trimul_fused_bmm_ew", dtype_of=tensor_dtype_of("dtri"),
+    bucket_of=key_bucket_of("L", "D"),
+)
+
+
+@triton.autotune(configs=_cfgs(), key=["L", "D"],
+                 prune_configs_by={"early_config_prune": _trimul_fused_bmm_ew_prune})
 @triton.jit
 def _bmm_gated_kernel(
     dtri, rhs, gLlog, pL, d_p, d_glog,

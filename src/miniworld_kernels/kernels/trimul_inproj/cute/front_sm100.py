@@ -26,7 +26,14 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
+
+_trimul_cute_front_sm100_transpose_prune = make_cache_prune(
+    "trimul_cute_front_sm100_transpose", dtype_of=tensor_dtype_of("src_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "N"),
+)
 
 
 @triton.autotune(
@@ -40,6 +47,7 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
         triton.Config({"BM": 128, "BN": 256}, num_warps=8),
     ],
     key=["GROUP_M", "N"],
+    prune_configs_by={"early_config_prune": _trimul_cute_front_sm100_transpose_prune},
 )
 @triton.jit
 def _transpose_kernel(src_ptr, dst_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr,

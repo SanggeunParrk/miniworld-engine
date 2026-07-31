@@ -39,6 +39,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from ..layernorm.triton.main import get_seq_group  # M-bucketing for the autotune key
 
 # ── dtype support ──────────────────────────────────────────────────────────────────────────────
@@ -92,7 +93,14 @@ _LN_CONFIGS = [
 
 
 # ───────────────────────── forward: LN-materialize (strided x → contiguous x_normed) ─────────
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M", "DT"])
+_layernorm_linear_te_ln_mat_prune = make_cache_prune(
+    "layernorm_linear_te_ln_mat", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("N", "GROUP_M", "DT"),
+)
+
+
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M", "DT"],
+                 prune_configs_by={"early_config_prune": _layernorm_linear_te_ln_mat_prune})
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N, eps,
                    sx0, sx1, sn0, sn1,
@@ -135,7 +143,14 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
 
 
 # ───────── backward: ONE LN-backward kernel → dx (arbitrary strides) + dγ + dβ (M-reduce) ─────
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M", "DT"], reset_to_zero=["DG", "DB"])
+_layernorm_linear_te_ln_bwd_prune = make_cache_prune(
+    "layernorm_linear_te_ln_bwd", dtype_of=tensor_dtype_of("DXn"),
+    bucket_of=key_bucket_of("N", "GROUP_M", "DT"),
+)
+
+
+@triton.autotune(configs=_LN_CONFIGS, key=["N", "GROUP_M", "DT"], reset_to_zero=["DG", "DB"],
+                 prune_configs_by={"early_config_prune": _layernorm_linear_te_ln_bwd_prune})
 @triton.jit
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,

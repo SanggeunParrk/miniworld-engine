@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 
 def get_seq_group(length: int) -> int:
     """Get sequence group based on length."""
@@ -68,7 +70,14 @@ bwd_configs = configs
 
 
 # fmt: off
-@triton.autotune(configs=fwd_configs, key=["N", "GROUP_M"])
+_layernorm_main_fwd_prune = make_cache_prune(
+    "layernorm_main_fwd", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("N", "GROUP_M"),
+)
+
+
+@triton.autotune(configs=fwd_configs, key=["N", "GROUP_M"],
+                 prune_configs_by={"early_config_prune": _layernorm_main_fwd_prune})
 @triton.jit
 def layer_norm_fwd_fused(
     X, Y, W, B, Mean, Rstd, Rowscale,
@@ -131,7 +140,14 @@ def layer_norm_fwd_fused(
 
 
 # fmt: off
-@triton.autotune(configs=fwd_configs, key=["N", "GROUP_M"])
+_layernorm_main_fwd_recal_prune = make_cache_prune(
+    "layernorm_main_fwd_recal", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("N", "GROUP_M"),
+)
+
+
+@triton.autotune(configs=fwd_configs, key=["N", "GROUP_M"],
+                 prune_configs_by={"early_config_prune": _layernorm_main_fwd_recal_prune})
 @triton.jit
 def layer_norm_fwd_fused_recal(
     X, Y, W, B, Mean, Rstd,
@@ -177,7 +193,14 @@ def layer_norm_fwd_fused_recal(
 
 
 # fmt: off
-@triton.autotune(configs=bwd_configs, key=["N", "GROUP_M"], reset_to_zero=["DW", "DB"])
+_layernorm_main_bwd_dx_prune = make_cache_prune(
+    "layernorm_main_bwd_dx", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("N", "GROUP_M"),
+)
+
+
+@triton.autotune(configs=bwd_configs, key=["N", "GROUP_M"], reset_to_zero=["DW", "DB"],
+                 prune_configs_by={"early_config_prune": _layernorm_main_bwd_dx_prune})
 @triton.jit
 def layer_norm_bwd_dx_fused(
     DX, DY, DW, DB,

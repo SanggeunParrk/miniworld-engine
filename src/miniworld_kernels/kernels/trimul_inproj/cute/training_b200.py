@@ -38,6 +38,7 @@ import os
 import torch
 import triton
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.trimul_inproj.autograd import _ln_bwd, _ln_fwd
 from miniworld_kernels.kernels.trimul_inproj.cute.front_sm100_fused import (
     prepack_lr_operand_sm100,
@@ -134,7 +135,14 @@ _LN_CFGS = [
 ]
 
 
-@triton.autotune(configs=_LN_CFGS, key=["D"])
+_trimul_cute_training_b200_ln_fwd_prune = make_cache_prune(
+    "trimul_cute_training_b200_ln_fwd", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("D"),
+)
+
+
+@triton.autotune(configs=_LN_CFGS, key=["D"],
+                 prune_configs_by={"early_config_prune": _trimul_cute_training_b200_ln_fwd_prune})
 @triton.jit
 def _ln_fwd_kernel(X, W, Bs, Y, Rstd, Xhat, Mean, M, D: tl.constexpr, eps,
                    sxm, sxd, BLOCK_M: tl.constexpr):
@@ -180,7 +188,14 @@ def _ln_fwd_fused(x, w, b, eps, out_shape=None):
     return (y.view(shp), mean.view(shp[:-1]), rstd.view(shp[:-1]), xhat.view(shp))
 
 
-@triton.autotune(configs=_LN_CFGS, key=["D"])
+_trimul_cute_training_b200_ln_bwd_dx_prune = make_cache_prune(
+    "trimul_cute_training_b200_ln_bwd_dx", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("D"),
+)
+
+
+@triton.autotune(configs=_LN_CFGS, key=["D"],
+                 prune_configs_by={"early_config_prune": _trimul_cute_training_b200_ln_bwd_dx_prune})
 @triton.jit
 def _ln_bwd_dx_kernel(DY, Xhat, Rstd, W, DX, M, D: tl.constexpr,
                       BLOCK_M: tl.constexpr):

@@ -28,12 +28,20 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
+
+_trimul_gate_elem_mul_prune = make_cache_prune(
+    "trimul_gate_elem_mul", dtype_of=tensor_dtype_of("glogit_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "N", "ADD_RESIDUAL", "USE_DROPOUT"),
+)
 
 
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
     key=["GROUP_M", "N", "ADD_RESIDUAL", "USE_DROPOUT"],
+    prune_configs_by={"early_config_prune": _trimul_gate_elem_mul_prune},
 )
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, n_elem, L,
@@ -63,6 +71,12 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, n_e
         tl.store(gate_ptr + off, g.to(gate_ptr.dtype.element_ty), mask=mask)
 
 
+_trimul_gate_elem_bwd_ew_prune = make_cache_prune(
+    "trimul_gate_elem_bwd_ew", dtype_of=tensor_dtype_of("dy_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "N", "USE_DROPOUT"),
+)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BM": bm}, num_warps=nw, num_stages=ns)
@@ -71,6 +85,7 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, n_e
         for ns in (2, 3, 4)
     ],
     key=["GROUP_M", "N", "USE_DROPOUT"],
+    prune_configs_by={"early_config_prune": _trimul_gate_elem_bwd_ew_prune},
 )
 @triton.jit
 def _gate_elem_bwd_ew_kernel(

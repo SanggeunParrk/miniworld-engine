@@ -21,6 +21,13 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+_transition_fold_swiglu_prune = make_cache_prune(
+    "transition_fold_swiglu", dtype_of=tensor_dtype_of("wa_ptr"),
+    bucket_of=key_bucket_of("N", "K"),
+)
+
 
 @triton.autotune(
     configs=[
@@ -29,6 +36,7 @@ import triton.language as tl
         for nw in (1, 2, 4, 8)
     ],
     key=["N", "K"],
+    prune_configs_by={"early_config_prune": _transition_fold_swiglu_prune},
 )
 @triton.jit
 def _fold_kernel(

@@ -7,6 +7,7 @@ import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels._typecheck import typecheck
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
@@ -36,7 +37,14 @@ else:
     ]
 
 
-@triton.autotune(configs=configs, key=["GROUP_M", "n", "N"])
+_transition_miniworld_fwd_prune = make_cache_prune(
+    "transition_miniworld_fwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "n", "N"),
+)
+
+
+@triton.autotune(configs=configs, key=["GROUP_M", "n", "N"],
+                 prune_configs_by={"early_config_prune": _transition_miniworld_fwd_prune})
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -82,7 +90,14 @@ def transition_fwd_kernel(
     tl.store(out_ptr_, swish_AB, mask=(offs_m[:, None] < M))
 
 
-@triton.autotune(configs=configs, key=["GROUP_M", "n", "N"])
+_transition_miniworld_bwd_prune = make_cache_prune(
+    "transition_miniworld_bwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "n", "N"),
+)
+
+
+@triton.autotune(configs=configs, key=["GROUP_M", "n", "N"],
+                 prune_configs_by={"early_config_prune": _transition_miniworld_bwd_prune})
 @triton.jit
 def transition_bwd_kernel(
     x_ptr,

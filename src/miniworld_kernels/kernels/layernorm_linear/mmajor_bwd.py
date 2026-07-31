@@ -26,6 +26,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from ..layernorm.triton.main import get_seq_group
 from ..layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback
@@ -44,7 +45,14 @@ _configs = [
 
 
 # fmt: off
-@triton.autotune(configs=_configs, key=["N"])
+_layernorm_linear_mmajor_bwd_prune = make_cache_prune(
+    "layernorm_linear_mmajor_bwd", dtype_of=tensor_dtype_of("DXn"),
+    bucket_of=key_bucket_of("N"),
+)
+
+
+@triton.autotune(configs=_configs, key=["N"],
+                 prune_configs_by={"early_config_prune": _layernorm_linear_mmajor_bwd_prune})
 @triton.jit
 def _ln_bwd_mmajor_kernel(
     DX, PDG, PDB, DXn, X, G, Mean, Rstd,

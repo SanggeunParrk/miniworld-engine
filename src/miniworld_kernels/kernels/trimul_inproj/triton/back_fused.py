@@ -16,6 +16,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 
@@ -92,9 +93,16 @@ def _dw_kernel(d_lr, preact, x_n, dW, M, D: tl.constexpr, BK: tl.constexpr, NPRO
     tl.atomic_add(dW + row + (3 * D + rd[None, :]), aR)
 
 
+_trimul_back_fused_dconcat_prune = make_cache_prune(
+    "trimul_back_fused_dconcat", dtype_of=tensor_dtype_of("dL_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "D"),
+)
+
+
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
     key=["GROUP_M", "D"],
+    prune_configs_by={"early_config_prune": _trimul_back_fused_dconcat_prune},
 )
 @triton.jit
 def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl.constexpr,
@@ -127,9 +135,16 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl
     tl.store(out + 3 * DMi + idx, (dR * gR).to(et), mask=mask)                  # d_pR
 
 
+_trimul_back_fused_dconcat5_prune = make_cache_prune(
+    "trimul_back_fused_dconcat5", dtype_of=tensor_dtype_of("dL_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "D"),
+)
+
+
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
     key=["GROUP_M", "D"],
+    prune_configs_by={"early_config_prune": _trimul_back_fused_dconcat5_prune},
 )
 @triton.jit
 def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr,
@@ -252,9 +267,16 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
 
 
 # ── σ(gate) backward: reconstruct GLU grads from lr + sg (no preact) ──────────────────────────
+_trimul_back_fused_dconcat_sig_prune = make_cache_prune(
+    "trimul_back_fused_dconcat_sig", dtype_of=tensor_dtype_of("dL_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "D"),
+)
+
+
 @triton.autotune(
     configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
     key=["GROUP_M", "D"],
+    prune_configs_by={"early_config_prune": _trimul_back_fused_dconcat_sig_prune},
 )
 @triton.jit
 def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,

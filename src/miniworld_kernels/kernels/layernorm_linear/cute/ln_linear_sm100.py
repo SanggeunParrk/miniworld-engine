@@ -36,6 +36,7 @@ from cutlass.cute.runtime import from_dlpack
 # returned -> identical launch/numerics; removes the per-call eager compile overhead.
 from quack.cute_dsl_utils import get_max_active_clusters
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import (
     GatedPersistentGemmKernel,
 )
@@ -47,6 +48,12 @@ from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import (
 #    feeds an M-major A view straight into the GEMM). K is a power of two here so
 #    BLOCK_K == K and there are no masked (variance-corrupting) columns.
 # --------------------------------------------------------------------------- #
+_layernorm_linear_cute_sm100_ln_mmajor_prune = make_cache_prune(
+    "layernorm_linear_cute_sm100_ln_mmajor", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("K"),
+)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
@@ -55,6 +62,7 @@ from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import (
         for ns in (2, 3, 4)
     ],
     key=["K"],
+    prune_configs_by={"early_config_prune": _layernorm_linear_cute_sm100_ln_mmajor_prune},
 )
 @triton.jit
 def _ln_mmajor_kernel(X, Y, W, B, M, K: tl.constexpr, eps,

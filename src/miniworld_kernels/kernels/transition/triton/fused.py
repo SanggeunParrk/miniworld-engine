@@ -277,8 +277,15 @@ _b2b_configs = [
 ]
 
 
+_transition_b2b_prune = make_cache_prune(
+    "transition_b2b", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "ND", "K", "D", "SAVE_XN", "FUSE_STATS", "ADD_RESIDUAL"),
+)
+
+
 # fmt: off
-@triton.autotune(configs=_b2b_configs, key=["GROUP_M", "ND", "K", "D", "SAVE_XN", "FUSE_STATS", "ADD_RESIDUAL"])
+@triton.autotune(configs=_b2b_configs, key=["GROUP_M", "ND", "K", "D", "SAVE_XN", "FUSE_STATS", "ADD_RESIDUAL"],
+                 prune_configs_by={"early_config_prune": _transition_b2b_prune})
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,

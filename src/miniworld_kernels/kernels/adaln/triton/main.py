@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "adaln"
 
 if AUTOTUNE:
@@ -64,7 +66,14 @@ else:
     ]
 
 
-@triton.autotune(configs=configs, key=["NX", "NC"])
+_adaln_main_fwd_prune = make_cache_prune(
+    "adaln_main_fwd", dtype_of=tensor_dtype_of("X"),
+    bucket_of=key_bucket_of("NX", "NC"),
+)
+
+
+@triton.autotune(configs=configs, key=["NX", "NC"],
+                 prune_configs_by={"early_config_prune": _adaln_main_fwd_prune})
 @triton.jit
 def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     X,
@@ -223,10 +232,17 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
         tl.store(Y + x_offsets, y, mask=x_mask)
 
 
+_adaln_main_bwd_input_prune = make_cache_prune(
+    "adaln_main_bwd_input", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("M", "NX", "NC"),
+)
+
+
 @triton.autotune(
     configs=bwd_configs,
     key=["M", "NX", "NC"],
     reset_to_zero=["DScaleB"],
+    prune_configs_by={"early_config_prune": _adaln_main_bwd_input_prune},
 )
 @triton.jit
 def adaln_bwd_input_kernel(  # noqa: PLR0915
@@ -428,7 +444,14 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
         tl.store(DCond + c_offsets, dcond, mask=c_mask)
 
 
-@triton.autotune(configs=param_configs, key=["M", "NX", "NC"])
+_adaln_main_bwd_weight_prune = make_cache_prune(
+    "adaln_main_bwd_weight", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("M", "NX", "NC"),
+)
+
+
+@triton.autotune(configs=param_configs, key=["M", "NX", "NC"],
+                 prune_configs_by={"early_config_prune": _adaln_main_bwd_weight_prune})
 @triton.jit
 def adaln_bwd_weight_kernel(
     DY,
@@ -518,7 +541,14 @@ def adaln_bwd_weight_kernel(
     tl.store(DBiasW + bias_offsets, acc_bias_w, mask=weight_mask)
 
 
-@triton.autotune(configs=param_configs, key=["M", "NX", "NC"])
+_adaln_main_bwd_lnw_prune = make_cache_prune(
+    "adaln_main_bwd_lnw", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("M", "NX", "NC"),
+)
+
+
+@triton.autotune(configs=param_configs, key=["M", "NX", "NC"],
+                 prune_configs_by={"early_config_prune": _adaln_main_bwd_lnw_prune})
 @triton.jit
 def adaln_bwd_lnw_kernel(
     DY,

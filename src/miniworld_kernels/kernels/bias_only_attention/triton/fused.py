@@ -29,6 +29,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 gemm_configs = [
     triton.Config({"BLOCK_J": bj, "BLOCK_I": bi, "BLOCK_K": bk}, num_warps=w, num_stages=s)
     for bj in [32, 64]
@@ -39,7 +41,14 @@ gemm_configs = [
 ]
 
 
-@triton.autotune(configs=gemm_configs, key=["L", "D"])
+_bias_only_fused_gemm_prune = make_cache_prune(
+    "bias_only_fused_gemm", dtype_of=tensor_dtype_of("a_ptr"),
+    bucket_of=key_bucket_of("L", "D"),
+)
+
+
+@triton.autotune(configs=gemm_configs, key=["L", "D"],
+                 prune_configs_by={"early_config_prune": _bias_only_fused_gemm_prune})
 @triton.jit
 def _bias_only_gemm(
     a_ptr,        # A = softmax(bias)  [B,H,Lj,Lk]

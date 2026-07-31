@@ -18,6 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 
@@ -36,6 +37,12 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
 #     under the N-tiling and is faster here (it was a wash without N-tiling).
 #   - BM=64, BN=64, num_warps=4 is the winner for every L.
 # Kept a tiny pruned set around the winner plus safe fallbacks.
+_trimul_back_prune = make_cache_prune(
+    "trimul_back", dtype_of=tensor_dtype_of("tri_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "K", "N", "ADD_RESIDUAL"),
+)
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BM": 64, "BN": 64}, num_warps=4, num_stages=2),
@@ -44,6 +51,7 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
         triton.Config({"BM": 64, "BN": 64}, num_warps=8, num_stages=2),
     ],
     key=["GROUP_M", "K", "N", "ADD_RESIDUAL"],
+    prune_configs_by={"early_config_prune": _trimul_back_prune},
 )
 @triton.jit
 def _back_kernel(

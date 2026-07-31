@@ -27,6 +27,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 
 def _configs():
     cfgs = []
@@ -38,7 +40,14 @@ def _configs():
     return cfgs
 
 
-@triton.autotune(configs=_configs(), key=["M", "D"])
+_fused_ln_mask_prune = make_cache_prune(
+    "fused_ln_mask", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("M", "D"),
+)
+
+
+@triton.autotune(configs=_configs(), key=["M", "D"],
+                 prune_configs_by={"early_config_prune": _fused_ln_mask_prune})
 @triton.jit
 def _fused_ln_mask_kernel(
     x_ptr,

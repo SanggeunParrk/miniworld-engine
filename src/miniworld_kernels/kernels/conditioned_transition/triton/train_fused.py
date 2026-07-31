@@ -42,6 +42,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
 # ============================================================================
 # FORWARD (training): reuse the fused inference structure, emit saved tensors.
 # ============================================================================
@@ -56,7 +58,14 @@ _cfgs_fwdA = [
 
 
 # fmt: off
-@triton.autotune(configs=_cfgs_fwdA, key=["M", "ND", "K"])
+_cond_transition_train_fused_expand_swiglu_prune = make_cache_prune(
+    "cond_transition_train_fused_expand_swiglu", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("M", "ND", "K"),
+)
+
+
+@triton.autotune(configs=_cfgs_fwdA, key=["M", "ND", "K"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_expand_swiglu_prune})
 @triton.jit
 def _fwd_expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr, ab_ptr,
@@ -105,7 +114,14 @@ _cfgs_fwdB = [
 
 
 # fmt: off
-@triton.autotune(configs=_cfgs_fwdB, key=["M", "ND", "D", "DC"])
+_cond_transition_train_fused_squeeze_gate_prune = make_cache_prune(
+    "cond_transition_train_fused_squeeze_gate", dtype_of=tensor_dtype_of("h_ptr"),
+    bucket_of=key_bucket_of("M", "ND", "D", "DC"),
+)
+
+
+@triton.autotune(configs=_cfgs_fwdB, key=["M", "ND", "D", "DC"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_squeeze_gate_prune})
 @triton.jit
 def _fwd_squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, y_ptr, out_ptr, scale_ptr,
@@ -236,7 +252,14 @@ _cfgs_dgemm = [
 
 
 # fmt: off
-@triton.autotune(configs=_cfgs_dgemm, key=["M", "N", "K"])
+_cond_transition_train_fused_dgemm_prune = make_cache_prune(
+    "cond_transition_train_fused_dgemm", dtype_of=tensor_dtype_of("a_ptr"),
+    bucket_of=key_bucket_of("M", "N", "K"),
+)
+
+
+@triton.autotune(configs=_cfgs_dgemm, key=["M", "N", "K"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_dgemm_prune})
 @triton.jit
 def _dgemm_kernel(
     a_ptr, w_ptr, c_ptr, M, N, K,
@@ -293,7 +316,14 @@ _cfgs_dx = [
 
 
 # fmt: off
-@triton.autotune(configs=_cfgs_dx, key=["M", "K", "ND"])
+_cond_transition_train_fused_dx_prune = make_cache_prune(
+    "cond_transition_train_fused_dx", dtype_of=tensor_dtype_of("dh_ptr"),
+    bucket_of=key_bucket_of("M", "K", "ND"),
+)
+
+
+@triton.autotune(configs=_cfgs_dx, key=["M", "K", "ND"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_dx_prune})
 @triton.jit
 def _dx_fused_kernel(
     dh_ptr, ab_ptr, wa_ptr, wb_ptr, dx_ptr,
@@ -360,7 +390,14 @@ def _dx_fused(dh, ab, wa, wb):
 
 # --- dh = dout @ Ws, with dout = sigmoid(scale)*dy formed in the K-loop; emit dout,dscale ---
 # fmt: off
-@triton.autotune(configs=_cfgs_dgemm, key=["M", "ND", "D"])
+_cond_transition_train_fused_dh_gatebwd_prune = make_cache_prune(
+    "cond_transition_train_fused_dh_gatebwd", dtype_of=tensor_dtype_of("out_ptr"),
+    bucket_of=key_bucket_of("M", "ND", "D"),
+)
+
+
+@triton.autotune(configs=_cfgs_dgemm, key=["M", "ND", "D"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_dh_gatebwd_prune})
 @triton.jit
 def _dh_gatebwd_kernel(
     out_ptr, scale_ptr, dy_ptr, ws_ptr, dh_ptr, dout_ptr, dscale_ptr,
@@ -418,7 +455,14 @@ def _dh_gatebwd(out, scale, dy, ws, ND):
 
 # --- dx = dab @ Wcat (one concatenated GEMM), dab=[da|db] formed per K-tile; emit dab ---
 # fmt: off
-@triton.autotune(configs=_cfgs_dgemm, key=["M", "K", "ND2"])
+_cond_transition_train_fused_dx_swiglubwd_prune = make_cache_prune(
+    "cond_transition_train_fused_dx_swiglubwd", dtype_of=tensor_dtype_of("dh_ptr"),
+    bucket_of=key_bucket_of("M", "K", "ND2"),
+)
+
+
+@triton.autotune(configs=_cfgs_dgemm, key=["M", "K", "ND2"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_dx_swiglubwd_prune})
 @triton.jit
 def _dx_swiglubwd_kernel(
     dh_ptr, ab_ptr, wcat_ptr, dx_ptr, dab_ptr,
@@ -533,7 +577,14 @@ _cfgs_wgrad = [
 
 
 # fmt: off
-@triton.autotune(configs=_cfgs_wgrad, key=["N", "K", "M"])
+_cond_transition_train_fused_wgrad_prune = make_cache_prune(
+    "cond_transition_train_fused_wgrad", dtype_of=tensor_dtype_of("g_ptr"),
+    bucket_of=key_bucket_of("N", "K", "M"),
+)
+
+
+@triton.autotune(configs=_cfgs_wgrad, key=["N", "K", "M"],
+                 prune_configs_by={"early_config_prune": _cond_transition_train_fused_wgrad_prune})
 @triton.jit
 def _wgrad_kernel(
     g_ptr, x_ptr, dw_ptr, M, N, K,

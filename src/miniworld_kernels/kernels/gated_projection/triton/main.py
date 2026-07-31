@@ -7,6 +7,7 @@ import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels._typecheck import typecheck
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "tri_attention"
@@ -29,7 +30,14 @@ else:
     ]
 
 
-@triton.autotune(configs=configs, key=["GROUP_M", "n_elements"])
+_gated_projection_sigmoid_gate_fwd_prune = make_cache_prune(
+    "gated_projection_sigmoid_gate_fwd", dtype_of=tensor_dtype_of("gate_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "n_elements"),
+)
+
+
+@triton.autotune(configs=configs, key=["GROUP_M", "n_elements"],
+                 prune_configs_by={"early_config_prune": _gated_projection_sigmoid_gate_fwd_prune})
 @triton.jit
 def sigmoid_gate_fwd_kernel(
     gate_ptr,
@@ -60,7 +68,14 @@ def sigmoid_gate_fwd_kernel(
     tl.store(out_ptr + offset, out_val, mask=mask)
 
 
-@triton.autotune(configs=configs, key=["GROUP_M", "n_elements"])
+_gated_projection_sigmoid_gate_bwd_prune = make_cache_prune(
+    "gated_projection_sigmoid_gate_bwd", dtype_of=tensor_dtype_of("gate_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "n_elements"),
+)
+
+
+@triton.autotune(configs=configs, key=["GROUP_M", "n_elements"],
+                 prune_configs_by={"early_config_prune": _gated_projection_sigmoid_gate_bwd_prune})
 @triton.jit
 def sigmoid_gate_bwd_kernel(
     gate_ptr,

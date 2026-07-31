@@ -25,6 +25,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from .main import get_seq_group, layer_norm_fwd_fused
 
 # Persistent grid = (#SMs * PERSIST_WAVES) blocks. A couple of blocks per SM keeps
@@ -42,7 +43,14 @@ _bwd_configs = [
 
 
 # fmt: off
-@triton.autotune(configs=_bwd_configs, key=["N"])
+_layernorm_persistent_bwd_prune = make_cache_prune(
+    "layernorm_persistent_bwd", dtype_of=tensor_dtype_of("DY"),
+    bucket_of=key_bucket_of("N"),
+)
+
+
+@triton.autotune(configs=_bwd_configs, key=["N"],
+                 prune_configs_by={"early_config_prune": _layernorm_persistent_bwd_prune})
 @triton.jit
 def _ln_bwd_persistent(
     DX, PART_DW, PART_DB, DY, X, W, Mean, Rstd,

@@ -43,7 +43,14 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_group
+
+
+_trimul_front_lr_prune = make_cache_prune(
+    "trimul_front_lr", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "D"),
+)
 
 
 @triton.autotune(
@@ -64,6 +71,7 @@ from miniworld_kernels.kernels.trimul_inproj.triton._autotune import get_seq_gro
         triton.Config({"BM": 128, "BK": 64}, num_warps=4, num_stages=3),
     ],
     key=["GROUP_M", "D"],
+    prune_configs_by={"early_config_prune": _trimul_front_lr_prune},
 )
 @triton.jit
 def _lr_kernel(
@@ -116,6 +124,12 @@ def _lr_kernel(
              tl.trans(out).to(lr_ptr.dtype.element_ty), mask=rm[None, :] < M)
 
 
+_trimul_front_gate_prune = make_cache_prune(
+    "trimul_front_gate", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("GROUP_M", "D"),
+)
+
+
 @triton.autotune(
     # gate kernel: (BM,D) acc, fully contiguous (M,D) store. BM=64/num_warps=4 wins.
     configs=[
@@ -126,6 +140,7 @@ def _lr_kernel(
         triton.Config({"BM": 128, "BK": 64}, num_warps=8, num_stages=2),
     ],
     key=["GROUP_M", "D"],
+    prune_configs_by={"early_config_prune": _trimul_front_gate_prune},
 )
 @triton.jit
 def _gate_kernel(

@@ -19,6 +19,7 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
 
 
@@ -30,7 +31,14 @@ _dbn_configs = [
 ]
 
 
-@triton.autotune(configs=_dbn_configs, key=["D"])
+_layernorm_transpose_dbn_prune = make_cache_prune(
+    "layernorm_transpose_dbn", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("D"),
+)
+
+
+@triton.autotune(configs=_dbn_configs, key=["D"],
+                 prune_configs_by={"early_config_prune": _layernorm_transpose_dbn_prune})
 @triton.jit
 def _ln_transpose_dbn_kernel(
     x_ptr,   # (D, M) channel-major: x[k, m] at k*M + m

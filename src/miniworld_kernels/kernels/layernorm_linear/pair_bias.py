@@ -18,6 +18,7 @@ import triton
 import triton.language as tl
 from jaxtyping import Float
 
+from miniworld_kernels.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_kernels._typecheck import typecheck
 
 # tl.dot needs every dim >= 16; below this the backward uses the scalar loop.
@@ -41,7 +42,14 @@ else:
     ]
 
 
-@triton.autotune(configs=configs, key=["N", "NH"])
+_layernorm_linear_pair_bias_fwd_prune = make_cache_prune(
+    "layernorm_linear_pair_bias_fwd", dtype_of=tensor_dtype_of("x_ptr"),
+    bucket_of=key_bucket_of("N", "NH"),
+)
+
+
+@triton.autotune(configs=configs, key=["N", "NH"],
+                 prune_configs_by={"early_config_prune": _layernorm_linear_pair_bias_fwd_prune})
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -79,8 +87,15 @@ def _layer_norm_linear_fwd(
     tl.store(rstd_ptr + rows, rstd, mask=row_mask)
 
 
+_layernorm_linear_pair_bias_bwd_prune = make_cache_prune(
+    "layernorm_linear_pair_bias_bwd", dtype_of=tensor_dtype_of("dout_ptr"),
+    bucket_of=key_bucket_of("N", "NH"),
+)
+
+
 @triton.autotune(
-    configs=configs, key=["N", "NH"], reset_to_zero=["dlnw_ptr", "dpw_ptr"]
+    configs=configs, key=["N", "NH"], reset_to_zero=["dlnw_ptr", "dpw_ptr"],
+    prune_configs_by={"early_config_prune": _layernorm_linear_pair_bias_bwd_prune},
 )
 @triton.jit
 def _layer_norm_linear_bwd(
