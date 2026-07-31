@@ -37,6 +37,13 @@ AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
 USE_SAVEDXN_SPLIT_BWD = os.getenv("TRANSITION_SAVEDXN_SPLIT_BWD", "0") == "1"
 
 
+def _gatebwd_wgmma_enabled() -> bool:
+    """Route the sm90 large-d (K in {256,512}) Version-A gate-backward through the hand-CUDA
+    WGMMA kernel (beats the Triton recompute). Default on; set MINIWORLD_TRANSITION_GATEBWD_WGMMA=0
+    to A/B against the Triton path."""
+    return os.getenv("MINIWORLD_TRANSITION_GATEBWD_WGMMA", "1").strip().lower() not in {"0", "false", "off"}
+
+
 def _cuda_b2b_train_enabled() -> bool:
     """Use the fast inference b2b CUDA kernel for the TRAINING forward too (Version A / save_xn=False:
     saves no xn, backward recomputes it). Same env toggle as the inference dispatch."""
@@ -1222,6 +1229,29 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
                 xn_saved, expand_a_weight, expand_b_weight, grad_expand,
             )
             xn = xn_saved
+        elif (
+            _gatebwd_wgmma_enabled()
+            and torch.cuda.get_device_capability(x2.device)[0] == 9  # Hopper (sm_90a)
+            and K in (256, 512)
+            and x2.dtype == torch.bfloat16
+            and x2.shape[0] % 128 == 0
+        ):
+            # sm90 hand-CUDA WGMMA fused expand + gate-backward: beats the Triton recompute at
+            # large d (d=256 ~1.02-1.05x, d=512 ~1.07-1.18x; d=128 stays Triton where it wins).
+            # Falls back to Triton on any build/launch failure.
+            try:
+                from miniworld_kernels.kernels.transition.cuda import (
+                    transition_expand_gatebwd_wgmma,
+                )
+                h, dAB, xn = transition_expand_gatebwd_wgmma(
+                    x2, rstd, c1, ln_weight, ln_bias,
+                    expand_a_weight, expand_b_weight, grad_expand,
+                )
+            except Exception:  # noqa: BLE001  build/launch unavailable -> Triton
+                h, dAB, xn = _transition_expand_gatebwd_stacked(
+                    x2, rstd, c1, ln_weight, ln_bias,
+                    expand_a_weight, expand_b_weight, grad_expand,
+                )
         else:
             h, dAB, xn = _transition_expand_gatebwd_stacked(
                 x2, rstd, c1, ln_weight, ln_bias,

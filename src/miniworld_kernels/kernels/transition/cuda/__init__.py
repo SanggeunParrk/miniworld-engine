@@ -56,6 +56,42 @@ transition_expand_gate_cuda = load(
 )
 
 
+transition_gatebwd_cuda = load(
+    name="transition_gatebwd_cuda",
+    sources=[str(_dir / "transition_gatebwd_kernel.cu")],
+    extra_cuda_cflags=[
+        "-std=c++17",
+        "-O3",
+        "--use_fast_math",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "-gencode",
+        "arch=compute_90a,code=sm_90a",
+        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
+        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
+        "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+    ],
+    extra_cflags=["-std=c++17"],
+    verbose=False,
+)
+
+
+def transition_expand_gatebwd_wgmma(x, rstd, c1, g, beta, wa, wb, grad_expand):
+    """Hopper WGMMA fused expand + SwiGLU gate backward. Returns (h, dAB, xn):
+    h=(M,ND) silu(a)*b, dAB=(M,2ND) [dA|dB], xn=(M,K). Matches the Triton
+    ``_transition_expand_gatebwd_stacked`` (Version A) for sm90 K in {128,256,512}."""
+    return transition_gatebwd_cuda.transition_expand_gatebwd_wgmma(
+        x, rstd, c1, g.contiguous(), beta.contiguous(),
+        wa.contiguous(), wb.contiguous(), grad_expand.contiguous(),
+    )
+
+
 def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, add_residual=False):
     """Fused LN + SwiGLU expand + squeeze forward for fixed AF3 transition shapes.
 
