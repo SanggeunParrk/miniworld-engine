@@ -1,13 +1,60 @@
 {
   "config_space_hash": "0d6d5fbd5310",
   "entries": {
+    "bfloat16|K2=128,NC=64": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.014240000396966934,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64
+        },
+        "ms": 0.014240000396966934,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64
+        },
+        "ms": 0.014271999709308147,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M": 64
+        },
+        "ms": 0.0144640002399683,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M": 64
+        },
+        "ms": 0.0144640002399683,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
     "bfloat16|K2=256,NC=128": [
       {
         "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M": 64
         },
-        "ms": 0.017472000792622566,
+        "ms": 0.0180479995906353,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -16,7 +63,7 @@
           "BLOCK_K": 32,
           "BLOCK_M": 64
         },
-        "ms": 0.01775999926030636,
+        "ms": 0.018271999433636665,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -25,7 +72,7 @@
           "BLOCK_K": 64,
           "BLOCK_M": 64
         },
-        "ms": 0.01788800023496151,
+        "ms": 0.018303999677300453,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -34,17 +81,17 @@
           "BLOCK_K": 64,
           "BLOCK_M": 32
         },
-        "ms": 0.01849599927663803,
+        "ms": 0.018912000581622124,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 32
+        },
+        "ms": 0.018912000581622124,
         "num_stages": 4,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 32
-        },
-        "ms": 0.018559999763965607,
-        "num_stages": 3,
         "num_warps": 4
       }
     ],
@@ -54,7 +101,7 @@
           "BLOCK_K": 64,
           "BLOCK_M": 64
         },
-        "ms": 0.03699199855327606,
+        "ms": 0.03728000074625015,
         "num_stages": 4,
         "num_warps": 8
       },
@@ -63,7 +110,7 @@
           "BLOCK_K": 64,
           "BLOCK_M": 32
         },
-        "ms": 0.0379519984126091,
+        "ms": 0.038015998899936676,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -72,7 +119,7 @@
           "BLOCK_K": 64,
           "BLOCK_M": 32
         },
-        "ms": 0.038015998899936676,
+        "ms": 0.038176000118255615,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -81,7 +128,7 @@
           "BLOCK_K": 32,
           "BLOCK_M": 64
         },
-        "ms": 0.038495998829603195,
+        "ms": 0.03840000182390213,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -90,7 +137,7 @@
           "BLOCK_K": 64,
           "BLOCK_M": 64
         },
-        "ms": 0.038816001266241074,
+        "ms": 0.039135999977588654,
         "num_stages": 3,
         "num_warps": 8
       }

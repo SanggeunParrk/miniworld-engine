@@ -1,53 +1,53 @@
 {
-  "config_space_hash": "52659416ba76",
+  "config_space_hash": "c6450ac335ab",
   "entries": {
-    "bfloat16|": [
+    "bfloat16|K=512,N=2048": [
       {
         "kwargs": {
-          "BLK": 1024
+          "BLOCK_J": 8
         },
-        "ms": 0.08111999928951263,
+        "ms": 0.009727999567985535,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_J": 8
+        },
+        "ms": 0.009920000098645687,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_J": 16
+        },
+        "ms": 0.009920000098645687,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_J": 8
+        },
+        "ms": 0.01027199998497963,
         "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLK": 2048
+          "BLOCK_J": 16
         },
-        "ms": 0.08115199953317642,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLK": 1024
-        },
-        "ms": 0.081216000020504,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLK": 2048
-        },
-        "ms": 0.081216000020504,
+        "ms": 0.010367999784648418,
         "num_stages": 3,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLK": 4096
-        },
-        "ms": 0.08156800270080566,
-        "num_stages": 3,
-        "num_warps": 8
       }
     ]
   },
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
-  "op": "bias_only_sigmul_fwd",
+  "op": "transition_fold_swiglu",
   "provenance": {
-    "built_utc": "2026-07-14T16:29:49+00:00",
+    "built_utc": "2026-07-31T10:09:29+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
