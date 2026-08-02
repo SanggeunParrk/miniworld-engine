@@ -6,9 +6,9 @@ import sys, os
 from pathlib import Path
 sys.path.insert(0, "/home/snu_hwle/psk/miniworld-kernels/src")
 import torch, triton
-from miniworld_kernels.modules.triangle_multiplication.module import TriangleMultiplication
-from miniworld_kernels.modules.exceptions import ImplementationType
-from miniworld_kernels.modules.triangle_multiplication.baseline_dtv1 import (
+from miniworld_engine.modules.triangle_multiplication.module import TriangleMultiplication
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
     fused_triangle_multiplicative_update_dtv1 as _dtv1,
 )
 

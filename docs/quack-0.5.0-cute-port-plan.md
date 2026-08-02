@@ -32,14 +32,14 @@
   CuTeDSL work, likely multi-session. `make_trivial_tiled_mma(ab_dtype=…)` is also
   deprecated (→ separate `a_dtype`/`b_dtype`) but only warns, not fatal.
  team-gm / MiniWorld are unaffected — they consume
-`miniworld_kernels.ops.*`, and the cute-vs-triton backend choice happens *inside* the
+`miniworld_engine.ops.*`, and the cute-vs-triton backend choice happens *inside* the
 ops whole-op (Phase 6). No consumer code changes.
 
 > **Update (autotune batch, `f2a8529`).** The module-layer dispatch this plan's
 > Phase 6 called for now exists: `modules/dispatch.py` `_MINIWORLD_KNOWN_BEST`
 > already routes `triangle_multiplication` → **CUTE on sm90+ (Hopper/Blackwell)**,
 > Triton pre-Hopper (`_trimul_known_best`). And the new backend-agnostic autotune
-> cache (`src/miniworld_kernels/autotune/`) exposes a **CuTe `select_config` hook**
+> cache (`src/miniworld_engine/autotune/`) exposes a **CuTe `select_config` hook**
 > our ported cute kernels plug their tile/cluster configs into (worked example:
 > `trimul_front_cute`). So Phase 6 shrinks to *making cute actually run on quack
 > 0.5.0* + adding bidir to the table. **Latent consequence:** on B200 with quack

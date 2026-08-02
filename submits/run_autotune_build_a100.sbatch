@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the shipped autotune-config cache on A100 for all adopted ops, then copy the runtime
-# cache into the committed package-data dir (src/miniworld_kernels/autotune/data/<op>/<gpu>.json).
+# cache into the committed package-data dir (src/miniworld_engine/autotune/data/<op>/<gpu>.json).
 # Commit those JSONs so A100 gets tuned configs out of the box. (H100/B200 run this on their box.)
 #SBATCH --job-name=mwk_autotune_build
 #SBATCH --partition=A100
@@ -16,12 +16,12 @@ cd /home/psk6950/miniworld-kernels
 echo "host=$(hostname) date=$(date)"
 pixi run --frozen python -c "import torch; assert torch.cuda.get_device_capability(0)[0]==8, 'need A100'; print('A100 ok')"
 
-pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python -m miniworld_kernels.autotune.build --op all'
+pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python -m miniworld_engine.autotune.build --op all'
 echo "[build exit=$?]"
 
 # Copy runtime cache -> shipped package data (committed).
-RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_kernels}/autotune"
-DST="src/miniworld_kernels/autotune/data"
+RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
+DST="src/miniworld_engine/autotune/data"
 echo "=== copying runtime cache $RT -> $DST ==="
 if [ -d "$RT" ]; then
   cp -rv "$RT/." "$DST/"

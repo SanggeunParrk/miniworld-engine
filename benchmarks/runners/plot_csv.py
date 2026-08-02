@@ -18,7 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from miniworld_kernels.viz import (
+from miniworld_engine.viz import (
     apply_theme,
     canonical,
     label_for,

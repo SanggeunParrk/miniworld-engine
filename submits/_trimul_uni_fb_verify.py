@@ -16,11 +16,11 @@ import sys
 import torch
 import torch.nn.functional as F
 
-from miniworld_kernels.kernels.trimul_inproj.reference import trimul_inproj_pytorch
-from miniworld_kernels.kernels.trimul_inproj.triton.back import trimul_back_triton
-from miniworld_kernels.kernels.trimul_inproj.triton.front import trimul_front_triton
-from miniworld_kernels.modules.exceptions import ImplementationType
-from miniworld_kernels.modules.triangle_multiplication.module import (
+from miniworld_engine.kernels.trimul_inproj.reference import trimul_inproj_pytorch
+from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
+from miniworld_engine.kernels.trimul_inproj.triton.front import trimul_front_triton
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.triangle_multiplication.module import (
     TriangleMultiplication,
 )
 

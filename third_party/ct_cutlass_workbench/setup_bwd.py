@@ -3,7 +3,7 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 CUTLASS = "/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass"
-KDIR = "/home/psk6950/miniworld-kernels/src/miniworld_kernels/kernels/conditioned_transition/cutlass"
+KDIR = "/home/psk6950/miniworld-kernels/src/miniworld_engine/kernels/conditioned_transition/cutlass"
 setup(
     name="ct_bwd_ext",
     ext_modules=[

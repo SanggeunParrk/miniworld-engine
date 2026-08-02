@@ -3,8 +3,8 @@ manual cuda.Event timing, per-phase prints so a hang is visible. Few shapes."""
 import time
 import torch
 
-from miniworld_kernels.modules import Transition, ImplementationType as IT
-from miniworld_kernels.modules import dispatch as D
+from miniworld_engine.modules import Transition, ImplementationType as IT
+from miniworld_engine.modules import dispatch as D
 
 dev = "cuda"; bf16 = torch.bfloat16
 _o90p, _o90 = D.is_sm90plus, D.is_sm90

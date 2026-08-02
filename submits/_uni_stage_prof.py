@@ -13,10 +13,10 @@ import time
 
 import torch
 
-from miniworld_kernels.kernels.layernorm.triton.main import triton_layernorm
-from miniworld_kernels.kernels.layernorm_linear.te_style import _te_forward
-from miniworld_kernels.kernels.trimul_inproj.triton.bidirectional import bidir_front_triton
-from miniworld_kernels.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
+from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+from miniworld_engine.kernels.layernorm_linear.te_style import _te_forward
+from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import bidir_front_triton
+from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
 
 DEVICE, BF16 = "cuda", torch.bfloat16
 

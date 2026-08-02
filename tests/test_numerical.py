@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="fused kernels require a CUDA GPU"
 )
 
-from miniworld_kernels.modules import (  # noqa: E402
+from miniworld_engine.modules import (  # noqa: E402
     AdaptiveLayerNorm,
     AugmentedAttentionPairBias,
     ConditionedTransition,
@@ -29,7 +29,7 @@ from miniworld_kernels.modules import (  # noqa: E402
     TriangleMultiplication,
     Transition,
 )
-from miniworld_kernels.modules.dispatch import KernelBackend  # noqa: E402
+from miniworld_engine.modules.dispatch import KernelBackend  # noqa: E402
 
 DEVICE = "cuda"
 BF16, FP32 = torch.bfloat16, torch.float32

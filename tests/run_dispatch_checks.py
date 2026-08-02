@@ -13,9 +13,9 @@ from pathlib import Path
 
 import torch
 
-from miniworld_kernels.modules import dispatch
-from miniworld_kernels.modules.dispatch import KernelBackend
-from miniworld_kernels.modules.exceptions import (
+from miniworld_engine.modules import dispatch
+from miniworld_engine.modules.dispatch import KernelBackend
+from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
@@ -31,26 +31,26 @@ def check(cond: bool, msg: str) -> None:
 
 
 def _builders():
-    from miniworld_kernels.modules.adaptive_layernorm.module import AdaptiveLayerNorm
-    from miniworld_kernels.modules.augmented_attention.module import (
+    from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
+    from miniworld_engine.modules.augmented_attention.module import (
         AugmentedAttentionPairBias,
     )
-    from miniworld_kernels.modules.conditioned_transition.module import (
+    from miniworld_engine.modules.conditioned_transition.module import (
         ConditionedTransition,
     )
-    from miniworld_kernels.modules.primitives import LayerNorm
-    from miniworld_kernels.modules.transition.module import Transition
-    from miniworld_kernels.modules.triangle_attention.bidirectional import (
+    from miniworld_engine.modules.primitives import LayerNorm
+    from miniworld_engine.modules.transition.module import Transition
+    from miniworld_engine.modules.triangle_attention.bidirectional import (
         BidirectionalTriangleAttention,
     )
-    from miniworld_kernels.modules.triangle_attention.module import (
+    from miniworld_engine.modules.triangle_attention.module import (
         TriangleAttention,
         TrianglePairAttention,
     )
-    from miniworld_kernels.modules.triangle_multiplication.bidirectional import (
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
     )
-    from miniworld_kernels.modules.triangle_multiplication.module import (
+    from miniworld_engine.modules.triangle_multiplication.module import (
         TriangleMultiplication,
     )
 
@@ -127,7 +127,7 @@ def main() -> int:
         os.environ.pop("MINIWORLD_TRIMUL_IMPL", None)
 
     print("== int64 static guard (M-index promotion in large-L kernels) ==")
-    src = Path(__file__).resolve().parents[1] / "src" / "miniworld_kernels" / "kernels"
+    src = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "kernels"
     hardened = [
         ("trimul_inproj/triton/front.py", ".to(tl.int64)"),
         ("trimul_inproj/triton/back_fused.py", ".to(tl.int64)"),
@@ -140,7 +140,7 @@ def main() -> int:
 
     print("== parity: MINIWORLD LayerNorm vs PYTORCH (CUDA) ==")
     if torch.cuda.is_available():
-        from miniworld_kernels.modules.primitives import LayerNorm
+        from miniworld_engine.modules.primitives import LayerNorm
         torch.manual_seed(0)
         x = torch.randn(2, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
         ref = LayerNorm(128, implementation=_I.PYTORCH).cuda().to(torch.bfloat16)

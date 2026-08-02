@@ -15,11 +15,11 @@ import time
 
 import torch
 
-from miniworld_kernels.modules.exceptions import ImplementationType
-from miniworld_kernels.modules.triangle_multiplication import (
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.triangle_multiplication import (
     BidirectionalTriangleMultiplication,
 )
-from miniworld_kernels.modules.triangle_multiplication.module import (
+from miniworld_engine.modules.triangle_multiplication.module import (
     TriangleMultiplication,
 )
 

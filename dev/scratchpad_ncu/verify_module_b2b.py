@@ -1,8 +1,8 @@
 """Module-level correctness: transition module CUDA-b2b inference path vs torch reference."""
 import os
 import torch
-from miniworld_kernels.modules.transition.module import Transition
-from miniworld_kernels.modules.exceptions import ImplementationType
+from miniworld_engine.modules.transition.module import Transition
+from miniworld_engine.modules.exceptions import ImplementationType
 
 dev = "cuda"
 torch.manual_seed(0)

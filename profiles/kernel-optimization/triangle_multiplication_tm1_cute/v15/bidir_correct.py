@@ -2,10 +2,10 @@ import sys, warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0,"/home/snu_hwle/psk/miniworld-kernels/src")
 import torch
-from miniworld_kernels.modules.triangle_multiplication.reference import TriangleMultiplicationReference
-from miniworld_kernels.modules.triangle_multiplication import TriangleMultiplication
-from miniworld_kernels.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
-from miniworld_kernels.modules import ImplementationType
+from miniworld_engine.modules.triangle_multiplication.reference import TriangleMultiplicationReference
+from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
+from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+from miniworld_engine.modules import ImplementationType
 torch.manual_seed(0); d=128; dev="cuda"; L=1024
 def rnd(m):
     for n,p in m.named_parameters():

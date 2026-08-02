@@ -53,7 +53,7 @@ if [ "$TARGETS" = "all" ]; then
   TARGETS="transition triangle_multiplication triangle_multiplication_bidirectional triangle_attention bias_only_attention adaptive_layernorm conditioned_transition augmented_attention_token augmented_attention_atom"
 fi
 for t in $TARGETS; do run_matrix "$t"; done
-DEV_KEY="$(pixi run --frozen python -c "from miniworld_kernels.autotune.cache import gpu_key; print(gpu_key())" 2>/dev/null)"
+DEV_KEY="$(pixi run --frozen python -c "from miniworld_engine.autotune.cache import gpu_key; print(gpu_key())" 2>/dev/null)"
 echo ""; echo "### caches for gpu_key=${DEV_KEY} ###"
-find src/miniworld_kernels/autotune/data -name "${DEV_KEY}.json" -printf '%p\n' 2>/dev/null | sort | wc -l
-echo "CAPTURE DONE (git add src/miniworld_kernels/autotune/data)"
+find src/miniworld_engine/autotune/data -name "${DEV_KEY}.json" -printf '%p\n' 2>/dev/null | sort | wc -l
+echo "CAPTURE DONE (git add src/miniworld_engine/autotune/data)"

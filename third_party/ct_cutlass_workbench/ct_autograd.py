@@ -44,7 +44,7 @@ class CondTransitionCutlass(torch.autograd.Function):
         ND = ctx.ND
         dy = dy.contiguous()
         # gate-bwd via the champion's fused triton kernel (dout,dscale in one pass)
-        from miniworld_kernels.kernels.conditioned_transition.triton.training import _gate_bwd
+        from miniworld_engine.kernels.conditioned_transition.triton.training import _gate_bwd
         dout, dscale = _gate_bwd(out, scale, dy)
         dout = dout.contiguous()
         dcond = dscale @ wsc

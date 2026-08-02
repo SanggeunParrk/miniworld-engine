@@ -12,15 +12,15 @@ import torch  # noqa: F401
 
 # (module, autotuner attr, representative named_args the smem formula/bucket reads)
 CASES = [
-    ("miniworld_kernels.kernels.transition.triton.main", "transition_fwd_kernel", {"n": 4, "N": 256}),
-    ("miniworld_kernels.kernels.transition.triton.main", "transition_bwd_kernel", {"n": 4, "N": 256}),
-    ("miniworld_kernels.kernels.tm1.triton.main", "fused_sigmoid_gate_fwd_kernel", {"N": 128}),
-    ("miniworld_kernels.kernels.tm1.triton.main", "fused_sigmoid_gate_bwd_kernel", {"N": 128}),
-    ("miniworld_kernels.kernels.tm2.triton.main", "fused_sigmoid_gate2_fwd_kernel", {"N": 128}),
-    ("miniworld_kernels.kernels.tm2.triton.main", "fused_sigmoid_gate2_bwd_kernel", {"N": 128}),
-    ("miniworld_kernels.kernels.conditioned_transition.triton.inference",
+    ("miniworld_engine.kernels.transition.triton.main", "transition_fwd_kernel", {"n": 4, "N": 256}),
+    ("miniworld_engine.kernels.transition.triton.main", "transition_bwd_kernel", {"n": 4, "N": 256}),
+    ("miniworld_engine.kernels.tm1.triton.main", "fused_sigmoid_gate_fwd_kernel", {"N": 128}),
+    ("miniworld_engine.kernels.tm1.triton.main", "fused_sigmoid_gate_bwd_kernel", {"N": 128}),
+    ("miniworld_engine.kernels.tm2.triton.main", "fused_sigmoid_gate2_fwd_kernel", {"N": 128}),
+    ("miniworld_engine.kernels.tm2.triton.main", "fused_sigmoid_gate2_bwd_kernel", {"N": 128}),
+    ("miniworld_engine.kernels.conditioned_transition.triton.inference",
      "_cond_transition_inference_kernel", {"BLOCK_K": 128, "D": 128}),
-    ("miniworld_kernels.kernels.conditioned_transition.triton.composed",
+    ("miniworld_engine.kernels.conditioned_transition.triton.composed",
      "_squeeze_gate_kernel", {}),
 ]
 

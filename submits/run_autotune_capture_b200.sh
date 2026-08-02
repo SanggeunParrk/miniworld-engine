@@ -65,7 +65,7 @@ capture_target() {
 capture_target "${CAPTURE_TARGET:-transition}"
 
 RT="$MINIWORLD_KERNELS_CACHE_DIR/autotune"
-DST="src/miniworld_kernels/autotune/data"
+DST="src/miniworld_engine/autotune/data"
 echo ""; echo "### runtime autotune caches produced ###"
 find "$RT" -name '*.json' -printf '%p\n' 2>/dev/null | sort
 if [ "${CAPTURE_COPY:-1}" = "1" ]; then

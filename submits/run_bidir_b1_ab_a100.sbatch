@@ -25,8 +25,8 @@ pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY
 echo "[exit=$?]"
 
 STASHED=0
-if git stash push -- src/miniworld_kernels/kernels/trimul_inproj/triton/bidirectional.py \
-                     src/miniworld_kernels/kernels/trimul_inproj/triton/back_fused.py; then
+if git stash push -- src/miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py \
+                     src/miniworld_engine/kernels/trimul_inproj/triton/back_fused.py; then
   STASHED=1
 fi
 trap '[ "$STASHED" = 1 ] && git stash pop' EXIT

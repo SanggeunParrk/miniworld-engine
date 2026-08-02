@@ -5,7 +5,7 @@ import os
 
 import triton
 
-from miniworld_kernels.autotune import cache as C
+from miniworld_engine.autotune import cache as C
 
 # --- as_cfg_dict over all three config shapes -----------------------------------------------
 tc = triton.Config({"BM": 128}, num_warps=4, num_stages=3)

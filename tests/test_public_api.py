@@ -1,12 +1,12 @@
 """Public/contract API guarantees.
 
-``miniworld_kernels.ops`` is the **consumer contract** (whole model-layer ops);
-``miniworld_kernels.kernels`` is the **internal primitive** surface out of which the
+``miniworld_engine.ops`` is the **consumer contract** (whole model-layer ops);
+``miniworld_engine.kernels`` is the **internal primitive** surface out of which the
 ops are built (also used by the benchmark harness). Both are pinned here so that:
 
   1. Each name set is stable — adding/removing one is a conscious change that must
      update the relevant frozen set (``_OPS_CONTRACT`` / ``_CONTRACT``) and CHANGELOG.
-  2. ``import miniworld_kernels.ops`` / ``.kernels`` stays cheap and side-effect-free:
+  2. ``import miniworld_engine.ops`` / ``.kernels`` stays cheap and side-effect-free:
      importing must NOT pull triton / cutlass / cuequivariance / lightning / hydra
      into ``sys.modules``. Heavy backends load lazily on first *call*, so the package
      imports on a CPU/login node without a GPU stack.
@@ -24,7 +24,7 @@ import pytest
 
 _HAS_TRITON = importlib.util.find_spec("triton") is not None
 
-# Frozen public surface of miniworld_kernels.kernels (== its __all__).
+# Frozen public surface of miniworld_engine.kernels (== its __all__).
 _CONTRACT = frozenset(
     {
         "adaln_inference",
@@ -54,7 +54,7 @@ _HEAVY = ("triton", "cutlass", "cuequivariance", "lightning", "hydra", "quack", 
 
 
 def test_public_kernel_surface_is_frozen() -> None:
-    from miniworld_kernels import kernels
+    from miniworld_engine import kernels
 
     surface = set(kernels.__all__)
     added = surface - _CONTRACT
@@ -71,7 +71,7 @@ def test_public_kernel_surface_is_frozen() -> None:
 )
 def test_every_public_name_resolves() -> None:
     """Each advertised name must actually resolve (lazily) to a callable."""
-    from miniworld_kernels import kernels
+    from miniworld_engine import kernels
 
     for name in sorted(_CONTRACT):
         obj = getattr(kernels, name)
@@ -86,7 +86,7 @@ def test_import_is_side_effect_free() -> None:
     heavy = ", ".join(repr(h) for h in _HEAVY)
     code = (
         "import sys\n"
-        "import miniworld_kernels.kernels as k\n"
+        "import miniworld_engine.kernels as k\n"
         f"_heavy = ({heavy},)\n"
         "leaked = sorted({m.split('.')[0] for m in sys.modules "
         "for h in _heavy if h in m})\n"
@@ -96,7 +96,7 @@ def test_import_is_side_effect_free() -> None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-# Frozen public surface of miniworld_kernels.ops — the WHOLE-OP (composite,
+# Frozen public surface of miniworld_engine.ops — the WHOLE-OP (composite,
 # weights-as-args, autograd-transparent) contract consumed by model code. Primitives
 # live in `kernels` and are NOT re-exported here. Grows as ops are added.
 _OPS_CONTRACT = frozenset(
@@ -114,7 +114,7 @@ _OPS_CONTRACT = frozenset(
 
 
 def test_ops_surface_is_frozen() -> None:
-    from miniworld_kernels import ops
+    from miniworld_engine import ops
 
     surface = set(ops.__all__)
     added = surface - _OPS_CONTRACT
@@ -130,7 +130,7 @@ def test_ops_import_is_side_effect_free() -> None:
     heavy = ", ".join(repr(h) for h in _HEAVY)
     code = (
         "import sys\n"
-        "import miniworld_kernels.ops as o\n"
+        "import miniworld_engine.ops as o\n"
         f"_heavy = ({heavy},)\n"
         "leaked = sorted({m.split('.')[0] for m in sys.modules "
         "for h in _heavy if h in m})\n"

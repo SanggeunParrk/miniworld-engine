@@ -1,9 +1,9 @@
 import sys, torch, torch.nn as nn, warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0,"/home/snu_hwle/psk/miniworld-kernels/src")
-from miniworld_kernels.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
-from miniworld_kernels.modules.exceptions import ImplementationType
-from miniworld_kernels.modules.triangle_multiplication.module import _load_cute_fns
+from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.triangle_multiplication.module import _load_cute_fns
 torch.manual_seed(0)
 DEV="cuda"; d=128; h=d; L=int(sys.argv[1]) if len(sys.argv)>1 else 256
 base=BidirectionalTriangleMultiplication(d_pair=d,d_hidden=h,implementation=ImplementationType.PYTORCH).to(DEV)

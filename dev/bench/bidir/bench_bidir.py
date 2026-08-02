@@ -2,10 +2,10 @@ import sys, warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0, "/home/snu_hwle/psk/mw-bidir/src")
 import torch, triton
-from miniworld_kernels.modules.triangle_multiplication.bidirectional import (
+from miniworld_engine.modules.triangle_multiplication.bidirectional import (
     BidirectionalTriangleMultiplication as TMB)
-from miniworld_kernels.modules.triangle_multiplication import TriangleMultiplication as TM
-from miniworld_kernels.modules import ImplementationType
+from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication as TM
+from miniworld_engine.modules import ImplementationType
 
 torch.manual_seed(0)
 torch.backends.cuda.matmul.allow_tf32 = True

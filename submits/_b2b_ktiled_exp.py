@@ -4,8 +4,8 @@ faster AND correct, it is the large-d forward optimization (route module d>=256 
 import torch
 import triton
 
-from miniworld_kernels.modules import Transition, ImplementationType as IT
-from miniworld_kernels.kernels.transition.triton.fused import transition_b2b_ktiled
+from miniworld_engine.modules import Transition, ImplementationType as IT
+from miniworld_engine.kernels.transition.triton.fused import transition_b2b_ktiled
 
 dev = "cuda"; bf16 = torch.bfloat16
 torch.manual_seed(0)

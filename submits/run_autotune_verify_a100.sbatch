@@ -22,9 +22,9 @@ import os, warnings, torch
 assert torch.cuda.get_device_capability(0)[0] == 8, "need A100"
 
 # 1) import gate (new module + pilot kernel import cleanly)
-from miniworld_kernels.autotune import cache as C
-from miniworld_kernels.autotune.build import build_trimul_bidir_front
-from miniworld_kernels.kernels.trimul_inproj.triton import bidirectional as B
+from miniworld_engine.autotune import cache as C
+from miniworld_engine.autotune.build import build_trimul_bidir_front
+from miniworld_engine.kernels.trimul_inproj.triton import bidirectional as B
 print("import ok; gpu_key =", C.gpu_key())
 
 FULL = list(B._bidir_front_kernel.configs)

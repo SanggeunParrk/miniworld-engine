@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[1] / "src" / "miniworld_kernels" / "kernels"
+_SRC = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "kernels"
 
 # (file, must-contain snippet) — the M-index promotion that keeps large-L offsets int64.
 _HARDENED = [

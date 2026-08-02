@@ -1,4 +1,4 @@
-# miniworld-kernels
+# miniworld-engine
 
 Dedicated GPU kernel-development repo for MiniWorld / AF3-style ops. The idea is
 to **cut one op out of the full model and optimize it in isolation**:
@@ -14,10 +14,10 @@ This repo is often accessed from a cluster login node.
 
 Repo structure:
 
-- A **kernel** (`src/miniworld_kernels/kernels/<unit>/`) is a chunk you deliberately chose to fuse and
+- A **kernel** (`src/miniworld_engine/kernels/<unit>/`) is a chunk you deliberately chose to fuse and
   hand-optimize. It owns its backend implementations (`triton/`, `cute/`,
   `cuda/`) plus a PyTorch `reference.py` and a public `interface.py`.
-- A **module** (`src/miniworld_kernels/modules/<op>/`) is a part cut from the
+- A **module** (`src/miniworld_engine/modules/<op>/`) is a part cut from the
   model (e.g. `triangle_multiplication`). It only *connects* kernels — it has
   **no** `triton/cute/cuda` folders.
 - A **benchmark** lives next to its target type:
@@ -32,7 +32,7 @@ Kernels and modules were consolidated here out of `team-gm`
 ## Layout
 
 ```
-src/miniworld_kernels/
+src/miniworld_engine/
 ├── _typecheck.py                 # standalone team_gm.typecheck shim
 ├── kernels/                      # fusion units: importable backends
 │   ├── tm1/  tm2/                #   left/right- and output-gated GEMM kernels

@@ -18,7 +18,7 @@ echo "host=$(hostname) date=$(date)"
 echo "### (1) int64-offset correctness: bidir d=512 L=768 fwd+bwd vs reference ###"
 pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python - <<PY
 import torch
-from miniworld_kernels.modules import BidirectionalTriangleMultiplication as Bidir, ImplementationType as IT
+from miniworld_engine.modules import BidirectionalTriangleMultiplication as Bidir, ImplementationType as IT
 torch.manual_seed(0)
 dev, bf16 = "cuda", torch.bfloat16
 d, L = 512, 768
@@ -42,11 +42,11 @@ PY'
 echo "[correctness exit=$?]"
 
 echo "### (2) rebuild full shipped cache ###"
-pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python -m miniworld_kernels.autotune.build --op all'
+pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python -m miniworld_engine.autotune.build --op all'
 echo "[build exit=$?]"
 
-RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_kernels}/autotune"
-DST="src/miniworld_kernels/autotune/data"
+RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
+DST="src/miniworld_engine/autotune/data"
 echo "### (3) copy $RT -> $DST ###"
 [ -d "$RT" ] && cp -rv "$RT/." "$DST/" && find "$DST" -name '*.json' -print
 echo "AUTOTUNE BUILD2 DONE"

@@ -2,7 +2,7 @@ import sys, warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0, "/home/snu_hwle/psk/miniworld-kernels/src")
 import torch
-from miniworld_kernels.kernels.tm1.cute.sm100_gate_gemm_collective import gate_gemm
+from miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective import gate_gemm
 
 torch.manual_seed(0)
 def check(M, N=128, K=128, mmajor=True):

@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to the public API (`miniworld_kernels.kernels`) are recorded
+Notable changes to the public API (`miniworld_engine.kernels`) are recorded
 here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
@@ -9,7 +9,7 @@ The public surface is enforced by `tests/test_public_api.py`.
 ## [Unreleased]
 
 ### Added
-- **`miniworld_kernels.ops` — the whole-op consumer contract.** Complete,
+- **`miniworld_engine.ops` — the whole-op consumer contract.** Complete,
   autograd-transparent model-layer ops (weights as arguments, backend dispatch +
   fwd/bwd inside), consumed as a single call: `triangle_multiplicative_update`,
   `triangle_attention`, `transition`, `conditioned_transition`,
@@ -27,7 +27,7 @@ The public surface is enforced by `tests/test_public_api.py`.
   (`torch`, `triton`, `einops`, `jaxtyping`, `numpy`). Benchmark harness,
   comparison baselines, the CuTeDSL backend, and dev tooling moved to
   `[project.optional-dependencies]` extras (`bench`, `baselines`, `cute`,
-  `dev`). Installing the package for `miniworld_kernels.kernels` no longer pulls
+  `dev`). Installing the package for `miniworld_engine.kernels` no longer pulls
   lightning / hydra / cuequivariance / scipy / cutlass.
 
 - Moved 21 unreferenced dev/probe/experiment kernel files (perf probes,

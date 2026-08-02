@@ -23,15 +23,15 @@ pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY
 import importlib
 # parse/import the edited hot files + every module class the bench uses
 mods = [
-    "miniworld_kernels",
-    "miniworld_kernels.modules.dispatch",
-    "miniworld_kernels.modules.transition.module",
-    "miniworld_kernels.kernels.transition.triton.fused",
+    "miniworld_engine",
+    "miniworld_engine.modules.dispatch",
+    "miniworld_engine.modules.transition.module",
+    "miniworld_engine.kernels.transition.triton.fused",
 ]
 for m in mods:
     importlib.import_module(m)
     print("import ok:", m)
-from miniworld_kernels.modules import (  # noqa: E402
+from miniworld_engine.modules import (  # noqa: E402
     Transition, TriangleMultiplication, TriangleAttention,
     AdaptiveLayerNorm, ConditionedTransition,
 )

@@ -11,7 +11,7 @@ set -uo pipefail
 cd /home/psk6950/miniworld-kernels
 pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python - <<PY
 import torch
-from miniworld_kernels.modules import BidirectionalTriangleMultiplication as Bidir, ImplementationType as IT
+from miniworld_engine.modules import BidirectionalTriangleMultiplication as Bidir, ImplementationType as IT
 dev,bf16="cuda",torch.bfloat16
 def cos(a,b):
     a,b=a.float().flatten(),b.float().flatten(); return torch.nn.functional.cosine_similarity(a,b,dim=0).item()

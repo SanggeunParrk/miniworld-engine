@@ -33,7 +33,7 @@ Rules of thumb:
   drivers anywhere under `benchmarks/`.
 - **Profiling (nsys/ncu) is instrumented in `src/`, not as a benchmarks script.** If a kernel
   needs profiling or logging, add the nsys/ncu hooks to that kernel's own
-  `src/miniworld_kernels/...` code and drive it through the normal harness — do not drop a
+  `src/miniworld_engine/...` code and drive it through the normal harness — do not drop a
   one-off capture script under `benchmarks/`. Capture outputs still land in the target's
   `profiles/`.
 - Profiler capture files go in the target's `profiles/`, never `artifacts/`.
@@ -141,7 +141,7 @@ Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
 All figures share one palette/theme so the benchmark
 figures read as **one coherent set** (this matters for the paper: a reviewer
 sees the same backend in the same colour in every plot). Defined once in
-`src/miniworld_kernels/viz/style.py` and imported by:
+`src/miniworld_engine/viz/style.py` and imported by:
 
 - `benchmarks/runners/plot_csv.py` (grouped bar plots from benchmark CSVs).
 
@@ -166,7 +166,7 @@ Rules baked into the module:
 
 - **Generated results go in the target's `artifacts/`**; durable explanations
   go in `docs/`.
-- **Use the shared style** (`miniworld_kernels.viz`) for every figure — never
+- **Use the shared style** (`miniworld_engine.viz`) for every figure — never
   ad-hoc colours.
 - **Both inference and training** when the op is used in training.
 - Latency plots use "lower is better"; speedup plots use "higher is better".

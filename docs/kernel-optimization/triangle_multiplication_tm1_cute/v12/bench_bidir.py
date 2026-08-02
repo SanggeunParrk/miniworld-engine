@@ -2,10 +2,10 @@ import sys, torch, torch.nn as nn, warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0,"/home/snu_hwle/psk/miniworld-kernels/src")
 import triton
-from miniworld_kernels.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
-from miniworld_kernels.modules.exceptions import ImplementationType
-from miniworld_kernels.modules.triangle_multiplication.module import TriangleMultiplication
-from miniworld_kernels.modules.triangle_multiplication.baseline_dtv1_bidir import fused_bidirectional_dtv1
+from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.triangle_multiplication.module import TriangleMultiplication
+from miniworld_engine.modules.triangle_multiplication.baseline_dtv1_bidir import fused_bidirectional_dtv1
 DEV="cuda"; DT=torch.bfloat16; d=128
 def cos(a,b): a,b=a.float().flatten(),b.float().flatten(); return (a@b/(a.norm()*b.norm()+1e-20)).item()
 

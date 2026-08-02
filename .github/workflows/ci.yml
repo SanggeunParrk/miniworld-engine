@@ -28,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff pyright pytest
           # editable install WITHOUT deps: the contract/guard tests import only the
-          # lazy `miniworld_kernels.kernels` surface (no torch/triton needed), so a
+          # lazy `miniworld_engine.kernels` surface (no torch/triton needed), so a
           # CPU runner stays fast and free of the GPU stack.
           pip install -e . --no-deps
 

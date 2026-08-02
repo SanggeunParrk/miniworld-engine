@@ -2,9 +2,9 @@
 7 timed reps each -> median + min/max spread, to quantify variance."""
 import statistics, torch, torch.nn.functional as F
 torch.backends.cuda.matmul.allow_tf32 = True
-from miniworld_kernels.kernels.conditioned_transition.triton.training import cond_transition_train, set_forward_mode
+from miniworld_engine.kernels.conditioned_transition.triton.training import cond_transition_train, set_forward_mode
 from ct_full import cond_transition_train_full
-from miniworld_kernels.kernels.conditioned_transition.triton.train_12_345 import cond_transition_train_12_345 as fused_dgrad
+from miniworld_engine.kernels.conditioned_transition.triton.train_12_345 import cond_transition_train_12_345 as fused_dgrad
 A=48
 def ref(x,cond,Wa,Wb,Ws,Wsc,bsc):
     h=F.silu(x@Wa.t())*(x@Wb.t()); o=h@Ws.t(); s=cond@Wsc.t()+bsc; return torch.sigmoid(s)*o

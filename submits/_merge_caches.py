@@ -13,7 +13,7 @@ import os
 import sys
 
 ROOT = os.path.expanduser("~/.cache/mwk_cap")
-DST = "src/miniworld_kernels/autotune/data"
+DST = "src/miniworld_engine/autotune/data"
 TOPK = 5
 
 

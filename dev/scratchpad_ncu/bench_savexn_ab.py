@@ -1,7 +1,7 @@
 """Training fwd+bwd A/B: save_xn=True (Version B, save xn) vs save_xn=False (Version A, recompute xn).
 Measures the full step (forward + .backward()) for the transition fused training path."""
 import torch, time
-from miniworld_kernels import kernels
+from miniworld_engine import kernels
 
 dev = "cuda"
 torch.manual_seed(0)

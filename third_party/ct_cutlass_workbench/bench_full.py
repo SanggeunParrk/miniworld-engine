@@ -9,7 +9,7 @@ try:
 except Exception:
     pass
 sys.path.insert(0, "/home/psk6950/miniworld-kernels/_ct_cutlass")
-from miniworld_kernels.kernels.conditioned_transition.triton.training import (
+from miniworld_engine.kernels.conditioned_transition.triton.training import (
     cond_transition_train, set_forward_mode,
 )
 from ct_full import cond_transition_train_full

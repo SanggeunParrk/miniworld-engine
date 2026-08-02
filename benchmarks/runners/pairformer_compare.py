@@ -7,7 +7,7 @@ Measures **inference** and **training** as two separate cases (never a single
   * training  = fwd + bwd (autograd; ours-trimul dispatches to the v6 merged
                 training kernel inside the module)
 
-The Pairformer is a pure shell (miniworld_kernels.modules.Pairformer): it only
+The Pairformer is a pure shell (miniworld_engine.modules.Pairformer): it only
 forwards ``implementation`` to its sub-modules, which each dispatch to the
 concrete kernel for the running GPU. So this measures the composed effect of
 every per-op backend choice under a realistic AF3 block stack.
@@ -36,7 +36,7 @@ if _SRC not in sys.path:
 import torch
 import triton
 
-from miniworld_kernels.modules import ImplementationType, Pairformer, PairformerConfig
+from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
 
 DEVICE = torch.device("cuda")
 IMPLS = {
@@ -67,7 +67,7 @@ def apply_stability_workarounds() -> list[str]:
     if cap[0] >= 10 and os.environ.get("MINIWORLD_TRANSITION_CUDA_B2B") is None:
         os.environ["MINIWORLD_TRANSITION_CUDA_B2B"] = "0"
         notes.append("transition CUDA b2b disabled on sm_100 (build unsupported) -> triton path")
-    from miniworld_kernels.kernels.bias_only_attention import dispatch as _bod
+    from miniworld_engine.kernels.bias_only_attention import dispatch as _bod
 
     _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005
     notes.append("triangle-attention gate forced non-fused (cudagraph-capturable, faster here)")

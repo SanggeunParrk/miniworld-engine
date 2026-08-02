@@ -11,22 +11,22 @@ from pathlib import Path
 import triton
 from triton.runtime.autotuner import Autotuner
 
-from miniworld_kernels.autotune import cache as C
+from miniworld_engine.autotune import cache as C
 
 MODS = [
-    "miniworld_kernels.kernels.triangle_attention.triton.main",
-    "miniworld_kernels.kernels.augmented_attention.triton.main",
-    "miniworld_kernels.kernels.adaln.triton.training",
-    "miniworld_kernels.kernels.adaln.triton.inference",
-    "miniworld_kernels.kernels.conditioned_transition.triton.inference",
-    "miniworld_kernels.kernels.conditioned_transition.triton.composed",
-    "miniworld_kernels.kernels.bias_only_attention.triton.gate_out",
-    "miniworld_kernels.kernels.layernorm_linear.triton.fused",
-    "miniworld_kernels.kernels.layernorm_linear.triton.stats",
-    "miniworld_kernels.kernels.tm1.triton.main",
-    "miniworld_kernels.kernels.tm2.triton.main",
-    "miniworld_kernels.kernels.transition.triton.fused",
-    "miniworld_kernels.kernels.transition.triton.main",
+    "miniworld_engine.kernels.triangle_attention.triton.main",
+    "miniworld_engine.kernels.augmented_attention.triton.main",
+    "miniworld_engine.kernels.adaln.triton.training",
+    "miniworld_engine.kernels.adaln.triton.inference",
+    "miniworld_engine.kernels.conditioned_transition.triton.inference",
+    "miniworld_engine.kernels.conditioned_transition.triton.composed",
+    "miniworld_engine.kernels.bias_only_attention.triton.gate_out",
+    "miniworld_engine.kernels.layernorm_linear.triton.fused",
+    "miniworld_engine.kernels.layernorm_linear.triton.stats",
+    "miniworld_engine.kernels.tm1.triton.main",
+    "miniworld_engine.kernels.tm2.triton.main",
+    "miniworld_engine.kernels.transition.triton.fused",
+    "miniworld_engine.kernels.transition.triton.main",
 ]
 
 # op-tag -> the live autotuner (its .configs = the CURRENT grid, and its early_config_prune)
@@ -42,7 +42,7 @@ for m in MODS:
                 live[op] = obj
 
 gk = C.gpu_key()
-DATA = Path("src/miniworld_kernels/autotune/data")
+DATA = Path("src/miniworld_engine/autotune/data")
 print(f"gpu_key: {gk}\n")
 
 # ---------------------------------------------------------------------------- #

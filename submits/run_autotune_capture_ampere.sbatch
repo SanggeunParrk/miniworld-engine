@@ -7,7 +7,7 @@
 #   MINIWORLD_AUTOTUNE_CAPTURE=1  -> bench.py installs capture, records per-config timings,
 #                                    flushes top-5 per (op,dtype,bucket) to the cache.
 # The capture builder writes DIRECTLY into the committed in-repo cache
-# (src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json) — there is no runtime-dir copy
+# (src/miniworld_engine/autotune/data/<op>/<gpu_key>.json) — there is no runtime-dir copy
 # step (cache.py deliberately dropped the $MINIWORLD_KERNELS_CACHE_DIR override). After the
 # job, the new "NVIDIA RTX A5000 (sm86).json" / "NVIDIA RTX A6000 (sm86).json" entries are
 # ready to `git add` + commit. cute/cuda kernels are sm_90+ (not built/tuned here).
@@ -85,10 +85,10 @@ capture_target() {
 
 capture_target "${CAPTURE_TARGET:-transition}"
 
-DST="src/miniworld_kernels/autotune/data"
+DST="src/miniworld_engine/autotune/data"
 echo ""
 echo "### autotune cache JSONs now present for this card (grep this GPU key) ###"
-DEV_KEY="$(pixi run --frozen python -c "from miniworld_kernels.autotune.cache import gpu_key; print(gpu_key())" 2>/dev/null)"
+DEV_KEY="$(pixi run --frozen python -c "from miniworld_engine.autotune.cache import gpu_key; print(gpu_key())" 2>/dev/null)"
 echo "gpu_key=${DEV_KEY}"
 find "$DST" -name "${DEV_KEY}.json" -printf '%p\n' 2>/dev/null | sort
 echo "AUTOTUNE CAPTURE DONE target=${CAPTURE_TARGET:-transition}  (git add ${DST} to commit)"

@@ -23,9 +23,9 @@ echo "[dispatch exit=$?]"
 echo "### (2)+(3) wiring safety + pilot hit ###"
 pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python - <<PY
 import warnings, torch
-from miniworld_kernels.modules import Transition, ImplementationType as IT
-from miniworld_kernels.autotune import build as _b, cache as C
-from miniworld_kernels.kernels.trimul_inproj.triton import bidirectional as B
+from miniworld_engine.modules import Transition, ImplementationType as IT
+from miniworld_engine.autotune import build as _b, cache as C
+from miniworld_engine.kernels.trimul_inproj.triton import bidirectional as B
 
 # (2) transition d=256 (miniworld) -> pre-Hopper split -> transition_fwd_kernel (wired prune).
 # Expect: a "no tuned autotune cache" warning for transition_split_fwd AND a correct run.

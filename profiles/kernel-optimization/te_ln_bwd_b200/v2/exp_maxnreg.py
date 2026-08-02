@@ -1,5 +1,5 @@
 import torch, triton
-from miniworld_kernels.kernels.layernorm_linear import te_style as T
+from miniworld_engine.kernels.layernorm_linear import te_style as T
 N=128
 def mm(M,N):  # (M,N) tensor with m-major strides (1,M)
     return torch.randn(N,M,device="cuda",dtype=torch.bfloat16).t()

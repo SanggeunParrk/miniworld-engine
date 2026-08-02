@@ -3,7 +3,7 @@ import torch, torch.nn.functional as F
 import ct_b2b_ext as ext
 torch.backends.cuda.matmul.allow_tf32=True; torch.backends.cudnn.allow_tf32=True
 import sys; sys.path.insert(0,"/home/psk6950/miniworld-kernels/_ct_cutlass")
-from miniworld_kernels.kernels.conditioned_transition.triton.inference import cond_transition_inference
+from miniworld_engine.kernels.conditioned_transition.triton.inference import cond_transition_inference
 
 def cos(a,b):
     a=a.flatten().double(); b=b.flatten().double(); return (a@b/(a.norm()*b.norm()+1e-20)).item()

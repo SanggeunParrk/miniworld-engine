@@ -6,7 +6,7 @@ caches — they are committed to git and shared across machines.
 
 The persistent on-disk cache root is a single, canonical, in-repo location:
 
-- `src/miniworld_kernels/autotune/data/<subdir>/<gpu_key>.json`
+- `src/miniworld_engine/autotune/data/<subdir>/<gpu_key>.json`
 
 where `<subdir>` is `ln_bwd_dispatch`, `bias_only_dispatch`, etc. There is
 deliberately **no** `$MINIWORLD_KERNELS_CACHE_DIR` / `$XDG_CACHE_HOME` / `~/.cache`
@@ -18,8 +18,8 @@ as a submodule) already carries the calibrated caches.
 
 Code:
 
-- `src/miniworld_kernels/kernels/layernorm/dispatch_cache.py`
-- `src/miniworld_kernels/kernels/layernorm/compile_native.py`
+- `src/miniworld_engine/kernels/layernorm/dispatch_cache.py`
+- `src/miniworld_engine/kernels/layernorm/compile_native.py`
 
 `miniworld` LayerNorm has three correct backward implementations and picks the
 fastest one per shape. The H100 heuristic is the static default; unknown GPUs
@@ -59,7 +59,7 @@ The static heuristic (also the universal fallback) is:
 
 ## LayerNorm Cache Format
 
-- **Location:** `src/miniworld_kernels/autotune/data/ln_bwd_dispatch/<gpu>.json` (in-repo, committed).
+- **Location:** `src/miniworld_engine/autotune/data/ln_bwd_dispatch/<gpu>.json` (in-repo, committed).
 - **Key:** GPU name + compute capability + Triton version
   (e.g. `NVIDIA_H100_80GB_HBM3_sm90_triton3.6.0.json`) — a driver/Triton upgrade or
   a different GPU gets its own entry.
@@ -82,7 +82,7 @@ The static heuristic (also the universal fallback) is:
 
 Code:
 
-- `src/miniworld_kernels/kernels/bias_only_attention/dispatch.py`
+- `src/miniworld_engine/kernels/bias_only_attention/dispatch.py`
 
 This cache uses the same root policy and GPU key helper as LayerNorm. It chooses
 among correct attention backend variants and stores the per-GPU crossover. A bad
@@ -90,7 +90,7 @@ or missing cache only changes speed; it falls back to the static H100 heuristic.
 
 ## In-Process Dispatch
 
-`src/miniworld_kernels/kernels/trimul_inproj/cute/dispatch.py` keeps a process
+`src/miniworld_engine/kernels/trimul_inproj/cute/dispatch.py` keeps a process
 local dispatch table for cuBLAS vs CuTe/quack candidates. It is intentionally
 not persisted: the choices are tied to live thunks, current process imports, and
 shape-specific warmup state.
@@ -113,7 +113,7 @@ CUDA-graph capture.
 
 Nothing to do — just run. The first training step (or first time each
 `(d, M-bucket)` is hit) calibrates and writes the cache under
-`src/miniworld_kernels/autotune/data/ln_bwd_dispatch/`; subsequent runs and
+`src/miniworld_engine/autotune/data/ln_bwd_dispatch/`; subsequent runs and
 re-imports read it. Commit the JSON so other machines get the calibrated choice.
 To pre-warm explicitly, run one inference+training pass per shape you care about.
 To inspect/clear, look at / delete the JSON under that in-repo dir.
@@ -124,7 +124,7 @@ To inspect/clear, look at / delete the JSON under that in-repo dir.
 Separate from the LayerNorm *path* cache above: this ships the top-K tuned **autotune configs**
 per `(gpu, dtype, op, shape-bucket)` so runs skip the full-grid autotune tax and performance is
 reproducible across machines. It is **backend-agnostic** — one cache format + storage layer
-serves Triton, CuTe, and CUDA kernels. Code: `src/miniworld_kernels/autotune/` (`cache.py`,
+serves Triton, CuTe, and CUDA kernels. Code: `src/miniworld_engine/autotune/` (`cache.py`,
 `build.py`).
 
 **INVARIANT:** config choice is performance-only — every candidate config computes the same
@@ -151,7 +151,7 @@ changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back
 
 ## Cache location & format
 
-- Single canonical, in-repo location (committed to git): `src/miniworld_kernels/autotune/data/<op>/<gpu_key>.json`.
+- Single canonical, in-repo location (committed to git): `src/miniworld_engine/autotune/data/<op>/<gpu_key>.json`.
   Reads (dispatch/prune) and writes (builder / `RUN_AUTOTUNE` regen) both target this path — no
   `~/.cache` / env-var override — so a stale per-user cache can never shadow the committed configs.
 - `gpu_key` = device name + capability (e.g. `NVIDIA A100 80GB PCIe (sm80)`); entries keyed
@@ -160,7 +160,7 @@ changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back
 
 ## Building the shipped cache (on the target GPU)
 
-There are two builders; both write directly into `src/miniworld_kernels/autotune/data/`,
+There are two builders; both write directly into `src/miniworld_engine/autotune/data/`,
 so after a build you just `git add` + commit the JSONs. A new GPU (H100/B200/…) is enabled by
 running one of these on that box and committing its JSONs.
 
@@ -182,7 +182,7 @@ Validated against the hand builder: capture reproduces its top-1 selections (nea
 
 **2. Explicit builder (per-kernel, for the pilot kernels).**
 
-    PYTHONPATH=src python -m miniworld_kernels.autotune.build --op all     # or --op <name>
+    PYTHONPATH=src python -m miniworld_engine.autotune.build --op all     # or --op <name>
 
 Its core `tune_bucket(op, gk, dtype, bucket, candidates, run_ms, csh)` is backend-agnostic: it
 benches each candidate via a `run_ms(cfg) -> ms` closure and stores the top-K. Triton builders
@@ -203,7 +203,7 @@ cannot run on Ampere):
   kernel's own default on a miss (so it is a no-op until a cache is shipped):
 
   ```python
-  from miniworld_kernels.autotune import select_config
+  from miniworld_engine.autotune import select_config
   CANDS = [dict(tile_m=128, tile_n=256, cluster_m=1, cluster_n=1, pingpong=False), ...]
   def pick(dev, M, N, dtype):
       best = select_config("trimul_front_cute", dtype=str(dtype),

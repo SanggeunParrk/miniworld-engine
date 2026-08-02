@@ -1,7 +1,7 @@
 """Grad correctness: Version A (save_xn=False, recompute, now stacked) & B (save_xn=True)
 vs a pure-torch transition reference. All grads must cos ~1.0."""
 import torch
-from miniworld_kernels import kernels
+from miniworld_engine import kernels
 
 dev = "cuda"; torch.manual_seed(0)
 d, n, eps = 128, 4, 1e-5

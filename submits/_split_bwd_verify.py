@@ -6,7 +6,7 @@ os.environ["MINIWORLD_TRANSITION_FORCE_SPLIT"] = "1"
 import torch
 import triton
 
-from miniworld_kernels.modules import Transition, ImplementationType as IT
+from miniworld_engine.modules import Transition, ImplementationType as IT
 
 dev = "cuda"; bf16 = torch.bfloat16
 torch.manual_seed(0)

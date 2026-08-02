@@ -53,7 +53,7 @@ cos>=0.999, bf16 only, h off HBM, 255-reg / 1-CTA occupancy expected to be uncha
 mem/spill (if the fragment-fill adds spill, that's a fail → note it). One focused experiment only.
 
 ## Deliverable THIS call (NO commit)
-1. Edit `src/miniworld_kernels/kernels/transition/cuda/transition_b2b_kernel.cu` per v10.
+1. Edit `src/miniworld_engine/kernels/transition/cuda/transition_b2b_kernel.cu` per v10.
 2. Write `docs/kernel-optimization/transition_b2b/v10.md`: environment; the v5 baseline + v9 lesson
    (v9 confounded STS-removal with global-LDG); v10 hypothesis (isolate STS removal, keep cp.async x
    + LDS fragment fill); exact code changes (diff vs v5); the single-variable-vs-v9 framing; and

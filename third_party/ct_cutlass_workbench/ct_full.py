@@ -10,7 +10,7 @@ import torch
 import ct_gemm_ext as G
 import ct_bwd_ext as B
 import ct_train_ext as T          # fused_h, fused_y (gate-fused squeeze)
-from miniworld_kernels.kernels.conditioned_transition.triton.training import (
+from miniworld_engine.kernels.conditioned_transition.triton.training import (
     _swiglu, _gate, _gate_bwd,
 )
 

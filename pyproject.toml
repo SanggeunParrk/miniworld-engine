@@ -1,12 +1,12 @@
 [project]
-name = "miniworld-kernels"
+name = "miniworld-engine"
 version = "0.1.0"
 requires-python = ">=3.10"
 description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
 dependencies = [
   # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
-  # inherits when it consumes miniworld-kernels as a submodule / dependency:
-  # only what `miniworld_kernels.kernels.*` needs to import and run its Triton
+  # inherits when it consumes miniworld-engine as a submodule / dependency:
+  # only what `miniworld_engine.kernels.*` needs to import and run its Triton
   # entry points. Bench harness, comparison baselines, and the CuTeDSL backend
   # are optional extras below so the parent never drags them in.
   "torch>=2.8",
@@ -34,7 +34,7 @@ bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
 # Dev: tests, lint, type smoke-check.
 dev = ["pytest", "ruff", "pyright"]
 # FlashAttention-4 (Blackwell/sm_100) — EXTERNAL CuTeDSL JIT wheel, used only as a
-# benchmark comparison backend (miniworld-kernels ships no flash kernel of its own).
+# benchmark comparison backend (miniworld-engine ships no flash kernel of its own).
 # Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
 # install with: uv pip install --prerelease=allow "flash-attn-4[cu13]"
 flash = ["flash-attn-4"]
@@ -88,19 +88,19 @@ ignore = [
 ]
 # team-gm's kernel relaxation (math-notation names, no annotations) for the
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
-"src/miniworld_kernels/kernels/**/*.py" = []
+"src/miniworld_engine/kernels/**/*.py" = []
 # Vendored kernel *bodies* are faithful copies (triton main/perf/miniworld,
 # CuTeDSL, CUDA) from team-gm branches + FlashAttentionBias — not linted, exactly
 # as the originals are not held to this repo's standards.
-"src/miniworld_kernels/kernels/**/triton/*.py" = ["ALL"]
-"src/miniworld_kernels/kernels/**/cute/*.py" = ["ALL"]
-"src/miniworld_kernels/kernels/**/cuda/*.py" = ["ALL"]
+"src/miniworld_engine/kernels/**/triton/*.py" = ["ALL"]
+"src/miniworld_engine/kernels/**/cute/*.py" = ["ALL"]
+"src/miniworld_engine/kernels/**/cuda/*.py" = ["ALL"]
 # dtv1 is the vendored perf/trimul fused kernel kept as a baseline.
-"src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
-"src/miniworld_kernels/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [
+"src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py" = ["ALL"]
+"src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1_bidir.py" = [
   "ALL",
 ]
-"src/miniworld_kernels/_typecheck.py" = []
+"src/miniworld_engine/_typecheck.py" = []
 
 [tool.ruff.format]
 docstring-code-format = false
@@ -190,7 +190,7 @@ no-build-isolation = ["transformer-engine-torch"]
 # `[project.dependencies]` (torch, triton, einops, jaxtyping, numpy) plus every
 # extra (cute/baselines/bench/dev) are pulled via the editable install below.
 [tool.pixi.pypi-dependencies]
-miniworld-kernels = { path = ".", editable = true, extras = ["cute", "baselines", "bench", "dev"] }
+miniworld-engine = { path = ".", editable = true, extras = ["cute", "baselines", "bench", "dev"] }
 # Transformer Engine (cu12) is dev-only and needs the special no-build-isolation
 # handling above, so it stays an explicit pixi dep rather than a package extra.
 transformer-engine = { version = "*", extras = ["pytorch", "core-cu12"] }

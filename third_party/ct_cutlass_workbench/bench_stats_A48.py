@@ -2,7 +2,7 @@
 7 timed reps each -> median + min/max spread, to quantify variance."""
 import statistics, torch, torch.nn.functional as F
 torch.backends.cuda.matmul.allow_tf32 = True
-from miniworld_kernels.kernels.conditioned_transition.triton.training import cond_transition_train, set_forward_mode
+from miniworld_engine.kernels.conditioned_transition.triton.training import cond_transition_train, set_forward_mode
 from ct_full import cond_transition_train_full
 A=48
 def ref(x,cond,Wa,Wb,Ws,Wsc,bsc):

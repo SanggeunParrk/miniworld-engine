@@ -11,9 +11,9 @@ import importlib
 import pytest
 import torch
 
-from miniworld_kernels.modules import dispatch
-from miniworld_kernels.modules.dispatch import KernelBackend
-from miniworld_kernels.modules.exceptions import (
+from miniworld_engine.modules import dispatch
+from miniworld_engine.modules.dispatch import KernelBackend
+from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
@@ -45,26 +45,26 @@ def test_to_kernel_backend_rejects_miniworld():
 # (the single production option) AND with PYTORCH (the reference).
 # --------------------------------------------------------------------------- #
 def _module_builders():
-    from miniworld_kernels.modules.adaptive_layernorm.module import AdaptiveLayerNorm
-    from miniworld_kernels.modules.augmented_attention.module import (
+    from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
+    from miniworld_engine.modules.augmented_attention.module import (
         AugmentedAttentionPairBias,
     )
-    from miniworld_kernels.modules.conditioned_transition.module import (
+    from miniworld_engine.modules.conditioned_transition.module import (
         ConditionedTransition,
     )
-    from miniworld_kernels.modules.primitives import LayerNorm
-    from miniworld_kernels.modules.transition.module import Transition
-    from miniworld_kernels.modules.triangle_attention.bidirectional import (
+    from miniworld_engine.modules.primitives import LayerNorm
+    from miniworld_engine.modules.transition.module import Transition
+    from miniworld_engine.modules.triangle_attention.bidirectional import (
         BidirectionalTriangleAttention,
     )
-    from miniworld_kernels.modules.triangle_attention.module import (
+    from miniworld_engine.modules.triangle_attention.module import (
         TriangleAttention,
         TrianglePairAttention,
     )
-    from miniworld_kernels.modules.triangle_multiplication.bidirectional import (
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
     )
-    from miniworld_kernels.modules.triangle_multiplication.module import (
+    from miniworld_engine.modules.triangle_multiplication.module import (
         TriangleMultiplication,
     )
 
@@ -175,7 +175,7 @@ requires_cuda = pytest.mark.skipif(
 
 @requires_cuda
 def test_layernorm_parity():
-    from miniworld_kernels.modules.primitives import LayerNorm
+    from miniworld_engine.modules.primitives import LayerNorm
 
     torch.manual_seed(0)
     x = torch.randn(2, 384, 384, 128, device="cuda", dtype=torch.bfloat16)

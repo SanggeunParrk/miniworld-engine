@@ -85,10 +85,10 @@ includes small per-call overhead that disappears under do_bench timing.)
 
 Runtime code:
 
-- `src/miniworld_kernels/modules/triangle_multiplication/`
-- `src/miniworld_kernels/kernels/tm1/`
-- `src/miniworld_kernels/kernels/tm2/`
-- `src/miniworld_kernels/kernels/fused_ln_mask/`
+- `src/miniworld_engine/modules/triangle_multiplication/`
+- `src/miniworld_engine/kernels/tm1/`
+- `src/miniworld_engine/kernels/tm2/`
+- `src/miniworld_engine/kernels/fused_ln_mask/`
 
 Benchmark code and generated results:
 

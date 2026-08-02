@@ -1,7 +1,7 @@
 """Training fwd+bwd: (a) old Version B (save_xn=True, triton fwd), (b) Version A + triton fwd,
 (c) Version A + CUDA b2b fwd (new single path). + grad correctness of (c) vs torch."""
 import os, time, torch
-from miniworld_kernels import kernels
+from miniworld_engine import kernels
 
 dev = "cuda"; torch.manual_seed(0)
 d, n, eps = 128, 4, 1e-5
