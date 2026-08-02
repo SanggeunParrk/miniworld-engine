@@ -56,6 +56,8 @@ experiments/
 scratchpad_ncu/
 third_party/ct_cutlass_workbench/*.out
 third_party/ct_cutlass_workbench/*.so
+# vendored CUTLASS checkout (166M) — build dependency, never tracked
+third_party/ct_cutlass_workbench/cutlass/
 
 # editor
 .vscode/
