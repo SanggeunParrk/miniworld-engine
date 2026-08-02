@@ -294,6 +294,594 @@
         "num_stages": 3,
         "num_warps": 8
       }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.057103998959064484,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.05721599981188774,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.05742400139570236,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.05753599852323532,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.0578560009598732,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,N=128,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.069023996591568,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.06911999732255936,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.0692799985408783,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.06937599927186966,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.06982400268316269,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,N=256,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.10543999820947647,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.10553599894046783,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.10576000064611435,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.10592000186443329,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.10601600259542465,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,N=256,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.12982399761676788,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.12985600531101227,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.12995199859142303,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.1302720010280609,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.1308480054140091,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,N=64,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.0323840007185936,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.032607998698949814,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.03299200162291527,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.033055998384952545,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.03315199911594391,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,N=64,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.03830400109291077,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.03840000182390213,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.0387520007789135,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.03891199827194214,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.03907199949026108,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=5,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.09497600048780441,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.09510400146245956,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.09516800194978714,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.09529600292444229,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.09532800316810608,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=5,N=128,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.11648000031709671,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.11664000153541565,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.11673600226640701,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.11684800311923027,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.1170239970088005,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=5,N=256,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.1804800033569336,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.1804800033569336,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.1807039976119995,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.1807679980993271,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.18083199858665466,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=5,N=256,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.22511999309062958,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.22521600127220154,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.22523199766874313,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.22543999552726746,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.22568000108003616,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=6,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.20160000026226044,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.20163199305534363,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.201664000749588,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.2017280012369156,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.20179200172424316,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=6,N=128,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.251583993434906,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.2520959973335266,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.25222399830818176,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.25228801369667053,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.25252799689769745,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=7,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.34990400075912476,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.34993600845336914,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.34998399019241333,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.3500159978866577,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.35017600655555725,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=7,N=128,USE_DROPOUT=1": [
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.44177600741386414,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.44196799397468567,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.442111998796463,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.4426240026950836,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 4096
+        },
+        "ms": 0.4427199959754944,
+        "num_stages": 3,
+        "num_warps": 4
+      }
     ]
   },
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",

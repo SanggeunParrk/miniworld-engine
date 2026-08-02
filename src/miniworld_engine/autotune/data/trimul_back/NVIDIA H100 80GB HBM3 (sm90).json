@@ -239,6 +239,272 @@
         "num_stages": 2,
         "num_warps": 8
       }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,K=128,N=128": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.08972799777984619,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.10275200009346008,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.10281600058078766,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.1424960047006607,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,K=256,N=256": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.2765119969844818,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.2877439856529236,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.3080480098724365,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.3102400004863739,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=4,K=64,N=64": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.043455999344587326,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.043807998299598694,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.04495999962091446,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.0504320003092289,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=5,K=128,N=128": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.14601600170135498,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.16963200271129608,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.17078399658203125,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.24089600145816803,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=5,K=256,N=256": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.4742400050163269,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.4915039986371994,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.5341759920120239,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.5355520248413086,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=6,K=128,N=128": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.30988800525665283,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.36262400448322296,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.36393600702285767,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.5239359736442566,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|ADD_RESIDUAL=1,GROUP_M=7,K=128,N=128": [
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 32
+        },
+        "ms": 0.5309439897537231,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.6265919804573059,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.6302080154418945,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BM": 64,
+          "BN": 64
+        },
+        "ms": 0.9197120070457458,
+        "num_stages": 2,
+        "num_warps": 8
+      }
     ]
   },
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
