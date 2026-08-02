@@ -240,7 +240,9 @@ class TriangleMultiplication(nn.Module):
                 # code path serves inference (forward-only) and training (merged
                 # autograd Function). Requires d_hidden == d_pair. See
                 # kernels/trimul_inproj/triton/unidirectional.py.
-                return _r(self._forward_triton(pair, mask))
+                # residual + row-broadcast dropout are now FUSED into the triton gate store
+                # (same gate_elem epilogue the cute path uses) — no external _r() add.
+                return self._forward_triton(pair, mask, add_residual, _ds)
 
             pair = self.ln_pair(pair)
             left, right = self._kernel_tm1(pair, backend)
@@ -263,6 +265,8 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
+        add_residual: bool = False,
+        dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """TRITON single-direction path (fwd + autograd bwd) — the fused BDLL pipeline
         mirroring cute's dispatch (LN_in -> gated BDLL front -> ONE bmm contraction ->
@@ -287,6 +291,8 @@ class TriangleMultiplication(nn.Module):
             self.to_left.weight.shape[0],   # d_hidden
             self.outgoing,
             mask=mask,
+            add_residual=add_residual,      # fuse residual + drop_row into the gate store epilogue
+            dropscale=dropscale,
         )
 
     def _forward_cuequivariance(

@@ -12,12 +12,18 @@ output store — no separate elementwise kernel / HBM round-trip); for others it
 - `BidirectionalTriangleMultiplication` — folded into the gate/back store.
   (Measured fusion gain, compile+cudagraph: transition inf ~1.10–1.22x, trimul-single inf
   ~1.07–1.09x, bidir inf ~1.02–1.04x; training smaller.)
+- **trimul TRITON backend** (`_forward_triton` / `bidirectional_trimul_triton`) — the residual +
+  drop_row are now fused into the same `gate_elem` store epilogue as the cute dispatch, so the
+  pre-Hopper (A100) default and any explicit `MINIWORLD_TRIMUL_IMPL=triton` path fuse too
+  (verified cos 0.99999 fwd+grad, dropout deterministic).
 
 ## NOT kernel-fused yet — explicit add, revisit in a later version
 These apply the residual (+ dropout) as an explicit `x + drop(op(x))` after the op. The contract
 is unified (blocks just call `module(...)`), but fusing the add into the op's output kernel would
 save a launch + an [B,L,L,D] HBM round-trip. Candidates, roughly by expected payoff:
 
+- **sm100 (B200) trimul back paths** (`_forward_cute_free` / v6-sm100) — currently apply
+  residual+dropout explicitly (`out + pair`); the tcgen05 back has no fused-residual store yet.
 - **`TriangleAttention`** (miniworld-engine) — fuse residual + drop_row (starting) / drop_col
   (ending) into the attention output epilogue (`fused_gate_out` / the bias-only store). This is
   the highest-value miniworld-engine follow-up.

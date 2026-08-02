@@ -221,7 +221,8 @@ class _BidirBackHalfTriton(torch.autograd.Function):
     folded into the front dxn GEMM). Weights x@W form; Wp is nn.Linear (N,K) form."""
 
     @staticmethod
-    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, h, mask=None):
+    def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, eps, h, mask=None,
+                residual=None, dropscale=None):
         B, L, _, D = x_n.shape
         M = B * L * L
         H = 2 * h                                                 # = WL.shape[1]
@@ -241,10 +242,14 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         view = tri.reshape(H, M).t()                              # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(
             view, ln_out_w, ln_out_b, Wp, None, eps)              # (M, D)
-        y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True)
+        # fuse the pairformer residual (== module input pair [M,D]) + row-broadcast dropout
+        # into the gate store epilogue (same path the cute dispatch uses).
+        y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True,
+                                   residual=residual, dropscale=dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h, ctx.mm = eps, h, mm
+        ctx.dropscale, ctx.add_residual, ctx.seq_len = dropscale, residual is not None, L
         return y.reshape(B, L, L, D)
 
     @staticmethod
@@ -256,9 +261,12 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         h = ctx.h
         H = 2 * h
         gy = gy.reshape(M, D).contiguous()  # guard: autograd may hand a non-contiguous / broadcast (.sum) grad
+        # residual grad passes straight through; op-branch grad is drop_row-scaled in gate_elem_bwd_ew
+        d_residual = gy.reshape(M, D) if ctx.add_residual else None
 
-        # ② gate bwd (elementwise; dx_gate folded into the dxn GEMM below)
-        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate)
+        # ② gate bwd (elementwise; dx_gate folded into the dxn GEMM below); dropout-scale dy
+        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate,
+                                            dropscale=ctx.dropscale, seq_len=ctx.seq_len)
         dWg = torch.mm(x_n.reshape(M, D).t(), d_glogit)           # (D, D) cuBLAS
 
         # ① LN_out + @Wp bwd (te_style)
@@ -287,12 +295,14 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         dx = torch.mm(d_glogit, Wg.t())                          # dx_gate  (M, D)
         dx.addmm_(dconc.t(), W_stack)                            # + dconcᵀ@W_stack (in-place)
         dx_n = dx.reshape(B, L, L, D)
-        # trailing Nones: eps, h, mask (non-differentiable)
-        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None)
+        # trailing Nones: eps, h, mask; then d_residual (fused residual input), dropscale
+        return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
+                d_residual, None)
 
 
 @torch.no_grad()
-def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h, mask=None):
+def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h, mask=None,
+                 residual=None):
     """Forward-only bidir back-half — the SAME kernel structure as cute's inference
     ``bidirectional_trimul_sm100`` (front → 2 bmm → LN_out+@Wp → gate), but NO
     autograd.Function / saved tensors and NO preact side output. This is why the
@@ -312,7 +322,7 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
     o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])            # incoming
     tri = torch.cat([o_out, o_in], dim=0)                        # (H, L, L)
     proj = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps)[0]
-    y = gate_elem_triton(x_n.reshape(M, D), proj, Wgt)           # gate GEMM + sigmoid·mul
+    y = gate_elem_triton(x_n.reshape(M, D), proj, Wgt, residual=residual, seq_len=L)  # + residual
     return y.view(B, L, L, D)
 
 
@@ -325,6 +335,8 @@ def bidirectional_trimul_triton(
     ln_out_w, ln_out_b,          # (2h,)
     eps_in, eps_out, d_hidden,
     mask=None,                   # (B, L) residue mask, optional (folded into LN_in like cute)
+    add_residual=False,          # fuse y = pair + drop_row(bidir_trimul(pair)) into the gate store
+    dropscale=None,              # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
 ):
     """Faithful triton mirror of the cute bidir. Returns (B, L, L, d_pair).
     Mirrors cute's dispatch exactly: LN_in (triton, row_scale mask), then — as cute
@@ -346,14 +358,21 @@ def bidirectional_trimul_triton(
         else:                                                   # (B, L, L) pair mask
             m = mask
         m2d = m.to(pair.dtype)
+    B, L = pair.shape[0], pair.shape[1]
+    M = B * L * L
+    # residual == the ORIGINAL (pre-LN_in) input pair; dropscale [B,1,L,D] -> [L,D] (B==1) for the
+    # gate store's row-broadcast indexing. Both fold into the gate_elem epilogue (no external add).
+    residual_flat = pair.reshape(M, d) if add_residual else None
+    ds_2d = dropscale.reshape(L, d) if dropscale is not None else None
     x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled():
         # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed.
         return _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
-                            ln_out_w, ln_out_b, eps_out, d_hidden, mask=m2d)
+                            ln_out_w, ln_out_b, eps_out, d_hidden, mask=m2d, residual=residual_flat)
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _BidirBackHalfTriton.apply(
         x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, d_hidden, m2d,
+        residual_flat, ds_2d,
     )

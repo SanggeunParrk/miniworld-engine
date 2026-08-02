@@ -126,7 +126,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
             # autograd pieces). See kernels/trimul_inproj/triton/bidirectional.py.
-            return _r(self._forward_triton(pair, mask))
+            # residual + row-broadcast dropout are now FUSED into the triton gate store
+            # (same gate_elem epilogue the cute path uses) — no external _r() add.
+            return self._forward_triton(pair, mask, add_residual, _ds)
         if self._backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
 
@@ -198,6 +200,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
+        add_residual: bool = False,
+        dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """TRITON bidirectional path (fwd + autograd bwd) — composed from the
         unidirectional triton pieces (per-direction ``triton_tm1`` front + triton
@@ -218,6 +222,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
             mask=mask,
+            add_residual=add_residual,      # fuse residual + drop_row into the gate store epilogue
+            dropscale=dropscale,
         )
 
     def _forward_cute_train(
