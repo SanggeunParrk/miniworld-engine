@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v17 (FIX the fused-stats reduction: warp-parallel, not 1-thread-per-row serial)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100; YOU
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100; YOU
 implement + write v17.md; DO **NOT** commit. Branch `b2b-cutlass-opt`. PTX allowed.
 
 ## Context: v16 (fused LN stats) REGRESSED the module path

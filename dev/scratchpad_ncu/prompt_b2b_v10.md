@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v10 (RS expand from SMEM, not global — isolate the xn STS removal)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste results; YOU analyze + implement (edit the .cu) + write v10.md draft; DO **NOT** commit (commit
 happens after I paste measured results). Branch `b2b-cutlass-opt`. BEST = v5 (`7528d0d`): **563.3us =
 0.956x** of Triton (~538us), cos 1.0. The kernel file currently IS v5.

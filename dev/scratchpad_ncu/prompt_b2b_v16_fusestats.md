@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v16 (FUSE LN STATS into the CUDA b2b kernel)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste; YOU implement + write v16.md draft; DO **NOT** commit. Branch `b2b-cutlass-opt`. PTX allowed.
 **BEST = v14 (`ea5aa3f`): kernel ~421us = 1.29x of Triton; wired into the Transition module inference
 (cuda_transition_b2b) where it gives ~1.20x end-to-end.** Kernel file currently IS v14.

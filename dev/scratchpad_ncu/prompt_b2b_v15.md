@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v15 (software-pipeline the ND loop: hide SwiGLU gate + squeeze under wgmma)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste; YOU analyze + implement + write v15.md draft; DO **NOT** commit. Branch `b2b-cutlass-opt`.
 PTX/inline-asm ALLOWED. **BEST = v14 (`ea5aa3f`): ~421us = 1.26-1.31x of Triton (~540us), cos 1.0.**
 Kernel file currently IS v14.

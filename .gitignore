@@ -53,7 +53,11 @@ src/**/benchmark/
 _ct_tmp/
 _trans_tmp/
 experiments/
-scratchpad_ncu/
+# dev/ holds development scratch, research probes, ncu harnesses (never shipped: the wheel is
+# src/ only). dev/scratchpad_ncu/ is local scratch (ncu dumps, kernel .cu backups, optimizer
+# prompt logs) — kept ignored as it was under the old scratchpad_ncu/ path; a handful of files
+# there stay tracked (they were committed before the move). dev/research and dev/bench are tracked.
+dev/scratchpad_ncu/
 third_party/ct_cutlass_workbench/*.out
 third_party/ct_cutlass_workbench/*.so
 # vendored CUTLASS checkout (166M) — build dependency, never tracked

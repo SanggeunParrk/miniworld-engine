@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v13 (WG-local barriers: cut CTA __syncthreads -> per-WG NamedBarrier)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste; YOU analyze + implement + write v13.md draft; DO **NOT** commit. Branch `b2b-cutlass-opt`.
 PTX/inline-asm ALLOWED. **BEST = v12 (`8b820c6`): ~442us = 1.20-1.23x of Triton (~540us), cos 1.0**
 (vectorized STG.128 swizzled shuffle epilogue). Kernel file currently IS v12.

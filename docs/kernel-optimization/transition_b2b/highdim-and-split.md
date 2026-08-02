@@ -44,7 +44,7 @@ Ceiling analysis: even spill-free (≈48% compute like d=256) ≈1533 µs — ST
 d=512 FLOPs = 4× d=256 and cute's larger non-fused tiles amortize better, PLUS fusion forces G=2 expand
 recompute (`out_acc[64,512]` = 256 fp32/thread spills otherwise). Fundamental: at K=D=512, smem cannot
 co-hold xn + weights + accumulator. cute's split (non-fused tiled GEMM, streams h, never co-resident)
-wins. Archived: `scratchpad_ncu/b2b_d512_ktile_slow_046x.cu`.
+wins. Archived: `dev/scratchpad_ncu/b2b_d512_ktile_slow_046x.cu`.
 
 ## Split path optimization attempt (per user: "optimize the two split kernels")
 The split = `cute_transition_fused` forward = `transition_expand_swiglu_cute` (LN-folded gated
@@ -81,7 +81,7 @@ dual-GEMM → h) + `torch.matmul(h, Ws^T)` (cuBLAS squeeze).
   smaller than the build, and never let `srun -t` cancel mid-build (that discards the cache → death
   spiral of rebuilds). Drop the cute JIT from micro-benches (it recompiles per shape, minutes each).
 
-## Artifacts (scratchpad_ncu/)
+## Artifacts (dev/scratchpad_ncu/)
 - Kernels: `b2b_d256_win_406us.cu` (d128+d256 winner), `b2b_d512_ktile_slow_046x.cu` (archived loss).
 - New: `src/.../cuda/transition_expand_gate_kernel.cu` (+ bindings) — correct, slower than cute.
 - Verify/bench: `verify_b2b_highdim.py`, `verify_module_infer.py`, `split_profile.py`,

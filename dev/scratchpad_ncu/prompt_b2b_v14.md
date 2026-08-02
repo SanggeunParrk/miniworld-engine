@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v14 (remove the LN-param-staging CTA sync)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste; YOU analyze + implement + write v14.md draft; DO **NOT** commit. Branch `b2b-cutlass-opt`.
 PTX/inline-asm ALLOWED. **BEST = v13 (`5669483`): ~433us = 1.22-1.25x of Triton (~540us), cos 1.0.**
 Kernel file currently IS v13.

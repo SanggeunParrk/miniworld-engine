@@ -1,13 +1,13 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v11 (Triton-matched VECTORIZED STG.128 output epilogue; PTX now ALLOWED)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste results; YOU analyze + implement (edit the .cu) + write v11.md draft; DO **NOT** commit. Branch
 `b2b-cutlass-opt`. BEST = v5 (`7528d0d`): **563.3us = 0.956x** of Triton (~543us), cos 1.0. Kernel file
 currently IS v5. **NEW: the user has LIFTED the "no PTX / no inline-asm editing" constraint** — you MAY
 now use inline PTX (`asm volatile`) for stores/loads where it lets us match Triton's instruction mix.
 
 ## Ground truth from Triton's own SASS (this is the TRITON->CUDA principled lever)
-I disassembled the winning Triton `_transition_b2b_kernel` (`scratchpad_ncu/b2b_dump/.../*.sass`).
+I disassembled the winning Triton `_transition_b2b_kernel` (`dev/scratchpad_ncu/b2b_dump/.../*.sass`).
 Its memory-op mix:
 - **8x `STG.E.128`** — the OUTPUT store is VECTORIZED 128-bit (8 bf16 per store instruction).
 - **48x `LDGSTS.E.BYPASS.128`** — all inputs loaded via async cp.async, 128-bit, **L1 BYPASS**.

@@ -1,6 +1,6 @@
 # cuda-kernel-optimizer skill — transition_b2b ROUND v12 (kill the v11 shuffle-tile SHARED BANK CONFLICTS)
 
-Follow `scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
+Follow `dev/scratchpad_ncu/SKILL_cuda_kernel_optimizer.md`. No-GPU: I build/validate/profile on H100 and
 paste; YOU analyze + implement + write v12.md draft; DO **NOT** commit. Branch `b2b-cutlass-opt`.
 PTX/inline-asm is ALLOWED (unlocked). **BEST = v11 (`1f7025b`): ~448us = 1.18-1.21x of Triton (~540us),
 cos 1.0** — the first version to beat Triton, via the vectorized STG.128 smem-shuffle output epilogue.
