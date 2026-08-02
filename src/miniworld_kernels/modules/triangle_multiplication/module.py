@@ -97,9 +97,28 @@ class TriangleMultiplication(nn.Module):
         outgoing: bool = True,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         ln_implementation: ImplementationType = ImplementationType.PYTORCH,
+        p_drop: float = 0.0,
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
+        # ======================================================================================
+        # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(trimul(pair)).
+        # The residual connection is UNCONDITIONAL (AF3 pairformer default
+        # ``pair = pair + drop_row(trimul(pair))``); residual connections are the standard in this
+        # domain, so there is deliberately NO flag to turn it off. The row-broadcast DROPOUT is
+        # OPTIONAL: ``p_drop`` (drop_row, broadcast_dim=1) is applied only in ``self.training``;
+        # p_drop=0 (default) or eval => residual only. The block just calls ``module(pair, mask)``.
+        #
+        # WHY IT'S FUSED IN (SPEED): both the residual add AND the dropout scale are done INSIDE
+        # the trimul back/gate kernel's output epilogue — not as separate ``out*ds + pair``
+        # elementwise ops. That removes extra kernel launches and their [B,L,L,D] HBM round-trips
+        # (the gate output + residual input are already resident at store time), which is the whole
+        # point of the fusion. Making the residual unconditional is what lets the kernel own that
+        # fused epilogue; a runtime residual toggle would force the slow separate-add path.
+        # >>> To run WITHOUT the residual (rare — benchmarking the raw op), you must EDIT THE CODE:
+        # >>> flip the ``_ADD_RESIDUAL`` local at the top of forward() to False.
+        # ======================================================================================
+        self.p_drop = p_drop
         # 'miniworld' (auto) -> concrete backend for the running GPU arch. The
         # public option is kept on self.implementation; forward routes on _backend.
         self.implementation = ImplementationType(implementation)
@@ -172,16 +191,21 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
-        add_residual: bool = False,
-        dropout_p: float = 0.0,
+        dropout_p: float | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass. Routes on the resolved internal backend, degrading to the
-        pytorch reference (with a warning) on a dtype the fused kernels can't run.
+        """Forward pass. ALWAYS returns the residual output ``pair + drop_row(trimul(pair))``.
+        Routes on the resolved internal backend, degrading to the pytorch reference (with a
+        warning) on a dtype the fused kernels can't run.
 
-        ``add_residual`` folds the pairformer residual ``pair + trimul(pair)`` (the residual
-        is this module's own input) into the op — in-kernel on the sm90 cute inference back
-        (trimul_back_triton), an explicit add elsewhere. Default off keeps standalone/bench
-        behaviour unchanged. Dropout stays outside (inference: identity; training: v6 path)."""
+        The residual is UNCONDITIONAL and fused into the kernel epilogue FOR SPEED (see the
+        constructor comment) — there is intentionally no flag to disable it (residual is the
+        domain standard). The row-broadcast DROPOUT is OPTIONAL: ``dropout_p`` overrides the
+        instance ``p_drop`` per call (None -> ``self.p_drop``) and is active only in
+        ``self.training`` (standard nn.Module semantics); inference is identity.
+        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line."""
+        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (fused epilogue, for speed). Edit to False to disable.
+        add_residual = _ADD_RESIDUAL
+        dropout_p = self.p_drop if dropout_p is None else dropout_p
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             backend = _dispatch.guard_dtype(
                 self._backend, pair.dtype, op="TriangleMultiplication"
@@ -189,7 +213,7 @@ class TriangleMultiplication(nn.Module):
             _pair_in = pair  # original (pre-LN) input == the residual; torch path rebinds `pair`
             # row-broadcast dropout scale (== drop_row mask/(1-p), [B,1,L,D]); training only.
             _ds = (self._make_drop_row_scale(pair, dropout_p)
-                   if dropout_p and dropout_p > 0.0 and torch.is_grad_enabled() else None)
+                   if dropout_p and dropout_p > 0.0 and self.training else None)
             def _r(out):  # explicit residual+dropout for paths that don't fold it in-kernel
                 if _ds is not None:
                     out = out * _ds
@@ -200,10 +224,11 @@ class TriangleMultiplication(nn.Module):
 
             if backend == KernelBackend.CUTE:
                 # The cute inference path (_forward_cute) is forward-only (no saved
-                # stats / no autograd graph). Under grad (training), dispatch to the
-                # autograd-capable sm100/sm90 v6 merged training kernel instead —
-                # keeping all backend selection inside the module.
-                if torch.is_grad_enabled():
+                # stats / no autograd graph). Under grad (training) OR whenever a dropout
+                # scale is live, dispatch to the autograd-capable sm100/sm90 v6 merged
+                # training kernel (it is the path that consumes _ds) — keeping all backend
+                # selection inside the module.
+                if torch.is_grad_enabled() or _ds is not None:
                     # training: fuse residual + row-broadcast dropout into the v6 back (sm90).
                     return self._forward_cute_train(pair, mask, add_residual, _ds)
                 return self._forward_cute(pair, mask, add_residual)

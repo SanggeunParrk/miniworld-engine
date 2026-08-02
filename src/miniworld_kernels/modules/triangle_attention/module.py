@@ -70,12 +70,31 @@ class TriangleAttention(nn.Module):
         use_self_attention: bool = True,
         use_qk_norm: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        p_drop: float = 0.0,
     ) -> None:
         super().__init__()
         self.n_head = n_head
         self.starting = starting
         self.use_self_attention = use_self_attention
         self.use_qk_norm = use_qk_norm
+        # ======================================================================================
+        # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop(triangle_attention(pair)).
+        # The residual connection is UNCONDITIONAL (AF3 pairformer default
+        # ``pair = pair + drop_row/col(tri_attention(pair))``); residual connections are the
+        # domain standard, so there is deliberately NO flag to turn it off. The DROPOUT is
+        # OPTIONAL: ``p_drop`` applies only in ``self.training`` on the AF3 broadcast axis for this
+        # module's role — starting => drop_row (broadcast over i, dim=1); ending => drop_col
+        # (broadcast over j, dim=2). p_drop=0 (default) / eval => residual only.
+        #
+        # NOTE — NOT KERNEL-FUSED YET (unlike Transition / TriangleMultiplication): the residual +
+        # dropout are an EXPLICIT ``pair + drop(out)`` after the attention op, not folded into the
+        # kernel epilogue. This unifies the module CONTRACT now (the block just calls
+        # ``module(pair, mask)``); fusing them into the attention output kernel for the speed win is
+        # a separate, later task.
+        # >>> To run WITHOUT the residual, EDIT THE CODE: flip the ``_ADD_RESIDUAL`` local in forward().
+        # ======================================================================================
+        self.p_drop = p_drop
+        self._drop_dim = 1 if starting else 2  # drop_row (i) for starting, drop_col (j) for ending
         # 'miniworld' (ours, auto) resolves to the TRITON family: the repo's only
         # tensor-core triangle-attention kernels are the triton ones (which
         # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolution
@@ -226,12 +245,37 @@ class TriangleAttention(nn.Module):
         return self._gate_out(gate.view(B, L, L, dv), out)
 
     @typecheck
+    def _make_drop_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
+        """drop_row/drop_col scale = (rand>p)/(1-p), broadcast over i (starting, dim=1) or j
+        (ending, dim=2) — matches modules.primitives.Dropout(broadcast_dim=self._drop_dim)."""
+        shape = list(pair.shape)
+        shape[self._drop_dim] = 1
+        keep = torch.rand(shape, device=pair.device, dtype=pair.dtype) > p
+        return keep.to(pair.dtype) / (1.0 - p)
+
+    @typecheck
     def forward(
         self,
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass."""
+        """Forward pass. ALWAYS returns the residual output ``pair + drop(tri_attention(pair))``
+        (residual UNCONDITIONAL; dropout optional via ``p_drop``, active only in ``self.training``).
+        The residual/dropout are applied EXPLICITLY here (NOT kernel-fused yet — see the constructor
+        comment); fusing them into the attention epilogue for the speed win is a later task.
+        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line."""
+        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (explicit add; not fused yet). Edit to False to disable.
+        out = self._attention(pair, mask)
+        if self.p_drop > 0.0 and self.training:
+            out = out * self._make_drop_scale(pair, self.p_drop)
+        return pair + out if _ADD_RESIDUAL else out
+
+    def _attention(
+        self,
+        pair: Float[torch.Tensor, "B L L d_pair"],
+        mask: Bool[torch.Tensor, "B L"] | None = None,
+    ) -> Float[torch.Tensor, "B L L d_pair"]:
+        """Raw triangle-attention op (NO residual/dropout) — the residual is added by forward()."""
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             # Degrade to the pytorch reference (with a warning) on a dtype the fused
             # triton kernels can't run; bf16 (production) keeps the fast path.

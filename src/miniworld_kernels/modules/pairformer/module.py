@@ -82,6 +82,7 @@ class PairformerBlock(nn.Module):
                 d_pair=config.d_pair,
                 d_hidden=config.d_hidden_tri_multi,
                 implementation=implementation,
+                p_drop=config.p_drop,  # drop_row owned by the module (residual is unconditional)
             )
             self.tri_multi_outgoing = None
             self.tri_multi_incoming = None
@@ -92,12 +93,14 @@ class PairformerBlock(nn.Module):
                 d_hidden=config.d_hidden_tri_multi,
                 outgoing=True,
                 implementation=implementation,
+                p_drop=config.p_drop,  # drop_row owned by the module (residual is unconditional)
             )
             self.tri_multi_incoming = TriangleMultiplication(
                 d_pair=config.d_pair,
                 d_hidden=config.d_hidden_tri_multi,
                 outgoing=False,
                 implementation=implementation,
+                p_drop=config.p_drop,  # drop_row owned by the module (residual is unconditional)
             )
         if config.use_triangle_attention:
             # team-gm's ``d_hidden_tri_attention`` is the PER-HEAD channel
@@ -114,6 +117,7 @@ class PairformerBlock(nn.Module):
                 starting=True,
                 use_self_attention=config.use_self_attention,
                 implementation=implementation,
+                p_drop=config.p_drop,  # drop_row owned by the module (residual unconditional)
             )
             self.tri_atten_ending = TriangleAttention(
                 d_pair=config.d_pair,
@@ -122,6 +126,7 @@ class PairformerBlock(nn.Module):
                 starting=False,
                 use_self_attention=config.use_self_attention,
                 implementation=implementation,
+                p_drop=config.p_drop,  # drop_col owned by the module (residual unconditional)
             )
         else:
             self.tri_atten_starting = None
@@ -138,22 +143,21 @@ class PairformerBlock(nn.Module):
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass (residual updates, pair track only)."""
+        # trimul & transition OWN their residual (unconditional) + drop_row (module p_drop, fused
+        # into the kernel epilogue for speed) — the block just calls ``module(pair, mask)``; there
+        # is no external ``pair + drop_row(...)`` here. See the modules' constructor comments.
         if self.tri_multi is not None:
-            # bidirectional trimul: fold residual + row-broadcast dropout into the op (fused in the
-            # training gate; applied in-module on inference / non-fused backends).
-            pair = self.tri_multi(pair, mask, add_residual=True, dropout_p=self.drop_row.p_drop)
+            pair = self.tri_multi(pair, mask)  # y = pair + drop_row(bidir_trimul(pair))
         else:
-            # single-dir: fold the residual + row-broadcast dropout into the trimul op (kernel adds
-            # the input + applies the drop_row mask in the gate/back epilogue — no separate ops).
-            p = self.drop_row.p_drop
-            pair = self.tri_multi_outgoing(pair, mask, add_residual=True, dropout_p=p)
-            pair = self.tri_multi_incoming(pair, mask, add_residual=True, dropout_p=p)
+            pair = self.tri_multi_outgoing(pair, mask)  # y = pair + drop_row(trimul_out(pair))
+            pair = self.tri_multi_incoming(pair, mask)  # y = pair + drop_row(trimul_in(pair))
         if self.tri_atten_starting is not None:
-            pair = pair + self.drop_row(self.tri_atten_starting(pair, mask))
-            pair = pair + self.drop_col(self.tri_atten_ending(pair, mask))
-        # Residual add folded into the transition op (its own input is the residual): the
-        # kernel adds x in the squeeze epilogue, dropping the separate elementwise-add kernel.
-        pair = self.transition_pair(pair, add_residual=True)
+            # Triangle attention now OWNS its residual + dropout too (drop_row for starting,
+            # drop_col for ending) — same contract as trimul. It is not kernel-fused yet (explicit
+            # add inside the module), but the block just calls ``module(pair, mask)``.
+            pair = self.tri_atten_starting(pair, mask)  # y = pair + drop_row(attn_start(pair))
+            pair = self.tri_atten_ending(pair, mask)    # y = pair + drop_col(attn_end(pair))
+        pair = self.transition_pair(pair)  # y = pair + transition(pair) (residual fused, no dropout)
         return pair
 
 

@@ -44,6 +44,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         d_hidden: int | None = None,
         *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        p_drop: float = 0.0,
     ) -> None:
         super().__init__()
         # Keep the PUBLIC option on self.implementation (contract: modules never overwrite it
@@ -51,6 +52,20 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
         self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
+        # ======================================================================================
+        # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
+        # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
+        # there is deliberately NO flag to turn it off. The row-broadcast DROPOUT is OPTIONAL:
+        # ``p_drop`` (drop_row, broadcast_dim=1) applies only in ``self.training``; p_drop=0 / eval
+        # => residual only. The block just calls ``module(pair, mask)``.
+        # WHY IT'S FUSED IN (SPEED): the residual add + dropout scale are done inside the trimul
+        # gate/back kernel's output epilogue (no separate elementwise op / [B,L,L,D] HBM round-trip),
+        # which is the whole point of the fusion; an unconditional residual is what lets the kernel
+        # own that fused epilogue. See the single-dir TriangleMultiplication for the full rationale.
+        # >>> To run WITHOUT the residual, you must EDIT THE CODE: flip the ``_ADD_RESIDUAL`` local
+        # >>> at the top of forward() to False.
+        # ======================================================================================
+        self.p_drop = p_drop
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
         d2 = 2 * self.d_hidden
@@ -77,16 +92,21 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: Float[torch.Tensor, "B L L d_pair"],
         mask: Bool[torch.Tensor, "B L"] | None = None,
-        add_residual: bool = False,
-        dropout_p: float = 0.0,
+        dropout_p: float | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
-        """Forward pass. Routes on the resolved backend (self._backend); self.implementation
-        stays the public option. ``add_residual``/``dropout_p`` fold the pairformer
-        residual + row-broadcast dropout into the training gate (fused) / apply them explicitly
-        on inference & the non-fused backends."""
+        """Forward pass. ALWAYS returns the residual output ``pair + drop_row(bidir_trimul(pair))``,
+        fused in the gate/back on sm90 (see the constructor comment). Routes on the resolved
+        backend (self._backend); self.implementation stays the public option. The residual is
+        UNCONDITIONAL (no flag — domain standard, fused FOR SPEED). The row-broadcast DROPOUT is
+        OPTIONAL: ``dropout_p`` overrides the instance ``p_drop`` per call (None -> ``self.p_drop``)
+        and is active only in ``self.training``.
+        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line."""
+        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (fused epilogue, for speed). Edit to False to disable.
+        add_residual = _ADD_RESIDUAL
+        dropout_p = self.p_drop if dropout_p is None else dropout_p
         _pair_in = pair
         _ds = (self._make_drop_row_scale(pair, dropout_p)
-               if dropout_p and dropout_p > 0.0 and torch.is_grad_enabled() else None)
+               if dropout_p and dropout_p > 0.0 and self.training else None)
         def _r(out):
             if _ds is not None:
                 out = out * _ds
@@ -95,9 +115,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if self._backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
         if self._backend == KernelBackend.CUTE:
-            # Inference: forward-only fused sm100 kernels. Training (grad): the
-            # v6-faithful fused bidirectional training kernel (residual+dropout fused in the gate).
-            if torch.is_grad_enabled():
+            # Inference: forward-only fused sm100 kernels. Training (grad) OR a live dropout
+            # scale: the v6-faithful fused bidirectional training kernel (residual+dropout fused
+            # in the gate) — it is the path that consumes _ds.
+            if torch.is_grad_enabled() or _ds is not None:
                 return self._forward_cute_train(pair, mask, add_residual, _ds)
             return self._forward_cute(pair, mask, add_residual)  # inference: residual fused in-gate
         if self._backend == KernelBackend.TRITON:

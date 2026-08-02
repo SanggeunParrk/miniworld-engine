@@ -109,6 +109,23 @@ class Transition(nn.Module):
         super().__init__()
         self.d_hidden = d_hidden
         self.n = n
+        # ==========================================================================
+        # THIS MODULE ALWAYS APPLIES THE POST-TRANSITION RESIDUAL: y = x + transition(x).
+        # The residual connection is UNCONDITIONAL — it is baked into the op (folded into the
+        # b2b/triton epilogue for free, reusing the already-loaded input tile). This is the AF3
+        # pairformer default (``pair = pair + transition(pair)``) and residual connections are
+        # ubiquitous/standard in this domain, so there is deliberately NO flag to turn it off.
+        # The transition track has NO dropout (AF3), so this module takes no dropout either.
+        #
+        # WHY IT'S FUSED IN (SPEED): the residual add is done INSIDE the transition kernel's
+        # output epilogue rather than as a separate ``out + x`` elementwise op. That removes a
+        # whole extra kernel launch and its M×D read+write round-trip through HBM — the input
+        # tile is already resident in registers/smem at store time, so the add is effectively
+        # free. Keeping it unconditional is what lets the kernel own that fused epilogue; a
+        # runtime toggle would force the slow separate-add path.
+        # >>> To run WITHOUT the residual (rare — benchmarking the raw op in isolation), you must
+        # >>> EDIT THE CODE: flip the ``_ADD_RESIDUAL`` local at the top of forward() to False.
+        # ==========================================================================
         # 'miniworld' (ours, auto) resolves to the TRITON family, which itself
         # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
         # d in {128,256} & n==4, cute split for d>=512, else triton). Transition has
@@ -131,19 +148,19 @@ class Transition(nn.Module):
         )
 
     @typecheck
-    def forward(
-        self, x: Float[torch.Tensor, "*"], add_residual: bool = False
-    ) -> Float[torch.Tensor, "*"]:
-        """Forward pass. Routes on the resolved internal backend (``_backend``),
-        degrading to the pytorch reference (with a warning) on a dtype the fused
+    def forward(self, x: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
+        """Forward pass. ALWAYS returns the residual output ``y = x + transition(x)`` (the
+        residual is this module's own input ``x``). Routes on the resolved internal backend
+        (``_backend``), degrading to the pytorch reference (with a warning) on a dtype the fused
         kernels can't run.
 
-        ``add_residual`` folds the post-transition residual add ``y = transition(x) + x``
-        (the residual is this module's own input ``x``) into the op — in-kernel on the fast
-        b2b/triton paths (free, it reuses the already-loaded input tile), an explicit add on
-        the other paths. Lets the caller (e.g. the pairformer block) drop the separate
-        elementwise-add kernel + its M×D round-trip. Default off keeps standalone / benchmark
-        behaviour unchanged."""
+        The residual is UNCONDITIONAL and fused into the kernel epilogue FOR SPEED (no separate
+        ``out + x`` kernel / HBM round-trip; the input tile is already resident at store time) —
+        see the constructor comment. There is intentionally no runtime flag to disable it, as
+        residual connections are the standard in this domain (AF3 ``pair = pair + transition(pair)``).
+        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line below."""
+        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (fused epilogue, for speed). Edit to False to disable.
+        add_residual = _ADD_RESIDUAL
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             out = self._torch_forward(x)

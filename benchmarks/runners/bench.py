@@ -576,8 +576,12 @@ def bench_triangle_multiplication(
                     mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
                 p_in = torch.cat([layer.to_left.weight, layer.to_right.weight], dim=0)
                 g_in = torch.cat([layer.to_left_gate.weight, layer.to_right_gate.weight], dim=0)
+                # The miniworld TriangleMultiplication now ALWAYS adds the residual (it is
+                # unconditional — see the module). The dtv1 baseline is the raw op, so add the
+                # residual explicitly here to keep the per-layer stack semantics identical for a
+                # fair speed/correctness comparison against the residual-inclusive pytorch ref.
                 if bidirectional:
-                    pair = fused_bidirectional_dtv1(
+                    pair = pair + fused_bidirectional_dtv1(
                         pair, mask_2d,
                         norm_in_weight=layer.ln_pair.weight, norm_in_bias=layer.ln_pair.bias,
                         p_in_weight=p_in, g_in_weight=g_in,
@@ -586,7 +590,7 @@ def bench_triangle_multiplication(
                         h=layer.d_hidden, eps=layer.ln_pair.eps,
                     )
                 else:
-                    pair = fused_triangle_multiplicative_update_dtv1(
+                    pair = pair + fused_triangle_multiplicative_update_dtv1(
                         pair, direction="outgoing", mask=mask_2d,
                         norm_in_weight=layer.ln_pair.weight, norm_in_bias=layer.ln_pair.bias,
                         p_in_weight=p_in, g_in_weight=g_in,
@@ -875,14 +879,17 @@ def bench_transition(
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             from miniworld_kernels import kernels
 
-            x = self.ln_in(x)
-            return kernels.triton_transition(
-                x,
+            # The base Transition now ALWAYS adds the residual; this legacy-triton baseline is the
+            # raw op, so add the residual explicitly (residual == the module input) to stay
+            # comparable to the residual-inclusive pytorch reference.
+            out = kernels.triton_transition(
+                self.ln_in(x),
                 self.expand_a.weight,
                 self.expand_b.weight,
                 self.squeeze.weight,
                 self.n,
             )
+            return x + out
 
     class MultiTransition(nn.Module):
         def __init__(
