@@ -1,5 +1,17 @@
 # Residual fusion — follow-ups (future versions)
 
+## Status at a glance
+
+| op | residual owned by module | kernel-fused (default H100) | remaining |
+|----|:---:|:---:|----|
+| Transition (pair/msa/single) | ✅ | ✅ cuda-b2b / triton | — |
+| TriangleMultiplication (single/bidir) | ✅ | ✅ cute **and** triton | sm100 (B200) back = explicit |
+| TriangleAttention (start/end) | ✅ | ❌ explicit add | fuse into attn output epilogue |
+| OuterProductMean (team-gm) | ✅ (`residual=pair`) | ❌ explicit add | cross-tensor; fuse in `to_out` |
+| MSAPairWeightedAveraging / AttentionPairBias (team-gm) | ✅ | ❌ explicit add | self-residual; fuse in torch layers |
+| AugmentedAttentionPairBias / ConditionedTransition (DiT) | mp_sum (block) | — | out of scope (magnitude-preserving) |
+
+
 The residual connection (and its optional row/col dropout) is now **owned by the module** for
 every residual-wrapped op (see the "ALWAYS APPLIES THE RESIDUAL" banners in each module). For
 some ops the residual is **fused into the kernel epilogue** (the add rides the op's existing
