@@ -129,7 +129,9 @@ class Transition(nn.Module):
         # 'miniworld' (ours, auto) resolves to the TRITON family, which itself
         # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
         # d in {128,256} & n==4, cute split for d>=512, else triton). Transition has
-        # no cuequivariance kernel, so CUEQUIVARIANCE shares that same auto path.
+        # NO cuequivariance kernel, so an explicit CUEQUIVARIANCE request falls back to
+        # the PYTORCH reference (resolve() maps cueq->pytorch for non-trimul ops) — NOT
+        # the Triton fused path (whose bf16 kernel OOMs shared memory at d>=256 on H100).
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_transition(self.implementation)

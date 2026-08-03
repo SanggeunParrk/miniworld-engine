@@ -166,6 +166,14 @@ def _coerce(impl: ImplementationType | str) -> ImplementationType:
 # --------------------------------------------------------------------------- #
 _DEFAULT_BACKEND = KernelBackend.TRITON  # unknown op / unknown GPU -> portable Triton
 
+# Ops that actually have a cuequivariance kernel. cuequivariance only ships a triangle
+# multiplication kernel; for every OTHER op an explicit CUEQUIVARIANCE request has no cueq
+# kernel to run, so it must fall back to the PYTORCH reference (the honest baseline) — NOT
+# the miniworld Triton fused path. Routing a no-cueq op's CUEQUIVARIANCE request into the
+# Triton family was a bug (e.g. the bf16 transition fused kernel OOMs shared memory at
+# d>=256 on H100). PYTORCH is the default fallback for cueq on these ops.
+_CUEQ_OPS = frozenset({"triangle_multiplication"})
+
 
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     """trimul: cute on Hopper+ (the measured winner; out_layout via ``trimul_out_layout``),
@@ -202,6 +210,10 @@ def resolve(
     any concrete backend passes through unchanged. Single entry point behind the per-op
     ``resolve_*`` wrappers kept below for the modules / benchmark harness."""
     impl = _coerce(impl)
+    # cuequivariance only has a trimul kernel: for any other op, an explicit CUEQUIVARIANCE
+    # request falls back to the PYTORCH reference (default), never the Triton fused path.
+    if impl == ImplementationType.CUEQUIVARIANCE and op not in _CUEQ_OPS:
+        return KernelBackend.PYTORCH
     if impl != ImplementationType.MINIWORLD:
         return to_kernel_backend(impl)
     best = _MINIWORLD_KNOWN_BEST.get(op, _DEFAULT_BACKEND)
