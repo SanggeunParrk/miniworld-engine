@@ -91,9 +91,12 @@ class AugmentedAttentionPairBias(nn.Module):
             bias = bias.permute(0, 3, 1, 2).contiguous()  # (B, H, L, L)
             attention = attention + bias[None]
             if mask is not None:
+                # finfo.min (not -inf): a fully-masked row of -inf softmaxes to NaN, so
+                # the reference must use the largest-finite-negative fill to stay NaN-safe
+                # (matches the triton kernel, which is finite on fully-masked rows).
                 attention = attention.masked_fill(
                     ~mask[:, :, None, None, :],
-                    float("-inf"),
+                    torch.finfo(attention.dtype).min,
                 )
             attention = F.softmax(attention, dim=-1)
             return torch.einsum("abhij,abjhd->abihd", attention, value)
