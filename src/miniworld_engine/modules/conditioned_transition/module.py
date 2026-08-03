@@ -1,9 +1,10 @@
-"""ConditionedTransition tail (post-AdaLN): SwiGLU expand/squeeze + sigmoid conditioning gate.
+"""ConditionedTransition: AdaLN -> SwiGLU expand/squeeze + sigmoid conditioning gate.
 
-Mirrors team-gm's ConditionedTransition, but only the part AFTER the AdaLN: the AdaLN is a
-separately-optimized op and is OUT OF SCOPE here. This module takes the *already-AdaLN'd*
-activation ``x`` and the conditioning ``cond`` and computes::
+Mirrors team-gm's ConditionedTransition (AF3 Algorithm 25). The MODULE owns the input
+AdaLN (``ada_ln_in``); the fused KERNEL is the post-AdaLN tail and receives the already-
+normalized activation. Given the RAW activation ``x`` and conditioning ``cond``::
 
+    x = ada_ln_in(x, cond)                 # AdaLN (module; step 1)
     a = x @ Wa^T ; b = x @ Wb^T            # expand_a, expand_b (no bias)
     h = silu(a) * b                        # SwiGLU
     out = h @ Ws^T                         # squeeze (no bias)
@@ -35,6 +36,7 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.primitives import Linear
+from ..adaptive_layernorm.module import AdaptiveLayerNorm
 
 
 class ConditionedTransition(nn.Module):
@@ -68,6 +70,13 @@ class ConditionedTransition(nn.Module):
         # sub-dispatch lives in the kernel); CUEQUIVARIANCE shares that path.
         self._backend = resolve_conditioned_transition(self.implementation)
 
+        # AF3 Algorithm 25 step 1: the conditioned transition STARTS with an AdaLN of the
+        # input (matches ESMFold2 + pre-migration team-gm). The AdaLN is applied by this
+        # MODULE; the fused KERNEL below stays the post-AdaLN tail (it receives the already-
+        # normalized activation). Checkpoint keys: transition.ada_ln_in.* + the flat tail.
+        self.ada_ln_in = AdaptiveLayerNorm(
+            d_hidden=d_hidden, d_cond=d_cond, implementation=implementation
+        )
         self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.float32)
         self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.float32)
         self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.float32)
@@ -91,10 +100,15 @@ class ConditionedTransition(nn.Module):
         x: Float[torch.Tensor, "*"],
         cond: Float[torch.Tensor, "*"],
     ) -> Float[torch.Tensor, "*"]:
-        """Forward pass. ``x`` is the AdaLN output, ``cond`` the conditioning signal.
+        """Forward pass. ``x`` is the RAW residual-stream activation, ``cond`` the
+        conditioning signal.
 
-        Flattens leading dims to (M, d_hidden) for the kernels; AdaLN is out of scope.
+        The module applies AdaLN (``ada_ln_in``) first (AF3 Alg. 25 step 1), then the
+        SwiGLU + sigmoid-gate tail. Leading dims are flattened to (M, d_hidden) for the
+        kernels, which operate on the already-normalized activation (the kernel is the
+        post-AdaLN tail; the AdaLN lives in this module).
         """
+        x = self.ada_ln_in(x, cond)
         if self._backend == KernelBackend.PYTORCH:
             return self._reference(x, cond)
 
