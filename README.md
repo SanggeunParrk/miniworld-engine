@@ -3,6 +3,13 @@
 Dedicated GPU kernel-development repo for MiniWorld / AF3-style ops. The idea is
 to **cut one op out of the full model and optimize it in isolation**:
 
+> **Where this fits.** miniworld-engine is the bottom layer of a three-layer
+> stack: it owns the fused kernels + building-block ops; **team-gm** composes them
+> into the representative AF3 blocks; terminal product repos assemble those into
+> full models. The boundary rules (which layer owns an op vs. a block vs. a model,
+> and where residuals live) are documented canonically in team-gm's
+> `docs/ARCHITECTURE.md`.
+
 ## Critical Safety
 
 This repo is often accessed from a cluster login node.
