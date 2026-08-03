@@ -15,9 +15,12 @@ from .augmented_attention import AugmentedAttentionPairBias
 from .conditioned_transition import ConditionedTransition
 from .dispatch import KernelBackend
 from .exceptions import ImplementationType, InvalidImplementationError
+from .attention_pair_bias import AttentionPairBias
+from .msa_pair_weighted_averaging import MSAPairWeightedAveraging
 from .outer_product import OuterProduct, OuterProductMean
 from .pairformer import Pairformer, PairformerBlock, PairformerConfig
-from .primitives import Dropout, LayerNorm, Linear
+from .primitives import Dropout, LayerNorm, Linear, MPLinear
+from .swa_atom_attention import SWA3DRoPEAttention
 from .transition import Transition
 from .triangle_attention import (
     BidirectionalTriangleAttention,
@@ -41,11 +44,15 @@ __all__ = [
     "KernelBackend",
     "LayerNorm",
     "Linear",
+    "AttentionPairBias",
+    "MSAPairWeightedAveraging",
     "OuterProduct",
     "OuterProductMean",
     "Pairformer",
     "PairformerBlock",
     "PairformerConfig",
+    "SWA3DRoPEAttention",
+    "MPLinear",
     "Transition",
     "TriangleAttention",
     "TriangleMultiplication",

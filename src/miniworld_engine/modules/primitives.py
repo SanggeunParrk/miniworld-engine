@@ -254,3 +254,62 @@ class Dropout(nn.Module):
             shape[self.broadcast_dim] = 1
         mask = torch.rand(shape, device=x.device, dtype=x.dtype) > self.p_drop
         return x * mask / (1.0 - self.p_drop)
+
+
+# --- magnitude-preserving (EDM2) primitives, ported from team-gm (for SWA/DiT) ---
+def magnitude_normalize(
+    x: torch.Tensor,
+    eps: float = 1e-4,
+) -> torch.Tensor:
+    """Per-output-channel L2 normalization (EDM2 ``normalize``, Algorithm 1).
+
+    Normalizes every output-channel slice (``dim 0``) of a weight tensor to unit
+    norm. ``alpha = sqrt(numel_per_channel)`` keeps ``eps`` scale-relative so the
+    behaviour is shape-agnostic. Ref: Karras et al., arXiv:2312.02696.
+    """
+    dim = list(range(1, x.ndim))
+    n = torch.linalg.vector_norm(x, dim=dim, keepdim=True)
+    alpha = math.sqrt(n.numel() / x.numel())
+    return x / torch.add(eps, n, alpha=alpha)
+
+
+class MPLinear(Linear):
+    """Magnitude-preserving Linear with EDM2 forced weight normalization.
+
+    Two pieces (Karras et al., arXiv:2312.02696, §2.2-2.3, Algorithm 1):
+
+    * **forced weight normalization** — during training the *stored* weight is
+      projected back onto the unit hypersphere at the start of each forward
+      (``copy_``), pinning ``||w||`` so the effective learning rate stays equal
+      across layers and uncontrolled magnitude growth is eliminated;
+    * **on-use weight normalization** — the forward always uses
+      ``normalize(w) / sqrt(fan_in)``, so output magnitude is preserved and the
+      loss gradient is projected onto the tangent plane.
+
+    The projection happens before the normalized weight participates in the
+    autograd graph; small MLP checks show this compiles cleanly with Inductor.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        *,
+        bias: bool = True,
+        dtype: torch.dtype | None = None,
+        init: Literal["default", "relu", "normal", "glorot", "one"] = "normal",
+    ) -> None:
+        if init in {"zero", "gating"}:
+            msg = f"MPLinear is incompatible with init={init!r} (cannot normalize a zero/gating weight)."
+            raise ValueError(msg)
+        super().__init__(in_features, out_features, bias=bias, dtype=dtype, init=init)
+        with torch.no_grad():
+            self.weight.copy_(magnitude_normalize(self.weight))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward with forced + on-use weight normalization."""
+        if self.training:
+            with torch.no_grad():
+                self.weight.copy_(magnitude_normalize(self.weight))
+        weight = magnitude_normalize(self.weight) / math.sqrt(self.in_features)
+        return nn.functional.linear(x, weight, self.bias)
