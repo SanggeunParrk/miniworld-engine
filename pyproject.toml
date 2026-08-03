@@ -3,6 +3,8 @@ name = "miniworld-engine"
 version = "0.1.0"
 requires-python = ">=3.10"
 description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
   # inherits when it consumes miniworld-engine as a submodule / dependency:
@@ -40,7 +42,7 @@ dev = ["pytest", "ruff", "pyright"]
 flash = ["flash-attn-4"]
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]  # >=77 for PEP 639 (SPDX `license` string + `license-files`)
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
