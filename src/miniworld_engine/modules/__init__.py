@@ -15,6 +15,7 @@ from .augmented_attention import AugmentedAttentionPairBias
 from .conditioned_transition import ConditionedTransition
 from .dispatch import KernelBackend
 from .exceptions import ImplementationType, InvalidImplementationError
+from .outer_product import OuterProduct, OuterProductMean
 from .pairformer import Pairformer, PairformerBlock, PairformerConfig
 from .primitives import Dropout, LayerNorm, Linear
 from .transition import Transition
@@ -40,6 +41,8 @@ __all__ = [
     "KernelBackend",
     "LayerNorm",
     "Linear",
+    "OuterProduct",
+    "OuterProductMean",
     "Pairformer",
     "PairformerBlock",
     "PairformerConfig",
