@@ -29,7 +29,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/practice/miniworld-kernels
+cd /home/psk6950/practice/miniworld-engine
 export HYDRA_FULL_ERROR=1
 
 echo "host=$(hostname)  date=$(date)"

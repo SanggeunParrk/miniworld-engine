@@ -20,7 +20,7 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=benchmarks/env_build_%j.out
 set -uo pipefail
-cd /home/psk6950/practice/miniworld-kernels
+cd /home/psk6950/practice/miniworld-engine
 
 echo "host=$(hostname)  date=$(date)  pixi=$(pixi --version)"
 
@@ -28,7 +28,7 @@ echo "host=$(hostname)  date=$(date)  pixi=$(pixi --version)"
 # Cold-install ordering fix for transformer-engine-torch (no-build-isolation).
 # A fresh `pixi install` builds the TE-torch sdist BEFORE torch is placed in the
 # env, so its setup.py `import torch` fails ("This package needs Torch to build").
-# The existing ~/miniworld-kernels env never hit this because it was built
+# The existing ~/miniworld-engine env never hit this because it was built
 # incrementally (torch already present). Fix: seed torch + prebuild TE into the
 # env FIRST (torch importable), so the subsequent `pixi install --frozen` sees
 # both already satisfied at the locked versions and SKIPS the problematic build,

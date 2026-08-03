@@ -82,7 +82,7 @@ class OuterProductMean(nn.Module):
 
         self.mask_interchain = mask_interchain
         # LN over the MSA feature dim — route to the fused miniworld_engine LN (bf16) under
-        # MINIWORLD_KERNELS; a raw nn.LayerNorm runs fp32-native under autocast and,
+        # MINIWORLD_ENGINE; a raw nn.LayerNorm runs fp32-native under autocast and,
         # at MSA depth 2048, is the single biggest kernel in the MSA module.
         self.ln_msa = LayerNorm(d_msa, implementation=implementation)
         self.to_left = Linear(d_msa, d_hidden, bias=False)

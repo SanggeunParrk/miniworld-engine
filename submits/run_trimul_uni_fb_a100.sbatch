@@ -13,7 +13,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) date=$(date)"
 echo "### git status (files under test should be MODIFIED) ###"; git status --short

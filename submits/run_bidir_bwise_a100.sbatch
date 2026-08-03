@@ -13,7 +13,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) date=$(date)"
 pixi run --frozen python -c "import torch; assert torch.cuda.get_device_capability(0)[0]==8, 'need A100'; print('A100 ok')"

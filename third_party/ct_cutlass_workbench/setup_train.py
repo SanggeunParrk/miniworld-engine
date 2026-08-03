@@ -2,8 +2,8 @@ import os
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-CUTLASS = "/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass"
-KDIR = "/home/psk6950/miniworld-kernels/src/miniworld_engine/kernels/conditioned_transition/cutlass"
+CUTLASS = "/home/psk6950/miniworld-engine/_ct_cutlass/cutlass"
+KDIR = "/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/conditioned_transition/cutlass"
 setup(
     name="ct_train_ext",
     ext_modules=[

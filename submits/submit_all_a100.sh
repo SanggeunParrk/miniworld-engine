@@ -8,7 +8,7 @@
 # arch misroutes / perf-vs-baseline, the empirical half of the review. Login-node-safe:
 # it only calls sbatch (no pixi/python/GPU here).
 set -uo pipefail
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 
 MODULE_TARGETS=(
   transition

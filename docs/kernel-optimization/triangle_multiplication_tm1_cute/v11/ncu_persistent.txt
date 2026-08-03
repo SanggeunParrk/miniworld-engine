@@ -1,4 +1,4 @@
-==PROF== Connected to process 1758361 (/home/snu_hwle/psk/miniworld-kernels/.pixi/envs/default/bin/python3.12)
+==PROF== Connected to process 1758361 (/home/snu_hwle/psk/miniworld-engine/.pixi/envs/default/bin/python3.12)
 PRE M=1048576
 ==PROF== Profiling "kernel_cutlass_kernel___main__PersistentGemm_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_Atom_ThrID_10_TV_Layout_Src_181_0": 0%....50%....100% - 9 passes
 persistent GEMM M=1048576: cos=0.999999 maxabs=1.562e-02

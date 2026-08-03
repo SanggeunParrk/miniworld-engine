@@ -4,7 +4,7 @@ augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-
 augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,augmented_attention_atom,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,d_pair,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
 
 from user code:
-   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+   File ""/home/snu_hwle/psk/miniworld-engine/src/miniworld_engine/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
     raise InvalidImplementationError(self.implementation)
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
@@ -15,7 +15,7 @@ augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-
 augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,augmented_attention_atom,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,d_pair,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,384,147456,1,256,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
 
 from user code:
-   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+   File ""/home/snu_hwle/psk/miniworld-engine/src/miniworld_engine/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
     raise InvalidImplementationError(self.implementation)
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""
@@ -26,7 +26,7 @@ augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-
 augmented_attention_atom_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_d_pair_d_sweep,module,augmented_attention_atom,NVIDIA B200,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,d_pair,cuequivariance,cuequivariance,,,,,,,,,,,,1,32,0.0,384,147456,1,512,384,768,128,16,failed,"InternalTorchDynamoError: AttributeError: 'UserDefinedObjectVariable' object has no attribute '__context__'
 
 from user code:
-   File ""/home/snu_hwle/psk/miniworld-kernels/src/miniworld_kernels/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
+   File ""/home/snu_hwle/psk/miniworld-engine/src/miniworld_engine/modules/augmented_attention/module.py"", line 110, in torch_dynamo_resume_in__kernel_attention_pair_bias_at_110
     raise InvalidImplementationError(self.implementation)
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=""+dynamo""

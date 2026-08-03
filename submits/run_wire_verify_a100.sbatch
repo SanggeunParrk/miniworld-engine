@@ -15,7 +15,7 @@
 #SBATCH --output=benchmarks/wire_verify_a100_%j.out
 
 set -uo pipefail
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 echo "host=$(hostname) date=$(date)"
 
 echo "### (1) import all touched kernel modules + discover wired op-tags ###"

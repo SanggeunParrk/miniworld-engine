@@ -21,7 +21,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) date=$(date) target=${CAPTURE_TARGET:-transition}"
 pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); assert cap[0]==8, cap; print('A100 ok', torch.__version__)"
@@ -73,7 +73,7 @@ capture_target() {
 
 capture_target "${CAPTURE_TARGET:-transition}"
 
-RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
+RT="${MINIWORLD_ENGINE_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
 DST="src/miniworld_engine/autotune/data"
 echo ""
 echo "### runtime autotune caches produced ###"

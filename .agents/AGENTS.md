@@ -14,7 +14,7 @@ Forbidden on the login node:
 
 Allowed on the login node:
 - Small repo-local reads such as `rg`, `sed`, `nl`, `git status`, and file inspection inside this repo only.
-- Narrow searches rooted at `/home/psk6950/miniworld-kernels` only.
+- Narrow searches rooted at `/home/psk6950/miniworld-engine` only.
 
 If GPU work, benchmarking, or heavy inspection is needed:
 - Use `srun` or an allocated compute node.

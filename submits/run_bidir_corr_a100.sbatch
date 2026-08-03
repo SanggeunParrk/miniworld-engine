@@ -8,7 +8,7 @@
 #SBATCH --time=00:25:00
 #SBATCH --output=benchmarks/bidir_corr_a100_%j.out
 set -uo pipefail
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python - <<PY
 import torch
 from miniworld_engine.modules import BidirectionalTriangleMultiplication as Bidir, ImplementationType as IT

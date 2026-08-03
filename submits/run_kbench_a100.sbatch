@@ -17,7 +17,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 
 echo "host=$(hostname)  date=$(date)"
 pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print('torch', torch.__version__, torch.cuda.get_device_name(0), 'sm', cap, 'ngpu', torch.cuda.device_count()); assert cap[0]==8, f'expected sm_80 (A100), got sm_{cap[0]}{cap[1]}'"

@@ -4,7 +4,7 @@ ONE cache location, always: ``src/miniworld_engine/autotune/data/<op>/<gpu_key>.
 committed to git and shipped inside the package. Reads (dispatch/prune) and writes
 (builder / RUN_AUTOTUNE regen) both target this in-repo path so a tuned cache is
 versioned with the kernels and shared across every machine that checks out the repo.
-There is deliberately NO ``$MINIWORLD_KERNELS_CACHE_DIR`` / ``$XDG_CACHE_HOME`` / ``~/.cache``
+There is deliberately NO ``$MINIWORLD_ENGINE_CACHE_DIR`` / ``$XDG_CACHE_HOME`` / ``~/.cache``
 override: a stale per-user cache must never shadow the repo's committed configs.
 
 Cache JSON schema (v1)::

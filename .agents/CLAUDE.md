@@ -1,4 +1,4 @@
-# CLAUDE.md - agent instructions for miniworld-kernels
+# CLAUDE.md - agent instructions for miniworld-engine
 
 ## HARD RULE: NEVER RUN ANYTHING ON THE LOGIN NODE
 
@@ -12,7 +12,7 @@ Route everything through `srun`/`sbatch` onto a compute node:
 ```bash
 srun --partition=h100 --account=cssb --qos=cssb_h100 --gres=gpu:h100:1 \
      --cpus-per-task=8 --mem=64G --time=00:20:00 \
-     bash -c 'cd /home/psk6950/miniworld-kernels && PYTHONPATH=src <cmd>'
+     bash -c 'cd /home/psk6950/miniworld-engine && PYTHONPATH=src <cmd>'
 # or write an sbatch script (see submits/run_bench.sbatch) and `sbatch` it.
 ```
 

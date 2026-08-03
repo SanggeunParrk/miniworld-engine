@@ -4,7 +4,7 @@ ref + graph time with replay-cos check."""
 from __future__ import annotations
 import sys, os
 from pathlib import Path
-sys.path.insert(0, "/home/snu_hwle/psk/miniworld-kernels/src")
+sys.path.insert(0, "/home/snu_hwle/psk/miniworld-engine/src")
 import torch, triton
 from miniworld_engine.modules.triangle_multiplication.module import TriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType

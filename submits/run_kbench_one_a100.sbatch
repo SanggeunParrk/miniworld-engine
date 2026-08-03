@@ -12,7 +12,7 @@
 #SBATCH --output=benchmarks/kernels/kbench1_%x_%j.out
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) target=${BENCH_TARGET} date=$(date)"
 pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print(torch.cuda.get_device_name(0),'sm',cap); assert cap[0]==8, 'need A100 (sm80)'"

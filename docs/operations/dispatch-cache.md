@@ -9,7 +9,7 @@ The persistent on-disk cache root is a single, canonical, in-repo location:
 - `src/miniworld_engine/autotune/data/<subdir>/<gpu_key>.json`
 
 where `<subdir>` is `ln_bwd_dispatch`, `bias_only_dispatch`, etc. There is
-deliberately **no** `$MINIWORLD_KERNELS_CACHE_DIR` / `$XDG_CACHE_HOME` / `~/.cache`
+deliberately **no** `$MINIWORLD_ENGINE_CACHE_DIR` / `$XDG_CACHE_HOME` / `~/.cache`
 override: reads and writes both target this in-repo path, so a stale per-user cache
 can never shadow the repo's committed choices, and a checkout of the repo (direct or
 as a submodule) already carries the calibrated caches.

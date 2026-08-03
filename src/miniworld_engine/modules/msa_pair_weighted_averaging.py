@@ -48,7 +48,7 @@ class MSAPairWeightedAveraging(nn.Module):
         if d_hidden is None:
             d_hidden = d_msa // n_head
 
-        # Fused miniworld_engine LN (bf16) under MINIWORLD_KERNELS — raw nn.LayerNorm is fp32
+        # Fused miniworld_engine LN (bf16) under MINIWORLD_ENGINE — raw nn.LayerNorm is fp32
         # native under autocast and dominates the MSA module at depth 2048.
         self.ln_msa = LayerNorm(d_msa, implementation=implementation)
         self.to_value = Linear(d_msa, d_hidden * n_head, bias=False, init="glorot")

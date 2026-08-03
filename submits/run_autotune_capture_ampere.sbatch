@@ -8,7 +8,7 @@
 #                                    flushes top-5 per (op,dtype,bucket) to the cache.
 # The capture builder writes DIRECTLY into the committed in-repo cache
 # (src/miniworld_engine/autotune/data/<op>/<gpu_key>.json) — there is no runtime-dir copy
-# step (cache.py deliberately dropped the $MINIWORLD_KERNELS_CACHE_DIR override). After the
+# step (cache.py deliberately dropped the $MINIWORLD_ENGINE_CACHE_DIR override). After the
 # job, the new "NVIDIA RTX A5000 (sm86).json" / "NVIDIA RTX A6000 (sm86).json" entries are
 # ready to `git add` + commit. cute/cuda kernels are sm_90+ (not built/tuned here).
 #
@@ -27,7 +27,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/practice/miniworld-kernels
+cd /home/psk6950/practice/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) date=$(date) target=${CAPTURE_TARGET:-transition}"
 pixi run --frozen python -c "

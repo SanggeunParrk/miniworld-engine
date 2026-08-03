@@ -108,7 +108,7 @@ trimul_inproj/
 ```bash
 srun --partition=h100 --account=cssb --qos=cssb_h100 --gres=gpu:h100:1 \
      --cpus-per-task=8 --mem=64G --time=00:20:00 \
-     bash -c 'cd /home/psk6950/miniworld-kernels && PYTHONPATH=src \
+     bash -c 'cd /home/psk6950/miniworld-engine && PYTHONPATH=src \
      pixi run --frozen python \
      src/miniworld_engine/kernels/trimul_inproj/cute/verify.py'
 ```

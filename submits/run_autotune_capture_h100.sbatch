@@ -15,7 +15,7 @@
 #SBATCH --output=/home/psk6950/cap_h100_%j.out
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) date=$(date) target=${CAPTURE_TARGET:-all}"
 pixi run --frozen python -c "

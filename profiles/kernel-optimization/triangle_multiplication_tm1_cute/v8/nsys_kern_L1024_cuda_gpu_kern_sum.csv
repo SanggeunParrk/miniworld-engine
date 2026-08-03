@@ -1,5 +1,5 @@
 Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
-38.7,3792339,12,316028.3,315567.0,313983,320255,1956.4,kernel_cutlass_kernel_miniworld_kernelskernelstm1cutesm100_gate_gemmGateGemm_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_0
+38.7,3792339,12,316028.3,315567.0,313983,320255,1956.4,kernel_cutlass_kernel_miniworld_enginekernelstm1cutesm100_gate_gemmGateGemm_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_1110_Copy_0
 18.5,1813818,6,302303.0,300927.0,300607,309663,3609.5,layer_norm_transpose_forward_kernel
 15.5,1519835,6,253305.8,252143.5,251263,259135,2945.1,fused_sigmoid_gated_dual_gemm_forward_kernel
 11.8,1155484,6,192580.7,191263.5,190239,198367,3076.5,nvjet_tst_256x256_64x4_2x1_2cta_v_bz_TNT

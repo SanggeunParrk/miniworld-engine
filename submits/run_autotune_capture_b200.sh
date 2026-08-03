@@ -9,19 +9,19 @@
 #
 # Env knobs (same semantics as the A100 job):
 #   CAP_COMPILE (default false), CAP_GRAPH (default manual), CAPTURE_COPY (default 1),
-#   MWK (miniworld-kernels checkout), PY (python for the quack-0.5.0 consumer env).
+#   MWK (miniworld-engine checkout), PY (python for the quack-0.5.0 consumer env).
 set -uo pipefail
 set -f
-MWK="${MWK:-$HOME/psk/miniworld-kernels}"
+MWK="${MWK:-$HOME/psk/miniworld-engine}"
 PY="${PY:-$HOME/psk/MiniWorld/.pixi/envs/default/bin/python}"   # quack 0.5.0 / cutlass 4.5.2 / FA4
 cd "$MWK"
 export HYDRA_FULL_ERROR=1
 # Repo-local, exec-capable caches (box /tmp is noexec; keep scratch repo-local under ncu/).
-export MINIWORLD_KERNELS_CACHE_DIR="${MINIWORLD_KERNELS_CACHE_DIR:-$MWK/ncu/autotune_run}"
+export MINIWORLD_ENGINE_CACHE_DIR="${MINIWORLD_ENGINE_CACHE_DIR:-$MWK/ncu/autotune_run}"
 export TRITON_CACHE_DIR="$MWK/ncu/p5cache/triton"
 export TORCHINDUCTOR_CACHE_DIR="$MWK/ncu/p5cache/inductor"
 export CUTE_DSL_CACHE_DIR="$MWK/ncu/p5cache/cute"
-echo "host=$(hostname) date=$(date) target=${CAPTURE_TARGET:-transition} cache=$MINIWORLD_KERNELS_CACHE_DIR"
+echo "host=$(hostname) date=$(date) target=${CAPTURE_TARGET:-transition} cache=$MINIWORLD_ENGINE_CACHE_DIR"
 $PY -c "import torch; cap=torch.cuda.get_device_capability(0); assert cap[0]==10, cap; print('B200 ok', torch.__version__)" || exit 1
 
 run_one() {
@@ -64,7 +64,7 @@ capture_target() {
 }
 capture_target "${CAPTURE_TARGET:-transition}"
 
-RT="$MINIWORLD_KERNELS_CACHE_DIR/autotune"
+RT="$MINIWORLD_ENGINE_CACHE_DIR/autotune"
 DST="src/miniworld_engine/autotune/data"
 echo ""; echo "### runtime autotune caches produced ###"
 find "$RT" -name '*.json' -printf '%p\n' 2>/dev/null | sort

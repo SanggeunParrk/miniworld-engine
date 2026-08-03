@@ -1,4 +1,4 @@
-==PROF== Connected to process 2427168 (/home/snu_hwle/psk/miniworld-kernels/.pixi/envs/default/bin/python3.12)
+==PROF== Connected to process 2427168 (/home/snu_hwle/psk/miniworld-engine/.pixi/envs/default/bin/python3.12)
 ==PROF== Profiling "layer_norm_bwd_main_kernel": 0%....50%....100% - 10 passes
 done D 512 L 1024
 ==PROF== Disconnected from process 2427168

@@ -26,7 +26,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/practice/miniworld-kernels
+cd /home/psk6950/practice/miniworld-engine
 
 echo "host=$(hostname)  date=$(date)"
 pixi run --frozen python -c "

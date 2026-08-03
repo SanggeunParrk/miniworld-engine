@@ -16,7 +16,7 @@
 
 set -uo pipefail
 set -f
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 
 echo "host=$(hostname)  date=$(date)"
 # FAIL-FAST CUDA/sm90 gate with retry (HGX nodes can throw CUDA error 802 right after alloc).

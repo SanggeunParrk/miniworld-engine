@@ -1,6 +1,6 @@
 import sys, warnings
 warnings.filterwarnings("ignore")
-sys.path.insert(0, "/home/snu_hwle/psk/miniworld-kernels/src")
+sys.path.insert(0, "/home/snu_hwle/psk/miniworld-engine/src")
 import torch
 from miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective import gate_gemm
 

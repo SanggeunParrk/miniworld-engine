@@ -2,7 +2,7 @@
 
 **Status:** IN PROGRESS. Phases 0–3 DONE (`a1aea37`); Phase 4 is the remaining blocker
 (a cutlass-dsl launch/stream ABI migration — larger than the quack shim).
-**Scope:** miniworld-kernels only.
+**Scope:** miniworld-engine only.
 
 ## Progress (2026-07-13)
 
@@ -76,7 +76,7 @@ but not the tcgen05-tuned path).
 1. **Never mutate the shared consumer env.** Upgrading its quack once pulled
    torch 2.10→2.13 and broke cu130; it was reverted. Do all porting in an
    **isolated quack-0.5.0 dev env**.
-2. **Never patch `site-packages` quack.** Fix everything in miniworld-kernels source.
+2. **Never patch `site-packages` quack.** Fix everything in miniworld-engine source.
 3. Two moving dimensions: **quack 0.3.11 → 0.5.0** *and* **cutlass-dsl 4.4.2 → 4.5.2**
    (the CuTeDSL API itself may have drifted, not just quack).
 
@@ -98,7 +98,7 @@ but not the tcgen05-tuned path).
 
 ### Phase 0 — isolated dev env
 Scratch env mirroring the consumer stack: `torch 2.10.0+cu130` + `quack-kernels==0.5.0`
-+ `nvidia-cutlass-dsl==4.5.2` + `triton==3.6.0`. A miniworld-kernels git worktree with
++ `nvidia-cutlass-dsl==4.5.2` + `triton==3.6.0`. A miniworld-engine git worktree with
 its own pixi env (or venv) pinned to these. All porting/testing here — never the shared
 consumer env.
 
@@ -114,7 +114,7 @@ Only the `gemm_out` custom-op registration is broken; the `gemm` / `gemm_act` fu
 cute needs live in the same module (so they can't be imported past the failing
 registration). Decide between:
 - **(A) use `GemmSm100` / `GemmSm90` classes directly** (they import fine on 0.5.0) and
-  reimplement the thin `gemm` / `gemm_act` dispatch/launch in miniworld-kernels. Clean,
+  reimplement the thin `gemm` / `gemm_act` dispatch/launch in miniworld-engine. Clean,
   larger.
 - **(B) compat shim** that exposes `gemm` / `gemm_act` while neutralizing the broken
   `gemm_out` registration (e.g. make the `RoundingMode` default serialize to an int
@@ -144,7 +144,7 @@ B200 (the payoff — confirm the tcgen05 win that motivates this).
 - Wire the ported cute kernels' build-time configs into the new autotune cache via
   `select_config(op, dtype, bucket, candidates)` (falls back to `default_config`
   on a miss); build + ship the B200 (sm100) cute config JSONs.
-- Bump the chain (miniworld-kernels → team-gm → MiniWorld); install the cute deps in the
+- Bump the chain (miniworld-engine → team-gm → MiniWorld); install the cute deps in the
   consumer env (coexisting with FA4 on quack 0.5.0); verify cute runs there — and that
   `MINIWORLD` (auto) trimul on B200 no longer hits the broken path.
 

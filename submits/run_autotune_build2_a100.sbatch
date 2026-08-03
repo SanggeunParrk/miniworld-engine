@@ -12,7 +12,7 @@
 #SBATCH --output=benchmarks/autotune_build2_a100_%j.out
 
 set -uo pipefail
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 echo "host=$(hostname) date=$(date)"
 
 echo "### (1) int64-offset correctness: bidir d=512 L=768 fwd+bwd vs reference ###"
@@ -45,7 +45,7 @@ echo "### (2) rebuild full shipped cache ###"
 pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python -m miniworld_engine.autotune.build --op all'
 echo "[build exit=$?]"
 
-RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
+RT="${MINIWORLD_ENGINE_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
 DST="src/miniworld_engine/autotune/data"
 echo "### (3) copy $RT -> $DST ###"
 [ -d "$RT" ] && cp -rv "$RT/." "$DST/" && find "$DST" -name '*.json' -print

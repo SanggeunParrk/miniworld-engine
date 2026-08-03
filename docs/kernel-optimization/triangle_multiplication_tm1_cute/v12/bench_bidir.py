@@ -1,6 +1,6 @@
 import sys, torch, torch.nn as nn, warnings
 warnings.filterwarnings("ignore")
-sys.path.insert(0,"/home/snu_hwle/psk/miniworld-kernels/src")
+sys.path.insert(0,"/home/snu_hwle/psk/miniworld-engine/src")
 import triton
 from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType

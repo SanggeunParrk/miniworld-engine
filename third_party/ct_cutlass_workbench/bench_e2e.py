@@ -14,7 +14,7 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, "/home/psk6950/miniworld-kernels/_ct_cutlass")
+sys.path.insert(0, "/home/psk6950/miniworld-engine/_ct_cutlass")
 from miniworld_engine.kernels.conditioned_transition.triton.training import (
     cond_transition_train, set_forward_mode,
 )

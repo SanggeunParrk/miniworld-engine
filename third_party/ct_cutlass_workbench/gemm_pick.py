@@ -87,6 +87,6 @@ ntd = {f"{k[0]}_{k[1]}_{k[2]}": v for k, v in nt_best.items()}
 tnd = {f"{k[0]}_{k[1]}_{k[2]}": v for k, v in tn_best.items()}
 print("\nNT_BEST =", ntd)
 print("TN_BEST =", tnd)
-with open("/home/psk6950/miniworld-kernels/_ct_cutlass/gemm_cfgs.json", "w") as f:
+with open("/home/psk6950/miniworld-engine/_ct_cutlass/gemm_cfgs.json", "w") as f:
     json.dump({"NT": ntd, "TN": tnd}, f)
 print("GEMM PICK DONE")

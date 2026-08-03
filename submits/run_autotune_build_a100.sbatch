@@ -12,7 +12,7 @@
 #SBATCH --output=benchmarks/autotune_build_a100_%j.out
 
 set -uo pipefail
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 echo "host=$(hostname) date=$(date)"
 pixi run --frozen python -c "import torch; assert torch.cuda.get_device_capability(0)[0]==8, 'need A100'; print('A100 ok')"
 
@@ -20,7 +20,7 @@ pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY
 echo "[build exit=$?]"
 
 # Copy runtime cache -> shipped package data (committed).
-RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
+RT="${MINIWORLD_ENGINE_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
 DST="src/miniworld_engine/autotune/data"
 echo "=== copying runtime cache $RT -> $DST ==="
 if [ -d "$RT" ]; then

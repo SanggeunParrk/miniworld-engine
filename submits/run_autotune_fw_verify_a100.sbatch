@@ -13,11 +13,11 @@
 #SBATCH --output=benchmarks/autotune_fw_verify_a100_%j.out
 
 set -uo pipefail
-cd /home/psk6950/miniworld-kernels
+cd /home/psk6950/miniworld-engine
 echo "host=$(hostname) date=$(date)"
 
 echo "### (1) backend-agnostic API mechanics (no GPU config needed) ###"
-pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src MINIWORLD_KERNELS_CACHE_DIR=$(mktemp -d) python - <<PY
+pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src MINIWORLD_ENGINE_CACHE_DIR=$(mktemp -d) python - <<PY
 import os
 from miniworld_engine.autotune import cache as C
 
@@ -70,7 +70,7 @@ echo "### (2) Triton builders through generic tune_bucket core ###"
 pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}; PYTHONPATH=src python -m miniworld_engine.autotune.build --op all'
 echo "[build exit=$?]"
 
-RT="${MINIWORLD_KERNELS_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
+RT="${MINIWORLD_ENGINE_CACHE_DIR:-$HOME/.cache/miniworld_engine}/autotune"
 echo "### rebuilt runtime caches ###"
 find "$RT" -name '*.json' -print 2>/dev/null
 echo "AUTOTUNE FW VERIFY DONE"

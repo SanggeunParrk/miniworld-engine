@@ -16,7 +16,7 @@ from miniworld_engine.kernels.conditioned_transition.triton.training import (
 
 # best configs per (regime, op); loaded from gemm_pick.py output. default 0 if unknown.
 import json, os
-_cfgf = "/home/psk6950/miniworld-kernels/_ct_cutlass/gemm_cfgs.json"
+_cfgf = "/home/psk6950/miniworld-engine/_ct_cutlass/gemm_cfgs.json"
 if os.path.exists(_cfgf):
     _c = json.load(open(_cfgf)); NT_BEST = _c["NT"]; TN_BEST = _c["TN"]
 else:

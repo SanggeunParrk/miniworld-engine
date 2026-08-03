@@ -16,7 +16,7 @@
 #SBATCH --output=benchmarks/kernels/kbench1_ampere_%x_%j.out
 set -uo pipefail
 set -f
-cd /home/psk6950/practice/miniworld-kernels
+cd /home/psk6950/practice/miniworld-engine
 export HYDRA_FULL_ERROR=1
 echo "host=$(hostname) target=${BENCH_TARGET} date=$(date)"
 pixi run --frozen python -c "

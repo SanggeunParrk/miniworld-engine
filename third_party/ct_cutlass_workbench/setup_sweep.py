@@ -2,7 +2,7 @@ import os
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-CUTLASS = "/home/psk6950/miniworld-kernels/_ct_cutlass/cutlass"
+CUTLASS = "/home/psk6950/miniworld-engine/_ct_cutlass/cutlass"
 setup(
     name="ct_sweep_ext",
     ext_modules=[

@@ -1,6 +1,6 @@
 import sys, warnings
 warnings.filterwarnings("ignore")
-sys.path.insert(0,"/home/snu_hwle/psk/miniworld-kernels/src")
+sys.path.insert(0,"/home/snu_hwle/psk/miniworld-engine/src")
 import torch
 from miniworld_engine.modules.triangle_multiplication.reference import TriangleMultiplicationReference
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
