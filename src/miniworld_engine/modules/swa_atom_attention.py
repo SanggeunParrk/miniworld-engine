@@ -270,7 +270,11 @@ def apply_rotary_emb_3d(
     cos = cos.unsqueeze(2).repeat(1, 1, 1, 2)  # [N, S, 1, 2*half]
     sin = sin.unsqueeze(2).repeat(1, 1, 1, 2)
     x_rot = x[..., :ro_dim]
-    x_rot = x_rot * cos + _rotate_half(x_rot) * sin
+    # cos/sin are fp32 (angle precision), which promotes a bf16 x to fp32. Do the
+    # rotation math in the promoted dtype but cast back to the input dtype, so q/k
+    # keep the same dtype as the (unrotated) v — otherwise SDPA rejects the mixed
+    # dtypes and flash silently upcasts. Mirrors _qk_norm's `.to(x.dtype)`.
+    x_rot = (x_rot * cos + _rotate_half(x_rot) * sin).to(x.dtype)
     return torch.cat([x_rot, x[..., ro_dim:]], dim=-1)
 
 
