@@ -61,17 +61,18 @@ class _TransitionDabLNBwdMixin(GemmDefaultEpiMixin):
         epilogue_args,
         smem_capacity,
         occupancy,
+        warp_shape_mnk=None,  # quack 0.5.0 added this trailing param to the base _compute_stages
     ):
         epi_stage = 1
         epi_c_stage = 1
         d_bytes_per_stage = cute.size(epi_tile) * d_dtype.width // 8
-        epi_bytes_per_stage = d_bytes_per_stage + cls.epi_smem_bytes_per_stage(
-            epilogue_args,
-            cta_tile_shape_mnk,
-            epi_tile,
-        )
-        epi_bytes = epi_bytes_per_stage * epi_stage
+        # quack 0.5.0: epi_smem_bytes_per_stage(int) -> epi_smem_bytes(...).{unstaged,d_stage,c_stage}.
+        esb = cls.epi_smem_bytes(epilogue_args, cta_tile_shape_mnk, epi_tile, warp_shape_mnk)
+        epi_bytes_per_stage = d_bytes_per_stage + esb.d_stage
+        epi_bytes = esb.unstaged + epi_bytes_per_stage * epi_stage
         epi_bytes += cute.size(epi_tile) * c_dtype.width // 8 * epi_c_stage
+        if esb.c_stage > 0:
+            epi_bytes += esb.c_stage * epi_c_stage
         a_shape = cute.slice_(cta_tile_shape_mnk, (None, 0, None))
         b_shape = cute.slice_(cta_tile_shape_mnk, (0, None, None))
         ab_bytes_per_stage = (
@@ -83,7 +84,7 @@ class _TransitionDabLNBwdMixin(GemmDefaultEpiMixin):
         return ab_stage, epi_stage, epi_c_stage
 
     @staticmethod
-    def _sm90_compute_tile_shape_or_override(
+    def _compute_tile_shape_or_override(
         cta_tile_shape_mnk,
         atom_layout_mnk,
         element_type=None,

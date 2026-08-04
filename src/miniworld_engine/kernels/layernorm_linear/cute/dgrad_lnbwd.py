@@ -16,7 +16,7 @@ KEY FIXES during bring-up (now resolved, cos 1.0 at K∈{128,256}, varied N):
    (which silently computed dY@Wᵀ; N=K=d hid it).  cos 0→0.48.
  - SINGLE epilogue subtile: the default epi_tile_N = gcd(32,tile_N) = 32 splits K=128 into 4
    subtiles → each visit's warp_reduction over N saw only 32 cols → PARTIAL c1/c2 → cos≈0.48.
-   We override `_sm90_compute_tile_shape_or_override` to force epi_tile = the full CTA tile so the
+   We override `_compute_tile_shape_or_override` to force epi_tile = the full CTA tile so the
    whole K-row is in ONE subtile → single-pass reduce+apply. cos 0.48→1.0. Safe ONLY with
    atom_layout 1×1 (tile_m=64, non-pingpong); a cooperative 2×1 atom iterates N-first and a
    full-M epi_tile would mis-order (see the warning in that gemm_sm90 helper).
@@ -74,23 +74,26 @@ class _DgradLNBwdMixin(GemmDefaultEpiMixin):
     4 subtiles, each visit sees only 32 cols → PARTIAL c1/c2 → dx cos≈0.5 (the iter-6 bug). We force
     epi_tile = the full CTA tile so the whole K-row lands in one subtile. Safe ONLY when atom_layout
     is 1×1 (tile_m=64 non-pingpong): with a cooperative 2×1 atom the accumulator iterates N-first and
-    a full-M epi_tile would mis-order — see the warning in gemm_sm90._sm90_compute_tile_shape_or_override.
+    a full-M epi_tile would mis-order — see the warning in gemm_sm90._compute_tile_shape_or_override.
     """
 
     @classmethod
     def _compute_stages(cls, cta_tile_shape_mnk, epi_tile, a_dtype, b_dtype, d_dtype, c_dtype,
-                        epilogue_args, smem_capacity, occupancy):
+                        epilogue_args, smem_capacity, occupancy, warp_shape_mnk=None):
         """Single full-N epi subtile ⇒ epi_stage=epi_c_stage=1 suffices (no subtile double-buffer).
         The stock heuristic reserves 2+2 epi stages, which at K=256 starves the mainloop down to
         ~2 ab stages (slow GEMM). Reclaiming that smem ~doubles ab_stage → competitive dgrad."""
         epi_stage = 1
         epi_c_stage = 0 if c_dtype is None else 1
         d_bytes_per_stage = cute.size(epi_tile) * d_dtype.width // 8 if d_dtype is not None else 0
-        epi_bytes_per_stage = d_bytes_per_stage + cls.epi_smem_bytes_per_stage(
-            epilogue_args, cta_tile_shape_mnk, epi_tile)
-        epi_bytes = epi_bytes_per_stage * epi_stage
+        # quack 0.5.0: epi_smem_bytes_per_stage(int) -> epi_smem_bytes(...).{unstaged,d_stage,c_stage}.
+        esb = cls.epi_smem_bytes(epilogue_args, cta_tile_shape_mnk, epi_tile, warp_shape_mnk)
+        epi_bytes_per_stage = d_bytes_per_stage + esb.d_stage
+        epi_bytes = esb.unstaged + epi_bytes_per_stage * epi_stage
         if c_dtype is not None:
             epi_bytes += cute.size(epi_tile) * c_dtype.width // 8 * epi_c_stage
+        if esb.c_stage > 0:  # tile-load ops carry their own per-c-stage smem
+            epi_bytes += esb.c_stage * epi_c_stage
         a_shape = cute.slice_(cta_tile_shape_mnk, (None, 0, None))
         b_shape = cute.slice_(cta_tile_shape_mnk, (0, None, None))
         ab_bytes_per_stage = (cute.size(a_shape) * a_dtype.width // 8
@@ -100,7 +103,7 @@ class _DgradLNBwdMixin(GemmDefaultEpiMixin):
         return ab_stage, epi_stage, epi_c_stage
 
     @staticmethod
-    def _sm90_compute_tile_shape_or_override(cta_tile_shape_mnk, atom_layout_mnk,
+    def _compute_tile_shape_or_override(cta_tile_shape_mnk, atom_layout_mnk,
                                              element_type=None, epi_tile_override=None):
         # Force a single epilogue subtile (full N = K) so the per-row reduction+apply is single-pass.
         # Requires atom_layout 1×1 (assert below catches a mis-set config).
@@ -197,7 +200,7 @@ def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: 
     cfg = default_config(dY.device)
     # tile_N must cover K (single-subtile reduction): use K (<=256) as tile_n.
     # tile_m=64 + non-pingpong → atom_layout 1×1, the only regime where forcing a full-N
-    # epi subtile is safe (see _sm90_compute_tile_shape_or_override override above).
+    # epi subtile is safe (see _compute_tile_shape_or_override override above).
     tile_m = 64
     tile_mn = (tile_m, K)
     pingpong = True   # tile_m=64 pingpong → still atom_layout 1×1 (single full-N epi subtile holds)
