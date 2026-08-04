@@ -71,7 +71,8 @@ def cases_dgrad(shapes):
         gamma = _rand(K); rstd = _rand(M, dtype=torch.float32).abs() + 0.5
         bucket = f"{bucket_mixed(M)}|k{K}"
         cases.append((bucket, lambda c, dY=dY, W=W, xhat=xhat, gamma=gamma, rstd=rstd:
-                      (lambda: dgrad_lnbwd_cute(dY, W, xhat, gamma, rstd, tile_m=c.tile_m))))
+                      (lambda: dgrad_lnbwd_cute(dY, W, xhat, gamma, rstd,
+                                                tile_m=c.tile_m, cluster_m=c.cluster_m))))
     return "dgrad_lnbwd", lnbwd_pp_candidates(), cases
 
 
@@ -86,7 +87,8 @@ def cases_dab(shapes):
         c1 = _rand(M, dtype=torch.float32) * 0.1
         bucket = f"{bucket_mixed(M)}|k{K}"
         cases.append((bucket, lambda c, dAB=dAB, w_ab=w_ab, x=x, gamma=gamma, rstd=rstd, c1=c1:
-                      (lambda: transition_dab_lnbwd_cute(dAB, w_ab, x, gamma, rstd, c1, tile_m=c.tile_m))))
+                      (lambda: transition_dab_lnbwd_cute(dAB, w_ab, x, gamma, rstd, c1,
+                                                         tile_m=c.tile_m, cluster_m=c.cluster_m))))
     return "dab_lnbwd", lnbwd_pp_candidates(), cases
 
 

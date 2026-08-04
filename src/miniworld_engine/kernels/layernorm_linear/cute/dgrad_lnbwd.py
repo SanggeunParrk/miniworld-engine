@@ -209,28 +209,32 @@ def _dgrad_default_tile_m(K: int) -> int:
 
 
 def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: Tensor,
-                     *, tile_m: int | None = None):
+                     *, tile_m: int | None = None, cluster_m: int | None = None):
     """dx (M,K) = LN-backward(dY@W). dY (M,N), W (N,K), xhat=(x-mean)*rstd (M,K), gamma (K,), rstd (M,).
 
-    ``tile_m`` (autotune knob) selects a pingpong atom-1×1 tile in {64,128,192}; None picks the
-    largest that fits K. All are numerically identical (config is performance-only)."""
+    ``tile_m`` (pingpong atom-1×1 tile in {64,128,192}) and ``cluster_m`` ({1,2}) are autotune knobs;
+    None resolves the swept fastest for this shape. All are numerically identical (performance-only)."""
     dev = get_device_capacity(dY.device)
     assert dev[0] == 9, "SM90 only"
     M, N = dY.shape
     K = W.shape[1]
     cfg = default_config(dY.device)
-    if tile_m is None:
-        # Brute-force autotuned over the pingpong atom-1×1 tile_m family; fall back to the
-        # largest-that-fits-K default on a cache miss. Config is performance-only.
+    if tile_m is None or cluster_m is None:
+        # Brute-force autotuned over the pingpong atom-1×1 family (tile_m × cluster_m); cache miss
+        # falls back to the largest-tile_m-that-fits-K, cluster_m=1. Config is performance-only.
         from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_pp_candidates
         from miniworld_engine.autotune.buckets import bucket_mixed
-        _dflt = lnbwd_pp_candidates()[0].__class__(  # a GemmConfig with the default tile_m
+        _dflt = lnbwd_pp_candidates()[0].__class__(
             tile_m=_dgrad_default_tile_m(K), tile_n=128, pingpong=True, cluster_m=1, cluster_n=1,
             device_capacity=9)
-        tile_m = resolve_config("dgrad_lnbwd", lnbwd_pp_candidates(), dtype=str(dY.dtype),
-                                bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt).tile_m
-        if K > _DGRAD_PP_TILE_N_MAX.get(tile_m, 0):   # cached tile_m doesn't fit this K -> safe default
-            tile_m = _dgrad_default_tile_m(K)
+        _c = resolve_config("dgrad_lnbwd", lnbwd_pp_candidates(), dtype=str(dY.dtype),
+                            bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt)
+        if K > _DGRAD_PP_TILE_N_MAX.get(_c.tile_m, 0):   # cached tile_m doesn't fit this K -> safe default
+            _c = _dflt
+        if tile_m is None:
+            tile_m = _c.tile_m
+        if cluster_m is None:
+            cluster_m = _c.cluster_m
     # Algorithmic invariants (keep config performance-only): tile_n = K (single full-N reduction),
     # atom_layout 1×1 via pingpong, and tile_m's pingpong tile_n cap must host K.
     assert tile_m in _DGRAD_PP_TILE_N_MAX, "dgrad tile_m must be a pingpong atom-1×1 tile (64/128/192)"
@@ -247,14 +251,14 @@ def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: 
     a_maj, b_maj, d_maj, c_maj = get_majors(A_p, B_p, D_p, C_p)
     a_dt, b_dt, d_dt, c_dt = get_dtypes(dY, W, dx, xhat)
     vec_dt = torch2cute_dtype_map[rstd.dtype]
-    cluster_mnk = (1, 1, 1)
+    cluster_mnk = (cluster_m, 1, 1)  # cluster_n=1 (output N=K is a single N-tile); cluster_m swept
     fn = _compile(a_dt, b_dt, d_dt, c_dt, a_maj, b_maj, d_maj, c_maj, vec_dt,
                   tile_mn, cluster_mnk, pingpong, True,
                   cfg.is_dynamic_persistent, dev)
     from miniworld_engine.kernels._quack_compat import is_compile_only
     if is_compile_only():
         return dx
-    mac = get_max_active_clusters(1)
+    mac = get_max_active_clusters(cluster_m)  # cluster size = cluster_m * cluster_n(=1)
     tile_count_semaphore = (
         torch.zeros(1, dtype=torch.int32, device=dY.device)
         if (cfg.is_dynamic_persistent and dev[0] == 9) else None

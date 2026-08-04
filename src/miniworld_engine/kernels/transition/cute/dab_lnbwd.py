@@ -244,26 +244,31 @@ def transition_dab_lnbwd_cute(
     c1: Tensor,
     *,
     tile_m: int | None = None,
+    cluster_m: int | None = None,
 ) -> Tensor:
     """Return dx = LNBackward(dAB @ w_ab), without materializing d_xn.
 
-    ``tile_m`` (autotune knob) selects a pingpong atom-1×1 tile in {64,128,192}; None picks the
-    largest that fits K. All numerically identical (performance-only)."""
+    ``tile_m`` ({64,128,192}) and ``cluster_m`` ({1,2}) are autotune knobs; None resolves the swept
+    fastest for this shape. All numerically identical (performance-only)."""
     dev = get_device_capacity(dAB.device)
     assert dev[0] == 9, "SM90 only"
     M, _n = dAB.shape
     K = w_ab.shape[1]
     cfg = default_config(dAB.device)
-    if tile_m is None:
+    if tile_m is None or cluster_m is None:
         from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_pp_candidates
         from miniworld_engine.autotune.buckets import bucket_mixed
         _dflt = lnbwd_pp_candidates()[0].__class__(
             tile_m=_dab_default_tile_m(K), tile_n=128, pingpong=True, cluster_m=1, cluster_n=1,
             device_capacity=9)
-        tile_m = resolve_config("dab_lnbwd", lnbwd_pp_candidates(), dtype=str(dAB.dtype),
-                                bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt).tile_m
-        if K > _DAB_PP_TILE_N_MAX.get(tile_m, 0):
-            tile_m = _dab_default_tile_m(K)
+        _c = resolve_config("dab_lnbwd", lnbwd_pp_candidates(), dtype=str(dAB.dtype),
+                            bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt)
+        if K > _DAB_PP_TILE_N_MAX.get(_c.tile_m, 0):
+            _c = _dflt
+        if tile_m is None:
+            tile_m = _c.tile_m
+        if cluster_m is None:
+            cluster_m = _c.cluster_m
     assert tile_m in _DAB_PP_TILE_N_MAX, "dab tile_m must be a pingpong atom-1×1 tile (64/128/192)"
     assert K <= _DAB_PP_TILE_N_MAX[tile_m], (
         f"tile_m={tile_m} pingpong caps tile_n at {_DAB_PP_TILE_N_MAX[tile_m]} < K={K}")
@@ -291,7 +296,7 @@ def transition_dab_lnbwd_cute(
         c_major,
         vec_dt,
         tile_mn,
-        (1, 1, 1),
+        (cluster_m, 1, 1),  # cluster_n=1 (output N=K single tile); cluster_m swept
         pingpong,
         True,
         cfg.is_dynamic_persistent,
@@ -320,7 +325,7 @@ def transition_dab_lnbwd_cute(
         rounding_mode=None,
     )
     sched = make_scheduler_args(
-        get_max_active_clusters(1),
+        get_max_active_clusters(cluster_m),
         cfg.max_swizzle_size,
         tile_count_semaphore,
     )
