@@ -163,15 +163,19 @@ def gemm_layernorm_linear(
     assert device_capacity[0] == 9, "first version targets SM90 (H100)"
     if config is None:
         # Brute-force autotuned over the FULL sm90 (plain) config space, cache-selected per
-        # (gpu, dtype, M-bucket, N). Falls back to quack's default on a cache miss. Replaces the
-        # hand-baked _tuned.py (M,d)->config lookup (retired). Config is performance-only.
+        # (gpu, dtype, M-bucket, N). Config is performance-only. On a cache MISS we fall back to the
+        # OLD hand-baked _tuned table (m1_config_for) for its (M,N) grid, else quack's default — so
+        # covered shapes get the swept winner (>= old) and UNCOVERED shapes get exactly the previous
+        # config (no regression vs the pre-autotune behaviour).
         from miniworld_engine.autotune.cute_config import resolve_config, plain_sm90_candidates
         from miniworld_engine.autotune.buckets import bucket_mixed
+        from ._tuned import m1_config_for
         M = A.shape[-2]
         N = D.shape[-1]
+        _fallback = m1_config_for(M, N) or default_config(A.device)
         config = resolve_config(
             "layernorm_linear_m1", plain_sm90_candidates(),
-            dtype=str(A.dtype), bucket=f"{bucket_mixed(M)}|n{N}", default=default_config(A.device),
+            dtype=str(A.dtype), bucket=f"{bucket_mixed(M)}|n{N}", default=_fallback,
         )
 
     # quack's low-level GEMM expects 3D (l, m, k) / (l, n, k) / (l, m, n).

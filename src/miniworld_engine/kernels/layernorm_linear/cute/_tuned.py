@@ -4,11 +4,12 @@ A per-(M, d) lookup of the fastest *correct* GEMM config found by the sweep, use
 ``layernorm_linear`` dispatcher. Shapes not in the table fall back to the path's default
 config (``None``), which is still correct — this only *speeds up* the benched shapes.
 
-RETIRED (M1) 2026-08-04: ``m1_config_for`` is NO LONGER used — the M1 path
-(``gemm_layernorm_linear``) now brute-force autotunes over the full sm90 config space via
-``autotune.cute_config.resolve_config`` (a swept per-(gpu,dtype,M-bucket,N) cache), replacing
-this hand-baked table. ``m1_config_for`` is kept only for reference/back-compat. ``m2_config_for``
-(the M2 fused path) still uses its baked table below until M2 is likewise swept.
+DEMOTED to CACHE-MISS FALLBACK (M1) 2026-08-04: the M1 path (``gemm_layernorm_linear``) now
+brute-force autotunes over the full sm90 config space via ``autotune.cute_config.resolve_config``
+(a swept per-(gpu,dtype,M-bucket,N) cache). ``m1_config_for`` is no longer the primary source but
+IS still consulted as the resolve() *default* on a cache miss — so a shape outside the swept
+buckets gets exactly its old hand-tuned config (no perf regression) rather than quack's generic
+default. ``m2_config_for`` is unused (M2 fused is a deferred quack-0.5.0 port; dispatch routes to M1).
 
 SAFE subset only (historical): the original sweep found two config families that returned
 wrong results in a timing-dependent way — ``cluster_m=2`` and the non-pingpong *coop* path
