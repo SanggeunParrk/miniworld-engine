@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from ._tuned import m2_config_for
 from .gemm_layernorm_linear import fold_for_gemm, layernorm_linear_cute
 from .gemm_layernorm_linear_fused import layernorm_linear_cute_fused
 
@@ -39,18 +38,12 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     forward-only crossover (see archived LayerNormLinear reports and
     ``docs/design/layernorm-linear-warp-specialized-stats.md``).
     """
-    m, n = x.shape[0], weight.shape[0]
-    # M1 config is None -> gemm_layernorm_linear brute-force autotunes it (cute_config cache);
-    # the hand-baked _tuned.m1_config_for lookup is retired. M2 keeps its baked table for now.
-    if save_stats:
-        return layernorm_linear_cute(
-            x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded,
-            return_stats=True, config=None,
-        )
-    if n <= 256:
-        return layernorm_linear_cute_fused(
-            x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=m2_config_for(m, n),
-        )
+    # All paths use M1 (`layernorm_linear_cute`, config=None -> brute-force autotuned via
+    # cute_config). The M2 fused kernel (`layernorm_linear_cute_fused`) is a deep quack-0.5.0 port
+    # in progress (load_AB->load_tma, _epi_smem_map->dict, and its kernel-filled SmemColVec op is
+    # dropped by 0.5.0's None-arg active-op filter — see todo.md); until it lands, n<=256 INFERENCE
+    # uses correct M1 instead of broken M2. M2's only edge was inference perf (~0.062 vs 0.094 ms).
     return layernorm_linear_cute(
-        x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=None,
+        x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded,
+        return_stats=save_stats, config=None,
     )

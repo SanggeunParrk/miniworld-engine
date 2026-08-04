@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
-    layernorm_linear_cute_fused,
+from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
+    layernorm_linear_cute,
 )
 from miniworld_engine.kernels.trimul_inproj.cute import dispatch
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
@@ -45,13 +45,12 @@ def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, eps=1e-5, lnl_conf
     assert B == 1 and L == L2
     N = Wp_nn.shape[0]                                             # output width = d_pair
     M = L * L
-    if lnl_config is None:
-        lnl_config = default_lnl_config(N)
+    del lnl_config  # M2 fused is a broken quack-0.5.0 port (see todo); use correct autotuned M1.
     # ① cute LayerNormLinear: M-major view of tri (channel strided by M), no copy.
     #    LN over K channels, then @Wp (K -> N). K may differ from N (bidirectional).
     view = tri_bdll.reshape(B, K, M)[0].t()                       # (M, K)
-    proj = layernorm_linear_cute_fused(view, ln_w, ln_b, Wp_nn, None, eps=eps,
-                                       config=lnl_config)          # (M, N)
+    proj = layernorm_linear_cute(view, ln_w, ln_b, Wp_nn, None, eps=eps,
+                                 config=None)                      # (M, N) — M1, brute-force autotuned
     # ② gate: dispatch fused-quack (act(A@B)⊙C, one launch) vs triton (cuBLAS gemm + ew),
     #    cache the per-shape winner (fused wins large L; triton can win tiny L).
     y = dispatch.pick("gate_infer", (M, N),

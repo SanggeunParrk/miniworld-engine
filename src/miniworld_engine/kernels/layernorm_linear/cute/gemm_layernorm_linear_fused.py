@@ -442,7 +442,8 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                     )
                     len_k = varlen_manager.len_k(batch_idx)
                     k_tile_cnt = cute.ceil_div(len_k, self.cta_tile_shape_mnk[2])
-                    ab_producer_state = self.load_AB(ab_pipeline, ab_producer_state, copy_A, copy_B, k_tile_cnt)
+                    # quack 0.5.0: load_AB(pipe, state, copy_A, copy_B, k) -> load_tma(pipe, state, [copy_A, copy_B], k)
+                    ab_producer_state = self.load_tma(ab_pipeline, ab_producer_state, [copy_A, copy_B], k_tile_cnt)
                     tile_scheduler.advance_to_next_work(is_scheduler_warp=is_scheduler_warp)
                     work_tile = tile_scheduler.get_current_work()
                 if const_expr(self.pingpong and not varlen_k):
@@ -467,8 +468,8 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 )
                 MWG = const_expr(self.mma_warp_groups)
                 stidx = cute.arch.thread_idx()[0] - (self.ab_load_warp_id + self.num_ab_load_warps) * 32
-                s_rstd = epi_smem_tensors[self._epi_smem_map["mRstd"]]
-                s_c1 = epi_smem_tensors[self._epi_smem_map["mC1"]]
+                s_rstd = epi_smem_tensors["mRstd"]
+                s_c1 = epi_smem_tensors["mC1"]
                 s_sched = TileSchedulerCls()
                 s_widx = s_sched._current_work_idx
                 gz = Int32(cute.arch.grid_dim()[2])
@@ -543,8 +544,8 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
             # SmemColVec buffers, sized [2*BLK_M]: each WG fills/reads its own half
             # (offset warp_group_idx*BLK_M) since the two WGs run different tiles whose
             # mma/epilogue overlap.
-            s_rstd = epi_smem_tensors[self._epi_smem_map["mRstd"]]
-            s_c1 = epi_smem_tensors[self._epi_smem_map["mC1"]]
+            s_rstd = epi_smem_tensors["mRstd"]
+            s_c1 = epi_smem_tensors["mC1"]
             wg_off = (warp_group_idx * BLK_M) if const_expr(self.pingpong) else Int32(0)
             tile_scheduler = TileSchedulerCls()
             work_tile = tile_scheduler.initial_work_tile_info()
