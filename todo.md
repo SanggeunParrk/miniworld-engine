@@ -79,6 +79,12 @@ the kernel is buggy at other values.
       `compute-sanitizer racecheck` = 0 hazards on `cluster_m=2 + coop`. Warning is **stale
       (already fixed)** → remove the safe-subset restriction and include `cluster_m=2`/coop in
       the config space. (Caveat: racecheck doesn't fully cover async TMA/mbarrier hazards.)
+- [x] **dgrad + dab LN-backward — were BROKEN on quack 0.5.0, FIXED 2026-08-04** (`cute/dgrad_lnbwd.py`,
+      `transition/cute/dab_lnbwd.py`). Three API drifts in their custom epilogue overrides (both used
+      in production backward): (1) `_compute_stages` gained `warp_shape_mnk=None`; (2)
+      `epi_smem_bytes_per_stage`→`epi_smem_bytes(...).{unstaged,d_stage,c_stage}`; (3) the tile-shape
+      override `_sm90_compute_tile_shape_or_override`→`_compute_tile_shape_or_override` (old name never
+      called → partial LN reduction, dx cos 0.48). Fixed all → dgrad cos=1.0, dab cos=1.0 vs torch. [a4dee06]
 - [x] **#2 layernorm_linear dgrad — `tile_m=64` / atom-1×1** (`cute/dgrad_lnbwd.py`).
       NOT a correctness bug (reviewed 2026-08-04): `dgrad_lnbwd_cute` takes **no config** — it
       hardcodes tile_m=64 and *asserts* the atom_layout-1×1 invariant
