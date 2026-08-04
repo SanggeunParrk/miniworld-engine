@@ -121,13 +121,16 @@ from quack.gemm_tvm_ffi_utils import (  # noqa: E402
     make_fake_gemm_tensors, compile_gemm_kernel,
 )
 
+# Cache-miss fallback config (config is a perf-only autotune knob; see dualgemm_back_cute).
 _CFG = dict(tile_m=128, tile_n=256, cluster_m=1, cluster_n=1, pingpong=False)
 
 
 @jit_cache
 def _compile_dualgemm(a_dtype, b_dtype, postact_dtype, vec_dtype,
-                      a_major, b_major, postact_major, device_capacity):
-    cfg = _CFG
+                      a_major, b_major, postact_major, device_capacity,
+                      tile_m, tile_n, cluster_m, cluster_n, pingpong):
+    cfg = dict(tile_m=tile_m, tile_n=tile_n, cluster_m=cluster_m, cluster_n=cluster_n,
+               pingpong=pingpong)
     mA, mB, mD, mC, m, n, k, l = make_fake_gemm_tensors(
         a_dtype, b_dtype, None, None, a_major, b_major, None, None
     )
@@ -172,12 +175,23 @@ def prepack_dualgemm(Wp, Wg, ln_w, ln_b, *, dtype, device, eps=1e-5):
     return Bm.t().contiguous(), S2, B22  # Bk (N,K)
 
 
-def dualgemm_back_cute(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, *, prepacked=None):
-    """One gated GEMM: y = (LN_D(tri)@Wp) ⊙ sigmoid(x_n@Wg), gate not materialized."""
+def dualgemm_back_cute(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, *, prepacked=None, config=None):
+    """One gated GEMM: y = (LN_D(tri)@Wp) ⊙ sigmoid(x_n@Wg), gate not materialized.
+
+    ``config`` (perf-only autotune knob): a GemmConfig over the sm90 gated space; None resolves the
+    cached fastest for (gpu, dtype, M-bucket, K), falling back to ``_CFG``."""
     B, D, L, _ = tri_bdll.shape
     assert B == 1
     M = L * L
+    K = 2 * D
     dev, dt = x_n.device, x_n.dtype
+    if config is None:
+        from quack.gemm_config import GemmConfig
+        from miniworld_engine.autotune.cute_config import resolve_config, gated_sm90_candidates
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        config = resolve_config(
+            "trimul_dualgemm", gated_sm90_candidates(), dtype=str(dt),
+            bucket=f"{bucket_mixed(M)}|k{K}", default=GemmConfig(device_capacity=9, **_CFG))
     tri_md = tri_bdll.reshape(D, M).t().contiguous()   # (M, D)
     A = torch.cat([tri_md, x_n.reshape(M, D)], dim=1)  # (M, 2D)
     if prepacked is None:
@@ -204,6 +218,7 @@ def dualgemm_back_cute(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, *, prepacked
     compiled = _compile_dualgemm(
         torch2cute_dtype_map[dt], torch2cute_dtype_map[dt], torch2cute_dtype_map[dt],
         torch2cute_dtype_map[torch.float32], a_major, b_major, postact_major, cap,
+        config.tile_m, config.tile_n, config.cluster_m, config.cluster_n, config.pingpong,
     )
     if is_compile_only():
         return Y.view(B, L, L, D)
