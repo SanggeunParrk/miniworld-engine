@@ -1,0 +1,321 @@
+{
+  "config_space_hash": "8323a22de321",
+  "entries": {
+    "torch.bfloat16|11|k128": [
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 256
+        },
+        "ms": 0.16451199352741241,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 256
+        },
+        "ms": 0.16524800658226013,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.16777600347995758,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.17215999960899353,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 128
+        },
+        "ms": 0.17987200617790222,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "torch.bfloat16|11|k256": [
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 192,
+          "tile_n": 128
+        },
+        "ms": 0.39206400513648987,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 128
+        },
+        "ms": 0.3943679928779602,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 128
+        },
+        "ms": 0.3948479890823364,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.3962080031633377,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.3973439931869507,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "torch.bfloat16|9|k128": [
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.04822399839758873,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 256
+        },
+        "ms": 0.04902400076389313,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 256
+        },
+        "ms": 0.04907200112938881,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.04918399825692177,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 192
+        },
+        "ms": 0.05220799893140793,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "torch.bfloat16|9|k256": [
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 192,
+          "tile_n": 128
+        },
+        "ms": 0.10553599894046783,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 192,
+          "tile_n": 128
+        },
+        "ms": 0.10596800222992897,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 128
+        },
+        "ms": 0.10745599865913391,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 2,
+          "cluster_n": 1,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": true,
+          "swap_ab": false,
+          "tile_m": 128,
+          "tile_n": 128
+        },
+        "ms": 0.10803200304508209,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "cluster_m": 1,
+          "cluster_n": 2,
+          "is_dynamic_persistent": false,
+          "max_swizzle_size": 8,
+          "pingpong": false,
+          "swap_ab": false,
+          "tile_m": 256,
+          "tile_n": 128
+        },
+        "ms": 0.10806400328874588,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ]
+  },
+  "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+  "op": "transition_swiglu_fwd",
+  "provenance": {
+    "built_utc": "2026-08-04T08:41:22+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

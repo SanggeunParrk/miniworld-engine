@@ -20,21 +20,25 @@ config space + cache-select, the cute counterpart of the Triton grid capture:
 - WIRED: `transition/cute/gemm_transition_swiglu.py` (fwd swiglu) — reference pattern; resolves
   by `(gpu, dtype, bucket_mixed(M)|kK)`, falls back to the K-aware default on miss. Verified.
 
-**MAJOR FINDING (2026-08-04) — the gated cute epilogue is broken (outputs ZEROS):**
-While building the sweep I verified each wired kernel's config-invariance. The GATED cute paths
-produce all-zero / garbage output for EVERY config (not a tuning issue — the store itself):
-- `transition_expand_swiglu_cute` / `cute_transition_fused` (fwd): output all zeros (min=max=0),
-  cos_vs_torch=0 for all 18 gated configs. `transition_gate_bwd` postact `h`: garbage (see #3).
-- Same family as the M2-fused `AttributeError: 'GemmLNLFusedSm90' object has no attribute
-  'load_AB'` — a quack version drift broke the gated/fused SM90 epilogues.
-- NOT a production regression: the transition module defaults to TRITON; `KernelBackend.CUTE`
-  is opt-in benchmarking only (module.py:191). Training is unaffected.
-- The PLAIN cute path (`layernorm_linear` M1, `GemmDefaultEpiMixin` standard D store) is FINE —
-  verified config-invariant (0/44 candidates diverge vs default). Only the GATED aux_out /
-  postact STSM store is broken.
-- **Real fix (supersedes config work for these):** repair the gated-postact store for the current
-  quack (see `_bdll_patch`-style ownership, `permute_gated_Cregs_b16`, `GemmGatedMixin`/M2 fused).
-  Until then the swiglu_fwd / gate_bwd sweeps are meaningless (their caches were withheld/removed).
+**RESOLVED (2026-08-04) — gated cute epilogue fixed; the "second drift" was a STALE CACHE:**
+The GATED cute paths produced all-zero (then garbage) output. TWO real fixes, both now verified:
+- **FIX 1 — gated postact field rename (`mPostAct` -> `mAuxOut`).** quack 0.5.0 renamed the gated
+  postact field and its attrs (`postact_dtype/postact_layout/cta_tile_shape_postact_mn` ->
+  `aux_out_dtype/aux_out_layout/cta_tile_shape_aux_out_mn`). Our 3 gated kernels used the old names,
+  so `GemmGatedMixin._epi_ops`' `TileStore("mAuxOut")` resolved to None -> the postact store was
+  SKIPPED -> zeros. Fixed in `gemm_transition_swiglu.py`, `backward_gatebwd.py`, `gemm_gated_ln.py`.
+- **FIX 2 (CRITICAL infra) — register our source in `quack.cache.EXTRA_SOURCE_DIRS`
+  (`kernels/_quack_compat.py`).** quack's jit disk-cache keys `.o` by `(qualname, *args)` + a hash of
+  QUACK's source, NOT ours. So editing a `.cute` kernel does NOT invalidate its cached `.o`: a stale
+  (broken) binary from `/tmp/<user>/quack_cache` is silently reused. This masked FIX 1 for an entire
+  debug session — every "still broken / garbage / tile_m=256 corrupts" result was a stale `.o`, not a
+  real bug. (So the earlier `#3` "tm256 corrupts h" and "atom_layout_m=2 dual-store" theories were
+  ALL stale-cache artifacts — disregard them.) Registering our pkg root makes edits bust the key.
+- **VERIFIED with clean/enabled cache:** forward `transition_expand_swiglu_cute` = cos 1.0 vs torch
+  for ALL 18 gated configs (incl. tm256 coop); `transition_gate_bwd` h + dAB = cos 1.0; plain
+  `layernorm_linear` = cos 1.0 vs torch. Config is performance-only across the gated space.
+- Restores the recorded transition-forward CuTe win (~1.1x K=128 → 2.6x K=512 vs triton) that the
+  MINIWORLD route selects for large d_pair. → re-capture + ship swiglu_fwd / gate_bwd caches.
 
 **TODO to finish the sweep-all-cute-kernels effort:**
 - [x] `layernorm_linear` M1 — wired + swept + cache SHIPPED (verified config-invariant, plain path).
@@ -86,24 +90,13 @@ the kernel is buggy at other values.
       *speed* ceiling (can't use the cooperative tile_m=128). To rescue d=256, load x̂ from gmem in
       the epilogue (M2's per-element pattern) instead of as the C operand → frees ~64KB epi-C smem
       → cooperative tile. Low priority (configs saturate → ~no speedup; d=128 already wins/ties).
-- [ ] **#3 transition gate-bwd — postact `h` output broken for ALL configs** (`cute/backward_gatebwd.py`).
-      **PRIOR DIAGNOSIS WAS WRONG.** Re-tested rigorously 2026-08-04 (M=8192 K=128 N=256, cute vs
-      **triton** `_transition_expand_gatebwd_savedxn` vs torch): triton h == torch (cos=1.0), but
-      the **cute `h`/PostAct is garbage for EVERY config** — cos(h,torch)=0.0, values ~1e-22/1e-38
-      denormals — for tm192-pp (the "reference"), tm256-coop, tm64-pp alike, with or without
-      `_bdll_patch`. `dAB`=[dA|dB] is CORRECT (cos=1.0) for **every** config incl. tm256-coop. So:
-      (a) it is NOT tile_m-dependent — the earlier "tm256 corrupts h, tm192 bit-exact" was a
-      garbage-vs-garbage kernel-vs-kernel compare; (b) config here is genuinely **performance-only**
-      (dAB correct across the whole space) → NO clamp/pin. The bogus `_safe_gated_bwd_config` clamp
-      was REMOVED 2026-08-04.
-      **Why it never mattered:** `transition/cute/fused.py` defaults `backward_backend="triton"`
-      (fused.py:92,205); the cute gatebwd (the only consumer of this `h`) is off by default, so the
-      broken postact store has never affected training.
-      **Real (open) bug:** the cute gatebwd postact `h` TMA store writes nothing/garbage
-      (config-independent). To make the cute backend usable, fix the postact store in
-      `GemmDLnGatedMixin` (dual D=[dA|dB] + postact=h epilogue) — likely the `tRS_rPostAct` build /
-      `epi_convert_postact` permute / n-major TMA setup, since dAB works but h doesn't. Verify
-      cos(h)=1.0 vs triton on H100. Independent of config — do NOT reintroduce a tile_m pin.
+- [x] **#3 transition gate-bwd — postact `h` — FIXED 2026-08-04.** Root cause = the gated postact
+      field rename (`mPostAct`->`mAuxOut`, FIX 1 above) + stale jit cache (FIX 2 above), NOT tile_m.
+      With the rename + a clean/enabled cache, `h` cos=1.0 and `dAB` cos=1.0 vs torch across all
+      gated configs (incl. tm256 coop). The earlier "tm256 corrupts h / garbage / denormals" reports
+      were ALL stale `.o` (the edit never recompiled). Config is performance-only; the removed
+      `_safe_gated_bwd_config` clamp stays removed. dswiglu math + the dual D=[dA|dB]+postact=h
+      epilogue are correct.
 - [ ] **transition swiglu / dab_lnbwd — hardcoded per-K configs** (`cute/gemm_transition_swiglu.py`,
       `cute/dab_lnbwd.py`). These are mostly *perf* hardcodes (not wrong) → replaced by proper
       tuning, not a correctness fix. Keep the `tile_n % 32` gate constraint (algorithmic) with a

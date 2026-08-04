@@ -57,6 +57,25 @@ except ImportError:
 
         return bool(getattr(_cu, "COMPILE_ONLY", False))
 
+# --- fix 3 (CRITICAL): register OUR cute-kernel source in quack's jit disk-cache key.
+# quack.cache.jit_cache keys compiled .o by (qualname, *args) + a hash of QUACK's source dir
+# (+ EXTRA_SOURCE_DIRS) — but NOT our kernels' source. So editing one of our .cute kernels does
+# NOT invalidate its cached .o: a stale binary from a previous (possibly broken) version is
+# silently reused. This masked the gated-postact fix (mPostAct->mAuxOut) for an entire debug
+# session — the edit compiled correctly but the node-local /tmp cache kept serving the broken .o.
+# Adding our package root to EXTRA_SOURCE_DIRS makes any change under it bust the cache key, so
+# edits recompile and old .o become orphaned (never hit). Idempotent; 0.5.0-only (0.3.11 lacks it).
+try:
+    import os as _os
+
+    import quack.cache as _qcache  # noqa: E402
+
+    _pkg_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))  # miniworld_engine/
+    if hasattr(_qcache, "EXTRA_SOURCE_DIRS") and _pkg_root not in _qcache.EXTRA_SOURCE_DIRS:
+        _qcache.EXTRA_SOURCE_DIRS.append(_pkg_root)
+except Exception:  # noqa: BLE001 - never let cache-key hardening break import
+    pass
+
 # gemm_interface is imported lazily (below) so merely needing jit_cache / is_compile_only
 # does not eagerly register every quack GEMM custom op. The RoundingMode fix above is
 # already applied, so the deferred import succeeds.

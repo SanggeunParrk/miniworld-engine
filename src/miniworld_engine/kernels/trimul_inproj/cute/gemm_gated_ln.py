@@ -42,14 +42,14 @@ class _BdllLnGatedMixin(GemmLnGatedMixin):
     """GemmLnGatedMixin, but accept an M-major (bdll) gated postact (no n-major assert)."""
 
     def epi_to_underlying_arguments(self, args, *, loc=None, ip=None):
-        assert args.mPostAct.element_type.width == 16, "gated postact must be 16-bit"
+        assert args.mAuxOut.element_type.width == 16, "gated postact must be 16-bit"
         # (n-major assert dropped — bdll postact is M-major)
         if self.arch == 90:
             assert self.cta_tile_shape_mnk[1] % 32 == 0, "gated SM90 needs tileN % 32 == 0"
         self.rounding_mode = args.rounding_mode
-        self.postact_dtype = args.mPostAct.element_type
-        self.postact_layout = cutlass.utils.LayoutEnum.from_tensor(args.mPostAct)
-        self.cta_tile_shape_postact_mn = (
+        self.aux_out_dtype = args.mAuxOut.element_type
+        self.aux_out_layout = cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut)
+        self.cta_tile_shape_aux_out_mn = (
             self.cta_tile_shape_mnk[0], self.cta_tile_shape_mnk[1] // 2,
         )
         d = self._epi_ops_to_params_dict(args)

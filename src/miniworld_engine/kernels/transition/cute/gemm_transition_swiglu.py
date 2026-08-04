@@ -76,7 +76,10 @@ class GemmLnGatedMixin(GemmGatedMixin):
 
     @mlir_namedtuple
     class EpilogueArguments(NamedTuple):
-        mPostAct: cute.Tensor
+        # quack 0.5.0 renamed the gated postact tensor field mPostAct -> mAuxOut; the base
+        # GemmGatedMixin._epi_ops has TileStore("mAuxOut"), so this MUST be named mAuxOut or the
+        # postact store is silently skipped (aux_out=None -> output stays zero). (fixed 2026-08-04)
+        mAuxOut: cute.Tensor
         act_fn: cutlass.Constexpr[Optional[object]] = None
         alpha: Optional[Float32 | cute.Tensor] = None
         beta: Optional[Float32 | cute.Tensor] = None
@@ -89,14 +92,14 @@ class GemmLnGatedMixin(GemmGatedMixin):
 
     def epi_to_underlying_arguments(self, args, *, loc=None, ip=None):
         # Mirror GemmGatedMixin: set up the gated postact tile (N//2) + dtype/layout.
-        assert args.mPostAct.element_type.width == 16, "gated postact must be 16-bit"
-        assert cutlass.utils.LayoutEnum.from_tensor(args.mPostAct).is_n_major_c()
+        assert args.mAuxOut.element_type.width == 16, "gated postact must be 16-bit"
+        assert cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut).is_n_major_c()
         if self.arch == 90:
             assert self.cta_tile_shape_mnk[1] % 32 == 0, "gated SM90 needs tileN % 32 == 0"
         self.rounding_mode = args.rounding_mode
-        self.postact_dtype = args.mPostAct.element_type
-        self.postact_layout = cutlass.utils.LayoutEnum.from_tensor(args.mPostAct)
-        self.cta_tile_shape_postact_mn = (
+        self.aux_out_dtype = args.mAuxOut.element_type
+        self.aux_out_layout = cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut)
+        self.cta_tile_shape_aux_out_mn = (
             self.cta_tile_shape_mnk[0],
             self.cta_tile_shape_mnk[1] // 2,
         )
@@ -187,12 +190,8 @@ def gemm_ln_swiglu(
         # pingpong/coop — see cute_config.gated_sm90_candidates), cache-selected per
         # (gpu, dtype, M-bucket, K). On a cache miss we fall back to the K-aware hand default
         # below (the win the K-sweep found: K<=128 -> 256x128 coop; K>=256 -> 192x128 pingpong).
-        # DORMANT (2026-08-04): the gated cute postact store currently writes ZEROS for every
-        # config (quack drift — same family as the M2-fused AttributeError and the gate-bwd `h`
-        # bug); the transition module's CUTE backend is opt-in benchmarking only, production uses
-        # triton. No tuned cache is shipped until the gated postact store is fixed (todo.md), so
-        # this resolve just warns-once + uses the default. Config is perf-only; correctness of the
-        # postact does NOT depend on it — the store itself is broken.
+        # Verified 2026-08-04 (post quack-0.5.0 mPostAct->mAuxOut fix): all 18 gated configs give
+        # cos=1.0 vs torch — config is performance-only.
         K = A.shape[-1]
         M = A.shape[0] if A.dim() == 2 else A.shape[0] * A.shape[1]
         if K <= 128:

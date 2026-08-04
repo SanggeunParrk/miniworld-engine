@@ -108,7 +108,7 @@ class GemmDLnGatedMixin(GemmGatedMixin):
 
     @mlir_namedtuple
     class EpilogueArguments(NamedTuple):
-        mPostAct: cute.Tensor
+        mAuxOut: cute.Tensor  # quack 0.5.0: gated postact field renamed mPostAct->mAuxOut (must match TileStore("mAuxOut"))
         act_bwd_fn: cutlass.Constexpr[Optional[object]] = None
         alpha: Optional[Float32 | cute.Tensor] = None
         beta: Optional[Float32 | cute.Tensor] = None
@@ -121,14 +121,14 @@ class GemmDLnGatedMixin(GemmGatedMixin):
 
     def epi_to_underlying_arguments(self, args, *, loc=None, ip=None):
         # Mirror GemmGatedMixin: set up the gated postact tile (N//2) + dtype/layout.
-        assert args.mPostAct.element_type.width == 16, "gated postact must be 16-bit"
-        assert cutlass.utils.LayoutEnum.from_tensor(args.mPostAct).is_n_major_c()
+        assert args.mAuxOut.element_type.width == 16, "gated postact must be 16-bit"
+        assert cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut).is_n_major_c()
         if self.arch == 90:
             assert self.cta_tile_shape_mnk[1] % 32 == 0, "gated SM90 needs tileN % 32 == 0"
         self.rounding_mode = args.rounding_mode
-        self.postact_dtype = args.mPostAct.element_type
-        self.postact_layout = cutlass.utils.LayoutEnum.from_tensor(args.mPostAct)
-        self.cta_tile_shape_postact_mn = (
+        self.aux_out_dtype = args.mAuxOut.element_type
+        self.aux_out_layout = cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut)
+        self.cta_tile_shape_aux_out_mn = (
             self.cta_tile_shape_mnk[0],
             self.cta_tile_shape_mnk[1] // 2,
         )
@@ -228,11 +228,8 @@ def gemm_dln_gatebwd(
     assert device_capacity[0] == 9, "SM90 (H100) only"
     if config is None:
         # Brute-force autotuned over the FULL sm90 gated config space (cute_config), cache-selected
-        # per (gpu, dtype, M-bucket, K). Config is performance-only here: dAB is bit-exact across
-        # the whole space. NOTE: the postact `h` of THIS kernel is broken for EVERY config
-        # (config-independent, verified vs triton+torch) — a latent bug on the non-default backend
-        # (`backward_backend="triton"` is the training default). Do NOT pin/clamp config to "fix"
-        # h. See todo.md "#3".
+        # per (gpu, dtype, M-bucket, K). Config is performance-only: verified 2026-08-04 (post the
+        # quack-0.5.0 mPostAct->mAuxOut fix) both h and dAB give cos=1.0 vs torch across configs.
         _default = GemmConfig(
             tile_m=192, tile_n=128, pingpong=True, is_dynamic_persistent=False,
             cluster_m=1, cluster_n=2, swap_ab=False, max_swizzle_size=8, device_capacity=9,
