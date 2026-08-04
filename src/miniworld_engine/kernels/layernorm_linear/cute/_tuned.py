@@ -4,12 +4,28 @@ A per-(M, d) lookup of the fastest *correct* GEMM config found by the sweep, use
 ``layernorm_linear`` dispatcher. Shapes not in the table fall back to the path's default
 config (``None``), which is still correct — this only *speeds up* the benched shapes.
 
-SAFE subset only (per the tuning decision): every M1 entry is **pingpong** with
-**cluster_m=1**. The sweep found two config families that are fast but return wrong
-results in a timing-dependent way — ``cluster_m=2`` and the non-pingpong *coop* path both
-drop to cos ~0.96–0.999 at d=128 — so neither is baked here. Every M2 entry is bit-clean
-(cos=0.999997); the racy ``tile_n>=160`` configs only ever won at d>=384, where the
-dispatcher uses M1 anyway, so they never enter this table.
+RETIRED (M1) 2026-08-04: ``m1_config_for`` is NO LONGER used — the M1 path
+(``gemm_layernorm_linear``) now brute-force autotunes over the full sm90 config space via
+``autotune.cute_config.resolve_config`` (a swept per-(gpu,dtype,M-bucket,N) cache), replacing
+this hand-baked table. ``m1_config_for`` is kept only for reference/back-compat. ``m2_config_for``
+(the M2 fused path) still uses its baked table below until M2 is likewise swept.
+
+SAFE subset only (historical): the original sweep found two config families that returned
+wrong results in a timing-dependent way — ``cluster_m=2`` and the non-pingpong *coop* path
+both dropped to cos ~0.96–0.999 at d=128 — so every M1 entry was baked **pingpong** with
+**cluster_m=1**.
+
+STALE as of 2026-08-04: that wrong-result behaviour **no longer reproduces**. 480 forward
+runs across 32 config×shape combinations (M∈{65536,262144}, d∈{128,256}, N∈{128,512},
+tile_m∈{128,192}, {cluster_m=2, coop, cluster_m=2+coop}) all give cos=1.0, and
+``compute-sanitizer racecheck`` reports 0 hazards on ``cluster_m=2 + non-pingpong coop``.
+The race was apparently fixed elsewhere and only this safe-subset restriction + warning
+remained. → a re-tune may now include ``cluster_m=2`` / coop in the config space. (Caveat:
+racecheck does not fully cover async TMA/mbarrier hazards, so re-tune under real load.)
+See ``todo.md`` ("Config fix").
+
+Every M2 entry is bit-clean (cos=0.999997); the racy ``tile_n>=160`` configs only ever won
+at d>=384, where the dispatcher uses M1 anyway, so they never enter this table.
 """
 
 from __future__ import annotations

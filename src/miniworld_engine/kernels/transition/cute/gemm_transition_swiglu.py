@@ -183,23 +183,34 @@ def gemm_ln_swiglu(
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "SM90 (H100) only"
     if config is None:
-        # d-aware best from the K-sweep (tile_n caps at 128 under pingpong; gated needs %32):
-        #   K=128  -> 256x128 NON-pingpong cluster(1,2)  (~1.1x vs triton at large M)
-        #   K>=256 -> 192x128 pingpong     cluster(1,2)  (1.6x at K=256, 2.6x at K=512)
-        # cute beats the tuned triton expand everywhere and the win GROWS with K, because
-        # triton's BLOCK_K=next_pow2(K) full-row load scales badly with K while WGMMA stays
-        # near FLOP-linear. K = A.shape[-1].
+        # Brute-force autotuned over the FULL sm90 gated config space (tile_m×tile_n × cluster ×
+        # pingpong/coop — see cute_config.gated_sm90_candidates), cache-selected per
+        # (gpu, dtype, M-bucket, K). On a cache miss we fall back to the K-aware hand default
+        # below (the win the K-sweep found: K<=128 -> 256x128 coop; K>=256 -> 192x128 pingpong).
+        # DORMANT (2026-08-04): the gated cute postact store currently writes ZEROS for every
+        # config (quack drift — same family as the M2-fused AttributeError and the gate-bwd `h`
+        # bug); the transition module's CUTE backend is opt-in benchmarking only, production uses
+        # triton. No tuned cache is shipped until the gated postact store is fixed (todo.md), so
+        # this resolve just warns-once + uses the default. Config is perf-only; correctness of the
+        # postact does NOT depend on it — the store itself is broken.
         K = A.shape[-1]
+        M = A.shape[0] if A.dim() == 2 else A.shape[0] * A.shape[1]
         if K <= 128:
-            config = GemmConfig(
+            _default = GemmConfig(
                 tile_m=256, tile_n=128, pingpong=False, is_dynamic_persistent=False,
                 cluster_m=1, cluster_n=2, swap_ab=False, max_swizzle_size=8, device_capacity=9,
             )
         else:
-            config = GemmConfig(
+            _default = GemmConfig(
                 tile_m=192, tile_n=128, pingpong=True, is_dynamic_persistent=False,
                 cluster_m=1, cluster_n=2, swap_ab=False, max_swizzle_size=8, device_capacity=9,
             )
+        from miniworld_engine.autotune.cute_config import resolve_config, gated_sm90_candidates
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        config = resolve_config(
+            "transition_swiglu_fwd", gated_sm90_candidates(),
+            dtype=str(A.dtype), bucket=f"{bucket_mixed(M)}|k{K}", default=_default,
+        )
 
     A3 = A.unsqueeze(0) if A.dim() == 2 else A
     B3 = B.unsqueeze(0) if B.dim() == 2 else B

@@ -227,14 +227,22 @@ def gemm_dln_gatebwd(
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "SM90 (H100) only"
     if config is None:
-        # tile_m=192 pingpong (1,2) is correct + fast across K here. NOTE: tile_m=256 (the
-        # forward's K<=128 pick) gives WRONG results in THIS backward — the gated epilogue
-        # with a real C operand + 3 outputs at tile_m=256 corrupts ~0.7% of elements
-        # (cos~0.993); tile_m=192/128 are bit-exact (cos 1.00000). So we do NOT inherit the
-        # forward's 256x128 config for the backward.
-        config = GemmConfig(
+        # Brute-force autotuned over the FULL sm90 gated config space (cute_config), cache-selected
+        # per (gpu, dtype, M-bucket, K). Config is performance-only here: dAB is bit-exact across
+        # the whole space. NOTE: the postact `h` of THIS kernel is broken for EVERY config
+        # (config-independent, verified vs triton+torch) — a latent bug on the non-default backend
+        # (`backward_backend="triton"` is the training default). Do NOT pin/clamp config to "fix"
+        # h. See todo.md "#3".
+        _default = GemmConfig(
             tile_m=192, tile_n=128, pingpong=True, is_dynamic_persistent=False,
             cluster_m=1, cluster_n=2, swap_ab=False, max_swizzle_size=8, device_capacity=9,
+        )
+        from miniworld_engine.autotune.cute_config import resolve_config, gated_sm90_candidates
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        M, K = A.shape[-2], A.shape[-1]
+        config = resolve_config(
+            "transition_gate_bwd", gated_sm90_candidates(),
+            dtype=str(A.dtype), bucket=f"{bucket_mixed(M)}|k{K}", default=_default,
         )
 
     A3 = A.unsqueeze(0) if A.dim() == 2 else A

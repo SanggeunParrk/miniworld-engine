@@ -162,7 +162,17 @@ def gemm_layernorm_linear(
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "first version targets SM90 (H100)"
     if config is None:
-        config = default_config(A.device)
+        # Brute-force autotuned over the FULL sm90 (plain) config space, cache-selected per
+        # (gpu, dtype, M-bucket, N). Falls back to quack's default on a cache miss. Replaces the
+        # hand-baked _tuned.py (M,d)->config lookup (retired). Config is performance-only.
+        from miniworld_engine.autotune.cute_config import resolve_config, plain_sm90_candidates
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        M = A.shape[-2]
+        N = D.shape[-1]
+        config = resolve_config(
+            "layernorm_linear_m1", plain_sm90_candidates(),
+            dtype=str(A.dtype), bucket=f"{bucket_mixed(M)}|n{N}", default=default_config(A.device),
+        )
 
     # quack's low-level GEMM expects 3D (l, m, k) / (l, n, k) / (l, m, n).
     A3 = A.unsqueeze(0) if A.dim() == 2 else A

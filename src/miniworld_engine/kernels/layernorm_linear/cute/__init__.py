@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._tuned import m1_config_for, m2_config_for
+from ._tuned import m2_config_for
 from .gemm_layernorm_linear import fold_for_gemm, layernorm_linear_cute
 from .gemm_layernorm_linear_fused import layernorm_linear_cute_fused
 
@@ -40,15 +40,17 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     ``docs/design/layernorm-linear-warp-specialized-stats.md``).
     """
     m, n = x.shape[0], weight.shape[0]
+    # M1 config is None -> gemm_layernorm_linear brute-force autotunes it (cute_config cache);
+    # the hand-baked _tuned.m1_config_for lookup is retired. M2 keeps its baked table for now.
     if save_stats:
         return layernorm_linear_cute(
             x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded,
-            return_stats=True, config=m1_config_for(m, n),
+            return_stats=True, config=None,
         )
     if n <= 256:
         return layernorm_linear_cute_fused(
             x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=m2_config_for(m, n),
         )
     return layernorm_linear_cute(
-        x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=m1_config_for(m, n),
+        x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded, config=None,
     )
