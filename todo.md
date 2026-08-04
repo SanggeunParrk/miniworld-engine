@@ -40,10 +40,21 @@ The GATED cute paths produced all-zero (then garbage) output. TWO real fixes, bo
 - Restores the recorded transition-forward CuTe win (~1.1x K=128 → 2.6x K=512 vs triton) that the
   MINIWORLD route selects for large d_pair. → re-capture + ship swiglu_fwd / gate_bwd caches.
 
-**TODO to finish the sweep-all-cute-kernels effort:**
-- [x] `layernorm_linear` M1 — wired + swept + cache SHIPPED (verified config-invariant, plain path).
-- [~] `transition/cute/gemm_transition_swiglu.py` (fwd), `backward_gatebwd.py` — wired (pattern
-      ready) but DORMANT: gated postact broken (zeros), caches withheld until the store is fixed.
+**STATUS 2026-08-04 — sm90 condition (no hardcoded/correctness-pinned cute config) MET:**
+- [x] `layernorm_linear` M1, `transition` swiglu-fwd + gate-bwd, `dgrad_lnbwd`, `dab_lnbwd` — wired
+      to `resolve_config`, swept, caches SHIPPED, all verified cos=1.0 (config performance-only).
+- [x] `trimul_inproj` main forward (`launch.py`) — uses quack's tuned `gemm_act` custom op (auto
+      config), no hardcode.
+- [x] `dualgemm_kernel` — made config-driven (was hardcoded `_CFG`); dead (no callers), _CFG fallback.
+- [x] `gemm_gated_ln` (trimul front) — config is a required param already; dead (no callers).
+- [~] **M2 fused `layernorm_linear_cute_fused` — broken quack-0.5.0 port, DEFERRED.** Partial fixes
+      landed (load_AB->load_tma, _epi_smem_map->name-keyed dict); remaining: the kernel-filled
+      `SmemColVec` op is dropped by 0.5.0's None-arg active-op filter (+ likely more downstream). It's
+      an INFERENCE-only optimization (n<=256 fwd); both consumers (dispatcher, trimul back_split) now
+      route to the correct M1 path, so nothing is broken in production. Revive M2 when someone needs
+      the inference perf (~0.062 vs M1 0.094 ms) — needs a full epi-composable port.
+- [ ] sm100 (B200) kernels — deferred (no B200 to verify). `_blackwell_dense_gemm` `_compute_stages`
+      and the `*_sm100` launch/stream ABI (see quack-0.5.0-cute-port-plan.md Phase 4).
 - [ ] Wire remaining cute GEMMs to `resolve_config` + their candidate space, dropping the
       hardcoded single-config default (keep it only as the cache-miss fallback):
       `backward_gatebwd.py`, `trimul_inproj/cute/gemm_gated_ln.py` (front, gated),
