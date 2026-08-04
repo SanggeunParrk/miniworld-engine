@@ -49,12 +49,14 @@ class GemmGatedLNMixin(GemmGatedMixin):
         ColVecLoad("mC1"),
         RowVecLoad("mSv"),
         RowVecLoad("mB2v"),
-        TileStore("mPostAct", epi_tile_fn=_gated_epi_tile_fn),
+        # quack 0.5.0: the base epilogue stores the aux-out op named "mAuxOut" (epi_setup_aux_out
+        # is hardcoded to it); a "mPostAct"-named TileStore is silently NOT stored -> zeros.
+        TileStore("mAuxOut", epi_tile_fn=_gated_epi_tile_fn),
     )
 
     @mlir_namedtuple
     class EpilogueArguments(NamedTuple):
-        mPostAct: cute.Tensor
+        mAuxOut: cute.Tensor
         mRstd: Optional[cute.Tensor] = None
         mC1: Optional[cute.Tensor] = None
         mSv: Optional[cute.Tensor] = None
@@ -65,14 +67,14 @@ class GemmGatedLNMixin(GemmGatedMixin):
         sr_seed: Optional[Int32 | cute.Tensor] = None
 
     def epi_to_underlying_arguments(self, args, *, loc=None, ip=None):
-        assert args.mPostAct.element_type.width == 16
-        assert cutlass.utils.LayoutEnum.from_tensor(args.mPostAct).is_n_major_c()
+        assert args.mAuxOut.element_type.width == 16
+        assert cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut).is_n_major_c()
         if self.arch == 90:
             assert self.cta_tile_shape_mnk[1] % 32 == 0
         self.rounding_mode = args.rounding_mode
-        self.postact_dtype = args.mPostAct.element_type
-        self.postact_layout = cutlass.utils.LayoutEnum.from_tensor(args.mPostAct)
-        self.cta_tile_shape_postact_mn = (
+        self.aux_out_dtype = args.mAuxOut.element_type
+        self.aux_out_layout = cutlass.utils.LayoutEnum.from_tensor(args.mAuxOut)
+        self.cta_tile_shape_aux_out_mn = (
             self.cta_tile_shape_mnk[0], self.cta_tile_shape_mnk[1] // 2,
         )
         d = self._epi_ops_to_params_dict(args)
