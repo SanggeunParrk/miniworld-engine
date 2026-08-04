@@ -29,13 +29,15 @@ PERF (archived dgrad_lnbwd bench, H100 bf16, full backward fused vs unfused cuBL
     M=16384  d=128 → 1.29x   |  d=256 → 1.20x
     M=65536  d=128 → 0.99x   |  d=256 → 0.73x
     M=262144 d=128 → 1.02x   |  d=256 → 0.75x
-  d=128 wins/ties everywhere (saving the dx_normed round-trip + the separate LN-bwd kernel). d=256
-  LOSES at large M: the full-N=256 epilogue subtile holds D+C (x̂) in smem, starving the mainloop
-  (ab_stage≈2 even after forcing epi_stage=epi_c_stage=1), so the dgrad GEMM falls behind quack's
-  tuned tile_m=128 cooperative gemm. The single-subtile invariant pins tile_m=64/atom-1×1, so we
-  can't use the faster cooperative tile. NEXT to rescue d=256: load x̂ directly from gmem in the
-  epilogue (M2's mX per-element pattern) instead of as the C operand → frees ~64KB epi-C smem →
-  more ab_stages. Until then the wired default gates fused to K≤128.
+  d=128 wins/ties everywhere (saving the dx_normed round-trip + the separate LN-bwd kernel).
+
+tile_m is now a FREE autotune knob (FIX B, 2026-08-04): the single full-N reduction needs only
+atom_layout 1×1, and PINGPONG is atom 1×1 for ALL tile_m in {64,128,192} — not just 64. So tile_m
+is swept over that family (whichever pingpong tile_n cap hosts tile_n=K), cache-selected. The H100
+sweep found tile_m=64 FASTEST at every shape, so the old hardcode's value was right — but it is now
+a *measured* winner over a genuinely free family, not a pinned constant. (Only a *cooperative* atom
+2×1 remains unusable — it iterates N-first and breaks the single-pass reduction; enabling it would
+need the gmem-x̂ epilogue rewrite, but pingpong-64 already wins, so that's moot.)
 """
 
 from __future__ import annotations
@@ -191,19 +193,51 @@ def _compile(a_dtype, b_dtype, d_dtype, c_dtype, a_major, b_major, d_major, c_ma
     )
 
 
-def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: Tensor):
-    """dx (M,K) = LN-backward(dY@W). dY (M,N), W (N,K), xhat=(x-mean)*rstd (M,K), gamma (K,), rstd (M,)."""
+# Pingpong tile_N_max per tile_m on SM90 (gemm_sm90 __init__): 64->256, 128->208, 192->128.
+# The single full-N LN-reduction subtile needs tile_n=K AND atom_layout 1×1; PINGPONG is atom
+# 1×1 for ALL of tile_m in {64,128,192} (only *cooperative* forces atom 2×1). So any of these is
+# numerically correct as long as its tile_N_max >= K — freeing the old tile_m=64 pin. (FIX B)
+_DGRAD_PP_TILE_N_MAX = {64: 256, 128: 208, 192: 128}
+
+
+def _dgrad_default_tile_m(K: int) -> int:
+    """Cache-miss fallback tile_m. The H100 sweep found tile_m=64 FASTEST at every shape (128/192
+    are numerically fine — see the family above — but slower), and 64 hosts tile_n=K for all K<=256,
+    so it's the best default. The tile_m knob + tuned cache can still pick 128/192 where a future
+    shape/GPU prefers them."""
+    return 64
+
+
+def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: Tensor,
+                     *, tile_m: int | None = None):
+    """dx (M,K) = LN-backward(dY@W). dY (M,N), W (N,K), xhat=(x-mean)*rstd (M,K), gamma (K,), rstd (M,).
+
+    ``tile_m`` (autotune knob) selects a pingpong atom-1×1 tile in {64,128,192}; None picks the
+    largest that fits K. All are numerically identical (config is performance-only)."""
     dev = get_device_capacity(dY.device)
     assert dev[0] == 9, "SM90 only"
     M, N = dY.shape
     K = W.shape[1]
     cfg = default_config(dY.device)
-    # tile_N must cover K (single-subtile reduction): use K (<=256) as tile_n.
-    # tile_m=64 + non-pingpong → atom_layout 1×1, the only regime where forcing a full-N
-    # epi subtile is safe (see _compute_tile_shape_or_override override above).
-    tile_m = 64
+    if tile_m is None:
+        # Brute-force autotuned over the pingpong atom-1×1 tile_m family; fall back to the
+        # largest-that-fits-K default on a cache miss. Config is performance-only.
+        from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_pp_candidates
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        _dflt = lnbwd_pp_candidates()[0].__class__(  # a GemmConfig with the default tile_m
+            tile_m=_dgrad_default_tile_m(K), tile_n=128, pingpong=True, cluster_m=1, cluster_n=1,
+            device_capacity=9)
+        tile_m = resolve_config("dgrad_lnbwd", lnbwd_pp_candidates(), dtype=str(dY.dtype),
+                                bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt).tile_m
+        if K > _DGRAD_PP_TILE_N_MAX.get(tile_m, 0):   # cached tile_m doesn't fit this K -> safe default
+            tile_m = _dgrad_default_tile_m(K)
+    # Algorithmic invariants (keep config performance-only): tile_n = K (single full-N reduction),
+    # atom_layout 1×1 via pingpong, and tile_m's pingpong tile_n cap must host K.
+    assert tile_m in _DGRAD_PP_TILE_N_MAX, "dgrad tile_m must be a pingpong atom-1×1 tile (64/128/192)"
+    assert K <= _DGRAD_PP_TILE_N_MAX[tile_m], (
+        f"tile_m={tile_m} pingpong caps tile_n at {_DGRAD_PP_TILE_N_MAX[tile_m]} < K={K}")
     tile_mn = (tile_m, K)
-    pingpong = True   # tile_m=64 pingpong → still atom_layout 1×1 (single full-N epi subtile holds)
+    pingpong = True   # pingpong => atom_layout 1×1 => the single full-N epi subtile holds
     dx = torch.empty(M, K, device=dY.device, dtype=dY.dtype)
     # GEMM computes A @ Bᵀ (contract last dims). We want dx_normed = dY @ W (contract N), so
     # B must be Wᵀ (K,N): dY @ (Wᵀ)ᵀ = dY @ W. (Passing W (N,K) computes dY@Wᵀ — wrong.)

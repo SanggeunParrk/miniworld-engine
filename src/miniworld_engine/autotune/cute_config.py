@@ -79,6 +79,16 @@ def plain_sm90_candidates() -> list[GemmConfig]:
     return _sm90(_get_sm90_configs(epilogue=None))
 
 
+def lnbwd_pp_candidates() -> list[GemmConfig]:
+    """dgrad / dab LN-backward: the ONLY free knob is tile_m over the pingpong atom-1×1 family
+    {64,128,192} (tile_n=K and atom 1×1 are fixed by the single full-N reduction). tile_n here is a
+    stable placeholder — the kernel uses tile_n=K. Configs whose pingpong tile_n cap can't host K
+    just fail to compile during the sweep and are dropped."""
+    return [GemmConfig(tile_m=tm, tile_n=128, pingpong=True, is_dynamic_persistent=False,
+                       cluster_m=1, cluster_n=1, swap_ab=False, max_swizzle_size=8, device_capacity=9)
+            for tm in (64, 128, 192)]
+
+
 # --------------------------------------------------------------------------- #
 # runtime config resolution (kernel side)
 # --------------------------------------------------------------------------- #

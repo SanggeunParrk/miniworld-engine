@@ -61,6 +61,35 @@ def cases_gate_bwd(shapes):
     return "transition_gate_bwd", gated_sm90_candidates(), cases
 
 
+def cases_dgrad(shapes):
+    from miniworld_engine.autotune.cute_config import lnbwd_pp_candidates  # noqa: F401
+    from miniworld_engine.kernels.layernorm_linear.cute.dgrad_lnbwd import dgrad_lnbwd_cute
+
+    cases = []
+    for (M, K, N) in shapes:
+        dY = _rand(M, N); W = _rand(N, K) / (N ** 0.5); xhat = _rand(M, K)
+        gamma = _rand(K); rstd = _rand(M, dtype=torch.float32).abs() + 0.5
+        bucket = f"{bucket_mixed(M)}|k{K}"
+        cases.append((bucket, lambda c, dY=dY, W=W, xhat=xhat, gamma=gamma, rstd=rstd:
+                      (lambda: dgrad_lnbwd_cute(dY, W, xhat, gamma, rstd, tile_m=c.tile_m))))
+    return "dgrad_lnbwd", lnbwd_pp_candidates(), cases
+
+
+def cases_dab(shapes):
+    from miniworld_engine.autotune.cute_config import lnbwd_pp_candidates
+    from miniworld_engine.kernels.transition.cute.dab_lnbwd import transition_dab_lnbwd_cute
+
+    cases = []
+    for (M, K, N) in shapes:  # N = per-pair width; dAB is (M, 2N), w_ab (2N, K)
+        dAB = _rand(M, 2 * N); w_ab = _rand(2 * N, K) / ((2 * N) ** 0.5); x = _rand(M, K)
+        gamma = _rand(K); rstd = _rand(M, dtype=torch.float32).abs() + 0.5
+        c1 = _rand(M, dtype=torch.float32) * 0.1
+        bucket = f"{bucket_mixed(M)}|k{K}"
+        cases.append((bucket, lambda c, dAB=dAB, w_ab=w_ab, x=x, gamma=gamma, rstd=rstd, c1=c1:
+                      (lambda: transition_dab_lnbwd_cute(dAB, w_ab, x, gamma, rstd, c1, tile_m=c.tile_m))))
+    return "dab_lnbwd", lnbwd_pp_candidates(), cases
+
+
 def cases_lnl_m1(shapes):
     from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
         layernorm_linear_cute,
@@ -80,10 +109,15 @@ _TRANSITION_SHAPES = [(65536, 128, 256), (262144, 128, 256), (65536, 256, 512), 
 _LNL_SHAPES = [(65536, 128, 128), (262144, 128, 128), (65536, 128, 256), (262144, 128, 256),
                (65536, 256, 512), (262144, 256, 512)]
 
+# LN-backward: reduction is over K; the tunable is tile_m over {64,128,192} where tile_n=K fits.
+_LNBWD_SHAPES = [(65536, 128, 512), (262144, 128, 512), (65536, 256, 512), (262144, 256, 512)]
+
 OPS = {
     "transition_swiglu_fwd": lambda: cases_swiglu_fwd(_TRANSITION_SHAPES),
     "transition_gate_bwd": lambda: cases_gate_bwd(_TRANSITION_SHAPES),
     "layernorm_linear_m1": lambda: cases_lnl_m1(_LNL_SHAPES),
+    "dgrad_lnbwd": lambda: cases_dgrad(_LNBWD_SHAPES),
+    "dab_lnbwd": lambda: cases_dab(_LNBWD_SHAPES),
 }
 
 

@@ -223,6 +223,18 @@ def _compile(
     )
 
 
+# Same as dgrad: the single full-N LN-reduction subtile needs tile_n=K + atom_layout 1×1;
+# PINGPONG is atom 1×1 for all tile_m in {64,128,192} (only cooperative forces 2×1). tile_N_max
+# per tile_m: 64->256, 128->208, 192->128. Any that hosts tile_n=K is numerically identical. (FIX B)
+_DAB_PP_TILE_N_MAX = {64: 256, 128: 208, 192: 128}
+
+
+def _dab_default_tile_m(K: int) -> int:
+    # Cache-miss fallback. H100 sweep: tile_m=64 fastest at every shape (128/192 valid but slower);
+    # 64 also hosts tile_n=K for all K<=256. The tile_m knob + cache can still pick 128/192.
+    return 64
+
+
 def transition_dab_lnbwd_cute(
     dAB: Tensor,
     w_ab: Tensor,
@@ -230,14 +242,32 @@ def transition_dab_lnbwd_cute(
     gamma: Tensor,
     rstd: Tensor,
     c1: Tensor,
+    *,
+    tile_m: int | None = None,
 ) -> Tensor:
-    """Return dx = LNBackward(dAB @ w_ab), without materializing d_xn."""
+    """Return dx = LNBackward(dAB @ w_ab), without materializing d_xn.
+
+    ``tile_m`` (autotune knob) selects a pingpong atom-1×1 tile in {64,128,192}; None picks the
+    largest that fits K. All numerically identical (performance-only)."""
     dev = get_device_capacity(dAB.device)
     assert dev[0] == 9, "SM90 only"
     M, _n = dAB.shape
     K = w_ab.shape[1]
     cfg = default_config(dAB.device)
-    tile_mn = (64, K)
+    if tile_m is None:
+        from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_pp_candidates
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        _dflt = lnbwd_pp_candidates()[0].__class__(
+            tile_m=_dab_default_tile_m(K), tile_n=128, pingpong=True, cluster_m=1, cluster_n=1,
+            device_capacity=9)
+        tile_m = resolve_config("dab_lnbwd", lnbwd_pp_candidates(), dtype=str(dAB.dtype),
+                                bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt).tile_m
+        if K > _DAB_PP_TILE_N_MAX.get(tile_m, 0):
+            tile_m = _dab_default_tile_m(K)
+    assert tile_m in _DAB_PP_TILE_N_MAX, "dab tile_m must be a pingpong atom-1×1 tile (64/128/192)"
+    assert K <= _DAB_PP_TILE_N_MAX[tile_m], (
+        f"tile_m={tile_m} pingpong caps tile_n at {_DAB_PP_TILE_N_MAX[tile_m]} < K={K}")
+    tile_mn = (tile_m, K)
     pingpong = True
     dx = torch.empty(M, K, device=dAB.device, dtype=dAB.dtype)
     wt = w_ab.t().contiguous()
