@@ -90,6 +90,18 @@ def lnbwd_pp_candidates() -> list[GemmConfig]:
             for tm in (64, 128, 192) for cm in (1, 2)]
 
 
+def tm2_candidates() -> list[GemmConfig]:
+    """tm2 from-scratch dual-A gated GEMM candidate space. The only knob is ``tile_m`` — the
+    number of stacked m64 WGMMA atoms (one warpgroup each), tiled over M via
+    ``atom_layout=(tile_m//64,1,1)``. All configs compute identical math (tile_m=64 is the
+    single-atom subset); it's a pure performance knob. tile_n=K=N is structural (single N-tile),
+    no cluster (each CTA owns its M-tile). Candidates that don't divide M or exceed SMEM for a
+    shape are dropped during the sweep. Only ``tile_m`` is read by the kernel."""
+    return [GemmConfig(tile_m=tm, tile_n=128, pingpong=False, is_dynamic_persistent=False,
+                       cluster_m=1, cluster_n=1, swap_ab=False, max_swizzle_size=8, device_capacity=9)
+            for tm in (64, 128, 192, 256)]
+
+
 # --------------------------------------------------------------------------- #
 # runtime config resolution (kernel side)
 # --------------------------------------------------------------------------- #

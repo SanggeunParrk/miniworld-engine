@@ -56,4 +56,62 @@ def tm2_cute(
     Wg_nk = W_gate.t().contiguous()
     Wo_nk = W_out.t().contiguous()
     mod = _load_kernel_module()
-    return mod.tm2_dual_from_scratch(x_gate, x_out, Wg_nk, Wo_nk)
+
+    D = x_gate.shape[-1]
+    M = x_gate.numel() // D
+    N, K = int(Wg_nk.shape[0]), int(Wg_nk.shape[1])
+    tile_m = _resolve_tm2_tile_m(M, N, K, str(x_gate.dtype), x_gate.device)
+    return mod.tm2_dual_from_scratch(x_gate, x_out, Wg_nk, Wo_nk, tile_m=tile_m)
+
+
+def _tm2_smem_bytes(tile_m: int, N: int, K: int) -> int:
+    """SMEM footprint of the tm2 kernel for a candidate tile_m (bf16, TILE_K=64, 2 K-stages).
+    sX1+sX2 scale with tile_m; sW1+sW2 with N; sO with tile_m*N; +8B mbarrier +align slack."""
+    tk, kloop = 64, K // 64
+    b = 2  # bf16
+    sX = tile_m * tk * kloop * b
+    sW = N * tk * kloop * b
+    sO = tile_m * N * b
+    return 2 * sX + 2 * sW + sO + 8 + 4 * 1024  # +mbar +alignment padding headroom
+
+
+# H100/sm90 hardware SMEM ceiling (opt-in max). Candidates above this are unlaunchable.
+_SM90_SMEM_MAX = 232448
+
+
+def _largest_valid_tile_m(M: int, N: int, K: int) -> int:
+    """Largest tile_m in {256,192,128,64} that divides M and fits sm90 SMEM (falls to 64)."""
+    for tm in (256, 192, 128, 64):
+        if M % tm == 0 and _tm2_smem_bytes(tm, N, K) <= _SM90_SMEM_MAX:
+            return tm
+    return 64
+
+
+def _resolve_tm2_tile_m(M: int, N: int, K: int, dtype: str, device) -> int:
+    """Pick the autotuned tile_m for this shape; fall back to the largest valid divisor.
+
+    The cache is bucketed by M, and buckets group multiple M — so a cached tile_m may not
+    divide *this* M or may exceed SMEM. Since tile_m is performance-only, we validate the
+    resolved pick and fall back to a guaranteed-valid default, never sacrificing correctness."""
+    default = _largest_valid_tile_m(M, N, K)
+    try:
+        from miniworld_engine.autotune.buckets import bucket_mixed
+        from miniworld_engine.autotune.cute_config import resolve_config, tm2_candidates
+        from quack.gemm_config import GemmConfig
+
+        dev_index = device.index if getattr(device, "index", None) is not None else 0
+        cfg = resolve_config(
+            "tm2_dual_fwd", tm2_candidates(), dtype=dtype,
+            bucket=f"{bucket_mixed(M)}|k{K}",
+            default=GemmConfig(tile_m=default, tile_n=N, pingpong=False,
+                               is_dynamic_persistent=False, cluster_m=1, cluster_n=1,
+                               swap_ab=False, max_swizzle_size=8, device_capacity=9),
+            device_index=dev_index,
+        )
+        tm = int(cfg.tile_m)
+    except Exception:  # noqa: BLE001 -- any resolve failure -> safe default
+        return default
+    # Validate the cached pick against THIS shape (divisibility + SMEM); else safe default.
+    if M % tm == 0 and _tm2_smem_bytes(tm, N, K) <= _SM90_SMEM_MAX:
+        return tm
+    return default

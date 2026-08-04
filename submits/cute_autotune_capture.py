@@ -20,6 +20,7 @@ from miniworld_engine.autotune.cute_config import (
     gated_sm90_candidates,
     plain_sm90_candidates,
     sweep_and_cache,
+    tm2_candidates,
 )
 
 BF16 = torch.bfloat16
@@ -92,6 +93,19 @@ def cases_dab(shapes):
     return "dab_lnbwd", lnbwd_pp_candidates(), cases
 
 
+def cases_tm2(shapes):
+    from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import tm2_dual_from_scratch
+
+    cases = []
+    for (M, K, N) in shapes:  # tm2: K == N == D; weights are (N, K) nn.Linear form
+        x1 = _rand(M, K); x2 = _rand(M, K)
+        wg = _rand(N, K) / (K ** 0.5); wp = _rand(N, K) / (K ** 0.5)
+        bucket = f"{bucket_mixed(M)}|k{K}"
+        cases.append((bucket, lambda c, x1=x1, x2=x2, wg=wg, wp=wp:
+                      (lambda: tm2_dual_from_scratch(x1, x2, wg, wp, tile_m=c.tile_m))))
+    return "tm2_dual_fwd", tm2_candidates(), cases
+
+
 def cases_lnl_m1(shapes):
     from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
         layernorm_linear_cute,
@@ -114,12 +128,17 @@ _LNL_SHAPES = [(65536, 128, 128), (262144, 128, 128), (65536, 128, 256), (262144
 # LN-backward: reduction is over K; the tunable is tile_m over {64,128,192} where tile_n=K fits.
 _LNBWD_SHAPES = [(65536, 128, 512), (262144, 128, 512), (65536, 256, 512), (262144, 256, 512)]
 
+# tm2 (from-scratch dual-A gated GEMM): K == N == D = 128; M = L² for L ∈ {384,512,768,1024}.
+# Different M expose different valid tile_m divisors (e.g. 147456 admits 192; 262144 admits 256).
+_TM2_SHAPES = [(147456, 128, 128), (262144, 128, 128), (589824, 128, 128), (1048576, 128, 128)]
+
 OPS = {
     "transition_swiglu_fwd": lambda: cases_swiglu_fwd(_TRANSITION_SHAPES),
     "transition_gate_bwd": lambda: cases_gate_bwd(_TRANSITION_SHAPES),
     "layernorm_linear_m1": lambda: cases_lnl_m1(_LNL_SHAPES),
     "dgrad_lnbwd": lambda: cases_dgrad(_LNBWD_SHAPES),
     "dab_lnbwd": lambda: cases_dab(_LNBWD_SHAPES),
+    "tm2_dual_fwd": lambda: cases_tm2(_TM2_SHAPES),
 }
 
 

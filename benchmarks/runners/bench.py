@@ -1831,8 +1831,9 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "tm2_cute":
-        from miniworld_engine.kernels.tm2.cute.tm2_cute import tm2_cute_forward
-        kfn = lambda xg, xo: tm2_cute_forward(xg, xo, wg, wp)  # noqa: E731
+        # cuequiv wrapper deleted 2026-08-04 — this now benches OUR from-scratch tm2 kernel.
+        from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import tm2_dual_from_scratch
+        kfn = lambda xg, xo: tm2_dual_from_scratch(xg, xo, wg, wp)  # noqa: E731  (wg/wp are (N,K))
         path = "kernels.tm2.cute"
     elif implementation == "triton_tm2":
         from miniworld_engine.kernels.tm2.triton.main import triton_tm2

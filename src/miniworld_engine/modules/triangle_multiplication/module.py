@@ -389,56 +389,10 @@ class TriangleMultiplication(nn.Module):
 
         Requires the cute env (cutlass-dsl + quack). Outgoing direction only.
         """
-        import os as _os
-        # cuequiv-FREE by default on every cute GPU now that the sm90 back-half
-        # (trimul_back_triton) is wired below — our kernels end-to-end, no cuequiv gate.
-        # Set MINIWORLD_TRIMUL_CUEQUIV_FREE=0 to A/B against the legacy cuequiv tm2 path.
-        if _os.environ.get("MINIWORLD_TRIMUL_CUEQUIV_FREE", "1") != "0":
-            return self._forward_cute_free(pair, mask, add_residual)
-        _res = pair if add_residual else None  # legacy cuequiv path: explicit residual add
-        tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
-        # Legacy cuequiv gate — lazy-imported ONLY on this opt-in (env=0) A/B path so the
-        # default cuequiv-free path never loads cuequiv.
-        from miniworld_engine.kernels.tm2.cute.tm2_cute import tm2_cute_forward
-        x = pair
-        b, l1, l2, d = x.shape
-        ln_in_w, ln_in_b = self.ln_pair.weight, self.ln_pair.bias
-        ln_out_w, ln_out_b = self.ln_out.weight, self.ln_out.bias
-
-        if mask is not None:
-            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-            x_normed = fused_ln_mask(x, ln_in_w, ln_in_b, mask_2d)
-        else:
-            out = layer_norm_transpose(
-                x.reshape(b * l1 * l2, d), ln_in_w, ln_in_b, eps=self.ln_pair.eps, layout="nd->nd"
-            )
-            x_normed = (out[0] if isinstance(out, tuple) else out).view(b, l1, l2, d)
-
-        # Zero-copy [B,D,L,L] store (no transpose). bdll_direct now writes the
-        # side output straight into [B,D,L,L] via two non-gated M-major GEMMs +
-        # a pointwise sigmoid-gate (quack 0.3.11's gated epilogue can't do an
-        # M-major postact; its non-gated store can — see launch.py). This drops
-        # the ~4.5ms permute the plain "bdll" path incurs at L=1024.
-        left_bdll, right_bdll = tm1_cute_forward(
-            x_normed,
-            self.to_left.weight.T,
-            self.to_left_gate.weight.T,
-            self.to_right.weight.T,
-            self.to_right_gate.weight.T,
-            out_layout=_resolve_trimul_out_layout(pair.device),
-        )
-        if self.outgoing:
-            tri_out_bdij = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)
-        else:
-            tri_out_bdij = torch.einsum("bdki,bdkj->bdij", left_bdll, right_bdll)
-        tri_dbn = tri_out_bdij.permute(1, 0, 2, 3).reshape(d, b, l1 * l2)
-        out = layer_norm_transpose(
-            tri_dbn, ln_out_w, ln_out_b, eps=self.ln_out.eps, layout="dbn->bnd"
-        )
-        out_normed = (out[0] if isinstance(out, tuple) else out).view(b, l1, l2, d)
-        # tm2 cute wants weights in (N, K) = nn.Linear form (already so).
-        out = tm2_cute_forward(x_normed, out_normed, self.to_gate.weight, self.to_out.weight)
-        return out + _res if _res is not None else out
+        # cuequiv-FREE, unconditionally: our from-scratch tm2 (tm2_dual_from_scratch) is the tm2
+        # kernel — the legacy cuequiv A/B path (and the MINIWORLD_TRIMUL_CUEQUIV_FREE gate) were
+        # DELETED 2026-08-04. cuequivariance is a comparison-only baseline (pyproject [baselines]).
+        return self._forward_cute_free(pair, mask, add_residual)
 
     @torch.compiler.disable
     def _forward_cute_free(

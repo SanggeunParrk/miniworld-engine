@@ -12,16 +12,22 @@ Tensor layout (bf16, contiguous, K-dim last):
 
 Implementation notes
 ====================
-* Single warpgroup per CTA (128 threads). No producer/consumer split — same
-  threads issue the TMA loads (one elected lane) and run the WGMMAs. This
-  removes the warp-specialised pipeline machinery; we just need one mbarrier
-  to cover the four bulk loads.
+* ``tile_m`` warpgroups per CTA (128 * tile_m//64 threads), one m64 WGMMA atom
+  each, tiled over M via ``atom_layout=(tile_m//64, 1, 1)``. ``tile_m`` is a
+  pure performance knob in {64, 128, 192, 256}; tile_m=64 is the single-atom
+  subset. (256 exceeds sm90 SMEM for K=N=128 and is dropped by the sweep.) No
+  producer/consumer split — the load warp issues the TMA loads and all warps
+  run the WGMMAs, gated by one mbarrier covering the four bulk loads.
 * SMEM is double-staged in K (TILE_K = 64) so the SMEM layout matches a
   standard ``K_SW128`` swizzle atom that WGMMA's descriptor knows how to
   read.  Two stages are loaded by TMA in sequence into the same mbarrier;
   expected_tx covers the full byte count.
 * WGMMAs accumulate ``G`` and ``V`` interleaved per K stage so the compiler
   can issue both A loads back-to-back before the next ``warpgroup.fence``.
+* DEADLOCK FIX (2026-08-04): the tiled-TMA ``cute.copy`` auto-elects a single
+  lane internally, so the load/store copies must NOT be nested in an outer
+  ``elect_one()`` — doing so makes cp.async.bulk.tensor never signal the
+  mbarrier and the kernel hangs. Only the one-shot ARRIVE stays elected.
 
 Targets shapes used by tm2 in TriMul: K = N = D = 128 (B=1, L∈384..1024).
 """
@@ -53,7 +59,10 @@ class TM2DualKernel:
     """
 
     def __init__(self, N: int, K: int, tile_m: int = 64):
-        assert tile_m == 64, "currently only TILE_M=64 (single m64 atom) is supported"
+        # Multi-atom M: one m64 WGMMA atom per warpgroup, tile_m//64 warpgroups (was pinned to a
+        # single m64 atom). The tiled_mma is already built with atom_layout=(tile_m//64,1,1), so
+        # generalizing is just scaling the warpgroup count. tile_m=64 is the 1-warpgroup subset.
+        assert tile_m in (64, 128, 192, 256), "tile_m must be a multiple of 64 in {64,128,192,256}"
         assert K % _TILE_K == 0, f"K={K} must be divisible by TILE_K={_TILE_K}"
         self.N = N
         self.K = K
@@ -61,6 +70,8 @@ class TM2DualKernel:
         self.tile_n = N
         self.tile_k = _TILE_K
         self.k_loop = K // _TILE_K
+        self.num_warpgroups = tile_m // 64
+        self.num_threads = 128 * self.num_warpgroups
         self.shared_storage = None
 
     # ----------------------------------------------------------------- kernel
@@ -137,15 +148,23 @@ class TM2DualKernel:
             tma_atom_W2, 0, cute.make_layout(1), gW2, sW2,
         )
 
-        # ---- Issue all four TMA loads × K_LOOP from one thread ---------
+        # ---- Issue all four TMA loads × K_LOOP -------------------------
+        # NOTE (deadlock fix): the tiled-TMA ``cute.copy`` performs its OWN
+        # single-lane election internally. Wrapping the copies in an OUTER
+        # ``elect_one()`` makes the cp.async.bulk.tensor never signal the
+        # mbarrier's transaction bytes → the load barrier never flips →
+        # kernel deadlock. So the ARRIVE (which must happen exactly once)
+        # stays inside ``elect_one()``, but the copies are issued from the
+        # whole warp and left to auto-elect — matching quack's rmsnorm /
+        # gemm_sm90 producer idiom.
         if warp_idx == 0:
             with cute.arch.elect_one():
                 cute.arch.mbarrier_arrive_and_expect_tx(mbar_full_ptr, tx_bytes_total)
-                for k in cutlass.range_constexpr(K_LOOP):
-                    load_X1(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
-                    load_X2(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
-                    load_W1(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
-                    load_W2(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
+            for k in cutlass.range_constexpr(K_LOOP):
+                load_X1(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
+                load_X2(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
+                load_W1(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
+                load_W2(src_idx=k, dst_idx=k, tma_bar_ptr=mbar_full_ptr)
 
         # ---- Wait for loads --------------------------------------------
         # Initial parity is 0; first completion flips it. The cutlass-dsl
@@ -222,13 +241,16 @@ class TM2DualKernel:
         cute.arch.barrier()
 
         if warp_idx == 0:
+            sO_t, gO_t = cpasync.tma_partition(
+                tma_atom_O, 0, cute.make_layout(1),
+                cute.group_modes(sO, 0, cute.rank(sO)),
+                cute.group_modes(gO, 0, cute.rank(gO)),
+            )
+            # Same deadlock fix as the loads: the tiled-TMA store copy auto-elects
+            # internally, so it must NOT be nested in an outer elect_one(). The
+            # commit/wait pair is issued from the single elected lane.
+            cute.copy(tma_atom_O, sO_t, gO_t)
             with cute.arch.elect_one():
-                sO_t, gO_t = cpasync.tma_partition(
-                    tma_atom_O, 0, cute.make_layout(1),
-                    cute.group_modes(sO, 0, cute.rank(sO)),
-                    cute.group_modes(gO, 0, cute.rank(gO)),
-                )
-                cute.copy(tma_atom_O, sO_t, gO_t)
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=True)
 
@@ -341,7 +363,7 @@ class TM2DualKernel:
             Int32(tx_bytes_total),
         ).launch(
             grid=[m_blocks, 1, 1],
-            block=[_NUM_THREADS, 1, 1],
+            block=[self.num_threads, 1, 1],  # 128 * (tile_m//64) warpgroups
         )
 
 
@@ -355,6 +377,7 @@ def tm2_dual_from_scratch(
     x2: torch.Tensor,
     Wg_nk: torch.Tensor,
     Wp_nk: torch.Tensor,
+    tile_m: int | None = None,
 ) -> torch.Tensor:
     """From-scratch CuTeDSL fused dual-A gated GEMM (tm2 forward).
 
@@ -376,7 +399,10 @@ def tm2_dual_from_scratch(
     N, K2 = int(Wg_nk.shape[0]), int(Wg_nk.shape[1])
     assert K == K2
 
-    tile_m = 64
+    # tile_m: multi-atom M knob in {64,128,192,256} (each is tile_m//64 m64 WGMMA warpgroups).
+    # None -> largest that divides M (falls to 64). All numerically identical (performance-only).
+    if tile_m is None:
+        tile_m = next((tm for tm in (256, 192, 128, 64) if M % tm == 0), 64)
     assert M % tile_m == 0, f"M={M} must be divisible by tile_m={tile_m}"
 
     x1_flat = x1.reshape(M, K)
