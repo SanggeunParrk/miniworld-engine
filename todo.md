@@ -51,10 +51,13 @@ The GATED cute paths produced all-zero (then garbage) output. TWO real fixes, bo
       `back_split.py`, `tm1/tm2` (custom-CuTe: expose their tile params or document the atom limit).
 - [ ] Build a capture driver that calls `sweep_and_cache` for each op across representative
       shapes on H100, writes `data/.../autotune/<op>/<gpu>.json`, commit.
-- [ ] `dgrad_lnbwd.py` #2: to make tile_m brute-forceable (drop the tile_m=64 pin) the epilogue
-      must load x̂ from gmem (frees the epi-C smem so a cooperative atom_layout works) — the
-      single-subtile full-N LN reduction genuinely needs atom 1×1 at tile_m=64 today. Deep
-      reimpl, then add it to the swept candidate space. (Not just a wiring change.)
+- [x] `dgrad_lnbwd.py` / `dab_lnbwd.py` — tile_m FREED + brute-forced (FIX B, 2026-08-04, `02039d1`).
+      The tile_m=64 pin was overly conservative: the reduction needs atom_layout 1×1, and PINGPONG is
+      atom 1×1 for ALL tile_m in {64,128,192} (only cooperative forces 2×1) — NO gmem-x̂ rewrite
+      needed. Now a config knob swept over that family (tile_n=K must fit the pingpong tile_n cap),
+      cache-selected. Verified cos=1.0 at 64/128/192; sweep found 64 fastest everywhere (measured, not
+      pinned). Cooperative (atom 2×1) stays unusable — that alone would need the gmem-x̂ rewrite, moot
+      since pingpong-64 wins.
 
 ## Config fix — eliminate correctness-pinned constants
 
