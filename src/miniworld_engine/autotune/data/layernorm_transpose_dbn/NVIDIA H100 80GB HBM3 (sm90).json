@@ -1,104 +1,12 @@
 {
   "config_space_hash": "ed852972e987",
   "entries": {
-    "bfloat16|D=1024": [
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.23849600553512573,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.23871999979019165,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.24393600225448608,
-        "num_stages": 2,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.24404799938201904,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.2468159943819046,
-        "num_stages": 3,
-        "num_warps": 8
-      }
-    ],
-    "bfloat16|D=128": [
-      {
-        "kwargs": {
-          "BLOCK_M": 64
-        },
-        "ms": 0.034143999218940735,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 64
-        },
-        "ms": 0.03436800092458725,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 128
-        },
-        "ms": 0.034591998904943466,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 128
-        },
-        "ms": 0.034623999148607254,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.03657599911093712,
-        "num_stages": 3,
-        "num_warps": 4
-      }
-    ],
     "bfloat16|D=256": [
       {
         "kwargs": {
           "BLOCK_M": 64
         },
-        "ms": 0.060447998344898224,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 64
-        },
-        "ms": 0.0607680007815361,
+        "ms": 0.03209599852561951,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -106,74 +14,40 @@
         "kwargs": {
           "BLOCK_M": 64
         },
-        "ms": 0.061664000153541565,
+        "ms": 0.03209599852561951,
         "num_stages": 3,
-        "num_warps": 8
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.032287999987602234,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.03232000023126602,
+        "num_stages": 2,
+        "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK_M": 64
         },
-        "ms": 0.06195199862122536,
+        "ms": 0.03270399942994118,
         "num_stages": 2,
         "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.062431998550891876,
-        "num_stages": 2,
-        "num_warps": 8
-      }
-    ],
-    "bfloat16|D=512": [
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.11907199770212173,
-        "num_stages": 2,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.11913599818944931,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.12256000190973282,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 32
-        },
-        "ms": 0.12278400361537933,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M": 16
-        },
-        "ms": 0.12508800625801086,
-        "num_stages": 2,
-        "num_warps": 4
       }
     ]
   },
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "op": "layernorm_transpose_dbn",
   "provenance": {
-    "built_utc": "2026-07-31T10:27:18+00:00",
+    "built_utc": "2026-08-05T01:56:50+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

@@ -6,15 +6,23 @@
         "kwargs": {
           "BLOCK_J": 8
         },
-        "ms": 0.009727999567985535,
+        "ms": 0.009600000455975533,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_J": 8
+        },
+        "ms": 0.009824000298976898,
         "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_J": 8
+          "BLOCK_J": 16
         },
-        "ms": 0.009920000098645687,
+        "ms": 0.0098879998549819,
         "num_stages": 3,
         "num_warps": 8
       },
@@ -22,23 +30,15 @@
         "kwargs": {
           "BLOCK_J": 16
         },
-        "ms": 0.009920000098645687,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_J": 8
-        },
-        "ms": 0.01027199998497963,
+        "ms": 0.010239999741315842,
         "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK_J": 16
+          "BLOCK_J": 8
         },
-        "ms": 0.010367999784648418,
+        "ms": 0.010304000228643417,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -47,7 +47,7 @@
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "op": "transition_fold_swiglu",
   "provenance": {
-    "built_utc": "2026-07-31T10:09:29+00:00",
+    "built_utc": "2026-08-05T08:43:28+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

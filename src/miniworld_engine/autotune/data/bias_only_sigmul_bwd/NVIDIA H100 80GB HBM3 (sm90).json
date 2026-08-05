@@ -4,33 +4,33 @@
     "bfloat16|": [
       {
         "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.12943999469280243,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLK": 1024
+        },
+        "ms": 0.12995199859142303,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BLK": 2048
         },
-        "ms": 0.12985600531101227,
+        "ms": 0.1300320029258728,
         "num_stages": 3,
         "num_warps": 8
       },
       {
         "kwargs": {
-          "BLK": 1024
+          "BLK": 2048
         },
-        "ms": 0.12992000579833984,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLK": 1024
-        },
-        "ms": 0.1300159990787506,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLK": 4096
-        },
-        "ms": 0.13072000443935394,
+        "ms": 0.13097600638866425,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -38,7 +38,7 @@
         "kwargs": {
           "BLK": 4096
         },
-        "ms": 0.1311040073633194,
+        "ms": 0.131071999669075,
         "num_stages": 3,
         "num_warps": 8
       }
@@ -47,7 +47,7 @@
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "op": "bias_only_sigmul_bwd",
   "provenance": {
-    "built_utc": "2026-07-14T16:33:52+00:00",
+    "built_utc": "2026-08-04T05:27:30+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

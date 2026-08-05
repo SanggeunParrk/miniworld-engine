@@ -1,5 +1,5 @@
 {
-  "config_space_hash": "d8cdde2e6dbe",
+  "config_space_hash": "26bf612c6c13",
   "entries": {
     "bfloat16|DH=128,N=128": [
       {
@@ -8,7 +8,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 128
         },
-        "ms": 0.047807998955249786,
+        "ms": 0.048128001391887665,
         "num_stages": 3,
         "num_warps": 8
       },
@@ -18,7 +18,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 128
         },
-        "ms": 0.04854400083422661,
+        "ms": 0.04927999898791313,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -28,18 +28,18 @@
           "BLOCK_M": 64,
           "BLOCK_N": 128
         },
-        "ms": 0.050016000866889954,
+        "ms": 0.049536000937223434,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.04966399818658829,
         "num_stages": 4,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64,
-          "BLOCK_N": 128
-        },
-        "ms": 0.050416000187397,
-        "num_stages": 3,
         "num_warps": 4
       },
       {
@@ -48,59 +48,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 128
         },
-        "ms": 0.052639998495578766,
-        "num_stages": 3,
-        "num_warps": 8
-      }
-    ],
-    "bfloat16|DH=64,N=64": [
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64,
-          "BLOCK_N": 64
-        },
-        "ms": 0.029023999348282814,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64,
-          "BLOCK_N": 64
-        },
-        "ms": 0.029023999348282814,
-        "num_stages": 4,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 128,
-          "BLOCK_N": 64
-        },
-        "ms": 0.029440000653266907,
-        "num_stages": 4,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 128,
-          "BLOCK_N": 64
-        },
-        "ms": 0.029472000896930695,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 32,
-          "BLOCK_M": 128,
-          "BLOCK_N": 64
-        },
-        "ms": 0.03046399913728237,
+        "ms": 0.05257600173354149,
         "num_stages": 3,
         "num_warps": 8
       }
@@ -109,7 +57,7 @@
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "op": "bias_only_gate_out_fwd",
   "provenance": {
-    "built_utc": "2026-07-14T16:28:45+00:00",
+    "built_utc": "2026-08-04T09:14:31+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
