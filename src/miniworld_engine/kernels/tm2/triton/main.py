@@ -3,6 +3,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
@@ -16,18 +17,7 @@ AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_multi"
 # BLOCK_M (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
 # all genuine tunable tiles of the `for k_start in range(0, N, BLOCK_K)` GEMM. The smem prune
 # below drops configs whose pipelined tiles overflow device shared memory before compile.
-fwd_configs = [
-    triton.Config(
-        {"BLOCK_M": block_m, "BLOCK_K": block_k, "BLOCK_N": block_n},
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
-    for block_m in [64, 128]
-    for block_n in [64, 128, 256]
-    for block_k in [32, 64]
-    for num_warps in [4, 8]
-    for num_stages in [2, 3, 4]
-]
+fwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K, "BLOCK_N": BLOCK_N})
 
 
 bwd_configs = list(fwd_configs)
@@ -221,13 +211,10 @@ def fused_sigmoid_gate2_bwd_kernel(
     )
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32 * 32, 64 * 64, 128 * 128, 256 * 256, 384 * 384]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_squared
+    return bucket_squared(length)
 
 
 class TritonTM2Function(torch.autograd.Function):

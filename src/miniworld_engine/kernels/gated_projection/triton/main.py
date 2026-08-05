@@ -3,6 +3,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
@@ -13,21 +14,9 @@ from miniworld_engine._typecheck import typecheck
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "tri_attention"
 
 if AUTOTUNE:
-    configs = [
-        triton.Config({"BLOCK_M": m}, w, s)
-        for m in [16, 32, 64, 128, 256]
-        for w in [4, 8]
-        for s in [1, 2, 3, 4]
-    ]
+    configs = brute({"BLOCK_M": BLOCK_M})
 else:
-    configs = [
-        triton.Config({"BLOCK_M": 64}, 8, 4),
-        triton.Config({"BLOCK_M": 64}, 4, 4),
-        triton.Config({"BLOCK_M": 32}, 8, 3),
-        triton.Config({"BLOCK_M": 32}, 8, 1),
-        triton.Config({"BLOCK_M": 16}, 4, 4),
-        triton.Config({"BLOCK_M": 16}, 8, 3),
-    ]
+    configs = brute({"BLOCK_M": BLOCK_M})
 
 
 _gated_projection_sigmoid_gate_fwd_prune = make_cache_prune(
@@ -112,13 +101,10 @@ def sigmoid_gate_bwd_kernel(
     tl.store(drep_ptr + offset, drep_val, mask=mask)
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32, 64, 128, 256, 512]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_mixed
+    return bucket_mixed(length)
 
 
 class TritonGatedProjectionFunction(torch.autograd.Function):

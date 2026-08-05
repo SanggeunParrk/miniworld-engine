@@ -3,6 +3,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
@@ -18,58 +19,17 @@ from miniworld_engine.autotune import (
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_attention"
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32, 64, 128, 256, 384, 512]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_squared
+    return bucket_squared(length * length)
 
 
-fwd_configs = [
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 2),
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 8, 3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 4, 3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 8, 3),
-]
+fwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
 
-bwd_preprocess_configs = [
-    triton.Config({"BLOCK_M": 32}, 4, 3),  # 128,384 at H100
-    triton.Config({"BLOCK_M": 32}, 4, 2),  # 256 at H100
-    triton.Config({"BLOCK_M": 64}, 8, 2),  # 512 at H100
-]
+bwd_preprocess_configs = brute({"BLOCK_M": BLOCK_M})
 
-bwd_configs = [
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 3),
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 128}, 4, 3),
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 256}, 8, 3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, 8, 3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 4, 3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, 8, 3),
-    # num_stages=2 (and small-tile) variants: at HEAD_DIM=64 (d_pair=256, n_head=4) the
-    # 3-stage pipeline needs 144 KB shared memory, which exceeds the ~100 KB/SM limit of
-    # sm_86 (RTX A5000/A6000) — every 3-stage config above is unlaunchable there. These
-    # 2-stage configs fit sm_86 and give the autotuner (and the device-smem prune below)
-    # a launchable option; on A100/H100/B200 they are just extra candidates.
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 2),
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 128}, 4, 2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, 8, 2),
-    # num_stages=1: needed at HEAD_DIM=128 (d_pair=512, n_head=4), where even a 2-stage
-    # pipeline exceeds sm_86's ~100 KB. Unpipelined, so smem ~= one working set; the only
-    # sm_86-launchable option at the widest head dim.
-    triton.Config({"BLOCK_M": 32, "BLOCK_N": 64}, 4, 1),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, 4, 1),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, 4, 1),
-]
+bwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
 
 
 _triangle_attention_fwd_prune = make_cache_prune(

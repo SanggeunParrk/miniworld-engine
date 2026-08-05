@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
@@ -43,13 +44,21 @@ _trimul_back_prune = make_cache_prune(
 )
 
 
+# Bounded grid (NOT the full brute): this kernel keeps a live (BM,BN) accumulator PAIR
+# (proj + gate) at full K=N=128, so wide tiles blow the 255-reg budget. Empirically
+# BM/BN=256, num_warps=16 or num_stages>=4 make ptxas spill/thrash for 20+ MINUTES per
+# config (there is no K-loop, so extra stages only add noise) — that stalls the whole
+# autotune sweep. Cap the search at register-sane, launchable tiles; the documented winner
+# (BM=64,BN=64,warps=4) sits well inside this box. early_config_prune still narrows to the
+# cached best at runtime; this only bounds what the tuner will ever compile.
+_TB_BM = (16, 32, 64, 128)
+_TB_BN = (16, 32, 64, 128)
+_TB_WARPS = (2, 4, 8)
+_TB_STAGES = (1, 2, 3)
+
+
 @triton.autotune(
-    configs=[
-        triton.Config({"BM": 64, "BN": 64}, num_warps=4, num_stages=2),
-        triton.Config({"BM": 64, "BN": 64}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 64, "BN": 32}, num_warps=4, num_stages=2),
-        triton.Config({"BM": 64, "BN": 64}, num_warps=8, num_stages=2),
-    ],
+    configs=brute({"BM": _TB_BM, "BN": _TB_BN}, warps=_TB_WARPS, stages=_TB_STAGES),
     key=["GROUP_M", "K", "N", "ADD_RESIDUAL"],
     prune_configs_by={"early_config_prune": _trimul_back_prune},
 )
@@ -83,10 +92,15 @@ def _back_kernel(
     xn = tl.load(xn_ptr + rm[:, None] * K + rk[None, :], mask=mmask, other=0.0)  # (BM, K)
 
     # Tile the output dim N: keep only a (BM, BN) accumulator pair live at a time.
+    # rn is masked against N so BN need not divide N (a config with BN>N — e.g. the
+    # full-grid autotune fallback on a stale cache — reads/writes only in-bounds; the
+    # out-of-range weight columns load as 0 and are dropped in the masked store, so the
+    # result is identical for every BN. Without this mask BN>N faults (illegal address).
     for j in tl.static_range(0, N, BN):
         rn = j + tl.arange(0, BN)
-        wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :])
-        wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :])
+        nmask = rn[None, :] < N
+        wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :], mask=nmask, other=0.0)
+        wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :], mask=nmask, other=0.0)
         proj = tl.dot(norm, wp)                                  # (BM, BN)
         gate = tl.sigmoid(tl.dot(xn, wg))                        # (BM, BN)
         acc = proj * gate
@@ -94,10 +108,10 @@ def _back_kernel(
             # Fuse the pairformer residual add y = pair + trimul(pair): the residual is the
             # module's own (pre-LN) input, added in the same coalesced store. No dropout here
             # (inference: dropout is identity; training uses the v6 kernel).
-            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask, other=0.0).to(tl.float32)
+            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask & nmask, other=0.0).to(tl.float32)
             acc = acc + res
         y = acc.to(y_ptr.dtype.element_ty)
-        tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask)
+        tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask & nmask)
 
 
 def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None):

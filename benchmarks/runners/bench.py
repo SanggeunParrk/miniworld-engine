@@ -81,6 +81,10 @@ class BenchConfig(BaseModel):
     sweep_axis: Literal["seq_len", "d_pair"] = "seq_len"
     sweep_seq_len: int = 512
 
+    # Dedicated parallel cache builder: when set, an autotune-capture run dumps its timings to
+    # THIS shard file instead of the in-repo cache (submits/build_autotune_cache.py merges shards).
+    autotune_shard: str = ""
+
     kernel: str
     implementations: list[str] = [
         ImplementationType.PYTORCH.value,
@@ -272,6 +276,25 @@ def capture_cudagraph(step: Callable, params: list, is_train: bool,
     if is_train:
         for p in params:
             p.grad = torch.zeros_like(p)
+    # Autotune-capture builds: prime Triton autotune on the DEFAULT stream FIRST, so every
+    # kernel's `_bench` runs eagerly and is recorded by the cache builder. Forward kernels tune
+    # fine from the side-stream warmup below, but BACKWARD-only kernels (transition/attention
+    # bwd, split bwd, …) otherwise first tune inside the graph capture — where do_bench can't run
+    # — and are silently skipped. A couple of eager fwd(+bwd) iters here fixes that; it's a no-op
+    # for normal timing runs (guarded on the capture patch being installed).
+    try:
+        from miniworld_engine.autotune import capture as _cap  # noqa: PLC0415
+        _capturing = _cap._orig_bench is not None  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        _capturing = False
+    if _capturing:
+        for _ in range(2):
+            if is_train:
+                step()
+            else:
+                with torch.no_grad():
+                    step()
+        torch.cuda.synchronize()
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -2517,7 +2540,10 @@ def main(cfg: DictConfig) -> None:
     # autotuner so every config benched during this sweep is recorded per (op, dtype, bucket)
     # and written to the runtime cache at the end. Pair with MINIWORLD_RUN_AUTOTUNE=1 so the full
     # grid (not a cached top-K) is benched. No-op otherwise; never affects benchmark numbers.
-    _capture_on = os.getenv("MINIWORLD_AUTOTUNE_CAPTURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    _capture_on = (
+        os.getenv("MINIWORLD_AUTOTUNE_CAPTURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+        or bool(getattr(conf, "autotune_shard", ""))  # shard build turns capture on by itself
+    )
     if _capture_on:
         from miniworld_engine.autotune import capture as _capture
         _capture.install()
@@ -2609,9 +2635,17 @@ def main(cfg: DictConfig) -> None:
     if _capture_on:
         print("\n[autotune-capture] captured configs:")
         print(_capture.summary())
-        written = _capture.flush(top_k=5)
-        for op, dtype, bucket, n, fp in written:
-            print(f"  wrote {op} [{dtype}|{bucket}] ({n} configs) -> {fp}")
+        shard = getattr(conf, "autotune_shard", "") or ""
+        if shard:
+            # Dedicated parallel builder (submits/build_autotune_cache.py): dump this run's
+            # timings to its OWN shard file instead of the in-repo cache, so many parallel
+            # capture jobs never race on the committed tree. A single merge step folds shards in.
+            n_ops = _capture.dump_shard(shard)
+            print(f"  [shard] dumped {n_ops} ops -> {shard}")
+        else:
+            written = _capture.flush(top_k=5)
+            for op, dtype, bucket, n, fp in written:
+                print(f"  wrote {op} [{dtype}|{bucket}] ({n} configs) -> {fp}")
         _capture.reset()
 
     autotune_summary = build_autotune_summary(

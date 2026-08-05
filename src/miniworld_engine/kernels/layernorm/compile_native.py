@@ -69,7 +69,11 @@ def _resolve_bwd_path(
     if _LN_BWD_OVERRIDE in _VALID_BWD_PATHS:
         return _LN_BWD_OVERRIDE
 
-    is_bf16 = x.dtype == torch.bfloat16
+    # The hand-CUDA fast bwd path requires x AND weight to share one dtype (its kernel rejects a
+    # mixed pair); the triton paths promote internally and tolerate a mixed pair. Some pairformer
+    # LNs run bf16 activations against an fp32 weight, so gate the cuda path on BOTH being bf16 —
+    # otherwise fall to a tolerant triton path (same path the mixed case already used elsewhere).
+    is_bf16 = x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
     mode = dispatch_cache.autotune_mode()
     if mode == "off":
         return _static_bwd_path(m, n, is_bf16)

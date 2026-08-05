@@ -53,13 +53,10 @@ else:
     ]
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32, 64, 128, 256, 512]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_squared
+    return bucket_squared(length * length)
 
 
 @triton.jit

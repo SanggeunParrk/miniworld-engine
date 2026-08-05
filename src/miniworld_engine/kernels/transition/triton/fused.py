@@ -26,6 +26,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from jaxtyping import Float
 
@@ -55,27 +56,10 @@ def _transition_fuse_stats_enabled() -> bool:
     return os.getenv("MINIWORLD_TRANSITION_FUSE_STATS", "").strip().lower() in {"1", "true", "on"}
 
 
-def get_seq_group(length: int) -> int:
-    """Bucket flattened LxL rows so autotune follows the L sweep without per-M noise."""
-    group_lengths = [
-        32 * 32,
-        64 * 64,
-        128 * 128,
-        256 * 256,
-        384 * 384,
-        48 * 128,
-        48 * 256,
-        48 * 384,
-        48 * 512,
-        48 * 1024,
-        48 * 2048,
-        48 * 3072,
-        48 * 4096,
-    ]
-    for group_idx, group_length in enumerate(sorted(group_lengths)):
-        if length <= group_length:
-            return group_idx
-    return len(group_lengths) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_mixed
+    return bucket_mixed(length)
 
 
 if AUTOTUNE:
@@ -272,9 +256,7 @@ def transition_expand_gate(
 # Single baked winner (BLOCK_M=64, BLOCK_N=64) for the d=128 b2b path. NOT env-gated:
 # multi-config autotune was timing-UNSTABLE here (cached bad configs -> 0.49-0.64ms runs);
 # the single baked config is stable at ~0.31ms. (Unlike the expand kernel, which autotunes.)
-_b2b_configs = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-]
+_b2b_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
 
 
 _transition_b2b_prune = make_cache_prune(

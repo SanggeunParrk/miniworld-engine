@@ -27,18 +27,12 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
-gemm_configs = [
-    triton.Config({"BLOCK_J": bj, "BLOCK_I": bi, "BLOCK_K": bk}, num_warps=w, num_stages=s)
-    for bj in [32, 64]
-    for bi in [1, 2, 4]
-    for bk in [32, 64]
-    for w in [4, 8]
-    for s in [2, 3]
-]
+gemm_configs = brute({"BLOCK_J": BLOCK_M, "BLOCK_I": BLOCK_M, "BLOCK_K": BLOCK_K})
 
 
 _bias_only_fused_gemm_prune = make_cache_prune(

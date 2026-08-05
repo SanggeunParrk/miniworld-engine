@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
@@ -34,12 +35,7 @@ from .main import get_seq_group, layer_norm_fwd_fused
 PERSIST_WAVES = 2
 
 
-_bwd_configs = [
-    triton.Config({"BLOCK_M": block_m}, num_warps=num_warps, num_stages=num_stages)
-    for block_m in [4, 8, 16, 32, 64]
-    for num_warps in [4, 8, 16]
-    for num_stages in [1, 2, 3]
-]
+_bwd_configs = brute({"BLOCK_M": BLOCK_M})
 
 
 # fmt: off

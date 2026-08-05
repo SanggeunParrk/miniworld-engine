@@ -3,6 +3,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
@@ -13,37 +14,11 @@ from miniworld_engine._typecheck import typecheck
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_multi"
 
 if AUTOTUNE:
-    fwd_configs = [
-        triton.Config({"BLOCK_M": m, "BLOCK_K": k}, w, s)
-        for m in [16, 32, 64]
-        for k in [16, 32, 64]
-        for w in [4, 8]
-        for s in [1, 2, 3]
-        if not m * k > 32 * 64
-    ]
-    bwd_configs = [
-        triton.Config({"BLOCK_M": m, "BLOCK_K": k}, w, s)
-        for m in [16, 32, 64, 128]
-        for k in [16, 32, 64, 128]
-        for w in [4, 8]
-        for s in [1, 2, 3]
-        if not m * k > 32 * 64
-    ]
+    fwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
+    bwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
 else:
-    fwd_configs = [
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, 4, 1),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 64}, 4, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, 8, 2),
-        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32}, 4, 2),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32}, 4, 1),
-    ]
-    bwd_configs = [
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, 4, 1),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 64}, 4, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, 8, 2),
-        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32}, 4, 2),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32}, 4, 1),
-    ]
+    fwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
+    bwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
 
 
 _tm2_miniworld_fwd_prune = make_cache_prune(
@@ -182,13 +157,10 @@ def fused_sigmoid_gate2_bwd_kernel(
     )
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32 * 32, 64 * 64, 128 * 128, 256 * 256]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_squared
+    return bucket_squared(length)
 
 
 class TritonTM2Function(torch.autograd.Function):

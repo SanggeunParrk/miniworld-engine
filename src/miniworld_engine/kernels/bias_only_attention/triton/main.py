@@ -3,6 +3,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
@@ -12,35 +13,15 @@ from miniworld_engine._typecheck import typecheck
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_attention"
 
-configs = [
-    triton.Config({"BLOCK_M": m, "BLOCK_N": n}, w, s)
-    for m in [16, 32, 64]
-    for n in [16, 32, 64]
-    for w in [4, 8]
-    for s in [2, 3]
-]
-pre_configs = [
-    triton.Config({"BLOCK_M": m}, w, s)
-    for m in [16, 32, 64, 128, 256]
-    for w in [4, 8]
-    for s in [1, 2, 3]
-]
-bwd_configs = [
-    triton.Config({"BLOCK_M": m, "BLOCK_N": n}, w, s)
-    for m in [16, 32, 64]
-    for n in [16, 32, 64]
-    for w in [4, 8]
-    for s in [2, 3]
-]
+configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
+pre_configs = brute({"BLOCK_M": BLOCK_M})
+bwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32, 64, 128, 256, 512]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_squared
+    return bucket_squared(length * length)
 
 
 @triton.jit

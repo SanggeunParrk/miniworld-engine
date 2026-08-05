@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
@@ -63,13 +64,7 @@ _trimul_front_lr_prune = make_cache_prune(
     # single x-read avoids the cold re-read a separate-grid-per-half would pay.
     # Curated for sm_100: BM in {64,128,256}, num_warps in {4,8}, BK<=K so the
     # K-loop pipelines (num_stages live). BM=128/num_warps=4 is the sweet spot.
-    configs=[
-        triton.Config({"BM": 128, "BK": 32}, num_warps=4, num_stages=4),
-        triton.Config({"BM": 128, "BK": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 256, "BK": 32}, num_warps=8, num_stages=3),
-        triton.Config({"BM": 64, "BK": 32}, num_warps=4, num_stages=4),
-        triton.Config({"BM": 128, "BK": 64}, num_warps=4, num_stages=3),
-    ],
+    configs=brute({"BM": BLOCK_M, "BK": BLOCK_K}),
     key=["GROUP_M", "D"],
     prune_configs_by={"early_config_prune": _trimul_front_lr_prune},
 )
@@ -132,13 +127,7 @@ _trimul_front_gate_prune = make_cache_prune(
 
 @triton.autotune(
     # gate kernel: (BM,D) acc, fully contiguous (M,D) store. BM=64/num_warps=4 wins.
-    configs=[
-        triton.Config({"BM": 64, "BK": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 64, "BK": 32}, num_warps=4, num_stages=4),
-        triton.Config({"BM": 64, "BK": 64}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 128, "BK": 32}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 128, "BK": 64}, num_warps=8, num_stages=2),
-    ],
+    configs=brute({"BM": BLOCK_M, "BK": BLOCK_K}),
     key=["GROUP_M", "D"],
     prune_configs_by={"early_config_prune": _trimul_front_gate_prune},
 )

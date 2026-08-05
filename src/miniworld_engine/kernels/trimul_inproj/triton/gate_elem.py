@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
@@ -39,7 +40,7 @@ _trimul_gate_elem_mul_prune = make_cache_prune(
 
 
 @triton.autotune(
-    configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
+    configs=brute({"BLK": BLOCK_1D}),
     key=["GROUP_M", "N", "ADD_RESIDUAL", "USE_DROPOUT"],
     prune_configs_by={"early_config_prune": _trimul_gate_elem_mul_prune},
 )
@@ -78,12 +79,7 @@ _trimul_gate_elem_bwd_ew_prune = make_cache_prune(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({"BM": bm}, num_warps=nw, num_stages=ns)
-        for bm in (32, 64, 128)
-        for nw in (4, 8)
-        for ns in (2, 3, 4)
-    ],
+    configs=brute({"BM": BLOCK_M}),
     key=["GROUP_M", "N", "USE_DROPOUT"],
     prune_configs_by={"early_config_prune": _trimul_gate_elem_bwd_ew_prune},
 )

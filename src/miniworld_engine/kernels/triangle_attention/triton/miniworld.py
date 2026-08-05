@@ -65,12 +65,10 @@ else:
     ]
 
 
-def get_seq_group(L):
-    GROUP_LENGTHS = [32, 64, 128, 256, 512]
-    for group_l in GROUP_LENGTHS:
-        if L <= group_l:
-            return group_l
-    return GROUP_LENGTHS[-1]
+def get_seq_group(L) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_squared
+    return bucket_squared(L * L)
 
 
 @triton.jit

@@ -251,6 +251,31 @@ def _device_smem_limit(device_index: int | None = None) -> int:
     return _smem_limit_cache[idx]
 
 
+# A COMPILE MONSTER is a config triton spends 10-20 MIN compiling (make_llir + ptxas), always
+# register-spill bound so it never wins. Two layers guard against it, and they compose:
+#   1) STATIC pre-filter here — drop the ``num_warps>=16`` / ``num_stages>=5`` tail before benching.
+#      These are monsters on EVERY current arch (deep pipelines / 16-warp blocks spill everywhere),
+#      so cutting them up front removes ~half the grid and the bulk of build time cheaply.
+#   2) A per-config COMPILE TIMEOUT (fork + SIGKILL) in ``autotune/capture.py`` — the arch-specific
+#      BACKSTOP that kills whatever the static rule misses on a given GPU, judged by real compile
+#      time. So the static rule can stay conservative (only the always-bad tail) without risking a
+#      hang from an arch's own oddball blowup.
+# This filters the *pruned candidate set* only; the full ``autotuner.configs`` (hence
+# ``config_space_hash``) is untouched, so every existing cache stays valid — unlike narrowing the
+# grid in grids.py, which would stale all caches.
+def _is_compile_monster(config) -> bool:
+    try:
+        d = as_cfg_dict(config)
+        return d["num_warps"] >= 16 or d["num_stages"] >= 5
+    except Exception:  # noqa: BLE001 -- unknown shape -> don't drop it
+        return False
+
+
+def _drop_compile_monsters(configs: list) -> list:
+    kept = [c for c in configs if not _is_compile_monster(c)]
+    return kept or configs  # never prune to empty
+
+
 def make_device_smem_prune(smem_bytes):
     """Build an ``early_config_prune`` that drops configs whose estimated static shared
     memory exceeds the running device's opt-in limit.
@@ -299,6 +324,7 @@ def make_cache_prune(op: str, *, dtype_of, bucket_of, base_prune=None):
 
     def prune(configs, named_args, **kwargs):
         base = list(base_prune(configs, named_args, **kwargs)) if base_prune else list(configs)
+        base = _drop_compile_monsters(base)  # cut the always-bad tail up front (backstopped in capture)
         if run_autotune_enabled() or not base:
             return base
         try:

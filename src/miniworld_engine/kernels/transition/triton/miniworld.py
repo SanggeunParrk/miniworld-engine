@@ -3,6 +3,7 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
@@ -13,28 +14,9 @@ from miniworld_engine._typecheck import typecheck
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
 
 if AUTOTUNE:
-    configs = [
-        triton.Config({"BLOCK_M": m, "BLOCK_K": k}, w, s)
-        for m in [16, 32, 64]
-        for k in [16, 32, 64]
-        for w in [4, 8, 16]
-        for s in [1, 2, 3]
-        if not m * k > 32 * 64
-    ]
+    configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
 else:
-    configs = [
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32}, 8, 2),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32}, 8, 3),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16}, 8, 3),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, 8, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, 8, 3),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, 16, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, 8, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, 16, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16}, 8, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16}, 16, 2),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 16}, 4, 2),
-    ]
+    configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
 
 
 _transition_miniworld_fwd_prune = make_cache_prune(
@@ -159,13 +141,10 @@ def transition_bwd_kernel(
     )
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [32 * 32, 64 * 64, 128 * 128, 256 * 256]
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_mixed
+    return bucket_mixed(length)
 
 
 class TritonTransitionFunction(torch.autograd.Function):

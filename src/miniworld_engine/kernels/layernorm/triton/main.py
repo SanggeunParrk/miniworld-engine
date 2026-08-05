@@ -3,31 +3,16 @@ import os
 
 import torch
 import triton
+from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 
-def get_seq_group(length: int) -> int:
-    """Get sequence group based on length."""
-    GROUP_LENGTHS = [
-        32 * 32,
-        64 * 64,
-        128 * 128,
-        256 * 256,
-        384 * 384,
-        512 * 512,
-        768 * 768,
-        48 * 128,
-        48 * 512,
-        48 * 256,
-        48 * 384,
-    ]
-    GROUP_LENGTHS = sorted(GROUP_LENGTHS)
-    for group_idx, group_length in enumerate(GROUP_LENGTHS):
-        if length <= group_length:
-            return group_idx
-    return len(GROUP_LENGTHS) - 1
+def get_seq_group(length) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    from miniworld_engine.autotune.buckets import bucket_mixed
+    return bucket_mixed(length)
 
 
 AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "layernorm"
@@ -43,27 +28,11 @@ AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "layernorm"
 _LN_CUDA_BWD_ENABLED = os.environ.get("MINIWORLD_LN_IN_CUDA", "0") != "0"
 
 
-configs = [
-    triton.Config({"BLOCK_M": block_m}, num_warps=num_warps, num_stages=num_stages)
-    # BLOCK_M up to 256: at small M (e.g. L=256 -> 65k rows) the cuequiv LN wins by picking
-    # ~110 rows/program (targeting ~592 blocks = 4/SM); our old cap of 64 forced >1000 tiny
-    # blocks there. 128/256 let the autotuner match that bigger-block sweet spot (autotune drops
-    # any config that spills / OOMs registers, so the wide range is safe).
-    for block_m in [1, 2, 4, 8, 16, 32, 64, 128]
-    for num_warps in [4, 8, 16]
-    for num_stages in [2, 3, 4, 5]
-]
+configs = brute({"BLOCK_M": BLOCK_M})
 
-fwd_configs = [
-    triton.Config({"BLOCK_M": 16}, num_warps=8, num_stages=4),  # 128, 256 at H100
-    triton.Config({"BLOCK_M": 64}, num_warps=8, num_stages=3),  # 384 at H100
-]
+fwd_configs = brute({"BLOCK_M": BLOCK_M})
 
-bwd_configs = [
-    triton.Config({"BLOCK_M": 128}, num_warps=8, num_stages=2),  # 128 at H100
-    triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=4),  # 256 at H100
-    triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=3),  # 384 at H100
-]
+bwd_configs = brute({"BLOCK_M": BLOCK_M})
 
 fwd_configs = configs
 bwd_configs = configs
