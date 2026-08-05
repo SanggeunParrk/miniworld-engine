@@ -208,8 +208,11 @@ def trimul_triton(
     x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
-    if not torch.is_grad_enabled():
-        # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed.
+    if not torch.is_grad_enabled() and ds_2d is None:
+        # INFERENCE: forward-only (no saved tensors) — cudagraphs at cute's speed. Also gate on
+        # ds_2d is None: a live dropout scale (train() under no_grad, p_drop>0) must take the
+        # TRAINING apply below (which folds dropout into the gate epilogue) — the inference path
+        # has no dropscale and would silently skip dropout. Mirrors the cute dispatch's guard.
         return _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
                           ln_out_w, ln_out_b, eps_out, outgoing, mask=m2d, residual=residual_flat)
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
