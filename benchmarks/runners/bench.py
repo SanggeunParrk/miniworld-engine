@@ -140,7 +140,13 @@ class BenchResult(NamedTuple):
 
 def module_miniworld_spec(raw: str) -> ImplementationSpec:
     if raw.strip().lower() == MINIWORLD_IMPL:
-        return ImplementationSpec(ImplementationType.CUEQUIVARIANCE, None, raw)
+        # MINIWORLD, not CUEQUIVARIANCE. `resolve()` sends a CUEQUIVARIANCE request for any
+        # non-trimul op to KernelBackend.PYTORCH, so the old mapping made `implementations=
+        # [miniworld]` bench the pytorch reference under the "ours" label for the two module
+        # benches that use this spec (transition, conditioned_transition). Silent: the sweep
+        # reported plausible times (3.16 ms at L=384/d=128, vs 0.65 ms for the triton path)
+        # and the autotune-capture builder recorded NOTHING, because no triton kernel ever ran.
+        return ImplementationSpec(ImplementationType.MINIWORLD, None, raw)
     if raw.strip().lower() == OLD_TRITON_IMPL:
         return ImplementationSpec(ImplementationType.TRITON, None, raw)
     return parse_implementation_spec(raw)
@@ -1063,6 +1069,7 @@ def bench_conditioned_transition(
         ImplementationType.PYTORCH,
         ImplementationType.TRITON,
         ImplementationType.CUEQUIVARIANCE,
+        ImplementationType.MINIWORLD,
     }:
         return as_bench_result(float("nan"))
 
