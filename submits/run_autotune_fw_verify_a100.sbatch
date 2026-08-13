@@ -61,7 +61,7 @@ print("  select_config MISS + STALE -> None (warn-once) OK")
 
 os.environ["MINIWORLD_RUN_AUTOTUNE"] = "1"
 assert C.select_config(op, dtype="bfloat16", bucket="K=128", candidates=cands) is None
-print("  MINIWORLD_RUN_AUTOTUNE=1 bypasses cache OK")
+print("   bypasses cache OK")
 print("API MECHANICS OK")
 PY'
 echo "[api exit=$?]"

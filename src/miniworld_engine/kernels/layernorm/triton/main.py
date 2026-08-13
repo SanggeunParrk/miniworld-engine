@@ -22,9 +22,11 @@ def get_seq_group(length) -> int:
 # e2e-NEUTRAL in the trimul training graph: LN_in bwd is ~7% of the step and the CUDA path's second
 # (reduce) kernel launch eats the ~12% compute win at these M (verified graph-time delta within
 # run-to-run noise at L=384/768/1024). Enabling also forces the one-time nvcc JIT build on first
-# `triton_layernorm` import. Set MINIWORLD_LN_IN_CUDA=1 to use it (kernels/layernorm/cuda/ now
+# `triton_layernorm` import. Set settings.layernorm_cuda_bwd to use it (kernels/layernorm/cuda/ now
 # gencodes sm_80/90/100 + PTX so the ext loads and runs on B200).
-_LN_CUDA_BWD_ENABLED = settings.current().layernorm_cuda_bwd
+def _ln_cuda_bwd_enabled() -> bool:
+    """Read at call time; see compile_native._ln_bwd_override."""
+    return settings.current().layernorm_cuda_bwd
 
 
 configs = brute({"BLOCK_M": BLOCK_M})
@@ -300,7 +302,7 @@ class TritonLayerNormFunction(torch.autograd.Function):
         # So auto-take CUDA for the masked path (always wins), but keep dense behind the opt-in
         # env flag. Lazy import so the nvcc JIT build only triggers when this path is taken; any
         # build/run failure falls through to triton.
-        if (x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _LN_CUDA_BWD_ENABLED)):
+        if (x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _ln_cuda_bwd_enabled())):
             try:
                 from ..cuda import layer_norm_bwd_cuda
                 dx_c, dw_c, db_c = layer_norm_bwd_cuda(

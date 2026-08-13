@@ -30,9 +30,7 @@
 set -uo pipefail
 set -f
 cd /home/psk6950/practice/miniworld-engine
-export HYDRA_FULL_ERROR=1
-
-echo "host=$(hostname)  date=$(date)"
+export HYDRA_FULL_ERROR=1 echo "host=$(hostname)  date=$(date)"
 # Sanity: confirm we actually landed on an sm_86 Ampere workstation card (A5000/A6000),
 # NOT an A100 (also cap[0]==8 but sm_80) — the cute gating is by capability, but the
 # results slug + tuned-cache key are by name, so guard the exact (8,6) + RTX Axxxx name.

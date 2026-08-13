@@ -49,6 +49,9 @@ class Settings:
     capture: bool = False
     #: Kernels with their full grid unlocked. Formerly TRITON_AUTOTUNE.
     autotune_kernels: frozenset[str] = frozenset()
+    #: Worker processes used to PRE-compile an autotune round before it is timed. None = one per
+    #: usable core (capped). 1 disables it. Only a build ever sets this; see autotune.capture.
+    compile_jobs: int | None = None
     #: bias_only gate epilogue calibration. Formerly MINIWORLD_BIASONLY_AUTOTUNE.
     biasonly_dispatch: DispatchMode = "auto"
     #: layernorm backend calibration. Formerly MINIWORLD_LN_AUTOTUNE.

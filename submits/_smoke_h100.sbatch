@@ -15,9 +15,7 @@
 set -uo pipefail
 set -f
 cd /home/psk6950/miniworld-engine
-export HYDRA_FULL_ERROR=1
-
-echo "host=$(hostname)  date=$(date)"
+export HYDRA_FULL_ERROR=1 echo "host=$(hostname)  date=$(date)"
 pixi run --frozen python -c "import torch; cap=torch.cuda.get_device_capability(0); print('torch', torch.__version__, torch.cuda.get_device_name(0), 'sm', cap); assert cap[0]==9, f'expected sm_90 (H100), got sm_{cap[0]}{cap[1]}'"
 
 echo ""

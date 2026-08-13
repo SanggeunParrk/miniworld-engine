@@ -43,9 +43,7 @@ if [ ! -x "$ENV/bin/python" ]; then
 fi
 export CONDA_PREFIX="$ENV" CUDA_HOME="$ENV"
 export PATH="$ENV/bin:$PATH"
-export LD_LIBRARY_PATH="$ENV/lib:${LD_LIBRARY_PATH:-}"
-
-echo "=== phase 1: seed torch (so TE-torch can import it at build time) ==="
+export LD_LIBRARY_PATH="$ENV/lib:${LD_LIBRARY_PATH:-}" echo "=== phase 1: seed torch (so TE-torch can import it at build time) ==="
 "$ENV/bin/python" -m pip install --no-cache-dir \
   "torch==2.10.0+cu128" \
   --extra-index-url https://download.pytorch.org/whl/cu128

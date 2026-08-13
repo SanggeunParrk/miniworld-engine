@@ -18,9 +18,7 @@
 set -uo pipefail
 set -f
 cd /home/psk6950/miniworld-engine
-export HYDRA_FULL_ERROR=1
-
-echo "host=$(hostname)  date=$(date)"
+export HYDRA_FULL_ERROR=1 echo "host=$(hostname)  date=$(date)"
 # FAIL-FAST CUDA/sm90 gate with retry: some HGX nodes throw CUDA error 802 ("system not yet
 # initialized", NVSwitch fabric race) right after allocation. Retry a few times; if still bad,
 # ABORT immediately (exit) instead of running dozens of doomed tasks on a broken node.

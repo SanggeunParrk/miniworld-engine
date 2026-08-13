@@ -54,7 +54,9 @@ _FLASH_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
 # Opt-in runtime guard (``settings.swa_check_front_packed``) that asserts the seqused_k
 # precondition — valid atoms are front-packed in each row. Off by default so it
 # adds no per-step GPU sync / torch.compile graph break in production.
-_CHECK_FRONT_PACKED = settings.current().swa_check_front_packed
+def _check_front_packed() -> bool:
+    """Read at call time; see layernorm.compile_native._ln_bwd_override."""
+    return settings.current().swa_check_front_packed
 
 
 @torch.compiler.disable  # FA4's CuTeDSL kernel is opaque to dynamo; mark it a clean
@@ -472,7 +474,7 @@ def build_attention_params(
     seqused = valid.sum(dim=-1, dtype=torch.int32)  # [N] valid atoms per row
     cu_seqlens = torch.arange(0, (n + 1) * s, s, dtype=torch.int32, device=valid.device)
     max_seqlen = s
-    if _CHECK_FRONT_PACKED:
+    if _check_front_packed():
         expected = torch.arange(s, device=valid.device).unsqueeze(0) < seqused.unsqueeze(1)
         if not torch.equal(valid, expected):
             raise RuntimeError(

@@ -12,9 +12,7 @@
 set -uo pipefail
 set -f
 cd /home/psk6950/miniworld-engine
-export HYDRA_FULL_ERROR=1
-
-echo "host=$(hostname)  date=$(date)"
+export HYDRA_FULL_ERROR=1 echo "host=$(hostname)  date=$(date)"
 pixi run --frozen python -c "import torch; print('torch', torch.__version__, torch.cuda.get_device_name(0))"
 
 module_dir_for() {

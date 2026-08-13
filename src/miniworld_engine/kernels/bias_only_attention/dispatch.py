@@ -17,10 +17,9 @@ a slower (never wrong) path; any error falls back to the static H100 heuristic.
 Calibrated choices persist to the in-repo ``autotune/data/bias_only_dispatch/`` tree
 (committed to git, shared across machines) — never ``~/.cache`` or an env-var path.
 
-Env:
-  MINIWORLD_BIASONLY_AUTOTUNE = auto (default) | off | force
-      off   -> never calibrate; always the static H100 thresholds
-      force -> calibrate even on H100 (sm90), ignoring the static fast-path
+``settings.biasonly_dispatch`` = auto (default) | off | force
+    off   -> never calibrate; always the static H100 thresholds
+    force -> calibrate even on H100 (sm90), ignoring the static fast-path
 """
 
 from __future__ import annotations
@@ -97,7 +96,16 @@ def use_kernels(L: int) -> bool:
 
 
 def use_infer_concat(d_hidden: int) -> bool:
-    """Use the inference LN+proj concat fusion (layernorm_linear)."""
+    """Use the inference LN+proj concat fusion (layernorm_linear).
+
+    A cache build pins this so it can sweep both branches: the kernels on the side this shape does
+    not take still run in production at other shapes, and would otherwise have no cached configs.
+    """
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    pin = settings.current().pin_infer_concat
+    if pin is not None:
+        return pin
     return d_hidden <= INFER_CONCAT_MAX_DH
 
 

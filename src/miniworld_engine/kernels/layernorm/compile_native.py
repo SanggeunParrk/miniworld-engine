@@ -36,9 +36,11 @@ def _use_partial_reduction(m: int, n: int) -> bool:
 # features). Only the *crossover thresholds* in `_static_bwd_path` were MEASURED on
 # H100 (sm_90). On other GPUs we don't guess: `_resolve_bwd_path` times the three
 # paths once per (d, M-bucket) on the real tensors and caches the winner per GPU
-# (see dispatch_cache). Escape hatch: env `MINIWORLD_LN_BWD=persistent|partial|
+# (see dispatch_cache). Escape hatch: env `settings.layernorm_bwd_path
 # atomic` forces one path (debug / manual override), bypassing cache + heuristic.
-_LN_BWD_OVERRIDE = settings.current().layernorm_bwd_path
+def _ln_bwd_override() -> str | None:
+    """Read at call time: a module-level constant would freeze whatever was set at import."""
+    return settings.current().layernorm_bwd_path
 _VALID_BWD_PATHS = {"persistent", "partial", "atomic", "cuda"}
 _HOPPER = (9, 0)
 
@@ -66,8 +68,8 @@ def _time_bwd_path(impl, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
 def _resolve_bwd_path(
     m: int, n: int, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor
 ) -> str:
-    if _LN_BWD_OVERRIDE in _VALID_BWD_PATHS:
-        return _LN_BWD_OVERRIDE
+    if _ln_bwd_override() in _VALID_BWD_PATHS:
+        return _ln_bwd_override()
 
     # The hand-CUDA fast bwd path requires x AND weight to share one dtype (its kernel rejects a
     # mixed pair); the triton paths promote internally and tolerate a mixed pair. Some pairformer

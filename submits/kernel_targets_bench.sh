@@ -9,9 +9,7 @@ set -f
 # Repo-root relative to THIS script (submits/..), so it runs in whichever checkout it
 # lives in — no hardcoded absolute path that breaks when a checkout moves or is removed.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export HYDRA_FULL_ERROR=1
-
-# target -> full variant list (rows compared inside its folder)
+export HYDRA_FULL_ERROR=1 # target -> full variant list (rows compared inside its folder)
 declare -A IMPLS=(
   [dual_gemm_epil]='[pytorch,trimul_front_triton,trimul_inproj_cute,tm1_cute,triton_tm1,trimul_front_sm100]'
   [gemm_epil]='[pytorch,layernorm_linear_triton,layernorm_linear_cute,layernorm_linear_cute_fused,layernorm_linear_te]'

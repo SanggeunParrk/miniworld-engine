@@ -37,7 +37,7 @@ SHAPES[augmented_attention_atom]='mask_prob=0.0 min_seq_len=128 max_seq_len=384 
 run_one() {
   target="$1"; shift
   echo ""; echo "### capture kernel=${target} $* ###"
-  pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-} MINIWORLD_RUN_AUTOTUNE=1 MINIWORLD_AUTOTUNE_CAPTURE=1; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
+  pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-} ; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
     kernel="$target" implementations='[miniworld]' metric=time compile=false cudagraph=manual "$@"
   echo "[exit=$?]"
 }

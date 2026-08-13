@@ -27,7 +27,7 @@ $PY -c "import torch; cap=torch.cuda.get_device_capability(0); assert cap[0]==10
 run_one() {
   target="$1"; shift
   echo ""; echo "### capture bench kernel=${target} $* ###"
-  env MINIWORLD_RUN_AUTOTUNE=1 MINIWORLD_AUTOTUNE_CAPTURE=1 PYTHONPATH=src \
+  env   PYTHONPATH=src \
     "$PY" benchmarks/runners/bench.py \
     kernel="$target" implementations='[miniworld]' metric=time \
     compile="${CAP_COMPILE:-false}" cudagraph="${CAP_GRAPH:-manual}" "$@"

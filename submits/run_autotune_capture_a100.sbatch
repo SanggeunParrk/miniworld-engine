@@ -3,8 +3,8 @@
 # (capture builder), instead of hand-replicating each kernel launch. For each target module we
 # run the existing bench harness (miniworld backend, inference+training, seq_len + d_pair
 # sweeps) with:
-#   MINIWORLD_RUN_AUTOTUNE=1      -> full grid is benched (no cached top-K narrowing)
-#   MINIWORLD_AUTOTUNE_CAPTURE=1  -> bench.py installs capture, records per-config timings,
+#         -> full grid is benched (no cached top-K narrowing)
+#     -> bench.py installs capture, records per-config timings,
 #                                    flushes top-5 per (op,dtype,bucket) to the runtime cache.
 # Then copy runtime cache -> committed package data. cute/cuda are sm90+ (not built here).
 #
@@ -30,7 +30,7 @@ run_one() {
   target="$1"; shift
   echo ""
   echo "### capture bench kernel=${target} $* ###"
-  pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-} MINIWORLD_RUN_AUTOTUNE=1 MINIWORLD_AUTOTUNE_CAPTURE=1; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
+  pixi run --frozen bash -c 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-} ; PYTHONPATH=src python benchmarks/runners/bench.py "$@"' _ \
     kernel="$target" implementations='[miniworld]' metric=time \
     compile="${CAP_COMPILE:-false}" cudagraph="${CAP_GRAPH:-manual}" "$@"
   echo "[exit=$?]"

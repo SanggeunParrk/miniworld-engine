@@ -32,7 +32,9 @@ from .te_style import _ln_bwd_kernel  # atomic small-M fallback
 from miniworld_engine import settings
 
 # Escape hatch / A-B control: force one path. "atomic" = the old te_style plain-atomic kernel.
-_OVERRIDE = settings.current().layernorm_out_bwd_path
+def _override() -> str | None:
+    """Read at call time; see layernorm.compile_native._ln_bwd_override."""
+    return settings.current().layernorm_out_bwd_path
 
 _WAVES = 2
 
@@ -169,12 +171,12 @@ def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides):
       • large M, N<=128 -> this module's specialized kernel (M-contiguous vector hint wins).
       • large M, N>128  -> canonical layernorm persistent kernel (wins at wide N).
     Requires m-major inputs (row stride 1); falls back to atomic otherwise. Env
-    MINIWORLD_LNOUT_BWD=atomic|persistent|canonical forces one path (A-B / debug)."""
+    settings.layernorm_out_bwd_path forces one path (A-B / debug)."""
     M, K = x.shape
-    if _OVERRIDE == "atomic" or x.stride(0) != 1 or M < _PERSIST_MIN_M:
+    if _override() == "atomic" or x.stride(0) != 1 or M < _PERSIST_MIN_M:
         return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides)
-    if _OVERRIDE == "canonical":
+    if _override() == "canonical":
         return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides)
-    if _OVERRIDE == "persistent" or K <= 128:
+    if _override() == "persistent" or K <= 128:
         return _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides)
     return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides)

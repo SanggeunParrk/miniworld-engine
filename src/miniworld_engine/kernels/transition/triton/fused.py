@@ -36,12 +36,14 @@ from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dt
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = settings.current().autotunes("transition")
-USE_SAVEDXN_SPLIT_BWD = settings.current().transition_savedxn_split_bwd
+def use_savedxn_split_bwd() -> bool:
+    """Read at call time; see layernorm.compile_native._ln_bwd_override."""
+    return settings.current().transition_savedxn_split_bwd
 
 
 def _gatebwd_wgmma_enabled() -> bool:
     """Route the sm90 large-d (K in {256,512}) Version-A gate-backward through the hand-CUDA
-    WGMMA kernel (beats the Triton recompute). Default on; set MINIWORLD_TRANSITION_GATEBWD_WGMMA=0
+    WGMMA kernel (beats the Triton recompute). Default on; set settings.transition_gatebwd_wgmma
     to A/B against the Triton path."""
     return settings.current().transition_gatebwd_wgmma
 
@@ -379,7 +381,7 @@ def transition_b2b(
     ``save_xn`` (Version B): also emit the normalized x (M, K) via a single in-kernel store
     for backward reuse. Returns ``(out, xn)`` then; else just ``out``.
 
-    With ``fuse_stats=True`` (or ``MINIWORLD_TRANSITION_FUSE_STATS=1/true/on``), the
+    With ``fuse_stats=True`` (or ``settings.transition_fuse_stats``), the
     kernel computes and stores the LayerNorm stats on-chip. Then returns
     ``(out, rstd, c1, xn)`` when ``save_xn`` else ``(out, rstd, c1)``.
     """
@@ -1194,8 +1196,8 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         #   B (has_xn):   reuse the saved xn (no re-normalize).
         #   A (recompute): re-normalize x from saved stats inline.
         # Both emit stacked dAB=[dA|dB] so stages (3)(4)(5)(6) below are version-INDEPENDENT.
-        # USE_SAVEDXN_SPLIT_BWD keeps the old split comparator (has_xn only, default off).
-        if ctx.has_xn and USE_SAVEDXN_SPLIT_BWD:
+        # use_savedxn_split_bwd() keeps the old split comparator (has_xn only, default off).
+        if ctx.has_xn and use_savedxn_split_bwd():
             h, dA, dB = _transition_expand_gatebwd_savedxn(
                 xn_saved, expand_a_weight, expand_b_weight, grad_expand,
             )
