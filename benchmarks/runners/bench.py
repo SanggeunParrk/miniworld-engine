@@ -88,6 +88,17 @@ class BenchConfig(BaseModel):
     # get captured -- yet they still run in production at other shapes, with no cached
     # configs at all. A build sweeps each side explicitly. "" = let the engine decide.
     pin_gate_backend: str = ""
+    # Row-broadcast dropout probability for the trimul residual epilogue. USE_DROPOUT is part of
+    # those kernels' autotune KEY, so `dropout=0` and `dropout>0` are different cache buckets and
+    # neither substitutes for the other. A cache built entirely at 0 leaves training -- the only
+    # place dropout is live -- with no entry, and the runtime falls back to the full grid, which
+    # looks like a hang. Builds must sweep both.
+    dropout: float = 0.0
+    #: Worker processes for parallel pre-compilation of each autotune round (0 = auto).
+    compile_jobs: int = 0
+    #: Pin the inference LN+proj concat fusion; None = let the engine decide. Typed bool, not str:
+    #: hydra parses `+pin_infer_concat=true` as a bool and a str field rejects it.
+    pin_infer_concat: bool | None = None
 
     kernel: str
     implementations: list[str] = [
@@ -566,7 +577,11 @@ def bench_triangle_multiplication(
                 # old wrappers did. load_state_dict casts the fp32 reference state.
                 self.layers = nn.ModuleList(
                     [
-                        base_cls(conf.d_pair, implementation=ImplementationType.MINIWORLD).to(
+                        base_cls(
+                            conf.d_pair,
+                            implementation=ImplementationType.MINIWORLD,
+                            p_drop=float(getattr(conf, "dropout", 0.0) or 0.0),
+                        ).to(
                             torch.bfloat16,
                         )
                         for _ in layer_states
@@ -2549,7 +2564,7 @@ def main(cfg: DictConfig) -> None:
 
     # Opt-in autotune-cache BUILD hook (``settings.capture``): instrument the Triton
     # autotuner so every config benched during this sweep is recorded per (op, dtype, bucket)
-    # and written to the runtime cache at the end. Pair with MINIWORLD_RUN_AUTOTUNE=1 so the full
+    # and written to the runtime cache at the end. Pair with settings.run_autotune so the full
     # grid (not a cached top-K) is benched. No-op otherwise; never affects benchmark numbers.
     from miniworld_engine import settings as _settings
     _capture_on = (
@@ -2560,9 +2575,23 @@ def main(cfg: DictConfig) -> None:
         from miniworld_engine import settings as _settings
         from miniworld_engine.autotune import capture as _capture
         _pin = (getattr(conf, "pin_gate_backend", "") or "").strip().lower()
+        # A capture MUST bench the full grid: with run_autotune off, make_cache_prune narrows the
+        # candidates to the committed cache's top-K, so the build re-measures its own previous
+        # answer (5 configs per bucket instead of 80-1500) and can never find a better one. This
+        # used to come from MINIWORLD_RUN_AUTOTUNE=1 in the launcher; tying it to capture removes
+        # the chance of running a build without it.
+        _pins = {"run_autotune": True, "capture": True}
+        _cj = int(getattr(conf, "compile_jobs", 0) or 0)
+        if _cj:
+            _pins["compile_jobs"] = _cj
         if _pin:
-            _settings.configure(pin_gate_backend=_pin)
-            print(f"  [capture] dispatch pinned: gate={_pin}", flush=True)
+            _pins["pin_gate_backend"] = _pin
+        _concat = getattr(conf, "pin_infer_concat", None)
+        if _concat is not None:
+            _pins["pin_infer_concat"] = bool(_concat)
+        _settings.configure(**_pins)
+        print("  [capture] full grid unlocked; "
+              + ", ".join(f"{k.removeprefix('pin_')}={v}" for k, v in _pins.items()), flush=True)
         _capture.install()
 
     bench_args = [
@@ -2651,6 +2680,7 @@ def main(cfg: DictConfig) -> None:
 
     if _capture_on:
         print("\n[autotune-capture] captured configs:")
+        print(_capture.precompile_summary())
         print(_capture.summary())
         shard = getattr(conf, "autotune_shard", "") or ""
         if shard:

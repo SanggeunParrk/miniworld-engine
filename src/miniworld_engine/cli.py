@@ -60,10 +60,31 @@ SHAPES = {
     "augmented_attention_atom": {"seq_lens": (128, 256, 384), "d_pairs": (16, 32, 64)},
 }
 
-#: Device-calibrated dispatch switches a build must sweep BOTH sides of. The card picks one side
-#: for the shapes swept here, so the other side's kernels never fire and never get captured — yet
-#: they still run in production at other shapes, and would then have no cached configs at all.
-GATE_PINS = ("fused", "split")
+#: Dispatch switches a build must sweep BOTH sides of, and the targets that consult each. The card
+#: picks one side for the shapes being swept, so the other side's kernels never fire and never get
+#: captured — yet they still run in production at other shapes, and would then have no cached
+#: configs at all. Not hypothetical: it is why the A6000 cache was missing bias_only_sigmul_* and
+#: triangle_attention_bwd_* entirely.
+#: Swept independently, NOT as a cross product — each switch selects among its own kernels, so one
+#: pinned run per side per switch covers them, while a cross product would multiply build time over
+#: combinations no shape ever takes.
+#: switch -> (values, applicable targets, applicable modes)
+PINS: dict[str, tuple[tuple, tuple[str, ...], tuple[str, ...]]] = {
+    # bias_only gate epilogue: fused_gate_out vs sigmoid_gate_fused + the split backward
+    "gate_backend": (("fused", "split"), ("bias_only_attention", "triangle_attention"),
+                     ("inference", "training")),
+    # inference LN+proj concat fusion (layernorm_linear) -- consulted on the inference path only
+    "infer_concat": ((True, False), ("bias_only_attention", "triangle_attention"),
+                     ("inference",)),
+    # Row-broadcast dropout in the trimul residual epilogue. USE_DROPOUT is part of
+    # trimul_gate_elem_mul / _bwd_ew's autotune KEY, so dropout on and off are DIFFERENT cache
+    # buckets. Every cache built so far was built with it off, so training -- the only place it is
+    # live -- found no entry and fell back to the full grid, which presents as a hang. Training
+    # only: the module gates dropout on self.training, so pinning it for inference does nothing.
+    #: Only the ON value: the unpinned training run already covers dropout=0, so sweeping 0 here
+    #: would just rebuild the same shard under a second name.
+    "dropout": ((0.25,), ("triangle_multiplication",), ("training",)),
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,11 +94,11 @@ class Job:
     target: str
     mode: str
     axis: str
-    gate: str | None
+    pin: tuple[str, object] | None      # (switch name, value) or None for the card's own choice
     shard: Path
 
-    def bench_args(self, impl: str) -> list[str]:
-        shapes = SHAPES.get(self.target, SHAPES["default"])
+    def bench_args(self, impl: str, shapes: dict | None = None) -> list[str]:
+        shapes = shapes or SHAPES.get(self.target, SHAPES["default"])
         seq_lens, d_pairs = shapes["seq_lens"], shapes["d_pairs"]
         fixed_seq = seq_lens[0]
         if self.axis == "seq_len":
@@ -94,7 +115,7 @@ class Job:
             "compile=false",
             "cudagraph=manual",
             f"sweep_axis={self.axis}",
-            f"name_suffix=build_{self.gate or impl}",
+            f"name_suffix=build_{self.pin[1] if self.pin else impl}",
             f"+autotune_shard={self.shard}",
             "mask_prob=0.0",
             f"sweep_seq_len={fixed_seq}",
@@ -102,32 +123,58 @@ class Job:
         ]
         if TARGETS[self.target]:
             args.extend(TARGETS[self.target].split())
-        if self.gate:
-            args.append(f"+pin_gate_backend={self.gate}")
+        if self.pin:
+            name, value = self.pin
+            # dropout is a plain bench setting; the others are capture-time dispatch pins
+            # `+` appends: hydra's schema is the yaml, not BenchConfig, so a bare `dropout=`
+            # fails with "Key 'dropout' is not in struct".
+            # bools go over as hydra's `true`/`false` so the bench's typed field accepts them;
+            # `1` arrives as an int and fails pydantic validation.
+            rendered = str(value).lower() if isinstance(value, bool) else value
+            args.append(f"+dropout={value}" if name == "dropout"
+                        else f"+pin_{name}={rendered}")
         return args
 
     @property
     def label(self) -> str:
-        pin = f" gate={self.gate}" if self.gate else ""
+        pin = f" {self.pin[0]}={self.pin[1]}" if self.pin else ""
         return f"{self.target} {self.mode}/{self.axis}{pin}"
 
 
-def build_jobs(targets: tuple[str, ...], shard_dir: Path, sweep_gate: bool) -> list[Job]:
+def build_jobs(targets: tuple[str, ...], shard_dir: Path, sweep_dispatch: bool) -> list[Job]:
     jobs = []
     for target in targets:
-        # Only the bias_only gate epilogue has a second branch worth sweeping; pinning it for
-        # kernels that never consult it would just duplicate identical work.
-        gates = GATE_PINS if (sweep_gate and target in
-                              ("bias_only_attention", "triangle_attention")) else (None,)
-        for gate in gates:
-            for mode in ("inference", "training"):
+        for mode in ("inference", "training"):
+            pins: list[tuple[str, object] | None] = [None]
+            if sweep_dispatch:
+                for switch, (values, targets_, modes) in PINS.items():
+                    if target in targets_ and mode in modes:
+                        pins.extend((switch, v) for v in values)
+            for pin in pins:
                 for axis in ("seq_len", "d_pair"):
-                    name = f"{target}-{mode}-{axis}" + (f"-gate{gate}" if gate else "")
-                    jobs.append(Job(target, mode, axis, gate, shard_dir / f"{name}.json"))
+                    tag = f"-{pin[0]}{pin[1]}" if pin else ""
+                    name = f"{target}-{mode}-{axis}{tag}"
+                    jobs.append(Job(target, mode, axis, pin, shard_dir / f"{name}.json"))
     return jobs
 
 
-def run_worker(device: int, queue: Queue, impl: str, repo: Path, log_dir: Path) -> list[dict]:
+def _compile_jobs_per_worker(n_workers: int) -> int:
+    """Cores each GPU worker may use to pre-compile a round.
+
+    The workers share this job's CPU allocation, so hand each an equal slice: letting every worker
+    spawn a pool sized to the whole machine would oversubscribe it many times over.
+    """
+    import os
+
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cores = os.cpu_count() or 1
+    return max(1, cores // max(1, n_workers))
+
+
+def run_worker(device: int, queue: Queue, impl: str, repo: Path, log_dir: Path,
+               shapes: dict | None = None, compile_jobs: int = 0) -> list[dict]:
     """Drain the shared queue on one GPU, as subprocesses so a crash cannot take the fleet down."""
     results = []
     while True:
@@ -136,7 +183,10 @@ def run_worker(device: int, queue: Queue, impl: str, repo: Path, log_dir: Path) 
         except Empty:
             return results
         log = log_dir / f"gpu{device}-{job.shard.stem}.log"
-        cmd = [sys.executable, "-u", "benchmarks/runners/bench.py", *job.bench_args(impl)]
+        cmd = [sys.executable, "-u", "benchmarks/runners/bench.py",
+               *job.bench_args(impl, shapes if job.target not in SHAPES else None)]
+        if compile_jobs:
+            cmd.append(f"+compile_jobs={compile_jobs}")
         started = time.monotonic()
         with log.open("w") as handle:
             proc = subprocess.run(  # noqa: S603
@@ -187,12 +237,23 @@ def cmd_capture(args: argparse.Namespace) -> int:
     log_dir = shard_dir / "logs"
     log_dir.mkdir(exist_ok=True)
 
-    jobs = build_jobs(tuple(targets), shard_dir, sweep_gate=not args.no_sweep_dispatch)
+    jobs = build_jobs(tuple(targets), shard_dir, sweep_dispatch=not args.no_sweep_dispatch)
     if args.resume:
         jobs = [j for j in jobs if not j.shard.exists()]
     if not jobs:
         print("nothing to do (every shard already exists; drop --resume to rebuild)")
         return 0
+
+    shapes = None
+    if args.seq_lens or args.d_pairs:
+        base = SHAPES["default"]
+        shapes = {
+            "seq_lens": tuple(int(x) for x in args.seq_lens.split(",")) if args.seq_lens
+            else base["seq_lens"],
+            "d_pairs": tuple(int(x) for x in args.d_pairs.split(",")) if args.d_pairs
+            else base["d_pairs"],
+        }
+        print(f"shape ladder overridden: {shapes}", flush=True)
 
     gpus = _resolve_gpus(args.gpus)
     print(f"capture: {len(targets)} target(s), {len(jobs)} shard(s), {len(gpus)} gpu(s) -> "
@@ -208,7 +269,10 @@ def cmd_capture(args: argparse.Namespace) -> int:
     started = time.monotonic()
     results: list[dict] = []
     with cf.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
-        futures = [pool.submit(run_worker, dev, queue, args.impl, repo, log_dir) for dev in gpus]
+        per_worker = _compile_jobs_per_worker(len(gpus))
+        print(f"pre-compile: {per_worker} core(s) per gpu worker", flush=True)
+        futures = [pool.submit(run_worker, dev, queue, args.impl, repo, log_dir, shapes, per_worker)
+                   for dev in gpus]
         for future in cf.as_completed(futures):
             results.extend(future.result())
 
@@ -223,6 +287,33 @@ def cmd_capture(args: argparse.Namespace) -> int:
         print(f"  FAIL  {r['label']}  exit={r['rc']} -> {r['log']}")
     # An empty shard is a silent failure: the run "succeeded" and the merge would just skip it.
     return 1 if (failed or empty) else 0
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    """Fold shards into the in-repo cache. Sole writer, so it never runs inside a capture worker."""
+    from miniworld_engine.autotune import capture
+    from miniworld_engine.autotune.cache import gpu_key
+
+    shard_dir = Path(args.shards).expanduser()
+    paths = sorted(str(p) for p in shard_dir.glob("*.json"))
+    if not paths:
+        print(f"no shard files under {shard_dir}", file=sys.stderr)
+        return 1
+
+    # Default to THIS machine's key rather than a hand-typed string: a typo silently writes the
+    # cache under a GPU nothing will ever look up.
+    gpu = args.gpu or gpu_key()
+    if gpu == "cpu":
+        print("no CUDA device visible; pass --gpu \"<gpu key>\" to merge from a login node",
+              file=sys.stderr)
+        return 2
+
+    written = capture.merge_shards(paths, top_k=args.top_k, gpu=gpu, only_ops=None)
+    ops = sorted({w[0] for w in written})
+    print(f"merged {len(ops)} ops / {len(written)} buckets from {len(paths)} shards into {gpu!r}")
+    for op in ops:
+        print(f"  {op}")
+    return 0
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
@@ -269,7 +360,15 @@ def main(argv: list[str] | None = None) -> int:
     cap.add_argument("--no-sweep-dispatch", action="store_true",
                      help="capture only the branch this card picks (leaves the other uncached)")
     cap.add_argument("--resume", action="store_true", help="skip shards that already exist")
+    cap.add_argument("--seq-lens", default="", help="comma list overriding the seq_len ladder")
+    cap.add_argument("--d-pairs", default="", help="comma list overriding the d_pair ladder")
     cap.set_defaults(func=cmd_capture)
+
+    mrg = sub.add_parser("merge", help="fold captured shards into the in-repo cache")
+    mrg.add_argument("--shards", default="~/.cache/miniworld-shards", help="dir holding the shards")
+    mrg.add_argument("--gpu", default="", help="cache key; defaults to this machine's GPU")
+    mrg.add_argument("--top-k", type=int, default=5, help="configs kept per bucket")
+    mrg.set_defaults(func=cmd_merge)
 
     ben = sub.add_parser("bench", help="run benchmarks")
     ben.add_argument("what", help=f"target or group ({', '.join(GROUPS)})")
