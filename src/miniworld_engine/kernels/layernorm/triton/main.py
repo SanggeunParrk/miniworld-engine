@@ -7,6 +7,7 @@ from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BL
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_engine import settings
 
 
 def get_seq_group(length) -> int:
@@ -14,8 +15,6 @@ def get_seq_group(length) -> int:
     from miniworld_engine.autotune.buckets import bucket_mixed
     return bucket_mixed(length)
 
-
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "layernorm"
 
 # Opt-in: route the LN backward (dx/dw/db) through the hand-CUDA warp-per-row kernel for the regime
 # where it beats the triton atomic path STANDALONE (bf16, 128<=N<=512, contiguous, no per-row
@@ -25,7 +24,7 @@ AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0") == "layernorm"
 # run-to-run noise at L=384/768/1024). Enabling also forces the one-time nvcc JIT build on first
 # `triton_layernorm` import. Set MINIWORLD_LN_IN_CUDA=1 to use it (kernels/layernorm/cuda/ now
 # gencodes sm_80/90/100 + PTX so the ext loads and runs on B200).
-_LN_CUDA_BWD_ENABLED = os.environ.get("MINIWORLD_LN_IN_CUDA", "0") != "0"
+_LN_CUDA_BWD_ENABLED = settings.current().layernorm_cuda_bwd
 
 
 configs = brute({"BLOCK_M": BLOCK_M})

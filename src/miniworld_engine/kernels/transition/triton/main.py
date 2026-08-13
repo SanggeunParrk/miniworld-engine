@@ -1,5 +1,4 @@
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/transition.py
-import os
 
 import torch
 import triton
@@ -8,9 +7,6 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
-
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
-
 
 def get_seq_group(length: int) -> int:
     """Get sequence group based on length."""
@@ -36,30 +32,15 @@ def get_seq_group(length: int) -> int:
     return len(GROUP_LENGTHS) - 1
 
 
-if AUTOTUNE or True:
-    configs = [
-        triton.Config({"BLOCK_M": m, "BLOCK_K": k, "BLOCK_N": n}, w, s)
-        for m in [32, 64, 128, 256]
-        for k in [16, 32, 64]
-        for n in [64, 128, 256]
-        for w in [4, 8]
-        for s in [2, 3, 4, 5]
-        # if not m * k > 32 * 64
-    ]
-else:
-    configs = [
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32, "BLOCK_N": 128}, 8, 2),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32, "BLOCK_N": 128}, 8, 3),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16, "BLOCK_N": 128}, 8, 3),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "BLOCK_N": 128}, 8, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "BLOCK_N": 128}, 8, 3),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "BLOCK_N": 256}, 16, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64, "BLOCK_N": 128}, 8, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64, "BLOCK_N": 128}, 16, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16, "BLOCK_N": 64}, 8, 2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16, "BLOCK_N": 64}, 16, 2),
-        triton.Config({"BLOCK_M": 16, "BLOCK_K": 16, "BLOCK_N": 64}, 4, 2),
-    ]
+configs = [
+    triton.Config({"BLOCK_M": m, "BLOCK_K": k, "BLOCK_N": n}, w, s)
+    for m in [32, 64, 128, 256]
+    for k in [16, 32, 64]
+    for n in [64, 128, 256]
+    for w in [4, 8]
+    for s in [2, 3, 4, 5]
+    # if not m * k > 32 * 64
+]
 
 
 def _smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001

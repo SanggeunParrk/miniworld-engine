@@ -1,5 +1,4 @@
 # vendored from team-gm origin/exp/miniworld@32e3897 : src/team_gm/modules/kernels/augmented_attention_pair_bias_compute_efficient.py
-import os
 
 import torch
 import triton
@@ -8,8 +7,6 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_engine._typecheck import typecheck
-
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "augmented_attention"
 
 
 def get_seq_group(length: int) -> int:

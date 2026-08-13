@@ -1,5 +1,4 @@
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/tm2.py
-import os
 
 import torch
 import triton
@@ -10,8 +9,6 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
-
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_multi"
 
 # Real cross-product tile search (was: 2 fwd pinned / 3 bwd configs with BLOCK_N pinned to 64).
 # BLOCK_M (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are

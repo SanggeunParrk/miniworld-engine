@@ -1,5 +1,6 @@
 # vendored from team-gm origin/miniworld@7c3c67e : src/team_gm/modules/kernels/triangle_attention_pair_bias.py
 import torch
+from miniworld_engine import settings
 import triton
 import triton.language as tl
 import os
@@ -9,8 +10,7 @@ from einops import rearrange, repeat, reduce
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
 
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_attention"
-
+AUTOTUNE = settings.current().autotunes("tri_attention")
 if AUTOTUNE:
     configs = []
     for BM in [16, 32, 64]:
@@ -36,6 +36,22 @@ if AUTOTUNE:
                         num_warps=w,
                     )
                 )
+    # The autotune branch defined `configs` and `pre_configs` but never `bwd_configs`, so merely
+    # unlocking this kernel's grid raised NameError at import. Nothing had exercised the branch:
+    # captures ran with the runtime's grid, not this one. Same sweep as the fwd grid, over the two
+    # blocks the bwd kernel takes.
+    bwd_configs = []
+    for BM in [16, 32, 64]:
+        for BN in [16, 32, 64]:
+            for s in [1, 2, 3]:
+                for w in [4, 8]:
+                    bwd_configs.append(
+                        triton.Config(
+                            {"BLOCK_M": BM, "BLOCK_N": BN},
+                            num_stages=s,
+                            num_warps=w,
+                        )
+                    )
 
 else:
     configs = [
