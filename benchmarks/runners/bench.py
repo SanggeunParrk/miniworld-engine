@@ -2,7 +2,6 @@
 # Single bench entry for miniworld-engine. Drops the model-level
 # Pairformer / DiffusionTransformer benches; keeps the kernel-wrapping layers.
 import importlib
-import os
 import sys
 import csv
 from collections.abc import Callable
@@ -84,6 +83,11 @@ class BenchConfig(BaseModel):
     # Dedicated parallel cache builder: when set, an autotune-capture run dumps its timings to
     # THIS shard file instead of the in-repo cache (submits/build_autotune_cache.py merges shards).
     autotune_shard: str = ""
+    # Pin a device-calibrated dispatch switch for the duration of a capture. The card picks
+    # one side for the shapes swept here, so the other side's kernels never fire and never
+    # get captured -- yet they still run in production at other shapes, with no cached
+    # configs at all. A build sweeps each side explicitly. "" = let the engine decide.
+    pin_gate_backend: str = ""
 
     kernel: str
     implementations: list[str] = [
@@ -2543,16 +2547,22 @@ def main(cfg: DictConfig) -> None:
     fabric = _NoFabric()
     fabric.launch()
 
-    # Opt-in autotune-cache BUILD hook (MINIWORLD_AUTOTUNE_CAPTURE=1): instrument the Triton
+    # Opt-in autotune-cache BUILD hook (``settings.capture``): instrument the Triton
     # autotuner so every config benched during this sweep is recorded per (op, dtype, bucket)
     # and written to the runtime cache at the end. Pair with MINIWORLD_RUN_AUTOTUNE=1 so the full
     # grid (not a cached top-K) is benched. No-op otherwise; never affects benchmark numbers.
+    from miniworld_engine import settings as _settings
     _capture_on = (
-        os.getenv("MINIWORLD_AUTOTUNE_CAPTURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+        _settings.current().capture
         or bool(getattr(conf, "autotune_shard", ""))  # shard build turns capture on by itself
     )
     if _capture_on:
+        from miniworld_engine import settings as _settings
         from miniworld_engine.autotune import capture as _capture
+        _pin = (getattr(conf, "pin_gate_backend", "") or "").strip().lower()
+        if _pin:
+            _settings.configure(pin_gate_backend=_pin)
+            print(f"  [capture] dispatch pinned: gate={_pin}", flush=True)
         _capture.install()
 
     bench_args = [

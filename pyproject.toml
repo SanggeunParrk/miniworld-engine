@@ -232,3 +232,6 @@ pyright = "pyright"
 test = "pytest tests/test_public_api.py tests/test_lazy_kernel_exports.py tests/test_int64_offsets.py -q"
 test-gpu = "pytest tests/test_numerical.py -q"
 ci = "ruff check src benchmarks submits && pyright && pytest tests/test_public_api.py tests/test_lazy_kernel_exports.py tests/test_int64_offsets.py -q"
+
+[project.scripts]
+miniworld-engine = "miniworld_engine.cli:main"
