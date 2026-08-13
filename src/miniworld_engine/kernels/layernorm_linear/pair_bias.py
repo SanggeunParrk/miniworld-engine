@@ -11,9 +11,9 @@ Registered as a ``torch.library.custom_op`` so it stays in the compiled graph
 without a graph break -- surviving ``torch.compile`` is the entire point.
 """
 
-import os
 
 import torch
+from miniworld_engine import settings
 import triton
 import triton.language as tl
 from jaxtyping import Float
@@ -24,8 +24,7 @@ from miniworld_engine._typecheck import typecheck
 # tl.dot needs every dim >= 16; below this the backward uses the scalar loop.
 MIN_TL_DOT_DIM = 16
 
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "layer_norm_linear"
-
+AUTOTUNE = settings.current().autotunes("layer_norm_linear")
 if AUTOTUNE:
     configs = [
         triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)

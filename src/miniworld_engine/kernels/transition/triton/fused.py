@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 
 import torch
+from miniworld_engine import settings
 import triton
 from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
@@ -34,26 +35,26 @@ from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "transition"
-USE_SAVEDXN_SPLIT_BWD = os.getenv("TRANSITION_SAVEDXN_SPLIT_BWD", "0") == "1"
+AUTOTUNE = settings.current().autotunes("transition")
+USE_SAVEDXN_SPLIT_BWD = settings.current().transition_savedxn_split_bwd
 
 
 def _gatebwd_wgmma_enabled() -> bool:
     """Route the sm90 large-d (K in {256,512}) Version-A gate-backward through the hand-CUDA
     WGMMA kernel (beats the Triton recompute). Default on; set MINIWORLD_TRANSITION_GATEBWD_WGMMA=0
     to A/B against the Triton path."""
-    return os.getenv("MINIWORLD_TRANSITION_GATEBWD_WGMMA", "1").strip().lower() not in {"0", "false", "off"}
+    return settings.current().transition_gatebwd_wgmma
 
 
 def _cuda_b2b_train_enabled() -> bool:
     """Use the fast inference b2b CUDA kernel for the TRAINING forward too (Version A / save_xn=False:
     saves no xn, backward recomputes it). Same env toggle as the inference dispatch."""
-    return os.getenv("MINIWORLD_TRANSITION_CUDA_B2B", "1").strip().lower() not in {"0", "false", "off"}
+    return settings.current().transition_cuda_b2b
 _TRANSITION_LNBWD_PRIVATIZE_REPLICAS = 64
 
 
 def _transition_fuse_stats_enabled() -> bool:
-    return os.getenv("MINIWORLD_TRANSITION_FUSE_STATS", "").strip().lower() in {"1", "true", "on"}
+    return settings.current().transition_fuse_stats
 
 
 def get_seq_group(length) -> int:
@@ -882,8 +883,7 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma):
     # (326 vs 358us, cos 1.0). Needs bf16/fp16 + K<=512 + contiguous + weight dtype == x dtype.
     # CUDA takes `mean`; recover it from c1=mean*rstd. Any mismatch -> graceful Triton fallback.
     if (
-        os.getenv("MINIWORLD_TRANSITION_LNBWD_CUDA", "1").strip().lower()
-        not in {"0", "false", "off"}
+        settings.current().transition_lnbwd_cuda
         and x2.dtype in (torch.float16, torch.bfloat16)
         and gamma.dtype == x2.dtype
         and K <= 512
@@ -901,8 +901,7 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma):
     # Default ON: privatizing dgamma/dbeta atomics across N replicas cuts atomic contention
     # (measured 1.31x @L=1024, ncu confirmed membar was the top stall). Set to 0/false/off to
     # restore the single-accumulator atomic path.
-    privatize_dgdb = os.getenv(
-        "MINIWORLD_TRANSITION_LNBWD_PRIVATIZE", "1").strip().lower() not in {"0", "false", "off"}
+    privatize_dgdb = settings.current().transition_lnbwd_privatize
     if privatize_dgdb:
         num_replicas = _TRANSITION_LNBWD_PRIVATIZE_REPLICAS
         dgamma_acc = torch.zeros((num_replicas, K), device=x2.device, dtype=torch.float32)
@@ -1254,7 +1253,7 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         dWa = dWab[: expand_a_weight.shape[0]]
         dWb = dWab[expand_a_weight.shape[0] :]
         if (
-            os.getenv("TRANSITION_DAB_LNBWD", "0") == "1"
+            settings.current().transition_dab_lnbwd
             and K <= 128
             and torch.cuda.get_device_capability(x2.device)[0] >= 9
         ):

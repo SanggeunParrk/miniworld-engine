@@ -114,7 +114,7 @@ class SwiGLUGateBwdKernel(GatedPersistentGemmKernel):
         )
         self.num_c_stage += (self.smem_capacity - used) // (n_out * c_bytes_ps)
 
-        if os.environ.get("MW_SETUP_DBG") == "1":
+        if settings.current().sm100_setup_debug:
             print(f"[SETUP] epi_tile={self.epi_tile} cta={self.cta_tile_shape_mnk} "
                   f"epi_m={epi_m} epi_n={epi_n} logical_per_sub={epi_m*epi_n*2} "
                   f"c_bytes_ps={c_bytes_ps} epi_subtile_cnt={self.epi_subtile_cnt} "
@@ -734,6 +734,8 @@ class SwiGLUGateBwdKernel(GatedPersistentGemmKernel):
 import triton
 import triton.language as tl
 
+from miniworld_engine import settings
+
 
 @triton.jit
 def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLK: tl.constexpr):
@@ -786,16 +788,16 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        op.sig_mode = os.environ.get("MW_SIG", "rsqrt")
-        op.epi_depth = int(os.environ.get("MW_EPI_DEPTH", "1"))
+        op.sig_mode = settings.current().sm100_sig_mode
+        op.epi_depth = settings.current().sm100_epi_depth or 1
         # FUSED path (DEFAULT): the grad is TMA-warp-loaded COALESCED into a staged smem
         # buffer (PipelineTmaAsync producer=TMA warp, consumer=epilogue warps) and s2r-read
         # in the epilogue, so dA/dB are emitted directly (no extra elementwise pass). This
         # beats the old SPLIT fallback (~1.45x -> ~2.1x standalone). Set MW_SPLIT=1 to fall
         # back to the split path (kernel no_grad + coalesced elementwise grad-multiply).
-        _fused = os.environ.get("MW_SPLIT") != "1"
-        op.no_grad = (not _fused) or os.environ.get("MW_NOGRAD") == "1"
-        op.one_out = os.environ.get("MW_ONEOUT") == "1"
+        _fused = not settings.current().sm100_split
+        op.no_grad = (not _fused) or settings.current().sm100_no_grad
+        op.one_out = settings.current().sm100_one_out
         _CACHE[key] = (cute.compile(op, mA, mBp, mBg, mGe, mH, mDA, mDB, mac, strm, options="--enable-tvm-ffi"), op.no_grad)
     compiled, _split = _CACHE[key]
     compiled(mA, mBp, mBg, mGe, mH, mDA, mDB)

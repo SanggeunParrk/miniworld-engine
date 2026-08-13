@@ -20,7 +20,6 @@ back to the te_style atomic kernel, which is faster there.
 """
 from __future__ import annotations
 
-import os
 
 import torch
 import triton
@@ -30,9 +29,10 @@ from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dt
 from ..layernorm.triton.main import get_seq_group
 from ..layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback
+from miniworld_engine import settings
 
 # Escape hatch / A-B control: force one path. "atomic" = the old te_style plain-atomic kernel.
-_OVERRIDE = (os.environ.get("MINIWORLD_LNOUT_BWD") or "").strip().lower() or None
+_OVERRIDE = settings.current().layernorm_out_bwd_path
 
 _WAVES = 2
 

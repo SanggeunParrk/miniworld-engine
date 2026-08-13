@@ -6,9 +6,12 @@ Run: ``pixi run python -m pytest tests/test_dispatch.py -q``
 
 from __future__ import annotations
 
-import importlib
+
+import dataclasses
 
 import pytest
+
+from miniworld_engine import settings
 import torch
 
 from miniworld_engine.modules import dispatch
@@ -123,9 +126,7 @@ def arch(monkeypatch):
     return _set
 
 
-def test_trimul_arch_policy(arch, monkeypatch):
-    monkeypatch.delenv("MINIWORLD_TRIMUL_IMPL", raising=False)
-    monkeypatch.delenv("MINIWORLD_TRIMUL_OUT_LAYOUT", raising=False)
+def test_trimul_arch_policy(arch):
     mw = ImplementationType.MINIWORLD
 
     arch(10)  # Blackwell / B200
@@ -141,14 +142,17 @@ def test_trimul_arch_policy(arch, monkeypatch):
     assert dispatch.trimul_out_layout() == "bdll_direct_wide"
 
 
-def test_trimul_env_override_wins(arch, monkeypatch):
+def test_trimul_settings_override_wins(arch):
+    """An explicit setting beats the arch policy (was MINIWORLD_TRIMUL_IMPL / _OUT_LAYOUT)."""
     arch(10)
-    monkeypatch.setenv("MINIWORLD_TRIMUL_IMPL", "triton")
-    assert dispatch.resolve_triangle_multiplication(ImplementationType.MINIWORLD) is (
-        KernelBackend.TRITON
-    )
-    monkeypatch.setenv("MINIWORLD_TRIMUL_OUT_LAYOUT", "blld")
-    assert dispatch.trimul_out_layout() == "blld"
+    previous = settings.configure(trimul_impl="triton", trimul_out_layout="blld")
+    try:
+        assert dispatch.resolve_triangle_multiplication(ImplementationType.MINIWORLD) is (
+            KernelBackend.TRITON
+        )
+        assert dispatch.trimul_out_layout() == "blld"
+    finally:
+        settings.configure(**dataclasses.asdict(previous))
 
 
 def test_arch_independent_resolvers(arch):

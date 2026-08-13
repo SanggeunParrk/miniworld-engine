@@ -26,22 +26,33 @@ triangle-attention gate) — apply_workarounds() sets them.
 
 from __future__ import annotations
 
-import os
 
 import torch
 import torch.nn as nn
 
 
 def apply_workarounds() -> None:
-    """Make every sub-module CUDA-graph-capturable (same as the bench runner)."""
-    if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10:
-        os.environ.setdefault("MINIWORLD_TRANSITION_CUDA_B2B", "0")
-    try:
-        from miniworld_engine.kernels.bias_only_attention import dispatch as _bod
+    """Make every sub-module CUDA-graph-capturable (same as the bench runner).
 
-        _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005
-    except Exception:  # noqa: BLE001
-        pass
+    Both of these used to reach around the engine: one wrote an environment variable that another
+    module would later read, the other rebound ``gate_use_fused`` on the module object. They are
+    settings now, so a caller can see what capture changed -- and change it back.
+    """
+    import dataclasses
+
+    from miniworld_engine import settings
+
+    active = settings.current()
+    defaults = {f.name: f.default for f in dataclasses.fields(settings.Settings)}
+    changes = {}
+    if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10:
+        # setdefault semantics: an explicit choice by the caller still wins.
+        if active.transition_cuda_b2b == defaults["transition_cuda_b2b"]:
+            changes["transition_cuda_b2b"] = False
+    if active.pin_gate_backend is None:
+        changes["pin_gate_backend"] = "split"
+    if changes:
+        settings.configure(**changes)
 
 
 class BucketedPairformer(nn.Module):

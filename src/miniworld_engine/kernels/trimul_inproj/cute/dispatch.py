@@ -20,10 +20,11 @@ import os
 
 import torch
 import triton
+from miniworld_engine import settings
 
 _CACHE: dict[str, dict] = {}
-_ENABLED = os.environ.get("TRIMUL_DISPATCH", "1") != "0"
-_LOG = os.environ.get("TRIMUL_DISPATCH_LOG", "0") == "1"
+_ENABLED = settings.current().trimul_cute_dispatch
+_LOG = settings.current().trimul_dispatch_log
 
 
 def pick(name, key, candidates):

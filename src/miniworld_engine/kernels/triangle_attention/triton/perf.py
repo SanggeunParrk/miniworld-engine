@@ -2,6 +2,7 @@
 import os
 
 import torch
+from miniworld_engine import settings
 import triton
 import triton.language as tl
 from einops import rearrange, reduce, repeat
@@ -10,8 +11,7 @@ from jaxtyping import Float
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_engine._typecheck import typecheck
 
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_attention"
-
+AUTOTUNE = settings.current().autotunes("tri_attention")
 if AUTOTUNE:
     configs = [
         triton.Config({"BLOCK_M": m, "BLOCK_N": n}, w, s)

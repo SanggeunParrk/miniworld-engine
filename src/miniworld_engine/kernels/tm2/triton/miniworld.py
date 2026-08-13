@@ -2,6 +2,7 @@
 import os
 
 import torch
+from miniworld_engine import settings
 import triton
 from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
@@ -11,8 +12,7 @@ from jaxtyping import Float
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 from miniworld_engine._typecheck import typecheck
 
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "tri_multi"
-
+AUTOTUNE = settings.current().autotunes("tri_multi")
 if AUTOTUNE:
     fwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})
     bwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K})

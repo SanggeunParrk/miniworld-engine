@@ -32,12 +32,12 @@ Biology", Algorithm 8 / Algorithm 9; RoPE: Su et al. (arXiv:2104.09864).
 from __future__ import annotations
 
 import importlib.util
-import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
+from miniworld_engine import settings
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules.primitives import Linear, MPLinear
@@ -51,10 +51,10 @@ from miniworld_engine.modules.primitives import Linear, MPLinear
 # ``miniworld_engine`` op is the intended future path; for now the fallback is torch.
 _FLASH_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
 
-# Opt-in runtime guard (SWA_CHECK_FRONT_PACKED=1) that asserts the seqused_k
+# Opt-in runtime guard (``settings.swa_check_front_packed``) that asserts the seqused_k
 # precondition — valid atoms are front-packed in each row. Off by default so it
 # adds no per-step GPU sync / torch.compile graph break in production.
-_CHECK_FRONT_PACKED = os.environ.get("SWA_CHECK_FRONT_PACKED") == "1"
+_CHECK_FRONT_PACKED = settings.current().swa_check_front_packed
 
 
 @torch.compiler.disable  # FA4's CuTeDSL kernel is opaque to dynamo; mark it a clean
@@ -464,7 +464,7 @@ def build_attention_params(
 
     Precondition: valid atoms are FRONT-PACKED in each row (``valid[i]`` is
     ``True`` for the first ``seqused[i]`` positions, then ``False``). seqused_k
-    masking relies on this; set ``SWA_CHECK_FRONT_PACKED=1`` to assert it at runtime.
+    masking relies on this; set ``settings.swa_check_front_packed`` to assert it at runtime.
     """
     cos = cos.repeat(num_aug, 1, 1)
     sin = sin.repeat(num_aug, 1, 1)

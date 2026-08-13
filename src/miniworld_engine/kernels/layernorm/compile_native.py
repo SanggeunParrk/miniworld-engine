@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 import torch
 import triton
@@ -20,6 +19,7 @@ from .triton.partial import (
 )
 from .triton.persistent import _ln_bwd_persistent, _persistent_grid
 from . import dispatch_cache
+from miniworld_engine import settings
 
 
 def _use_partial_reduction(m: int, n: int) -> bool:
@@ -38,7 +38,7 @@ def _use_partial_reduction(m: int, n: int) -> bool:
 # paths once per (d, M-bucket) on the real tensors and caches the winner per GPU
 # (see dispatch_cache). Escape hatch: env `MINIWORLD_LN_BWD=persistent|partial|
 # atomic` forces one path (debug / manual override), bypassing cache + heuristic.
-_LN_BWD_OVERRIDE = (os.environ.get("MINIWORLD_LN_BWD") or "").strip().lower() or None
+_LN_BWD_OVERRIDE = settings.current().layernorm_bwd_path
 _VALID_BWD_PATHS = {"persistent", "partial", "atomic", "cuda"}
 _HOPPER = (9, 0)
 

@@ -54,9 +54,11 @@ from quack.gemm_tvm_ffi_utils import (
 
 
 import os
-_DEBUG_MODE = int(os.environ.get("LNL_DEBUG", "0"))
-_WS_DEBUG = int(os.environ.get("LNL_WS_DEBUG", "0"))  # warp-specialized stats bring-up
-_WS = int(os.environ.get("LNL_WS", "0"))  # warp-specialized stats PRODUCTION path
+
+from miniworld_engine import settings
+_DEBUG_MODE = settings.current().lnl_debug
+_WS_DEBUG = settings.current().lnl_ws_debug  # warp-specialized stats bring-up
+_WS = settings.current().lnl_ws  # warp-specialized stats PRODUCTION path
 
 
 @cute.jit

@@ -2,13 +2,13 @@
 import os
 
 import torch
+from miniworld_engine import settings
 import triton
 import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
-AUTOTUNE = os.getenv("TRITON_AUTOTUNE", "0").lower() == "adaln"
-
+AUTOTUNE = settings.current().autotunes("adaln")
 if AUTOTUNE:
     configs = [
         triton.Config(

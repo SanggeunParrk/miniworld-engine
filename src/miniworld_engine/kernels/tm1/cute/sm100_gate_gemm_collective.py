@@ -44,6 +44,8 @@ from cutlass.utils.gemm.sm100 import (
     transform_partitioned_tensor_layout,
 )
 
+from miniworld_engine import settings
+
 
 class GatedPersistentGemmKernel(PersistentDenseGemmKernel):
     """Dual-B gated GEMM on the tuned Blackwell persistent collective."""
@@ -631,11 +633,11 @@ def gate_gemm(A, Bp, Bg, mmajor=False):
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        op.proj_only = os.environ.get("MW_PROJONLY") == "1"
-        op.epi_gate = os.environ.get("MW_NOGATE_EPI") != "1"
-        op.no_exp = os.environ.get("MW_NOEXP") == "1"
-        op.sig_mode = os.environ.get("MW_SIG", "rsqrt")
-        op.epi_depth = int(os.environ.get("MW_EPI_DEPTH", "3"))
+        op.proj_only = settings.current().sm100_proj_only
+        op.epi_gate = settings.current().sm100_gate_epi
+        op.no_exp = settings.current().sm100_no_exp
+        op.sig_mode = settings.current().sm100_sig_mode
+        op.epi_depth = settings.current().sm100_epi_depth or 3
         _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm, options="--enable-tvm-ffi")
     _CACHE[key](mA, mBp, mBg, mC)
     if M != _M_orig:

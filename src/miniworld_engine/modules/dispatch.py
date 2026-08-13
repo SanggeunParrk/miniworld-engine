@@ -35,7 +35,6 @@ policy silently — see the per-op resolvers.
 
 from __future__ import annotations
 
-import os
 import warnings
 
 import torch
@@ -177,8 +176,10 @@ _CUEQ_OPS = frozenset({"triangle_multiplication"})
 
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     """trimul: cute on Hopper+ (the measured winner; out_layout via ``trimul_out_layout``),
-    Triton pre-Hopper. Env ``MINIWORLD_TRIMUL_IMPL`` pins a backend for debug/A-B."""
-    override = os.environ.get("MINIWORLD_TRIMUL_IMPL")
+    Triton pre-Hopper. ``settings.trimul_impl`` pins a backend for debug/A-B."""
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    override = settings.current().trimul_impl
     if override:
         return to_kernel_backend(ImplementationType(override.strip().lower()))
     return KernelBackend.CUTE if is_sm90plus(device) else KernelBackend.TRITON
@@ -307,8 +308,10 @@ def trimul_out_layout(device: torch.device | None = None) -> str:
     ``bdll_sm100`` 0.115 ms (fastest — beats even the old 4.4.2 bdll_sm100 at 0.160 ms),
     ``bdll_direct_wide`` 0.184 ms, ``bdll_direct`` 0.194 ms, triton 0.284 ms, pytorch 1.14 ms.
     d-major [B,D,L,L] feeds the efficient d-major einsum (the d-last ``blld`` einsum is ~9x
-    slower). Env-overridable (``MINIWORLD_TRIMUL_OUT_LAYOUT``) for debug/A-B."""
-    override = os.environ.get("MINIWORLD_TRIMUL_OUT_LAYOUT")
+    slower). Overridable via ``settings.trimul_out_layout`` for debug/A-B."""
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    override = settings.current().trimul_out_layout
     if override:
         return override.strip()
     return "bdll_sm100" if is_sm100(device) else "bdll_direct_wide"

@@ -36,10 +36,11 @@ import triton
 import triton.language as tl
 from miniworld_engine.kernels._quack_compat import gemm_act, gemm_act_tuned
 from quack.gemm_config import GemmConfig
+from miniworld_engine import settings
 
 # v14: fuse the GLU into the GEMM epilogue (kills the preact re-read + the _glu launch).
 # Opt-out via MINIWORLD_TRAIN_FRONT_FUSED=0 (falls back to the v13 gemm_act + _glu_bdll path).
-_FRONT_FUSED = os.environ.get("MINIWORLD_TRAIN_FRONT_FUSED", "1") != "0"
+_FRONT_FUSED = settings.current().trimul_train_front_fused
 
 
 def _fused_available(device) -> bool:

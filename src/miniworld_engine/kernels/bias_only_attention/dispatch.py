@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -52,7 +51,8 @@ _CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 
 def autotune_mode() -> str:
-    return (os.environ.get("MINIWORLD_BIASONLY_AUTOTUNE") or "auto").strip().lower()
+    from miniworld_engine import settings  # noqa: PLC0415
+    return settings.current().biasonly_dispatch
 
 
 def _cache_dir() -> Path:
@@ -134,6 +134,14 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
                    dtype: torch.dtype) -> bool:
     """True -> fused_gate_out; False -> split. Static H100 by DH; calibrated+cached
     per GPU on other arches (or when forced)."""
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    # A cache BUILD pins this so it can sweep both branches: whichever side the card does not pick
+    # at the swept shapes still runs in production at other shapes, and would otherwise have no
+    # cached configs. Unset at run time, so this costs a settings read and nothing else.
+    pin = settings.current().pin_gate_backend
+    if pin is not None:
+        return pin == "fused"
     mode = autotune_mode()
     # The fused tl.dot's tile is [BLOCK_M, OUTPUT_N] (N = n_out = d_pair); the
     # contraction d_hidden is just looped over (BLOCK_K). So fused-vs-split is decided

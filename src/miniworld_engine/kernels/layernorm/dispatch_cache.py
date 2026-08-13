@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import re
 from pathlib import Path
 
@@ -38,7 +37,8 @@ _CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 
 def autotune_mode() -> str:
-    return (os.environ.get("MINIWORLD_LN_AUTOTUNE") or "auto").strip().lower()
+    from miniworld_engine import settings  # noqa: PLC0415
+    return settings.current().layernorm_dispatch
 
 
 def _cache_dir() -> Path:

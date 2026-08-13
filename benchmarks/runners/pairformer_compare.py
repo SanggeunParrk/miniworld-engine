@@ -24,7 +24,6 @@ Usage (on a CUDA box):
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -37,6 +36,7 @@ import torch
 import triton
 
 from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
+from miniworld_engine import settings
 
 DEVICE = torch.device("cuda")
 IMPLS = {
@@ -64,8 +64,8 @@ def apply_stability_workarounds() -> list[str]:
     """
     notes: list[str] = []
     cap = torch.cuda.get_device_capability(0)
-    if cap[0] >= 10 and os.environ.get("MINIWORLD_TRANSITION_CUDA_B2B") is None:
-        os.environ["MINIWORLD_TRANSITION_CUDA_B2B"] = "0"
+    if cap[0] >= 10 and settings.current().transition_cuda_b2b:
+        settings.configure(transition_cuda_b2b=False)
         notes.append("transition CUDA b2b disabled on sm_100 (build unsupported) -> triton path")
     from miniworld_engine.kernels.bias_only_attention import dispatch as _bod
 

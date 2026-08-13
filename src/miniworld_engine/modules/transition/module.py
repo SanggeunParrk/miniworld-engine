@@ -1,5 +1,4 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/transition.py
-import os
 from contextlib import contextmanager
 
 import torch
@@ -20,10 +19,6 @@ from miniworld_engine.modules.primitives import LayerNorm, Linear
 from ..ops import swish_gate
 
 
-_LARGE_D_TRAINING_ENV = "MINIWORLD_TRANSITION_LARGE_D_TRAINING"
-_CUTE_BACKWARD_ENV = "MINIWORLD_TRANSITION_CUTE_BACKWARD_BACKEND"
-_CUDA_B2B_ENV = "MINIWORLD_TRANSITION_CUDA_B2B"
-
 
 def _force_split_enabled() -> bool:
     """Force the split path (ln_in + non-fused triton_transition) instead of the fused
@@ -31,48 +26,30 @@ def _force_split_enabled() -> bool:
     but the split is the proven, shape-general fallback: set MINIWORLD_TRANSITION_FORCE_SPLIT=1
     to A/B against it or as an escape hatch on a GPU where the fused path misbehaves. Static
     (env, compile-safe) rather than a runtime try/except, which is fragile under torch.compile."""
-    return os.getenv("MINIWORLD_TRANSITION_FORCE_SPLIT", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    return settings.current().transition_force_split
 
 
 def _cuda_b2b_inference_enabled() -> bool:
     """Whether to route d=128/n=4 inference through the hand-CUDA fused b2b kernel
     (beats the Triton b2b ~1.29x). Default on; set MINIWORLD_TRANSITION_CUDA_B2B=0 to
     A/B against the Triton path."""
-    value = os.getenv(_CUDA_B2B_ENV, "1").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    return settings.current().transition_cuda_b2b
 
 
 def _large_d_training_backend_from_env() -> str | None:
-    value = os.getenv(_LARGE_D_TRAINING_ENV, "fallback").strip().lower()
-    fallback_values = {"", "0", "false", "off", "fallback", "torch", "pytorch"}
-    triton_values = {"1", "true", "yes", "on", "cute_triton", "cute-triton", "hybrid"}
-    cute_values = {"cute", "all_cute", "all-cute"}
-    if value in fallback_values:
-        return None
-    if value in triton_values:
-        return "triton"
-    if value in cute_values:
-        return "cute"
-    msg = (
-        f"{_LARGE_D_TRAINING_ENV} must be one of fallback, cute_triton, or cute; "
-        f"got {value!r}"
-    )
-    raise ValueError(msg)
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    return settings.current().transition_large_d_training
 
 
 def _explicit_cute_backward_backend() -> str:
-    value = os.getenv(_CUTE_BACKWARD_ENV, "triton").strip().lower()
-    if value in {"triton", "hybrid", "cute_triton", "cute-triton"}:
-        return "triton"
-    if value in {"cute", "all_cute", "all-cute"}:
-        return "cute"
-    msg = f"{_CUTE_BACKWARD_ENV} must be one of triton or cute; got {value!r}"
-    raise ValueError(msg)
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    return settings.current().transition_cute_backward
 
 
 @contextmanager

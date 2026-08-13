@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import warnings
 from pathlib import Path
 
@@ -41,7 +40,8 @@ _CACHE_ROOT = Path(__file__).parent / "data"
 # --------------------------------------------------------------------------- #
 def run_autotune_enabled() -> bool:
     """``MINIWORLD_RUN_AUTOTUNE=1`` -> ignore the cache and run the full autotune grid."""
-    return os.getenv("MINIWORLD_RUN_AUTOTUNE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    from miniworld_engine import settings  # noqa: PLC0415 -- avoid an import cycle
+    return settings.current().run_autotune
 
 
 def gpu_key(device_index: int | None = None) -> str:
