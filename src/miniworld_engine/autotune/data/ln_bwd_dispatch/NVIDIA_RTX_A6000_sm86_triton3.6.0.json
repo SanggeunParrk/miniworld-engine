@@ -61,5 +61,13 @@
       "persistent": 0.671004
     },
     "path": "atomic"
+  },
+  "64|65536": {
+    "ms": {
+      "atomic": 0.045361,
+      "partial": 0.132936,
+      "persistent": 0.051705
+    },
+    "path": "atomic"
   }
 }

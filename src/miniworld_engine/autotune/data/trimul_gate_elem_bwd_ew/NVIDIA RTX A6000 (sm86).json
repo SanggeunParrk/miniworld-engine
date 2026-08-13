@@ -1,0 +1,181 @@
+{
+  "config_space_hash": "475972b60ce4",
+  "entries": {
+    "bfloat16|GROUP_M=2,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.26419198513031006,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.26419198513031006,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.26419198513031006,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.26419198513031006,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.26521599292755127,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|GROUP_M=2,N=256,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.5263360142707825,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.5263360142707825,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.5263360142707825,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.5263360142707825,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.5273600220680237,
+        "num_stages": 2,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16|GROUP_M=3,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.4689919948577881,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BM": 32
+        },
+        "ms": 0.4689919948577881,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.4689919948577881,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.4689919948577881,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.4689919948577881,
+        "num_stages": 3,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16|GROUP_M=4,N=128,USE_DROPOUT=0": [
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.7311360239982605,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.7311360239982605,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.7311360239982605,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 64
+        },
+        "ms": 0.7311360239982605,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BM": 16
+        },
+        "ms": 0.7321599721908569,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ]
+  },
+  "gpu": "NVIDIA RTX A6000 (sm86)",
+  "op": "trimul_gate_elem_bwd_ew",
+  "provenance": {
+    "built_utc": "2026-08-07T02:12:38+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

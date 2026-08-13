@@ -1,0 +1,24 @@
+{
+  "config_space_hash": "e8a792f2a212",
+  "entries": {
+    "float32|D=128,DC=384,K=128,ND=256": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.20787200331687927,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "op": "cond_transition_training_b2b_fwd",
+  "provenance": {
+    "built_utc": "2026-08-06T04:26:06+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

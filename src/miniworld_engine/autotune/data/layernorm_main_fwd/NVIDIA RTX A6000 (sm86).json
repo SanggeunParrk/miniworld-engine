@@ -1,0 +1,223 @@
+{
+  "config_space_hash": "bb35a8ab34e3",
+  "entries": {
+    "bfloat16|GROUP_M=10,N=128": [
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 1,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16|GROUP_M=10,N=256": [
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.21401600539684296,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.21456000208854675,
+        "num_stages": 4,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_M=10,N=512": [
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.4259839951992035,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.4259839951992035,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.4259839951992035,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.4259839951992035,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.4259839951992035,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_M=11,N=128": [
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.19148799777030945,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.19155199825763702,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.19246400147676468,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 32
+        },
+        "ms": 0.19249600172042847,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.19251200556755066,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|GROUP_M=12,N=128": [
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.2979840040206909,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.2979840040206909,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.2979840040206909,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.2979840040206909,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 16
+        },
+        "ms": 0.2979840040206909,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ]
+  },
+  "gpu": "NVIDIA RTX A6000 (sm86)",
+  "op": "layernorm_main_fwd",
+  "provenance": {
+    "built_utc": "2026-08-06T04:31:21+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

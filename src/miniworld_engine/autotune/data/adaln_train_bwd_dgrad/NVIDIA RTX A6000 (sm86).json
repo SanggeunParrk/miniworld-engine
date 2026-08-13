@@ -7,7 +7,7 @@
           "BLOCK_K": 32,
           "BLOCK_M": 32
         },
-        "ms": 0.03174399957060814,
+        "ms": 0.03379200026392937,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -16,31 +16,31 @@
           "BLOCK_K": 64,
           "BLOCK_M": 32
         },
-        "ms": 0.03276799991726875,
+        "ms": 0.03379200026392937,
         "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK_K": 32,
-          "BLOCK_M": 32
+          "BLOCK_M": 64
         },
         "ms": 0.03379200026392937,
         "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64
+        },
+        "ms": 0.03379200026392937,
+        "num_stages": 4,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK_K": 64,
-          "BLOCK_M": 32
-        },
-        "ms": 0.03379200026392937,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 32,
           "BLOCK_M": 64
         },
         "ms": 0.03379200026392937,
@@ -54,8 +54,8 @@
           "BLOCK_K": 32,
           "BLOCK_M": 64
         },
-        "ms": 0.07475200295448303,
-        "num_stages": 3,
+        "ms": 0.07372800260782242,
+        "num_stages": 4,
         "num_warps": 8
       },
       {
@@ -64,8 +64,17 @@
           "BLOCK_M": 64
         },
         "ms": 0.07475200295448303,
-        "num_stages": 4,
+        "num_stages": 3,
         "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 32
+        },
+        "ms": 0.07577600330114365,
+        "num_stages": 3,
+        "num_warps": 4
       },
       {
         "kwargs": {
@@ -78,19 +87,10 @@
       },
       {
         "kwargs": {
-          "BLOCK_K": 32,
-          "BLOCK_M": 32
-        },
-        "ms": 0.07782399654388428,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M": 32
         },
-        "ms": 0.08089599758386612,
+        "ms": 0.08191999793052673,
         "num_stages": 2,
         "num_warps": 4
       }

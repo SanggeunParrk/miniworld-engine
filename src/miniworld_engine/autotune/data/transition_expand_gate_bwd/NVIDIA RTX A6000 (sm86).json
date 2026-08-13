@@ -6,9 +6,19 @@
         "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 1.0557440519332886,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64,
           "BLOCK_N": 64
         },
-        "ms": 1.3301759958267212,
+        "ms": 1.2615679502487183,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -18,19 +28,9 @@
           "BLOCK_M": 64,
           "BLOCK_N": 128
         },
-        "ms": 1.4264320135116577,
+        "ms": 1.3250559568405151,
         "num_stages": 4,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64,
-          "BLOCK_N": 128
-        },
-        "ms": 1.5626239776611328,
-        "num_stages": 3,
-        "num_warps": 8
       },
       {
         "kwargs": {
@@ -38,7 +38,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 128
         },
-        "ms": 1.7889280319213867,
+        "ms": 1.8565119504928589,
         "num_stages": 3,
         "num_warps": 8
       }
@@ -50,7 +50,7 @@
           "BLOCK_M": 64,
           "BLOCK_N": 128
         },
-        "ms": 2.6992640495300293,
+        "ms": 2.6199039220809937,
         "num_stages": 3,
         "num_warps": 8
       },
@@ -60,7 +60,7 @@
           "BLOCK_M": 64,
           "BLOCK_N": 128
         },
-        "ms": 3.180031895637512,
+        "ms": 3.1411200761795044,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -70,7 +70,7 @@
           "BLOCK_M": 64,
           "BLOCK_N": 64
         },
-        "ms": 3.3500159978866577,
+        "ms": 3.3505280017852783,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -80,7 +80,7 @@
           "BLOCK_M": 128,
           "BLOCK_N": 128
         },
-        "ms": 4.846591949462891,
+        "ms": 4.877312183380127,
         "num_stages": 3,
         "num_warps": 8
       }
@@ -127,14 +127,24 @@
         "num_warps": 8
       }
     ],
-    "bfloat16|GROUP_M=12,K=128,ND=512": [
+    "bfloat16|GROUP_M=11,K=128,ND=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 1.8688000440597534,
+        "num_stages": 3,
+        "num_warps": 8
+      },
       {
         "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M": 64,
           "BLOCK_N": 64
         },
-        "ms": 2.357248067855835,
+        "ms": 2.240511894226074,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -144,19 +154,9 @@
           "BLOCK_M": 64,
           "BLOCK_N": 128
         },
-        "ms": 2.5441280603408813,
+        "ms": 2.4186880588531494,
         "num_stages": 4,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M": 64,
-          "BLOCK_N": 128
-        },
-        "ms": 2.8139519691467285,
-        "num_stages": 3,
-        "num_warps": 8
       },
       {
         "kwargs": {
@@ -164,7 +164,49 @@
           "BLOCK_M": 128,
           "BLOCK_N": 128
         },
-        "ms": 3.1733760833740234,
+        "ms": 3.446784019470215,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_M=12,K=128,ND=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 2.9122560024261475,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 3.4949119091033936,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 3.7744638919830322,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M": 128,
+          "BLOCK_N": 128
+        },
+        "ms": 5.385216236114502,
         "num_stages": 3,
         "num_warps": 8
       }

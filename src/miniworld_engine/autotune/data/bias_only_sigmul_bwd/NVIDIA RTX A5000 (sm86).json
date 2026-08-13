@@ -4,6 +4,14 @@
     "bfloat16|": [
       {
         "kwargs": {
+          "BLK": 2048
+        },
+        "ms": 0.5283839702606201,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BLK": 1024
         },
         "ms": 0.5294079780578613,
@@ -12,11 +20,11 @@
       },
       {
         "kwargs": {
-          "BLK": 2048
+          "BLK": 1024
         },
         "ms": 0.5294079780578613,
         "num_stages": 3,
-        "num_warps": 4
+        "num_warps": 8
       },
       {
         "kwargs": {
@@ -33,14 +41,6 @@
         "ms": 0.5294079780578613,
         "num_stages": 3,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLK": 1024
-        },
-        "ms": 0.5304319858551025,
-        "num_stages": 3,
-        "num_warps": 8
       }
     ]
   },

@@ -1,0 +1,201 @@
+{
+  "config_space_hash": "9b17ce1f7f64",
+  "entries": {
+    "bfloat16|GROUP_N=4,H=16,HEAD_DIM=48": [
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 2.668544054031372,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 4.322303771972656,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 4.532224178314209,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 5.029888153076172,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 5.433343887329102,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_N=5,H=16,HEAD_DIM=48": [
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 4.6233601570129395,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 7.473664045333862,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 7.81004786491394,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 8.644607543945312,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 9.437695980072021,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|GROUP_N=6,H=4,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 2.450432062149048,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 2.456576108932495,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 2.764288067817688,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 2.861056089401245,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 128
+        },
+        "ms": 2.8815360069274902,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|GROUP_N=8,H=4,HEAD_DIM=32": [
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 23.593472480773926,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 23.625216484069824,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 24.299519538879395,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 128
+        },
+        "ms": 24.38809585571289,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 24.476672172546387,
+        "num_stages": 2,
+        "num_warps": 8
+      }
+    ]
+  },
+  "gpu": "NVIDIA RTX A6000 (sm86)",
+  "op": "augmented_attention_compute_bwd",
+  "provenance": {
+    "built_utc": "2026-08-07T02:12:38+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
