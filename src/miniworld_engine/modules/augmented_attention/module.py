@@ -69,13 +69,30 @@ class AugmentedAttentionPairBias(nn.Module):
             self.norm_query = nn.RMSNorm(d_hidden)
             self.norm_key = nn.RMSNorm(d_hidden)
 
-        self.ln_pair = LayerNorm(d_pair)
+        # No offset: this LayerNorm's bias reaches the loss only through `to_bias`, as a per-head
+        # constant added to every attention logit, and softmax(z + c) == softmax(z) exactly. Its
+        # gradient is therefore identically zero -- measured, not assumed: perturbing it in fp64
+        # moves the loss by ~1e-9 regardless of step size, while the same probe on the weight
+        # gives a directional derivative that converges to 4 digits. Matches MiniWorld upstream
+        # (`nn.LayerNorm(d_pair, bias=False)`) and AlphaFold3 (`create_offset=False` on the
+        # pair_input_layer_norm).
+        self.ln_pair = LayerNorm(d_pair, bias=False)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
 
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:  # noqa: ANN001
+        """Drop `ln_pair.bias` from checkpoints written before it was removed.
+
+        The parameter had an identically zero gradient, so a trained checkpoint carries it at its
+        zero init and discarding it changes nothing numerically. Without this a strict load of any
+        existing checkpoint fails on an unexpected key.
+        """
+        state_dict.pop(f"{prefix}ln_pair.bias", None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _kernel_attention_pair_bias(
         self,
