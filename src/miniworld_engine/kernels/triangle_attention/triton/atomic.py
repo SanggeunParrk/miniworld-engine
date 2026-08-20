@@ -10,6 +10,7 @@ import os
 from einops import rearrange, repeat, reduce
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import token_key
 
 
 AUTOTUNE = settings.current().autotunes("tri_attention")
@@ -536,7 +537,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
             M.stride(0), M.stride(1), M.stride(2), M.stride(3),
             B, H, L, D,
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
         # fmt: on
@@ -582,7 +583,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         _attn_bwd_preprocess[grid](
             o, grad_output, delta,
             B, L, D,
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
         # fmt: on
@@ -602,7 +603,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
             HL, L, D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
         )
         # fmt: on
 

@@ -9,8 +9,9 @@ import torch
 import triton
 from torch import Tensor
 
+from miniworld_engine.autotune.shape_key import both_key, length_of
+
 from .triton.main import (
-    get_seq_group,
     layer_norm_bwd_dx_fused,
     layer_norm_fwd_fused,
 )
@@ -125,7 +126,10 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
         m,
         n,
         eps,
-        GROUP_M=get_seq_group(m),  # BLOCK_N is a tuned tile now (see triton/main.py)
+        # L = x.shape[-2], read before the reshape above (pair (B,L,L,D) / token (B,L,D)),
+        # not the row count m. The kernel parameter is `shape_key`; `GROUP_M` here was a
+        # stale name from before the rename.
+        shape_key=both_key(length_of(x.shape)),
         HAS_ROWSCALE=False,
     )
     return y_2d.view_as(x), mean, rstd
@@ -155,7 +159,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
         x_2d.stride(1),
         m,
         n,
-        GROUP_M=get_seq_group(m),  # BLOCK_N is a tuned tile now (see triton/main.py)
+        shape_key=both_key(length_of(x.shape)),
         HAS_ROWSCALE=False,
     )
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
@@ -187,7 +191,7 @@ def _bwd_partial_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd:
         x_2d.stride(1),
         m,
         N=n,
-        GROUP_M=get_seq_group(m),
+        shape_key=both_key(length_of(x.shape)),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)
@@ -221,7 +225,7 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
         x_2d.stride(1),
         m,
         N=n,
-        GROUP_M=get_seq_group(m),
+        shape_key=both_key(length_of(x.shape)),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)

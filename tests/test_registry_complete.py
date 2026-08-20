@@ -157,3 +157,76 @@ def test_the_rule_is_written_down() -> None:
     """The rule has to be findable by someone adding a kernel, not only enforced after the fact."""
     spec = (ROOT / "docs/kernels/naming.md").read_text()
     assert "registry.csv" in spec, "docs/kernels/naming.md must document the registry requirement"
+
+
+def test_launch_keywords_match_the_kernel_signature() -> None:
+    """Every `kernel[grid](..., NAME=...)` keyword must be a parameter of that kernel.
+
+    This exists because of a real regression. Renaming 90 key-only `GROUP_M`/`GROUP_N`/`seq_group`
+    parameters to `shape_key` rewrote the kernel signatures and the `key=[...]` lists, but skipped
+    files that define no kernel of their own -- so 14 launch sites in four files kept passing the old
+    keyword, one of them on a production path (`layernorm_linear/autograd.py`). Triton swallows an
+    unknown keyword and then dies on the missing required one, so the message names the missing
+    parameter and not the stale keyword that caused it:
+
+        TypeError: dynamic_func() missing 1 required positional argument: 'shape_key'
+
+    Nothing checked that the two sides agreed, so the break reached a pushed commit. Now something
+    does. This is static -- no GPU, no launch.
+
+    Scope: only calls whose callee name is a kernel defined somewhere in the package, and only
+    keyword arguments. A `**kwargs` forward is skipped rather than guessed at, and so is any name
+    the calling file REBINDS -- `from .cute import layernorm_linear as _fwd` makes the local `_fwd`
+    a different function from the package's `_fwd`, and resolving by bare name cannot tell them
+    apart. Without that exclusion this reported three false positives.
+    """
+    params: dict[str, set[str]] = {}
+    starstar: set[str] = set()
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            names = ({a.arg for a in fn.args.args} | {a.arg for a in fn.args.kwonlyargs}
+                     | {a.arg for a in fn.args.posonlyargs})
+            if fn.args.kwarg is not None:
+                starstar.add(fn.name)
+            # a name defined twice in the package: union, so we only flag a keyword no
+            # definition accepts
+            params.setdefault(fn.name, set()).update(names)
+
+    bad = []
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        rebound = set()
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                rebound |= {a.asname or a.name.split(".")[0] for a in n.names}
+            elif isinstance(n, ast.Assign):
+                rebound |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.keywords:
+                continue
+            f = node.func
+            if isinstance(f, ast.Subscript):          # kernel[grid](...) -- the Triton launch
+                name = getattr(f.value, "id", None) or getattr(f.value, "attr", None)
+            elif isinstance(f, ast.Name):
+                name = f.id
+            else:
+                continue
+            if name is None or name not in params or name in starstar or name in rebound:
+                continue
+            for kw in node.keywords:
+                if kw.arg is None:                    # **kwargs forward
+                    continue
+                if kw.arg not in params[name]:
+                    bad.append(f"{path.relative_to(SRC)}:{node.lineno} "
+                               f"{name}(..., {kw.arg}=...) -- not a parameter of {name}")
+    assert not bad, "launch keywords that the kernel does not accept:\n" + "\n".join(
+        f"  {b}" for b in bad)

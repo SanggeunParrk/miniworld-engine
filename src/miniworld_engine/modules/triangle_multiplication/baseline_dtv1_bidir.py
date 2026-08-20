@@ -54,7 +54,8 @@ def fused_bidirectional_dtv1(
 
     # input: one fused LN + gated GEMM, output 2·(2h) = 4h wide → chunk into left/right (2h each)
     ab_t, _, _, x_normed = _InputLNAndGEMM.apply(
-        x_flat, norm_in_weight, norm_in_bias, g_in_weight, p_in_weight, mask_flat, eps, True)
+        x_flat, norm_in_weight, norm_in_bias, g_in_weight, p_in_weight, mask_flat, eps, True,
+        i)  # trailing arg is L (tokens) for the autotune shape key
     left_t, right_t = torch.chunk(ab_t, 2, dim=0)            # each (2h, M)
     left = left_t.view(H, b, i, j)
     right = right_t.view(H, b, i, j)

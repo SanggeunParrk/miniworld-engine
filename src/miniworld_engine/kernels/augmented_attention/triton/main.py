@@ -10,9 +10,13 @@ import triton.language as tl
 from jaxtyping import Bool, Float
 
 from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import atom_key
 from miniworld_engine._typecheck import typecheck
 
 
+# NOT called from this file any more -- every launch below keys on `atom_key(L)` (see
+# autotune/shape_key.py: the key is L, the atom count, and this family is level=atom in
+# kernels/registry.csv). Kept only because ``checks_attn.py`` still imports it.
 def get_seq_group(length) -> int:
     """Delegates to canonical size-bucketing (autotune.buckets)."""
     from miniworld_engine.autotune.buckets import bucket_linear
@@ -504,14 +508,15 @@ def _attn_bwd(
 # reappear, reproduce the failure before trusting any explanation.
 
 
+# ``_dq_reduce`` used to bucket its own flat element count A*B*L*H*D through the helper below,
+# because that count is above 1e5 for every real shape and saturated the old LINEAR edge set. It now
+# keys on `atom_key(L)` like every other kernel in this family: L is what the config was tuned
+# against, and the element count is a function of it (times fixed A/H/D), so nothing is lost by
+# keying the cause instead of the product -- and the family stops holding two bucket spaces at once.
+#
+# NOT called from this file any more. Kept only because ``checks_attn.py`` still imports it.
 def get_elem_group(n_elem) -> int:
-    """Bucket a flat ELEMENT count for an autotune key (canonical autotune.buckets).
-
-    Distinct from ``get_seq_group`` above, which buckets a sequence length L against the LINEAR
-    edges (capped at 2048). ``_dq_reduce``'s count is A*B*L*H*D -- above 1e5 for every real shape,
-    so every launch would land in the same saturated linear bucket. The MIXED edges are the union
-    of the linear and squared edge sets and still discriminate at that magnitude.
-    """
+    """Bucket a flat ELEMENT count (canonical autotune.buckets). Superseded by `atom_key(L)`."""
     from miniworld_engine.autotune.buckets import bucket_mixed
     return bucket_mixed(n_elem)
 
@@ -602,7 +607,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=atom_key(L),
         )
 
         q, k, v, out = [x.view(A, B, L, H, D) for x in (q, k, v, out)]
@@ -639,7 +644,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             q.stride(4),
             H,
             D,
-            shape_key=get_seq_group(L),
+            shape_key=atom_key(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -690,7 +695,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=atom_key(L),
         )
 
         # sum the splits into the final dq
@@ -707,7 +712,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             dq_expand.stride(0),
             1,  # element stride (contiguous)
             n_elem,
-            shape_key=get_elem_group(n_elem),
+            shape_key=atom_key(L),
         )
 
         dbias = dbias.sum(dim=0)

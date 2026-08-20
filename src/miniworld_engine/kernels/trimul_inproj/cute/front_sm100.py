@@ -29,7 +29,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
+from miniworld_engine.autotune.shape_key import token_key
 
 
 
@@ -55,11 +55,17 @@ def _transpose_kernel(src_ptr, dst_ptr, M, N, BLOCK_M1: tl.constexpr, BLOCK_N: t
     )
 
 
-def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor) -> None:
-    """blld (M, 2D) row-major -> out (2D, M) row-major, in place into out_2d_m."""
+def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor, *,
+                            seq_len: int | None = None) -> None:
+    """blld (M, 2D) row-major -> out (2D, M) row-major, in place into out_2d_m.
+
+    ``seq_len`` is L (tokens); both arguments are already flattened (M = L*L rows), so the
+    caller has to supply it. None -> smallest bucket (bench/driver entry only).
+    """
     M, N = blld.shape
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
-    _transpose_kernel[grid](blld, out_2d_m, M, N, shape_key=get_seq_group(M))
+    _transpose_kernel[grid](blld, out_2d_m, M, N,
+                            shape_key=token_key(seq_len if seq_len is not None else 0))
 
 
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:
@@ -108,5 +114,5 @@ def trimul_front_sm100(
 
     # blld (M, 2D) -> bdll (2D, M) == [B, 2D, L, L]; left/right are the D-plane slices.
     lr = torch.empty(B, 2 * D, L, L, device=x.device, dtype=x.dtype)
-    _transpose_blld_to_bdll(blld, lr.view(2 * D, M))
+    _transpose_blld_to_bdll(blld, lr.view(2 * D, M), seq_len=L)
     return lr[:, :D], lr[:, D:]

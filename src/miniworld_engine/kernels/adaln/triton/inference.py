@@ -84,26 +84,28 @@ def _fp32_matmul_ctx(dtype):
 # ───────────────────── step 1: cond_aff = LN(cond) · lnw  (no bias) ─────────────────────
 
 
-# shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, which had
-# no representation in the key at all.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key is keyed, and its value is L -- the atom count (this family is level=atom in
+# kernels/registry.csv) -- not the flattened row count M = B*A the kernels iterate.
+# `_cond_affine` and `_adaln_epilogue` are INNER launchers that only see the (M, D) matrix, so each
+# takes the key from the caller that still holds the pre-flatten shape; the default covers a caller
+# that hands in a genuinely 2-D activation (nothing folded into the rows, so shape[-2] IS L), which
+# is what the drivers and checkers do.
+from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
 def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
-                 out_dtype: torch.dtype | None = None) -> torch.Tensor:
+                 out_dtype: torch.dtype | None = None, *,
+                 shape_key: int | None = None) -> torch.Tensor:
     M, N = cond.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(cond.shape))
     aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
     _ln_kernel[grid](
         cond, aff, lnw, M, int(N), eps,
         cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
-        HAS_W=True, seq_group=get_seq_group(M),
+        HAS_W=True, shape_key=shape_key,
     )
     return aff
 
@@ -170,15 +172,18 @@ def _adaln_epilogue_kernel(
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float) -> torch.Tensor:
+def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float, *,
+                    shape_key: int | None = None) -> torch.Tensor:
     M, N = x.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x.shape))
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
     _adaln_epilogue_kernel[grid](
         x, sb, y, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1), y.stride(0), y.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return y
 
@@ -206,7 +211,10 @@ def adaln_inference_materialize(
     if cond2d.stride(-1) != 1:
         cond2d = cond2d.contiguous()
 
-    cond_aff = _cond_affine(cond2d, cond_ln_weight, eps_cond)
+    # L from the pre-flatten shapes (shape[-2]), read before the reshapes above discarded them.
+    key_x = atom_key(length_of(orig_x_shape))
+    cond_aff = _cond_affine(cond2d, cond_ln_weight, eps_cond,
+                            shape_key=atom_key(length_of(cond.shape)))
 
     if weight_cat is None:
         weight_cat = torch.cat([scale_weight, bias_weight], dim=0)  # (2NX, NC)
@@ -220,7 +228,7 @@ def adaln_inference_materialize(
         with _fp32_matmul_ctx(x.dtype):
             sb = F.linear(cond_aff, weight_cat, bias_cat)  # (M, 2NX) = [scale | bias]
 
-    y = _adaln_epilogue(x2d, sb, eps_x)
+    y = _adaln_epilogue(x2d, sb, eps_x, shape_key=key_x)
     return y.reshape(orig_x_shape)
 
 
@@ -283,7 +291,8 @@ def adaln_inference_lnfold(
     # kernel A: [scale|bias] = LN(cond) @ [Wscale|Wbias]ᵀ + [scale_b|0], LN folded into prologue.
     sb = layernorm_linear(cond2d, cond_ln_weight, ln_bias, weight_cat, bias_cat, eps_cond,
                           prefolded=prefolded)                              # (M, 2NX)
-    y = _adaln_epilogue(x2d, sb, eps_x)                                     # kernel B
+    y = _adaln_epilogue(x2d, sb, eps_x,
+                        shape_key=atom_key(length_of(orig_x_shape)))         # kernel B
     return y.reshape(orig_x_shape)
 
 
@@ -411,7 +420,8 @@ def adaln_inference_fused(
         scale_weight.stride(0), scale_weight.stride(1),
         bias_weight.stride(0), bias_weight.stride(1), y.stride(0), y.stride(1),
         m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low,
-        shape_key=get_seq_group(m),
+        # L is x's pre-flatten shape[-2]; m = B*A is the row count, not the shape.
+        shape_key=atom_key(length_of(orig_x_shape)),
     )
     return y.reshape(orig_x_shape)
 

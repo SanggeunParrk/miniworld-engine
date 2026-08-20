@@ -10,6 +10,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import both_key, length_of
 from miniworld_engine import settings
 
 
@@ -273,7 +274,9 @@ class TritonLayerNormFunction(torch.autograd.Function):
             x_2d, y_2d, weight, bias, mean, rstd, rs,  # rs (or rstd placeholder when no rowscale)
             x_2d.stride(0), x_2d.stride(1),
             M, N, eps,
-            shape_key=get_seq_group(M), HAS_ROWSCALE=has_rs,
+            # L = x.shape[-2], read BEFORE the reshape above -- one rule for pair
+            # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
+            shape_key=both_key(length_of(x.shape)), HAS_ROWSCALE=has_rs,
         )
         # fmt: on
 
@@ -331,7 +334,8 @@ class TritonLayerNormFunction(torch.autograd.Function):
             x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)
             dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
             M, N,
-            shape_key=get_seq_group(M), HAS_ROWSCALE=has_rs,
+            # ctx.input_shape is the forward's PRE-flatten shape; L = its [-2].
+            shape_key=both_key(length_of(ctx.input_shape)), HAS_ROWSCALE=has_rs,
         )
         # fmt: on
 
@@ -368,7 +372,7 @@ def triton_layernorm_masked(x, weight, bias, eps, row_scale):
         x_2d, y_2d, weight, bias, mean, rstd, rs,
         x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
-        shape_key=get_seq_group(M), HAS_ROWSCALE=True,
+        shape_key=both_key(length_of(x.shape)), HAS_ROWSCALE=True,
     )
     # fmt: on
     return y_2d.view_as(x)

@@ -55,12 +55,17 @@ from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtyp
 # Flat elementwise stages tile ONE axis (the linear element index) — canonical 1-D sweep,
 # replacing the literal BLOCK=2048 each was launched with.
 
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
+# never the row count, and never the flat element count, a kernel receives.
+#
+# CAVEAT, and it is the one thing to know about this family: every entry point here is handed an
+# ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py does
+# `x.reshape(-1, d)` before it calls -- so the largest L reachable inside these files is `length_of`
+# of that 2-D matrix, i.e. M = B*A. That IS A when no batch axis was folded in (B == 1) and is B*A
+# otherwise; the true A can only come from the module. The inner launchers therefore take the key as
+# a `shape_key` argument instead of re-deriving it, so the thread is one hop from the entry point
+# once the module passes A down.
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
 
 
 # ============================================================================
@@ -171,8 +176,10 @@ def _fwd_squeeze_gate_kernel(
 # fmt: on
 
 
-def _fwd_expand_swiglu(x, wa, wb):
+def _fwd_expand_swiglu(x, wa, wb, *, shape_key=None):
     M, K = x.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x.shape))
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     ab = torch.empty(M, 2 * ND, device=x.device, dtype=x.dtype)
@@ -181,13 +188,15 @@ def _fwd_expand_swiglu(x, wa, wb):
         x, wa, wb, h, ab, M, ND, K, 2 * ND,
         x.stride(0), x.stride(1), wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1), ab.stride(0), ab.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return h, ab
 
 
-def _fwd_squeeze_gate(h, cond, ws, wsc, bsc):
+def _fwd_squeeze_gate(h, cond, ws, wsc, bsc, *, shape_key=None):
     M, ND = h.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(h.shape))
     D = ws.shape[0]
     DC = cond.shape[1]
     y = torch.empty(M, D, device=h.device, dtype=h.dtype)
@@ -200,7 +209,7 @@ def _fwd_squeeze_gate(h, cond, ws, wsc, bsc):
         ws.stride(0), ws.stride(1), wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), out.stride(0), out.stride(1),
         scale.stride(0), scale.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return y, out, scale
 
@@ -212,13 +221,19 @@ def _fwd_squeeze_gate(h, cond, ws, wsc, bsc):
 # --- gate-bwd: dout = sg*dy ; dscale = out*sg*(1-sg)*dy  (one HBM pass over (M,D)) ---
 
 
-def _gate_bwd(out, scale, dy):
+def _gate_bwd(out, scale, dy, *, shape_key=None):
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
+    if shape_key is None:
+        # `n` is a flat element count (M*D), not a shape: it cannot go in the key. The kernel is
+        # `_sigmul_bwd`, which belongs to the gated_projection family (registry level=BOTH), so it
+        # keys against the union bucket set -- otherwise the same L would bucket differently
+        # depending on which family launched it.
+        shape_key = both_key(length_of(out.shape))
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
     # _sigmul_bwd's order is (grad, gate_logit, value, d_gate, d_value)
-    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=get_seq_group(n))
+    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key)
     return dout, dscale
 
 
@@ -272,12 +287,15 @@ def _dgemm_kernel(
 # fmt: on
 
 
-def _dgemm(a, w, M, N, K, swk, swn):
+def _dgemm(a, w, M, N, K, swk, swn, *, shape_key=None):
     """C = a(M,K) @ W(K,N) via TF32 triton. swk,swn = W strides for the (K,N) logical view."""
+    if shape_key is None:
+        shape_key = atom_key(length_of(a.shape))
     c = torch.empty(M, N, device=a.device, dtype=a.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(N, meta["BLOCK_N"]),)  # noqa: E731
+    # GROUP_M stays a CSV tile knob for this kernel; only shape_key's VALUE changes here.
     _dgemm_kernel[grid](a, w, c, M, N, K, a.stride(0), a.stride(1), swk, swn,
-                        c.stride(0), c.stride(1), shape_key=get_seq_group(M))
+                        c.stride(0), c.stride(1), shape_key=shape_key)
     return c
 
 
@@ -334,8 +352,10 @@ def _dx_fused_kernel(
 # fmt: on
 
 
-def _dx_fused(dh, ab, wa, wb):
+def _dx_fused(dh, ab, wa, wb, *, shape_key=None):
     M, ND = dh.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(dh.shape))
     K = wa.shape[1]
     dx = torch.empty(M, K, device=dh.device, dtype=dh.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(K, meta["BLOCK_N"]))  # noqa: E731
@@ -343,7 +363,7 @@ def _dx_fused(dh, ab, wa, wb):
         dh, ab, wa, wb, dx, M, K, ND,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1),
         wa.stride(0), wa.stride(1), dx.stride(0), dx.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return dx
 
@@ -403,9 +423,11 @@ def _dh_gatebwd_kernel(
 # fmt: on
 
 
-def _dh_gatebwd(out, scale, dy, ws, ND):
+def _dh_gatebwd(out, scale, dy, ws, ND, *, shape_key=None):
     """dh = (sigmoid(scale)*dy) @ Ws ; also returns materialized dout, dscale for wgrad."""
     M, D = out.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(out.shape))
     dh = torch.empty(M, ND, device=out.device, dtype=out.dtype)
     dout = torch.empty(M, D, device=out.device, dtype=out.dtype)
     dscale = torch.empty(M, D, device=out.device, dtype=out.dtype)
@@ -413,7 +435,7 @@ def _dh_gatebwd(out, scale, dy, ws, ND):
     _dh_gatebwd_kernel[grid](
         out, scale, dy, ws, dh, dout, dscale, M, ND, D,
         out.stride(0), out.stride(1), ws.stride(0), ws.stride(1), dh.stride(0), dh.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,   # GROUP_M is still the CSV tile knob; this is only its cache label
     )
     return dh, dout, dscale
 
@@ -472,9 +494,11 @@ def _dx_swiglubwd_kernel(
 # fmt: on
 
 
-def _dx_swiglubwd(dh, ab, wcat):
+def _dx_swiglubwd(dh, ab, wcat, *, shape_key=None):
     """dx = dab @ Wcat (one GEMM), dab formed in-register from (dh, ab); emits dab for wgrad."""
     M, ND = dh.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(dh.shape))
     ND2 = 2 * ND
     K = wcat.shape[1]
     dx = torch.empty(M, K, device=dh.device, dtype=dh.dtype)
@@ -484,7 +508,7 @@ def _dx_swiglubwd(dh, ab, wcat):
         dh, ab, wcat, dx, dab, M, K, ND, ND2,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1),
         wcat.stride(0), wcat.stride(1), dx.stride(0), dx.stride(1), dab.stride(0), dab.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,   # GROUP_M is still the CSV tile knob; this is only its cache label
     )
     return dx, dab
 
@@ -525,8 +549,10 @@ def _swiglu_bwd_pack_kernel(
     tl.store(dab_ptr + row * stride_pm + (col + ND) * stride_pn, dh * silu, mask=mask)
 
 
-def _swiglu_bwd_pack(dh, ab):
+def _swiglu_bwd_pack(dh, ab, *, shape_key=None):
     M, ND = dh.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(dh.shape))
     dab = torch.empty(M, 2 * ND, device=dh.device, dtype=dh.dtype)
     grid = lambda meta: (  # noqa: E731
         triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]),
@@ -534,7 +560,7 @@ def _swiglu_bwd_pack(dh, ab):
     _swiglu_bwd_pack_kernel[grid](
         dh, ab, dab, M, ND,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1), dab.stride(0), dab.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return dab
 
@@ -576,13 +602,15 @@ def _wgrad_kernel(
 # fmt: on
 
 
-def _wgrad(g, x, N, K):
+def _wgrad(g, x, N, K, *, shape_key=None):
     """dW(N,K) = g(M,N)^T @ x(M,K) via TF32 triton (reduce over M)."""
     M = g.shape[0]
+    if shape_key is None:
+        shape_key = atom_key(length_of(g.shape))
     dw = torch.empty(N, K, device=g.device, dtype=g.dtype)
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_N_ROW"]), triton.cdiv(K, meta["BLOCK_N_COL"]))  # noqa: E731
     _wgrad_kernel[grid](g, x, dw, M, N, K, g.stride(0), g.stride(1),
-                       x.stride(0), x.stride(1), dw.stride(0), dw.stride(1), shape_key=get_seq_group(M))
+                       x.stride(0), x.stride(1), dw.stride(0), dw.stride(1), shape_key=shape_key)
     return dw
 
 
@@ -608,9 +636,11 @@ class ConditionedTransitionTailFusedFunction(torch.autograd.Function):
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc):
         x = x.contiguous()
         wa = wa.contiguous(); wb = wb.contiguous()
-        h, ab = _fwd_expand_swiglu(x, wa, wb)
+        shape_key = atom_key(length_of(x.shape))  # x is already (M, K) -- see the CAVEAT up top
+        h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=shape_key)
         y, out, scale = _fwd_squeeze_gate(h, cond.contiguous(), ws.contiguous(),
-                                          wsc.contiguous(), bsc.contiguous())
+                                          wsc.contiguous(), bsc.contiguous(),
+                                          shape_key=shape_key)
         ctx.save_for_backward(x, cond, ab, h, out, scale, wa, wb, ws, wsc)
         ctx.ND = wa.shape[0]
         ctx.wcat = torch.cat([wa, wb], dim=0)   # (2ND, K) for the one-GEMM dx
@@ -629,11 +659,12 @@ class ConditionedTransitionTailFusedFunction(torch.autograd.Function):
 
         # --- dgrad: TF32 triton GEMMs with the producing elementwise FUSED into the prologue ---
         #   dh = (sigmoid(scale)*dy) @ Ws ; gate-bwd folded in; emits dout,dscale for wgrad.
-        dh, dout, dscale = _dh_gatebwd(out, scale, dy, ws, ND)
+        shape_key = atom_key(length_of(x.shape))   # the same L the forward keyed on
+        dh, dout, dscale = _dh_gatebwd(out, scale, dy, ws, ND, shape_key=shape_key)
         #   dcond = dscale @ Wsc ; Wsc:(D,DC) logical (K=D, N=DC). (dscale already materialized.)
-        dcond = _dgemm(dscale, wsc, M, DC, D, wsc.stride(0), wsc.stride(1))
+        dcond = _dgemm(dscale, wsc, M, DC, D, wsc.stride(0), wsc.stride(1), shape_key=shape_key)
         #   dx = dab @ Wcat (one concatenated GEMM); swiglu-bwd folded in; emits dab for wgrad.
-        dx, dab = _dx_swiglubwd(dh, ab, wcat)
+        dx, dab = _dx_swiglubwd(dh, ab, wcat, shape_key=shape_key)
 
         # --- wgrad: cuBLAS (TF32) reductions over M (cuBLAS's domain; left on cuBLAS) ---
         db_sc = dscale.sum(0)

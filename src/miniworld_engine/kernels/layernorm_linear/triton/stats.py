@@ -34,6 +34,7 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 # would mint a fresh autotune (a full-grid sweep on a cache miss) for every distinct M the model
 # runs, which is a per-shape stall, not a better config.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import both_key
 
 
 def get_seq_group(rows) -> int:
@@ -73,7 +74,8 @@ def _stats_kernel(
 
 
 @opaque()
-def stats_triton(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+def stats_triton(x: torch.Tensor, eps: float, *, shape_key: int | None = None,
+                 ) -> tuple[torch.Tensor, torch.Tensor]:
     """rstd[m], c1[m]=mean*rstd over the last dim of X (M, K). Both fp32 [M].
 
     ``@opaque()``: this is the only autotuned Triton kernel
@@ -92,6 +94,11 @@ def stats_triton(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tenso
     _stats_kernel[grid](
         x, rstd, c1, M, K, eps,
         x.stride(0), x.stride(1),
-        shape_key=get_seq_group(M),
+        # shape_key = both_key(length_of(<pre-flatten shape>)) from the caller that still has
+        # it (transition/triton/fused.py, transition/cute/fused.py). None = a caller not yet
+        # threaded (transition/cuda/__init__.py, gemm_transition_swiglu.py, drivers/checks --
+        # all outside this change's file set); it buckets the flattened ROW count, the L-vs-L*L
+        # ambiguity autotune.shape_key removes.
+        shape_key=both_key(M) if shape_key is None else shape_key,
     )
     return rstd, c1

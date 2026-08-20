@@ -30,6 +30,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.autotune import tensor_dtype_of
+from miniworld_engine.autotune.shape_key import token_key
 
 # Flat elementwise glue around the cute GEMM: one tiled axis (the linear element index).
 # Both kernels were launched with a literal BLOCK=1024 that no measurement chose.
@@ -88,15 +89,22 @@ def _glu_wide(out: torch.Tensor, wide: torch.Tensor, D: int, L: int) -> None:
     """out[B,D,L,L] = sigmoid(wide[:,0:D]) * wide[:,D:2D], wide is (B,2D,L,L). B=1."""
     D_L2 = D * L * L
     grid = lambda meta: (triton.cdiv(D_L2, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_wide_kernel[grid](wide, out, 2 * D_L2, D_L2, shape_key=get_seq_group(D_L2))
+    # D_L2 is a flat ELEMENT count (D*L*L), not a length -- L is the caller-supplied token count.
+    _glu_wide_kernel[grid](wide, out, 2 * D_L2, D_L2, shape_key=token_key(L))
 
 
-def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor) -> None:
-    """proj *= sigmoid(gate), fused single-pass Triton kernel. In-place on proj."""
+def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor, *, seq_len: int | None = None) -> None:
+    """proj *= sigmoid(gate), fused single-pass Triton kernel. In-place on proj.
+
+    ``seq_len`` is L (tokens). ``proj`` is bdll ``[B, D, L, L]``, so its own ``shape[-2]`` is L
+    only by coincidence of that layout; the caller passes L explicitly instead. None -> smallest
+    bucket (bench/driver entry only).
+    """
     assert proj.is_contiguous() and gate.is_contiguous()
     n = proj.numel()
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _gate_mul_kernel[grid](proj, gate, n, shape_key=get_seq_group(n))
+    # n is a flat element count, never a length.
+    _gate_mul_kernel[grid](proj, gate, n, shape_key=token_key(seq_len if seq_len is not None else 0))
 
 
 
@@ -218,12 +226,12 @@ def tm1_cute_forward(
         # left = sigmoid(x @ WLg) * (x @ WL)
         gemm_act(A=x_flat, B=WL, activation=None, store_preact=False, postact_out=left_view)
         gemm_act(A=x_flat, B=WLg, activation=None, store_preact=False, postact_out=gate_view)
-        _fused_gate_mul(left_bdll, gate_buf)
+        _fused_gate_mul(left_bdll, gate_buf, seq_len=L)
 
         # right = sigmoid(x @ WRg) * (x @ WR)
         gemm_act(A=x_flat, B=WR, activation=None, store_preact=False, postact_out=right_view)
         gemm_act(A=x_flat, B=WRg, activation=None, store_preact=False, postact_out=gate_view)
-        _fused_gate_mul(right_bdll, gate_buf)
+        _fused_gate_mul(right_bdll, gate_buf, seq_len=L)
         return left_bdll, right_bdll
     if out_layout == "bdll_sm100":
         # From-scratch SM100 tcgen05 gated GEMM: out = sigmoid(x@Wg.T) * (x@Wp.T),

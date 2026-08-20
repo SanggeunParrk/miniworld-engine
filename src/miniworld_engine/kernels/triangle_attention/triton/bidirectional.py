@@ -20,12 +20,13 @@ import torch
 import triton
 from einops import rearrange, reduce
 
+from miniworld_engine.autotune.shape_key import token_key
+
 from .main import (
     _attn_bwd_dkdv,
     _attn_bwd_dq,
     _attn_bwd_preprocess,
     _attn_fwd,
-    get_seq_group,
 )
 
 
@@ -39,12 +40,18 @@ def _fwd_dir(q, k, v, bias, out, m, sm_scale):
     _attn_fwd[grid](
         q, k, v, bias, sm_scale, m, out,
         *q.stride(), *out.stride(), *bias.stride(), *m.stride(),
-        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
     )
     return bias
 
 
 def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
+    # NOTE the three launches below pass exactly the positional tails main.py passes to the same
+    # three kernels. They used to carry ONE EXTRA leading `HL` each (`HL, B, HL, L, D` where main
+    # passes `HL, B, L, D`, and likewise for dkdv/dq), so every argument after it was shifted and
+    # the kernels read the wrong scalars. Nothing caught it: this file's kernels have no row in
+    # registry.csv, so no driver and no checker ever launches this path, even though
+    # modules/triangle_attention/bidirectional.py:175 imports it.
     """One direction backward. dq/dk/dv [B,H,L,L,D] views into the concat-grad buffer. Returns
     dbias [B,H,L,L] (in this direction's frame)."""
     B, H, L, _, D = q.shape
@@ -53,21 +60,21 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
     delta = torch.empty_like(m_m)
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
-        out, dout, delta, *out.stride(), *dout.stride(), HL, B, HL, L, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        out, dout, delta, *out.stride(), *dout.stride(), HL, B, L, D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
     )
     dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)
     grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
     _attn_bwd_dkdv[grid_kv](
         q, k, v, bias, sm_scale, dout, dk, dv, dbias, m_m, delta,
-        *q.stride(), *dk.stride(), *dout.stride(), *bias.stride(), L * L, HL, L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        *q.stride(), *dk.stride(), *dout.stride(), *bias.stride(), L * L, L, HL, D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
     )
     grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
     _attn_bwd_dq[grid_q](
         q, k, v, bias, sm_scale, dout, dq, m_m, delta,
-        *q.stride(), *dq.stride(), *dout.stride(), *bias.stride(), HL, L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        *q.stride(), *dq.stride(), *dout.stride(), *bias.stride(), L, HL, D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
     )
     return reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
 

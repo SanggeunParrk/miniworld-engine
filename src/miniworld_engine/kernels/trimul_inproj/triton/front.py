@@ -46,7 +46,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
+from miniworld_engine.autotune.shape_key import token_key
 
 
 
@@ -162,7 +162,7 @@ def trimul_front_triton(x, WL, WLg, WR, WRg, Wg):
     gate = torch.empty(M, D, device=x.device, dtype=x.dtype)          # blld
     lr_grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(2 * D, meta["BLOCK_N"]))  # noqa: E731
     g_grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))       # noqa: E731
-    group_m = get_seq_group(M)
-    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D, shape_key=group_m)
-    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D, shape_key=group_m)
+    key = token_key(L)
+    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D, shape_key=key)
+    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D, shape_key=key)
     return lr[:, :D], lr[:, D:], gate.view(B, L, L, D)

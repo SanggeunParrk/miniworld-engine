@@ -12,6 +12,7 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import token_key
 
 
 def get_seq_group(length) -> int:
@@ -365,7 +366,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
             *bias.stride(),   # bias contiguous (B,H,m,n)
             *m.stride(),
-            B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=get_seq_group(L),
+            B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
         )
         ctx.save_for_backward(q, k, v, bias, m, out)
         return out
@@ -390,7 +391,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             out, grad_output, delta,
             *out.stride(),           # out STRIDED 5D (projection layout)
             *grad_output.stride(), HL, B, L, D,
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -419,7 +420,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
             L * L,              # dbias HL-dim stride
             L, HL, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=get_seq_group(L),
+            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
         )
         grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
         _attn_bwd_dq[grid_q](
@@ -429,7 +430,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             *grad_output.stride(),
             *bias.stride(),
             L, HL, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=get_seq_group(L),
+            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
         )
 
         # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;

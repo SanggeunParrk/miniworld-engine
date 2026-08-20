@@ -31,7 +31,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
+from miniworld_engine.autotune.shape_key import length_of, token_key
 
 
 
@@ -124,6 +124,21 @@ def _gate_elem_bwd_ew_kernel(
         tl.store(dglogit_ptr + off, dglogit.to(dglogit_ptr.dtype.element_ty), mask=mask)
 
 
+def _shape_key(seq_len, x_n=None) -> int:
+    """token_key(L). L comes from ``seq_len`` (every production caller passes it) or, failing
+    that, from an un-flattened 4-D ``(B, L, L, K)`` activation.
+
+    A 2-D ``(M, K)`` argument with no ``seq_len`` has no L in it at all: M is L*L here and
+    recovering L from it would be a guess about which layout produced M. Those callers get the
+    smallest bucket, and the caller is what has to be fixed -- see the module note.
+    """
+    if seq_len is not None:
+        return token_key(int(seq_len))
+    if x_n is not None and x_n.dim() == 4:
+        return token_key(length_of(x_n.shape))
+    return token_key(0)
+
+
 def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
                      residual=None, dropscale=None, seq_len=None):
     """gate = sigmoid(x_n @ Wg); y = proj ⊙ gate. Returns y, or (y, gate) if return_gate.
@@ -131,7 +146,9 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
 
     ``residual`` [M,N] (== module input pair) and ``dropscale`` [L,N] (== drop_row mask/(1-p),
     broadcast over the i-index) optionally fuse the pairformer residual+dropout into the store:
-    y = residual + dropscale ⊙ (proj⊙gate). ``seq_len`` (L) is required with dropscale.
+    y = residual + dropscale ⊙ (proj⊙gate). ``seq_len`` (L) is required with dropscale, and is
+    also what the autotune shape key is bucketed from (see ``_shape_key``) -- pass it whenever
+    ``x_n`` arrives already flattened to (M, K).
 
     gate GEMM via cuBLAS (D-general), then a 2-D (row x col) elementwise pass
     (sigmoid + mul + residual/dropout)."""
@@ -150,7 +167,7 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
     ds_flat = dropscale.reshape(L, N) if use_dropout else proj_flat   # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_mul_kernel[grid](glogit, proj_flat, y, gate, res_flat, ds_flat, M, L, N=N,
-                           SAVE_GATE=return_gate, shape_key=get_seq_group(M),
+                           SAVE_GATE=return_gate, shape_key=_shape_key(seq_len, x_n),
                            ADD_RESIDUAL=add_residual, USE_DROPOUT=use_dropout)
     return (y, gate) if return_gate else y
 
@@ -198,7 +215,9 @@ def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False,
     recomputed in-kernel (fused fwd path saves preact, not gate).
 
     ``dropscale`` [L,N] (+ ``seq_len``=L): scale the incoming grad by the row-broadcast drop
-    scale before the gate bwd (grad of y = dropscale ⊙ (proj⊙gate))."""
+    scale before the gate bwd (grad of y = dropscale ⊙ (proj⊙gate)). ``seq_len`` is also what the
+    autotune shape key is bucketed from -- every argument here is already flattened to (M, N),
+    so it is the only place L can come from."""
     M, N = dy.reshape(-1, dy.shape[-1]).shape
     dy, proj, gate = dy.reshape(M, N), proj.reshape(M, N), gate.reshape(M, N)
     d_proj = torch.empty_like(dy)
@@ -208,7 +227,7 @@ def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False,
     ds_flat = dropscale.reshape(L, N) if use_dropout else dy  # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N,
-                                   shape_key=get_seq_group(M), FROM_PREACT=from_preact,
+                                   shape_key=_shape_key(seq_len), FROM_PREACT=from_preact,
                                    USE_DROPOUT=use_dropout)
     return d_proj, d_glogit
 
@@ -225,8 +244,10 @@ def gate_elem_bwd(dy, x_n, proj, gate, Wg):
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    # gate_elem_bwd is the 2-D-only ``GateElem`` autograd path: x_n arrives already flattened
+    # to (M, K) and nothing upstream carries L, so the key is UNKNOWN here (smallest bucket).
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, dy, 0, M, N=N,
-                                   shape_key=get_seq_group(M), USE_DROPOUT=False)
+                                   shape_key=_shape_key(None), USE_DROPOUT=False)
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
     dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS
     return d_proj, dx_gate, dWg

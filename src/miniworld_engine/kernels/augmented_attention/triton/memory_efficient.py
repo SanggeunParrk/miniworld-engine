@@ -16,12 +16,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-
-
-def get_seq_group(length) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    from miniworld_engine.autotune.buckets import bucket_linear
-    return bucket_linear(length)
+from miniworld_engine.autotune.shape_key import atom_key
 
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
@@ -308,7 +303,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=atom_key(L),
         )
 
         q, k, v, out = [x.view(A, B, L, H, D) for x in (q, k, v, out)]
@@ -344,7 +339,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             q.stride(4),
             H,
             D,
-            shape_key=get_seq_group(L),
+            shape_key=atom_key(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -388,7 +383,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=atom_key(L),
         )
 
         dbias = dbias.permute(0, 1, 3, 2).contiguous()  # (B, L, H, L) -> (B, L, L, H)

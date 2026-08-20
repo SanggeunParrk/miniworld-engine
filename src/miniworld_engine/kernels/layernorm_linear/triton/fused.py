@@ -33,6 +33,7 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 # kernel was written for) is still reachable; every smaller candidate is made correct by the
 # k-loops below rather than silently wrong.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import both_key, length_of
 
 
 def get_seq_group(rows) -> int:
@@ -189,6 +190,8 @@ def layernorm_linear_triton_fwd(
         x2.stride(0), x2.stride(1),
         w.stride(0), w.stride(1),
         y.stride(0), y.stride(1),
-        HAS_BIAS=bias is not None, shape_key=get_seq_group(M),
+        # L = x.shape[-2], read BEFORE the reshape to (M, K) -- one rule for pair
+        # (B, L, L, D) and token/atom (B, L, D). Never M.
+        HAS_BIAS=bias is not None, shape_key=both_key(length_of(x.shape)),
     )
     return y.reshape(*x.shape[:-1], N)

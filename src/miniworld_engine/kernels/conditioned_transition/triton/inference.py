@@ -41,12 +41,17 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 # fmt: off
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
+# never the row count a kernel receives.
+#
+# CAVEAT, and it is the one thing to know about this family: every entry point here is handed an
+# ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py does
+# `x.reshape(-1, d)` before it calls -- so the largest L reachable inside these files is `length_of`
+# of that 2-D matrix, i.e. M = B*A. That IS A when no batch axis was folded in (B == 1) and is B*A
+# otherwise; the true A can only come from the module. The inner launchers therefore take the key as
+# a `shape_key` argument instead of re-deriving it, so the thread is one hop from the entry point
+# once the module passes A down.
+from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['ND', 'K', 'DC', 'shape_key'])
@@ -156,6 +161,7 @@ def cond_transition_inference(
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=get_seq_group(M),
+        # x arrives already (M, K), so this is M = B*A -- see the CAVEAT at the top of the file.
+        shape_key=atom_key(length_of(x.shape)),
     )
     return out

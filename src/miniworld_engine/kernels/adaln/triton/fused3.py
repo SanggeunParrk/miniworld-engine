@@ -28,15 +28,17 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 
-# shape_key is the row-count cache bucket. It is NOT GROUP_M: in this file GROUP_M is the tuned
-# L2-swizzle axis the two GEMM kernels read from the CSV, so the bucket takes a separate,
-# lowercase name -- it is a plain runtime int no kernel body ever reads.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key is the SHAPE cache bucket, and shape means L -- the atom count (this family is
+# level=atom in kernels/registry.csv) -- never the row count a kernel receives. It is NOT GROUP_M:
+# in this file GROUP_M is the tuned L2-swizzle axis the two GEMM kernels read from the CSV, so the
+# bucket takes a separate, lowercase name -- a plain runtime int no kernel body ever reads.
+#
+# The four launchers below are INNER launchers: they only ever see the flattened (M, D) matrix, and
+# M is B*A, so L is not recoverable here. Each therefore takes the key as a `shape_key` argument
+# from the caller that still holds the pre-flatten shape. The default covers the callers that hand
+# in a genuinely 2-D activation (no batch axis was folded in, so shape[-2] IS L) -- the drivers and
+# checkers do exactly that.
+from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
 @triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['N', 'HAS_W', 'shape_key'])
@@ -97,8 +99,10 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
 
 
-def _layernorm(x, eps, weight=None):
+def _layernorm(x, eps, weight=None, *, shape_key=None):
     M, N = x.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x.shape))
     y = torch.empty_like(x)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is a tl.constexpr now (it drives the BLOCK_N >= N fold), so it must reach the kernel as a
@@ -106,7 +110,7 @@ def _layernorm(x, eps, weight=None):
     # did not already force.
     _ln_kernel[grid](x, y, weight if weight is not None else x, M, int(N), eps,
                      x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-                     HAS_W=weight is not None, shape_key=get_seq_group(M),)
+                     HAS_W=weight is not None, shape_key=shape_key,)
     return y
 
 
@@ -172,9 +176,11 @@ def _gemm_gate_kernel(
                  gate.to(Gate.dtype.element_ty), mask=om)
 
 
-def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b):
+def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b, *, shape_key=None):
     # Ws, Wb are the (N, K) nn.Linear weights (k-contiguous tile = MMA-friendly B layout).
     M, N = x_norm.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x_norm.shape))
     K = cond_norm.shape[1]
     y = torch.empty_like(x_norm)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),)  # noqa: E731
@@ -183,7 +189,7 @@ def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b):
         x_norm.stride(0), x_norm.stride(1), cond_norm.stride(0), cond_norm.stride(1),
         Ws.stride(0), Ws.stride(1), Wb.stride(0), Wb.stride(1), y.stride(0), y.stride(1),
         0, 0,                       # Gate is unread when SAVE_GATE=False
-        shape_key=get_seq_group(M), SAVE_GATE=False,
+        shape_key=shape_key, SAVE_GATE=False,
     )
     return y
 
@@ -191,8 +197,10 @@ def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b):
 # ── training: K3 variant that also stores gate=sigmoid(scale); + backward elementwise ──────────
 
 
-def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b):
+def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b, *, shape_key=None):
     M, N = x_norm.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x_norm.shape))
     K = cond_norm.shape[1]
     y = torch.empty_like(x_norm)
     gate = torch.empty_like(x_norm)
@@ -202,7 +210,7 @@ def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b):
         x_norm.stride(0), x_norm.stride(1), cond_norm.stride(0), cond_norm.stride(1),
         Ws.stride(0), Ws.stride(1), Wb.stride(0), Wb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1),
-        shape_key=get_seq_group(M), SAVE_GATE=True,)
+        shape_key=shape_key, SAVE_GATE=True,)
     return y, gate
 
 
@@ -234,15 +242,17 @@ def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                  dxn.to(Dxn.dtype.element_ty), mask=mask)
 
 
-def _bwd_elem(dy, x_norm, gate):
+def _bwd_elem(dy, x_norm, gate, *, shape_key=None):
     M, N = dy.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(dy.shape))
     dscale = torch.empty_like(dy)
     dxn = torch.empty_like(dy)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     _bwd_elem_kernel[grid](dy, x_norm, gate, dscale, dxn, M, N,
                            dy.stride(0), dy.stride(1), x_norm.stride(0), x_norm.stride(1),
                            gate.stride(0), gate.stride(1), dscale.stride(0), dscale.stride(1),
-                           dxn.stride(0), dxn.stride(1), shape_key=get_seq_group(M),)
+                           dxn.stride(0), dxn.stride(1), shape_key=shape_key,)
     return dscale, dxn
 
 
@@ -261,7 +271,8 @@ class _Fused3TrainFn(torch.autograd.Function):
         zeros_c = sb.new_zeros(nc)
         x_norm, mean_x, rstd_x = _ln_materialize(x2d, ones, zeros_x, eps_x)
         cond_norm, mean_c, rstd_c = _ln_materialize(cond2d, lnw, zeros_c, eps_cond)
-        y, gate = _gemm_gate_train(x_norm, cond_norm, Ws, Wb, sb)
+        y, gate = _gemm_gate_train(x_norm, cond_norm, Ws, Wb, sb,
+                                   shape_key=atom_key(length_of(orig)))
         ctx.save_for_backward(x2d, cond2d, x_norm, cond_norm, gate, mean_x, rstd_x, mean_c, rstd_c, lnw, Ws, Wb)
         ctx.orig = orig
         ctx.ocond = cond.shape
@@ -276,7 +287,8 @@ class _Fused3TrainFn(torch.autograd.Function):
         nx = x2d.shape[-1]
         dy2d = dy.reshape(-1, nx)
         dy2d = dy2d.contiguous() if dy2d.stride(-1) != 1 else dy2d
-        dscale, dxn = _bwd_elem(dy2d, x_norm, gate)
+        dscale, dxn = _bwd_elem(dy2d, x_norm, gate,
+                                shape_key=atom_key(length_of(ctx.orig)))
         with _fp32_matmul_ctx(dy.dtype):
             dWs = dscale.t() @ cond_norm           # (N,K)
             dWb = dy2d.t() @ cond_norm             # (N,K)
@@ -304,7 +316,12 @@ def adaln_fused3(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
         x2d = x2d.contiguous()
     if cond2d.stride(-1) != 1:
         cond2d = cond2d.contiguous()
-    x_norm = _layernorm(x2d, eps_x)                         # K1
-    cond_norm = _layernorm(cond2d, eps_cond, cond_ln_weight)  # K2
-    y = _gemm_gate(x_norm, cond_norm, scale_weight, bias_weight, scale_bias)  # K3
+    # L is x's (and cond's) pre-flatten shape[-2] -- the atom count -- read before the reshape
+    # above threw it away. cond carries its own L in case a caller ever passes a different rank.
+    key_x = atom_key(length_of(orig))
+    key_cond = atom_key(length_of(cond.shape))
+    x_norm = _layernorm(x2d, eps_x, shape_key=key_x)                         # K1
+    cond_norm = _layernorm(cond2d, eps_cond, cond_ln_weight, shape_key=key_cond)  # K2
+    y = _gemm_gate(x_norm, cond_norm, scale_weight, bias_weight, scale_bias,
+                   shape_key=key_x)  # K3
     return y.reshape(orig)

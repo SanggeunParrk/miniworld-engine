@@ -24,7 +24,8 @@ from miniworld_engine.kernels._compile import opaque
 # Mean and Rstd, verified by replaying one launch's arguments into both (.bench/eq_*.out).
 # Its "low register" claim was not in the code: the body matched main.py's statement for
 # statement with HAS_ROWSCALE=False. Only the launcher below survives, as a bench probe.
-from .main import get_seq_group, layer_norm_fwd_fused
+from .main import layer_norm_fwd_fused
+from miniworld_engine.autotune.shape_key import both_key, length_of
 
 import torch
 import triton
@@ -47,6 +48,7 @@ def triton_layernorm_lowreg(x: torch.Tensor, weight: torch.Tensor, bias: torch.T
         rstd,                       # Rowscale is unread when HAS_ROWSCALE=False; pass any [M] ptr
         x_2d.stride(0), x_2d.stride(1),
         m, n, eps,
-        GROUP_M=get_seq_group(m), HAS_ROWSCALE=False,
+        # L = x.shape[-2] BEFORE the reshape, not m. (Kernel param is `shape_key` now.)
+        shape_key=both_key(length_of(x.shape)), HAS_ROWSCALE=False,
     )
     return y_2d.view_as(x)

@@ -202,7 +202,7 @@ def triangle_attention_bwd_pre_triton() -> Pair:
     _attn_bwd_preprocess[grid](
         out, do, delta,
         *out.stride(), *do.stride(), HL, B, L, D,
-        GROUP_N=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # Delta is addressed off_hz*N_CTX + off_m with off_hz enumerating (b, h, i_row) as
     # b*HL + h*L + i_row -- i.e. exactly the [B, H*L, L] flattening of the rowsum.
@@ -248,7 +248,7 @@ def triangle_attention_bwd_pre_contig_triton() -> Pair:
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D32,
-        GROUP_N=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D32),
+        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D32),
     )
     return delta, _rowsum(o, do)
 
@@ -287,7 +287,7 @@ def augmented_attention_bwd_pre_triton() -> Pair:
     _attn_bwd_preprocess[grid](
         o, do, delta, A, B, L,
         o.stride(1), o.stride(2), o.stride(3), o.stride(4), H, D,
-        GROUP_N=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # Delta is (A,B,H,L) -- stored at off_z*H*N_CTX + off_h*N_CTX + off_m with off_z over A*B --
     # while the rowsum over d leaves (A,B,L,H), so H moves in front of L.
@@ -317,7 +317,7 @@ def augmented_attention_bwd_reduce_triton() -> Pair:
     grid = lambda META: (triton.cdiv(n_elem, META["BLOCK_E"]),)
     _dq_reduce[grid](
         dq_expand, dq, num_splits, dq_expand.stride(0), 1, n_elem,
-        seq_group=get_elem_group(n_elem),
+        shape_key=get_elem_group(n_elem),
     )
     return dq, dq_expand.sum(0)
 
@@ -364,7 +364,7 @@ def bias_only_attention_bwd_pre_triton() -> Pair:
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D,
-        GROUP_N=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     return delta, _rowsum(o, do)
 

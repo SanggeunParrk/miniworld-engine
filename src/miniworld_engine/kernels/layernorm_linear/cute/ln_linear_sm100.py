@@ -65,6 +65,7 @@ from miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective import (
 # d_hidden (128..1024), so a set that stopped at 128 would force a multi-pass over K on every
 # shape. A row at or above the extent keeps the whole-row single-pass schedule.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import both_key
 
 
 def get_seq_group(rows) -> int:
@@ -82,7 +83,9 @@ def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
     x = tri_bkll.reshape(K, M)  # X[m,k] = x[k, m] (M-major)
     Y = torch.empty(M, K, device=tri_bkll.device, dtype=tri_bkll.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
-    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, GROUP_M=get_seq_group(M))
+    # L is right here in the [B, K, L, L] pair activation -- not M = L*L. (The kernel
+    # parameter is `shape_key`; `GROUP_M` was a stale name from before the rename.)
+    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, shape_key=both_key(L))
     return Y
 
 

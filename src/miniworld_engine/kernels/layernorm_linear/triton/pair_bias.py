@@ -37,6 +37,7 @@ MIN_TL_DOT_DIM = 16
 # shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import both_key, length_of
 
 
 def get_seq_group(rows) -> int:
@@ -291,7 +292,8 @@ def _fwd_op(
         N,
         nh,
         eps,
-        shape_key=get_seq_group(M),
+        # L = x.shape[-2] (the op takes the pre-flatten activation), never the row count M.
+        shape_key=both_key(length_of(x.shape)),
     )
     return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
 
@@ -316,6 +318,10 @@ def _bwd_op(
     proj_weight: torch.Tensor,
     mean: torch.Tensor,
     rstd: torch.Tensor,
+    # x2 arrives already flattened to (M, N), so L is gone by here: the key is computed by
+    # `_backward` below from ctx.xshape (the forward's pre-flatten shape) and passed in.
+    # None only for the coordinator-owned drivers_ln / checks_ln call sites.
+    shape_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     M, N = x2.shape
     nh = proj_weight.shape[0]
@@ -340,13 +346,13 @@ def _bwd_op(
         N,
         nh,
         USE_DOT=nh >= MIN_TL_DOT_DIM,
-        shape_key=get_seq_group(M),
+        shape_key=both_key(M) if shape_key is None else shape_key,
     )
     return dx, dlnw.to(ln_weight.dtype), dpw.to(proj_weight.dtype)
 
 
 @_bwd_op.register_fake
-def _(dout, x2, ln_weight, proj_weight, mean, rstd):
+def _(dout, x2, ln_weight, proj_weight, mean, rstd, shape_key=None):
     return (
         torch.empty_like(x2),
         torch.empty_like(ln_weight),
@@ -365,7 +371,8 @@ def _setup_context(ctx, inputs, output):
 
 def _backward(ctx, grad_out, grad_mean, grad_rstd):
     x2, ln_weight, proj_weight, mean, rstd = ctx.saved_tensors
-    dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd)
+    dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd,
+                            shape_key=both_key(length_of(ctx.xshape)))
     return dx.reshape(ctx.xshape), dlnw, dpw, None
 
 

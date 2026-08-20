@@ -71,12 +71,12 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # tensor argument, so fp32 and bf16 already land in different cache slots.
 
 
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key's value is L -- the atom count (this family is level=atom in kernels/registry.csv) --
+# not the flattened row count M = B*A the kernels iterate. The three launchers below are INNER
+# launchers that only see the (M, D) matrices, so each takes the key from the caller that still
+# holds the pre-flatten shape; the default covers a caller that hands in a genuinely 2-D activation
+# (nothing folded into the rows, so shape[-2] IS L), which is what the drivers and checkers do.
+from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
 @triton.autotune(configs=configs_for("adaln_epilogue_saveact_triton"), key=['N', 'HAS_SB', 'shape_key'])
@@ -155,8 +155,10 @@ def _epilogue_train_kernel(
                      gate.to(Gate.dtype.element_ty), mask=mask)
 
 
-def _epilogue_train(x, sb, eps, scale_bias=None):
+def _epilogue_train(x, sb, eps, scale_bias=None, *, shape_key=None):
     M, N = x.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x.shape))
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
     gate = torch.empty(M, N, device=x.device, dtype=x.dtype)
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
@@ -167,7 +169,7 @@ def _epilogue_train(x, sb, eps, scale_bias=None):
         x, sb, y, mean, rstd, gate, scale_bias, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1), HAS_SB=scale_bias is not None,
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return y, mean, rstd, gate
 
@@ -258,10 +260,12 @@ def _bwd_x_kernel(
                      dx.to(DX.dtype.element_ty), mask=mask)
 
 
-def _bwd_x(dy, x, mean_x, rstd_x, gate):
+def _bwd_x(dy, x, mean_x, rstd_x, gate, *, shape_key=None):
     """Returns D=(2N,M) [dscale;dy stacked on the 2N axis] and dx=(M,N) (x's layout), one kernel.
     D's (2N,M) layout is chosen so the wgrad D@cond_aff is a contiguous-K GEMM (see kernel note)."""
     M, N = dy.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(dy.shape))
     D = torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype)   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
@@ -270,7 +274,7 @@ def _bwd_x(dy, x, mean_x, rstd_x, gate):
         dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
         dy.stride(0), dy.stride(1), x.stride(0), x.stride(1), gate.stride(0), gate.stride(1),
         D.stride(0), D.stride(1), dx.stride(0), dx.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return D, dx
 
@@ -405,10 +409,13 @@ def _dgrad_condln_kernel(
                      dcond.to(DCond.dtype.element_ty), mask=nmask2)
 
 
-def _dgrad_condln(D, w_cat, cond, mean_c, rstd_c, lnw):
+def _dgrad_condln(D, w_cat, cond, mean_c, rstd_c, lnw, *, shape_key=None):
     """Fused dgrad+cond-LN-bwd: dcond_aff = Dᵀ@w_cat (in-kernel GEMM) → cond LN-backward → (dcond,
     dlnw). No dcond_aff HBM round-trip, no cuBLAS dgrad. D=(2NX,M), w_cat=(2NX,NC)."""
     K2, M = D.shape
+    if shape_key is None:
+        # off `cond` (M, NC), not off D: D is (2NX, M), so its shape[-2] is 2NX, not a length.
+        shape_key = atom_key(length_of(cond.shape))
     NC = w_cat.shape[1]
     dcond = torch.empty_strided((M, NC), cond.stride(), device=cond.device, dtype=cond.dtype)
     dlnw = torch.zeros(NC, dtype=torch.float32, device=cond.device)
@@ -418,7 +425,7 @@ def _dgrad_condln(D, w_cat, cond, mean_c, rstd_c, lnw):
         D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
         D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
         cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return dcond, dlnw.to(lnw.dtype)
 
@@ -460,7 +467,8 @@ class AdaLNTrainFn(torch.autograd.Function):
         sb = _mm(cond_aff, w_cat.t())                                  # (M, 2NX) raw [scale|bias]
 
         # scale_bias (β for the scale half) is folded into the epilogue — no full (M,2NX) add pass.
-        y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias)
+        y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias,
+                                                 shape_key=atom_key(length_of(orig_x_shape)))
 
         ctx.save_for_backward(x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
                               cond_ln_weight, scale_weight, bias_weight)
@@ -482,7 +490,10 @@ class AdaLNTrainFn(torch.autograd.Function):
             dy2d = dy2d.contiguous()
 
         # ONE kernel: D=(2NX,M) [dscale;dy] AND dx (fused x LN-backward, no affine, in x's layout).
-        D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate)               # D=(2NX,M), dx=(M,NX)
+        # L for both backward launches: the pre-flatten atom count the forward stored on ctx.
+        shape_key = atom_key(length_of(ctx.orig_x_shape))
+        D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate,
+                       shape_key=shape_key)                          # D=(2NX,M), dx=(M,NX)
         w_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
 
         dW_cat = _mm(D, cond_aff)                                     # (2NX,NC) = [dWs;dWb]  (cuBLAS wgrad — ONLY cuBLAS matmul)
@@ -491,7 +502,8 @@ class AdaLNTrainFn(torch.autograd.Function):
         use_triton = (cond2d.shape[1] <= _DGRAD_TRITON_NC_MAX) if _DGRAD_TRITON is None else _DGRAD_TRITON
         if use_triton:
             # FUSED triton: dcond_aff = Dᵀ@w_cat (in-kernel GEMM) + cond LN-backward in ONE kernel.
-            dcond, dlnw = _dgrad_condln(D, w_cat, cond2d, mean_c, rstd_c, lnw)
+            dcond, dlnw = _dgrad_condln(D, w_cat, cond2d, mean_c, rstd_c, lnw,
+                                        shape_key=shape_key)
         else:
             dcond_aff = _mm(D.t(), w_cat)                             # cuBLAS dgrad → (M,NC)
             dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c, cond2d.stride())

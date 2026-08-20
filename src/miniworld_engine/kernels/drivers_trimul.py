@@ -86,7 +86,7 @@ def gated_projection_bwd_gate_triton() -> None:
     dgate, dx = torch.empty_like(gate), torch.empty_like(x)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     sigmoid_gate_bwd_kernel[grid](gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0),
-                                  M, D, GROUP_M=get_seq_group(M))
+                                  M, D, shape_key=get_seq_group(M))
 
 
 def gated_projection_gate_flat_triton() -> None:
@@ -329,7 +329,7 @@ def gated_projection_gate_packed_mmajor_triton() -> None:
     preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
     lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
     grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, seq_group=get_seq_group(M))
+    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=get_seq_group(M))
 
 
 def fused_preact_gemm_kernel() -> None:

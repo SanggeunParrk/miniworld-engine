@@ -12,6 +12,7 @@ from jaxtyping import Float
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.autotune.shape_key import token_key
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
@@ -392,7 +393,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
         )
 
         ctx.save_for_backward(v, bias, m, out)
@@ -430,7 +431,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             B,
             L,
             D,
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -452,7 +453,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=get_seq_group(L),
+            shape_key=token_key(L),
         )
 
         dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)

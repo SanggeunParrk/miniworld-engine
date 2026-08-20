@@ -17,14 +17,12 @@ AUTOTUNE = settings.current().autotunes("adaln")
 
 
 
-# shape_key, not raw M: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, so the
-# forward had no row axis in its key at all while its three backwards keyed the raw count.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key is the SHAPE bucket, and shape means L -- the atom count -- not the row count the
+# kernels receive. This module is level=atom in kernels/registry.csv, so the wrapper is
+# `atom_key`, and the value comes from `length_of(x.shape)` -- x's shape[-2] BEFORE the
+# `reshape(-1, nx)` below. The flattened M is B*A, which is why it cannot be the key: two batch
+# sizes at the same A are the same shape for tuning, and M cannot tell them apart.
+from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
 @triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"), key=['NX', 'NC', 'shape_key'])
@@ -738,6 +736,8 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
 
         m, nx = x_2d.shape
         _, nc = cond_2d.shape
+        # L for the autotune key: x's pre-flatten shape[-2] (the atom count), not m = B*A.
+        shape_key = atom_key(length_of(orig_x_shape))
 
         y = torch.empty_like(x_2d)
         x_hat = torch.empty((m, nx), dtype=torch.float32, device=x.device)
@@ -780,7 +780,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             eps_cond=eps_cond,
             USE_BF16=compute_dtype == torch.bfloat16,
             USE_FP16=compute_dtype == torch.float16,
-            shape_key=get_seq_group(m),
+            shape_key=shape_key,
         )
 
         ctx.save_for_backward(
@@ -822,6 +822,8 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
         grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
         m, nx = grad_output_2d.shape
         _, nc = cond_norm.shape
+        # Same L as the forward: the pre-flatten atom count, kept on ctx for exactly this.
+        shape_key = atom_key(length_of(ctx.orig_x_shape))
 
         dx = torch.empty_like(grad_output_2d)
         dcond = torch.empty((m, nc), dtype=torch.float32, device=grad_output.device)
@@ -857,7 +859,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
-            shape_key=get_seq_group(m),
+            shape_key=shape_key,
         )
         weight_grid = lambda meta: (
             triton.cdiv(nx, meta["BLOCK_N_NX"]),
@@ -884,7 +886,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
-            shape_key=get_seq_group(m),
+            shape_key=shape_key,
         )
         lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_N"])]
         adaln_bwd_lnw_kernel[lnw_grid](
@@ -908,7 +910,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
-            shape_key=get_seq_group(m),
+            shape_key=shape_key,
         )
 
         return (

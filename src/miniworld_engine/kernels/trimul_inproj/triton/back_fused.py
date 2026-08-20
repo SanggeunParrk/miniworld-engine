@@ -19,7 +19,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
+from miniworld_engine.autotune.shape_key import token_key
 
 
 # `_dx_kernel` and `_dw_kernel` were removed here. Both were @triton.jit with NO autotune and no
@@ -122,7 +122,7 @@ def front_bwd_dW_glogit(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit
     dconc5 = torch.empty(5 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
     _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, shape_key=get_seq_group(M))
+        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, shape_key=token_key(L))
 
     dWs = dconc5 @ xf                                            # (5H, Din) cuBLAS huge-K
     dWLg = dWs[:H].t().contiguous()
@@ -173,7 +173,7 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)   # [d_gLlog;d_pL;d_gRlog;d_pR]
     DM = H * M
     _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dconc, M, DM, D=H, shape_key=get_seq_group(M))
+        dL2, dR2, preact2, dconc, M, DM, D=H, shape_key=token_key(L))
 
     # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
     # slower there — measured. dispatch confirms + self-documents).
@@ -233,7 +233,7 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
     _dconcat_sig_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, lrL, lrR, sg2, dconc, M, DM, D=H, shape_key=get_seq_group(M))
+        dL2, dR2, lrL, lrR, sg2, dconc, M, DM, D=H, shape_key=token_key(L))
 
     from miniworld_engine.kernels.trimul_inproj.cute import dispatch
     dWs = dispatch.mm("dWs", dconc, xf)

@@ -40,7 +40,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
 )
-from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
+from miniworld_engine.autotune.shape_key import token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew,
@@ -167,7 +167,7 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)          # noqa: E731
     _bidir_front_kernel[grid](
         x_flat, Wlr, left, right, preact, M, M,
-        K=K, H2=H2, shape_key=get_seq_group(M), SAVE_PREACT=save_preact,
+        K=K, H2=H2, shape_key=token_key(L), SAVE_PREACT=save_preact,
     )
     return left, right, (preact if save_preact else None)
 

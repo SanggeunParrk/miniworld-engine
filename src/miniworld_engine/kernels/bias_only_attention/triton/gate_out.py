@@ -29,6 +29,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import length_of, token_key
 
 
 
@@ -40,6 +41,18 @@ from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 def get_seq_group(rows) -> int:
     """Delegates to canonical size-bucketing (autotune.buckets)."""
     return _bucket(rows)
+
+
+def _key_of(shape) -> int:
+    """token_key(L) from an activation's PRE-flatten shape ``[..., DH]``.
+
+    ``length_of`` reads L at ``shape[-2]``: right for both the pair ``(B, L, L, DH)`` and token
+    ``(B, L, DH)`` activations the module hands in, with no branch on which one it is. Only the
+    autograd Functions call this -- they still hold the un-flattened shape. The inner launchers
+    below take the finished key as a parameter, because once the activation is ``(M, DH)`` the
+    L is gone and M alone cannot say what produced it.
+    """
+    return token_key(length_of(shape))
 
 
 @triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['shape_key', 'N', 'DH'])
@@ -150,8 +163,13 @@ def _dgrad_epi(
     tl.store(a_ptr + off, (s * r).to(a_ptr.dtype.element_ty), mask=em)
 
 
-def _dgrad_epilogue(do2, wo, g2, r2):
-    """One kernel: d_a=do2@wo (GEMM) + gate-bwd epilogue -> (d_out_r, d_gate, gated)."""
+def _dgrad_epilogue(do2, wo, g2, r2, *, shape_key: int | None = None):
+    """One kernel: d_a=do2@wo (GEMM) + gate-bwd epilogue -> (d_out_r, d_gate, gated).
+
+    ``shape_key`` is ``token_key(L)``, computed by the caller: everything here is already the
+    flattened ``(M, DH)`` matrix, and M alone cannot say what L produced it. None -> smallest
+    bucket (bench/driver entry only).
+    """
     M, DH = g2.shape
     N = wo.shape[0]
     dr = torch.empty_like(g2)
@@ -163,12 +181,13 @@ def _dgrad_epilogue(do2, wo, g2, r2):
         do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
         g2.stride(0), g2.stride(1), r2.stride(0), r2.stride(1),
         dr.stride(0), dr.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=token_key(0) if shape_key is None else shape_key,
     )
     return dr, dg, a
 
 
-def _fwd(gate2d, outr2d, wo):
+def _fwd(gate2d, outr2d, wo, *, shape_key: int | None = None):
+    """``shape_key`` is ``token_key(L)`` from the caller (see ``_dgrad_epilogue``)."""
     M, DH = gate2d.shape
     N = wo.shape[0]
     out = torch.empty((M, N), device=gate2d.device, dtype=gate2d.dtype)
@@ -180,7 +199,7 @@ def _fwd(gate2d, outr2d, wo):
         outr2d.stride(0), outr2d.stride(1),
         wo.stride(0), wo.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=token_key(0) if shape_key is None else shape_key,
     )
     return out
 
@@ -194,7 +213,7 @@ class _FusedGateOut(torch.autograd.Function):
         DH = shape[-1]
         g2 = gate.reshape(-1, DH).contiguous()
         r2 = outr.reshape(-1, DH).contiguous()
-        out2 = _fwd(g2, r2, wo.contiguous())
+        out2 = _fwd(g2, r2, wo.contiguous(), shape_key=_key_of(shape))
         ctx.save_for_backward(g2, r2, wo)
         ctx.shape = shape
         ctx.N = wo.shape[0]
@@ -209,7 +228,7 @@ class _FusedGateOut(torch.autograd.Function):
         # out = a @ wo^T, a = sigmoid(gate)*out_r. Fuse the dgrad GEMM (d_a=do@wo)
         # with the gate-backward epilogue so d_a never materializes; only the wgrad
         # (d_wo = do^T @ a, needs the materialized gated `a`) stays on cuBLAS.
-        d_r, d_g, a = _dgrad_epilogue(do2, wo, g2, r2)
+        d_r, d_g, a = _dgrad_epilogue(do2, wo, g2, r2, shape_key=_key_of(ctx.shape))
         d_wo = do2.transpose(0, 1) @ a              # GEMM  [N, DH]
         return (
             d_g.reshape(ctx.shape),
@@ -239,7 +258,8 @@ class _SigmoidGate(torch.autograd.Function):
         a = torch.empty_like(gate)
         n = gate.numel()
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, shape_key=get_seq_group(n))
+        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n,
+                          shape_key=_key_of(gate.shape))
         ctx.save_for_backward(gate, out)
         return a
 
@@ -251,7 +271,8 @@ class _SigmoidGate(torch.autograd.Function):
         do = torch.empty_like(out)
         n = gate.numel()
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, shape_key=get_seq_group(n))
+        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n,
+                          shape_key=_key_of(gate.shape))
         return dg, do
 
 

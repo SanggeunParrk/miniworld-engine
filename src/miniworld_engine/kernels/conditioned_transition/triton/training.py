@@ -53,12 +53,17 @@ from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtyp
 # form — 1.5x on the whole conditioned_transition step (3406us -> 5107us of kernel time, same
 # 83 launches, so it is GPU work and not launch overhead). Trading ALU for bandwidth is the
 # wrong direction here. BLOCK_E still comes from the config space, so the tile is tuned either way.
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
+# never the row count, and never the flat element count, a kernel receives.
+#
+# CAVEAT, and it is the one thing to know about this family: every entry point here is handed an
+# ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py does
+# `x.reshape(-1, d)` before it calls -- so the largest L reachable inside these files is `length_of`
+# of that 2-D matrix, i.e. M = B*A. That IS A when no batch axis was folded in (B == 1) and is B*A
+# otherwise; the true A can only come from the module. The inner launchers therefore take the key as
+# a `shape_key` argument instead of re-deriving it, so the thread is one hop from the entry point
+# once the module passes A down.
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
 
 
 @triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['shape_key', 'ND'])
@@ -83,20 +88,27 @@ def _swiglu_fwd_kernel(
 
 
 
-def _swiglu(a, b):
+def _swiglu(a, b, *, shape_key=None):
     M, ND = a.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(a.shape))
     h = torch.empty(M, ND, device=a.device, dtype=a.dtype)  # contiguous output
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1),
-                             shape_key=get_seq_group(M))
+                             shape_key=shape_key)
     return h
 
 
-def _gate(out, scale):
+def _gate(out, scale, *, shape_key=None):
     y = torch.empty_like(out)
     n = out.numel()
+    if shape_key is None:
+        # `n` is a flat element count (M*D), not a shape. The kernel is `_sigmul_fwd`, which belongs
+        # to the gated_projection family (registry level=BOTH), so it keys against the union bucket
+        # set -- otherwise the same L would bucket differently depending on the launching family.
+        shape_key = both_key(length_of(out.shape))
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _sigmul_fwd[grid](scale, out, y, n, shape_key=get_seq_group(n))
+    _sigmul_fwd[grid](scale, out, y, n, shape_key=shape_key)
     return y
 
 
@@ -134,12 +146,14 @@ def _swiglu_bwd_kernel(
     tl.store(dab_ptr + base + (col + ND) * stride_pn, db.to(dab_ptr.dtype.element_ty), mask=mask)
 
 
-def _gate_bwd(out, scale, dy):
+def _gate_bwd(out, scale, dy, *, shape_key=None):
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
+    if shape_key is None:
+        shape_key = both_key(length_of(out.shape))   # `_sigmul_bwd` is gated_projection, level=both
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=get_seq_group(n))
+    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key)
     return dout, dscale
 
 
@@ -148,9 +162,11 @@ def _gate_bwd(out, scale, dy):
 # is a fast cuBLAS-adjacent reduction; keep it separate.
 
 
-def _swiglu_bwd_packed(a, b, dh):
+def _swiglu_bwd_packed(a, b, dh, *, shape_key=None):
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""
     M, ND = a.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(a.shape))
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_bwd_kernel[grid](
@@ -158,7 +174,7 @@ def _swiglu_bwd_packed(a, b, dh):
         a.stride(0), a.stride(1),
         dh.stride(0), dh.stride(1),
         dab.stride(0), dab.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return dab
 
@@ -267,9 +283,11 @@ def _b2b_fwd_train_kernel(
 # fmt: on
 
 
-def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
+def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
     """atom fused b2b training forward -> (y, ab=[a|b], h, out, scale)."""
     M, K = x.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x.shape))
     ND = wa.shape[0]
     D = ws.shape[0]
     DC = cond.shape[1]
@@ -287,7 +305,7 @@ def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
         wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
         out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return y, ab, h, out, scale
 
@@ -363,10 +381,10 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         else:  # "cublas": cat-merged expand (one GEMM) + cuBLAS GEMMs + triton elementwise
             ab = x @ wcat.t()                     # (M, 2*ND)
             a, b = ab[:, :ND], ab[:, ND:]
-            h = _swiglu(a, b)
+            h = _swiglu(a, b, shape_key=atom_key(length_of(x.shape)))
             out = h @ ws.t()
             scale = torch.addmm(bsc, cond, wsc.t())
-            y = _gate(out, scale)
+            y = _gate(out, scale, shape_key=both_key(length_of(x.shape)))
         ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc)
         ctx.ND = ND
         return y
@@ -378,7 +396,11 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         a, b = ab[:, :ND], ab[:, ND:]
         dy = dy.contiguous()
         # gate bwd (fused elementwise: dout, dscale in one flat pass — measured-best)
-        dout, dscale = _gate_bwd(out, scale, dy)        # (M, D), (M, D)
+        # One L for the whole backward: x is already (M, K) here -- see the CAVEAT up top.
+        # `_sigmul_bwd` is a level=both kernel, so its label uses the union bucket set.
+        shape_key = atom_key(length_of(x.shape))
+        dout, dscale = _gate_bwd(out, scale, dy,
+                                 shape_key=both_key(length_of(x.shape)))  # (M, D), (M, D)
         # conditioning grads
         dcond = dscale @ wsc                            # (M, DC)
         dWsc = dscale.t() @ cond                        # (D, DC)
@@ -387,7 +409,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         dh = dout @ ws                                  # (M, ND)
         dWs = dout.t() @ h                              # (D, ND)
         # swiglu bwd (fused elementwise) -> packed [da | db] : (M, 2*ND)
-        dab = _swiglu_bwd_packed(a, b, dh)
+        dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
         # expand bwd: one concatenated GEMM each (vs 2 + add).
         dx = dab @ wcat                                 # (M, K)
         dWcat = dab.t() @ x                             # (2*ND, K)

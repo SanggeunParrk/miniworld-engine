@@ -32,6 +32,7 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 # so it is a CSV tile; a row at or above the extent keeps the whole-row schedule
 # is still reachable and the tuner picks it wherever the second pass is not worth the registers.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import both_key
 
 
 def get_seq_group(rows) -> int:
@@ -115,7 +116,9 @@ def _ln_transpose_dbn_bnd(x, weight, bias, eps):
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _ln_transpose_dbn_kernel[grid](
         x_dm, y, weight.contiguous(), bias.contiguous(), M, float(eps), D=d,
-        shape_key=get_seq_group(M),
+        # x is CHANNEL-major (D, B, N) here, so the token axis is x.shape[-1] = n --
+        # i.e. shape[-2] of the (B, N, D) result this returns. Not M = b*n.
+        shape_key=both_key(n),
     )
     return y.view(b, n, d)
 

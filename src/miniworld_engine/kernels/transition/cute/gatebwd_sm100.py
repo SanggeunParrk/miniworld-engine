@@ -741,6 +741,7 @@ from miniworld_engine.autotune import tensor_dtype_of
 
 
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import both_key
 
 
 def get_seq_group(rows) -> int:
@@ -764,17 +765,21 @@ def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLOCK_E: tl.constexpr, shape_key
     tl.store(dB_ptr + offs, tl.load(dB_ptr + offs, mask=m) * ge, mask=m)
 
 
-def _grad_mul_inplace(dA, dB, ge):
+def _grad_mul_inplace(dA, dB, ge, *, shape_key: int | None = None):
     """dA *= ge; dB *= ge  in one pass (grad read once). All (M,ND) bf16 contiguous."""
     N = dA.numel()
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_E"]),)  # noqa: E731
-    _grad_mul_kernel[grid](dA, dB, ge, N, shape_key=get_seq_group(N))
+    # N here is a FLAT ELEMENT COUNT (dA.numel()), not even a row count -- there is nothing
+    # in it to recover L from, so the key comes from the caller: both_key(length_of(<pre-
+    # flatten shape>)). None = drivers_trans / checks_trans (coordinator-owned).
+    _grad_mul_kernel[grid](dA, dB, ge, N,
+                           shape_key=both_key(N) if shape_key is None else shape_key)
 
 
 _CACHE = {}
 
 
-def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
+def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand, *, shape_key: int | None = None):
     """SwiGLU gate-backward. xn:(M,K), wa/wb:(ND,K), grad_expand:(M,ND) bf16.
     Returns (h, dA, dB) each (M,ND) bf16, where a=xn@wa^T, b=xn@wb^T,
     h=silu(a)*b, dA=grad_expand*b*silu'(a), dB=grad_expand*silu(a)."""
@@ -821,5 +826,5 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand):
     if _split:
         # dA = grad_expand * (b*silu'(a)); dB = grad_expand * silu(a) — one fused pass
         # (grad read once) instead of two torch muls.
-        _grad_mul_inplace(dA, dB, grad_expand)
+        _grad_mul_inplace(dA, dB, grad_expand, shape_key=shape_key)
     return h, dA, dB

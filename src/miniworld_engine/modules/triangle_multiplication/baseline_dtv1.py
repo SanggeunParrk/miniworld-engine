@@ -82,6 +82,7 @@ from cuequivariance_ops.triton import Layout
 
 from miniworld_engine.autotune import tensor_dtype_of
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+from miniworld_engine.autotune.shape_key import token_key
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -191,6 +192,18 @@ def _triangle_contract_bmm_dbij(
 # ---------------------------------------------------------------------------
 # Forward Triton kernels
 # ---------------------------------------------------------------------------
+
+
+def _shape_key(seq_len) -> int:
+    """token_key(L). Every launcher in this file is handed an already-flattened matrix -- the
+    public entry point does ``x.reshape(b*i*j, d)`` before the first autograd.Function -- so L
+    cannot be read from any tensor here and is threaded down as ``seq_len`` instead. M = b*i*j
+    and the elementwise count ~2*D*M are element counts, not lengths.
+
+    None -> smallest bucket: that is the bench/driver entry point calling a launcher directly
+    with no L to give, not a production path.
+    """
+    return token_key(int(seq_len)) if seq_len is not None else token_key(0)
 
 
 def get_seq_group(rows) -> int:
@@ -525,7 +538,7 @@ def _gated_gemm_bwd_elemwise_kernel(
     tl.store(d_proj_ptr + offs, d_proj.to(out_dtype), mask=mask)
 
 
-def _elemwise_bwd_combined(grad, ab, sig_m):
+def _elemwise_bwd_combined(grad, ab, sig_m, *, seq_len=None):
     """Backward for input gated GEMM — writes (d_gate, d_proj) into a single (2N, M) buffer.
 
     Returns d_combined[shape=(2N, M)] where:
@@ -544,12 +557,12 @@ def _elemwise_bwd_combined(grad, ab, sig_m):
         grad.contiguous(), ab.contiguous(), sig_m.contiguous(),
         d_combined[:n], d_combined[n:],
         n_total,
-        shape_key=get_seq_group(n_total),
+        shape_key=_shape_key(seq_len),
     )
     return d_combined  # (2N, M) fully contiguous
 
 
-def _elemwise_bwd_separate(grad, ab, sig_m):
+def _elemwise_bwd_separate(grad, ab, sig_m, *, seq_len=None):
     """Backward for output gated GEMM — returns (d_gate, d_proj) as separate tensors."""
     n_total = grad.numel()
     d_gate = torch.empty_like(grad)
@@ -559,7 +572,7 @@ def _elemwise_bwd_separate(grad, ab, sig_m):
         grad.contiguous(), ab.contiguous(), sig_m.contiguous(),
         d_gate, d_proj,
         n_total,
-        shape_key=get_seq_group(n_total),
+        shape_key=_shape_key(seq_len),
     )
     return d_gate, d_proj
 
@@ -598,7 +611,7 @@ def _layernorm_backward_fused(grad_x_normed, x, mean, rstd, norm_w):
     return grad_x_op.view(m, k), grad_w, grad_b
 
 
-def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out):
+def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out, *, seq_len=None):
     """Run _input_gated_gemm_kernel; return (ab, sig_m).
 
     ab (= sigmoid(xn@wg.T) * (xn@wp.T) * mask) is stored in the input dtype
@@ -635,12 +648,12 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out):
         APPLY_MASK=apply_mask,
         TRANSPOSE_OUT=transpose_out,
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-        shape_key=get_seq_group(m),
+        shape_key=_shape_key(seq_len),
     )
     return ab, sig_m
 
 
-def _output_gemm_fwd(x_normed, x_out, w_gate, w_proj):
+def _output_gemm_fwd(x_normed, x_out, w_gate, w_proj, *, seq_len=None):
     """Run _output_gated_gemm_kernel; return (ab, sig).
 
     ab (the gated output) is in the input dtype — it becomes the final function
@@ -664,7 +677,7 @@ def _output_gemm_fwd(x_normed, x_out, w_gate, w_proj):
         m, n, k,
         w_gate.stride(0),
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-        shape_key=get_seq_group(m),
+        shape_key=_shape_key(seq_len),
     )
     return ab, sig
 
@@ -688,7 +701,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
 
     @staticmethod
     @opaque()
-    def forward(ctx, x, norm_w, norm_b, w_gate, w_proj, mask, eps, transpose_out):
+    def forward(ctx, x, norm_w, norm_b, w_gate, w_proj, mask, eps, transpose_out, seq_len):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
             x, w_gate, w_proj = x.to(dtype), w_gate.to(dtype), w_proj.to(dtype)
@@ -704,6 +717,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
             x_normed, w_gate, w_proj,
             mask if apply_mask else None,
             transpose_out,
+            seq_len=seq_len,
         )
 
         # Pre-compute [w_gate; w_proj] (4D×K) once in forward; reuse in backward
@@ -717,6 +731,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
             w_combined,
         )
         ctx.transpose_out = transpose_out
+        ctx.seq_len = seq_len
         return ab, mean, rstd, x_normed
 
     @staticmethod
@@ -731,7 +746,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
 
         # Elementwise backward → d_combined (2N, M) contiguous buffer.
         # d_combined[:N] = d_gate,  d_combined[N:] = d_proj
-        d_combined = _elemwise_bwd_combined(grad_ab, ab, sig_m)
+        d_combined = _elemwise_bwd_combined(grad_ab, ab, sig_m, seq_len=ctx.seq_len)
 
         # Weight grad: single (4D, M) @ (M, K) GEMM then split — reads x_normed once.
         grad_w_combined = d_combined @ x_normed   # (4D, K)
@@ -747,7 +762,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
             grad_xn = torch.mm(d_combined.T, w_combined)   # (M, K)
 
         grad_x, grad_nw, grad_nb = _layernorm_backward_fused(grad_xn, x, mean, rstd, norm_w)
-        return grad_x, grad_nw, grad_nb, grad_w_gate, grad_w_proj, None, None, None
+        return grad_x, grad_nw, grad_nb, grad_w_gate, grad_w_proj, None, None, None, None
 
 
 class _OutputGEMM(torch.autograd.Function):
@@ -759,15 +774,16 @@ class _OutputGEMM(torch.autograd.Function):
 
     @staticmethod
     @opaque()
-    def forward(ctx, x_normed, x_out, w_gate, w_proj):
+    def forward(ctx, x_normed, x_out, w_gate, w_proj, seq_len):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
             x_normed, x_out = x_normed.to(dtype), x_out.to(dtype)
             w_gate, w_proj = w_gate.to(dtype), w_proj.to(dtype)
 
         x_normed, x_out = x_normed.contiguous(), x_out.contiguous()
-        ab, sig = _output_gemm_fwd(x_normed, x_out, w_gate, w_proj)
+        ab, sig = _output_gemm_fwd(x_normed, x_out, w_gate, w_proj, seq_len=seq_len)
         ctx.save_for_backward(x_normed, x_out, w_gate, w_proj, ab, sig)
+        ctx.seq_len = seq_len
         return ab
 
     @staticmethod
@@ -775,13 +791,14 @@ class _OutputGEMM(torch.autograd.Function):
     def backward(ctx, grad_out):
         x_normed, x_out, w_gate, w_proj, ab, sig = ctx.saved_tensors
 
-        d_gate, d_proj = _elemwise_bwd_separate(grad_out.contiguous(), ab, sig)
+        d_gate, d_proj = _elemwise_bwd_separate(grad_out.contiguous(), ab, sig,
+                                               seq_len=ctx.seq_len)
 
         grad_w_gate = d_gate.T @ x_normed    # (D, M) @ (M, K) = (D, K)
         grad_w_proj = d_proj.T @ x_out       # (D, M) @ (M, K) = (D, K)
         grad_x_normed = d_gate @ w_gate      # (M, D) @ (D, K) = (M, K)
         grad_x_out = d_proj @ w_proj         # (M, D) @ (D, K) = (M, K)
-        return grad_x_normed, grad_x_out, grad_w_gate, grad_w_proj
+        return grad_x_normed, grad_x_out, grad_w_gate, grad_w_proj, None
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +839,7 @@ def fused_triangle_multiplicative_update_dtv1(
         mask_flat,
         eps,
         True,  # TRANSPOSE_OUT — writes (2D, M) for free reshape to (D, B, I, J)
+        i,     # L (tokens) for the autotune shape key — x_flat has already lost it
     )
     a_t, b_t = torch.chunk(ab_t, 2, dim=0)
     a_dbij = a_t.view(d, b, i, j)
@@ -842,5 +860,6 @@ def fused_triangle_multiplicative_update_dtv1(
         x_out_flat.reshape(m, d),
         g_out_weight,
         p_out_weight,
+        i,  # L (tokens) for the autotune shape key
     )
     return result.reshape(b, i, j, d)

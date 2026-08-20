@@ -12,6 +12,7 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import length_of, token_key
 
 
 def get_seq_group(length) -> int:
@@ -279,7 +280,7 @@ class TritonTM1Function(torch.autograd.Function):
             right,
             M,
             N,
-            shape_key=get_seq_group(M),
+            shape_key=token_key(length_of(original_shape)),
         )
 
         ctx.save_for_backward(
@@ -338,7 +339,7 @@ class TritonTM1Function(torch.autograd.Function):
             dRB,
             M,
             N,
-            shape_key=get_seq_group(M),
+            shape_key=token_key(length_of(original_shape)),
         )
 
         dx = dLA @ left_gate_weight.T + dLB @ left_weight.T

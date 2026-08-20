@@ -26,11 +26,11 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import both_key, length_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 from miniworld_engine.kernels.transition.triton.fused import (
     _transition_expand_gatebwd_savedxn,
     _transition_ln_bwd,
-    get_seq_group,
 )
 
 
@@ -67,14 +67,17 @@ def _xn_recompute_kernel(
 # fmt: on
 
 
-def _xn_recompute(x2, rstd, c1, gamma, beta):
+def _xn_recompute(x2, rstd, c1, gamma, beta, *, shape_key: int | None = None):
     M, K = x2.shape
     xn = torch.empty_like(x2)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _xn_recompute_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(), xn,
         M, K, x2.stride(0), x2.stride(1),
-        shape_key=get_seq_group(M),
+        # both_key(length_of(<pre-flatten shape>)) from the caller (the backward below).
+        # None = drivers_trans / checks_trans, which the coordinator threads; that path
+        # buckets the flattened ROW count, the ambiguity autotune.shape_key removes.
+        shape_key=both_key(M) if shape_key is None else shape_key,
     )
     return xn
 from miniworld_engine.kernels.transition.cute.gemm_transition_swiglu import (
@@ -123,7 +126,10 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         x2 = x2.contiguous()
 
         # LN stats computed once and saved for the separate backward (no recompute there).
-        rstd, c1 = stats_triton(x2, eps)
+        # L = shape[-2] of x BEFORE the reshape -- one rule for pair (B, L, L, D) and
+        # token/atom (B, L, D). Threaded into every launcher, saved for the backward.
+        shape_key = both_key(length_of(orig_shape))
+        rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
 
         # cute fused LN + SwiGLU expand (LN folded into the gated dual-GEMM), then cuBLAS squeeze.
         expand = transition_expand_swiglu_cute(
@@ -146,6 +152,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         ctx.n = n
         ctx.eps = eps
         ctx.orig_shape = orig_shape
+        ctx.shape_key = shape_key
         ctx.backward_backend = backward_backend
         return out.reshape(orig_shape)
 
@@ -157,6 +164,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
             expand_a_weight, expand_b_weight, squeeze_weight,
         ) = ctx.saved_tensors
         orig_shape = ctx.orig_shape
+        shape_key = ctx.shape_key
         dt = x2.dtype
         K = x2.shape[-1]
         D = squeeze_weight.shape[0]
@@ -170,13 +178,13 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
 
         # Re-materialize xn (one bandwidth-bound triton pass) from raw x + saved stats:
         # reused by the cute gatebwd GEMM operand AND the stacked wgrad GEMM.
-        xn = _xn_recompute(x2, rstd, c1, ln_weight, ln_bias)
+        xn = _xn_recompute(x2, rstd, c1, ln_weight, ln_bias, shape_key=shape_key)
 
         grad_expand = go @ squeeze_weight                 # dh  [M, ND]
         if ctx.backward_backend == "cute":
             # ONE cute WGMMA: recompute a,b once -> h (for dWs) + interleaved dAB=[dA|dB].
             h, dAB, Bw = transition_expand_gatebwd_cute(
-                xn, grad_expand, expand_a_weight, expand_b_weight
+                xn, grad_expand, expand_a_weight, expand_b_weight, shape_key=shape_key,
             )
             dWs = go.t() @ h
             d_xn = dAB @ Bw
@@ -188,7 +196,8 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
             # cuBLAS GEMM but removes a bandwidth-heavy materialization at wide d.
             # Recompute h here (store_h=True) instead of saving it in the forward.
             h, dA, dB = _transition_expand_gatebwd_savedxn(
-                xn, expand_a_weight, expand_b_weight, grad_expand, store_h=True
+                xn, expand_a_weight, expand_b_weight, grad_expand, store_h=True,
+                shape_key=shape_key,
             )
             dWs = go.t() @ h
             dWa = dA.t() @ xn
@@ -196,7 +205,8 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
             d_xn = dA @ expand_a_weight + dB @ expand_b_weight
 
         # LayerNorm backward (EXISTING triton kernel from saved stats: dx, dgamma, dbeta).
-        dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight)
+        dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight,
+                                               shape_key=shape_key)
 
         return (
             dx.reshape(orig_shape),

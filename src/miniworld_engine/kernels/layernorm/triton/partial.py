@@ -14,7 +14,8 @@ import triton.language as tl
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
-from .main import get_seq_group, layer_norm_fwd_fused
+from .main import layer_norm_fwd_fused
+from miniworld_engine.autotune.shape_key import both_key, length_of
 
 
 def _bwd_block_m(n: int) -> int:
@@ -70,7 +71,9 @@ class TritonLayerNormPartialReductionFunction(torch.autograd.Function):
             m,
             n,
             eps,
-            GROUP_M=get_seq_group(m),
+            # L = x.shape[-2] BEFORE the reshape, not m. (The kernel parameter is named
+            # shape_key now -- GROUP_M here was a stale name from before the rename.)
+            shape_key=both_key(length_of(x.shape)),
             HAS_ROWSCALE=False,
         )
 
@@ -109,7 +112,7 @@ class TritonLayerNormPartialReductionFunction(torch.autograd.Function):
             x.stride(1),
             m,
             N=n,
-            GROUP_M=get_seq_group(m),
+            shape_key=both_key(length_of(ctx.input_shape)),
         )
 
         dw = partial_dw.sum(dim=0).to(weight.dtype)

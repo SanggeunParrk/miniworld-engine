@@ -30,12 +30,17 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 # fmt: off
-from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-
-
-def get_seq_group(rows) -> int:
-    """Delegates to canonical size-bucketing (autotune.buckets)."""
-    return _bucket(rows)
+# shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
+# never the row count a kernel receives.
+#
+# CAVEAT, and it is the one thing to know about this family: every entry point here is handed an
+# ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py does
+# `x.reshape(-1, d)` before it calls -- so the largest L reachable inside these files is `length_of`
+# of that 2-D matrix, i.e. M = B*A. That IS A when no batch axis was folded in (B == 1) and is B*A
+# otherwise; the true A can only come from the module. The inner launchers therefore take the key as
+# a `shape_key` argument instead of re-deriving it, so the thread is one hop from the entry point
+# once the module passes A down.
+from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
 @triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['shape_key', 'ND', 'K'])
@@ -151,9 +156,11 @@ def _squeeze_gate_kernel(
 # fmt: on
 
 
-def _expand_swiglu(x, wa, wb):
+def _expand_swiglu(x, wa, wb, *, shape_key=None):
     """h = silu(x @ Wa^T) * (x @ Wb^T) -> (M, ND)."""
     M, K = x.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(x.shape))
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
@@ -163,14 +170,16 @@ def _expand_swiglu(x, wa, wb):
         x.stride(0), x.stride(1),
         wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return h
 
 
-def _squeeze_gate(h, cond, ws, wsc, bsc):
+def _squeeze_gate(h, cond, ws, wsc, bsc, *, shape_key=None):
     """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D)."""
     M, ND = h.shape
+    if shape_key is None:
+        shape_key = atom_key(length_of(h.shape))
     D = ws.shape[0]
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
@@ -183,7 +192,7 @@ def _squeeze_gate(h, cond, ws, wsc, bsc):
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=shape_key,
     )
     return out
 
@@ -195,8 +204,9 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc):
     """
     wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
-    h = _expand_swiglu(x, wa, wb)
-    return _squeeze_gate(h, cond, ws, wsc, bsc)
+    shape_key = atom_key(length_of(x.shape))   # x is already (M, K) here -- see the CAVEAT above
+    h = _expand_swiglu(x, wa, wb, shape_key=shape_key)
+    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)
 
 
 def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc):
@@ -213,5 +223,6 @@ def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc):
     """
     wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
-    h = _expand_swiglu(x, wa, wb)            # 1+2
-    return _squeeze_gate(h, cond, ws, wsc, bsc)  # 3+4+5
+    shape_key = atom_key(length_of(x.shape))   # x is already (M, K) here -- see the CAVEAT above
+    h = _expand_swiglu(x, wa, wb, shape_key=shape_key)            # 1+2
+    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)  # 3+4+5

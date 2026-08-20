@@ -21,7 +21,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
+from miniworld_engine.autotune.shape_key import token_key
 
 
 # B200 (sm_100) pruned set. Swept BM in {32,64,128,256,512} x warps {4,8,16}
@@ -196,5 +196,5 @@ def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=Non
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
                        ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
-                       K=D, N=D, shape_key=get_seq_group(M), ADD_RESIDUAL=add_residual)
+                       K=D, N=D, shape_key=token_key(L), ADD_RESIDUAL=add_residual)
     return y.view(B, L, L, D)

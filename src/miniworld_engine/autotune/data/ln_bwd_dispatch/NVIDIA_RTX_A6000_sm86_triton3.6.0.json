@@ -1,4 +1,12 @@
 {
+  "128|1024": {
+    "ms": {
+      "atomic": 0.018139,
+      "partial": 0.023815,
+      "persistent": 0.026996
+    },
+    "path": "atomic"
+  },
   "128|1048576": {
     "ms": {
       "atomic": 1.120352,
@@ -12,6 +20,14 @@
       "atomic": 0.16907,
       "partial": 0.280803,
       "persistent": 0.175927
+    },
+    "path": "atomic"
+  },
+  "128|256": {
+    "ms": {
+      "atomic": 0.017084,
+      "partial": 0.022738,
+      "persistent": 0.026198
     },
     "path": "atomic"
   },

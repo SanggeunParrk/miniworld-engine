@@ -112,5 +112,5 @@ def trimul_front_sm100_fused(
 
     # 2. blld (M, 2D) -> bdll (2D, M) == [B, 2D, L, L]; left/right are the D-plane slices.
     lr = torch.empty(B, 2 * D, L, L, device=x.device, dtype=x.dtype)
-    _transpose_blld_to_bdll(blld, lr.view(2 * D, M))
+    _transpose_blld_to_bdll(blld, lr.view(2 * D, M), seq_len=L)
     return lr[:, :D], lr[:, D:]

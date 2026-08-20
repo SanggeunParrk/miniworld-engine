@@ -12,6 +12,7 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
+from miniworld_engine.autotune.shape_key import length_of, token_key
 
 # Real cross-product tile search (was: 2 fwd pinned / 3 bwd configs with BLOCK_N pinned to 64).
 # BLOCK_M1 (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
@@ -212,7 +213,7 @@ class TritonTM2Function(torch.autograd.Function):
             out,
             M,
             N,
-            shape_key=get_seq_group(M),
+            shape_key=token_key(length_of(original_shape)),
         )
 
         ctx.save_for_backward(x, y, gate_weight, out_weight)
@@ -247,7 +248,7 @@ class TritonTM2Function(torch.autograd.Function):
             dB,
             M,
             N,
-            shape_key=get_seq_group(M),
+            shape_key=token_key(length_of(original_shape)),
         )
         dx = dA @ gate_weight.T
         dy = dB @ out_weight.T

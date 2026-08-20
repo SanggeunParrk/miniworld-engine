@@ -52,7 +52,7 @@ from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels._quack_compat import jit_cache
-from miniworld_engine.kernels.transition.triton.fused import get_seq_group
+from miniworld_engine.autotune.shape_key import both_key
 from quack.gemm_config import GemmConfig
 from quack.gemm_tvm_ffi_utils import (
     perm3d_single,
@@ -90,7 +90,7 @@ def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BLOCK_M1: tl.
 # fmt: on
 
 
-def _cdup_interleave(ge: Tensor) -> Tensor:
+def _cdup_interleave(ge: Tensor, *, shape_key: int | None = None) -> Tensor:
     # ge may be a strided/transposed VIEW (col stride != 1); the kernel reads it with an
     # explicit col stride, fusing an upstream transpose into this (already-present) copy.
     M, N = ge.shape
@@ -98,7 +98,10 @@ def _cdup_interleave(ge: Tensor) -> Tensor:
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
     _cdup_interleave_kernel[grid](
         ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0),
-        shape_key=get_seq_group(M),
+        # both_key(length_of(<pre-flatten shape>)) from transition/cute/fused.py's backward.
+        # None = drivers_trans / checks_trans (coordinator-owned): buckets the flattened ROW
+        # count, the L-vs-L*L ambiguity autotune.shape_key removes.
+        shape_key=both_key(M) if shape_key is None else shape_key,
     )
     return o
 
@@ -319,6 +322,7 @@ def transition_expand_gatebwd_cute(
     *,
     prefolded_B: Tensor | None = None,   # (2N, K) interleaved [Wa|Wb] (NO gamma fold for bwd)
     config: GemmConfig | None = None,
+    shape_key: int | None = None,        # both_key(length_of(pre-flatten shape)) from caller
 ) -> tuple[Tensor, Tensor, Tensor]:
     """SwiGLU-gate backward via one dual-accumulator WGMMA.
 
@@ -354,7 +358,7 @@ def transition_expand_gatebwd_cute(
     S = torch.zeros(1, 2 * N, dtype=torch.float32, device=xn.device)
     B2 = torch.zeros(1, 2 * N, dtype=torch.float32, device=xn.device)
     # Duplicate grad_expand to interleaved (M, 2N) so C aligns to the [a|b] accumulator.
-    C = _cdup_interleave(grad_expand)
+    C = _cdup_interleave(grad_expand, shape_key=shape_key)
     dAB = torch.empty(M, 2 * N, dtype=xn.dtype, device=xn.device)
     h = torch.empty(M, N, dtype=xn.dtype, device=xn.device)
     gemm_dln_gatebwd(xn, Bw, dAB, h, C, rstd, c1, S, B2, config=config)

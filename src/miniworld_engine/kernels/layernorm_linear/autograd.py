@@ -81,7 +81,7 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
         xc, gamma, mean, rstd, rstd,
         dgamma.stride(0), dbeta.stride(0), xc.stride(0), xc.stride(1),
         M, K,
-        GROUP_M=get_seq_group(M),  # BLOCK_N is a tuned tile now (see layernorm/triton/main.py)
+        shape_key=get_seq_group(M),  # BLOCK_N is a tuned tile now (see layernorm/triton/main.py)
         HAS_ROWSCALE=False,
     )
     return dx, dgamma, dbeta
