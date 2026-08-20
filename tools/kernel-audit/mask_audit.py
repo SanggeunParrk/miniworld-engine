@@ -19,7 +19,9 @@ body never mentions its extent at all cannot be masking the axis it walks.
 with ``boundary_check=(0, 1)`` is fully bounded and is not reported.
 """
 from __future__ import annotations
-import ast, csv, re
+import ast
+import csv
+import re
 from pathlib import Path
 
 import os

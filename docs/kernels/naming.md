@@ -173,3 +173,56 @@ detail 이 둘 이상이면 이 순서로 쓴다:
 이름표는 파일 기준이 아니라 **launch 지점 기준**으로 열거한다. 파일 기준으로 세면 `.cu` 커널과
 cute collective 클래스가 통째로 빠진다(현재 최소 6개 CUDA 커널이 이름표에 없다 —
 [naming-audit.md](../docs/kernels/naming-audit.md) §2 참조).
+
+---
+
+## 커널 등록 규칙 (필수)
+
+새 커널은 **`src/miniworld_engine/kernels/registry.csv`에 행을 추가해야 완료된다.** 이름만 규칙에
+맞추는 것으로는 부족하다. 열은 9개다.
+
+    kernel, backend, family, kind, level, file, symbol, driver, check
+
+`kind`와 `level`은 **개발자가 직접 채운다.** 자동으로 채워지지 않는다.
+
+| 열 | 값 | 의미 |
+|---|---|---|
+| `kind` | `gemm` / `reduce` / `elem` | 행렬곱을 하는가(`tl.dot`, cuBLAS gemm, MMA/WGMMA/tcgen05), 행렬곱 없이 레인·블록 간 감축을 하는가(`tl.sum/max/min`, warp shuffle, atomic 누적), 아니면 원소 단위 작업인가 |
+| `level` | `atom` / `token` / `both` | 모델에서 원자 단위 블록에 쓰이는가, 토큰·페어 단위에 쓰이는가, 양쪽인가 |
+| `driver` | `module:function` | 그 커널을 실제 입력으로 한 번 실행하는 함수. 비워둘 수 없다 |
+| `check` | `module:function` | 같은 형상으로 다시 실행해 torch fp32 레퍼런스와 대조하는 함수. 어떤 카드에서도 launch되지 않는 커널만 비워둘 수 있다 |
+
+### 왜 필수인가
+
+**행이 없으면 커널은 "미검증"이 아니라 "존재하지 않는 것"이 된다.** `autotune.run_all`, 커버리지
+보고, 모든 정확도 스윕이 registry를 순회한다. 예전에는 AST로 `configs_for(...)`를 훑어 커널을
+찾았는데, 그건 답을 추론하는 방식이었고 양방향으로 틀렸다 — 그래서 선언이 생겼다.
+
+**`level`은 기계가 채울 수 없다.** 그 커널이 모델의 어디에 쓰이는지는 커널 텍스트의 성질이 아니라
+아키텍처의 성질이다. 나중에 자동으로 메울 수 없으므로 추가하는 사람이 넣어야 한다.
+
+**`driver`/`check`가 비면 구멍이 보이지 않는다.** driver는 커널이 도는지를, checker는 수치가 맞는지를
+증명한다. 이 둘은 다른 얘기다 — 커널 56개가 "예외를 내지 않았다"는 이유로 `ok`로 기록돼 있었고, 그
+상태에서 마스킹 버그 3개가 프로덕션 코드에 남아 있었다. 그 셋은 우연히 checker가 있어서 잡혔다.
+
+`kind`에서 `reduce`를 `elem`과 따로 두는 이유: 감축에는 **누적 순서**가 있다. 타일 크기가 수치를
+바꾸는 자리, 배리어 누락이나 tail 마스크 오류가 행 전체를 오염시키는 자리가 전부 여기다. 실제로
+발견된 결함 4개 중 3개가 감축·수축축에서 나왔다.
+
+### 강제
+
+`tests/test_registry_complete.py`가 검사한다. GPU가 필요 없다.
+
+* 빈 셀 (`check` 제외), 어휘 밖의 `kind`/`level`, 한 family 안에서 갈리는 `level`
+* 중복 이름, 존재하지 않는 `file`
+* **`configs_for("op")`를 호출하는데 행이 없는 op** — 잊은 커널을 실제로 잡는 방향이다. config는
+  있고 행은 없는 커널은 프로덕션에서 돌면서 어떤 스윕에도 나타나지 않는다
+* `driver`/`check`가 가리키는 함수가 그 모듈에 정의돼 있는지
+* **손으로 넣은 `kind`가 소스와 맞는지** — `tools/kernel-audit/classify.py`가 커널이 인라인하는
+  호출의 전이 폐쇄를 따라가 판정한다. 불일치는 자동으로 행의 잘못이 아니다(`tl.dot`이 생겼으면
+  커널의 kind가 실제로 바뀐 것이다). 그래서 테스트는 양쪽을 다 출력하고 판단은 사람에게 남긴다.
+  손으로 선언하고 기계가 검증한다.
+
+`tools/kernel-audit/classify.py`는 본문만 보지 않는다. flash-attention forward는 `tl.dot`을
+인라인되는 `@triton.jit` 헬퍼에 두고, CUDA LayerNorm은 감축을 `__device__` 헬퍼에 둔다 — 본문만
+읽으면 둘 다 `elem`으로 잡힌다.

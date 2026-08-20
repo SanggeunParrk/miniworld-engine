@@ -6,7 +6,8 @@ The autotuner injects EXACTLY the config CSV header columns, so:
   * axes.csv names must match the code, or the doc points at a knob that does not exist
 """
 from __future__ import annotations
-import ast, csv
+import ast
+import csv
 from collections import defaultdict
 from pathlib import Path
 

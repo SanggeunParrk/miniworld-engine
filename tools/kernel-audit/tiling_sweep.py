@@ -9,7 +9,10 @@ or CUTE kernel's tiling is fixed in its source and re-running it per set measure
 paying a multi-minute nvcc build each time.
 """
 from __future__ import annotations
-import argparse, csv, os, sys, traceback
+import argparse
+import csv
+import os
+import sys
 from pathlib import Path
 
 # Do NOT shadow PYTHONPATH: an inserted path takes precedence over it, so a caller that points

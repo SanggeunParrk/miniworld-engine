@@ -9,7 +9,8 @@ This finds the mismatch by name instead of by number:
   * a single grid object shared by two kernels whose axis sets differ
 """
 from __future__ import annotations
-import ast, csv
+import ast
+import csv
 from collections import defaultdict
 from pathlib import Path
 

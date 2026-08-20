@@ -17,7 +17,8 @@ would be guessing, every column here is read off the code or the config CSVs:
 The prose is not lost: the previous file is kept verbatim as docs/kernels/axes-legacy.csv.
 """
 from __future__ import annotations
-import ast, csv
+import ast
+import csv
 from pathlib import Path
 
 ROOT = Path("src/miniworld_engine")
