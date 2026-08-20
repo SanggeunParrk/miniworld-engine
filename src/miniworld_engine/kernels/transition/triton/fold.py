@@ -16,28 +16,19 @@ their two reductions, and writes B (already interleaved), S, B2. Target < 15us.
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
 
-_transition_fold_swiglu_prune = make_cache_prune(
-    "transition_fold_swiglu", dtype_of=tensor_dtype_of("wa_ptr"),
-    bucket_of=key_bucket_of("N", "K"),
-)
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_J": bj}, num_warps=nw)
-        for bj in (8, 16, 32, 64, 128)
-        for nw in (1, 2, 4, 8)
-    ],
-    key=["N", "K"],
-    prune_configs_by={"early_config_prune": _transition_fold_swiglu_prune},
-)
+
+# BLOCK_N is the 2-D row tile over N; BLOCK_K tiles the K reduction. Both come from the CSV.
+@triton.autotune(configs=configs_for("transition_fold_triton"), key=['N', 'K'])
 @triton.jit
 def _fold_kernel(
     wa_ptr, wb_ptr, gamma_ptr, beta_ptr,
@@ -45,35 +36,43 @@ def _fold_kernel(
     N, K,
     stride_wn, stride_wk,   # Wa/Wb share strides (both (N,K) contiguous)
     stride_bn, stride_bk,   # B is (2N, K)
-    BLOCK_J: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    j = pid * BLOCK_J + tl.arange(0, BLOCK_J)        # (BLOCK_J,) over N
-    k = tl.arange(0, BLOCK_K)                         # (BLOCK_K,) over K
+    j = pid * BLOCK_N + tl.arange(0, BLOCK_N)        # (BLOCK_N,) over N
     j_mask = j < N
-    k_mask = k < K
-    mask = j_mask[:, None] & k_mask[None, :]
 
-    w_off = j[:, None] * stride_wn + k[None, :] * stride_wk
-    wa = tl.load(wa_ptr + w_off, mask=mask, other=0.0).to(tl.float32)   # (BJ, BK)
-    wb = tl.load(wb_ptr + w_off, mask=mask, other=0.0).to(tl.float32)
-    gamma = tl.load(gamma_ptr + k, mask=k_mask, other=0.0).to(tl.float32)  # (BK,)
-    beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+    # The four K-reductions are plain sums, so they accumulate exactly across K tiles; the B
+    # rows are elementwise and are written per tile inside the same loop. K used to arrive as
+    # BLOCK_K=next_power_of_2(K) — one whole-row tile the autotuner never chose.
+    sa = tl.zeros([BLOCK_N], dtype=tl.float32)     # S gate
+    sb = tl.zeros([BLOCK_N], dtype=tl.float32)     # S up
+    b2a = tl.zeros([BLOCK_N], dtype=tl.float32)    # Wa@beta
+    b2b = tl.zeros([BLOCK_N], dtype=tl.float32)    # Wb@beta
+    for k0 in range(0, K, BLOCK_K):
+        k = k0 + tl.arange(0, BLOCK_K)             # (BLOCK_K,) over K
+        k_mask = k < K
+        mask = j_mask[:, None] & k_mask[None, :]
 
-    # folded gated rows (gamma-scaled), cast to bf16 for B.
-    ba = wa * gamma[None, :]
-    bb = wb * gamma[None, :]
-    # reductions over K.
-    sa = tl.sum(ba, axis=1)            # S gate
-    sb = tl.sum(bb, axis=1)            # S up
-    b2a = tl.sum(wa * beta[None, :], axis=1)   # Wa@beta
-    b2b = tl.sum(wb * beta[None, :], axis=1)   # Wb@beta
+        w_off = j[:, None] * stride_wn + k[None, :] * stride_wk
+        wa = tl.load(wa_ptr + w_off, mask=mask, other=0.0).to(tl.float32)   # (BJ, BK)
+        wb = tl.load(wb_ptr + w_off, mask=mask, other=0.0).to(tl.float32)
+        gamma = tl.load(gamma_ptr + k, mask=k_mask, other=0.0).to(tl.float32)  # (BK,)
+        beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
 
-    # write B interleaved: row 2j = gate, 2j+1 = up.
-    b_off_a = (2 * j[:, None]) * stride_bn + k[None, :] * stride_bk
-    b_off_b = (2 * j[:, None] + 1) * stride_bn + k[None, :] * stride_bk
-    tl.store(b_ptr + b_off_a, ba.to(b_ptr.dtype.element_ty), mask=mask)
-    tl.store(b_ptr + b_off_b, bb.to(b_ptr.dtype.element_ty), mask=mask)
+        # folded gated rows (gamma-scaled), cast to bf16 for B.
+        ba = wa * gamma[None, :]
+        bb = wb * gamma[None, :]
+        sa += tl.sum(ba, axis=1)
+        sb += tl.sum(bb, axis=1)
+        b2a += tl.sum(wa * beta[None, :], axis=1)
+        b2b += tl.sum(wb * beta[None, :], axis=1)
+
+        # write B interleaved: row 2j = gate, 2j+1 = up.
+        b_off_a = (2 * j[:, None]) * stride_bn + k[None, :] * stride_bk
+        b_off_b = (2 * j[:, None] + 1) * stride_bn + k[None, :] * stride_bk
+        tl.store(b_ptr + b_off_a, ba.to(b_ptr.dtype.element_ty), mask=mask)
+        tl.store(b_ptr + b_off_b, bb.to(b_ptr.dtype.element_ty), mask=mask)
 
     # write S / B2 interleaved (f32).
     tl.store(s_ptr + 2 * j, sa, mask=j_mask)
@@ -97,14 +96,12 @@ def fold_swiglu_triton(
     B = torch.empty(2 * N, K, dtype=w2_dtype, device=Wa.device)
     S = torch.empty(2 * N, dtype=torch.float32, device=Wa.device)
     B2 = torch.empty(2 * N, dtype=torch.float32, device=Wa.device)
-    BLOCK_K = triton.next_power_of_2(K)
-    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_J"]),)
+    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_N"]),)
     _fold_kernel[grid](
         Wa, Wb, ln_weight.contiguous(), ln_bias.contiguous(),
         B, S, B2,
         N, K,
         Wa.stride(0), Wa.stride(1),
         B.stride(0), B.stride(1),
-        BLOCK_K=BLOCK_K,
     )
     return B, S, B2

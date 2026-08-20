@@ -21,6 +21,7 @@ A future custom kernel can fold the transpose into the GEMM epilogue.
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 from miniworld_engine.kernels._quack_compat import gemm_act
@@ -28,9 +29,28 @@ from miniworld_engine.kernels._quack_compat import gemm_act
 import triton
 import triton.language as tl
 
+from miniworld_engine.autotune import tensor_dtype_of
 
+# Flat elementwise glue around the cute GEMM: one tiled axis (the linear element index).
+# Both kernels were launched with a literal BLOCK=1024 that no measurement chose.
+
+
+
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+# restore_value is NOT optional here: this kernel is IN-PLACE (proj is both read and written),
+# and the autotuner runs every candidate config on the real buffers. Without it, proj would be
+# multiplied by sigmoid(gate) once per benched config instead of once, so the tuning sweep itself
+# silently corrupts the tensor. Any in-place kernel that gains an @autotune needs this.
+@triton.autotune(configs=configs_for("gated_projection_gate_inplace_flat_triton"), key=['seq_group'], restore_value=['proj_ptr'])
 @triton.jit
-def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK: tl.constexpr):
+def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK_E: tl.constexpr, seq_group):
     """In-place: proj = proj * sigmoid(gate), elementwise over a flat buffer.
 
     sigmoid + multiply are computed in fp32 (a single round to bf16 on store),
@@ -39,22 +59,25 @@ def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK: tl.constexpr):
     gate + one write. Precision is not reduced (fewer intermediate roundings).
     """
     pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     m = offs < n
     p = tl.load(proj_ptr + offs, mask=m).to(tl.float32)
     g = tl.load(gate_ptr + offs, mask=m).to(tl.float32)
     tl.store(proj_ptr + offs, (p * tl.sigmoid(g)).to(tl.bfloat16), mask=m)
 
 
+
+
+@triton.autotune(configs=configs_for("gated_projection_gate_packed_flat_triton"), key=['seq_group'])
 @triton.jit
-def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK: tl.constexpr):
+def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK_E: tl.constexpr, seq_group):
     """out[flat < D_L2 region] = sigmoid(wide[gate half]) * wide[proj half].
 
     ``wide`` is (2D, L, L) contiguous == gate channels [0:D] then proj channels
     [D:2D], each (L,L). Flattened, gate elem e maps to proj elem e + D_L2. One read
     of gate + one of proj + one write, fp32 math, single bf16 round on store."""
     pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     m = offs < D_L2
     g = tl.load(wide_ptr + offs, mask=m).to(tl.float32)              # gate half
     p = tl.load(wide_ptr + offs + D_L2, mask=m).to(tl.float32)       # proj half
@@ -64,17 +87,16 @@ def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK: tl.constexpr):
 def _glu_wide(out: torch.Tensor, wide: torch.Tensor, D: int, L: int) -> None:
     """out[B,D,L,L] = sigmoid(wide[:,0:D]) * wide[:,D:2D], wide is (B,2D,L,L). B=1."""
     D_L2 = D * L * L
-    BLOCK = 1024
-    _glu_wide_kernel[(triton.cdiv(D_L2, BLOCK),)](wide, out, 2 * D_L2, D_L2, BLOCK=BLOCK)
+    grid = lambda meta: (triton.cdiv(D_L2, meta["BLOCK_E"]),)  # noqa: E731
+    _glu_wide_kernel[grid](wide, out, 2 * D_L2, D_L2, seq_group=get_seq_group(D_L2))
 
 
 def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor) -> None:
     """proj *= sigmoid(gate), fused single-pass Triton kernel. In-place on proj."""
     assert proj.is_contiguous() and gate.is_contiguous()
     n = proj.numel()
-    BLOCK = 1024
-    grid = (triton.cdiv(n, BLOCK),)
-    _gate_mul_kernel[grid](proj, gate, n, BLOCK=BLOCK)
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
+    _gate_mul_kernel[grid](proj, gate, n, seq_group=get_seq_group(n))
 
 
 

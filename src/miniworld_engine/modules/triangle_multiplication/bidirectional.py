@@ -15,6 +15,8 @@ back (cute LayerNormLinear over ``2*d_hidden`` + triton GateElem). See
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+
 import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
@@ -195,7 +197,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         return _one("outgoing", slice(0, h)) + _one("incoming", slice(h, 2 * h))
 
-    @torch.compiler.disable
+    @opaque()
     def _forward_triton(
         self,
         pair: torch.Tensor,
@@ -290,7 +292,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             out = out * dropscale
         return out + pair if add_residual else out
 
-    @torch.compiler.disable
+    @opaque()
     def _forward_cute(
         self,
         pair: torch.Tensor,
@@ -367,7 +369,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             residual=(pair.reshape(M, d) if add_residual else None), seq_len=l1)
         return y.view(b, l1, l2, d)
 
-    @torch.compiler.disable
+    @opaque()
     def _forward_cute_free(
         self, pair: torch.Tensor, mask: torch.Tensor | None = None, add_residual: bool = False,
     ) -> torch.Tensor:

@@ -5,6 +5,10 @@ from pathlib import Path
 
 from torch.utils.cpp_extension import load
 
+from ..._nvcc import ensure_cuda_home, gencodes, host_flags
+
+ensure_cuda_home()
+
 _dir = Path(__file__).parent
 
 layer_norm_cuda = load(
@@ -12,17 +16,9 @@ layer_norm_cuda = load(
     sources=[str(_dir / "layer_norm_cuda_kernel.cu")],
     # Explicit -gencode so the JIT build never relies on torch's arch autodetect
     # (which can misreport the device, e.g. "Unknown CUDA arch (10.1)" on H100).
-    extra_cuda_cflags=[
-        "-O3", "--use_fast_math",
-        "-gencode=arch=compute_80,code=sm_80",
-        "-gencode=arch=compute_90,code=sm_90",
-        # B200 / Blackwell (sm_100): emit SASS for sm_100 plus a compute_100 PTX
-        # fallback so the plain-CUDA kernels (shfl + vector loads, no arch-only
-        # features) load and JIT on sm_10.x. Without this the module builds but the
-        # kernel launch fails with "no kernel image is available" on B200.
-        "-gencode=arch=compute_100,code=sm_100",
-        "-gencode=arch=compute_100,code=compute_100",
-    ],
+    # Arch list filtered against what the local nvcc actually supports -- see kernels/_nvcc.py.
+    # A hard-coded compute_90 made this build fail outright when PATH resolved nvcc to CUDA 11.7.
+    extra_cuda_cflags=[*host_flags(), "-O3", "--use_fast_math", *gencodes("80", "90", "100", ptx=("100",))],
     verbose=False,
 )
 

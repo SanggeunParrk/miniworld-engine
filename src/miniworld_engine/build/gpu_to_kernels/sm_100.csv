@@ -1,0 +1,11 @@
+> B200 (Blackwell, compute capability 10.0).
+>
+> Deliberately empty. quack ships gemm_sm90 and this repo has never run a cute unit on Blackwell,
+> so whether it dispatches, falls back, or raises is UNVERIFIED -- and the two errors are not
+> equally cheap. Denying wrongly leaves an empty cache bucket that surfaces as a multi-minute
+> full-grid stall inside a production forward, weeks later, far from here. Building wrongly costs
+> GPU-hours and says so in the build log the same day. So this stays open until a build reports
+> otherwise; if cute fails on B200, add the row and paste the error into its reason.
+>
+> Columns: case,impl,dtype,build,reason
+case,impl,dtype,build,reason

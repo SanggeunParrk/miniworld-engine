@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 import time
@@ -84,6 +85,13 @@ PINS: dict[str, tuple[tuple, tuple[str, ...], tuple[str, ...]]] = {
     #: Only the ON value: the unpinned training run already covers dropout=0, so sweeping 0 here
     #: would just rebuild the same shard under a second name.
     "dropout": ((0.25,), ("triangle_multiplication",), ("training",)),
+    # transition's forward runs the hand-CUDA fused b2b when it applies, and that kernel is not
+    # autotuned -- so the TRITON expand-gate forward never fires during a build and
+    # transition_expand_gate_fwd stays absent from the cache, while its backward (which has no CUDA
+    # counterpart) is captured normally. The CUDA path only covers fixed shapes, so production
+    # falls back to the triton one elsewhere and finds nothing cached. Sweeping it off captures
+    # that side. Off only: the default (on) is already covered by the unpinned runs.
+    "transition_cuda_b2b": ((False,), ("transition",), ("inference", "training")),
 }
 
 
@@ -316,22 +324,363 @@ def cmd_merge(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_bench(args: argparse.Namespace) -> int:
+#: Named config sets live here, one directory per set, one ``<op>.csv`` per op inside it.
+CONFIG_ROOT = "configs"
+
+
+def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
+    """Map the ``config_type`` positional to a config directory, or an exit code.
+
+    A config set IS a directory of ``<op>.csv`` files, so the argument is either a path to one or a
+    short name resolving to ``configs/<name>``. There is no second mechanism: the same directory
+    drives a build, a bench and any accuracy run, which is what keeps them measuring the same thing.
+    """
+    given = Path(config_type).expanduser()
+    candidates = [given] if given.is_absolute() or given.parts[:1] == (CONFIG_ROOT,) else [
+        repo / CONFIG_ROOT / config_type, given,
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    have = sorted(d.name for d in (repo / CONFIG_ROOT).glob("*") if d.is_dir())
+    print(f"unknown config set {config_type!r}; have: {', '.join(have) or '(none)'}\n"
+          f"a config set is a directory of <op>.csv under {CONFIG_ROOT}/", file=sys.stderr)
+    return 2
+
+
+def apply_config_dir(directory: Path) -> int:
+    """Select ``directory`` as the config set, then import the kernels. Non-zero if unusable.
+
+    ORDER MATTERS. Triton's ``Autotuner.__init__`` keeps the list it is handed only when that list
+    is non-empty; hand it an empty one and it substitutes ``[Config({})]`` of its own and drops the
+    reference, so filling the list afterwards has no effect and every kernel launches with no tile
+    at all (``dynamic_func() missing ... 'BLOCK_M1'``). So the directory has to be set BEFORE the
+    kernel modules import and their decorators run.
+    """
+    from miniworld_engine.autotune.configs import missing_ops, registered_ops, use_config_dir
+    from miniworld_engine.build.audit import import_all_kernels
+
+    os.environ["MINIWORLD_CONFIG_DIR"] = str(directory)  # inherited by every child process
+    use_config_dir(directory, require_all=False)   # sets the directory; nothing registered yet
+    import_all_kernels()                           # decorators now read it and arrive non-empty
+    missing = missing_ops()
+    total = len(registered_ops())
+    print(f"config set {directory}: {total - len(missing)}/{total} ops covered", flush=True)
+    if missing:
+        print(f"  {len(missing)} op(s) have no CSV and cannot launch: "
+              f"{', '.join(missing[:8])}{'...' if len(missing) > 8 else ''}", file=sys.stderr)
+        return 1
+    return 0
+
+
+#: bench target -> the build case(s) that drive the same kernels.
+#:
+#: The name spaces are not the same and never were. ``benchmarks/runners/bench.py`` has two families
+#: of entry point -- ``bench_kernel_*`` (17 kernel-level targets) and ``bench_<module>`` (the
+#: module-level ones) -- while ``build`` names the 23 cases that drive the production modules. That
+#: gap is why ``bench adaln_bwd`` was rejected as an unknown target: the CLI only ever listed the
+#: module family. A bench that auto-builds has to cross the gap explicitly; deriving it by string
+#: match would silently build nothing for every target whose name differs.
+#:
+#: Kernel-target rows come from what each ``bench_kernel_*`` function actually imports, not from its
+#: name. A wrong entry degrades to today's behaviour and says so: the build fills the wrong case and
+#: the bench then prints the engine's own per-op "no tuned autotune cache" warning, so it cannot
+#: silently produce a fast-looking number from an untuned kernel.
+MODULE_BUILD_CASES: dict[str, tuple[str, ...]] = {
+    "transition": ("transition",),
+    "triangle_multiplication": ("triangle_multiplication",),
+    "triangle_multiplication_bidirectional": ("triangle_multiplication_bidir",),
+    "triangle_attention": ("triangle_attention_bidir", "triangle_attention_heads"),
+    # bench's bias_only_attention target drives kernels.bias_only_attention.triton.main directly;
+    # AttentionPairBias is the production module that dispatches those kernels, so its case is what
+    # fills their cache.
+    "bias_only_attention": ("attention_pair_bias",),
+    "conditioned_transition": ("conditioned_transition",),
+    "adaptive_layernorm": ("adaptive_layernorm",),
+    "augmented_attention_token": ("augmented_attention",),
+    "augmented_attention_atom": ("augmented_attention",),
+}
+
+KERNEL_BUILD_CASES: dict[str, tuple[str, ...]] = {
+    "dual_gemm_epil": ("tm1_triton", "triangle_multiplication"),
+    "dual_gemm_epil_bwd": ("triangle_multiplication",),
+    "gemm_epil": ("layernorm_linear_pair_bias",),
+    "gemm_gate": ("tm2_triton",),
+    "gate_bwd": ("triangle_multiplication",),
+    "transition_b2b": ("transition",),
+    "transition_b2b_bwd": ("transition",),
+    "layernorm": ("layernorm_lowreg", "layernorm_transpose"),
+    "layernorm_bwd": ("layernorm_lowreg", "layernorm_transpose"),
+    "ln_mask": ("layernorm_lowreg",),
+    "adaln": ("adaptive_layernorm", "layernorm_linear_pair_bias"),
+    "adaln_bwd": ("adaptive_layernorm",),
+    "tri_attn": ("triangle_attention_bidir", "triangle_attention_heads"),
+    "bias_attn": ("attention_pair_bias",),
+    "aug_attn": ("augmented_attention",),
+    "cond_transition_tail": ("conditioned_transition",),
+    # gemm_epil_bwd imports adaln, augmented_attention, bias_only_attention,
+    # conditioned_transition, layernorm and layernorm_linear -- it benches the shared GEMM-epilogue
+    # backward across all of them, so its cache comes from all of their cases.
+    "gemm_epil_bwd": ("adaptive_layernorm", "augmented_attention", "attention_pair_bias",
+                      "conditioned_transition", "layernorm_lowreg",
+                      "layernorm_linear_pair_bias"),
+}
+
+
+def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
+                       mapping: dict[str, tuple[str, ...]], table: str,
+                       config_type: str = "default") -> int:
+    """Build the cache for ``targets`` before benching them, using config set ``config_type``.
+
+    Benching an unbuilt kernel does not measure the engine: with no configs the launch fails, and
+    with a full grid the autotuner sweeps mid-measurement, so the number is a tuning run with a
+    benchmark wrapped around it.
+    """
+    from miniworld_engine.autotune import builder, capture
+
+    cases: list[str] = []
+    for target in targets:
+        mapped = mapping.get(target)
+        if not mapped:
+            print(f"target {target!r} has no build case mapping; add it to {table} or the bench "
+                  f"would measure an untuned kernel", file=sys.stderr)
+            return 2
+        cases.extend(mapped)
+    names = tuple(dict.fromkeys(cases))
+
+    directory = resolve_config_dir(config_type, repo)
+    if isinstance(directory, int):
+        return directory
+    rc = apply_config_dir(directory)
+    if rc:
+        return rc
+
+    selected = [c for c in builder.cases() if c.name in names]
+    print(f"=== build before bench: {', '.join(names)}  (config set {config_type})", flush=True)
+    results = builder.build_all(selected, Path(args.shards).expanduser(),
+                                _resolve_gpus(args.gpus), args.compile_jobs,
+                                resume=args.resume, config_dir=directory)
+    bad = [r for r in results if r["rc"] != 0 or not r["ops"]]
+    if bad:
+        print(f"build produced {len(bad)} bad unit(s); benching now would measure an untuned "
+              f"kernel:", file=sys.stderr)
+        for r in bad[:10]:
+            print(f"  {r['label']} rc={r['rc']} ops={r['ops']} -> {r['log']}", file=sys.stderr)
+        return 1
+    # capture.merge_shards is the sole writer of the in-repo cache; skipping it would leave the
+    # bench reading the OLD cache while the shards just built sat unread.
+    shard_dir = Path(args.shards).expanduser()
+    shards = sorted(str(x) for x in shard_dir.glob("*.json"))
+    written = capture.merge_shards(shards) if shards else []
+    print(f"=== merged {len(written)} op file(s) into the in-repo cache", flush=True)
+    return 0
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
+    from miniworld_engine.autotune import builder
+
+    selected = [c for c in builder.cases() if args.case in ("all", c.name)]
+    if not selected:
+        names = ", ".join(c.name for c in builder.cases())
+        print(f"unknown case {args.case!r}; have: all, {names}", file=sys.stderr)
+        return 2
+
+    repo = Path(__file__).resolve().parents[2]
+    directory = resolve_config_dir(args.config_type, repo)
+    if isinstance(directory, int):
+        return directory
+    rc = apply_config_dir(directory)
+    if rc:
+        return rc
+
+    results = builder.build_all(selected, Path(args.shards).expanduser(),
+                                _resolve_gpus(args.gpus), args.compile_jobs,
+                                resume=args.resume, reclaim=args.reclaim,
+                                bench_budget=args.bench_budget, config_dir=directory)
+    failed = [r for r in results if r["rc"] != 0]
+    empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
+    print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
+          f"{len(failed)} failed")
+    for r in empty + failed:
+        print(f"  {'EMPTY' if r in empty else 'FAIL '} {r['label']} -> {r['log']}")
+    return 1 if (failed or empty) else 0
+
+
+def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
+               per_target_mode: bool) -> tuple[list[str], dict | None]:
+    """The argv and env for one target's bench.py run."""
+    # bench.py requires a mode. For a kernel target it is not the caller's to choose: the name
+    # says it (`*_bwd` = training, else inference), which is why bench_kernel has no --mode.
+    mode = ("training" if target.endswith("_bwd") else "inference") if per_target_mode \
+        else args.mode
+    cmd = [sys.executable, "-u", "benchmarks/runners/bench.py", f"kernel={target}",
+           f"implementations=[{args.impl}]", f"mode={mode}", "metric=time"]
+    extra = TARGETS.get(target, "")
+    if extra:
+        cmd.extend(extra.split())
+    env = None
+    if config_dir is not None:
+        # The child must have the set in its ENVIRONMENT, not on its argv: bench.py's own header
+        # imports kernel modules, so anything read inside main() lands after the autotuners have
+        # already been handed empty lists. +config_dir is kept so the child can assert they agree.
+        cmd.append(f"+config_dir={config_dir}")
+        env = {**os.environ, "MINIWORLD_CONFIG_DIR": str(config_dir)}
+    return cmd, env
+
+
+def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
+               config_dir: Path | None = None, *, per_target_mode: bool = False) -> int:
+    """Bench every target, one process each, spread across the visible GPUs.
+
+    Targets are independent processes, so on an N-GPU node N of them run at once -- pinned with
+    CUDA_VISIBLE_DEVICES so each child sees exactly one card and cannot contend for memory with a
+    sibling. Running them serially on one card was leaving the rest of the node idle for the whole
+    sweep, and `all` is 17 targets.
+
+    Each child's output is captured and printed as one block when it finishes: interleaving live
+    output from several benches produces a log where no line can be attributed to a target.
+    """
+    started = time.time()   # coverage must count THIS run's .ops, not history
+    gpus = _resolve_gpus(args.gpus) or [0]
+    jobs = [(t, *_bench_cmd(args, t, config_dir, per_target_mode)) for t in targets]
+    rc = 0
+
+    def run(job: tuple, gpu: int) -> tuple[str, int, str]:
+        target, cmd, env = job
+        env = {**(env or os.environ), "CUDA_VISIBLE_DEVICES": str(gpu)}
+        done = subprocess.run(cmd, cwd=repo, check=False, env=env,  # noqa: S603
+                              capture_output=True, text=True)
+        return target, done.returncode, (done.stdout or "") + (done.stderr or "")
+
+    if len(gpus) == 1 or len(jobs) == 1:
+        for job in jobs:
+            target, code, out = run(job, gpus[0])
+            print(f"=== bench {target}  (gpu {gpus[0]}, rc={code})", flush=True)
+            print(out, flush=True)
+            rc |= code
+    else:
+        import concurrent.futures as cf
+        import itertools
+
+        with cf.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
+            futures = {pool.submit(run, job, gpu): job[0]
+                       for job, gpu in zip(jobs, itertools.cycle(gpus))}
+            for fut in cf.as_completed(futures):
+                target, code, out = fut.result()
+                print(f"=== bench {target}  (rc={code})", flush=True)
+                print(out, flush=True)
+                rc |= code
+    if len(targets) > 1:
+        rc |= _report_coverage(targets, repo, since=started)
+    return rc
+
+
+def _report_coverage(targets: tuple[str, ...], repo: Path, *, since: float = 0.0) -> int:
+    """Compare the kernels that actually launched against everything the repo declares.
+
+    The denominator is ``kernels/registry.csv`` -- declared data, not something derived from this
+    run. Deriving it from the run would drop every unreachable kernel out of numerator and
+    denominator together and coverage would read 100% forever.
+
+    Nothing here decides whether a kernel *could* run. A kernel either launched or it did not.
+    """
+    from miniworld_engine.autotune import devices
+    from miniworld_engine.autotune.cache import gpu_key
+
+    key = gpu_key()
+    launched: set[str] = set()
+    for target in targets:
+        # bench.py owns the layout: benchmarks/{kernels,modules}/<target>/artifacts/<gpu>/<run>.ops
+        family = "kernels" if target in KERNEL_BUILD_CASES else "modules"
+        base = repo / "benchmarks" / family / target
+        if not base.is_dir():
+            continue
+        for f in base.glob("artifacts/*/*.ops"):
+            # only this run: a .ops written before a rename still names kernels that no longer
+            # exist, and counting it makes the coverage report describe history, not the run
+            if f.stat().st_mtime < since:
+                continue
+            launched |= {ln.strip() for ln in f.read_text().split("\n") if ln.strip()}
+
+    declared = devices.registered_kernels()
+    hit = declared & launched
+    devices.record(key, {k: (True, "launched by bench") for k in hit})
+    missed = sorted(declared - launched)
+    print(f"\n=== coverage on {key}")
+    print(f"    declared: {len(declared)}   launched: {len(hit)}   never launched: {len(missed)}")
+    stray = sorted(launched - declared)
+    if stray:
+        print("    launched but NOT in registry -- add them:", file=sys.stderr)
+        for op in stray:
+            print(f"      {op}", file=sys.stderr)
+    if missed:
+        print("    no bench reaches these kernels:", file=sys.stderr)
+        for op in missed:
+            print(f"      {op}", file=sys.stderr)
+    return 1 if (missed or stray) else 0
+
+def cmd_bench_kernel(args: argparse.Namespace) -> int:
+    """Kernel-level bench: the ``bench_kernel_*`` entry points, with a config_type."""
+    repo = Path(__file__).resolve().parents[2]
+    # 'all' is the honest default unit of work: a sweep that names one target measures one
+    # target, and calling that "the kernels" is how a broken implementation stays hidden.
+    targets = tuple(KERNEL_BUILD_CASES) if args.what == "all" else (args.what,)
+    unknown = [t for t in targets if t not in KERNEL_BUILD_CASES]
+    if unknown:
+        print(f"unknown kernel target(s): {', '.join(unknown)}; have: all, "
+              f"{', '.join(sorted(KERNEL_BUILD_CASES))}", file=sys.stderr)
+        return 2
+    # A config set means "measure AT these configs". There is then nothing to tune, so there is
+    # nothing to build: a build exists to SEARCH for the best config and write a cache, and its
+    # unit list is a cross product over impls, dtypes, shapes, train/eval and setting switches --
+    # hundreds of module runs that say nothing about whether a pinned config computes the right
+    # answer. Building here also imports the failure modes of paths the run does not even use
+    # (a cute impl the card cannot run, a case whose arguments are mis-ordered), and a single bad
+    # unit aborts a measurement that would otherwise have succeeded.
+    if args.config_type:
+        directory = resolve_config_dir(args.config_type, repo)
+        if isinstance(directory, int):
+            return directory
+        rc = apply_config_dir(directory)
+        if rc:
+            return rc
+    else:
+        # No config set: the autotuner would search its full grid mid-measurement, which times a
+        # search rather than a kernel. Build first so the search happens once, up front.
+        rc = _bench_build_first(args, targets, repo, KERNEL_BUILD_CASES, "KERNEL_BUILD_CASES")
+        if rc:
+            return rc
+        directory = None
+    return _run_bench(args, targets, repo, directory, per_target_mode=True)
+
+
+def cmd_bench_module(args: argparse.Namespace) -> int:
+    """Module-level bench: takes NO config_type.
+
+    A module bench is the production-shaped measurement -- whole module, its own dispatch decisions
+    -- so the config space is not the caller's to pick: it is whatever the cache holds. That is
+    ``default``, passed here as a constant rather than an argument so the two cannot disagree.
+    """
     repo = Path(__file__).resolve().parents[2]
     targets = GROUPS.get(args.what, (args.what,))
-    unknown = [t for t in targets if t not in TARGETS]
+    unknown = [t for t in targets if t not in MODULE_BUILD_CASES]
     if unknown:
-        print(f"unknown target(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"unknown module target(s): {', '.join(unknown)}; have: "
+              f"{', '.join(sorted(MODULE_BUILD_CASES))}; groups: {', '.join(GROUPS)}",
+              file=sys.stderr)
         return 2
-    rc = 0
-    for target in targets:
-        cmd = [sys.executable, "-u", "benchmarks/runners/bench.py", f"kernel={target}",
-               f"implementations=[{args.impl}]", f"mode={args.mode}", "metric=time"]
-        if TARGETS[target]:
-            cmd.extend(TARGETS[target].split())
-        print(f"=== bench {target}", flush=True)
-        rc |= subprocess.run(cmd, cwd=repo, check=False).returncode  # noqa: S603
-    return rc
+    # A module bench takes no config set, so the build uses "default" -- see the docstring.
+    rc = _bench_build_first(args, targets, repo, MODULE_BUILD_CASES, "MODULE_BUILD_CASES")
+    if rc:
+        return rc
+    directory = resolve_config_dir("default", repo)
+    if isinstance(directory, int):
+        return directory
+    rc = apply_config_dir(directory)
+    if rc:
+        return rc
+    return _run_bench(args, targets, repo, directory)
 
 
 def _resolve_gpus(spec: str) -> list[int]:
@@ -370,11 +719,58 @@ def main(argv: list[str] | None = None) -> int:
     mrg.add_argument("--top-k", type=int, default=5, help="configs kept per bucket")
     mrg.set_defaults(func=cmd_merge)
 
-    ben = sub.add_parser("bench", help="run benchmarks")
-    ben.add_argument("what", help=f"target or group ({', '.join(GROUPS)})")
-    ben.add_argument("--impl", default="miniworld")
-    ben.add_argument("--mode", default="inference", choices=("inference", "training"))
-    ben.set_defaults(func=cmd_bench)
+    bld = sub.add_parser("build", help="build the cache by driving the production modules")
+    bld.add_argument("case", nargs="?", default="all", help="kernel case, or 'all'")
+    bld.add_argument("config_type", nargs="?", default="default",
+                     help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
+    bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
+    bld.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
+    bld.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
+    bld.add_argument("--resume", action="store_true",
+                     help="skip units whose shard already has entries")
+    bld.add_argument("--bench-budget", type=float, default=0.0,
+                     help="abandon a config once one launch exceeds this factor x the round's "
+                          "best (0 = off). Post-hoc: it skips the full do_bench of a config that "
+                          "is already out of the running, it does not shorten the launch itself.")
+    bld.add_argument("--reclaim", action="store_true",
+                     help="first delete claims left by a killed build (they are otherwise "
+                          "skipped silently forever). Do NOT use while another build runs "
+                          "against the same --shards dir.")
+    bld.set_defaults(func=cmd_build)
+
+    def _bench_common(parser_) -> None:
+        """Options both bench subcommands share: how to run the bench, and the pre-bench build."""
+        parser_.add_argument("--impl", default="all",
+                             help="comma list of implementation names, or 'all' (default) for "
+                                  "every implementation the target defines")
+        # Forwarded to the pre-bench build. Same defaults as `build` so the two agree.
+        parser_.add_argument("--shards", default="~/.cache/miniworld-build",
+                             help="dir for the shards")
+        parser_.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
+        parser_.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
+        parser_.add_argument("--resume", action="store_true",
+                             help="pre-bench build skips units whose shard already has entries")
+
+    bk = sub.add_parser("bench_kernel",
+                        help="build the cache, then bench ONE kernel-level target")
+    bk.add_argument("what", help=f"kernel target, or 'all' "
+                                 f"({', '.join(sorted(KERNEL_BUILD_CASES))})")
+    bk.add_argument("config_type", nargs="?", default=None,
+                    help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
+    _bench_common(bk)
+    bk.set_defaults(func=cmd_bench_kernel)
+
+    bm = sub.add_parser("bench_module",
+                        help="build the cache, then bench a module-level target (no config arg)")
+    bm.add_argument("what", help=f"module target or group "
+                                f"({', '.join(sorted(MODULE_BUILD_CASES))}; "
+                                f"groups: {', '.join(GROUPS)})")
+    _bench_common(bm)
+    # Only the module bench takes a mode: a module genuinely runs in both regimes. A kernel target's
+    # name already says which one it is (`*_bwd` or not), so offering the choice there can only
+    # produce a wrong answer -- a forward re-timed under training, or a backward asked for inference.
+    bm.add_argument("--mode", default="inference", choices=("inference", "training"))
+    bm.set_defaults(func=cmd_bench_module, config_type=None)
 
     args = parser.parse_args(argv)
     return args.func(args)

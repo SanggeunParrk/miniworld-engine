@@ -1,0 +1,23 @@
+{
+  "config_space_hash": "158ef51c65a6",
+  "entries": {
+    "any|any": [
+      {
+        "kwargs": {
+          "BLOCK_E": 64
+        },
+        "ms": NaN,
+        "num_stages": 1,
+        "num_warps": 2
+      }
+    ]
+  },
+  "gpu": "NVIDIA RTX A6000 (sm86)",
+  "op": "cond_transition_train_swiglu_fwd",
+  "provenance": {
+    "built_utc": "2026-08-19T14:35:18+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

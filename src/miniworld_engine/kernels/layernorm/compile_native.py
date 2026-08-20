@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+
 
 import torch
 import triton
@@ -12,13 +14,9 @@ from .triton.main import (
     layer_norm_bwd_dx_fused,
     layer_norm_fwd_fused,
 )
-from .triton.partial import (
-    _bwd_block_m,
-    _bwd_num_warps,
-    _layer_norm_bwd_dx_partials,
-)
+from .triton.partial import _bwd_block_m
 from .triton.persistent import _ln_bwd_persistent, _persistent_grid
-from . import dispatch_cache
+from . import dispatch as dispatch_cache
 from miniworld_engine import settings
 
 
@@ -113,7 +111,7 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
     m, n = x_2d.shape
     mean = torch.empty(m, dtype=torch.float32, device=x.device)
     rstd = torch.empty(m, dtype=torch.float32, device=x.device)
-    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M"])]
+    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
     layer_norm_fwd_fused[grid](
         x_2d,
         y_2d,
@@ -127,8 +125,7 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
         m,
         n,
         eps,
-        BLOCK_N=triton.next_power_of_2(n),
-        GROUP_M=get_seq_group(m),
+        GROUP_M=get_seq_group(m),  # BLOCK_N is a tuned tile now (see triton/main.py)
         HAS_ROWSCALE=False,
     )
     return y_2d.view_as(x), mean, rstd
@@ -141,7 +138,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
     dx_2d = torch.empty_like(dy_2d)
     dw = torch.zeros(n, dtype=torch.float32, device=x.device)
     db = torch.zeros(n, dtype=torch.float32, device=x.device)
-    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M"])]
+    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
     layer_norm_bwd_dx_fused[grid](
         dx_2d,
         dy_2d,
@@ -158,8 +155,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
         x_2d.stride(1),
         m,
         n,
-        BLOCK_N=triton.next_power_of_2(n),
-        GROUP_M=get_seq_group(m),
+        GROUP_M=get_seq_group(m),  # BLOCK_N is a tuned tile now (see triton/main.py)
         HAS_ROWSCALE=False,
     )
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
@@ -169,15 +165,15 @@ def _bwd_partial_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd:
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()
     dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
     m, n = x_2d.shape
-    block_m = _bwd_block_m(n)
-    block_n = triton.next_power_of_2(n)
-    num_warps = _bwd_num_warps(n)
-    num_partials = triton.cdiv(m, block_m)
+    # _bwd_block_m now sizes the PARTIAL BUFFER only; BLOCK_M1/BLOCK_N/num_warps are tuned
+    # (see triton/partial.py). Grid axis 1 is the feature tile.
+    num_partials = triton.cdiv(m, _bwd_block_m(n))
 
     dx_2d = torch.empty_like(dy_2d)
     partial_dw = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
     partial_db = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
-    _layer_norm_bwd_dx_partials[(num_partials,)](
+    grid = lambda meta: (num_partials, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
+    _ln_bwd_persistent[grid](
         dx_2d,
         partial_dw,
         partial_db,
@@ -191,10 +187,7 @@ def _bwd_partial_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd:
         x_2d.stride(1),
         m,
         N=n,
-        BLOCK_M=block_m,
-        BLOCK_N=block_n,
-        num_warps=num_warps,
-        num_stages=2,
+        GROUP_M=get_seq_group(m),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)
@@ -208,12 +201,13 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
     dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
     m, n = x_2d.shape
     g = _persistent_grid(x.device)
-    block_n = triton.next_power_of_2(n)
 
     dx_2d = torch.empty_like(dy_2d)
     partial_dw = torch.empty((g, n), dtype=torch.float32, device=x.device)
     partial_db = torch.empty((g, n), dtype=torch.float32, device=x.device)
-    _ln_bwd_persistent[(g,)](
+    # grid axis 1 = feature tiles; BLOCK_N is tuned now (see triton/persistent.py).
+    grid = lambda meta: (g, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
+    _ln_bwd_persistent[grid](
         dx_2d,
         partial_dw,
         partial_db,
@@ -227,7 +221,7 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
         x_2d.stride(1),
         m,
         N=n,
-        BLOCK_N=block_n,
+        GROUP_M=get_seq_group(m),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)
@@ -246,28 +240,20 @@ def _bwd_cuda_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Te
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
 
 
-@torch.library.custom_op("miniworld_layernorm::atomic_bwd", mutates_args=())
-def _atomic_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    return _bwd_atomic_impl(dy, x, weight, mean, rstd)
 
 
-@_atomic_bwd.register_fake
-def _(dy, x, weight, mean, rstd):
-    return x.new_empty(x.shape), weight.new_empty(weight.shape), weight.new_empty(weight.shape)
 
 
-@torch.library.custom_op("miniworld_layernorm::partial_bwd", mutates_args=())
-def _partial_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    return _bwd_partial_impl(dy, x, weight, mean, rstd)
 
 
-@_partial_bwd.register_fake
-def _(dy, x, weight, mean, rstd):
-    return x.new_empty(x.shape), weight.new_empty(weight.shape), weight.new_empty(weight.shape)
 
 
-@torch.library.custom_op("miniworld_layernorm::dispatch_bwd", mutates_args=())
-def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+@opaque(fake=lambda dy, x, weight, mean, rstd: (
+    x.new_empty(x.shape), weight.new_empty(weight.shape), weight.new_empty(weight.shape)),
+    name="layernorm_dispatch_bwd")
+def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor,
+                  rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Backward through whichever reduction path this shape and card resolve to."""
     m = x.numel() // x.shape[-1]
     n = x.shape[-1]
     path = _resolve_bwd_path(m, n, dy, x, weight, mean, rstd)
@@ -280,88 +266,38 @@ def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Ten
     return _bwd_atomic_impl(dy, x, weight, mean, rstd)
 
 
-@_dispatch_bwd.register_fake
-def _(dy, x, weight, mean, rstd):
-    return x.new_empty(x.shape), weight.new_empty(weight.shape), weight.new_empty(weight.shape)
-
-
-def _setup_context(ctx, inputs, output) -> None:
-    x, weight, bias, eps = inputs
-    y, mean, rstd = output
-    del bias, eps, y
-    ctx.save_for_backward(x, weight, mean, rstd)
-
-
-@torch.library.custom_op("miniworld_layernorm::atomic_fwd", mutates_args=())
-def _atomic_fwd(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tensor, Tensor, Tensor]:
+@opaque(fake=lambda x, weight, bias, eps: (
+    x.new_empty(x.shape),
+    x.new_empty((x.numel() // x.shape[-1],), dtype=torch.float32),
+    x.new_empty((x.numel() // x.shape[-1],), dtype=torch.float32)),
+    name="layernorm_dispatch_fwd")
+def _dispatch_fwd(x: Tensor, weight: Tensor, bias: Tensor,
+                  eps: float) -> tuple[Tensor, Tensor, Tensor]:
     return _fwd_impl(x, weight, bias, eps)
 
 
-@_atomic_fwd.register_fake
-def _(x, weight, bias, eps):
-    m = x.numel() // x.shape[-1]
-    return x.new_empty(x.shape), x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32)
+class _LayerNormDispatch(torch.autograd.Function):
+    """Carries the backward-path choice through autograd.
+
+    An autograd.Function rather than ``custom_op.register_autograd`` so the same code works under
+    both ``compile_wrap`` modes: the launchers above are wrapped by ``opaque`` and this only has to
+    save the tensors the chosen backward path needs.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, bias, eps):
+        y, mean, rstd = _dispatch_fwd(x, weight, bias, eps)
+        ctx.save_for_backward(x, weight, mean, rstd)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, weight, mean, rstd = ctx.saved_tensors
+        dx, dw, db = _dispatch_bwd(dy, x, weight, mean, rstd)
+        return dx, dw, db, None
 
 
-def _atomic_backward(ctx, dy, dmean, drstd):
-    del dmean, drstd
-    x, weight, mean, rstd = ctx.saved_tensors
-    dx, dw, db = _atomic_bwd(dy, x, weight, mean, rstd)
-    return dx, dw, db, None
-
-
-_atomic_fwd.register_autograd(_atomic_backward, setup_context=_setup_context)
-
-
-@torch.library.custom_op("miniworld_layernorm::partial_fwd", mutates_args=())
-def _partial_fwd(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tensor, Tensor, Tensor]:
-    return _fwd_impl(x, weight, bias, eps)
-
-
-@_partial_fwd.register_fake
-def _(x, weight, bias, eps):
-    m = x.numel() // x.shape[-1]
-    return x.new_empty(x.shape), x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32)
-
-
-def _partial_backward(ctx, dy, dmean, drstd):
-    del dmean, drstd
-    x, weight, mean, rstd = ctx.saved_tensors
-    dx, dw, db = _partial_bwd(dy, x, weight, mean, rstd)
-    return dx, dw, db, None
-
-
-_partial_fwd.register_autograd(_partial_backward, setup_context=_setup_context)
-
-
-@torch.library.custom_op("miniworld_layernorm::dispatch_fwd", mutates_args=())
-def _dispatch_fwd(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tensor, Tensor, Tensor]:
-    return _fwd_impl(x, weight, bias, eps)
-
-
-@_dispatch_fwd.register_fake
-def _(x, weight, bias, eps):
-    m = x.numel() // x.shape[-1]
-    return x.new_empty(x.shape), x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32)
-
-
-def _dispatch_backward(ctx, dy, dmean, drstd):
-    del dmean, drstd
-    x, weight, mean, rstd = ctx.saved_tensors
-    dx, dw, db = _dispatch_bwd(dy, x, weight, mean, rstd)
-    return dx, dw, db, None
-
-
-_dispatch_fwd.register_autograd(_dispatch_backward, setup_context=_setup_context)
-
-
-def layernorm_atomic_compile(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
-    return _atomic_fwd(x, weight, bias, eps)[0]
-
-
-def layernorm_partial_compile(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
-    return _partial_fwd(x, weight, bias, eps)[0]
-
-
-def layernorm_dispatch_compile(x: Tensor, weight: Tensor, bias: Tensor, eps: float = 1e-5) -> Tensor:
-    return _dispatch_fwd(x, weight, bias, eps)[0]
+def layernorm_dispatch_compile(x: Tensor, weight: Tensor, bias: Tensor,
+                               eps: float = 1e-5) -> Tensor:
+    """LayerNorm whose backward reduction path is resolved per shape and card."""
+    return _LayerNormDispatch.apply(x, weight, bias, eps)

@@ -19,78 +19,26 @@ the GEMMs/fused kernel require SM90 (the fully-portable training path is LayerNo
 
 from __future__ import annotations
 
+from .triton.recompute import _recompute_xhat, _recompute_xnormed
+
 import torch
 import triton
-import triton.language as tl
 
 # torch/triton-only (no quack) — safe to import eagerly; this IS the LN-part backward.
+
 from ..layernorm.triton.main import get_seq_group, layer_norm_bwd_dx_fused
 
 
-@triton.jit
-def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
-                    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
-    cols = tl.arange(0, BLOCK_K)
-    rm = rows < M
-    cm = cols < K
-    x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
-                mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
-    mean = tl.load(mean_ptr + rows, mask=rm, other=0.0)[:, None]
-    rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)[:, None]
-    g = tl.load(g_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
-    b = tl.load(b_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
-    y = (x - mean) * rstd * g + b
-    tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1,
-             y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
 
 
-def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
-                       mean: torch.Tensor, rstd: torch.Tensor):
-    """x_normed = (x-mean)*rstd*γ + β, one fused bf16 pass using the SAVED mean/rstd (no stats
-    recompute). Reads x at its own strides (strided/transposed view OK — no pre-copy) and writes
-    a CONTIGUOUS (M,K) output."""
-    M, K = x.shape
-    y = torch.empty(M, K, device=x.device, dtype=x.dtype)   # contiguous out
-    BLOCK_K = triton.next_power_of_2(K)
-    BLOCK_M = 8
-    grid = (triton.cdiv(M, BLOCK_M),)
-    _xnormed_kernel[grid](
-        x, gamma, beta, mean, rstd, y, M, K, x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, num_warps=8,
-    )
-    return y
 
 
-@triton.jit
-def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
-                 BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
-    cols = tl.arange(0, BLOCK_K)
-    rm = rows < M
-    cm = cols < K
-    x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
-                mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
-    mean = tl.load(mean_ptr + rows, mask=rm, other=0.0)[:, None]
-    rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)[:, None]
-    y = (x - mean) * rstd
-    tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1,
-             y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
 
 
-def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor):
-    """x̂ = (x-mean)·rstd (no affine), one fused bf16 pass using the SAVED mean/rstd.
-    Reads x at its own strides (so a transposed/strided view is fine — NO pre-copy) and
-    writes a CONTIGUOUS (M,K) x̂. This lets the caller feed a strided x (e.g. a bmm
-    output viewed channel-major) without a .contiguous() transpose copy."""
-    M, K = x.shape
-    y = torch.empty(M, K, device=x.device, dtype=x.dtype)   # contiguous out
-    grid = (triton.cdiv(M, 8),)
-    _xhat_kernel[grid](x, mean, rstd, y, M, K, x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-                       BLOCK_M=8, BLOCK_K=triton.next_power_of_2(K), num_warps=8)
-    return y
+
+
+
+
 
 
 def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias):
@@ -127,14 +75,13 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     dgamma = torch.zeros(K, dtype=torch.float32, device=x.device)
     dbeta = torch.zeros(K, dtype=torch.float32, device=x.device)
     xc = x.to(dx_normed.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     layer_norm_bwd_dx_fused[grid](
         dx, dx_normed, dgamma, dbeta,
         xc, gamma, mean, rstd, rstd,
         dgamma.stride(0), dbeta.stride(0), xc.stride(0), xc.stride(1),
         M, K,
-        BLOCK_N=triton.next_power_of_2(K),
-        GROUP_M=get_seq_group(M),
+        GROUP_M=get_seq_group(M),  # BLOCK_N is a tuned tile now (see layernorm/triton/main.py)
         HAS_ROWSCALE=False,
     )
     return dx, dgamma, dbeta

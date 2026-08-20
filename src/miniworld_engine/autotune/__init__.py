@@ -4,8 +4,8 @@ Ship the top-K tuned configs per ``(gpu, dtype, op, shape-bucket)`` so runs do n
 full-grid autotune tax and performance is reproducible across machines. Two runtime entry
 points share one cache format and one storage layer:
 
-* **Triton** — :func:`make_cache_prune` is used as the kernel's ``early_config_prune`` hook and
-  narrows the ``@triton.autotune`` grid to the cached top-K (Triton still picks among them).
+* **Triton** — the candidate list comes from :func:`autotune.configs.configs_for`, i.e. from
+  ``configs/<set>/<op>.csv``. Triton picks among those rows and nothing narrows them.
 * **CuTe / CUDA** — these fix their tile/cluster/stage config at build time and have no autotune
   loop, so they call :func:`select_config` to *pick one* cached config (falling back to the
   kernel's own ``default_config`` on a miss).
@@ -20,14 +20,14 @@ so a missing / stale / wrong cache can only ever be slower, never incorrect.
 
 from __future__ import annotations
 
+from .buckets import elem_bucket_of
+from .configs import configs_for, missing_ops, registered_ops, use_config_dir
 from .cache import (
     as_cfg_dict,
     config_space_hash,
     gpu_key,
     key_bucket_of,
-    make_cache_prune,
-    make_device_smem_prune,
-    run_autotune_enabled,
+    operand_bytes,
     select_config,
     shape_bucket,
     store_ranked_configs,
@@ -36,12 +36,15 @@ from .cache import (
 
 __all__ = [
     "as_cfg_dict",
+    "configs_for",
+    "missing_ops",
+    "registered_ops",
+    "use_config_dir",
     "config_space_hash",
+    "elem_bucket_of",
     "gpu_key",
     "key_bucket_of",
-    "make_cache_prune",
-    "make_device_smem_prune",
-    "run_autotune_enabled",
+    "operand_bytes",
     "select_config",
     "shape_bucket",
     "store_ranked_configs",

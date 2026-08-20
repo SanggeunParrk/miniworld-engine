@@ -21,42 +21,28 @@ WHY this shape (the SM100 finding):
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 
-_trimul_cute_front_sm100_transpose_prune = make_cache_prune(
-    "trimul_cute_front_sm100_transpose", dtype_of=tensor_dtype_of("src_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "N"),
-)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BM": 64, "BN": 64}, num_warps=4),
-        triton.Config({"BM": 128, "BN": 64}, num_warps=4),
-        triton.Config({"BM": 64, "BN": 128}, num_warps=4),
-        triton.Config({"BM": 128, "BN": 128}, num_warps=8),
-        triton.Config({"BM": 256, "BN": 64}, num_warps=8),
-        triton.Config({"BM": 64, "BN": 256}, num_warps=8),
-        triton.Config({"BM": 128, "BN": 256}, num_warps=8),
-    ],
-    key=["GROUP_M", "N"],
-    prune_configs_by={"early_config_prune": _trimul_cute_front_sm100_transpose_prune},
-)
+@triton.autotune(configs=configs_for("trimul_transpose_triton"), key=['GROUP_M', 'N'])
 @triton.jit
-def _transpose_kernel(src_ptr, dst_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr,
-                      GROUP_M: tl.constexpr):
+def _transpose_kernel(src_ptr, dst_ptr, M, N, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
+                      GROUP_M):
     """src (M,N) row-major -> dst (N,M) row-major. dst[n,m] = src[m,n]."""
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
-    rm = pid_m * BM + tl.arange(0, BM)
-    rn = pid_n * BN + tl.arange(0, BN)
+    rm = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     src = tl.load(
         src_ptr + rm[:, None] * N + rn[None, :],
         mask=(rm[:, None] < M) & (rn[None, :] < N),
@@ -72,7 +58,7 @@ def _transpose_kernel(src_ptr, dst_ptr, M, N, BM: tl.constexpr, BN: tl.constexpr
 def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor) -> None:
     """blld (M, 2D) row-major -> out (2D, M) row-major, in place into out_2d_m."""
     M, N = blld.shape
-    grid = lambda meta: (triton.cdiv(M, meta["BM"]), triton.cdiv(N, meta["BN"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
     _transpose_kernel[grid](blld, out_2d_m, M, N, GROUP_M=get_seq_group(M))
 
 

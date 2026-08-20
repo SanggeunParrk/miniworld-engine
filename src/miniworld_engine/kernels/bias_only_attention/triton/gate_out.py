@@ -19,31 +19,30 @@ M = B*L*L (rows), dh = d_hidden (contraction), N = d_pair (output width).
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _sigmul_fwd
+
 import torch
 import triton
-from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
-from miniworld_engine.autotune import (
-    key_bucket_of,
-    make_cache_prune,
-    make_device_smem_prune,
-    tensor_dtype_of,
-)
 
-_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N, "BLOCK_K": BLOCK_K})
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
-_bias_only_gate_out_fwd_prune = make_cache_prune(
-    "bias_only_gate_out_fwd", dtype_of=tensor_dtype_of("gate_ptr"),
-    bucket_of=key_bucket_of("N", "DH"),
-)
 
 
-@triton.autotune(
-    configs=_configs, key=["M", "N", "DH"],
-    prune_configs_by={"early_config_prune": _bias_only_gate_out_fwd_prune},
-)
+
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+@triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['seq_group', 'N', 'DH'])
 @triton.jit
 def _gate_out_fwd(
     gate_ptr,   # [M, DH]
@@ -56,23 +55,24 @@ def _gate_out_fwd(
     stride_om, stride_od,
     stride_wn, stride_wd,
     stride_cm, stride_cn,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    seq_group,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
     m_ok = offs_m < M
     n_ok = offs_n < N
 
-    acc = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
     for k0 in range(0, DH, BLOCK_K):
         kk = k0 + offs_k
         k_ok = kk < DH
-        # A-tile = sigmoid(gate) * out_r  -> [BLOCK_M, BLOCK_K]
+        # A-tile = sigmoid(gate) * out_r  -> [BLOCK_M1, BLOCK_K]
         g = tl.load(
             gate_ptr + offs_m[:, None] * stride_gm + kk[None, :] * stride_gd,
             mask=m_ok[:, None] & k_ok[None, :], other=0.0,
@@ -96,38 +96,12 @@ def _gate_out_fwd(
     )
 
 
-def _dgrad_smem_bytes(config, named_args, kwargs):
-    """Conservative static-smem estimate for _dgrad_epi (device-smem prune). The pipelined
-    loop loads do[BM, BN] and wo[BN, DH] in bf16; the 2.8x factor calibrates raw tile bytes
-    to Triton's real allocation. Only needs to rank configs so the over-limit ones are dropped
-    before the autotuner compiles (and dies on) them; the prune always keeps the smallest."""
-    dh = None
-    if hasattr(named_args, "__contains__") and "DH" in named_args:
-        dh = named_args["DH"]
-    elif kwargs is not None:
-        dh = kwargs.get("DH")
-    if dh is None:
-        return None
-    bm = int(config.kwargs["BM"])
-    bn = int(config.kwargs["BN"])
-    ns = int(config.num_stages)
-    raw = ns * 2 * (bm * bn + bn * int(dh))  # bf16 do[BM,BN] + wo[BN,DH]
-    return int(raw * 2.8)
-
-
-_bias_only_gate_out_bwd_prune = make_cache_prune(
-    "bias_only_gate_out_bwd", dtype_of=tensor_dtype_of("do_ptr"),
-    bucket_of=key_bucket_of("N", "DH"),
-    base_prune=make_device_smem_prune(_dgrad_smem_bytes),
-)
-
-
-@triton.autotune(
-    configs=[triton.Config({"BM": bm, "BN": bn}, num_warps=w, num_stages=s)
-             for bm in (32, 64, 128) for bn in (64, 128) for w in (4, 8) for s in (2, 3)],
-    key=["M", "N", "DH"],
-    prune_configs_by={"early_config_prune": _bias_only_gate_out_bwd_prune},
-)
+# BLOCK_N tiles the DH output axis, which used to be the raw shape constant DH (`tl.arange(0, DH)` and
+# a `[BLOCK_M1, DH]` accumulator): the live accumulator width was d_hidden, not a config choice. DH is a
+# free (non-reduced) axis here -- the contraction is N -- so it moves onto the grid. ``BLOCK_N`` is not
+# constrained, so its candidate values live in the CSV like every other axis; they are the
+# canonical 2-D set.
+@triton.autotune(configs=configs_for("gated_projection_bwd_dx_triton"), key=['seq_group', 'N', 'DH'])
 @triton.jit
 def _dgrad_epi(
     do_ptr,     # [M, N]   = grad_out
@@ -139,37 +113,41 @@ def _dgrad_epi(
     a_ptr,      # out: gated = sigmoid(gate)*r  [M, DH]  (for the d_wo GEMM)
     M, N: tl.constexpr, DH: tl.constexpr,
     s_dom, s_don, s_won, s_woh, s_gm, s_gh, s_rm, s_rh, s_om, s_oh,
-    BM: tl.constexpr, BN: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr,
+    seq_group,
 ):
     """Fuses the dgrad GEMM d_a = grad_out @ wo with the gate-backward epilogue:
     d_a is never materialized, gate/out_r are read once. One kernel replaces the
     cuBLAS dgrad + a separate elementwise pass.
 
-    The contraction dim N is TILED (BN) and accumulated, so shared memory is bounded by
-    the [BM,BN]+[BN,DH] tiles instead of the full [N,DH] weight. The old single-shot
+    The contraction dim N is TILED (BLOCK_K) and accumulated, so shared memory is bounded by
+    the [BLOCK_M1,BLOCK_K]+[BLOCK_K,DH] tiles instead of the full [N,DH] weight. The old single-shot
     ``wo[N, DH]`` load needed ~N*DH*2 bytes of smem (e.g. 128 KB at N=DH=256), which fits
     A100/H100 but exceeds the ~100 KB/SM of sm_86 (RTX A5000/A6000); tiling makes it
     launchable on any GPU. Math is unchanged (same GEMM + epilogue)."""
     pid = tl.program_id(0).to(tl.int64)
-    rm = pid * BM + tl.arange(0, BM)
-    rh = tl.arange(0, DH)
+    pid_h = tl.program_id(1).to(tl.int64)
+    rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    rh = pid_h * BLOCK_N + tl.arange(0, BLOCK_N)
     mm = rm[:, None] < M
-    da = tl.zeros((BM, DH), dtype=tl.float32)                              # [BM, DH] acc
-    for n0 in range(0, N, BN):
-        rn = n0 + tl.arange(0, BN)
+    hm = rh[None, :] < DH
+    em = mm & hm
+    da = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)                              # [BLOCK_M1, BLOCK_N] acc
+    for n0 in range(0, N, BLOCK_K):
+        rn = n0 + tl.arange(0, BLOCK_K)
         nmask = rn < N
         do = tl.load(do_ptr + rm[:, None] * s_dom + rn[None, :] * s_don,
-                     mask=mm & nmask[None, :], other=0.0)                  # [BM, BN]
+                     mask=mm & nmask[None, :], other=0.0)                  # [BLOCK_M1, BLOCK_K]
         wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh,
-                     mask=nmask[:, None], other=0.0)                       # [BN, DH]
-        da = tl.dot(do, wo, da)                                           # accumulate [BM, DH]
+                     mask=nmask[:, None] & hm, other=0.0)                  # [BLOCK_K, BLOCK_N]
+        da = tl.dot(do, wo, da)                                           # accumulate [BLOCK_M1, BLOCK_N]
     s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh,
-                           mask=mm, other=0.0).to(tl.float32))
-    r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=mm, other=0.0).to(tl.float32)
+                           mask=em, other=0.0).to(tl.float32))
+    r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=em, other=0.0).to(tl.float32)
     off = rm[:, None] * s_om + rh[None, :] * s_oh
-    tl.store(dr_ptr + off, (s * da).to(dr_ptr.dtype.element_ty), mask=mm)
-    tl.store(dg_ptr + off, (da * r * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=mm)
-    tl.store(a_ptr + off, (s * r).to(a_ptr.dtype.element_ty), mask=mm)
+    tl.store(dr_ptr + off, (s * da).to(dr_ptr.dtype.element_ty), mask=em)
+    tl.store(dg_ptr + off, (da * r * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=em)
+    tl.store(a_ptr + off, (s * r).to(a_ptr.dtype.element_ty), mask=em)
 
 
 def _dgrad_epilogue(do2, wo, g2, r2):
@@ -179,12 +157,13 @@ def _dgrad_epilogue(do2, wo, g2, r2):
     dr = torch.empty_like(g2)
     dg = torch.empty_like(g2)
     a = torch.empty_like(g2)
-    grid = lambda META: (triton.cdiv(M, META["BM"]),)
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]), triton.cdiv(DH, META["BLOCK_N"]))
     _dgrad_epi[grid](
         do2, wo, g2, r2, dr, dg, a, M, N, DH,
         do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
         g2.stride(0), g2.stride(1), r2.stride(0), r2.stride(1),
         dr.stride(0), dr.stride(1),
+        seq_group=get_seq_group(M),
     )
     return dr, dg, a
 
@@ -193,7 +172,7 @@ def _fwd(gate2d, outr2d, wo):
     M, DH = gate2d.shape
     N = wo.shape[0]
     out = torch.empty((M, N), device=gate2d.device, dtype=gate2d.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]), triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]), triton.cdiv(N, META["BLOCK_N"]))
     _gate_out_fwd[grid](
         gate2d, outr2d, wo, out,
         M, N, DH,
@@ -201,13 +180,14 @@ def _fwd(gate2d, outr2d, wo):
         outr2d.stride(0), outr2d.stride(1),
         wo.stride(0), wo.stride(1),
         out.stride(0), out.stride(1),
+        seq_group=get_seq_group(M),
     )
     return out
 
 
 class _FusedGateOut(torch.autograd.Function):
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(ctx, gate, outr, wo):
         # gate, outr: [..., DH]; wo: [N, DH]
         shape = gate.shape
@@ -221,7 +201,7 @@ class _FusedGateOut(torch.autograd.Function):
         return out2.reshape(*shape[:-1], wo.shape[0])
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_out):
         g2, r2, wo = ctx.saved_tensors
         N = ctx.N
@@ -250,68 +230,28 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 
 
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
-_bias_only_sigmul_fwd_prune = make_cache_prune(
-    "bias_only_sigmul_fwd", dtype_of=tensor_dtype_of("g_ptr"),
-    bucket_of=key_bucket_of(),
-)
-
-
-@triton.autotune(
-    configs=[triton.Config({"BLK": b}, num_warps=w) for b in (1024, 2048, 4096) for w in (4, 8)],
-    key=["n"],
-    prune_configs_by={"early_config_prune": _bias_only_sigmul_fwd_prune},
-)
-@triton.jit
-def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLK: tl.constexpr):
-    off = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK)
-    m = off < n
-    g = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
-    o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
-    tl.store(a_ptr + off, (g * o).to(a_ptr.dtype.element_ty), mask=m)
-
-
-_bias_only_sigmul_bwd_prune = make_cache_prune(
-    "bias_only_sigmul_bwd", dtype_of=tensor_dtype_of("g_ptr"),
-    bucket_of=key_bucket_of(),
-)
-
-
-@triton.autotune(
-    configs=[triton.Config({"BLK": b}, num_warps=w) for b in (1024, 2048, 4096) for w in (4, 8)],
-    key=["n"],
-    prune_configs_by={"early_config_prune": _bias_only_sigmul_bwd_prune},
-)
-@triton.jit
-def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLK: tl.constexpr):
-    off = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK)
-    m = off < n
-    da = tl.load(da_ptr + off, mask=m, other=0.0).to(tl.float32)
-    s = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
-    o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
-    tl.store(do_ptr + off, (da * s).to(do_ptr.dtype.element_ty), mask=m)
-    tl.store(dg_ptr + off, (da * o * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=m)
 
 
 class _SigmoidGate(torch.autograd.Function):
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(ctx, gate, out):
         a = torch.empty_like(gate)
         n = gate.numel()
-        grid = lambda M: (triton.cdiv(n, M["BLK"]),)
-        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n)
+        grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, seq_group=get_seq_group(n))
         ctx.save_for_backward(gate, out)
         return a
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, da):
         gate, out = ctx.saved_tensors
         dg = torch.empty_like(gate)
         do = torch.empty_like(out)
         n = gate.numel()
-        grid = lambda M: (triton.cdiv(n, M["BLK"]),)
-        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n)
+        grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, seq_group=get_seq_group(n))
         return dg, do
 
 

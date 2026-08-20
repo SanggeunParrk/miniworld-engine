@@ -2,6 +2,7 @@
 # Single bench entry for miniworld-engine. Drops the model-level
 # Pairformer / DiffusionTransformer benches; keeps the kernel-wrapping layers.
 import importlib
+import os
 import sys
 import csv
 from collections.abc import Callable
@@ -83,6 +84,10 @@ class BenchConfig(BaseModel):
     # Dedicated parallel cache builder: when set, an autotune-capture run dumps its timings to
     # THIS shard file instead of the in-repo cache (submits/build_autotune_cache.py merges shards).
     autotune_shard: str = ""
+    #: directory of <op>.csv config files; every kernel's autotune grid comes from
+    #: here. Applied BEFORE the kernels import -- triton keeps the config list it is
+    #: handed only when non-empty, so a late selection has no effect.
+    config_dir: str = ""
     # Pin a device-calibrated dispatch switch for the duration of a capture. The card picks
     # one side for the shapes swept here, so the other side's kernels never fire and never
     # get captured -- yet they still run in production at other shapes, with no cached
@@ -99,6 +104,8 @@ class BenchConfig(BaseModel):
     #: Pin the inference LN+proj concat fusion; None = let the engine decide. Typed bool, not str:
     #: hydra parses `+pin_infer_concat=true` as a bool and a str field rejects it.
     pin_infer_concat: bool | None = None
+    #: Pin transition's hand-CUDA fused b2b forward on/off; None = let the engine decide.
+    pin_transition_cuda_b2b: bool | None = None
 
     kernel: str
     implementations: list[str] = [
@@ -1397,13 +1404,13 @@ BF16 = torch.bfloat16
 
 
 def _acc_fwd(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
-    _, rel, cos = tensor_metrics(actual, expected)
-    return {"output_rel_frob": rel, "output_cosine": cos}
+    mx, rel, cos = tensor_metrics(actual, expected)
+    return {"output_max_abs": mx, "output_rel_frob": rel, "output_cosine": cos}
 
 
 def _acc_grad(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
-    _, rel, cos = tensor_metrics(actual, expected)
-    return {"grad_rel_frob": rel, "grad_cosine": cos}
+    mx, rel, cos = tensor_metrics(actual, expected)
+    return {"grad_max_abs": mx, "grad_rel_frob": rel, "grad_cosine": cos}
 
 
 def _flat(items: list[torch.Tensor]) -> torch.Tensor:
@@ -1549,9 +1556,9 @@ def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
         kfn = lambda x: layernorm_linear_cute_fused(x, lw, lb, w, None, eps)  # noqa: E731
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear_fused"
     elif implementation == "layernorm_linear_te":
-        from miniworld_engine.kernels.layernorm_linear.te_style import layernorm_linear_te_fn
+        from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
         kfn = lambda x: layernorm_linear_te_fn(x, lw, lb, w, None, eps)  # noqa: E731
-        path = "kernels.layernorm_linear.te_style"
+        path = "kernels.layernorm_linear.triton.te_style"
     else:
         return as_bench_result(float("nan"))
 
@@ -1578,8 +1585,12 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         torch.manual_seed(1)
         return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
 
+    # Transition.forward ALWAYS adds the residual (fused epilogue); the kernels below are called
+    # with add_residual=False. Compare the raw op on both sides -- the residual add is the
+    # module-level bench's business, not this kernel's.
+    ref_fn = ref_mod._torch_forward
     if implementation == "pytorch":
-        kfn, path = (lambda x: ref_mod(x)), "module.reference.torch"
+        kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_engine.kernels import triton_transition_fused
         kfn = lambda x: triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)  # noqa: E731
@@ -1596,7 +1607,7 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
     else:
         return as_bench_result(float("nan"))
 
-    acc = _acc_fwd(kfn(_x()), ref_mod(_x()))
+    acc = _acc_fwd(kfn(_x()), ref_fn(_x()))
     return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="module.reference.torch", dtype="bfloat16")
 
 
@@ -1728,18 +1739,12 @@ def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels import triton_triangle_attention_pair_bias as fn
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
         path = "kernels.triangle_attention.triton.main"
-    elif implementation == "triton_tri_attn_miniworld":
-        from miniworld_engine.kernels.triangle_attention.triton.miniworld import (
+    elif implementation == "triton_tri_attn_atomic":
+        from miniworld_engine.kernels.triangle_attention.triton.atomic import (
             triton_triangle_attention_pair_bias as fn,
         )
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
-        path = "kernels.triangle_attention.triton.miniworld"
-    elif implementation == "triton_tri_attn_perf":
-        from miniworld_engine.kernels.triangle_attention.triton.perf import (
-            triton_triangle_attention_pair_bias as fn,
-        )
-        kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
-        path = "kernels.triangle_attention.triton.perf"
+        path = "kernels.triangle_attention.triton.atomic"
     else:
         return as_bench_result(float("nan"))
 
@@ -1754,7 +1759,7 @@ def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
 
 def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
     """Bias-only attention: out[i,j,d]=sum_k softmax_k(bias[j,k])*v[i,k,d]. v:(1,H,L,L,dh) bias:(1,H,L,L).
-    Rows: pytorch, triton_bias_attn, bias_only_fused(dep, NEGATIVE RESULT)."""
+    Rows: pytorch, triton_bias_attn."""
     import torch.nn.functional as F
 
     L, dh = seq_len, 32
@@ -1776,10 +1781,6 @@ def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels import triton_bias_only_attention
         kfn = lambda v, b: triton_bias_only_attention(v, b)  # noqa: E731
         path = "kernels.bias_only_attention.triton.main"
-    elif implementation == "bias_only_fused":
-        from miniworld_engine.kernels.bias_only_attention.triton.fused import bias_only_fused_fwd
-        kfn = lambda v, b: bias_only_fused_fwd(v, b)  # noqa: E731
-        path = "kernels.bias_only_attention.triton.fused"
     else:
         return as_bench_result(float("nan"))
 
@@ -1789,7 +1790,7 @@ def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
 
 def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
     """Augmented pair-bias attention: softmax(q.k*d^-0.5 + bias)*v. q,k,v:(A,1,L,H,dh) bias:(1,L,L,H).
-    Rows: pytorch, triton_aug_attn, aug_attn_compute_efficient(dep)."""
+    Rows: pytorch, triton_aug_attn, aug_attn_memory_efficient."""
     import torch.nn.functional as F
 
     L, A, H, dh = seq_len, 8, 4, 32
@@ -1812,16 +1813,16 @@ def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_aug_attn":
         from miniworld_engine.kernels import triton_augmented_attention_pair_bias
-        # memory-efficient backend explicitly (the dispatch wrapper now defaults to
-        # compute-efficient); keeps this row distinct from aug_attn_compute_efficient.
-        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b, compute_efficient=False)  # noqa: E731
+        # The dispatch wrapper's default: the compute-efficient backend in triton/main.py. The
+        # memory-efficient one is the aug_attn_memory_efficient row below.
+        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b)  # noqa: E731
         path = "kernels.augmented_attention.triton.main"
-    elif implementation == "aug_attn_compute_efficient":
-        from miniworld_engine.kernels.augmented_attention.triton.compute_efficient import (
+    elif implementation == "aug_attn_memory_efficient":
+        from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import (
             triton_augmented_attention_pair_bias as fn,
         )
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
-        path = "kernels.augmented_attention.triton.compute_efficient"
+        path = "kernels.augmented_attention.triton.memory_efficient"
     else:
         return as_bench_result(float("nan"))
 
@@ -1851,9 +1852,9 @@ def bench_kernel_ln_mask(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "fused_ln_mask":
-        from miniworld_engine.kernels.fused_ln_mask.triton.main import fused_ln_mask
+        from miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
         kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)  # noqa: E731
-        path = "kernels.fused_ln_mask.triton"
+        path = "kernels.fused_ln_mask.cute"
     else:
         return as_bench_result(float("nan"))
 
@@ -1917,18 +1918,22 @@ def bench_kernel_cond_transition_tail(conf, seq_len, implementation, fabric):
         return (torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32),
                 torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32))
 
+    # The kernel is the POST-AdaLN tail: ConditionedTransition.forward runs `ada_ln_in` first and
+    # only then calls it. Normalize once here so both sides see the same input.
+    ref_fn = lambda x, c: ref_mod._reference(ref_mod.ada_ln_in(x, c), c)  # noqa: E731
     if implementation == "pytorch":
-        kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
+        kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_cond_transition":
         raw = kernels.cond_transition_inference_dispatch
         kfn = lambda x, c: raw(  # noqa: E731
-            x.reshape(-1, D), c.reshape(-1, D), wa, wb, ws, wsc, bsc).reshape(1, L, L, D)
+            ref_mod.ada_ln_in(x, c).reshape(-1, D), c.reshape(-1, D),
+            wa, wb, ws, wsc, bsc).reshape(1, L, L, D)
         path = "kernels.conditioned_transition.triton"
     else:
         return as_bench_result(float("nan"))
 
     xc, cc = _xc()
-    acc = _acc_fwd(kfn(xc, cc), ref_mod(xc, cc))
+    acc = _acc_fwd(kfn(xc, cc), ref_fn(xc, cc))
     return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype="float32")
 
 
@@ -2139,13 +2144,15 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
     torch.manual_seed(1)
     x0 = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
     dy = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
+    # Residual-free on both sides: Transition.forward folds `+x` into the output, which puts an
+    # extra identity `+dy` into ref_dx that the add_residual=False kernels do not produce.
     xr = x0.clone().requires_grad_(True)
-    ref_mod(xr).backward(dy)
+    ref_mod._torch_forward(xr).backward(dy)
     ref_dx = xr.grad
 
     x = x0.clone().requires_grad_(True)
     if implementation == "pytorch":
-        out, path = ref_mod(x), "module.reference.torch"
+        out, path = ref_mod._torch_forward(x), "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_engine.kernels import triton_transition_fused
         out = triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
@@ -2182,9 +2189,9 @@ def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         out, path = F.linear(F.layer_norm(x, (D,), lw, lb, eps), w), "pytorch.autograd"
     elif implementation == "layernorm_linear_te":
-        from miniworld_engine.kernels.layernorm_linear.te_style import layernorm_linear_te_fn
+        from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
         out = layernorm_linear_te_fn(x, lw, lb, w, None, eps)
-        path = "kernels.layernorm_linear.te_style"
+        path = "kernels.layernorm_linear.triton.te_style"
     elif implementation == "layernorm_linear_cute":
         from miniworld_engine.kernels.layernorm_linear.autograd import layernorm_linear_fn
         out = layernorm_linear_fn(x, lw, lb, w, None, eps)
@@ -2226,6 +2233,52 @@ KERNEL_MAP = {
     "augmented_attention_token": bench_augmented_attention_token,
     "augmented_attention_atom": bench_augmented_attention_atom,
 }
+
+def target_impls(target: str) -> tuple[str, ...]:
+    """Every implementation ``target`` knows how to bench.
+
+    Read out of this module's own source rather than kept as a second list: the names live in each
+    bench function's ``implementation == "..."`` chain, and any hand-maintained copy drifts the
+    moment an implementation is added, renamed or dropped -- which is exactly the drift that let a
+    sweep call itself a kernel test while exercising one implementation per target.
+
+    Module-level targets do not use that chain; they parse the name into an ``ImplementationType``,
+    so their set is the enum plus the two aliases ``module_miniworld_spec`` understands.
+    """
+    import ast as _ast  # noqa: PLC0415
+    import inspect as _inspect  # noqa: PLC0415
+
+    fn = KERNEL_MAP.get(target)
+    if fn is None:
+        return ()
+    tree = _ast.parse(_inspect.getsource(fn))
+    out: list[str] = []
+    for node in _ast.walk(tree):
+        if not (isinstance(node, _ast.Compare) and isinstance(node.left, _ast.Name)
+                and node.left.id == "implementation"):
+            continue
+        for cmp in node.comparators:
+            vals = ([cmp] if isinstance(cmp, _ast.Constant)
+                    else list(cmp.elts) if isinstance(cmp, (_ast.Tuple, _ast.List, _ast.Set))
+                    else [])
+            for v in vals:
+                if isinstance(v, _ast.Constant) and isinstance(v.value, str) and v.value not in out:
+                    out.append(v.value)
+    if out:
+        return tuple(out)
+    return (*[m.value for m in ImplementationType], MINIWORLD_IMPL, OLD_TRITON_IMPL)
+
+
+def expand_implementations(target: str, requested: list[str]) -> list[str]:
+    """Resolve the sentinel ``all`` to every implementation of ``target``."""
+    if [r.strip().lower() for r in requested] != ["all"]:
+        return requested
+    impls = target_impls(target)
+    if not impls:
+        msg = f"implementations=all: no implementations found for target {target!r}"
+        raise ValueError(msg)
+    return list(impls)
+
 
 _KERNELS_ROOT = _REPO_ROOT / "benchmarks" / "kernels"
 _MODULES_ROOT = _REPO_ROOT / "benchmarks" / "modules"
@@ -2531,10 +2584,24 @@ def csv_row(
     version_base=None,
 )
 def main(cfg: DictConfig) -> None:
+    # The config set is chosen at import time via MINIWORLD_CONFIG_DIR (see autotune.configs):
+    # this module's own header imports miniworld_engine.modules, which pulls kernel modules in,
+    # so selecting here would already be too late for every op registered by that chain.
+    _cfgdir = str(getattr(cfg, "config_dir", "") or "")
+    if _cfgdir and _cfgdir != os.environ.get("MINIWORLD_CONFIG_DIR", ""):
+        msg = (f"config_dir={_cfgdir} but MINIWORLD_CONFIG_DIR="
+               f"{os.environ.get('MINIWORLD_CONFIG_DIR', '')!r}: the set must be in the "
+               f"environment before this process imports any kernel.")
+        raise ValueError(msg)
+    if _cfgdir:
+        print(f"config set: {_cfgdir}", flush=True)
     conf = BenchConfig.model_validate(cfg)
     if not conf.compile and conf.cudagraph == "disabled":
         msg = "Final benchmarks must run compiled or cudagraph'd. Use compile=true or cudagraph=manual|graphed."
         raise ValueError(msg)
+    from miniworld_engine.autotune.capture import install_launch_recorder
+    install_launch_recorder()   # coverage accounting; no effect on what or how anything is benched
+    conf.implementations = expand_implementations(conf.kernel, conf.implementations)
     bench_func = KERNEL_MAP[conf.kernel]
 
     torch.backends.cuda.matmul.allow_tf32 = conf.allow_tf32
@@ -2589,6 +2656,9 @@ def main(cfg: DictConfig) -> None:
         _concat = getattr(conf, "pin_infer_concat", None)
         if _concat is not None:
             _pins["pin_infer_concat"] = bool(_concat)
+        _b2b = getattr(conf, "pin_transition_cuda_b2b", None)
+        if _b2b is not None:
+            _pins["transition_cuda_b2b"] = bool(_b2b)
         _settings.configure(**_pins)
         print("  [capture] full grid unlocked; "
               + ", ".join(f"{k.removeprefix('pin_')}={v}" for k, v in _pins.items()), flush=True)
@@ -2701,6 +2771,15 @@ def main(cfg: DictConfig) -> None:
         single_config_records=autotune_single_config_records,
         seen_autotuners=seen_autotuners,
     )
+    # Which ops this target actually launched -- the coverage denominator for any claim that a
+    # sweep "tested the kernels". Identified by config-list identity (autotune.configs.op_of).
+    from miniworld_engine.autotune.capture import launched_ops
+    _lo = launched_ops()
+    if _lo:
+        print(f"\nops launched ({len(_lo)}): " + " ".join(sorted(_lo)), flush=True)
+        # Persisted, not just printed: each target is its own process, so the caller can only
+        # aggregate coverage across a whole 'all' run by reading these back.
+        (results_dir / f"{run_name}.ops").write_text("\n".join(sorted(_lo)) + "\n")
     if autotune_summary is None:
         print("\nNo Triton autotune configs were captured during this run.")
         return

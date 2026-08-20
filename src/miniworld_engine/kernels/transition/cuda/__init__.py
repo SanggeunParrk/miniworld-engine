@@ -4,19 +4,23 @@ from pathlib import Path
 
 from torch.utils.cpp_extension import load
 
+from ..._nvcc import ensure_cuda_home, gencodes, host_flags
+
+ensure_cuda_home()
+
 _dir = Path(__file__).parent
 
 transition_b2b_cuda = load(
     name="transition_b2b_cuda",
     sources=[str(_dir / "transition_b2b_kernel.cu")],
     extra_cuda_cflags=[
+        *host_flags(),
         "-std=c++17",
         "-O3",
         "--use_fast_math",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
-        "-gencode",
-        "arch=compute_90a,code=sm_90a",
+        *gencodes("90a"),
         "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
         "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
         "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
@@ -35,13 +39,13 @@ transition_expand_gate_cuda = load(
     name="transition_expand_gate_cuda",
     sources=[str(_dir / "transition_expand_gate_kernel.cu")],
     extra_cuda_cflags=[
+        *host_flags(),
         "-std=c++17",
         "-O3",
         "--use_fast_math",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
-        "-gencode",
-        "arch=compute_90a,code=sm_90a",
+        *gencodes("90a"),
         "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
         "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
         "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
@@ -60,13 +64,13 @@ transition_gatebwd_cuda = load(
     name="transition_gatebwd_cuda",
     sources=[str(_dir / "transition_gatebwd_kernel.cu")],
     extra_cuda_cflags=[
+        *host_flags(),
         "-std=c++17",
         "-O3",
         "--use_fast_math",
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
-        "-gencode",
-        "arch=compute_90a,code=sm_90a",
+        *gencodes("90a"),
         "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
         "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
         "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",

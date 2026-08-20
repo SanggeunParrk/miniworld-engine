@@ -14,6 +14,8 @@ and doubled grads directly, so there is no ``split``/``cat``/``transpose`` in th
 (those materializations were ~21% of the naive bidir self-attention step)."""
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+
 import torch
 import triton
 from einops import rearrange, reduce
@@ -33,11 +35,11 @@ def _fwd_dir(q, k, v, bias, out, m, sm_scale):
     (saved for backward)."""
     B, H, L, _, D = q.shape
     bias = bias.contiguous()
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * H, L]
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
     _attn_fwd[grid](
         q, k, v, bias, sm_scale, m, out,
         *q.stride(), *out.stride(), *bias.stride(), *m.stride(),
-        B, H, L, D, BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
     )
     return bias
 
@@ -49,23 +51,23 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
     HL = H * L
     m_m = rearrange(m, "B H L L2 -> B (H L) L2")
     delta = torch.empty_like(m_m)
-    grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * HL, 1]
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         out, dout, delta, *out.stride(), *dout.stride(), HL, B, HL, L, D,
-        BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
     )
     dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)
-    grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_N"]), 1, B * HL]
+    grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
     _attn_bwd_dkdv[grid_kv](
         q, k, v, bias, sm_scale, dout, dk, dv, dbias, m_m, delta,
         *q.stride(), *dk.stride(), *dout.stride(), *bias.stride(), L * L, HL, L, HL, D,
-        BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
     )
-    grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M"]), 1, B * HL]
+    grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
     _attn_bwd_dq[grid_q](
         q, k, v, bias, sm_scale, dout, dq, m_m, delta,
         *q.stride(), *dq.stride(), *dout.stride(), *bias.stride(), HL, L, HL, D,
-        BLOCK_D=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
     )
     return reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
 
@@ -78,7 +80,7 @@ def _split_dirs(t, H):
 
 class BidirTriangleAttentionFn(torch.autograd.Function):
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(ctx, q, k, v, bias, n_head):
         B, L, _, D2 = q.shape
         H = n_head
@@ -107,7 +109,7 @@ class BidirTriangleAttentionFn(torch.autograd.Function):
         return out
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, dout):
         q, k, v, bs, be, m_s, m_e, out = ctx.saved_tensors
         H, dh = ctx.H, ctx.dh

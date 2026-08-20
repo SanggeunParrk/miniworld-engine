@@ -1,3 +1,5 @@
+
+from miniworld_engine.kernels._compile import opaque
 """Full Transition fwd+bwd with the GEMM-bearing kernels on quack SM90 WGMMA.
 
 Mirrors ``triton/fused.py`` (``TritonTransitionFusedFunction``) EXACTLY in structure — same
@@ -16,52 +18,63 @@ once with a plain ``layer_norm`` (memory-bound, cheap) and reused by both the ga
 operand and the wgrad GEMMs — the LN-bwd kernel still gets the raw x2 + saved stats.
 """
 
+from miniworld_engine.autotune.configs import configs_for
 import torch
 import triton
 import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 from miniworld_engine.kernels.transition.triton.fused import (
     _transition_expand_gatebwd_savedxn,
     _transition_ln_bwd,
+    get_seq_group,
 )
 
 
 # fmt: off
+
+
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_foldstats_triton"), key=['seq_group', 'K'])
 @triton.jit
 def _xn_recompute_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, b_ptr, o_ptr, M, K, sm, sk,
-    BM: tl.constexpr, BK: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
+    seq_group,
 ):
     # xn = (x*rstd - c1)*gamma + beta from saved stats. One bandwidth-bound pass (read x,
     # write xn). Replaces the eager fp32 layer_norm recompute, which materialized several
     # (M,K) fp32 temporaries and was ~10x slower.
+    # Elementwise in K (rstd/c1 are per-row and already reduced), so K loops in BLOCK_K tiles —
+    # was BLOCK_M1=64 / BLOCK_K=next_power_of_2(K), two constants the tuner never saw.
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BM + tl.arange(0, BM)
-    k = tl.arange(0, BK)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rm = rows < M
-    km = k < K
-    mask = rm[:, None] & km[None, :]
-    off = rows[:, None] * sm + k[None, :] * sk
-    x = tl.load(x_ptr + off, mask=mask, other=0.0).to(tl.float32)
     rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)
     c1 = tl.load(c1_ptr + rows, mask=rm, other=0.0)
-    g = tl.load(g_ptr + k, mask=km, other=0.0).to(tl.float32)
-    b = tl.load(b_ptr + k, mask=km, other=0.0).to(tl.float32)
-    xn = (x * rstd[:, None] - c1[:, None]) * g[None, :] + b[None, :]
-    tl.store(o_ptr + off, xn.to(o_ptr.dtype.element_ty), mask=mask)
+    for k0 in range(0, K, BLOCK_K):
+        k = k0 + tl.arange(0, BLOCK_K)
+        km = k < K
+        mask = rm[:, None] & km[None, :]
+        off = rows[:, None] * sm + k[None, :] * sk
+        x = tl.load(x_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + k, mask=km, other=0.0).to(tl.float32)
+        b = tl.load(b_ptr + k, mask=km, other=0.0).to(tl.float32)
+        xn = (x * rstd[:, None] - c1[:, None]) * g[None, :] + b[None, :]
+        tl.store(o_ptr + off, xn.to(o_ptr.dtype.element_ty), mask=mask)
 # fmt: on
 
 
 def _xn_recompute(x2, rstd, c1, gamma, beta):
     M, K = x2.shape
     xn = torch.empty_like(x2)
-    _xn_recompute_kernel[(triton.cdiv(M, 64),)](
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    _xn_recompute_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(), xn,
         M, K, x2.stride(0), x2.stride(1),
-        BM=64, BK=triton.next_power_of_2(K),
+        seq_group=get_seq_group(M),
     )
     return xn
 from miniworld_engine.kernels.transition.cute.gemm_transition_swiglu import (
@@ -78,7 +91,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
 
     @typecheck
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(
         ctx,
         x: Float[torch.Tensor, "... d"],
@@ -137,7 +150,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         return out.reshape(orig_shape)
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         (
             x2, rstd, c1, ln_weight, ln_bias,

@@ -25,7 +25,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
-from miniworld_engine.kernels.layernorm_linear.te_style import (
+from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
 )

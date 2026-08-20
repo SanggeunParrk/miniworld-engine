@@ -1,56 +1,82 @@
 {
   "128|1048576": {
     "ms": {
-      "atomic": 1.164504,
-      "cuda": 1.182558,
-      "partial": 2.43497,
-      "persistent": 1.182343
+      "atomic": 1.121657,
+      "partial": 2.262699,
+      "persistent": 1.146179
     },
     "path": "atomic"
   },
   "128|131072": {
     "ms": {
-      "atomic": 0.177829,
-      "cuda": 0.182421,
-      "partial": 0.339325,
-      "persistent": 0.183259
+      "atomic": 0.169509,
+      "partial": 0.326775,
+      "persistent": 0.176449
     },
     "path": "atomic"
   },
   "128|262144": {
     "ms": {
-      "atomic": 0.299076,
-      "cuda": 0.310458,
-      "partial": 0.599998,
-      "persistent": 0.312762
+      "atomic": 0.291182,
+      "partial": 0.569408,
+      "persistent": 0.299882
     },
     "path": "atomic"
   },
   "128|524288": {
     "ms": {
-      "atomic": 0.654336,
-      "cuda": 0.676899,
-      "partial": 1.37475,
-      "persistent": 0.678947
+      "atomic": 0.637987,
+      "partial": 1.247933,
+      "persistent": 0.650522
     },
     "path": "atomic"
   },
-  "256|131072": {
+  "128|65536": {
     "ms": {
-      "atomic": 0.383386,
-      "cuda": 0.341285,
-      "partial": 0.385818,
-      "persistent": 0.348745
+      "atomic": 0.082927,
+      "partial": 0.245347,
+      "persistent": 0.087618
     },
-    "path": "cuda"
+    "path": "atomic"
   },
-  "512|131072": {
+  "256|1048576": {
     "ms": {
-      "atomic": 0.71296,
-      "cuda": 0.677815,
-      "partial": 0.725371,
-      "persistent": 0.649075
+      "atomic": 2.315823,
+      "partial": 2.369629,
+      "persistent": 2.228503
     },
     "path": "persistent"
+  },
+  "256|262144": {
+    "ms": {
+      "atomic": 0.586547,
+      "partial": 0.630682,
+      "persistent": 0.570778
+    },
+    "path": "persistent"
+  },
+  "256|65536": {
+    "ms": {
+      "atomic": 0.163249,
+      "partial": 0.181419,
+      "persistent": 0.156938
+    },
+    "path": "persistent"
+  },
+  "384|1048576": {
+    "ms": {
+      "atomic": 4.273835,
+      "partial": 4.844544,
+      "persistent": 5.75744
+    },
+    "path": "atomic"
+  },
+  "384|131072": {
+    "ms": {
+      "atomic": 0.60375,
+      "partial": 0.65536,
+      "persistent": 0.836895
+    },
+    "path": "atomic"
   }
 }

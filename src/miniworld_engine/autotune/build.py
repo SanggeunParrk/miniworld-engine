@@ -84,7 +84,7 @@ def build_transition_split_fwd(d_hiddens=(256, 512), seq_lens=(384, 512, 768, 10
             gm = get_seq_group(M)
             pos = (x, wa, wb, out, M, n, N)
             grid = lambda meta: (  # noqa: E731
-                triton.cdiv(M, meta["BLOCK_M"]) * triton.cdiv(n * N, meta["BLOCK_N"]),
+                triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(n * N, meta["BLOCK_N"]),
             )
             bucket = shape_bucket(GROUP_M=gm, n=n, N=N)
             run_ms = lambda cfg: _bench(  # noqa: E731
@@ -121,7 +121,7 @@ def build_trimul_bidir_front(d_pairs=(128, 256, 512), seq_lens=(384, 512, 768, 1
             preact = torch.empty(4 * h2, M, device=dev, dtype=dtype)
             gm = B.get_seq_group(M)
             pos = (x_flat, Wlr, left, right, preact, M, M)
-            grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
+            grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
             bucket = shape_bucket(GM=gm, H2=h2, K=d)
             run_ms = lambda cfg: _bench(  # noqa: E731
                 kernel.fn, grid, pos,

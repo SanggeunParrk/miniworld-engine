@@ -22,16 +22,13 @@ miss / stale / bad pick only costs speed, never correctness. Config is performan
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Callable, Iterable
 
 from quack.gemm_config import GemmConfig, _get_sm90_configs
 
 from .cache import (
-    as_cfg_dict,
     config_space_hash,
     gpu_key,
-    run_autotune_enabled,
     select_config,
     store_ranked_configs,
 )

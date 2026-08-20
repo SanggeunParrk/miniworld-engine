@@ -1,64 +1,31 @@
+
+from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/tm2.py
 
+from miniworld_engine.autotune.configs import configs_for
 import torch
 import triton
-from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
+
 from einops import rearrange
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 # Real cross-product tile search (was: 2 fwd pinned / 3 bwd configs with BLOCK_N pinned to 64).
-# BLOCK_M (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
+# BLOCK_M1 (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
 # all genuine tunable tiles of the `for k_start in range(0, N, BLOCK_K)` GEMM. The smem prune
 # below drops configs whose pipelined tiles overflow device shared memory before compile.
-fwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_K": BLOCK_K, "BLOCK_N": BLOCK_N})
 
 
-bwd_configs = list(fwd_configs)
 
 
-def _tm2_smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
-    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE compile.
-
-    Both the fwd and bwd fused sigmoid-gate2 GEMMs pipeline, per k-step, TWO x tiles
-    [BLOCK_M, BLOCK_K] (x_gate, x_out) and TWO weight tiles [BLOCK_K, BLOCK_N] (W_gate, W_out)
-    -- W = 2 -- across ``num_stages`` (bf16 = 2 B). The largest cross-product tiles (e.g.
-    BLOCK_M=128, BLOCK_K=64, BLOCK_N=256, num_stages=4 ~= 384 KB) overflow A100's ~163 KB smem,
-    so prune up front: Triton's bench-time OOM pruning is unsafe under CUDA-graph capture (fires
-    mid-capture and poisons the stream). Device-aware via ``max_shared_mem``.
-    """
-    import triton as _triton
-
-    try:
-        limit = _triton.runtime.driver.active.utils.get_device_properties(
-            torch.cuda.current_device(),
-        )["max_shared_mem"]
-    except Exception:  # noqa: BLE001 -- conservative sm100 budget
-        limit = 227 * 1024
-
-    def _smem(c):
-        bm = c.kwargs["BLOCK_M"]
-        bk = c.kwargs["BLOCK_K"]
-        bn = c.kwargs["BLOCK_N"]
-        return c.num_stages * (2 * bm * bk + 2 * bk * bn) * 2
-
-    kept = [c for c in configs if _smem(c) <= limit]
-    return kept or [min(configs, key=_smem)]
 
 
-_tm2_fwd_prune = make_cache_prune(
-    "tm2_fwd", dtype_of=tensor_dtype_of("x_gate_ptr"), bucket_of=key_bucket_of("GROUP_M", "N"),
-    base_prune=_tm2_smem_early_prune,
-)
 
 
-@triton.autotune(
-    configs=fwd_configs, key=["GROUP_M", "N"],
-    prune_configs_by={"early_config_prune": _tm2_fwd_prune},
-)
+@triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_triton"), key=['GROUP_M', 'N'])
 @triton.jit
 def fused_sigmoid_gate2_fwd_kernel(
     x_gate_ptr,
@@ -68,25 +35,25 @@ def fused_sigmoid_gate2_fwd_kernel(
     out_ptr,
     M,
     N: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    GROUP_M,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    row_start = pid_m * BLOCK_M
+    row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
 
     # int64 M-index: offs_m*N (M=B*L*L) overflows int32 at large logical L.
-    offs_m = row_start + tl.arange(0, BLOCK_M).to(tl.int64)
+    offs_m = row_start + tl.arange(0, BLOCK_M1).to(tl.int64)
     offs_n = col_start + tl.arange(0, BLOCK_N)
 
-    A_tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    B_tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    A_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    B_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
 
     for k_start in range(0, N, BLOCK_K):
         offs_k = k_start + tl.arange(0, BLOCK_K)
@@ -122,16 +89,9 @@ def fused_sigmoid_gate2_fwd_kernel(
     )
 
 
-_tm2_bwd_prune = make_cache_prune(
-    "tm2_bwd", dtype_of=tensor_dtype_of("x_gate_ptr"), bucket_of=key_bucket_of("GROUP_M", "N"),
-    base_prune=_tm2_smem_early_prune,
-)
 
 
-@triton.autotune(
-    configs=bwd_configs, key=["GROUP_M", "N"],
-    prune_configs_by={"early_config_prune": _tm2_bwd_prune},
-)
+@triton.autotune(configs=configs_for("trimul_outproj_bwd_gate_recompute_triton"), key=['GROUP_M', 'N'])
 @triton.jit
 def fused_sigmoid_gate2_bwd_kernel(
     x_gate_ptr,
@@ -143,25 +103,25 @@ def fused_sigmoid_gate2_bwd_kernel(
     dB_ptr,
     M,
     N: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    GROUP_M,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    row_start = pid_m * BLOCK_M
+    row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
 
     # int64 M-index: offs_m*N (M=B*L*L) overflows int32 at large logical L.
-    offs_m = row_start + tl.arange(0, BLOCK_M).to(tl.int64)
+    offs_m = row_start + tl.arange(0, BLOCK_M1).to(tl.int64)
     offs_n = col_start + tl.arange(0, BLOCK_N)
 
-    A_tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    B_tile = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    A_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    B_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
     for k_start in range(0, N, BLOCK_K):
         offs_k = k_start + tl.arange(0, BLOCK_K)
         x_gate_tile = tl.load(
@@ -217,7 +177,7 @@ def get_seq_group(length) -> int:
 class TritonTM2Function(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(
         ctx,
         x: Float[torch.Tensor, "* d"],
@@ -242,7 +202,7 @@ class TritonTM2Function(torch.autograd.Function):
         out = torch.empty_like(x)
 
         grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
+            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
         ]
         fused_sigmoid_gate2_fwd_kernel[grid](
             x,
@@ -261,7 +221,7 @@ class TritonTM2Function(torch.autograd.Function):
         return out.reshape(original_shape)
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_out: torch.Tensor):
         x, y, gate_weight, out_weight = ctx.saved_tensors
         original_shape = ctx.original_shape
@@ -275,7 +235,7 @@ class TritonTM2Function(torch.autograd.Function):
         dB = torch.empty_like(x)
 
         grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
+            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
         ]
         fused_sigmoid_gate2_bwd_kernel[grid](
             x,

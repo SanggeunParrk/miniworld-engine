@@ -1,0 +1,85 @@
+"""Recompute helpers for the LayerNormLinear backward: x_normed and x_hat from saved stats."""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+from miniworld_engine.autotune.configs import configs_for
+
+# Bucketed row count, not raw M: a raw token count mints one full sweep per sequence length.
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_triton"), key=['GROUP_M', 'K'])
+@triton.jit
+def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
+                    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M):
+    # Pure elementwise (mean/rstd are read, never reduced here), so the K axis loops in
+    # BLOCK_K tiles instead of the old whole-row BLOCK_K=next_power_of_2(K): the tile is now
+    # a tuned config value on both axes, and a wide K no longer forces one giant register tile.
+    pid = tl.program_id(0).to(tl.int64)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    rm = rows < M
+    mean = tl.load(mean_ptr + rows, mask=rm, other=0.0)[:, None]
+    rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)[:, None]
+    for k0 in range(0, K, BLOCK_K):
+        cols = k0 + tl.arange(0, BLOCK_K)
+        cm = cols < K
+        x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
+                    mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
+        b = tl.load(b_ptr + cols, mask=cm, other=0.0).to(tl.float32)[None, :]
+        y = (x - mean) * rstd * g + b
+        tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1,
+                 y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+
+def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
+                       mean: torch.Tensor, rstd: torch.Tensor):
+    """x_normed = (x-mean)*rstd*γ + β, one fused bf16 pass using the SAVED mean/rstd (no stats
+    recompute). Reads x at its own strides (strided/transposed view OK — no pre-copy) and writes
+    a CONTIGUOUS (M,K) output."""
+    M, K = x.shape
+    y = torch.empty(M, K, device=x.device, dtype=x.dtype)   # contiguous out
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    _xnormed_kernel[grid](
+        x, gamma, beta, mean, rstd, y, M, K, x.stride(0), x.stride(1), y.stride(0), y.stride(1),
+        GROUP_M=get_seq_group(M),
+    )
+    return y
+
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_noaffine_triton"), key=['GROUP_M', 'K'])
+@triton.jit
+def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
+                 BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M):
+    pid = tl.program_id(0).to(tl.int64)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    rm = rows < M
+    mean = tl.load(mean_ptr + rows, mask=rm, other=0.0)[:, None]
+    rstd = tl.load(rstd_ptr + rows, mask=rm, other=0.0)[:, None]
+    for k0 in range(0, K, BLOCK_K):     # K tiled, was a whole-row next_power_of_2(K) constant
+        cols = k0 + tl.arange(0, BLOCK_K)
+        cm = cols < K
+        x = tl.load(x_ptr + rows[:, None] * sx0 + cols[None, :] * sx1,
+                    mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        y = (x - mean) * rstd
+        tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1,
+                 y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
+
+def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor):
+    """x̂ = (x-mean)·rstd (no affine), one fused bf16 pass using the SAVED mean/rstd.
+    Reads x at its own strides (so a transposed/strided view is fine — NO pre-copy) and
+    writes a CONTIGUOUS (M,K) x̂. This lets the caller feed a strided x (e.g. a bmm
+    output viewed channel-major) without a .contiguous() transpose copy."""
+    M, K = x.shape
+    y = torch.empty(M, K, device=x.device, dtype=x.dtype)   # contiguous out
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    _xhat_kernel[grid](x, mean, rstd, y, M, K, x.stride(0), x.stride(1), y.stride(0), y.stride(1),
+                       GROUP_M=get_seq_group(M))
+    return y

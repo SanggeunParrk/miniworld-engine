@@ -1,4 +1,7 @@
+
+from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/adaln.py
+from miniworld_engine.autotune.configs import configs_for
 import os
 
 import torch
@@ -6,74 +9,25 @@ from miniworld_engine import settings
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 AUTOTUNE = settings.current().autotunes("adaln")
-if AUTOTUNE:
-    configs = [
-        triton.Config(
-            {"BLOCK_M": block_m, "BLOCK_NX": block_nx, "BLOCK_NC": block_nc},
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-        for block_m in [16, 32]
-        for block_nx in [32, 64, 128]
-        for block_nc in [32, 64, 128]
-        for num_warps in [4, 8]
-        for num_stages in [2, 3, 4]
-    ]
-    bwd_configs = [
-        triton.Config(
-            {"BLOCK_M": block_m, "BLOCK_NX": block_nx, "BLOCK_NC": block_nc},
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-        for block_m in [64, 128]
-        for block_nx in [64, 128]
-        for block_nc in [64, 128]
-        for num_warps in [4, 8]
-        for num_stages in [2, 3]
-    ]
-    param_configs = [
-        triton.Config(
-            {"BLOCK_M": block_m, "BLOCK_NX": block_nx, "BLOCK_NC": block_nc},
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-        for block_m in [32, 64]
-        for block_nx in [32, 64]
-        for block_nc in [32, 64]
-        for num_warps in [4, 8]
-        for num_stages in [2, 3]
-    ]
-else:
-    configs = [
-        triton.Config({"BLOCK_M": 16, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=4),
-        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=4),
-        triton.Config({"BLOCK_M": 16, "BLOCK_NX": 128, "BLOCK_NC": 64}, num_warps=8),
-        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 128, "BLOCK_NC": 64}, num_warps=8),
-    ]
-    bwd_configs = [
-        triton.Config({"BLOCK_M": 64, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=4),
-        triton.Config({"BLOCK_M": 128, "BLOCK_NX": 64, "BLOCK_NC": 64}, num_warps=8),
-        triton.Config({"BLOCK_M": 64, "BLOCK_NX": 128, "BLOCK_NC": 64}, num_warps=8),
-    ]
-    param_configs = [
-        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 32, "BLOCK_NC": 32}, num_warps=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_NX": 32, "BLOCK_NC": 32}, num_warps=4),
-        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 64, "BLOCK_NC": 32}, num_warps=8),
-        triton.Config({"BLOCK_M": 32, "BLOCK_NX": 32, "BLOCK_NC": 64}, num_warps=8),
-    ]
 
 
-_adaln_main_fwd_prune = make_cache_prune(
-    "adaln_main_fwd", dtype_of=tensor_dtype_of("X"),
-    bucket_of=key_bucket_of("NX", "NC"),
-)
 
 
-@triton.autotune(configs=configs, key=["NX", "NC"],
-                 prune_configs_by={"early_config_prune": _adaln_main_fwd_prune})
+# GROUP_M, not raw M: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, so the
+# forward had no row axis in its key at all while its three backwards keyed the raw count.
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+@triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"), key=['NX', 'NC', 'GROUP_M'])
 @triton.jit
 def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     X,
@@ -103,26 +57,27 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     eps_cond,
     USE_BF16: tl.constexpr,
     USE_FP16: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_NX: tl.constexpr,
-    BLOCK_NC: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K_NX: tl.constexpr,
+    BLOCK_K_NC: tl.constexpr,
+    GROUP_M,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
 
-    mean_x = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for x_start in range(0, NX, BLOCK_NX):
-        x_cols = x_start + tl.arange(0, BLOCK_NX)
+    mean_x = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for x_start in range(0, NX, BLOCK_K_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_K_NX)
         x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
         x_offsets = rows[:, None] * stride_xr + x_cols[None, :] * stride_xc
         x = tl.load(X + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
         mean_x += tl.sum(tl.where(x_mask, x, 0.0), axis=1)
     mean_x /= NX
 
-    var_x = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for x_start in range(0, NX, BLOCK_NX):
-        x_cols = x_start + tl.arange(0, BLOCK_NX)
+    var_x = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for x_start in range(0, NX, BLOCK_K_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_K_NX)
         x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
         x_offsets = rows[:, None] * stride_xr + x_cols[None, :] * stride_xc
         x = tl.load(X + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
@@ -130,18 +85,18 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
         var_x += tl.sum(x_centered * x_centered, axis=1)
     rstd_x = tl.rsqrt(var_x / NX + eps_x)
 
-    mean_cond = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for c_start in range(0, NC, BLOCK_NC):
-        c_cols = c_start + tl.arange(0, BLOCK_NC)
+    mean_cond = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for c_start in range(0, NC, BLOCK_K_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_K_NC)
         c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
         c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
         cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
         mean_cond += tl.sum(tl.where(c_mask, cond, 0.0), axis=1)
     mean_cond /= NC
 
-    var_cond = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for c_start in range(0, NC, BLOCK_NC):
-        c_cols = c_start + tl.arange(0, BLOCK_NC)
+    var_cond = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for c_start in range(0, NC, BLOCK_K_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_K_NC)
         c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
         c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
         cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
@@ -152,16 +107,16 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     tl.store(RstdX + rows, rstd_x, mask=row_mask)
     tl.store(RstdC + rows, rstd_cond, mask=row_mask)
 
-    for c_start in range(0, NC, BLOCK_NC):
-        c_cols = c_start + tl.arange(0, BLOCK_NC)
+    for c_start in range(0, NC, BLOCK_K_NC):
+        c_cols = c_start + tl.arange(0, BLOCK_K_NC)
         c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
         c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
         cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
         cond_norm = (cond - mean_cond[:, None]) * rstd_cond[:, None]
         tl.store(CondNorm + c_offsets, cond_norm, mask=c_mask)
 
-    for x_start in range(0, NX, BLOCK_NX):
-        x_cols = x_start + tl.arange(0, BLOCK_NX)
+    for x_start in range(0, NX, BLOCK_K_NX):
+        x_cols = x_start + tl.arange(0, BLOCK_K_NX)
         x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
         x_offsets = rows[:, None] * stride_xr + x_cols[None, :] * stride_xc
 
@@ -169,11 +124,11 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
         x_hat = (x - mean_x[:, None]) * rstd_x[:, None]
 
         scale_b = tl.load(ScaleB + x_cols, mask=x_cols < NX, other=0.0).to(tl.float32)
-        scale = tl.zeros([BLOCK_M, BLOCK_NX], dtype=tl.float32)
-        bias = tl.zeros([BLOCK_M, BLOCK_NX], dtype=tl.float32)
+        scale = tl.zeros([BLOCK_M1, BLOCK_K_NX], dtype=tl.float32)
+        bias = tl.zeros([BLOCK_M1, BLOCK_K_NX], dtype=tl.float32)
 
-        for c_start in range(0, NC, BLOCK_NC):
-            c_cols = c_start + tl.arange(0, BLOCK_NC)
+        for c_start in range(0, NC, BLOCK_K_NC):
+            c_cols = c_start + tl.arange(0, BLOCK_K_NC)
             c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
             c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
             cond = tl.load(Cond + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
@@ -217,14 +172,17 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
 
         scale += scale_b[None, :]
 
+        # Round AFTER the sigmoid, not before: tl.sigmoid takes fp32/fp64 only, and rounding the
+        # accumulator first bought nothing -- `scale` feeds no tl.dot from here on (unlike the
+        # cond_aff/scale_w/bias_w casts above, which do). The stored Gate keeps its low-precision
+        # dtype so the backward reconstructs exactly what the forward used.
+        gate = tl.sigmoid(scale)
         if USE_BF16:
-            scale = scale.to(tl.bfloat16)
+            gate = gate.to(tl.bfloat16)
             bias = bias.to(tl.bfloat16)
         elif USE_FP16:
-            scale = scale.to(tl.float16)
+            gate = gate.to(tl.float16)
             bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
         y = gate.to(tl.float32) * x_hat + bias.to(tl.float32)
 
         tl.store(XHat + x_offsets, x_hat, mask=x_mask)
@@ -232,18 +190,11 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
         tl.store(Y + x_offsets, y, mask=x_mask)
 
 
-_adaln_main_bwd_input_prune = make_cache_prune(
-    "adaln_main_bwd_input", dtype_of=tensor_dtype_of("DY"),
-    bucket_of=key_bucket_of("M", "NX", "NC"),
-)
 
 
-@triton.autotune(
-    configs=bwd_configs,
-    key=["M", "NX", "NC"],
-    reset_to_zero=["DScaleB"],
-    prune_configs_by={"early_config_prune": _adaln_main_bwd_input_prune},
-)
+@triton.autotune(configs=configs_for("adaln_bwd_dx_dbias_triton"),
+                 key=['GROUP_M', 'NX', 'NC'],
+                 reset_to_zero=['DScaleB'])
 @triton.jit
 def adaln_bwd_input_kernel(  # noqa: PLR0915
     DY,
@@ -271,187 +222,265 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
     NC: tl.constexpr,
     USE_BF16: tl.constexpr,
     USE_FP16: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_NX: tl.constexpr,
-    BLOCK_NC: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K_NX: tl.constexpr,
+    BLOCK_K_NC: tl.constexpr,
+    GROUP_M,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
 
-    sum_grad_x = tl.zeros([BLOCK_M], dtype=tl.float32)
-    sum_grad_xhat = tl.zeros([BLOCK_M], dtype=tl.float32)
-
-    for x_start in range(0, NX, BLOCK_NX):
-        x_cols = x_start + tl.arange(0, BLOCK_NX)
+    if BLOCK_K_NX >= NX and BLOCK_K_NC >= NC:
+        # COVERING TILES. BLOCK_K_NX/NX and BLOCK_K_NC/NC are all tl.constexpr, so this test is
+        # resolved at COMPILE time and only one of the two branches is ever emitted.
+        #
+        # When one tile spans each axis the four sweeps below degenerate to a single trip each,
+        # and the general form then (a) re-reads DY / XHat / Gate FOUR times and (b) re-runs the
+        # whole grad_cond_aff GEMM (2 tl.dot) a second time just to form dcond. Here the operands
+        # are read ONCE and the fp32 accumulator `grad_cond_aff` is kept in REGISTERS and reused
+        # for both the c1/c2 reductions and the dcond epilogue -- halving this kernel's tl.dot
+        # count. Every expression is copied verbatim from the general branch, so at a covering
+        # config the two are numerically identical.
+        x_cols = tl.arange(0, BLOCK_K_NX)
         x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
         x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
 
-        dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+        dy_raw = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
         x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
         gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-        grad_xhat = tl.where(x_mask, dy * gate, 0.0)
-        dscale = tl.where(x_mask, dy * x_hat * gate * (1.0 - gate), 0.0)
 
-        sum_grad_x += tl.sum(grad_xhat, axis=1)
-        sum_grad_xhat += tl.sum(grad_xhat * tl.where(x_mask, x_hat, 0.0), axis=1)
-
-        partial_dscale_b = tl.sum(dscale, axis=0)
+        grad_xhat = tl.where(x_mask, dy_raw * gate, 0.0)
+        dscale = tl.where(x_mask, dy_raw * x_hat * gate * (1.0 - gate), 0.0)
+        sum_grad_x = tl.sum(grad_xhat, axis=1)
+        sum_grad_xhat = tl.sum(grad_xhat * tl.where(x_mask, x_hat, 0.0), axis=1)
         tl.atomic_add(
             DScaleB + x_cols,
-            partial_dscale_b.to(DScaleB.dtype.element_ty),
+            tl.sum(dscale, axis=0).to(DScaleB.dtype.element_ty),
             mask=x_cols < NX,
         )
 
-    c1_x = sum_grad_xhat / NX
-    c2_x = sum_grad_x / NX
-    rstd_x = tl.load(RstdX + rows, mask=row_mask, other=0.0).to(tl.float32)
+        c1_x = sum_grad_xhat / NX
+        c2_x = sum_grad_x / NX
+        rstd_x = tl.load(RstdX + rows, mask=row_mask, other=0.0).to(tl.float32)
 
-    sum_grad_cond = tl.zeros([BLOCK_M], dtype=tl.float32)
-    sum_grad_cond_norm = tl.zeros([BLOCK_M], dtype=tl.float32)
-
-    for c_start in range(0, NC, BLOCK_NC):
-        c_cols = c_start + tl.arange(0, BLOCK_NC)
+        c_cols = tl.arange(0, BLOCK_K_NC)
         c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
         c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
-
-        cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(
-            tl.float32
-        )
+        cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(tl.float32)
         lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
-        grad_cond_aff = tl.zeros([BLOCK_M, BLOCK_NC], dtype=tl.float32)
 
-        for x_start in range(0, NX, BLOCK_NX):
-            x_cols = x_start + tl.arange(0, BLOCK_NX)
-            x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
-            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
-
-            dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-            x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-            gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-            dy = tl.where(x_mask, dy, 0.0)
-            dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
-
-            weight_offsets = (
-                x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
-            )
-            weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
-            scale_w = tl.load(
-                ScaleW + weight_offsets,
-                mask=weight_mask,
-                other=0.0,
-            ).to(tl.float32)
-            bias_w = tl.load(
-                BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
-                mask=weight_mask,
-                other=0.0,
-            ).to(tl.float32)
-
-            grad_cond_aff = tl.dot(
-                dscale,
-                scale_w,
-                acc=grad_cond_aff,
-                input_precision="ieee",
-                out_dtype=tl.float32,
-            )
-            grad_cond_aff = tl.dot(
-                dy,
-                bias_w,
-                acc=grad_cond_aff,
-                input_precision="ieee",
-                out_dtype=tl.float32,
-            )
-
+        dy = tl.where(x_mask, dy_raw, 0.0)
+        dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
+        weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
+        scale_w = tl.load(
+            ScaleW + (x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc),
+            mask=weight_mask,
+            other=0.0,
+        ).to(tl.float32)
+        bias_w = tl.load(
+            BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
+            mask=weight_mask,
+            other=0.0,
+        ).to(tl.float32)
+        grad_cond_aff = tl.zeros([BLOCK_M1, BLOCK_K_NC], dtype=tl.float32)
+        grad_cond_aff = tl.dot(
+            dscale, scale_w, acc=grad_cond_aff,
+            input_precision="ieee", out_dtype=tl.float32,
+        )
+        grad_cond_aff = tl.dot(
+            dy, bias_w, acc=grad_cond_aff,
+            input_precision="ieee", out_dtype=tl.float32,
+        )
         grad_cond_norm = grad_cond_aff * lnw[None, :]
 
-        sum_grad_cond += tl.sum(tl.where(c_mask, grad_cond_norm, 0.0), axis=1)
-        sum_grad_cond_norm += tl.sum(
+        sum_grad_cond = tl.sum(tl.where(c_mask, grad_cond_norm, 0.0), axis=1)
+        sum_grad_cond_norm = tl.sum(
             tl.where(c_mask, grad_cond_norm * cond_norm, 0.0),
             axis=1,
         )
+        c1_cond = sum_grad_cond_norm / NC
+        c2_cond = sum_grad_cond / NC
+        rstd_cond = tl.load(RstdC + rows, mask=row_mask, other=0.0).to(tl.float32)
 
-    c1_cond = sum_grad_cond_norm / NC
-    c2_cond = sum_grad_cond / NC
-    rstd_cond = tl.load(RstdC + rows, mask=row_mask, other=0.0).to(tl.float32)
-
-    for x_start in range(0, NX, BLOCK_NX):
-        x_cols = x_start + tl.arange(0, BLOCK_NX)
-        x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
-        x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
-
-        dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-        x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-        gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-        grad_xhat = dy * gate
-        dx = (grad_xhat - (x_hat * c1_x[:, None] + c2_x[:, None])) * rstd_x[:, None]
+        # dx epilogue, reusing the ONE dy/gate/x_hat read above.
+        dx = (dy_raw * gate - (x_hat * c1_x[:, None] + c2_x[:, None])) * rstd_x[:, None]
         tl.store(DX + x_offsets, dx, mask=x_mask)
 
-    for c_start in range(0, NC, BLOCK_NC):
-        c_cols = c_start + tl.arange(0, BLOCK_NC)
-        c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
-        c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
-
-        cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(
-            tl.float32
-        )
-        lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
-        grad_cond_aff = tl.zeros([BLOCK_M, BLOCK_NC], dtype=tl.float32)
-
-        for x_start in range(0, NX, BLOCK_NX):
-            x_cols = x_start + tl.arange(0, BLOCK_NX)
-            x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
-            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
-
-            dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-            x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-            gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
-            dy = tl.where(x_mask, dy, 0.0)
-            dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
-
-            weight_offsets = (
-                x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
-            )
-            weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
-            scale_w = tl.load(
-                ScaleW + weight_offsets,
-                mask=weight_mask,
-                other=0.0,
-            ).to(tl.float32)
-            bias_w = tl.load(
-                BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
-                mask=weight_mask,
-                other=0.0,
-            ).to(tl.float32)
-            grad_cond_aff = tl.dot(
-                dscale,
-                scale_w,
-                acc=grad_cond_aff,
-                input_precision="ieee",
-                out_dtype=tl.float32,
-            )
-            grad_cond_aff = tl.dot(
-                dy,
-                bias_w,
-                acc=grad_cond_aff,
-                input_precision="ieee",
-                out_dtype=tl.float32,
-            )
-
-        grad_cond_norm = grad_cond_aff * lnw[None, :]
+        # dcond epilogue, reusing the ONE grad_cond_norm computed above (no second GEMM).
         dcond = (
             grad_cond_norm - (cond_norm * c1_cond[:, None] + c2_cond[:, None])
         ) * rstd_cond[:, None]
         tl.store(DCond + c_offsets, dcond, mask=c_mask)
+    else:
+        sum_grad_x = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        sum_grad_xhat = tl.zeros([BLOCK_M1], dtype=tl.float32)
+
+        for x_start in range(0, NX, BLOCK_K_NX):
+            x_cols = x_start + tl.arange(0, BLOCK_K_NX)
+            x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+            dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            grad_xhat = tl.where(x_mask, dy * gate, 0.0)
+            dscale = tl.where(x_mask, dy * x_hat * gate * (1.0 - gate), 0.0)
+
+            sum_grad_x += tl.sum(grad_xhat, axis=1)
+            sum_grad_xhat += tl.sum(grad_xhat * tl.where(x_mask, x_hat, 0.0), axis=1)
+
+            partial_dscale_b = tl.sum(dscale, axis=0)
+            tl.atomic_add(
+                DScaleB + x_cols,
+                partial_dscale_b.to(DScaleB.dtype.element_ty),
+                mask=x_cols < NX,
+            )
+
+        c1_x = sum_grad_xhat / NX
+        c2_x = sum_grad_x / NX
+        rstd_x = tl.load(RstdX + rows, mask=row_mask, other=0.0).to(tl.float32)
+
+        sum_grad_cond = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        sum_grad_cond_norm = tl.zeros([BLOCK_M1], dtype=tl.float32)
+
+        for c_start in range(0, NC, BLOCK_K_NC):
+            c_cols = c_start + tl.arange(0, BLOCK_K_NC)
+            c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+            c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+
+            cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(
+                tl.float32
+            )
+            lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
+            grad_cond_aff = tl.zeros([BLOCK_M1, BLOCK_K_NC], dtype=tl.float32)
+
+            for x_start in range(0, NX, BLOCK_K_NX):
+                x_cols = x_start + tl.arange(0, BLOCK_K_NX)
+                x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+                x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+                dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+                x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+                gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+                dy = tl.where(x_mask, dy, 0.0)
+                dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
+
+                weight_offsets = (
+                    x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
+                )
+                weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
+                scale_w = tl.load(
+                    ScaleW + weight_offsets,
+                    mask=weight_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                bias_w = tl.load(
+                    BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
+                    mask=weight_mask,
+                    other=0.0,
+                ).to(tl.float32)
+
+                grad_cond_aff = tl.dot(
+                    dscale,
+                    scale_w,
+                    acc=grad_cond_aff,
+                    input_precision="ieee",
+                    out_dtype=tl.float32,
+                )
+                grad_cond_aff = tl.dot(
+                    dy,
+                    bias_w,
+                    acc=grad_cond_aff,
+                    input_precision="ieee",
+                    out_dtype=tl.float32,
+                )
+
+            grad_cond_norm = grad_cond_aff * lnw[None, :]
+
+            sum_grad_cond += tl.sum(tl.where(c_mask, grad_cond_norm, 0.0), axis=1)
+            sum_grad_cond_norm += tl.sum(
+                tl.where(c_mask, grad_cond_norm * cond_norm, 0.0),
+                axis=1,
+            )
+
+        c1_cond = sum_grad_cond_norm / NC
+        c2_cond = sum_grad_cond / NC
+        rstd_cond = tl.load(RstdC + rows, mask=row_mask, other=0.0).to(tl.float32)
+
+        for x_start in range(0, NX, BLOCK_K_NX):
+            x_cols = x_start + tl.arange(0, BLOCK_K_NX)
+            x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+            x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+            dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+            grad_xhat = dy * gate
+            dx = (grad_xhat - (x_hat * c1_x[:, None] + c2_x[:, None])) * rstd_x[:, None]
+            tl.store(DX + x_offsets, dx, mask=x_mask)
+
+        for c_start in range(0, NC, BLOCK_K_NC):
+            c_cols = c_start + tl.arange(0, BLOCK_K_NC)
+            c_mask = row_mask[:, None] & (c_cols[None, :] < NC)
+            c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
+
+            cond_norm = tl.load(CondNorm + c_offsets, mask=c_mask, other=0.0).to(
+                tl.float32
+            )
+            lnw = tl.load(LnW + c_cols, mask=c_cols < NC, other=0.0).to(tl.float32)
+            grad_cond_aff = tl.zeros([BLOCK_M1, BLOCK_K_NC], dtype=tl.float32)
+
+            for x_start in range(0, NX, BLOCK_K_NX):
+                x_cols = x_start + tl.arange(0, BLOCK_K_NX)
+                x_mask = row_mask[:, None] & (x_cols[None, :] < NX)
+                x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
+
+                dy = tl.load(DY + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+                x_hat = tl.load(XHat + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+                gate = tl.load(Gate + x_offsets, mask=x_mask, other=0.0).to(tl.float32)
+                dy = tl.where(x_mask, dy, 0.0)
+                dscale = dy * tl.where(x_mask, x_hat, 0.0) * gate * (1.0 - gate)
+
+                weight_offsets = (
+                    x_cols[:, None] * stride_swr + c_cols[None, :] * stride_swc
+                )
+                weight_mask = (x_cols[:, None] < NX) & (c_cols[None, :] < NC)
+                scale_w = tl.load(
+                    ScaleW + weight_offsets,
+                    mask=weight_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                bias_w = tl.load(
+                    BiasW + (x_cols[:, None] * stride_bwr + c_cols[None, :] * stride_bwc),
+                    mask=weight_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                grad_cond_aff = tl.dot(
+                    dscale,
+                    scale_w,
+                    acc=grad_cond_aff,
+                    input_precision="ieee",
+                    out_dtype=tl.float32,
+                )
+                grad_cond_aff = tl.dot(
+                    dy,
+                    bias_w,
+                    acc=grad_cond_aff,
+                    input_precision="ieee",
+                    out_dtype=tl.float32,
+                )
+
+            grad_cond_norm = grad_cond_aff * lnw[None, :]
+            dcond = (
+                grad_cond_norm - (cond_norm * c1_cond[:, None] + c2_cond[:, None])
+            ) * rstd_cond[:, None]
+            tl.store(DCond + c_offsets, dcond, mask=c_mask)
 
 
-_adaln_main_bwd_weight_prune = make_cache_prune(
-    "adaln_main_bwd_weight", dtype_of=tensor_dtype_of("DY"),
-    bucket_of=key_bucket_of("M", "NX", "NC"),
-)
 
 
-@triton.autotune(configs=param_configs, key=["M", "NX", "NC"],
-                 prune_configs_by={"early_config_prune": _adaln_main_bwd_weight_prune})
+@triton.autotune(configs=configs_for("adaln_bwd_dw_triton"), key=['GROUP_M', 'NX', 'NC'])
 @triton.jit
 def adaln_bwd_weight_kernel(
     DY,
@@ -474,24 +503,25 @@ def adaln_bwd_weight_kernel(
     NC: tl.constexpr,
     USE_BF16: tl.constexpr,
     USE_FP16: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_NX: tl.constexpr,
-    BLOCK_NC: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_N_NX: tl.constexpr,
+    BLOCK_N_NC: tl.constexpr,
+    GROUP_M,
 ):
     pid_x = tl.program_id(0).to(tl.int64)
     pid_c = tl.program_id(1).to(tl.int64)
 
-    x_cols = pid_x * BLOCK_NX + tl.arange(0, BLOCK_NX)
-    c_cols = pid_c * BLOCK_NC + tl.arange(0, BLOCK_NC)
+    x_cols = pid_x * BLOCK_N_NX + tl.arange(0, BLOCK_N_NX)
+    c_cols = pid_c * BLOCK_N_NC + tl.arange(0, BLOCK_N_NC)
     x_mask = x_cols < NX
     c_mask = c_cols < NC
 
     lnw = tl.load(LnW + c_cols, mask=c_mask, other=0.0).to(tl.float32)
-    acc_scale_w = tl.zeros([BLOCK_NX, BLOCK_NC], dtype=tl.float32)
-    acc_bias_w = tl.zeros([BLOCK_NX, BLOCK_NC], dtype=tl.float32)
+    acc_scale_w = tl.zeros([BLOCK_N_NX, BLOCK_N_NC], dtype=tl.float32)
+    acc_bias_w = tl.zeros([BLOCK_N_NX, BLOCK_N_NC], dtype=tl.float32)
 
-    for row_start in tl.range(0, M, BLOCK_M):
-        rows = row_start + tl.arange(0, BLOCK_M)
+    for row_start in tl.range(0, M, BLOCK_M1):
+        rows = row_start + tl.arange(0, BLOCK_M1)
         row_mask = rows < M
 
         x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
@@ -541,14 +571,9 @@ def adaln_bwd_weight_kernel(
     tl.store(DBiasW + bias_offsets, acc_bias_w, mask=weight_mask)
 
 
-_adaln_main_bwd_lnw_prune = make_cache_prune(
-    "adaln_main_bwd_lnw", dtype_of=tensor_dtype_of("DY"),
-    bucket_of=key_bucket_of("M", "NX", "NC"),
-)
 
 
-@triton.autotune(configs=param_configs, key=["M", "NX", "NC"],
-                 prune_configs_by={"early_config_prune": _adaln_main_bwd_lnw_prune})
+@triton.autotune(configs=configs_for("adaln_bwd_dlnw_triton"), key=['GROUP_M', 'NX', 'NC'])
 @triton.jit
 def adaln_bwd_lnw_kernel(
     DY,
@@ -571,28 +596,29 @@ def adaln_bwd_lnw_kernel(
     NC: tl.constexpr,
     USE_BF16: tl.constexpr,
     USE_FP16: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_NX: tl.constexpr,
-    BLOCK_NC: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    GROUP_M,
 ):
     pid_c = tl.program_id(0).to(tl.int64)
-    c_cols = pid_c * BLOCK_NC + tl.arange(0, BLOCK_NC)
+    c_cols = pid_c * BLOCK_N + tl.arange(0, BLOCK_N)
     c_mask = c_cols < NC
 
-    acc_lnw = tl.zeros([BLOCK_NC], dtype=tl.float32)
+    acc_lnw = tl.zeros([BLOCK_N], dtype=tl.float32)
 
-    for row_start in tl.range(0, M, BLOCK_M):
-        rows = row_start + tl.arange(0, BLOCK_M)
+    for row_start in tl.range(0, M, BLOCK_M1):
+        rows = row_start + tl.arange(0, BLOCK_M1)
         row_mask = rows < M
         c_offsets = rows[:, None] * stride_cr + c_cols[None, :] * stride_cc
         c_row_mask = row_mask[:, None] & c_mask[None, :]
         cond_norm = tl.load(CondNorm + c_offsets, mask=c_row_mask, other=0.0).to(
             tl.float32
         )
-        grad_cond_aff = tl.zeros([BLOCK_M, BLOCK_NC], dtype=tl.float32)
+        grad_cond_aff = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
 
-        for x_start in range(0, NX, BLOCK_NX):
-            x_cols = x_start + tl.arange(0, BLOCK_NX)
+        for x_start in range(0, NX, BLOCK_K):
+            x_cols = x_start + tl.arange(0, BLOCK_K)
             x_mask = x_cols < NX
             x_offsets = rows[:, None] * stride_yr + x_cols[None, :] * stride_yc
             x_row_mask = row_mask[:, None] & x_mask[None, :]
@@ -656,7 +682,7 @@ def adaln_bwd_lnw_kernel(
 
 class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(
         ctx,
         x: torch.Tensor,
@@ -725,7 +751,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
         rstd_x = torch.empty(m, dtype=torch.float32, device=x.device)
         rstd_cond = torch.empty(m, dtype=torch.float32, device=x.device)
 
-        grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M"])]
+        grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
         adaln_fwd_kernel[grid](
             x_2d,
             cond_2d,
@@ -754,6 +780,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             eps_cond=eps_cond,
             USE_BF16=compute_dtype == torch.bfloat16,
             USE_FP16=compute_dtype == torch.float16,
+            GROUP_M=get_seq_group(m),
         )
 
         ctx.save_for_backward(
@@ -779,7 +806,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
         return y.reshape(orig_x_shape)
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         (
             x_hat,
@@ -803,7 +830,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
         dscale_b = torch.zeros((nx,), dtype=torch.float32, device=grad_output.device)
         dbias_w = torch.empty_like(bias_weight, dtype=torch.float32)
 
-        input_grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M"])]
+        input_grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
         adaln_bwd_input_kernel[input_grid](
             grad_output_2d,
             dx,
@@ -830,10 +857,11 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
+            GROUP_M=get_seq_group(m),
         )
         weight_grid = lambda meta: (
-            triton.cdiv(nx, meta["BLOCK_NX"]),
-            triton.cdiv(nc, meta["BLOCK_NC"]),
+            triton.cdiv(nx, meta["BLOCK_N_NX"]),
+            triton.cdiv(nc, meta["BLOCK_N_NC"]),
         )
         adaln_bwd_weight_kernel[weight_grid](
             grad_output_2d,
@@ -856,8 +884,9 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
+            GROUP_M=get_seq_group(m),
         )
-        lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_NC"])]
+        lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_N"])]
         adaln_bwd_lnw_kernel[lnw_grid](
             grad_output_2d,
             dlnw,
@@ -879,6 +908,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
+            GROUP_M=get_seq_group(m),
         )
 
         return (

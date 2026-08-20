@@ -23,110 +23,123 @@ the forward SwiGLU + gate, and the backward gate-grad + SwiGLU-grad.
 """
 
 from __future__ import annotations
+# _gate_fwd_kernel / _gate_bwd_kernel used to be defined here. They were bitwise equal to
+# bias_only_attention's copies (.bench/direct.out), so both now come from one home.
+from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _sigmul_fwd
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtype_of
 
 # autograd Functions cannot be @typecheck'd cleanly; keep precision policy explicit.
 
+# The flat elementwise stages tile ONE axis (the linear element index), so their config space is
+# the canonical 1-D block sweep. Each used to be launched with a literal BLOCK (2048 / 1024) —
+# a hardcoded tile that no measurement chose and that no card can move.
+
+
 
 # --- forward elementwise: h = silu(a)*b , scale = s@... already done, gate -----------
+# FLAT 1-D, not a 2-D tile. The 2-D form was tried on the argument that a/b are strided views
+# of the packed ab, so a flat index has to recover (row, col) with a runtime `//ND` and `%ND`
+# per element. That argument is real but it optimises the wrong resource: this kernel is
+# bandwidth-bound, and the flat index is fully coalesced whereas a (BLOCK_M1, BLOCK_N) tile of a
+# strided view breaks each row into its own segment. MEASURED on an A6000 at M=4096/ND=512:
+# 2-D cost _swiglu_fwd 467us + _swiglu_bwd 822us of GPU time against <100us each for the flat
+# form — 1.5x on the whole conditioned_transition step (3406us -> 5107us of kernel time, same
+# 83 launches, so it is GPU work and not launch overhead). Trading ALU for bandwidth is the
+# wrong direction here. BLOCK_E still comes from the config space, so the tile is tuned either way.
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+@triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['seq_group', 'ND'])
 @triton.jit
 def _swiglu_fwd_kernel(
     a_ptr, b_ptr, h_ptr, M, ND,
-    stride_m, stride_n,      # a, b: (M, ND), possibly strided views
-    BLOCK: tl.constexpr,
+    stride_m, stride_n,      # a, b: (M, ND), possibly strided views (same strides)
+    BLOCK_E: tl.constexpr,
+    seq_group,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     mask = offs < M * ND
     row = offs // ND
     col = offs % ND
     idx = row * stride_m + col * stride_n
-    a = tl.load(a_ptr + idx, mask=mask).to(tl.float32)
-    b = tl.load(b_ptr + idx, mask=mask).to(tl.float32)
+    a = tl.load(a_ptr + idx, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(b_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     h = a * tl.sigmoid(a) * b
-    tl.store(h_ptr + offs, h, mask=mask)   # h is contiguous (M, ND)
+    tl.store(h_ptr + offs, h.to(h_ptr.dtype.element_ty), mask=mask)   # h is contiguous (M, ND)
 
 
-@triton.jit
-def _gate_fwd_kernel(out_ptr, scale_ptr, y_ptr, n_elem, BLOCK: tl.constexpr):
-    pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_elem
-    out = tl.load(out_ptr + offs, mask=mask).to(tl.float32)
-    scale = tl.load(scale_ptr + offs, mask=mask).to(tl.float32)
-    y = tl.sigmoid(scale) * out
-    tl.store(y_ptr + offs, y, mask=mask)
 
 
 def _swiglu(a, b):
     M, ND = a.shape
     h = torch.empty(M, ND, device=a.device, dtype=a.dtype)  # contiguous output
-    n = M * ND
-    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)  # noqa: E731
-    _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1), BLOCK=2048)
+    grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
+    _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1),
+                             seq_group=get_seq_group(M))
     return h
 
 
 def _gate(out, scale):
     y = torch.empty_like(out)
     n = out.numel()
-    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)  # noqa: E731
-    _gate_fwd_kernel[grid](out, scale, y, n, BLOCK=1024)
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
+    _sigmul_fwd[grid](scale, out, y, n, seq_group=get_seq_group(n))
     return y
 
 
 # --- backward elementwise (fused) ----------------------------------------------------
-@triton.jit
-def _gate_bwd_kernel(out_ptr, scale_ptr, dy_ptr, dout_ptr, dscale_ptr, n_elem, BLOCK: tl.constexpr):
-    pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_elem
-    out = tl.load(out_ptr + offs, mask=mask).to(tl.float32)
-    scale = tl.load(scale_ptr + offs, mask=mask).to(tl.float32)
-    dy = tl.load(dy_ptr + offs, mask=mask).to(tl.float32)
-    sg = tl.sigmoid(scale)
-    tl.store(dout_ptr + offs, sg * dy, mask=mask)
-    tl.store(dscale_ptr + offs, out * sg * (1.0 - sg) * dy, mask=mask)
 
 
+# FLAT 1-D — same measurement as _swiglu_fwd_kernel; this one was the larger of the two
+# regressions (822us of GPU time as a 2-D tile).
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_flat_triton"), key=['seq_group', 'ND'])
 @triton.jit
 def _swiglu_bwd_kernel(
-    a_ptr, b_ptr, dh_ptr, dab_ptr, M, ND, ND2,
-    stride_m, stride_n,          # a, b: (M, ND) (possibly strided views)
+    a_ptr, b_ptr, dh_ptr, dab_ptr, M, ND,
+    stride_m, stride_n,          # a, b: (M, ND) (possibly strided views, same strides)
     stride_dhm, stride_dhn,      # dh: (M, ND) (own strides — may differ from a/b)
     stride_pm, stride_pn,        # dab: (M, 2*ND) packed [da | db]
-    BLOCK: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+    seq_group,
 ):
     # Packs da into dab[:, :ND] and db into dab[:, ND:] so the expand-bwd is one GEMM.
     pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     mask = offs < M * ND
     row = offs // ND
     col = offs % ND
-    a = tl.load(a_ptr + row * stride_m + col * stride_n, mask=mask).to(tl.float32)
-    b = tl.load(b_ptr + row * stride_m + col * stride_n, mask=mask).to(tl.float32)
-    dh = tl.load(dh_ptr + row * stride_dhm + col * stride_dhn, mask=mask).to(tl.float32)
+    a = tl.load(a_ptr + row * stride_m + col * stride_n, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(b_ptr + row * stride_m + col * stride_n, mask=mask, other=0.0).to(tl.float32)
+    dh = tl.load(dh_ptr + row * stride_dhm + col * stride_dhn, mask=mask, other=0.0).to(tl.float32)
     sa = tl.sigmoid(a)
     silu = a * sa
     silu_prime = sa * (1.0 + a * (1.0 - sa))  # sa + silu*(1 - sa)
     da = dh * b * silu_prime
     db = dh * silu
     base = row * stride_pm
-    tl.store(dab_ptr + base + col * stride_pn, da, mask=mask)
-    tl.store(dab_ptr + base + (col + ND) * stride_pn, db, mask=mask)
+    tl.store(dab_ptr + base + col * stride_pn, da.to(dab_ptr.dtype.element_ty), mask=mask)
+    tl.store(dab_ptr + base + (col + ND) * stride_pn, db.to(dab_ptr.dtype.element_ty), mask=mask)
 
 
 def _gate_bwd(out, scale, dy):
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
-    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)  # noqa: E731
-    _gate_bwd_kernel[grid](out, scale, dy, dout, dscale, n, BLOCK=2048)
+    grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
+    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, seq_group=get_seq_group(n))
     return dout, dscale
 
 
@@ -139,14 +152,13 @@ def _swiglu_bwd_packed(a, b, dh):
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""
     M, ND = a.shape
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
-    n = M * ND
-    grid = lambda meta: (triton.cdiv(n, meta["BLOCK"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_bwd_kernel[grid](
-        a, b, dh, dab, M, ND, 2 * ND,
+        a, b, dh, dab, M, ND,
         a.stride(0), a.stride(1),
         dh.stride(0), dh.stride(1),
         dab.stride(0), dab.stride(1),
-        BLOCK=2048,
+        seq_group=get_seq_group(M),
     )
     return dab
 
@@ -158,27 +170,29 @@ def _swiglu_bwd_packed(a, b, dh):
 # ============================================================================
 
 # --- atom (d<=128): single-kernel b2b forward, emits ab,h,out,scale,y -----------------
-# num_stages=2 only: the b2b ALSO writes ab,h,out,scale and pipelines x[BM,BK=128] +
-# wa/wb[BK,BN] + ws_t[BN,D] + out_acc[BM,D]; stages>=3 or BLOCK_N=128 overflows the 232KB
-# SM90 smem budget (saw 245760B). Keep tiles modest.
-_cfgs_b2b = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 32}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 256, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 32}, num_warps=4, num_stages=2),
-]
+# EVERY tile axis is now a searched knob. The old grid tuned only BLOCK_M1/BLOCK_N and pinned the
+# rest at the launch site or to a shape: BLOCK_K = next_power_of_2(K) (whole-K register tile, no
+# K loop at all), BLOCK_DC = min(128, next_power_of_2(DC)), and the D axis was not tiled — `D`
+# itself was the extent of `tl.arange(0, D)` and of the `(BLOCK_M1, D)` accumulators, so a wider D
+# silently grew the register tile and there was no config the tuner could move.
+#
+# Now: the K contraction loops in BLOCK_K tiles, D is tiled by BLOCK_D over grid axis 1 (as in
+# `composed.py::_squeeze_gate_kernel`), and the DC contraction reuses BLOCK_K. Reusing BLOCK_K for
+# the DC loop is deliberate: both are contraction widths of the same kernel and both draw from the
+# same candidate set, and a fifth independent axis would multiply this grid by another 5x (15k ->
+# 75k configs) for a loop that costs a few percent of the runtime.
+#
+# The D-tiling makes the expand half (a/b/h) per-d-tile work, so it is recomputed by every d
+# program; the `pid_d == 0` guard keeps the saved-tensor stores single-writer. With BLOCK_D >= D
+# (which the tuner reaches: D <= 128 on this atom path and BLOCK_D sweeps up to 256) there is one
+# d program and the recompute is zero — i.e. the previous behaviour is still inside the space.
 
 
 # fmt: off
-_cond_transition_training_b2b_fwd_prune = make_cache_prune(
-    "cond_transition_training_b2b_fwd", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("ND", "K", "D", "DC"),
-)
 
 
-@triton.autotune(configs=_cfgs_b2b, key=["ND", "K", "D", "DC"],
-                 prune_configs_by={"early_config_prune": _cond_transition_training_b2b_fwd_prune})
+@triton.autotune(configs=configs_for("cond_transition_fwd_b2b_saveact_triton"),
+                 key=['ND', 'K', 'DC', 'seq_group'])
 @triton.jit
 def _b2b_fwd_train_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr,
@@ -195,49 +209,58 @@ def _b2b_fwd_train_kernel(
     stride_hm, stride_hn,     # h:  (M, ND)
     stride_om, stride_od,     # out:(M, D)
     stride_sm, stride_sc,     # scale:(M, D)
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr,
+    BLOCK_K_D: tl.constexpr, BLOCK_N: tl.constexpr,
+    seq_group,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    pid_d = tl.program_id(1).to(tl.int64)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
-    k = tl.arange(0, BLOCK_K)
-    k_mask = k < K
-    x = tl.load(x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-                mask=row_mask[:, None] & k_mask[None, :], other=0.0)
-    dcols = tl.arange(0, D)
-    out_acc = tl.zeros((BLOCK_M, D), dtype=tl.float32)
-    for n0 in range(0, ND, BLOCK_N):
-        cols = n0 + tl.arange(0, BLOCK_N)
+    dcols = pid_d * BLOCK_N + tl.arange(0, BLOCK_N)
+    d_mask = dcols < D
+    out_acc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    for n0 in range(0, ND, BLOCK_K_ND):
+        cols = n0 + tl.arange(0, BLOCK_K_ND)
         col_mask = cols < ND
-        wa = tl.load(wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-                     mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-        wb = tl.load(wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-                     mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-        a = tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-        b = tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+        a = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+        b = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K_D):
+            k = k0 + tl.arange(0, BLOCK_K_D)
+            k_mask = k < K
+            x = tl.load(x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                        mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+            wa = tl.load(wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                         mask=k_mask[:, None] & col_mask[None, :], other=0.0)
+            wb = tl.load(wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                         mask=k_mask[:, None] & col_mask[None, :], other=0.0)
+            a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
+            b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
         h = a * tl.sigmoid(a) * b
         ws_t = tl.load(ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
-                       mask=col_mask[:, None], other=0.0)
+                       mask=col_mask[:, None] & d_mask[None, :], other=0.0)
         out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
-        # emit saved tensors for backward (write the chunk as we go)
-        cm = row_mask[:, None] & col_mask[None, :]
+        # emit saved tensors for backward (write the chunk as we go). Only the pid_d==0 column
+        # of programs writes them: a/b/h do not depend on the d tile, so every other d program
+        # would re-store identical bytes. Folded into the store MASK rather than an `if`, so
+        # there is no divergent control flow around the stores.
+        cm = row_mask[:, None] & col_mask[None, :] & (pid_d == 0)
         tl.store(ab_ptr + rows[:, None] * stride_abm + cols[None, :] * stride_abn, a, mask=cm)
         tl.store(ab_ptr + rows[:, None] * stride_abm + (cols + ND)[None, :] * stride_abn, b, mask=cm)
         tl.store(h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn, h, mask=cm)
-    scale = tl.zeros((BLOCK_M, D), dtype=tl.float32)
-    for c0 in range(0, DC, BLOCK_DC):
-        dc = c0 + tl.arange(0, BLOCK_DC)
+    scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    for c0 in range(0, DC, BLOCK_K_D):
+        dc = c0 + tl.arange(0, BLOCK_K_D)
         dc_mask = dc < DC
         cond = tl.load(cond_ptr + rows[:, None] * stride_cm + dc[None, :] * stride_cc,
                        mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
         wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
-                        mask=dc_mask[:, None], other=0.0)
+                        mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
         scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
-    bsc = tl.load(bsc_ptr + dcols)
+    bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
-    rm = row_mask[:, None]
+    rm = row_mask[:, None] & d_mask[None, :]
     tl.store(y_ptr + rows[:, None] * stride_ym + dcols[None, :] * stride_yd, y, mask=rm)
     tl.store(out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od, out_acc, mask=rm)
     tl.store(scale_ptr + rows[:, None] * stride_sm + dcols[None, :] * stride_sc, scale, mask=rm)
@@ -255,7 +278,8 @@ def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
     scale = torch.empty(M, D, device=x.device, dtype=x.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),  # noqa: E731
+                         triton.cdiv(D, meta["BLOCK_N"]))
     _b2b_fwd_train_kernel[grid](
         x, cond, wa, wb, ws, wsc, bsc, y, ab, h, out, scale, M, ND, K, D, DC,
         x.stride(0), x.stride(1), cond.stride(0), cond.stride(1),
@@ -263,8 +287,7 @@ def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
         wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
         out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        BLOCK_K=triton.next_power_of_2(K),
-        BLOCK_DC=min(128, triton.next_power_of_2(DC)),
+        seq_group=get_seq_group(M),
     )
     return y, ab, h, out, scale
 

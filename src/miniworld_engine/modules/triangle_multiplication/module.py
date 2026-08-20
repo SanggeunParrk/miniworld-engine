@@ -1,3 +1,5 @@
+
+from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/triangle_updates.py
 """Triangle multiplicative update — the model-level op that connects the tm1 / tm2
 fused kernels (and a cuequivariance baseline)."""
@@ -51,7 +53,7 @@ def _load_cute_fns():
     ):
         if str(d) not in sys.path:
             sys.path.insert(0, str(d))
-    from miniworld_engine.kernels.layernorm.transpose import layer_norm_transpose
+    from miniworld_engine.kernels.layernorm.triton.transpose import layer_norm_transpose
     from fused_ln_mask import fused_ln_mask  # pyright: ignore[reportMissingImports]
     from launch import tm1_cute_forward  # pyright: ignore[reportMissingImports]
 
@@ -260,7 +262,7 @@ class TriangleMultiplication(nn.Module):
             out = self.ln_out(out)
             return _r(self._kernel_tm2(pair, out, backend))
 
-    @torch.compiler.disable
+    @opaque()
     def _forward_triton(
         self,
         pair: torch.Tensor,
@@ -375,7 +377,7 @@ class TriangleMultiplication(nn.Module):
             out = out * dropscale
         return out + pair if add_residual else out
 
-    @torch.compiler.disable
+    @opaque()
     def _forward_cute(
         self,
         pair: torch.Tensor,
@@ -394,7 +396,7 @@ class TriangleMultiplication(nn.Module):
         # DELETED 2026-08-04. cuequivariance is a comparison-only baseline (pyproject [baselines]).
         return self._forward_cute_free(pair, mask, add_residual)
 
-    @torch.compiler.disable
+    @opaque()
     def _forward_cute_free(
         self,
         pair: torch.Tensor,

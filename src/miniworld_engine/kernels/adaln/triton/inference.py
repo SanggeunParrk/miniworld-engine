@@ -21,6 +21,11 @@ eager/compiled path runs — one launch, cond_aff read once, TF32 policy for fp3
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
+
+# The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
+# HAS_W=True -- bitwise equal on the output (.bench/direct.out). Imported now.
+from .fused3 import _ln_kernel
 
 import contextlib
 
@@ -29,7 +34,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 # fp32 matmul precision policy (shared idea with layernorm_linear/te_style).
 _FP32_MATMUL_PRECISION = "high"  # "high" → TF32 (fast); "highest" → true fp32
@@ -69,99 +75,110 @@ def _fp32_matmul_ctx(dtype):
         torch.backends.cuda.matmul.allow_tf32 = prev
 
 
-_LN_CONFIGS = [
-    triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
-    for bm in (1, 2, 4, 8, 16, 32)
-    for nw in (4, 8, 16)
-    for ns in (2, 3, 4)
-]
+# Both axes are tuned tiles. BLOCK_N used to arrive as next_pow2(N) from the launcher (the whole
+# row), which is also why BLOCK_M1 was pinned to 1..32. N here is the REDUCE axis (mean/var over
+# d_cond / d_hidden = 128..1024), so it is a CSV tile and
+# would force a two-pass over X on every shape instead of leaving the whole-row tile reachable.
 
 
 # ───────────────────── step 1: cond_aff = LN(cond) · lnw  (no bias) ─────────────────────
-_adaln_infer_ln1_prune = make_cache_prune(
-    "adaln_infer_ln1", dtype_of=tensor_dtype_of("Cond"), bucket_of=key_bucket_of("N"),
-)
 
 
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "DT"],
-                 prune_configs_by={"early_config_prune": _adaln_infer_ln1_prune})
-@triton.jit
-def _cond_affine_kernel(
-    Cond, CondAff, LnW, M, N, eps,
-    sc0, sc1, sa0, sa1,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr,
-):
-    row = tl.program_id(0).to(tl.int64)
-    rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
-    rmask = rm < M
-    cols = tl.arange(0, BLOCK_N)
-    cmask = cols < N
-    mask = rmask[:, None] & cmask[None, :]
-    c = tl.load(Cond + rm[:, None] * sc0 + cols[None, :] * sc1, mask=mask, other=0.0).to(tl.float32)
-    mean = tl.sum(c, axis=1) / N
-    cc = tl.where(cmask[None, :], c - mean[:, None], 0.0)
-    var = tl.sum(cc * cc, axis=1) / N
-    rstd = 1.0 / tl.sqrt(var + eps)
-    lnw = tl.load(LnW + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
-    aff = cc * rstd[:, None] * lnw
-    tl.store(CondAff + rm[:, None] * sa0 + cols[None, :] * sa1,
-             aff.to(CondAff.dtype.element_ty), mask=mask)
+# GROUP_M is keyed: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, which had
+# no representation in the key at all.
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
 
 
 def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
                  out_dtype: torch.dtype | None = None) -> torch.Tensor:
     M, N = cond.shape
     aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
-    _cond_affine_kernel[grid](
-        cond, aff, lnw, M, N, eps,
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
+    _ln_kernel[grid](
+        cond, aff, lnw, M, int(N), eps,
         cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
-        BLOCK_N=triton.next_power_of_2(N), DT=cond.element_size(),
+        HAS_W=True, seq_group=get_seq_group(M),
     )
     return aff
 
 
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
-_adaln_infer_ln2_prune = make_cache_prune(
-    "adaln_infer_ln2", dtype_of=tensor_dtype_of("X"), bucket_of=key_bucket_of("N"),
-)
 
 
-@triton.autotune(configs=_LN_CONFIGS, key=["N", "DT"],
-                 prune_configs_by={"early_config_prune": _adaln_infer_ln2_prune})
+@triton.autotune(configs=configs_for("adaln_epilogue_triton"), key=['N', 'GROUP_M'])
 @triton.jit
 def _adaln_epilogue_kernel(
-    X, SB, Y, M, N, eps,
+    X, SB, Y, M, N: tl.constexpr, eps,
     sx0, sx1, ss0, ss1, sy0, sy1,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, DT: tl.constexpr,
-):
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M):
     # SB is (M, 2N): cols [0:N] = scale (incl. scale_b), [N:2N] = bias.
     row = tl.program_id(0).to(tl.int64)
-    rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
+    rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
-    cols = tl.arange(0, BLOCK_N)
-    cmask = cols < N
-    mask = rmask[:, None] & cmask[None, :]
-    x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
-    mean = tl.sum(x, axis=1) / N
-    xc = tl.where(cmask[None, :], x - mean[:, None], 0.0)
-    var = tl.sum(xc * xc, axis=1) / N
-    rstd = 1.0 / tl.sqrt(var + eps)
-    x_hat = xc * rstd[:, None]
-    scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
-    bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1, mask=mask, other=0.0).to(tl.float32)
-    y = tl.sigmoid(scale) * x_hat + bias
-    tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
+    # TWO-PASS: pass 1 accumulates Σx / Σx² over the N tiles (fp32, plain sums → exact across
+    # tiles); pass 2 re-reads x and streams the scale/bias halves of SB for the gate epilogue.
+    #
+    # COVERING TILE (BLOCK_K >= N): the two loops are single-trip but their tl.loads of X sit in
+    # separate scf.for regions and are NOT CSE'd, so the covering config read x twice. `N` is
+    # `tl.constexpr` (already this kernel's autotune key, so a new d_hidden already forced a
+    # re-tune and a fresh compile) which makes the guard a TRACE-time comparison — exactly one
+    # branch is emitted and the covering tile is back to the untiled single-read schedule. The
+    # fast path uses the CENTRED variance Σ(x-mean)²/N (numerically stabler, and x is already in
+    # registers); the uncentered Σx²/N - mean² stays in the tiled branch, where it is what keeps
+    # that branch to one read per tile.
+    if BLOCK_K >= N:
+        cols = tl.arange(0, BLOCK_K)
+        mask = rmask[:, None] & (cols[None, :] < N)
+        x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+        mean = tl.sum(x, axis=1) / N
+        xc = tl.where(mask, x - mean[:, None], 0.0)
+        var = tl.sum(xc * xc, axis=1) / N
+        rstd = 1.0 / tl.sqrt(var + eps)
+        x_hat = xc * rstd[:, None]
+        scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
+        bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1,
+                       mask=mask, other=0.0).to(tl.float32)
+        y = tl.sigmoid(scale) * x_hat + bias
+        tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
+    else:
+        s = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        for n0 in range(0, N, BLOCK_K):
+            cols = n0 + tl.arange(0, BLOCK_K)
+            mask = rmask[:, None] & (cols[None, :] < N)
+            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            s += tl.sum(x, axis=1)
+            ss += tl.sum(x * x, axis=1)
+        mean = s / N
+        var = ss / N - mean * mean
+        rstd = 1.0 / tl.sqrt(var + eps)
+        for n0 in range(0, N, BLOCK_K):
+            cols = n0 + tl.arange(0, BLOCK_K)
+            mask = rmask[:, None] & (cols[None, :] < N)
+            x = tl.load(X + rm[:, None] * sx0 + cols[None, :] * sx1, mask=mask, other=0.0).to(tl.float32)
+            x_hat = (x - mean[:, None]) * rstd[:, None]
+            scale = tl.load(SB + rm[:, None] * ss0 + cols[None, :] * ss1, mask=mask, other=0.0).to(tl.float32)
+            bias = tl.load(SB + rm[:, None] * ss0 + (cols[None, :] + N) * ss1,
+                           mask=mask, other=0.0).to(tl.float32)
+            y = tl.sigmoid(scale) * x_hat + bias
+            tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
 
 
 def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float) -> torch.Tensor:
     M, N = x.shape
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]),)  # noqa: E731
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
     _adaln_epilogue_kernel[grid](
-        x, sb, y, M, N, eps,
+        x, sb, y, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1), y.stride(0), y.stride(1),
-        BLOCK_N=triton.next_power_of_2(N), DT=x.element_size(),
+        GROUP_M=get_seq_group(M),
     )
     return y
 
@@ -274,47 +291,35 @@ def adaln_inference_lnfold(
 # One kernel: LN(cond)·lnw, in-kernel GEMM → scale,bias, LN(x), sigmoid-gate → Y. Writes ONLY Y
 # (no x_hat/cond_norm/gate/rstd saves), so it strips the backward-materialization traffic the
 # training fwd kernel pays — a pure win in the memory-bound small-d regime.
-_FUSED_CONFIGS = [
-    triton.Config({"BLOCK_M": bm, "BLOCK_NX": bnx, "BLOCK_NC": bnc}, num_warps=nw, num_stages=ns)
-    for bm in (16, 32, 64)
-    for bnx in (64, 128)
-    for bnc in (64, 128)
-    for nw in (4, 8)
-    for ns in (2, 3)
-]
 
 
-_adaln_infer_fused_prune = make_cache_prune(
-    "adaln_infer_fused", dtype_of=tensor_dtype_of("X"), bucket_of=key_bucket_of("NX", "NC"),
-)
 
 
-@triton.autotune(configs=_FUSED_CONFIGS, key=["NX", "NC", "DT"],
-                 prune_configs_by={"early_config_prune": _adaln_infer_fused_prune})
+@triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['NX', 'NC', 'GROUP_M'])
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915
     X, Cond, LnW, ScaleW, ScaleB, BiasW, Y,
     sxr, sxc, scr, scc, swr, swc, sbwr, sbwc, syr, syc,
     M, NX: tl.constexpr, NC: tl.constexpr, eps_x, eps_cond,
-    USE_LOW: tl.constexpr, DT: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_NX: tl.constexpr, BLOCK_NC: tl.constexpr,
+    USE_LOW: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K_NX: tl.constexpr, BLOCK_K_NC: tl.constexpr,
+    GROUP_M,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
 
     # --- LN(cond) stats ---
-    mean_c = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for cs in range(0, NC, BLOCK_NC):
-        cc = cs + tl.arange(0, BLOCK_NC)
+    mean_c = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for cs in range(0, NC, BLOCK_K_NC):
+        cc = cs + tl.arange(0, BLOCK_K_NC)
         cm = row_mask[:, None] & (cc[None, :] < NC)
         co = rows[:, None] * scr + cc[None, :] * scc
         v = tl.load(Cond + co, mask=cm, other=0.0).to(tl.float32)
         mean_c += tl.sum(tl.where(cm, v, 0.0), axis=1)
     mean_c /= NC
-    var_c = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for cs in range(0, NC, BLOCK_NC):
-        cc = cs + tl.arange(0, BLOCK_NC)
+    var_c = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for cs in range(0, NC, BLOCK_K_NC):
+        cc = cs + tl.arange(0, BLOCK_K_NC)
         cm = row_mask[:, None] & (cc[None, :] < NC)
         co = rows[:, None] * scr + cc[None, :] * scc
         v = tl.load(Cond + co, mask=cm, other=0.0).to(tl.float32)
@@ -323,17 +328,17 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     rstd_c = tl.rsqrt(var_c / NC + eps_cond)
 
     # --- LN(x) stats ---
-    mean_x = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for xs in range(0, NX, BLOCK_NX):
-        xc = xs + tl.arange(0, BLOCK_NX)
+    mean_x = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for xs in range(0, NX, BLOCK_K_NX):
+        xc = xs + tl.arange(0, BLOCK_K_NX)
         xm = row_mask[:, None] & (xc[None, :] < NX)
         xo = rows[:, None] * sxr + xc[None, :] * sxc
         v = tl.load(X + xo, mask=xm, other=0.0).to(tl.float32)
         mean_x += tl.sum(tl.where(xm, v, 0.0), axis=1)
     mean_x /= NX
-    var_x = tl.zeros([BLOCK_M], dtype=tl.float32)
-    for xs in range(0, NX, BLOCK_NX):
-        xc = xs + tl.arange(0, BLOCK_NX)
+    var_x = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for xs in range(0, NX, BLOCK_K_NX):
+        xc = xs + tl.arange(0, BLOCK_K_NX)
         xm = row_mask[:, None] & (xc[None, :] < NX)
         xo = rows[:, None] * sxr + xc[None, :] * sxc
         v = tl.load(X + xo, mask=xm, other=0.0).to(tl.float32)
@@ -342,18 +347,18 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     rstd_x = tl.rsqrt(var_x / NX + eps_x)
 
     # --- per x-block: GEMM scale,bias over cond, then gate ---
-    for xs in range(0, NX, BLOCK_NX):
-        xc = xs + tl.arange(0, BLOCK_NX)
+    for xs in range(0, NX, BLOCK_K_NX):
+        xc = xs + tl.arange(0, BLOCK_K_NX)
         xm = row_mask[:, None] & (xc[None, :] < NX)
         xo = rows[:, None] * sxr + xc[None, :] * sxc
         xv = tl.load(X + xo, mask=xm, other=0.0).to(tl.float32)
         x_hat = (xv - mean_x[:, None]) * rstd_x[:, None]
 
         scale_b = tl.load(ScaleB + xc, mask=xc < NX, other=0.0).to(tl.float32)
-        scale = tl.zeros([BLOCK_M, BLOCK_NX], dtype=tl.float32)
-        bias = tl.zeros([BLOCK_M, BLOCK_NX], dtype=tl.float32)
-        for cs in range(0, NC, BLOCK_NC):
-            cc = cs + tl.arange(0, BLOCK_NC)
+        scale = tl.zeros([BLOCK_M1, BLOCK_K_NX], dtype=tl.float32)
+        bias = tl.zeros([BLOCK_M1, BLOCK_K_NX], dtype=tl.float32)
+        for cs in range(0, NC, BLOCK_K_NC):
+            cc = cs + tl.arange(0, BLOCK_K_NC)
             cm = row_mask[:, None] & (cc[None, :] < NC)
             co = rows[:, None] * scr + cc[None, :] * scc
             v = tl.load(Cond + co, mask=cm, other=0.0).to(tl.float32)
@@ -399,13 +404,14 @@ def adaln_inference_fused(
     nc = cond2d.shape[-1]
     y = torch.empty_like(x2d)
     use_low = x.dtype in (torch.bfloat16, torch.float16)
-    grid = lambda META: (triton.cdiv(m, META["BLOCK_M"]),)  # noqa: E731
+    grid = lambda META: (triton.cdiv(m, META["BLOCK_M1"]),)  # noqa: E731
     _adaln_fused_kernel[grid](
         x2d, cond2d, cond_ln_weight, scale_weight, scale_bias, bias_weight, y,
         x2d.stride(0), x2d.stride(1), cond2d.stride(0), cond2d.stride(1),
         scale_weight.stride(0), scale_weight.stride(1),
         bias_weight.stride(0), bias_weight.stride(1), y.stride(0), y.stride(1),
-        m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low, DT=x.element_size(),
+        m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low,
+        GROUP_M=get_seq_group(m),
     )
     return y.reshape(orig_x_shape)
 

@@ -35,7 +35,7 @@ def augmented_attention_pair_bias(
     caller's dtype on output, so it stays bf16 even when the surrounding forward is fp32.
     """
     if kernel_type == "compute_efficient":
-        from .triton.compute_efficient import (
+        from .triton.main import (
             triton_augmented_attention_pair_bias as _fn,
         )
     elif kernel_type == "memory_efficient":

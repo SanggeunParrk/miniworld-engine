@@ -23,72 +23,69 @@ B=1, bf16.
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
-from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 
-_trimul_gate_elem_mul_prune = make_cache_prune(
-    "trimul_gate_elem_mul", dtype_of=tensor_dtype_of("glogit_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "N", "ADD_RESIDUAL", "USE_DROPOUT"),
-)
 
 
-@triton.autotune(
-    configs=brute({"BLK": BLOCK_1D}),
-    key=["GROUP_M", "N", "ADD_RESIDUAL", "USE_DROPOUT"],
-    prune_configs_by={"early_config_prune": _trimul_gate_elem_mul_prune},
-)
+@triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"),
+                 key=['GROUP_M', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT'])
 @triton.jit
-def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, n_elem, L,
-                     N: tl.constexpr, BLK: tl.constexpr, SAVE_GATE: tl.constexpr,
-                     GROUP_M: tl.constexpr, ADD_RESIDUAL: tl.constexpr, USE_DROPOUT: tl.constexpr):
-    """Elementwise (1D, D-general): gate = sigmoid(glogit); y = proj ⊙ gate; [save gate].
+def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
+                     N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, SAVE_GATE: tl.constexpr,
+                     GROUP_M, ADD_RESIDUAL: tl.constexpr, USE_DROPOUT: tl.constexpr):
+    """Elementwise (row x col tile, D-general): gate = sigmoid(glogit); y = proj ⊙ gate;
+    [save gate].
 
     Optionally fuses the pairformer residual+dropout: y = residual + dropscale ⊙ (proj⊙gate).
     ``ds_ptr`` is the row-broadcast drop scale [L, N] (== drop_row mask/(1-p), broadcast over the
-    i-index); for flat element ``off`` the scale is ds[(off//N) % L, off%N]. ``res_ptr`` is the
-    module input pair [M, N]."""
-    off = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
-    mask = off < n_elem
-    g = tl.sigmoid(tl.load(glogit_ptr + off, mask=mask, other=0.0).to(tl.float32))
-    p = tl.load(proj_ptr + off, mask=mask, other=0.0).to(tl.float32)
-    y = p * g
+    i-index); for row ``m`` the scale row is ds[m % L]. ``res_ptr`` is the module input pair
+    [M, N].
+
+    2-D, not flat: the drop-scale operand is broadcast PER ROW, so a flat linear index had to
+    recover the row with ``off // N`` and the column with ``off - m*N`` — and it did so per
+    element. Tiling (row x col) makes the row index the program's own coordinate, so the only
+    remaining division is one ``% L`` per row, hoisted out of the column loop."""
+    rm = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
+    mmask = rm < M
     if USE_DROPOUT:
-        m = off // N
-        n = off - m * N
-        j = m % L
-        ds = tl.load(ds_ptr + j * N + n, mask=mask, other=0.0).to(tl.float32)
-        y = y * ds
-    if ADD_RESIDUAL:
-        y = y + tl.load(res_ptr + off, mask=mask, other=0.0).to(tl.float32)
-    tl.store(y_ptr + off, y.to(y_ptr.dtype.element_ty), mask=mask)
-    if SAVE_GATE:
-        tl.store(gate_ptr + off, g.to(gate_ptr.dtype.element_ty), mask=mask)
+        j = rm % L
+    for n0 in range(0, N, BLOCK_K):
+        rn = n0 + tl.arange(0, BLOCK_K)
+        mask = mmask[:, None] & (rn < N)[None, :]
+        off = rm[:, None] * N + rn[None, :]
+        g = tl.sigmoid(tl.load(glogit_ptr + off, mask=mask, other=0.0).to(tl.float32))
+        p = tl.load(proj_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        y = p * g
+        if USE_DROPOUT:
+            ds = tl.load(ds_ptr + j[:, None] * N + rn[None, :],
+                         mask=mask, other=0.0).to(tl.float32)
+            y = y * ds
+        if ADD_RESIDUAL:
+            y = y + tl.load(res_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + off, y.to(y_ptr.dtype.element_ty), mask=mask)
+        if SAVE_GATE:
+            tl.store(gate_ptr + off, g.to(gate_ptr.dtype.element_ty), mask=mask)
 
 
-_trimul_gate_elem_bwd_ew_prune = make_cache_prune(
-    "trimul_gate_elem_bwd_ew", dtype_of=tensor_dtype_of("dy_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "N", "USE_DROPOUT"),
-)
 
 
-@triton.autotune(
-    configs=brute({"BM": BLOCK_M}),
-    key=["GROUP_M", "N", "USE_DROPOUT"],
-    prune_configs_by={"early_config_prune": _trimul_gate_elem_bwd_ew_prune},
-)
+@triton.autotune(configs=configs_for("gated_projection_bwd_gate_dropres_triton"),
+                 key=['GROUP_M', 'N', 'USE_DROPOUT'])
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)
     dproj_ptr, dglogit_ptr,        # (M, N) out
     ds_ptr, L,                     # row-broadcast drop scale [L, N] (used iff USE_DROPOUT)
-    M, N: tl.constexpr, BM: tl.constexpr, GROUP_M: tl.constexpr,
+    M, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M,
     FROM_PREACT: tl.constexpr = False, USE_DROPOUT: tl.constexpr = False,
 ):
     """Fused elementwise: d_proj = dy⊙gate ; d_glogit = dy⊙proj⊙gate⊙(1-gate).
@@ -97,26 +94,34 @@ def _gate_elem_bwd_ew_kernel(
     lets the fused fwd (gate_elem_quack_fused) save preact instead of gate.
 
     If USE_DROPOUT, the incoming grad is scaled by the row-broadcast drop scale
-    (dy_eff = dy ⊙ ds[m%L, n]) before the gate backward — the grad of y = ds ⊙ (proj⊙gate)."""
+    (dy_eff = dy ⊙ ds[m%L, n]) before the gate backward — the grad of y = ds ⊙ (proj⊙gate).
+
+    The N axis is tiled by BLOCK_K rather than taken whole (``tl.arange(0, N)``): N was the row width
+    itself, so the register tile was set by the shape and no config could move it — and it forced
+    N to be a power of two."""
     pid = tl.program_id(0).to(tl.int64)
     # int64 M-index: off = m*N + n with M=B*L*L overflows int32 at large L.
-    rm = pid.to(tl.int64) * BM + tl.arange(0, BM).to(tl.int64)
-    rn = tl.arange(0, N)
+    rm = pid.to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
     mmask = rm[:, None] < M
-    off = rm[:, None] * N + rn[None, :]
-    dy = tl.load(dy_ptr + off, mask=mmask, other=0.0).to(tl.float32)
     if USE_DROPOUT:
         j = rm % L
-        ds = tl.load(ds_ptr + j[:, None] * N + rn[None, :], mask=mmask, other=0.0).to(tl.float32)
-        dy = dy * ds
-    proj = tl.load(proj_ptr + off, mask=mmask, other=0.0).to(tl.float32)
-    gate = tl.load(gate_ptr + off, mask=mmask, other=0.0).to(tl.float32)
-    if FROM_PREACT:
-        gate = tl.sigmoid(gate)
-    dproj = dy * gate
-    dglogit = dy * proj * gate * (1.0 - gate)
-    tl.store(dproj_ptr + off, dproj.to(dproj_ptr.dtype.element_ty), mask=mmask)
-    tl.store(dglogit_ptr + off, dglogit.to(dglogit_ptr.dtype.element_ty), mask=mmask)
+    for n0 in range(0, N, BLOCK_K):
+        rn = n0 + tl.arange(0, BLOCK_K)
+        mask = mmask & (rn < N)[None, :]
+        off = rm[:, None] * N + rn[None, :]
+        dy = tl.load(dy_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        if USE_DROPOUT:
+            ds = tl.load(ds_ptr + j[:, None] * N + rn[None, :],
+                         mask=mask, other=0.0).to(tl.float32)
+            dy = dy * ds
+        proj = tl.load(proj_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.load(gate_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        if FROM_PREACT:
+            gate = tl.sigmoid(gate)
+        dproj = dy * gate
+        dglogit = dy * proj * gate * (1.0 - gate)
+        tl.store(dproj_ptr + off, dproj.to(dproj_ptr.dtype.element_ty), mask=mask)
+        tl.store(dglogit_ptr + off, dglogit.to(dglogit_ptr.dtype.element_ty), mask=mask)
 
 
 def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
@@ -128,7 +133,8 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
     broadcast over the i-index) optionally fuse the pairformer residual+dropout into the store:
     y = residual + dropscale ⊙ (proj⊙gate). ``seq_len`` (L) is required with dropscale.
 
-    gate GEMM via cuBLAS (D-general), then a 1D elementwise (sigmoid + mul + residual/dropout)."""
+    gate GEMM via cuBLAS (D-general), then a 2-D (row x col) elementwise pass
+    (sigmoid + mul + residual/dropout)."""
     xn_flat = x_n.reshape(-1, x_n.shape[-1])
     M = xn_flat.shape[0]
     N = proj.shape[-1]
@@ -142,9 +148,8 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
     L = int(seq_len) if seq_len is not None else (x_n.shape[1] if x_n.dim() == 4 else 0)
     res_flat = residual.reshape(M, N) if add_residual else proj_flat  # dummy ptr when off
     ds_flat = dropscale.reshape(L, N) if use_dropout else proj_flat   # dummy ptr when off
-    n_elem = M * N
-    grid = lambda meta: (triton.cdiv(n_elem, meta["BLK"]),)  # noqa: E731
-    _gate_mul_kernel[grid](glogit, proj_flat, y, gate, res_flat, ds_flat, n_elem, L, N=N,
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    _gate_mul_kernel[grid](glogit, proj_flat, y, gate, res_flat, ds_flat, M, L, N=N,
                            SAVE_GATE=return_gate, GROUP_M=get_seq_group(M),
                            ADD_RESIDUAL=add_residual, USE_DROPOUT=use_dropout)
     return (y, gate) if return_gate else y
@@ -201,7 +206,7 @@ def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False,
     use_dropout = dropscale is not None
     L = int(seq_len) if seq_len is not None else 0
     ds_flat = dropscale.reshape(L, N) if use_dropout else dy  # dummy ptr when off
-    grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N,
                                    GROUP_M=get_seq_group(M), FROM_PREACT=from_preact,
                                    USE_DROPOUT=use_dropout)
@@ -219,7 +224,7 @@ def gate_elem_bwd(dy, x_n, proj, gate, Wg):
     xn_flat = x_n.reshape(M, -1)
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
-    grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, dy, 0, M, N=N,
                                    GROUP_M=get_seq_group(M), USE_DROPOUT=False)
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS

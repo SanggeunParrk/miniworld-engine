@@ -35,13 +35,8 @@ SCHEMA = 1
 _CACHE_ROOT = Path(__file__).parent / "data"
 
 
-# --------------------------------------------------------------------------- #
-# keys / roots
-# --------------------------------------------------------------------------- #
-def run_autotune_enabled() -> bool:
-    """``MINIWORLD_RUN_AUTOTUNE=1`` -> ignore the cache and run the full autotune grid."""
-    from miniworld_engine import settings  # noqa: PLC0415 -- avoid an import cycle
-    return settings.current().run_autotune
+
+
 
 
 def gpu_key(device_index: int | None = None) -> str:
@@ -104,6 +99,10 @@ def _sig_from_dict(d: dict) -> tuple:
     kw = tuple(sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
                       for k, v in d["kwargs"].items()))
     return (kw, int(d["num_warps"]), int(d["num_stages"]))
+
+
+
+
 
 
 def config_to_dict(config, ms: float | None = None) -> dict:
@@ -188,7 +187,20 @@ def store_ranked_configs(
 _warned: set[tuple] = set()
 
 
+#: Every (op, gpu, dtype|bucket) this process failed to find in the cache. A build can only report
+#: what it captured; this records what a RUN actually asked for and did not get, which is the only
+#: direct measure of whether the cache covers a workload -- ``miniworld-engine audit`` replays the
+#: build matrix with capture off and requires this to come back empty.
+_CACHE_MISSES: set = set()
+
+
+def cache_misses() -> frozenset:
+    """(op, gpu, key) triples this process looked up and did not find."""
+    return frozenset(_CACHE_MISSES)
+
+
 def _warn_once(op: str, gk: str, tag: str, reason: str) -> None:
+    _CACHE_MISSES.add((op, gk, tag))
     key = (op, gk, tag, reason)
     if key in _warned:
         return
@@ -216,6 +228,29 @@ def key_bucket_of(*key_names: str):
     return f
 
 
+def operand_bytes(named_args, kwargs, arg_name: str, default: int = 2) -> int:
+    """Bytes per element of a kernel operand, for shared-memory estimates.
+
+    Every hand-written smem estimator in this repo multiplied its element COUNT by a literal 2
+    with a "bf16 = 2 B" comment. That is right up to the moment a kernel runs in fp32, where it
+    reports exactly half the real footprint -- so an over-limit config survives the prune and the
+    launch dies with OutOfResources instead of the tuner quietly rejecting it. It is the wrong
+    direction to be wrong in: the prune exists precisely so an unlaunchable config never reaches
+    a launch. Read the operand instead of assuming it.
+
+    ``default`` is the bf16 2 B the estimators used to hardcode, kept for the case where the
+    operand is not introspectable -- an unknown estimate must not become a crash.
+    """
+    t = named_args.get(arg_name) if hasattr(named_args, "get") else None
+    if t is None:
+        t = kwargs.get(arg_name)
+    size = getattr(t, "element_size", None)
+    try:
+        return int(size()) if callable(size) else default
+    except Exception:  # noqa: BLE001 -- never let an estimate break a launch
+        return default
+
+
 def tensor_dtype_of(arg_name: str, default: str = "bfloat16"):
     """Build a ``dtype_of`` that reads the dtype of a tensor kernel-arg (falls back to
     ``default`` — production bf16 — if it isn't introspectable in named_args)."""
@@ -228,27 +263,6 @@ def tensor_dtype_of(arg_name: str, default: str = "bfloat16"):
 _smem_limit_cache: dict[int, int] = {}
 
 
-def _device_smem_limit(device_index: int | None = None) -> int:
-    """Opt-in shared-memory bytes per block for the current CUDA device (memoized).
-
-    This is the hard ceiling a Triton kernel launch must fit under: ~99 KB on sm_86
-    (RTX A5000/A6000), ~164 KB on sm_80 (A100), ~228 KB on sm_90 (H100). A config whose
-    static shared memory exceeds it raises ``OutOfResources`` at compile — and Triton's
-    autotuner does NOT skip that gracefully (it propagates), so an over-limit config that
-    reaches the autotuner aborts the whole launch. Hence we must drop it BEFORE tuning.
-    """
-    if not torch.cuda.is_available():
-        return 1 << 30
-    idx = torch.cuda.current_device() if device_index is None else device_index
-    if idx not in _smem_limit_cache:
-        p = torch.cuda.get_device_properties(idx)
-        # shared_memory_per_block_optin is the dynamic-smem opt-in max; fall back to the
-        # static per-block figure on older pytorch that doesn't expose the optin field.
-        limit = getattr(p, "shared_memory_per_block_optin", None) or getattr(
-            p, "shared_memory_per_block", 48 * 1024
-        )
-        _smem_limit_cache[idx] = int(limit)
-    return _smem_limit_cache[idx]
 
 
 # A COMPILE MONSTER is a config triton spends 10-20 MIN compiling (make_llir + ptxas), always
@@ -262,99 +276,36 @@ def _device_smem_limit(device_index: int | None = None) -> int:
 #      hang from an arch's own oddball blowup.
 # This filters the *pruned candidate set* only; the full ``autotuner.configs`` (hence
 # ``config_space_hash``) is untouched, so every existing cache stays valid — unlike narrowing the
-# grid in grids.py, which would stale all caches.
-def _is_compile_monster(config) -> bool:
-    try:
-        d = as_cfg_dict(config)
-        return d["num_warps"] >= 16 or d["num_stages"] >= 5
-    except Exception:  # noqa: BLE001 -- unknown shape -> don't drop it
-        return False
+# config set, which would stale all caches.
+#: Tile-axis names, used to tell a GEMM-shaped kernel from an elementwise one. A config that tiles
+#: two or more of these is walking an M x N (x K) iteration space; one that tiles a single axis is
+#: streaming a flat buffer. The distinction is read off the config itself rather than declared per
+#: kernel, so a new kernel is classified correctly without anyone remembering to annotate it.
+_TILE_AXES = frozenset({
+    "BLOCK_M1", "BLOCK_N", "BLOCK_K", "BLOCK_D", "BLOCK_DC", "BLOCK_NC", "BLOCK_NX",
+    "BM", "BN", "BK", "BD", "BLK", "BLOCK_J",
+})
 
 
-def _drop_compile_monsters(configs: list) -> list:
-    kept = [c for c in configs if not _is_compile_monster(c)]
-    return kept or configs  # never prune to empty
 
 
-def make_device_smem_prune(smem_bytes):
-    """Build an ``early_config_prune`` that drops configs whose estimated static shared
-    memory exceeds the running device's opt-in limit.
-
-    ``smem_bytes(config, named_args) -> int`` returns a (conservative) byte estimate for one
-    ``triton.Config`` at the current shape. Compose it as the ``base_prune`` of
-    :func:`make_cache_prune` so the cache only ever narrows within launchable configs. On
-    a device that fits every config (A100/H100/B200) this is a no-op; on sm_86 it removes the
-    unlaunchable wide/high-``num_stages`` configs so a fitting one is chosen instead of the
-    launch aborting. NEVER prune to empty: if the estimate would drop everything (estimate too
-    aggressive), keep the single smallest-estimate config so the launch still has a candidate.
-    """
-
-    def prune(configs, named_args, **kwargs):
-        configs = list(configs)
-        try:
-            limit = _device_smem_limit()
-        except Exception:  # noqa: BLE001 -- never let the smem guard break a launch
-            return configs
-        kept = []
-        for c in configs:
-            try:
-                est = smem_bytes(c, named_args, kwargs)
-            except Exception:  # noqa: BLE001 -- unknown estimate -> don't drop it
-                kept.append(c)
-                continue
-            if est is None or est <= limit:
-                kept.append(c)
-        if kept:
-            return kept
-        # Everything estimated over-limit: keep the smallest so we still try to launch.
-        return [min(configs, key=lambda c: smem_bytes(c, named_args, kwargs) or 0)]
-
-    return prune
 
 
-def make_cache_prune(op: str, *, dtype_of, bucket_of, base_prune=None):
-    """Build a Triton ``early_config_prune`` callback that narrows the grid to the cached
-    top-K for the running (gpu, dtype, shape-bucket).
 
-    ``dtype_of(named_args, kwargs) -> str`` and ``bucket_of(named_args, kwargs) -> str`` extract
-    the cache sub-keys from the kernel's runtime args. ``base_prune`` (optional) is another
-    ``early_config_prune`` (e.g. a device-smem filter) run FIRST for safety — the cache only
-    ever narrows within what the base prune already deemed launchable.
-    """
 
-    def prune(configs, named_args, **kwargs):
-        base = list(base_prune(configs, named_args, **kwargs)) if base_prune else list(configs)
-        base = _drop_compile_monsters(base)  # cut the always-bad tail up front (backstopped in capture)
-        if run_autotune_enabled() or not base:
-            return base
-        try:
-            gk = gpu_key()
-            dtype = str(dtype_of(named_args, kwargs))
-            bucket = str(bucket_of(named_args, kwargs))
-        except Exception:  # noqa: BLE001 -- never let cache lookup break a kernel launch
-            return base
-        data = _load(op, gk)
-        if data is None:
-            _warn_once(op, gk, dtype, "no tuned autotune cache")
-            return base
-        if data.get("config_space_hash") != config_space_hash(configs):
-            _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
-            return base
-        entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
-        if not entry:
-            _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
-            return base
-        want = {_sig_from_dict(e) for e in entry}
-        kept = [c for c in base if _sig(c) in want]
-        return kept or base
 
-    # Introspection tags: the op this kernel tunes as, plus its dtype/bucket extractors. The
-    # generic capture builder reads these off a live autotuner to key captured timings the SAME
-    # way the runtime prune keys its lookup (so a built cache is guaranteed to hit).
-    prune._miniworld_op = op  # noqa: SLF001
-    prune._miniworld_dtype_of = dtype_of  # noqa: SLF001
-    prune._miniworld_bucket_of = bucket_of  # noqa: SLF001
-    return prune
+
+
+#: Every op that wires itself to the cache, filled as the kernel modules import. This is the only
+#: complete list of what a build OUGHT to produce -- chasing missing ops one at a time (a dispatch
+#: switch here, a dropout flag there) finds them one incident at a time, and each one is silent
+#: until production hits the uncached path. Comparing this set against a built cache turns every
+#: such hole into a single loud check; see ``miniworld-engine coverage``.
+_REGISTERED_OPS: set[str] = set()
+
+
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -366,7 +317,7 @@ def select_config(
     """Return the cached **best** config (``{kwargs, num_warps, num_stages}``) for the running
     ``(gpu, dtype, shape-bucket)``, or ``None`` (warn-once) on a miss/stale cache.
 
-    This is the cute/cuda counterpart of :func:`make_cache_prune`: those backends fix their
+    This is the cute/cuda counterpart of :func:`configs_for`: those backends fix their
     tile/cluster/stage config at build time and have no Triton autotune loop, so they call this
     to *pick one* config from the shipped cache instead of narrowing a grid. Callers apply the
     returned ``kwargs`` (e.g. ``tile_m``/``tile_n``/``cluster``) and, on ``None``, fall back to
@@ -376,8 +327,6 @@ def select_config(
     INVARIANT (as everywhere in this module): every candidate computes the same math, so a
     miss/stale/None result only costs speed, never correctness.
     """
-    if run_autotune_enabled():
-        return None
     try:
         gk = gpu_key(device_index)
     except Exception:  # noqa: BLE001

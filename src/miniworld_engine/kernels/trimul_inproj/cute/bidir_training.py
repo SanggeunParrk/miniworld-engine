@@ -17,11 +17,13 @@ the front's dxn GEMM:  dx_n = (d_concatᵀ @ W_stack) + (d_glogit @ Wgᵀ)  done
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+
 import torch
 import torch.nn as nn
 
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
-from miniworld_engine.kernels.layernorm_linear.te_style import _te_backward, _te_forward
+from miniworld_engine.kernels.layernorm_linear.triton.te_style import _te_backward, _te_forward
 from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch, dispatch
 from miniworld_engine.kernels.trimul_inproj.cute.launch import (
     prepack_lr_operand, trimul_inproj_cute_forward,
@@ -125,7 +127,7 @@ class BidirBackHalf(torch.autograd.Function):
                 d_residual, None)
 
 
-@torch.compiler.disable
+@opaque()
 def bidir_forward(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
                   ln_out_w, ln_out_b, eps, b_lr, h, row_scale=None,
                   add_residual=False, dropscale=None):

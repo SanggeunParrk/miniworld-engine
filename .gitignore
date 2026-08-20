@@ -3,7 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
-build/
+# anchored: setuptools' build artefacts live at the repo root only, and an unanchored "build/"
+# also swallows src/miniworld_engine/build/ -- a real package, whose absence from git shows up as
+# an ImportError in the cache builder rather than as a missing file.
+/build/
 dist/
 
 # pixi materialized environments (regenerate from pixi.lock)
@@ -77,3 +80,13 @@ _fold_t.py
 
 # job logs (SLURM .out etc.) — sibling of artifacts/
 benchmarks/**/logs/
+
+# --- .bench: audit scratch --------------------------------------------------------------------
+# Per-run logs, result CSVs and one-off sbatch wrappers are scratch and are NOT tracked. The
+# reusable audit tools are: docs/kernels/tiling-audit.md cites them by path, so the audit it
+# records has to stay reproducible from a clean checkout.
+.bench/**
+!.bench/**/
+!.bench/*.py
+!.bench/tiling/*.py
+!.bench/*.md

@@ -20,7 +20,7 @@ from .autograd import (
 )
 from .interface import layernorm_linear_triton
 from .reference import LayerNormLinearRef, layernorm_linear_pytorch
-from .te_style import LayerNormLinearTEFn, layernorm_linear_te_fn, set_fp32_matmul_precision
+from .triton.te_style import LayerNormLinearTEFn, layernorm_linear_te_fn, set_fp32_matmul_precision
 
 __all__ = [
     "LayerNormLinearFn",

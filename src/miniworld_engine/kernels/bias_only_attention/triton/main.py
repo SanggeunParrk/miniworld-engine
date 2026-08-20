@@ -1,18 +1,20 @@
+
+from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/bias_only_attention.py
 
+from miniworld_engine.autotune.configs import configs_for
 import torch
 import triton
-from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
+
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine._typecheck import typecheck
 
-configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
-pre_configs = brute({"BLOCK_M": BLOCK_M})
-bwd_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
+# HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
+# reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
 
 
 def get_seq_group(length) -> int:
@@ -31,16 +33,16 @@ def _attn_fwd_inner(
     b_ptr,
     stride_vn,
     stride_bn,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     N_CTX,
 ):
-    offset_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offset_k = tl.arange(0, BLOCK_D)
-    for start_n in range(0, N_CTX, BLOCK_N):
-        offset_n = start_n + tl.arange(0, BLOCK_N)
+    offset_m = start_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    offset_k = tl.arange(0, HEAD_DIM_PAD)
+    for start_n in range(0, N_CTX, BLOCK_M2):
+        offset_n = start_n + tl.arange(0, BLOCK_M2)
         bias_mask = (offset_m[:, None] < N_CTX) & (offset_n[None, :] < N_CTX)
         bias_val = tl.load(b_ptr, mask=bias_mask, other=float("-inf"))
         v_mask = (offset_n[:, None] < N_CTX) & (offset_k[None, :] < HEAD_DIM)
@@ -61,19 +63,15 @@ def _attn_fwd_inner(
         acc = acc * alpha[:, None]
         acc = tl.dot(p.to(v.dtype), v, acc)
         m_i = m_ij
-        b_ptr += BLOCK_N * stride_bn
-        v_ptr += BLOCK_N * stride_vn
+        b_ptr += BLOCK_M2 * stride_bn
+        v_ptr += BLOCK_M2 * stride_vn
     return acc, l_i, m_i
 
 
-_bias_only_attention_main_fwd_prune = make_cache_prune(
-    "bias_only_attention_main_fwd", dtype_of=tensor_dtype_of("v_ptr"),
-    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
-)
 
 
-@triton.autotune(configs=configs, key=["GROUP_N", "H", "HEAD_DIM"],
-                 prune_configs_by={"early_config_prune": _bias_only_attention_main_fwd_prune})
+@triton.autotune(configs=configs_for("bias_only_attention_fwd_triton"),
+                 key=['GROUP_N', 'H', 'HEAD_DIM'])
 @triton.jit
 def _attn_fwd(
     v_ptr,
@@ -102,12 +100,12 @@ def _attn_fwd(
     H: tl.constexpr,
     N_CTX,
     HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    GROUP_N: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    GROUP_N,
 ):
-    tl.static_assert(BLOCK_D >= HEAD_DIM)
+    tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     start_m = tl.program_id(0).to(tl.int64)
     off_hz = tl.program_id(1).to(tl.int64)
     off_t = tl.program_id(2).to(tl.int64)
@@ -117,9 +115,9 @@ def _attn_fwd(
     output_offset = off_z * stride_oz + off_h * stride_oh + off_t * stride_ot
     bias_offset = off_z * stride_bz + off_h * stride_bh
 
-    offset_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offset_n = tl.arange(0, BLOCK_N)
-    offset_k = tl.arange(0, BLOCK_D)
+    offset_m = start_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    offset_n = tl.arange(0, BLOCK_M2)
+    offset_k = tl.arange(0, HEAD_DIM_PAD)
 
     v_ptr = (
         v_ptr
@@ -140,9 +138,9 @@ def _attn_fwd(
         + offset_n[None, :] * stride_bn
     )
 
-    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
-    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+    m_i = tl.zeros([BLOCK_M1], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M1], dtype=tl.float32) + 1.0
+    acc = tl.zeros([BLOCK_M1, HEAD_DIM_PAD], dtype=tl.float32)
 
     acc, l_i, m_i = _attn_fwd_inner(
         acc,
@@ -153,9 +151,9 @@ def _attn_fwd(
         bias_ptr,
         stride_vn,
         stride_bn,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_D,
+        BLOCK_M1,
+        BLOCK_M2,
+        HEAD_DIM_PAD,
         HEAD_DIM,
         N_CTX,
     )
@@ -166,8 +164,8 @@ def _attn_fwd(
         + off_z * stride_mz
         + off_h * stride_mh
         + off_t * stride_mt
-        + start_m * BLOCK_M
-        + tl.arange(0, BLOCK_M)
+        + start_m * BLOCK_M1
+        + tl.arange(0, BLOCK_M1)
     )
 
     tl.store(m_ptr, m_i, mask=offset_m < N_CTX)
@@ -175,41 +173,40 @@ def _attn_fwd(
     tl.store(o_ptr, acc.to(out_ptr.type.element_ty), mask=out_mask)
 
 
-_bias_only_attention_main_bwd_preprocess_prune = make_cache_prune(
-    "bias_only_attention_main_bwd_preprocess", dtype_of=tensor_dtype_of("o"),
-    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
-)
 
 
-@triton.autotune(configs=pre_configs, key=["GROUP_N", "H", "HEAD_DIM"],
-                 prune_configs_by={"early_config_prune": _bias_only_attention_main_bwd_preprocess_prune})
+# The launcher hands the backward H*L, not H: v is the "B (H L) L2 D" rearrangement. Naming it H and
+# keying on it partitioned the cache per sequence length -- defeating the GROUP_N bucket next to it --
+# for a value this kernel never reads. Dropped.
+@triton.autotune(configs=configs_for("bias_only_attention_bwd_pre_triton"),
+                 key=['GROUP_N', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_preprocess(
     o,
     DO,
     Delta,
     Z,
-    H: tl.constexpr,
     N_CTX,
     HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    GROUP_N: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    GROUP_N,
 ):
-    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
+    off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     off_hz = tl.program_id(1).to(tl.int64)
-    off_n = tl.arange(0, BLOCK_D)
-
-    o_ptr = o + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
-    do_ptr = DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
-
-    mask_m = (off_m[:, None] < N_CTX) & (off_n[None, :] < HEAD_DIM)
     mask_delta = off_m < N_CTX
 
-    o = tl.load(o_ptr, mask=mask_m, other=0.0).to(tl.float32)
-    do = tl.load(do_ptr, mask=mask_m, other=0.0).to(tl.float32)
-
-    delta = tl.sum(o * do, axis=1)
+    # delta[m] = sum_d o[m,d]*do[m,d]: a reduction over d, so HEAD_DIM_PAD tiles it and the fp32
+    # partials accumulate (summation is associative -> exact for any tile size).
+    delta = tl.zeros([BLOCK_M1], dtype=tl.float32)
+    for d0 in range(0, HEAD_DIM, HEAD_DIM_PAD):
+        off_n = d0 + tl.arange(0, HEAD_DIM_PAD)
+        o_ptr = o + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
+        do_ptr = DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]
+        mask_m = (off_m[:, None] < N_CTX) & (off_n[None, :] < HEAD_DIM)
+        ot = tl.load(o_ptr, mask=mask_m, other=0.0).to(tl.float32)
+        dot = tl.load(do_ptr, mask=mask_m, other=0.0).to(tl.float32)
+        delta += tl.sum(ot * dot, axis=1)
 
     delta_ptr = Delta + off_hz * N_CTX + off_m
     tl.store(delta_ptr, delta, mask=mask_delta)
@@ -227,24 +224,24 @@ def _attn_bwd_dvdbias(
     stride_tok,
     stride_d,
     N_CTX,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     start_n,
     stride_bm,
     stride_bn,
 ):
-    offs_n = start_n + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_D)
+    offs_n = start_n + tl.arange(0, BLOCK_M2)
+    offs_k = tl.arange(0, HEAD_DIM_PAD)
     do_ptrs = DO + offs_k[None, :] * stride_d
     biasT_ptrs = Bias + offs_n[:, None] * stride_bn
     dbiasT_ptrs = DBias + offs_n[:, None] * stride_bn
     m_ptrs = M
     d_ptrs = D
 
-    for inner_start_m in range(0, N_CTX, BLOCK_M):
-        offs_m = inner_start_m + tl.arange(0, BLOCK_M)
+    for inner_start_m in range(0, N_CTX, BLOCK_M1):
+        offs_m = inner_start_m + tl.arange(0, BLOCK_M1)
         do_mask = (offs_m[:, None] < N_CTX) & (offs_k[None, :] < HEAD_DIM)
         bias_mask = (offs_m[None, :] < N_CTX) & (offs_n[:, None] < N_CTX)
 
@@ -275,14 +272,12 @@ def _attn_bwd_dvdbias(
     return dv
 
 
-_bias_only_attention_main_bwd_prune = make_cache_prune(
-    "bias_only_attention_main_bwd", dtype_of=tensor_dtype_of("v_ptr"),
-    bucket_of=key_bucket_of("GROUP_N", "H", "HEAD_DIM"),
-)
 
 
-@triton.autotune(configs=bwd_configs, key=["GROUP_N", "H", "HEAD_DIM"],
-                 prune_configs_by={"early_config_prune": _bias_only_attention_main_bwd_prune})
+# HL, not H: `bhid` runs over B*HL, so the decode below divides by H*L. Keyed on GROUP_N only --
+# keying the raw product would partition the cache per sequence length.
+@triton.autotune(configs=configs_for("bias_only_attention_bwd_triton"),
+                 key=['GROUP_N', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd(
     v_ptr,
@@ -300,19 +295,19 @@ def _attn_bwd(
     bias_stride_h,
     bias_stride_m,
     bias_stride_n,
-    H: tl.constexpr,
+    HL,
     N_CTX,
     HEAD_DIM: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    GROUP_N: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
+    BLOCK_M2: tl.constexpr,
+    HEAD_DIM_PAD: tl.constexpr,
+    GROUP_N,
 ):
-    tl.static_assert(BLOCK_D >= HEAD_DIM)
+    tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
     bhid = tl.program_id(2).to(tl.int64)
     off_chz = bhid * N_CTX
-    adj = stride_h * (bhid % H) + stride_z * (bhid // H)
+    adj = stride_h * (bhid % HL) + stride_z * (bhid // HL)
     pid = tl.program_id(0).to(tl.int64)
 
     v_ptr += adj
@@ -321,16 +316,16 @@ def _attn_bwd(
     m_ptr += off_chz
     d_ptr += off_chz
 
-    offset_bias = bias_stride_h * (bhid % H) + bias_stride_z * (bhid // H)
+    offset_bias = bias_stride_h * (bhid % HL) + bias_stride_z * (bhid // HL)
     bias_ptr = bias_ptr + offset_bias
     dbias_ptr = dbias_ptr + offset_bias
 
-    offs_k = tl.arange(0, BLOCK_D)
+    offs_k = tl.arange(0, HEAD_DIM_PAD)
 
-    start_n = pid * BLOCK_N
-    offs_n = start_n + tl.arange(0, BLOCK_N)
+    start_n = pid * BLOCK_M2
+    offs_n = start_n + tl.arange(0, BLOCK_M2)
 
-    dv = tl.zeros([BLOCK_N, BLOCK_D], dtype=tl.float32)
+    dv = tl.zeros([BLOCK_M2, HEAD_DIM_PAD], dtype=tl.float32)
 
     v_ptrs = v_ptr + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
     dv_ptrs = dv_ptr + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d
@@ -351,9 +346,9 @@ def _attn_bwd(
         stride_tok,
         stride_d,
         N_CTX,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_D,
+        BLOCK_M1,
+        BLOCK_M2,
+        HEAD_DIM_PAD,
         HEAD_DIM,
         start_n,
         bias_stride_m,
@@ -370,7 +365,7 @@ def _attn_bwd(
 class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(
         ctx,
         v: Float[torch.Tensor, "B H L L D"],
@@ -382,7 +377,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
         out = torch.empty_like(v)
         m = torch.empty(B, H, L, L, device=v.device, dtype=torch.float32)
 
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * H, L]
+        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
         _attn_fwd[grid](
             v,
             bias,
@@ -396,7 +391,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             H,
             L,
             D,
-            BLOCK_D=triton.next_power_of_2(D),
+            HEAD_DIM_PAD=triton.next_power_of_2(D),
             GROUP_N=get_seq_group(L),
         )
 
@@ -404,12 +399,18 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
         return out
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         v, bias, m, out = ctx.saved_tensors
 
         if grad_output.dtype != v.dtype:
             grad_output = grad_output.to(v.dtype)
+        # `_attn_bwd_preprocess` below takes no stride arguments -- it addresses o/DO by a
+        # contiguous formula. An upstream grad that is a stride-0 expanded view, which is what
+        # `out.sum().backward()` hands us, has one element of storage and the kernel reads L*D
+        # past it. triton/atomic.py had the identical defect; compute-sanitizer reported 14
+        # invalid global reads there before the same one-line fix.
+        grad_output = grad_output.contiguous()
 
         v, out, grad_output = [
             rearrange(x, "B H L L2 D -> B (H L) L2 D")
@@ -421,23 +422,22 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
         B, HL, L, D = v.shape
         delta = torch.empty_like(m)
 
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M"]), B * HL, 1]
+        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
         _attn_bwd_preprocess[grid](
             out,
             grad_output,
             delta,
             B,
-            HL,
             L,
             D,
-            BLOCK_D=triton.next_power_of_2(D),
             GROUP_N=get_seq_group(L),
+            HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
         dv = torch.empty_like(v)
         dbias = torch.empty_like(bias)
 
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_N"]), 1, B * HL]
+        grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
         _attn_bwd[grid](
             v,
             bias,
@@ -451,7 +451,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             HL,
             L,
             D,
-            BLOCK_D=triton.next_power_of_2(D),
+            HEAD_DIM_PAD=triton.next_power_of_2(D),
             GROUP_N=get_seq_group(L),
         )
 

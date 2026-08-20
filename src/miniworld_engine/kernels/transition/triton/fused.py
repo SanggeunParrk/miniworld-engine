@@ -22,17 +22,20 @@ tile for BOTH the A and B projections across the N-loop.
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
+
 import os
 
 import torch
 from miniworld_engine import settings
 import triton
-from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
+
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = settings.current().autotunes("transition")
@@ -65,128 +68,130 @@ def get_seq_group(length) -> int:
     return bucket_mixed(length)
 
 
-if AUTOTUNE:
-    _configs = [
-        triton.Config({"BLOCK_M": bm, "BLOCK_N": bn}, num_warps=nw, num_stages=ns)
-        for bm in (16, 32, 64, 128)
-        for bn in (64, 128, 256, 512)
-        for nw in (4, 8)
-        for ns in (2, 3, 4)
-    ]
-else:
-    _configs = [
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 256}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 256}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_M": 32, "BLOCK_N": 128}, num_warps=4, num_stages=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 512}, num_warps=8, num_stages=2),
-    ]
-
-
-def _expand_early_prune(configs, named_args, **kwargs):
-    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE they are
-    compiled/benched. The expand kernel stages wa+wb tiles ``[BLOCK_K, BLOCK_N]`` (BLOCK_K =
-    next_pow2(K); K is NOT tiled) across ``num_stages``, plus the single ``[BLOCK_M, BLOCK_K]``
-    xn tile, all bf16. Autotune's bench-time OutOfResources pruning is unsafe under CUDA-graph
-    capture -- the failing bench fires DURING capture and fatally poisons the stream (seen at
-    d>=256: a 430KB/856KB config OOMs mid-capture). Pruning up front keeps only capturable
-    configs so the fused path (and its sm100 gatebwd backward) is usable at d=256 under cudagraph."""
-    import triton as _triton
-
-    K = named_args["K"] if "K" in named_args else kwargs.get("K")
-    if K is None:
-        return list(configs)
-    bk = _triton.next_power_of_2(int(K))
-    try:
-        limit = _triton.runtime.driver.active.utils.get_device_properties(
-            torch.cuda.current_device(),
-        )["max_shared_mem"]
-    except Exception:  # noqa: BLE001 -- fall back to a conservative sm100 smem budget
-        limit = 227 * 1024
-
-    def _smem(c):
-        bm = c.kwargs["BLOCK_M"]
-        bn = c.kwargs["BLOCK_N"]
-        # num_stages copies of the pipelined wa+wb tiles + the single xn tile (bf16 = 2 B)
-        return c.num_stages * 2 * bk * bn * 2 + bm * bk * 2
-
-    kept = [c for c in configs if _smem(c) <= limit]
-    return kept or [min(configs, key=_smem)]
-
-
-# Cache-narrowing prune composed OVER the smem safety prune (runs first, inside make_cache_prune).
-_transition_expand_gate_fwd_prune = make_cache_prune(
-    "transition_expand_gate_fwd", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "ND", "K"), base_prune=_expand_early_prune,
-)
+# BLOCK_K is a CSV tile. It used to arrive from the launcher as
+# ``BLOCK_K=next_power_of_2(K)`` -- the whole d row in one tile, which is also what forced the
+# smem cliff and the "no config fits" footgun below. The CSV reaches
+# 1024 (the wrapper's K ceiling), so that single-tile schedule is still in the sweep; the k-loop
+# in the kernel makes every smaller candidate correct instead of wrong, and bounds smem.
 
 
 # fmt: off
-@triton.autotune(
-    configs=_configs,
-    key=["GROUP_M", "ND", "K", "SAVE_XN"],
-    prune_configs_by={"early_config_prune": _transition_expand_gate_fwd_prune},
-)
+@triton.autotune(configs=configs_for("transition_layernorm_expand_swiglu_triton"),
+                 key=['GROUP_M', 'ND', 'K', 'SAVE_XN'])
 @triton.jit
 def _transition_expand_gate_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, out_ptr, xn_ptr,
-    M, ND, K, GROUP_M: tl.constexpr,
+    # K is tl.constexpr (it is the model's d, fixed per module, and already in this kernel's
+    # autotune key), so `BLOCK_K_D >= K` below is a COMPILE-TIME test and only one branch is emitted.
+    M, ND, K: tl.constexpr, GROUP_M,
     stride_xm, stride_xk,
     stride_wn, stride_wk,   # Wa, Wb share layout: (ND, K) row-major -> stride_wn=K, stride_wk=1
     stride_om, stride_on,
     stride_nm, stride_nk,   # xn out: (M, K) row-major (only used when SAVE_XN)
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
     SAVE_XN: tl.constexpr,
 ):
-    # One program owns BLOCK_M rows and ALL of ND: LayerNorm is applied ONCE per row and
-    # the normalized tile is reused for both the A and B projections across the N-loop.
+    # One program owns BLOCK_M1 rows and ALL of ND. LayerNorm uses PRECOMPUTED row stats, so
+    # normalizing a k-tile needs nothing but that tile: BLOCK_K_D tiles the d axis and the two
+    # projections accumulate across it.
     pid_m = tl.program_id(0).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    k = tl.arange(0, BLOCK_K)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
-    k_mask = k < K
-
-    # --- normalize once (stats precomputed): xn = (x*rstd - c1) * g + beta ---
-    x = tl.load(
-        x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-        mask=row_mask[:, None] & k_mask[None, :], other=0.0,
-    ).to(tl.float32)
     rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
     c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
-    g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-    beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-    xhat = x * rstd[:, None] - c1[:, None]
-    xn = (xhat * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)  # (BM, BK)
 
-    # --- Version B: stash the (single) normalized tile so backward can reuse it ---
-    if SAVE_XN:
-        tl.store(
-            xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk,
-            xn, mask=row_mask[:, None] & k_mask[None, :],
-        )
+    if BLOCK_K_D >= K:
+        # COVERING TILE -> the pre-tiling schedule: ONE x read, normalized ONCE, and the single
+        # bf16 `xn` tile held in registers and reused by the SAVE_XN store and by both projections
+        # of EVERY ND chunk. The general branch below has the x load nested inside the ND loop, so
+        # it re-reads x ceil(ND/BLOCK_K_ND) times per row -- at ND=4d that is a 4x read amplification
+        # of the kernel's largest input. Numerics are identical to the else-branch at BLOCK_K_D >= K:
+        # its loops are single-trip and every expression here matches it term for term.
+        k = tl.arange(0, BLOCK_K_D)
+        k_mask = k < K
+        km = row_mask[:, None] & k_mask[None, :]
+        x = tl.load(
+            x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+            mask=km, other=0.0,
+        ).to(tl.float32)
+        g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        xhat = x * rstd[:, None] - c1[:, None]
+        xn = (xhat * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)  # (BM, BK)
+        if SAVE_XN:
+            tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
+        for n0 in range(0, ND, BLOCK_K_ND):
+            cols = n0 + tl.arange(0, BLOCK_K_ND)
+            col_mask = cols < ND
+            a = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            b = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            wa = tl.load(  # (BLOCK_K_D, BLOCK_K_ND): w[k, n] = W[cols[n], k]
+                wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+            )
+            wb = tl.load(
+                wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+            )
+            a = tl.dot(xn, wa, a, out_dtype=tl.float32)
+            b = tl.dot(xn, wb, b, out_dtype=tl.float32)
+            gate = a * tl.sigmoid(a) * b
+            tl.store(
+                out_ptr + rows[:, None] * stride_om + cols[None, :] * stride_on,
+                gate.to(out_ptr.dtype.element_ty),
+                mask=row_mask[:, None] & col_mask[None, :],
+            )
+    else:
+        # --- Version B: stash the normalized x so backward can reuse it ---
+        if SAVE_XN:
+            for k0 in range(0, K, BLOCK_K_D):
+                k = k0 + tl.arange(0, BLOCK_K_D)
+                k_mask = k < K
+                km = row_mask[:, None] & k_mask[None, :]
+                x = tl.load(
+                    x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                    mask=km, other=0.0,
+                ).to(tl.float32)
+                g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
+                    x_ptr.dtype.element_ty)
+                tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
 
-    # --- loop the two projections over N-tiles, reusing the one normalized X tile ---
-    for n0 in range(0, ND, BLOCK_N):
-        cols = n0 + tl.arange(0, BLOCK_N)
-        col_mask = cols < ND
-        wa = tl.load(  # (BLOCK_K, BLOCK_N): w[k, n] = W[cols[n], k]
-            wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-            mask=k_mask[:, None] & col_mask[None, :], other=0.0,
-        )
-        wb = tl.load(
-            wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-            mask=k_mask[:, None] & col_mask[None, :], other=0.0,
-        )
-        a = tl.dot(xn, wa, out_dtype=tl.float32)
-        b = tl.dot(xn, wb, out_dtype=tl.float32)
-        gate = a * tl.sigmoid(a) * b
-        tl.store(
-            out_ptr + rows[:, None] * stride_om + cols[None, :] * stride_on,
-            gate.to(out_ptr.dtype.element_ty),
-            mask=row_mask[:, None] & col_mask[None, :],
-        )
+        # --- loop the two projections over N-tiles; each contracts over the K-tiles ---
+        for n0 in range(0, ND, BLOCK_K_ND):
+            cols = n0 + tl.arange(0, BLOCK_K_ND)
+            col_mask = cols < ND
+            a = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            b = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K_D):
+                k = k0 + tl.arange(0, BLOCK_K_D)
+                k_mask = k < K
+                x = tl.load(
+                    x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                    mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                ).to(tl.float32)
+                g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                xhat = x * rstd[:, None] - c1[:, None]
+                xn = (xhat * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)  # (BM, BK)
+                wa = tl.load(  # (BLOCK_K_D, BLOCK_K_ND): w[k, n] = W[cols[n], k]
+                    wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                )
+                wb = tl.load(
+                    wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                )
+                a = tl.dot(xn, wa, a, out_dtype=tl.float32)
+                b = tl.dot(xn, wb, b, out_dtype=tl.float32)
+            gate = a * tl.sigmoid(a) * b
+            tl.store(
+                out_ptr + rows[:, None] * stride_om + cols[None, :] * stride_on,
+                gate.to(out_ptr.dtype.element_ty),
+                mask=row_mask[:, None] & col_mask[None, :],
+            )
 # fmt: on
 
 
@@ -209,39 +214,17 @@ def transition_expand_gate(
     M, K = x2.shape
     ND = wa.shape[0]
     assert wa.shape[1] == K and wb.shape == wa.shape
-    assert K <= 1024, "fused expand assumes K fits one BLOCK_K (next_pow2(K) <= 1024)"
 
-    # Footgun guard: this kernel loads BLOCK_K = next_pow2(K) whole, so at large K on a
-    # small-smem GPU (A100, 163KB) NO autotune config fits. The prune's `kept or [min]`
-    # fallback would otherwise hand back an oversized config and fail with a cryptic
-    # compile-time OutOfResources. Detect infeasibility here and raise an actionable error
-    # so the caller can route to the bounded-smem `transition_b2b_ktiled` (or the split)
-    # instead. Only forward-only (save_xn=False) has that alternative; save_xn=True (legacy
-    # stacked backward) genuinely needs this kernel, so only guard the reachable case.
-    if x2.is_cuda:
-        bk = triton.next_power_of_2(K)
-        try:
-            _limit = triton.runtime.driver.active.utils.get_device_properties(
-                x2.device.index if x2.device.index is not None else torch.cuda.current_device(),
-            )["max_shared_mem"]
-        except Exception:  # noqa: BLE001
-            _limit = 227 * 1024
-        _min_smem = min(
-            c.num_stages * 2 * bk * c.kwargs["BLOCK_N"] * 2 + c.kwargs["BLOCK_M"] * bk * 2
-            for c in _configs
-        )
-        if _min_smem > _limit:
-            msg = (
-                f"transition_expand_gate: no autotune config fits device shared memory at "
-                f"K={K} (min {_min_smem} B > limit {_limit} B). Use transition_b2b_ktiled "
-                f"(bounded smem) for large K on this GPU."
-            )
-            raise RuntimeError(msg)
+    # The old footgun guard lived here: with BLOCK_K pinned to next_pow2(K) the weight tiles were
+    # [K, BLOCK_N] and at large K NO config fit device smem, so the wrapper had to detect that and
+    # raise. BLOCK_K is a tuned, looped tile now -- the smallest candidate is 16, so a fitting
+    # config always exists and `_expand_early_prune` selects among the ones that do. Nothing to
+    # guard, and no K ceiling either.
 
     rstd, c1 = stats if stats is not None else stats_triton(x2, eps)
     expand = torch.empty(M, ND, device=x2.device, dtype=x2.dtype)
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else expand
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731 (N looped in-kernel)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731 (N looped in-kernel)
     _transition_expand_gate_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), expand, xn,
@@ -250,97 +233,197 @@ def transition_expand_gate(
         wa.stride(0), wa.stride(1),
         expand.stride(0), expand.stride(1),
         xn.stride(0), xn.stride(1),
-        BLOCK_K=triton.next_power_of_2(K),
         SAVE_XN=save_xn,
     )
     return (expand, xn) if save_xn else expand
 
 
-# Single baked winner (BLOCK_M=64, BLOCK_N=64) for the d=128 b2b path. NOT env-gated:
+# Single baked winner (BLOCK_M1=64, BLOCK_N=64) for the d=128 b2b path. NOT env-gated:
 # multi-config autotune was timing-UNSTABLE here (cached bad configs -> 0.49-0.64ms runs);
 # the single baked config is stable at ~0.31ms. (Unlike the expand kernel, which autotunes.)
-_b2b_configs = brute({"BLOCK_M": BLOCK_M, "BLOCK_N": BLOCK_N})
+# The d contraction and the squeeze output width are tuned extents now. They used to be,
+# respectively, the launcher's ``next_power_of_2(K)`` and the raw shape constant D
+# (`tl.arange(0, D)` + a `[BLOCK_M1, D]` accumulator). BLOCK_K is a CSV tile so the
+# whole-row single-tile schedule this kernel was written for is still in the sweep.
+#
+# The squeeze output rides on BLOCK_N rather than getting its own axis: both are "how wide a chunk
+# of the fused body do I hold", they trade against the same register/smem budget, and a fourth
+# independent axis would multiply this sweep 5x for a combination (narrow ND tile + wide D tile)
+# the tuner has no reason to want. What matters is that the extent is a tuned one, not the shape
+# constant D.
 
 
-_transition_b2b_prune = make_cache_prune(
-    "transition_b2b", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "ND", "K", "D", "SAVE_XN", "FUSE_STATS", "ADD_RESIDUAL"),
-)
 
 
 # fmt: off
-@triton.autotune(configs=_b2b_configs, key=["GROUP_M", "ND", "K", "D", "SAVE_XN", "FUSE_STATS", "ADD_RESIDUAL"],
-                 prune_configs_by={"early_config_prune": _transition_b2b_prune})
+@triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
+                 key=['GROUP_M', 'ND', 'K', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr, xn_ptr,
-    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M: tl.constexpr, EPS: tl.constexpr,
+    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M, EPS: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
     stride_om, stride_od,
     stride_nm, stride_nk,    # xn out: (M, K) row-major (only used when SAVE_XN)
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
     SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
 ):
-    # Back-to-back: one program owns BLOCK_M rows and ALL of ND. It builds the gated h
-    # tile-by-tile and ACCUMULATES the squeeze out[BM, D] += h_chunk @ Ws[:, chunk]^T, so
-    # the (M, ND) intermediate h never touches HBM. Only valid when K fits one BLOCK_K.
+    # Back-to-back: a program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. It builds
+    # the gated h tile-by-tile and ACCUMULATES the squeeze out[BM, BN] += h_chunk @ Ws[:, chunk]^T,
+    # so the (M, ND) intermediate h never touches HBM. BLOCK_K_D tiles the d contraction and BLOCK_K_ND
+    # tiles both the ND chunk and the squeeze output; at BLOCK_K_D >= K and BLOCK_K_ND >= D the grid is
+    # 1-D over M and every k-loop is a single iteration, i.e. exactly the original schedule.
     pid_m = tl.program_id(0).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    k = tl.arange(0, BLOCK_K)
+    pid_d = tl.program_id(1).to(tl.int64)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
-    k_mask = k < K
+    dcols = pid_d * BLOCK_K_ND + tl.arange(0, BLOCK_K_ND)   # squeeze output tile: BLOCK_K_ND-wide
+    d_mask = dcols < D
+    out_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
 
-    x = tl.load(
-        x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-        mask=row_mask[:, None] & k_mask[None, :], other=0.0,
-    ).to(tl.float32)
-    if FUSE_STATS:
-        inv_k = 1.0 / K
-        mean = tl.sum(x, axis=1) * inv_k
-        x_centered = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
-        var = tl.sum(x_centered * x_centered, axis=1) * inv_k
-        rstd = tl.rsqrt(var + EPS)
-        c1 = mean * rstd
-        tl.store(rstd_out_ptr + rows, rstd, mask=row_mask)
-        tl.store(c1_out_ptr + rows, c1, mask=row_mask)
+    if BLOCK_K_D >= K:
+        # COVERING TILE. BLOCK_K_D and K are both tl.constexpr, so this comparison is resolved at
+        # COMPILE time and only one of the two branches is ever emitted. One tile holds the whole
+        # d row, so read x ONCE, normalize once, and reuse the single bf16 `xn` tile for the
+        # stats, the SAVE_XN store and both projections of every ND chunk -- exactly the
+        # pre-tiling schedule. The k-tiled `else` below is the general (BLOCK_K_D < K) form; at
+        # BLOCK_K_D >= K its loops are single-trip and every expression here matches it term for
+        # term, so the two branches are numerically identical.
+        k = tl.arange(0, BLOCK_K_D)
+        k_mask = k < K
+        km = row_mask[:, None] & k_mask[None, :]
+        x = tl.load(
+            x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+            mask=km, other=0.0,
+        ).to(tl.float32)
+        if FUSE_STATS:
+            inv_k = 1.0 / K
+            mean = tl.sum(x, axis=1) * inv_k
+            x_centered = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
+            var = tl.sum(x_centered * x_centered, axis=1) * inv_k
+            rstd = tl.rsqrt(var + EPS)
+            c1 = mean * rstd
+            if pid_d == 0:
+                tl.store(rstd_out_ptr + rows, rstd, mask=row_mask)
+                tl.store(c1_out_ptr + rows, c1, mask=row_mask)
+        else:
+            rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
+            c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
+        g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
+            x_ptr.dtype.element_ty)
+        if SAVE_XN:
+            if pid_d == 0:
+                tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
+        for n0 in range(0, ND, BLOCK_K_ND):
+            cols = n0 + tl.arange(0, BLOCK_K_ND)
+            col_mask = cols < ND
+            wa = tl.load(
+                wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+            )
+            wb = tl.load(
+                wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+            )
+            a = tl.dot(xn, wa, out_dtype=tl.float32)
+            b = tl.dot(xn, wb, out_dtype=tl.float32)
+            h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # (BM, BN)
+            ws_t = tl.load(  # (BN, BD): Ws[d, cols]^T
+                ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
+                mask=col_mask[:, None] & d_mask[None, :], other=0.0,
+            )
+            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
     else:
-        rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
-        c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
-    g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-    beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-    xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
+        if FUSE_STATS:
+            # Two sweeps over K (mean, then CENTERED variance) so the fp32 algebra at BLOCK_K_D >= K is
+            # exactly the original single-tile one.
+            inv_k = 1.0 / K
+            acc_s = tl.zeros([BLOCK_M1], dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K_D):
+                k = k0 + tl.arange(0, BLOCK_K_D)
+                k_mask = k < K
+                x = tl.load(
+                    x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                    mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                ).to(tl.float32)
+                acc_s += tl.sum(x, axis=1)
+            mean = acc_s * inv_k
+            acc_s = tl.zeros([BLOCK_M1], dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K_D):
+                k = k0 + tl.arange(0, BLOCK_K_D)
+                k_mask = k < K
+                x = tl.load(
+                    x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                    mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                ).to(tl.float32)
+                x_centered = tl.where(k_mask[None, :], x - mean[:, None], 0.0)
+                acc_s += tl.sum(x_centered * x_centered, axis=1)
+            var = acc_s * inv_k
+            rstd = tl.rsqrt(var + EPS)
+            c1 = mean * rstd
+            # Only the first D-block writes the per-row stats (every D-block computes the same value;
+            # one writer keeps it a single store rather than cdiv(D, BLOCK_K_ND) redundant ones).
+            if pid_d == 0:
+                tl.store(rstd_out_ptr + rows, rstd, mask=row_mask)
+                tl.store(c1_out_ptr + rows, c1, mask=row_mask)
+        else:
+            rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
+            c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
 
-    # --- Version B: stash the (single) normalized tile for backward reuse ---
-    if SAVE_XN:
-        tl.store(
-            xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk,
-            xn, mask=row_mask[:, None] & k_mask[None, :],
-        )
+        # --- Version B: stash the normalized x for backward reuse (first D-block only) ---
+        if SAVE_XN:
+            if pid_d == 0:
+                for k0 in range(0, K, BLOCK_K_D):
+                    k = k0 + tl.arange(0, BLOCK_K_D)
+                    k_mask = k < K
+                    km = row_mask[:, None] & k_mask[None, :]
+                    x = tl.load(
+                        x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                        mask=km, other=0.0,
+                    ).to(tl.float32)
+                    g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                    beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                    xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
+                        x_ptr.dtype.element_ty)
+                    tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
 
-    dcols = tl.arange(0, D)
-    out_acc = tl.zeros((BLOCK_M, D), dtype=tl.float32)
-    for n0 in range(0, ND, BLOCK_N):
-        cols = n0 + tl.arange(0, BLOCK_N)
-        col_mask = cols < ND
-        wa = tl.load(
-            wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-            mask=k_mask[:, None] & col_mask[None, :], other=0.0,
-        )
-        wb = tl.load(
-            wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
-            mask=k_mask[:, None] & col_mask[None, :], other=0.0,
-        )
-        a = tl.dot(xn, wa, out_dtype=tl.float32)
-        b = tl.dot(xn, wb, out_dtype=tl.float32)
-        h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # (BM, BN)
-        ws_t = tl.load(  # (BN, D): Ws[d, cols]^T
-            ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
-            mask=col_mask[:, None], other=0.0,
-        )
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32)
+        for n0 in range(0, ND, BLOCK_K_ND):
+            cols = n0 + tl.arange(0, BLOCK_K_ND)
+            col_mask = cols < ND
+            a = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            b = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K_D):
+                k = k0 + tl.arange(0, BLOCK_K_D)
+                k_mask = k < K
+                x = tl.load(
+                    x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                    mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                ).to(tl.float32)
+                g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
+                    x_ptr.dtype.element_ty)
+                wa = tl.load(
+                    wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                )
+                wb = tl.load(
+                    wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                )
+                a = tl.dot(xn, wa, a, out_dtype=tl.float32)
+                b = tl.dot(xn, wb, b, out_dtype=tl.float32)
+            h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # (BM, BN)
+            ws_t = tl.load(  # (BN, BD): Ws[d, cols]^T
+                ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
+                mask=col_mask[:, None] & d_mask[None, :], other=0.0,
+            )
+            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
     if ADD_RESIDUAL:
         # Fuse the post-transition residual add: y = transition(x) + x. The residual is the
         # kernel's OWN pre-LN input x (the module never mutates it before `pair + transition(pair)`),
@@ -348,12 +431,12 @@ def _transition_b2b_kernel(
         # L2-hot from the LN load above) and add in fp32 before the single output store.
         res = tl.load(
             x_ptr + rows[:, None] * stride_xm + dcols[None, :] * stride_xk,
-            mask=row_mask[:, None], other=0.0,
+            mask=row_mask[:, None] & d_mask[None, :], other=0.0,
         ).to(tl.float32)
         out_acc += res
     tl.store(
         out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
-        out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None],
+        out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None] & d_mask[None, :],
     )
 # fmt: on
 
@@ -398,7 +481,9 @@ def transition_b2b(
         rstd, c1 = stats if stats is not None else stats_triton(x2, eps)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else out
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    grid = lambda meta: (  # noqa: E731
+        triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_K_ND"]),
+    )
     _transition_b2b_kernel[grid](
         x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
@@ -408,7 +493,6 @@ def transition_b2b(
         ws.stride(0), ws.stride(1),
         out.stride(0), out.stride(1),
         xn.stride(0), xn.stride(1),
-        BLOCK_K=triton.next_power_of_2(K),
         SAVE_XN=save_xn,
         FUSE_STATS=fuse_stats,
         ADD_RESIDUAL=add_residual,
@@ -425,105 +509,61 @@ def transition_b2b(
 # The full-K-row b2b above loads BLOCK_K = next_pow2(K), so its weight tiles are [K, BLOCK_N]
 # and overflow smem at d>=256. This variant tiles K (inner k-loop): weight tiles are
 # [BLOCK_K, BLOCK_N], BOUNDED regardless of d -> no OOM, and the k-loop pipelines (good
-# large-K scaling). The squeeze fusion is unchanged: one program owns BLOCK_M rows x ALL of
-# n*d, accumulates out_acc[BLOCK_M, D] across the N-chunk loop, writes once. Separate stats
+# large-K scaling). The squeeze fusion is unchanged: one program owns BLOCK_M1 rows x ALL of
+# n*d, accumulates out_acc[BLOCK_M1, D] across the N-chunk loop, writes once. Separate stats
 # (rstd, c1 precomputed) let us normalize each k-tile without the full row.
 # ---------------------------------------------------------------------------
-if AUTOTUNE:
-    _b2b_kt_configs = [
-        triton.Config({"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=nw, num_stages=ns)
-        for bm in (32, 64, 128)
-        for bn in (64, 128)
-        for bk in (32, 64, 128)
-        for nw in (4, 8)
-        for ns in (2, 3, 4)
-    ]
-else:
-    _b2b_kt_configs = [
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=4),
-    ]
 
 
-def _b2b_kt_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
-    """Drop K-tiled configs that exceed the device shared-memory limit BEFORE compile.
-
-    Weight tiles are [BLOCK_K, BLOCK_N] for wa+wb across ``num_stages`` plus the
-    [BLOCK_M, BLOCK_K] x tile, all bf16 (2 B). Unlike the full-K-row expand kernel this
-    is BOUNDED by the config (BLOCK_K is tiled, not next_pow2(K)), so a fitting config
-    always exists -- but under CUDA-graph capture a bench-time OutOfResources poisons the
-    stream, so prune up front. The smallest config fits A100 (163KB), so ``kept`` is never
-    empty there; the ``or [min]`` is only a last-resort so autotune still has a candidate."""
-    import triton as _triton
-
-    try:
-        limit = _triton.runtime.driver.active.utils.get_device_properties(
-            torch.cuda.current_device(),
-        )["max_shared_mem"]
-    except Exception:  # noqa: BLE001 -- conservative sm100 budget
-        limit = 227 * 1024
-
-    def _smem(c):
-        bm = c.kwargs["BLOCK_M"]
-        bn = c.kwargs["BLOCK_N"]
-        bk = c.kwargs["BLOCK_K"]
-        return c.num_stages * 2 * bk * bn * 2 + bm * bk * 2
-
-    kept = [c for c in configs if _smem(c) <= limit]
-    return kept or [min(configs, key=_smem)]
 
 
-# Cache-narrowing prune composed OVER the smem safety prune (runs first, inside make_cache_prune).
-_transition_b2b_ktiled_prune = make_cache_prune(
-    "transition_b2b_ktiled", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "ND", "K", "D"), base_prune=_b2b_kt_early_prune,
-)
 
 
 # fmt: off
-@triton.autotune(
-    configs=_b2b_kt_configs,
-    key=["GROUP_M", "ND", "K", "D"],
-    prune_configs_by={"early_config_prune": _transition_b2b_ktiled_prune},
-)
+@triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['GROUP_M', 'ND', 'K'])
 @triton.jit
 def _transition_b2b_ktiled_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr,
-    M, ND, K, D: tl.constexpr, GROUP_M: tl.constexpr,
+    # K is tl.constexpr (model d, fixed per module, already in this kernel's autotune key) so the
+    # `BLOCK_K_D >= K` guard below resolves at COMPILE time and only one branch is emitted.
+    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
     stride_om, stride_od,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
 ):
-    # One program owns BLOCK_M rows and ALL of ND. Inner k-loop keeps weight tiles
-    # [BLOCK_K, BLOCK_N] (bounded smem at any d); squeeze accumulated in out_acc across the
-    # N-chunk loop; h never leaves regs. No atomics.
+    # One program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. Inner k-loop keeps
+    # weight tiles [BLOCK_K_D, BLOCK_K_ND] (bounded smem at any d); squeeze accumulated in out_acc
+    # across the N-chunk loop; h never leaves regs. No atomics.
     pid_m = tl.program_id(0).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    pid_d = tl.program_id(1).to(tl.int64)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
     rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
     c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
-    dcols = tl.arange(0, D)
-    out_acc = tl.zeros((BLOCK_M, D), dtype=tl.float32)
-    for n0 in range(0, ND, BLOCK_N):
-        cols = n0 + tl.arange(0, BLOCK_N)
-        col_mask = cols < ND
-        a_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        b_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_K):
-            k = k0 + tl.arange(0, BLOCK_K)
-            k_mask = k < K
-            x = tl.load(
-                x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
-                mask=row_mask[:, None] & k_mask[None, :], other=0.0,
-            ).to(tl.float32)
-            g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-            beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-            xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
+    dcols = pid_d * BLOCK_K_ND + tl.arange(0, BLOCK_K_ND)   # squeeze output tile: BLOCK_K_ND-wide
+    d_mask = dcols < D
+    out_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+
+    if BLOCK_K_D >= K:
+        # COVERING TILE -> read x ONCE and hold the normalized bf16 tile in registers across every
+        # ND chunk, instead of re-reading and re-normalizing it inside the chunk loop
+        # (ceil(ND/BLOCK_K_ND) times per row). Same arithmetic as the else-branch at BLOCK_K_D >= K,
+        # where the k-loop is single-trip and a_acc/b_acc start from an exact fp32 zero.
+        k = tl.arange(0, BLOCK_K_D)
+        k_mask = k < K
+        x = tl.load(
+            x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+            mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+        ).to(tl.float32)
+        g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
+        for n0 in range(0, ND, BLOCK_K_ND):
+            cols = n0 + tl.arange(0, BLOCK_K_ND)
+            col_mask = cols < ND
             wa = tl.load(
                 wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
@@ -532,18 +572,54 @@ def _transition_b2b_ktiled_kernel(
                 wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            a_acc += tl.dot(xn, wa, out_dtype=tl.float32)
-            b_acc += tl.dot(xn, wb, out_dtype=tl.float32)
-        h = (a_acc * tl.sigmoid(a_acc) * b_acc).to(x_ptr.dtype.element_ty)  # (BM, BN)
-        ws_t = tl.load(
-            ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
-            mask=col_mask[:, None], other=0.0,
-        )  # (BN, D)
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32)
-    tl.store(
-        out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
-        out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None],
-    )
+            a_acc = tl.dot(xn, wa, out_dtype=tl.float32)
+            b_acc = tl.dot(xn, wb, out_dtype=tl.float32)
+            h = (a_acc * tl.sigmoid(a_acc) * b_acc).to(x_ptr.dtype.element_ty)  # (BM, BN)
+            ws_t = tl.load(
+                ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
+                mask=col_mask[:, None] & d_mask[None, :], other=0.0,
+            )  # (BN, BD)
+            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
+        tl.store(
+            out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
+            out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None] & d_mask[None, :],
+        )
+    else:
+        for n0 in range(0, ND, BLOCK_K_ND):
+            cols = n0 + tl.arange(0, BLOCK_K_ND)
+            col_mask = cols < ND
+            a_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            b_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K_D):
+                k = k0 + tl.arange(0, BLOCK_K_D)
+                k_mask = k < K
+                x = tl.load(
+                    x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
+                    mask=row_mask[:, None] & k_mask[None, :], other=0.0,
+                ).to(tl.float32)
+                g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(x_ptr.dtype.element_ty)
+                wa = tl.load(
+                    wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                )
+                wb = tl.load(
+                    wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+                    mask=k_mask[:, None] & col_mask[None, :], other=0.0,
+                )
+                a_acc += tl.dot(xn, wa, out_dtype=tl.float32)
+                b_acc += tl.dot(xn, wb, out_dtype=tl.float32)
+            h = (a_acc * tl.sigmoid(a_acc) * b_acc).to(x_ptr.dtype.element_ty)  # (BM, BN)
+            ws_t = tl.load(
+                ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
+                mask=col_mask[:, None] & d_mask[None, :], other=0.0,
+            )  # (BN, BD)
+            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
+        tl.store(
+            out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
+            out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None] & d_mask[None, :],
+        )
 # fmt: on
 
 
@@ -566,7 +642,9 @@ def transition_b2b_ktiled(
     D = ws.shape[0]
     rstd, c1 = stats_triton(x2, eps)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    grid = lambda meta: (  # noqa: E731
+        triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_K_ND"]),
+    )
     _transition_b2b_ktiled_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out,
@@ -592,48 +670,25 @@ _B2B_MAX_K = 128
 # — transition_fwd_kernel for h, transition_bwd_kernel for dA/dB). Plus the LayerNorm
 # backward kernel. GEMMs (grad_expand, dWs, dWa, dWb, d_xn) stay cuBLAS.
 # ---------------------------------------------------------------------------
-if AUTOTUNE:
-    _egb_configs = [
-        triton.Config({"BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk}, num_warps=nw, num_stages=ns)
-        for bm in (32, 64, 128)
-        for bn in (64, 128)
-        for bk in (32, 64, 128)
-        for nw in (4, 8)
-        for ns in (2, 3, 4)
-    ]
-else:
-    _egb_configs = [
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32}, num_warps=4, num_stages=4),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
-        triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
-    ]
 
 
 # Cache-narrowing prune (no smem base prune on this kernel).
-_transition_expand_gate_bwd_prune = make_cache_prune(
-    "transition_expand_gate_bwd", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "ND", "K"),
-)
 
 
 # fmt: off
-@triton.autotune(
-    configs=_egb_configs,
-    key=["GROUP_M", "ND", "K", "NORMALIZE", "STORE_H", "STACK_DAB"],
-    prune_configs_by={"early_config_prune": _transition_expand_gate_bwd_prune},
-)
+@triton.autotune(configs=configs_for("transition_bwd_swiglu_recompute_triton"),
+                 key=['GROUP_M', 'ND', 'K', 'NORMALIZE', 'STORE_H', 'STACK_DAB'])
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,
     h_ptr, dA_ptr, dB_ptr, dAB_ptr, xn_ptr,
-    M, ND, K, GROUP_M: tl.constexpr,
+    M, ND, K, GROUP_M,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_gm, stride_gn,    # grad_expand / h / dA / dB: (M, ND) row-major
     stride_abm, stride_abn,  # dAB: (M, 2*ND) row-major, [dA | dB]
     stride_nm, stride_nk,    # xn out: (M, K) row-major
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     NORMALIZE: tl.constexpr, STORE_H: tl.constexpr, STACK_DAB: tl.constexpr,
 ):
     # Recompute a=xn@Wa, b=xn@Wb ONCE (tile M,ND; loop K). Emits:
@@ -648,7 +703,7 @@ def _transition_expand_gatebwd_kernel(
     #     the normalize math AND the xn emit (the caller already holds xn).
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < M
     cmask = cols < ND
@@ -656,8 +711,8 @@ def _transition_expand_gatebwd_kernel(
         rstd = tl.load(rstd_ptr + rows, mask=rmask, other=0.0)
         c1 = tl.load(c1_ptr + rows, mask=rmask, other=0.0)
     et = h_ptr.dtype.element_ty
-    a = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    b = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    a = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    b = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
     for k0 in range(0, K, BLOCK_K):
         k = k0 + tl.arange(0, BLOCK_K)
         k_mask = k < K
@@ -713,7 +768,7 @@ def _transition_expand_gatebwd(x2, rstd, c1, gamma, beta, wa, wb, grad_expand):
     dA = torch.empty_like(grad_expand)
     dB = torch.empty_like(grad_expand)
     xn = torch.empty_like(x2)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -743,7 +798,7 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
     h = torch.empty_like(grad_expand)
     dAB = torch.empty(M, ND * 2, device=x2.device, dtype=grad_expand.dtype)
     xn = torch.empty_like(x2)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -773,7 +828,7 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool
     h = torch.empty_like(grad_expand) if store_h else grad_expand
     dA = torch.empty_like(grad_expand)
     dB = torch.empty_like(grad_expand)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -797,7 +852,7 @@ def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand):
     ND = wa.shape[0]
     h = torch.empty_like(grad_expand)
     dAB = torch.empty(M, ND * 2, device=xn.device, dtype=grad_expand.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -817,27 +872,30 @@ def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand):
 
 # Cache-narrowing prune (no smem base prune). dtype from the input activation x_ptr (the
 # 2nd pointer arg), NOT the dxn_ptr grad accumulator. reset_to_zero preserved below.
-_transition_ln_bwd_prune = make_cache_prune(
-    "transition_ln_bwd", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "K"),
-)
 
 
 # fmt: off
-@triton.autotune(
-    configs=[triton.Config({"BLOCK_M": bm}, num_warps=nw)
-             for bm in (1, 2, 4, 8, 16) for nw in (2, 4, 8)],
-    key=["GROUP_M", "K"], reset_to_zero=["dg_ptr", "db_ptr"],
-    prune_configs_by={"early_config_prune": _transition_ln_bwd_prune},
-)
+# BLOCK_K is a CSV tile instead of the launcher's next_power_of_2(K). The row
+# reductions (ca, cb) need ALL of K before dx can be formed, so the kernel walks K twice; at
+# BLOCK_K >= K both sweeps are one iteration and the second reads an L2-hot row, i.e. the
+# original single-tile schedule. reset_to_zero on dg/db is unchanged and still required (the
+# dgamma/dbeta atomics accumulate across M-blocks AND across autotune trials).
+# BLOCK_M1 comes from the CSV. A 1-row tile is not a tile, it is a per-row launch: it multiplies
+# the grid by BLOCK_M1 and gives every reduction a one-element vector to sum -- keep CSV rows at
+# or above 16.
+@triton.autotune(configs=configs_for("layernorm_bwd_privatized_triton"),
+                 key=['GROUP_M', 'K'],
+                 reset_to_zero=['dg_ptr', 'db_ptr'])
 @triton.jit
 def _transition_ln_bwd_kernel(
     dxn_ptr, x_ptr, rstd_ptr, c1_ptr, g_ptr, dx_ptr, dg_ptr, db_ptr,
-    M, K, GROUP_M: tl.constexpr,
+    # K is tl.constexpr (model d, fixed per module, already in this kernel's autotune key) so the
+    # `BLOCK_K >= K` guard below resolves at COMPILE time and only one branch is emitted.
+    M, K: tl.constexpr, GROUP_M,
     stride_m, stride_k,
     dg_stride_replica, dg_stride_k,
     db_stride_replica, db_stride_k,
-    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     NUM_REPLICAS: tl.constexpr, PRIVATIZE_DGDB: tl.constexpr,
 ):
     # LayerNorm backward consuming the SAVED stats (rstd, c1=mean*rstd), one pass over K:
@@ -845,35 +903,80 @@ def _transition_ln_bwd_kernel(
     #   dx = rstd*(wdy - mean_k(wdy) - x_hat*mean_k(wdy*x_hat))
     #   dgamma += sum_m(dxn*x_hat) ; dbeta += sum_m(dxn)   (atomic over M-blocks)
     pid = tl.program_id(0).to(tl.int64)
-    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
-    k = tl.arange(0, BLOCK_K)
+    rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rows < M
-    kmask = k < K
-    mask = rmask[:, None] & kmask[None, :]
-    off = rows[:, None] * stride_m + k[None, :] * stride_k
-    dxn = tl.load(dxn_ptr + off, mask=mask, other=0.0).to(tl.float32)
-    x = tl.load(x_ptr + off, mask=mask, other=0.0).to(tl.float32)
     rstd = tl.load(rstd_ptr + rows, mask=rmask, other=0.0)
     c1 = tl.load(c1_ptr + rows, mask=rmask, other=0.0)
-    g = tl.load(g_ptr + k, mask=kmask, other=0.0).to(tl.float32)
-    x_hat = x * rstd[:, None] - c1[:, None]
-    wdy = g[None, :] * dxn
-    wdy = tl.where(mask, wdy, 0.0)
-    x_hat = tl.where(mask, x_hat, 0.0)
     inv_k = 1.0 / K
-    ca = tl.sum(x_hat * wdy, axis=1) * inv_k
-    cb = tl.sum(wdy, axis=1) * inv_k
-    dx = (wdy - (x_hat * ca[:, None] + cb[:, None])) * rstd[:, None]
-    tl.store(dx_ptr + off, dx.to(dx_ptr.dtype.element_ty), mask=mask)
-    pdg = tl.sum(dxn * x_hat, axis=0)
-    pdb = tl.sum(dxn, axis=0)
-    if PRIVATIZE_DGDB:
-        replica = pid % NUM_REPLICAS
-        tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask)
-        tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask)
+
+    if BLOCK_K >= K:
+        # COVERING TILE -> the pre-tiling single-pass schedule: dxn / x / gamma are read ONCE and
+        # x_hat + wdy stay in registers for both the row reductions AND the dx epilogue, instead
+        # of the two sweeps the general branch needs. Numerics are identical to the else-branch at
+        # BLOCK_K >= K (its sweeps are single-trip and ca/cb start from an exact fp32 zero).
+        k = tl.arange(0, BLOCK_K)
+        kmask = k < K
+        mask = rmask[:, None] & kmask[None, :]
+        off = rows[:, None] * stride_m + k[None, :] * stride_k
+        dxn = tl.load(dxn_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        x = tl.load(x_ptr + off, mask=mask, other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + k, mask=kmask, other=0.0).to(tl.float32)
+        x_hat = tl.where(mask, x * rstd[:, None] - c1[:, None], 0.0)
+        wdy = tl.where(mask, g[None, :] * dxn, 0.0)
+        ca = tl.sum(x_hat * wdy, axis=1) * inv_k
+        cb = tl.sum(wdy, axis=1) * inv_k
+        dx = (wdy - (x_hat * ca[:, None] + cb[:, None])) * rstd[:, None]
+        tl.store(dx_ptr + off, dx.to(dx_ptr.dtype.element_ty), mask=mask)
+        pdg = tl.sum(dxn * x_hat, axis=0)
+        pdb = tl.sum(dxn, axis=0)
+        if PRIVATIZE_DGDB:
+            replica = pid % NUM_REPLICAS
+            tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask)
+            tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask)
+        else:
+            tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
+            tl.atomic_add(db_ptr + k, pdb, mask=kmask)
     else:
-        tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
-        tl.atomic_add(db_ptr + k, pdb, mask=kmask)
+        # pass A: the two row reductions over ALL of K.
+        ca = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        cb = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            k = k0 + tl.arange(0, BLOCK_K)
+            kmask = k < K
+            mask = rmask[:, None] & kmask[None, :]
+            off = rows[:, None] * stride_m + k[None, :] * stride_k
+            dxn = tl.load(dxn_ptr + off, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + off, mask=mask, other=0.0).to(tl.float32)
+            g = tl.load(g_ptr + k, mask=kmask, other=0.0).to(tl.float32)
+            x_hat = tl.where(mask, x * rstd[:, None] - c1[:, None], 0.0)
+            wdy = tl.where(mask, g[None, :] * dxn, 0.0)
+            ca += tl.sum(x_hat * wdy, axis=1)
+            cb += tl.sum(wdy, axis=1)
+        ca = ca * inv_k
+        cb = cb * inv_k
+
+        # pass B: dx, plus the dgamma/dbeta column partials.
+        for k0 in range(0, K, BLOCK_K):
+            k = k0 + tl.arange(0, BLOCK_K)
+            kmask = k < K
+            mask = rmask[:, None] & kmask[None, :]
+            off = rows[:, None] * stride_m + k[None, :] * stride_k
+            dxn = tl.load(dxn_ptr + off, mask=mask, other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + off, mask=mask, other=0.0).to(tl.float32)
+            g = tl.load(g_ptr + k, mask=kmask, other=0.0).to(tl.float32)
+            x_hat = tl.where(mask, x * rstd[:, None] - c1[:, None], 0.0)
+            wdy = tl.where(mask, g[None, :] * dxn, 0.0)
+            dx = (wdy - (x_hat * ca[:, None] + cb[:, None])) * rstd[:, None]
+            tl.store(dx_ptr + off, dx.to(dx_ptr.dtype.element_ty), mask=mask)
+            pdg = tl.sum(dxn * x_hat, axis=0)
+            pdb = tl.sum(dxn, axis=0)
+            if PRIVATIZE_DGDB:
+                replica = pid % NUM_REPLICAS
+                tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask)
+                tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask)
+            else:
+                tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
+                tl.atomic_add(db_ptr + k, pdb, mask=kmask)
 # fmt: on
 
 
@@ -912,13 +1015,12 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma):
         num_replicas = 1
         dgamma_acc = torch.zeros(K, device=x2.device, dtype=torch.float32)
         dbeta_acc = torch.zeros(K, device=x2.device, dtype=torch.float32)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _transition_ln_bwd_kernel[grid](
         dxn, x2, rstd, c1, gamma.contiguous(), dx, dgamma_acc, dbeta_acc,
         M, K, get_seq_group(M), x2.stride(0), x2.stride(1),
         dgamma_acc.stride(0), dgamma_acc.stride(-1),
         dbeta_acc.stride(0), dbeta_acc.stride(-1),
-        BLOCK_K=triton.next_power_of_2(K),
         NUM_REPLICAS=num_replicas, PRIVATIZE_DGDB=privatize_dgdb,
     )
     if privatize_dgdb:
@@ -951,7 +1053,7 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
 
     @typecheck
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(
         ctx,
         x: Float[torch.Tensor, "... d"],
@@ -1119,7 +1221,7 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         return out.reshape(orig_shape)
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         # SEPARATE (non-fused) backward: explicit per-stage ops, reusing the LN stats
         # (rstd, c1) saved by forward (no mean/rstd recompute). GEMMs are bf16 (matching

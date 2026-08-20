@@ -32,7 +32,7 @@ import torch
 
 # Reuse the shared per-GPU key (name + compute capability + triton version) and
 # M-bucketing from the layernorm dispatch cache so all kernels key GPUs identically.
-from miniworld_engine.kernels.layernorm.dispatch_cache import gpu_key, mbucket
+from miniworld_engine.kernels.layernorm.dispatch import gpu_key, mbucket
 
 # ---- static H100 thresholds (defaults / fallback) --------------------------------
 KERNEL_MIN_L = 384
@@ -151,7 +151,7 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
     if pin is not None:
         return pin == "fused"
     mode = autotune_mode()
-    # The fused tl.dot's tile is [BLOCK_M, OUTPUT_N] (N = n_out = d_pair); the
+    # The fused tl.dot's tile is [BLOCK_M1, OUTPUT_N] (N = n_out = d_pair); the
     # contraction d_hidden is just looped over (BLOCK_K). So fused-vs-split is decided
     # by the OUTPUT width n_out, NOT by d_hidden. (bench_back_designs conflated them
     # because there d_hidden == n_out; the bidir case d_hidden=2h, n_out=d_pair shows

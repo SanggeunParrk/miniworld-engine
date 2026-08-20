@@ -15,34 +15,30 @@ Both matmuls are K-tiled (loop BLOCK_K over the contraction dim), so any K compi
 fp32 io with TF32 tensor cores (``input_precision="tf32"``).
 """
 
+from miniworld_engine.autotune.configs import configs_for
 import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 # --- kernel A: expand + SwiGLU -> h:(M, ND) ----------------------------------
-_cfgs_a = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128}, num_warps=8, num_stages=3),
-]
 
 
-_cond_transition_infer_expand_prune = make_cache_prune(
-    "cond_transition_infer_expand", dtype_of=tensor_dtype_of("x_ptr"),
-    bucket_of=key_bucket_of("ND", "K"),
-)
 
 
 # fmt: off
-@triton.autotune(
-    configs=_cfgs_a, key=["M", "ND", "K"],
-    prune_configs_by={"early_config_prune": _cond_transition_infer_expand_prune},
-)
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['seq_group', 'ND', 'K'])
 @triton.jit
 def _expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr,
@@ -50,16 +46,17 @@ def _expand_swiglu_kernel(
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_hm, stride_hn,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    seq_group,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
     col_mask = cols < ND
-    a = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    b = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    a = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    b = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
     for k0 in range(0, K, BLOCK_K):
         k = k0 + tl.arange(0, BLOCK_K)
         k_mask = k < K
@@ -87,78 +84,13 @@ def _expand_swiglu_kernel(
 
 # --- kernel B: squeeze + conditioning gate -> y:(M, D) -----------------------
 # D is tiled too (BLOCK_D, power-of-2) so D need not be a power of 2 (D=768) and the
-# (BLOCK_M, BLOCK_D) out/scale tiles stay register-sized. Grid = (M tiles, D tiles).
-# BLOCK_DC (the DC-loop tile, `for c0 in range(0, DC, BLOCK_DC)`) is now a SEARCHED knob,
-# crossed {64, 128} over the existing BLOCK_M/BLOCK_D/BLOCK_K/num_warps/num_stages combos (it used
-# to be pinned at the launch site to min(128, next_pow2(DC))). Both values are <= the old 128 cap,
-# so smem stays within the previously safe envelope.
-_cfgs_b = [
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=8, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=8, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=8, num_stages=3),
-    triton.Config({"BLOCK_M": 128, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=8, num_stages=3),
-    # occupancy-friendly for the token stream (small M=384-1024, D=768): smaller M/D tiles
-    # -> more CTAs so all 132 SMs are busy (BM=64/BD=64 alone gives only ~72 CTAs). Keeps the
-    # gate fused (unlike split-K, which would un-fuse it).
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 64, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 128, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 32, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 64, "BLOCK_D": 32, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=4),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 128, "BLOCK_DC": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 32, "BLOCK_D": 64, "BLOCK_K": 128, "BLOCK_DC": 128}, num_warps=4, num_stages=3),
-]
-
-
-def _squeeze_smem_early_prune(configs, named_args, **kwargs):  # noqa: ARG001
-    """Drop configs whose shared-memory footprint exceeds the device limit BEFORE compile.
-
-    Per program _squeeze_gate pipelines, across ``num_stages``: in the ND loop the squeeze-GEMM
-    operands h ``[BLOCK_M, BLOCK_K]`` + ws_t ``[BLOCK_K, BLOCK_D]``; in the DC loop cond
-    ``[BLOCK_M, BLOCK_DC]`` + wsc_t ``[BLOCK_DC, BLOCK_D]`` (out_acc/scale are fp32 register
-    accumulators, not smem). bf16 = 2 B. Large BLOCK_M/BLOCK_D/BLOCK_K/BLOCK_DC combos overflow
-    A100's ~163 KB, so prune up front: Triton's bench-time OOM pruning is unsafe under CUDA-graph
-    capture (fires mid-capture, poisons the stream). Device-aware via ``max_shared_mem`` —
-    sm90/sm100 keep more configs. This is composed as the base_prune UNDER the cache prune.
-    """
-    import triton as _triton
-
-    try:
-        limit = _triton.runtime.driver.active.utils.get_device_properties(
-            torch.cuda.current_device(),
-        )["max_shared_mem"]
-    except Exception:  # noqa: BLE001 -- conservative sm100 budget
-        limit = 227 * 1024
-
-    def _smem(c):
-        bm = c.kwargs["BLOCK_M"]
-        bd = c.kwargs["BLOCK_D"]
-        bk = c.kwargs["BLOCK_K"]
-        bdc = c.kwargs["BLOCK_DC"]
-        return c.num_stages * (bm * bk + bk * bd + bm * bdc + bdc * bd) * 2
-
-    kept = [c for c in configs if _smem(c) <= limit]
-    return kept or [min(configs, key=_smem)]
-
-
-_cond_transition_infer_squeeze_prune = make_cache_prune(
-    "cond_transition_infer_squeeze", dtype_of=tensor_dtype_of("h_ptr"),
-    bucket_of=key_bucket_of("ND", "D", "DC"), base_prune=_squeeze_smem_early_prune,
-)
+# (BLOCK_M1, BLOCK_D) out/scale tiles stay register-sized. Grid = (M tiles, D tiles).
+# Every tile, BLOCK_K_DC included, comes from the CSV. Nothing filters for the running card's
+# shared-memory limit: a row that does not fit fails at launch.
 
 
 # fmt: off
-@triton.autotune(
-    configs=_cfgs_b, key=["M", "ND", "D", "DC"],
-    prune_configs_by={"early_config_prune": _cond_transition_infer_squeeze_prune},
-)
+@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['seq_group', 'ND', 'DC'])
 @triton.jit
 def _squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
@@ -169,41 +101,42 @@ def _squeeze_gate_kernel(
     stride_sd, stride_sn,     # Ws: (D, ND) row-major
     stride_scd, stride_scc,   # Wsc: (D, DC) row-major
     stride_om, stride_od,
-    BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr,
-    BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
+    seq_group,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1).to(tl.int64)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    dcols = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    dcols = pid_d * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
     d_mask = dcols < D
 
     # out[:, d_tile] = h @ Ws[d_tile, :]^T   (K = ND, tiled)
-    out_acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
-    for n0 in range(0, ND, BLOCK_K):
-        n = n0 + tl.arange(0, BLOCK_K)
+    out_acc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    for n0 in range(0, ND, BLOCK_K_ND):
+        n = n0 + tl.arange(0, BLOCK_K_ND)
         n_mask = n < ND
         h = tl.load(
             h_ptr + rows[:, None] * stride_hm + n[None, :] * stride_hn,
             mask=row_mask[:, None] & n_mask[None, :], other=0.0,
         )
-        ws_t = tl.load(  # (BLOCK_K, BLOCK_D): Ws[d_tile, n]^T
+        ws_t = tl.load(  # (BLOCK_K_ND, BLOCK_N): Ws[d_tile, n]^T
             ws_ptr + n[:, None] * stride_sn + dcols[None, :] * stride_sd,
             mask=n_mask[:, None] & d_mask[None, :], other=0.0,
         )
         out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
 
     # scale[:, d_tile] = cond @ Wsc[d_tile, :]^T + b_sc  (DC tiled), y = sigmoid(scale) * out
-    scale = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
-    for c0 in range(0, DC, BLOCK_DC):
-        dc = c0 + tl.arange(0, BLOCK_DC)
+    scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    for c0 in range(0, DC, BLOCK_K_DC):
+        dc = c0 + tl.arange(0, BLOCK_K_DC)
         dc_mask = dc < DC
         cond = tl.load(
             cond_ptr + rows[:, None] * stride_cm + dc[None, :] * stride_cc,
             mask=row_mask[:, None] & dc_mask[None, :], other=0.0,
         )
-        wsc_t = tl.load(  # (BLOCK_DC, BLOCK_D): Wsc[d_tile, dc]^T
+        wsc_t = tl.load(  # (BLOCK_K_DC, BLOCK_N): Wsc[d_tile, dc]^T
             wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
             mask=dc_mask[:, None] & d_mask[None, :], other=0.0,
         )
@@ -223,13 +156,14 @@ def _expand_swiglu(x, wa, wb):
     M, K = x.shape
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
     _expand_swiglu_kernel[grid](
         x, wa, wb, h,
         M, ND, K,
         x.stride(0), x.stride(1),
         wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1),
+        seq_group=get_seq_group(M),
     )
     return h
 
@@ -240,7 +174,7 @@ def _squeeze_gate(h, cond, ws, wsc, bsc):
     D = ws.shape[0]
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), triton.cdiv(D, meta["BLOCK_D"]))  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))  # noqa: E731
     _squeeze_gate_kernel[grid](
         h, cond, ws, wsc, bsc, out,
         M, ND, D, DC,
@@ -249,6 +183,7 @@ def _squeeze_gate(h, cond, ws, wsc, bsc):
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
+        seq_group=get_seq_group(M),
     )
     return out
 

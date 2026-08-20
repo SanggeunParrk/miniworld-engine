@@ -7,7 +7,9 @@ milestone:
 
   ① LN_out over the K(=d_hidden) channel of the einsum output ``tri`` [B,K,L,L],
      read M-major (no transpose copy) by a custom Triton kernel, written as a
-     contiguous (M, K) bf16 ``LNout``  —  ``_ln_mmajor_kernel``.
+     contiguous (M, K) bf16 ``LNout``  —  ``_ln_transpose_dbn_kernel``, imported from
+     ``layernorm/triton/transpose.py`` (the copy that used to live here was the same
+     program and bitwise equal on Y).
   ② proj = LNout @ Wp.T   on OUR tm1 tcgen05 CUTLASS Blackwell collective
      (``GatedPersistentGemmKernel``) in ``proj_only`` mode (single effective B;
      the dummy second-B TMA load is negligible since B=(N,K) is tiny).
@@ -21,10 +23,17 @@ materialize round-trip; this two-kernel version already beats cuequiv on B200.
 """
 
 from __future__ import annotations
+# This file used to carry its own copy of the m-major LayerNorm forward. It was the same
+# program as layernorm/triton/transpose.py's (identical node and line counts) and bitwise
+# equal on Y when both were handed the same arguments (.bench/eq_*.out), so it is imported
+# now. Note it is NOT interchangeable with the row-major forward: feeding it row-major input
+# gives rel=1.442, because reading the M-major view is part of what the kernel means.
+from miniworld_engine.kernels.layernorm.triton.transpose import _ln_transpose_dbn_kernel
 
 import torch
 import triton
 import triton.language as tl
+
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -36,7 +45,7 @@ from cutlass.cute.runtime import from_dlpack
 # returned -> identical launch/numerics; removes the per-call eager compile overhead.
 from quack.cute_dsl_utils import get_max_active_clusters
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective import (
     GatedPersistentGemmKernel,
 )
@@ -45,44 +54,22 @@ from miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective import (
 # --------------------------------------------------------------------------- #
 # ① LN over K, reading tri [B,K,L,L] M-major (channel strided by M=L*L), writing
 #    a contiguous (M, K) output. No transpose copy (mirrors the H100 LNL, which
-#    feeds an M-major A view straight into the GEMM). K is a power of two here so
-#    BLOCK_K == K and there are no masked (variance-corrupting) columns.
+#    feeds an M-major A view straight into the GEMM). The K axis is now a tuned,
+#    MASKED tile (BLOCK_K from the sweep), so K need not be a power of two and the
+#    tail columns contribute nothing to the variance.
 # --------------------------------------------------------------------------- #
-_layernorm_linear_cute_sm100_ln_mmajor_prune = make_cache_prune(
-    "layernorm_linear_cute_sm100_ln_mmajor", dtype_of=tensor_dtype_of("X"),
-    bucket_of=key_bucket_of("K"),
-)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_M": bm}, num_warps=nw, num_stages=ns)
-        for bm in (16, 32, 64)
-        for nw in (4, 8)
-        for ns in (2, 3, 4)
-    ],
-    key=["K"],
-    prune_configs_by={"early_config_prune": _layernorm_linear_cute_sm100_ln_mmajor_prune},
-)
-@triton.jit
-def _ln_mmajor_kernel(X, Y, W, B, M, K: tl.constexpr, eps,
-                      BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr):
-    row = tl.program_id(0).to(tl.int64)
-    rm = row * BLOCK_M + tl.arange(0, BLOCK_M)
-    rk = tl.arange(0, BLOCK_K)
-    mmask = rm < M
-    # X[m,k] at m*1 + k*M  (M-major view of the [K, L, L] planes)
-    xoff = rm[:, None] + rk[None, :] * M
-    x = tl.load(X + xoff, mask=mmask[:, None], other=0.0).to(tl.float32)
-    mean = tl.sum(x, axis=1) / K
-    xc = x - mean[:, None]
-    var = tl.sum(xc * xc, axis=1) / K
-    rstd = 1.0 / tl.sqrt(var + eps)
-    w = tl.load(W + rk).to(tl.float32)
-    b = tl.load(B + rk).to(tl.float32)
-    y = xc * rstd[:, None] * w[None, :] + b[None, :]
-    yoff = rm[:, None] * K + rk[None, :]
-    tl.store(Y + yoff, y.to(Y.dtype.element_ty), mask=mmask[:, None])
+# BLOCK_K is the REDUCE axis (mean/var over K), so it is a CSV tile rather than the narrow
+# canonical BLOCK_K: it used to arrive as BLOCK_K=next_power_of_2(K) from the launcher and K is
+# d_hidden (128..1024), so a set that stopped at 128 would force a multi-pass over K on every
+# shape. A row at or above the extent keeps the whole-row single-pass schedule.
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
 
 
 def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
@@ -94,9 +81,8 @@ def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
     M = L * L
     x = tri_bkll.reshape(K, M)  # X[m,k] = x[k, m] (M-major)
     Y = torch.empty(M, K, device=tri_bkll.device, dtype=tri_bkll.dtype)
-    BLOCK_K = triton.next_power_of_2(K)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)  # noqa: E731
-    _ln_mmajor_kernel[grid](x, Y, w, b, M, K=K, eps=float(eps), BLOCK_K=BLOCK_K)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, GROUP_M=get_seq_group(M))
     return Y
 
 

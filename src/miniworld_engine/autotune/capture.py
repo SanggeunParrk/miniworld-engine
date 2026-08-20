@@ -3,9 +3,9 @@
 Instead of hand-replicating each kernel's launch in a per-kernel builder (fragile, and how the
 int32-offset bug slipped in), this patches ``triton.runtime.autotuner.Autotuner._bench`` to
 record every (config -> measured ms) as it is benchmarked during a REAL module forward/backward
-run. Each timing is keyed by the SAME ``(op, dtype, shape-bucket)`` the runtime cache-prune uses
-(read off the kernel's ``make_cache_prune`` hook via its ``_miniworld_op`` /
-``_miniworld_dtype_of`` / ``_miniworld_bucket_of`` tags), so a built cache is guaranteed to hit.
+run. The op behind a live autotuner is recovered by identity of the config list it was handed
+(:func:`autotune.configs.op_of`) -- the only back-reference left now that the prune objects that
+used to carry the name are gone.
 
 Usage (on the target GPU, with the full grid unlocked so every config is benched):
 
@@ -36,6 +36,8 @@ from .cache import _sig_from_dict as _sig_from_dict
 # op -> {"grid": [configs] | None, "entries": {(dtype, bucket): {sig: (config, ms)}}}
 _CAPTURE: dict = {}
 _orig_bench = None
+_orig_run = None
+_SINGLE_SEEN: set = set()
 _orig_compile = None
 _orig_prune = None
 # Wall-clock budget (seconds) for compiling a SINGLE config during a build, enforced by forking the
@@ -94,6 +96,268 @@ _ROUND: dict = {}
 #: armed round the compile it is servicing belongs to.
 _CURRENT: dict = {}
 
+#: autotuner id -> best median (ms) seen so far in the CURRENT round. Reset by prune_configs.
+_BEST: dict = {}
+
+#: configs abandoned by the bench budget, for the summary. Counted, never silent: a build that
+#: skipped nine tenths of its grid and one that measured all of it produce the same cache file.
+#:
+#: The seconds are split so the remaining bench time can be ATTRIBUTED rather than guessed. Three
+#: candidates look identical in a total: slow kernels running to completion before being judged,
+#: the fixed per-config cost of probing at all (two launches, two syncs, python round-trips), and
+#: the full do_bench of the configs that survive. They call for different fixes, so they are
+#: measured apart. ``kernel_ms`` is device time from cuda events; the ``*_s`` are host wall-clock,
+#: and the gap between them IS the fixed overhead.
+_ABANDONED: dict = {"skipped": 0, "measured": 0, "warm_s": 0.0, "probe_s": 0.0,
+                    "bench_s": 0.0, "kernel_ms": 0.0, "skipped_kernel_ms": 0.0}
+
+#: Where a compile() call actually spends its time. The guard forks a child, waits for it, and then
+#: recompiles in-process expecting a cache hit -- three costs that look like one. They have
+#: different fixes: fork is proportional to the parent's RSS, the wait is quantised by the poll
+#: interval, and the in-process call is a lookup in ~/.triton/cache, which currently holds 88k+
+#: entries. Measured apart so the fix targets the real one.
+_COMPILE_T: dict = {"calls": 0, "fork_s": 0.0, "wait_s": 0.0, "parent_s": 0.0, "polls": 0}
+
+#: First-launch cost per config, split. warm_s minus compile() left ~500s unexplained on a unit
+#: whose kernels ran 2.2s of device time; these are the three things a first launch does that a
+#: second one does not -- load the cubin into the context, build the launcher stub, and run the
+#: autotuner's pre_hook (which zeroes reset_to_zero tensors).
+_LAUNCH_T: dict = {"init_handles": 0, "init_s": 0.0, "launcher_s": 0.0,
+                   "prehook_calls": 0, "prehook_s": 0.0, "run_calls": 0, "run_s": 0.0}
+
+#: (device_ms, config kwargs) for every probed config. The budget knows a config is slow; it does
+#: not know WHY, and "drop the slow ones" is only actionable once the slow ones share an attribute.
+#: Kept in memory and dumped next to the shard.
+_PROBE_LOG: list = []
+_CURRENT_CFG: dict = {}
+
+def _sig_line(cfg: dict) -> str:
+    return ",".join(f"{k}={cfg[k]}" for k in sorted(cfg))
+
+
+#: sig -> median ms for every probe this unit has already decided, across attempts. A kill costs a
+#: restart, and a restart that re-benched everything up to the killed config would make the guard
+#: cost more than the hang it prevents -- quadratic in the number of bad configs. Replaying the
+#: decision instead makes a restart cost only the configs never reached.
+_PROBE_DONE: dict = {}
+_PROBE_FILE: list = []
+
+
+def load_probe_state(shard_path) -> int:
+    """Load the probes and compiles this unit already settled. Returns how many probes replay.
+
+    Kept after the bench watchdog was removed: it no longer serves kill-and-restart, it serves any
+    restart. A unit that dies to an OOM, a node failure, or a job time limit resumes without
+    re-benching or re-compiling what it had already decided.
+    """
+    from pathlib import Path as _P  # noqa: PLC0415
+
+    stem = str(shard_path)[: -len(".json")] if str(shard_path).endswith(".json") else str(shard_path)
+    cf = _P(stem + ".compiled")
+    _COMPILED_FILE.append(cf)
+    if cf.exists():
+        _COMPILED.update(ln.strip() for ln in cf.read_text().splitlines() if ln.strip())
+    pf = _P(stem + ".probes")
+    _PROBE_FILE.append(pf)
+    if pf.exists():
+        for ln in pf.read_text().splitlines():
+            sig, _, ms = ln.rpartition("\t")
+            if sig:
+                try:
+                    _PROBE_DONE[sig] = float(ms)
+                except ValueError:
+                    continue
+    return len(_PROBE_DONE)
+
+
+#: sigs whose compile is already in the on-disk triton cache from an earlier attempt at this unit.
+#: The probe replay made a restart skip re-BENCHING; without the same trick for compiling, every
+#: restart still re-submitted the whole round to a fresh spawn pool -- 446 s a time, which is what
+#: turned 87 legitimate kills into 7799 s. The triton cache is already warm for these; the cost
+#: being avoided is the pool spawn and the job round-trip, not the compile itself.
+_COMPILED: set = set()
+_COMPILED_FILE: list = []
+
+
+def _mark_compiled(sigs) -> None:
+    """Record configs whose compile is SETTLED -- succeeded or permanently failed.
+
+    Failures have to be recorded too. A config that fails to compile fails deterministically (it
+    spills registers, or wants more smem than the card has), so retrying it on every restart is
+    pure loss: 38 such configs cost 206 s per attempt and, across ~90 attempts, dominated the
+    restart budget the compiled-list was added to remove. A settled failure is as reusable a fact
+    as a settled success -- the bench scores it +inf either way.
+    """
+    new_sigs = [x for x in sigs if x not in _COMPILED]
+    if not new_sigs:
+        return
+    _COMPILED.update(new_sigs)
+    if _COMPILED_FILE:
+        try:
+            with _COMPILED_FILE[0].open("a") as fh:
+                fh.write("".join(x + "\n" for x in new_sigs))
+        except OSError:
+            pass
+
+
+def _cfg_sig(config) -> str:
+    d = dict(config.kwargs)
+    d["num_warps"] = config.num_warps
+    d["num_stages"] = config.num_stages
+    return _sig_line(d)
+
+
+def _remember(sig: str, ms: float) -> None:
+    _PROBE_DONE[sig] = ms
+    if _PROBE_FILE:
+        try:
+            with _PROBE_FILE[0].open("a") as fh:
+                fh.write(f"{sig}\t{ms}\n")
+        except OSError:
+            pass
+
+
+def probe_log_summary(top: int = 0) -> str:
+    """Per-axis mean device time over every probed config -- which axis value costs the time."""
+    import collections  # noqa: PLC0415
+
+    if not _PROBE_LOG:
+        return ""
+    per = collections.defaultdict(list)
+    for ms, cfg in _PROBE_LOG:
+        for k, v in cfg.items():
+            per[(k, v)].append(ms)
+    lines = [f"  [probe-log] {len(_PROBE_LOG)} configs probed; mean device ms by axis value:"]
+    for (k, v), vals in sorted(per.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        lines.append(f"      {k}={v!s:<6} n={len(vals):<5} mean={sum(vals) / len(vals):8.2f}ms"
+                     f"  min={min(vals):7.3f}ms")
+    if top:
+        worst = sorted(_PROBE_LOG, key=lambda r: -r[0])[:top]
+        lines.append("    slowest configs:")
+        lines += [f"      {ms:9.1f}ms  {cfg}" for ms, cfg in worst]
+    return "\n".join(lines)
+
+
+def _install_launch_probes() -> None:
+    """Time the per-config first-launch path. Idempotent; build-only."""
+    import time  # noqa: PLC0415
+
+    from triton.compiler.compiler import CompiledKernel  # noqa: PLC0415
+    from triton.runtime.autotuner import Autotuner  # noqa: PLC0415
+    from triton.runtime.jit import JITFunction  # noqa: PLC0415
+
+    if getattr(CompiledKernel, "_mw_probed", False):
+        return
+    CompiledKernel._mw_probed = True
+
+    orig_init = CompiledKernel._init_handles
+
+    def init_handles(self):  # noqa: ANN001, ANN202
+        if self.module is not None:
+            return orig_init(self)
+        t = time.monotonic()
+        try:
+            return orig_init(self)
+        finally:
+            _LAUNCH_T["init_handles"] += 1
+            _LAUNCH_T["init_s"] += time.monotonic() - t
+
+    CompiledKernel._init_handles = init_handles
+
+    orig_run = JITFunction.run
+
+    def run(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+        t = time.monotonic()
+        try:
+            return orig_run(self, *a, **k)
+        finally:
+            _LAUNCH_T["run_calls"] += 1
+            _LAUNCH_T["run_s"] += time.monotonic() - t
+
+    JITFunction.run = run
+
+    orig_pre = Autotuner.pre_hook if hasattr(Autotuner, "pre_hook") else None
+    if callable(orig_pre):
+        def pre_hook(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+            t = time.monotonic()
+            try:
+                return orig_pre(self, *a, **k)
+            finally:
+                _LAUNCH_T["prehook_calls"] += 1
+                _LAUNCH_T["prehook_s"] += time.monotonic() - t
+
+        Autotuner.pre_hook = pre_hook
+
+
+def _budget_ms(autotuner) -> float | None:
+    """Bench budget for the next config, or None when the feature is off."""
+    from miniworld_engine import settings  # noqa: PLC0415
+
+    cur = settings.current()
+    factor = cur.bench_budget_factor
+    if not factor:
+        return None
+    best = _BEST.get(id(autotuner))
+    cap = cur.bench_budget_cap_ms
+    return cap if best is None else min(cap, best * factor)
+
+
+def _budgeted_do_bench(orig, budget: float):
+    """``do_bench`` that probes once and gives up if the config is already out of the running.
+
+    One untimed call first: the timed one must not include a JIT compile (the precompile round
+    normally removes that, but a cache miss here would read as a slow kernel and abandon a config
+    for the wrong reason). Then one timed launch -- enough to separate a config that is 10x the
+    best from one that might win, which is the only distinction the budget needs to make.
+    """
+    import time  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    from miniworld_engine import settings as _settings  # noqa: PLC0415
+
+    skip_warm = _settings.current().bench_budget_skip_warm
+
+    def f(kernel_call, quantiles=None, **kw):  # noqa: ANN001, ANN003, ANN202
+        sig = _sig_line(_CURRENT_CFG)
+        if sig in _PROBE_DONE:          # decided on an earlier attempt: replay, do not relaunch
+            m = _PROBE_DONE[sig]
+            _ABANDONED["skipped" if m == float("inf") else "measured"] += 1
+            return [m] * 3
+        if not skip_warm:
+            t0 = time.perf_counter()
+            kernel_call()                   # warm: compile / cache / allocator
+            torch.cuda.synchronize()
+            _ABANDONED["warm_s"] += time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        kernel_call()
+        end.record()
+        torch.cuda.synchronize()
+        probe_wall = time.perf_counter() - t1
+        dev_ms = start.elapsed_time(end)
+        _ABANDONED["probe_s"] += probe_wall
+        _ABANDONED["kernel_ms"] += dev_ms
+
+        if dev_ms > budget:
+            _ABANDONED["skipped"] += 1
+            _ABANDONED["skipped_kernel_ms"] += dev_ms
+            _PROBE_LOG.append((dev_ms, dict(_CURRENT_CFG)))
+            _remember(sig, float("inf"))
+            return [float("inf")] * 3
+        _PROBE_LOG.append((dev_ms, dict(_CURRENT_CFG)))
+        _ABANDONED["measured"] += 1
+        t2 = time.perf_counter()
+        res = orig(kernel_call, quantiles=quantiles, **kw)
+        _ABANDONED["bench_s"] += time.perf_counter() - t2
+        _remember(sig, _median(res))
+        return res
+
+    return f
+
 
 def precompile_summary() -> str:
     """One line on what the pre-compile actually did.
@@ -102,8 +366,32 @@ def precompile_summary() -> str:
     just stays slow. Reporting the counts makes the difference visible instead of inferred.
     """
     p = _PRECOMPILE
+    budget = ""
+    a = _ABANDONED
+    if a["skipped"] or a["measured"]:
+        tot = a["skipped"] + a["measured"]
+        host = a["warm_s"] + a["probe_s"] + a["bench_s"]
+        dev = a["kernel_ms"] / 1000.0
+        budget = (
+            f"\n  [bench-budget] {a['skipped']}/{tot} abandoned"
+            f" | warm {a['warm_s']:.0f}s + probe {a['probe_s']:.0f}s"
+            f" + full-bench {a['bench_s']:.0f}s = {host:.0f}s host"
+            f" | device {dev:.1f}s (of which abandoned kernels"
+            f" {a['skipped_kernel_ms'] / 1000.0:.1f}s)"
+            f" | fixed overhead {host - dev:.0f}s")
+    c = _COMPILE_T
+    if c["calls"]:
+        budget += (f"\n  [compile-guard] {c['calls']} compile() calls"
+                   f" | fork {c['fork_s']:.0f}s + wait {c['wait_s']:.0f}s"
+                   f" ({c['polls']} polls x 50ms) + parent-recompile {c['parent_s']:.0f}s"
+                   f" = {c['fork_s'] + c['wait_s'] + c['parent_s']:.0f}s")
+    lt = _LAUNCH_T
+    if lt["run_calls"]:
+        budget += (f"\n  [first-launch] fn.run {lt['run_calls']} calls {lt['run_s']:.0f}s"
+                   f" | init_handles {lt['init_handles']} x -> {lt['init_s']:.0f}s"
+                   f" | pre_hook {lt['prehook_calls']} x -> {lt['prehook_s']:.0f}s")
     return (f"  [precompile] jobs={_compile_jobs()} rounds={p['rounds']} configs={p['configs']} "
-            f"-> compiled={p['compiled']} failed={p['failed']} in {p['seconds']:.0f}s")
+            f"-> compiled={p['compiled']} failed={p['failed']} in {p['seconds']:.0f}s{budget}")
 
 
 def _compile_jobs() -> int:
@@ -194,11 +482,23 @@ def _precompile_round(src, target, options, configs) -> None:
     """Compile every config of this round in parallel, blocking until done. Never raises."""
     global _PRECOMPILE_POOL
     jobs = _compile_jobs()
-    if jobs < 2 or len(configs) < 2:
+    # A single config still goes through the pool. The parallelism is pointless there, but the
+    # TIMEOUT is not: the worker forks and gets SIGKILLed past _COMPILE_BUDGET_S, which is the only
+    # bound that exists on a compile. Bailing out at len(configs) < 2 sent every pinned-config-set
+    # run straight into triton's serial in-process compile, where a pathological config stalls with
+    # no output and nothing can interrupt it.
+    if jobs < 1 or not configs:
         return
     import time  # noqa: PLC0415
 
     started = time.monotonic()
+    todo = [c for c in configs if _cfg_sig(c) not in _COMPILED]
+    skipped = len(configs) - len(todo)
+    if not todo:
+        print(f"  [precompile] round skipped: all {len(configs)} configs already compiled "
+              f"on an earlier attempt", flush=True)
+        return
+    configs = todo
     try:
         import multiprocessing as mp  # noqa: PLC0415
 
@@ -233,13 +533,18 @@ def _precompile_round(src, target, options, configs) -> None:
             done = []
         ok = sum(1 for d in done if d)
         bad = sum(1 for d in done if not d)
+        # settled = attempted and answered, pass or fail. `done` is shorter than `configs` only
+        # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
+        # unsettled and is retried, which is the intent.
+        _mark_compiled(_cfg_sig(c) for c, _ in zip(configs, done))
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
         _PRECOMPILE["rounds"] += 1
         _PRECOMPILE["configs"] += len(payloads)
         # Printed per round, not just in the final summary: when this stalled before, nothing was
         # visible until the shard finished, so a dead pool and a slow one looked identical.
-        print(f"  [precompile] round {_PRECOMPILE['rounds']}: {len(payloads)} configs on {jobs} "
+        print(f"  [precompile] round {_PRECOMPILE['rounds']}: {len(payloads)} configs "
+              f"({skipped} already compiled) on {jobs} "
               f"workers -> {ok} compiled, {bad} failed, "
               f"{time.monotonic() - started:.0f}s", flush=True)
     except Exception:  # noqa: BLE001 -- an optimisation; a build must never fail because of it
@@ -271,16 +576,66 @@ def _sig(config) -> tuple:
     return (kw, d["num_warps"], d["num_stages"])
 
 
+#: ops whose autotuner actually launched this process, in first-launch order.
+_LAUNCHED: dict[str, int] = {}
+
+
+#: autotuner ids already attributed to an op, so the hot path costs one set lookup.
+_NOTED: set = set()
+_REC_INSTALLED = False
+
+
+def launched_ops() -> dict[str, int]:
+    """op -> number of distinct autotuners that ran for it. See :func:`install_launch_recorder`."""
+    return dict(_LAUNCHED)
+
+
+def install_launch_recorder() -> None:
+    """Record which ops actually launch. Idempotent, and safe inside a timing benchmark.
+
+    Separate from :func:`install`: capture pins dispatch switches and forces a full-grid search,
+    which is right for a build and wrong for a measurement. Coverage has to be answerable during
+    an ordinary bench, otherwise "we ran the kernels" stays an assumption. Attribution happens
+    once per autotuner (memoised on id), so the per-launch cost is a set membership test.
+    """
+    global _REC_INSTALLED
+    if _REC_INSTALLED:
+        return
+    _REC_INSTALLED = True
+    from triton.runtime.autotuner import Autotuner  # noqa: PLC0415
+
+    prev = Autotuner.run
+
+    def run(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        key = id(self)
+        if key not in _NOTED:
+            _NOTED.add(key)
+            op = _op_name(self)
+            if op:
+                _LAUNCHED[op] = _LAUNCHED.get(op, 0) + 1
+        return prev(self, *args, **kwargs)
+
+    Autotuner.run = run
+
+
+def _op_name(autotuner) -> str | None:
+    """The op behind a live autotuner, by identity of the config list it was handed."""
+    from miniworld_engine.autotune.configs import op_of  # noqa: PLC0415
+    return op_of(getattr(autotuner, "configs", None))
+
+
 def _record_one(autotuner, config, meta, ms) -> None:
-    ecp = getattr(autotuner, "early_config_prune", None)
-    op = getattr(ecp, "_miniworld_op", None)
+    op = _op_name(autotuner)
     if not op:
         return
+    ecp = getattr(autotuner, "early_config_prune", None)
     if ms == float("inf"):
         return
     nargs = getattr(autotuner, "nargs", None) or {}
-    dtype = str(ecp._miniworld_dtype_of(nargs, meta))   # noqa: SLF001
-    bucket = str(ecp._miniworld_bucket_of(nargs, meta))  # noqa: SLF001
+    # dtype/bucket used to come off the prune object. Without one the reading is still valid, it
+    # just is not split by input class -- one bucket per op.
+    dtype = str(ecp._miniworld_dtype_of(nargs, meta)) if ecp else "any"   # noqa: SLF001
+    bucket = str(ecp._miniworld_bucket_of(nargs, meta)) if ecp else "any"  # noqa: SLF001
     slot = _CAPTURE.setdefault(op, {"grid": None, "entries": {}})
     if slot["grid"] is None:
         slot["grid"] = list(autotuner.configs)
@@ -329,6 +684,8 @@ def install() -> None:
             _precompile_round(src, kwargs["target"], kwargs.get("options"), armed)
         if _COMPILE_BUDGET_S <= 0:
             return _orig_compile(*args, **kwargs)
+        _COMPILE_T["calls"] += 1
+        _t_fork = time.monotonic()
         pid = os.fork()
         if pid == 0:  # child: compile into the on-disk cache, no torch/CUDA touched, then exit
             try:
@@ -336,6 +693,8 @@ def install() -> None:
                 os._exit(0)
             except BaseException:  # noqa: BLE001 -- any failure -> parent treats config as unusable
                 os._exit(3)
+        _COMPILE_T["fork_s"] += time.monotonic() - _t_fork
+        _t_wait = time.monotonic()
         deadline = time.monotonic() + _COMPILE_BUDGET_S
         while True:
             w, st = os.waitpid(pid, os.WNOHANG)
@@ -349,10 +708,32 @@ def install() -> None:
                     pass
                 raise RuntimeError(
                     f"triton compile exceeded {_COMPILE_BUDGET_S}s (register-spill config); skipped")
-            time.sleep(0.05)
+            # Adaptive backoff, not a flat 50ms. Almost every compile here is an on-disk cache
+            # hit that finishes in single-digit milliseconds, but a flat 50ms poll charges the
+            # full tick to each one: 89,695 polls = 1848s of pure sleeping on one unit, 34% of its
+            # wall clock. Start at 1ms so a hit is noticed almost immediately, and back off to
+            # 50ms once it is clear this is a real compile, where the tick is irrelevant next to
+            # the seconds it will take.
+            waited = time.monotonic() - _t_wait
+            time.sleep(0.001 if waited < 0.05 else 0.01 if waited < 0.5 else 0.05)  # noqa: ASYNC251
+            _COMPILE_T["polls"] += 1
+        _COMPILE_T["wait_s"] += time.monotonic() - _t_wait
         if os.waitstatus_to_exitcode(st) != 0:
+            # Raising is right DURING a tuning round: _bench catches it, the config scores +inf and
+            # is pruned, which is how the budget filters register-spill configs. It is wrong for a
+            # launch outside tuning -- the winning config's own compile, or a kernel that is not
+            # autotuned at all -- where the exception escapes into the module forward and takes the
+            # whole unit down. Outside a round, compile in-process instead.
+            if _CURRENT.get("id") is None:
+                return _orig_compile(*args, **kwargs)
             raise RuntimeError("triton compile failed in isolated child; config skipped")
-        return _orig_compile(*args, **kwargs)  # disk-cache hit -> instant
+        _t_parent = time.monotonic()
+        try:
+            return _orig_compile(*args, **kwargs)  # expected: ~/.triton/cache hit
+        finally:
+            _COMPILE_T["parent_s"] += time.monotonic() - _t_parent
+
+    _install_launch_probes()
 
     _tcc.compile = _fork_compile
     _tc.compile = _fork_compile  # the name create_binder rebinds via `from ..compiler import compile`
@@ -365,6 +746,11 @@ def install() -> None:
     def prune_configs(self, kwargs):  # noqa: ANN001, ANN202
         pruned = _orig_prune(self, kwargs)
         _ROUND[id(self)] = list(pruned)     # per autotuner: rounds interleave across kernels
+        # A round is exactly one prune_configs + one sweep of the pruned list for ONE autotune key,
+        # so this is where the running best resets. Keeping it per autotuner rather than global:
+        # rounds from different kernels interleave, and a fast elementwise kernel's best would
+        # otherwise set an impossible budget for a GEMM.
+        _BEST.pop(id(self), None)
         return pruned
 
     Autotuner.prune_configs = prune_configs
@@ -376,6 +762,14 @@ def install() -> None:
         # compiles triggers the fan-out for the whole round.
         previous = _CURRENT.get("id")
         _CURRENT["id"] = id(self)
+        budget = _budget_ms(self)
+        _CURRENT_CFG.clear()
+        _CURRENT_CFG.update(config.kwargs)
+        _CURRENT_CFG["num_warps"] = config.num_warps
+        _CURRENT_CFG["num_stages"] = config.num_stages
+        saved_do_bench = getattr(self, "do_bench", None)
+        if budget is not None and saved_do_bench is not None:
+            self.do_bench = _budgeted_do_bench(saved_do_bench, budget)
         try:
             res = _orig_bench(self, *args, config=config, **meta)
         except Exception:  # noqa: BLE001 -- a config that fails to compile/run simply loses
@@ -389,22 +783,71 @@ def install() -> None:
             res = [float("inf")] * 3
         finally:
             _CURRENT["id"] = previous
+            if budget is not None and saved_do_bench is not None:
+                self.do_bench = saved_do_bench
+        med = _median(res)
+        if med != float("inf"):
+            prev = _BEST.get(id(self))
+            if prev is None or med < prev:
+                _BEST[id(self)] = med
         try:
-            _record_one(self, config, meta, _median(res))
+            _record_one(self, config, meta, med)
         except Exception:  # noqa: BLE001 -- capture must never perturb a real bench
             pass
         return res
 
     Autotuner._bench = _bench
 
+    # A single-config autotuner never reaches _bench: triton gates the whole tuning path on
+    # `if len(self.configs) > 1`, so with one config it just launches. That is the normal shape of
+    # a pinned config set, and without this hook such a build captures nothing and every unit is
+    # reported EMPTY even though the kernel ran fine. Time it once per (autotuner, key) and record
+    # it, so a pinned build produces a cache entry naming the config it actually used.
+    global _orig_run
+    if _orig_run is None:
+        _orig_run = Autotuner.run
+
+    def run(self, *args, **kwargs):
+        # triton gates its whole tuning path on len(configs) > 1, so a pinned single config never
+        # reaches prune_configs -- which is where a round is armed for the compile hook. Arm it
+        # here instead, or the one compile that matters runs serially in-process with no timeout.
+        cfgs0 = getattr(self, "configs", None) or []
+        previous = _CURRENT.get("id")
+        if len(cfgs0) == 1 and id(self) not in _ROUND:
+            _ROUND[id(self)] = list(cfgs0)
+            _CURRENT["id"] = id(self)
+        try:
+            out = _orig_run(self, *args, **kwargs)
+        finally:
+            if _CURRENT.get("id") == id(self):
+                _CURRENT["id"] = previous
+        cfgs = getattr(self, "configs", None) or []
+        if len(cfgs) == 1:
+            mark = (id(self), tuple(sorted((k, str(v)) for k, v in kwargs.items()
+                                           if isinstance(v, (int, float, str, bool)))))
+            if mark not in _SINGLE_SEEN:
+                _SINGLE_SEEN.add(mark)
+                try:
+                    _record_one(self, cfgs[0], kwargs, float("nan"))
+                except Exception:  # noqa: BLE001 -- capture must never perturb a real run
+                    pass
+        return out
+
+    Autotuner.run = run
+
 
 def uninstall() -> None:
-    global _orig_bench, _orig_compile, _orig_prune
+    global _orig_bench, _orig_compile, _orig_prune, _orig_run
     shutdown_precompile()
     if _orig_bench is not None:
         from triton.runtime.autotuner import Autotuner
         Autotuner._bench = _orig_bench
         _orig_bench = None
+        if _orig_run is not None:
+            Autotuner.run = _orig_run
+            _orig_run = None
+        _SINGLE_SEEN.clear()
+        _LAUNCHED.clear()
         if _orig_prune is not None:
             Autotuner.prune_configs = _orig_prune
             _orig_prune = None

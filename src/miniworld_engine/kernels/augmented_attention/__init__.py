@@ -11,17 +11,17 @@ call via the ``compute_efficient`` kwarg:
     the attention in the backward. Lower memory, preferable on memory-tight or
     very long-L cases.
 
-The two live in ``triton/compute_efficient.py`` and ``triton/main.py``.
+The two live in ``triton/main.py`` and ``triton/memory_efficient.py``.
 """
 
 from __future__ import annotations
 
 import torch
 
-from .triton.compute_efficient import (
+from .triton.main import (
     triton_augmented_attention_pair_bias as _pair_bias_compute_efficient,
 )
-from .triton.main import (
+from .triton.memory_efficient import (
     triton_augmented_attention_pair_bias as _pair_bias_memory_efficient,
 )
 

@@ -11,102 +11,31 @@ Outputs: dx_n (M,D), dWL/dWLg/dWR/dWRg (D,D).
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 
+# `_dx_kernel` and `_dw_kernel` were removed here. Both were @triton.jit with NO autotune and no
+# caller anywhere in src/, benchmarks/ or tests/ -- the only surviving mention was the comment in
+# `front_bwd_dW` recording that cuBLAS beats the hand-written split-K wgrad. They also held the
+# last untiled shape axis in the kernels: `rd = tl.arange(0, D)` took the whole channel axis in
+# one tile (and `_dw_kernel` carried four [D, D] fp32 accumulators, i.e. 4 x D^2 registers).
+# Tiling dead code would have added an unexercised code path; deleting it removes the violation
+# and the maintenance surface at once.
+
+
+
+@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['GROUP_M', 'D'])
 @triton.jit
-def _dx_kernel(d_lr, preact, W, dx, M, D: tl.constexpr, BM: tl.constexpr):
-    pid = tl.program_id(0).to(tl.int64)
-    rm = pid * BM + tl.arange(0, BM)
-    mm = rm < M
-    rd = tl.arange(0, D)
-    D2 = 2 * D
-    b = rm[:, None]
-    dl = tl.load(d_lr + rd[None, :] * M + b, mask=mm[:, None], other=0.0).to(tl.float32)
-    dr = tl.load(d_lr + (D + rd[None, :]) * M + b, mask=mm[:, None], other=0.0).to(tl.float32)
-    gLlog = tl.load(preact + (2 * rd[None, :]) * M + b, mask=mm[:, None], other=0.0).to(tl.float32)
-    pL = tl.load(preact + (2 * rd[None, :] + 1) * M + b, mask=mm[:, None], other=0.0).to(tl.float32)
-    gRlog = tl.load(preact + (D2 + 2 * rd[None, :]) * M + b, mask=mm[:, None], other=0.0).to(tl.float32)
-    pR = tl.load(preact + (D2 + 2 * rd[None, :] + 1) * M + b, mask=mm[:, None], other=0.0).to(tl.float32)
-    gL = tl.sigmoid(gLlog)
-    gR = tl.sigmoid(gRlog)
-    d_pL = (dl * gL).to(tl.bfloat16)
-    d_gLlog = (dl * pL * gL * (1 - gL)).to(tl.bfloat16)
-    d_pR = (dr * gR).to(tl.bfloat16)
-    d_gRlog = (dr * pR * gR * (1 - gR)).to(tl.bfloat16)
-    rk = tl.arange(0, D)
-    WLg = tl.load(W + rk[:, None] * (4 * D) + (0 * D + rd[None, :])).to(tl.bfloat16)
-    WL = tl.load(W + rk[:, None] * (4 * D) + (1 * D + rd[None, :])).to(tl.bfloat16)
-    WRg = tl.load(W + rk[:, None] * (4 * D) + (2 * D + rd[None, :])).to(tl.bfloat16)
-    WR = tl.load(W + rk[:, None] * (4 * D) + (3 * D + rd[None, :])).to(tl.bfloat16)
-    acc = tl.dot(d_gLlog, tl.trans(WLg))
-    acc += tl.dot(d_pL, tl.trans(WL))
-    acc += tl.dot(d_gRlog, tl.trans(WRg))
-    acc += tl.dot(d_pR, tl.trans(WR))
-    tl.store(dx + rm[:, None] * D + rd[None, :], acc.to(tl.bfloat16), mask=mm[:, None])
-
-
-@triton.jit
-def _dw_kernel(d_lr, preact, x_n, dW, M, D: tl.constexpr, BK: tl.constexpr, NPROG: tl.constexpr):
-    pid = tl.program_id(0).to(tl.int64)
-    rd = tl.arange(0, D)
-    D2 = 2 * D
-    aLg = tl.zeros((D, D), tl.float32)
-    aL = tl.zeros((D, D), tl.float32)
-    aRg = tl.zeros((D, D), tl.float32)
-    aR = tl.zeros((D, D), tl.float32)
-    n_tiles = tl.cdiv(M, BK)
-    for kt in range(pid, n_tiles, NPROG):
-        rk = kt * BK + tl.arange(0, BK)
-        mk = rk < M
-        b = rk[:, None]
-        dl = tl.load(d_lr + rd[None, :] * M + b, mask=mk[:, None], other=0.0).to(tl.float32)
-        dr = tl.load(d_lr + (D + rd[None, :]) * M + b, mask=mk[:, None], other=0.0).to(tl.float32)
-        gLlog = tl.load(preact + (2 * rd[None, :]) * M + b, mask=mk[:, None], other=0.0).to(tl.float32)
-        pL = tl.load(preact + (2 * rd[None, :] + 1) * M + b, mask=mk[:, None], other=0.0).to(tl.float32)
-        gRlog = tl.load(preact + (D2 + 2 * rd[None, :]) * M + b, mask=mk[:, None], other=0.0).to(tl.float32)
-        pR = tl.load(preact + (D2 + 2 * rd[None, :] + 1) * M + b, mask=mk[:, None], other=0.0).to(tl.float32)
-        gL = tl.sigmoid(gLlog)
-        gR = tl.sigmoid(gRlog)
-        d_pL = (dl * gL).to(tl.bfloat16)
-        d_gLlog = (dl * pL * gL * (1 - gL)).to(tl.bfloat16)
-        d_pR = (dr * gR).to(tl.bfloat16)
-        d_gRlog = (dr * pR * gR * (1 - gR)).to(tl.bfloat16)
-        xt = tl.load(x_n + b * D + rd[None, :], mask=mk[:, None], other=0.0).to(tl.bfloat16)  # (BK,D)
-        xt_t = tl.trans(xt)  # (D, BK)
-        aLg += tl.dot(xt_t, d_gLlog)   # dWLg[k,d] = sum_m x[m,k] d_gLlog[m,d]
-        aL += tl.dot(xt_t, d_pL)
-        aRg += tl.dot(xt_t, d_gRlog)
-        aR += tl.dot(xt_t, d_pR)
-    # dW layout (D, 4D) = [WLg|WL|WRg|WR] blocks
-    rk2 = tl.arange(0, D)
-    row = rk2[:, None] * (4 * D)
-    tl.atomic_add(dW + row + (0 * D + rd[None, :]), aLg)
-    tl.atomic_add(dW + row + (1 * D + rd[None, :]), aL)
-    tl.atomic_add(dW + row + (2 * D + rd[None, :]), aRg)
-    tl.atomic_add(dW + row + (3 * D + rd[None, :]), aR)
-
-
-_trimul_back_fused_dconcat_prune = make_cache_prune(
-    "trimul_back_fused_dconcat", dtype_of=tensor_dtype_of("dL_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "D"),
-)
-
-
-@triton.autotune(
-    configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
-    key=["GROUP_M", "D"],
-    prune_configs_by={"early_config_prune": _trimul_back_fused_dconcat_prune},
-)
-@triton.jit
-def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl.constexpr,
-                    GROUP_M: tl.constexpr):
+def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
+                    GROUP_M):
     """1D channel-major elementwise: out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR].
     Iterate over DM=D*M positions (d,m); dL=dL_ptr[idx], dR=dR_ptr[idx] (separate left/right
     buffers — no d_lr cat in the caller); preact is interleaved so needs (2d)*M+m indexing.
@@ -116,7 +45,7 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl
     # derived offset (k·DM+idx, (2d±)·M+m) is computed in int64.
     Mi = M.to(tl.int64)
     DMi = DM.to(tl.int64)
-    idx = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
+    idx = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E).to(tl.int64)
     mask = idx < DMi
     d = idx // Mi
     m = idx - d * Mi
@@ -135,20 +64,12 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLK: tl
     tl.store(out + 3 * DMi + idx, (dR * gR).to(et), mask=mask)                  # d_pR
 
 
-_trimul_back_fused_dconcat5_prune = make_cache_prune(
-    "trimul_back_fused_dconcat5", dtype_of=tensor_dtype_of("dL_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "D"),
-)
 
 
-@triton.autotune(
-    configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
-    key=["GROUP_M", "D"],
-    prune_configs_by={"early_config_prune": _trimul_back_fused_dconcat5_prune},
-)
+@triton.autotune(configs=configs_for("trimul_bwd_gate_transpose_packed_triton"), key=['GROUP_M', 'D'])
 @triton.jit
 def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr,
-                     BLK: tl.constexpr, GROUP_M: tl.constexpr):
+                     BLOCK_E: tl.constexpr, GROUP_M):
     """Like `_dconcat_kernel` but builds a 5-block d_concat (5D,M):
        [d_gLlog; d_pL; d_gRlog; d_pR; d_glogit].
     Block 4 relayouts the gate input-grad d_glogit (M,D) row-major into channel-major (D,M).
@@ -157,7 +78,7 @@ def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.conste
     only (gate width == per-side hidden D)."""
     Mi = M.to(tl.int64)
     DMi = DM.to(tl.int64)
-    idx = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
+    idx = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E).to(tl.int64)
     mask = idx < DMi
     d = idx // Mi
     m = idx - d * Mi
@@ -200,7 +121,7 @@ def front_bwd_dW_glogit(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit
 
     dconc5 = torch.empty(5 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
-    _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](
+    _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
         dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, GROUP_M=get_seq_group(M))
 
     dWs = dconc5 @ xf                                            # (5H, Din) cuBLAS huge-K
@@ -251,7 +172,7 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
 
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)   # [d_gLlog;d_pL;d_gRlog;d_pR]
     DM = H * M
-    _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](
+    _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
         dL2, dR2, preact2, dconc, M, DM, D=H, GROUP_M=get_seq_group(M))
 
     # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
@@ -267,27 +188,19 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
 
 
 # ── σ(gate) backward: reconstruct GLU grads from lr + sg (no preact) ──────────────────────────
-_trimul_back_fused_dconcat_sig_prune = make_cache_prune(
-    "trimul_back_fused_dconcat_sig", dtype_of=tensor_dtype_of("dL_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "D"),
-)
 
 
-@triton.autotune(
-    configs=[triton.Config({"BLK": b}, num_warps=nw) for b in (1024, 2048, 4096) for nw in (4, 8)],
-    key=["GROUP_M", "D"],
-    prune_configs_by={"early_config_prune": _trimul_back_fused_dconcat_sig_prune},
-)
+@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_recompute_triton"), key=['GROUP_M', 'D'])
 @triton.jit
 def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
-                        D: tl.constexpr, BLK: tl.constexpr, GROUP_M: tl.constexpr):
+                        D: tl.constexpr, BLOCK_E: tl.constexpr, GROUP_M):
     """out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR], built from the forward outputs lr (=left,
     right) and sg (=σ(gate), [2D,M]) instead of raw preact logits:
         d_glog = d_out·lr·(1-sg) ;  d_proj = d_out·sg    (proj = lr/sg is never needed).
     lr split as two [D,M] buffers (left/right); sg is [2D,M] (left rows 0:D, right rows D:2D)."""
     Mi = M.to(tl.int64)
     DMi = DM.to(tl.int64)
-    idx = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
+    idx = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E).to(tl.int64)
     mask = idx < DMi
     dL = tl.load(dL_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     dR = tl.load(dR_ptr + idx, mask=mask, other=0.0).to(tl.float32)
@@ -319,7 +232,7 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
 
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
-    _dconcat_sig_kernel[lambda meta: (triton.cdiv(DM, meta["BLK"]),)](
+    _dconcat_sig_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
         dL2, dR2, lrL, lrR, sg2, dconc, M, DM, D=H, GROUP_M=get_seq_group(M))
 
     from miniworld_engine.kernels.trimul_inproj.cute import dispatch

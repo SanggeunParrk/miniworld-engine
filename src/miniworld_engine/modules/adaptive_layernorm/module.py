@@ -22,15 +22,21 @@ class AdaptiveLayerNorm(nn.Module):
         d_cond: int,
         *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         self.implementation = ImplementationType(implementation)
         # 'miniworld' (auto) -> the TRITON family (the only fused adaln kernel).
         self._backend = resolve_adaptive_layernorm(self.implementation)
-        self.ln_in = nn.LayerNorm(d_hidden, elementwise_affine=False)
-        self.ln_cond = nn.LayerNorm(d_cond, bias=False)
-        self.to_scale = Linear(d_cond, d_hidden, init="gating")
-        self.to_bias = Linear(d_cond, d_hidden, bias=False, init="zero")
+        # Constructor-level, like ConditionedTransition: the norm and the scale/bias projections
+        # are one numerical unit. The module already followed a post-hoc ``.to(dtype)``; taking it
+        # here as well means a caller can build a bf16 module directly instead of building fp32
+        # and converting, which is what a parent passing its own dtype down needs.
+        self.dtype = dtype
+        self.ln_in = nn.LayerNorm(d_hidden, elementwise_affine=False, dtype=dtype)
+        self.ln_cond = nn.LayerNorm(d_cond, bias=False, dtype=dtype)
+        self.to_scale = Linear(d_cond, d_hidden, init="gating", dtype=dtype)
+        self.to_bias = Linear(d_cond, d_hidden, bias=False, init="zero", dtype=dtype)
 
     @typecheck
     def forward(

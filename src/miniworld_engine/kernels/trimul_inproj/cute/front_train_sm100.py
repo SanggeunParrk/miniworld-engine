@@ -28,12 +28,14 @@ WHY a separate sm100 front (vs the sm90 ``trimul_inproj_cute_forward(bdll_direct
 B=1, square L, bf16 in / fp32 acc / bf16 out.
 """
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import os
 
 import torch
 import triton
 import triton.language as tl
+from miniworld_engine.autotune import tensor_dtype_of
 from miniworld_engine.kernels._quack_compat import gemm_act, gemm_act_tuned
 from quack.gemm_config import GemmConfig
 from miniworld_engine import settings
@@ -100,13 +102,24 @@ def prepack_lr_operand_sm100(WL, WLg, WR, WRg) -> torch.Tensor:
     return torch.cat([_interleave(WLg, WL), _interleave(WRg, WR)], dim=1).contiguous()
 
 
+
+
+from miniworld_engine.autotune.buckets import bucket_squared as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+@triton.autotune(configs=configs_for("gated_projection_gate_packed_mmajor_triton"), key=['H', 'seq_group'])
 @triton.jit
-def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLK: tl.constexpr):
+def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLOCK_E: tl.constexpr, seq_group):
     """preact (4H,M) channel-major -> lr (2H,M). Per side: even plane=gate, odd=proj.
     Grid over the (H,M) per-side positions; each program emits left plane d AND right plane d.
     int64 offsets (4*H*M can exceed int32 at L=1024, H=128)."""
     Mi = M.to(tl.int64)
-    idx = tl.program_id(0).to(tl.int64) * BLK + tl.arange(0, BLK).to(tl.int64)
+    idx = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E).to(tl.int64)
     HM = H * Mi
     mask = idx < HM
     d = idx // Mi
@@ -182,7 +195,7 @@ def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
         gemm_act_tuned.fn(x_flat, b_lr, None, preact_view, None, None, None,
                           None, None, False, config=_cfg)
     lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
-    grid = lambda meta: (triton.cdiv(H * M, meta["BLK"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(H * M, meta["BLOCK_E"]),)  # noqa: E731
     _glu_bdll_kernel[grid](preact.view(4 * H, M), lr.view(2 * H, M), H=H, M=M,
-                           BLK=4096, num_warps=8)
+                           seq_group=get_seq_group(M))
     return lr[:, :H], lr[:, H:], preact

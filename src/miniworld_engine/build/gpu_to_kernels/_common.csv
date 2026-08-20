@@ -1,0 +1,10 @@
+> Rules that hold on EVERY card, applied before the per-GPU file.
+>
+> Only for misses that are a property of the KERNEL, not of the architecture -- a bf16-only fused
+> path captures nothing under fp32 on an H100 for exactly the reason it captures nothing on an
+> A6000. Anything that differs by card belongs in sm_NN.csv, not here.
+>
+> Columns: case,impl,dtype,build,reason   ("*" matches anything; last match across both files wins)
+case,impl,dtype,build,reason
+transition,*,float32,no,"the fused transition kernels are bf16; an fp32 run falls through to torch, so there is no autotuner to capture -- 12 fp32 units produced 0 ops each."
+triangle_multiplication,*,float32,no,"the trimul fused path is bf16-only, same miss: 180 fp32 units produced 0 ops (builds 1628031/1628032)."

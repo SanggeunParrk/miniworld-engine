@@ -31,6 +31,8 @@ Biology", Algorithm 8 / Algorithm 9; RoPE: Su et al. (arXiv:2104.09864).
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+
 import importlib.util
 
 import torch
@@ -59,7 +61,7 @@ def _check_front_packed() -> bool:
     return settings.current().swa_check_front_packed
 
 
-@torch.compiler.disable  # FA4's CuTeDSL kernel is opaque to dynamo; mark it a clean
+@opaque()  # FA4's CuTeDSL kernel is opaque to dynamo; mark it a clean
 # eager leaf so torch.compile breaks here once (no per-trace resume churn / cache
 # pressure) and CUDA graphs (reduce-overhead) capture the compiled regions around it.
 def flash_window_seqused(

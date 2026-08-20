@@ -27,6 +27,7 @@ xn:(M,K), wa/wb:(ND,K), grad_expand:(M,ND) all bf16, row-major. M and ND are mul
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 import os
 
 import cuda.bindings.driver as cuda
@@ -735,12 +736,28 @@ import triton
 import triton.language as tl
 
 from miniworld_engine import settings
+from miniworld_engine.autotune import tensor_dtype_of
 
 
+
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
+
+
+def get_seq_group(rows) -> int:
+    """Delegates to canonical size-bucketing (autotune.buckets)."""
+    return _bucket(rows)
+
+
+# IN-PLACE (dA/dB are read and written), so the autotuner must restore them between benched
+# configs — otherwise each candidate multiplies the gradients by `ge` again and the sweep itself
+# corrupts them. See the same note on tm1/cute/launch::_gate_mul_kernel.
+@triton.autotune(configs=configs_for("transition_bwd_epilogue_triton"),
+                 key=['seq_group'],
+                 restore_value=['dA_ptr', 'dB_ptr'])
 @triton.jit
-def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLK: tl.constexpr):
+def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLOCK_E: tl.constexpr, seq_group):
     pid = tl.program_id(0).to(tl.int64)
-    offs = pid * BLK + tl.arange(0, BLK)
+    offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     m = offs < N
     ge = tl.load(ge_ptr + offs, mask=m)          # read grad once
     tl.store(dA_ptr + offs, tl.load(dA_ptr + offs, mask=m) * ge, mask=m)
@@ -750,8 +767,8 @@ def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLK: tl.constexpr):
 def _grad_mul_inplace(dA, dB, ge):
     """dA *= ge; dB *= ge  in one pass (grad read once). All (M,ND) bf16 contiguous."""
     N = dA.numel()
-    grid = (triton.cdiv(N, 4096),)
-    _grad_mul_kernel[grid](dA, dB, ge, N, BLK=4096)
+    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_E"]),)  # noqa: E731
+    _grad_mul_kernel[grid](dA, dB, ge, N, seq_group=get_seq_group(N))
 
 
 _CACHE = {}

@@ -60,6 +60,7 @@ class ConditionedTransition(nn.Module):
         d_cond: int = 384,
         n: int = 2,
         implementation: ImplementationType = ImplementationType.PYTORCH,
+        dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         self.d_hidden = d_hidden
@@ -75,12 +76,22 @@ class ConditionedTransition(nn.Module):
         # MODULE; the fused KERNEL below stays the post-AdaLN tail (it receives the already-
         # normalized activation). Checkpoint keys: transition.ada_ln_in.* + the flat tail.
         self.ada_ln_in = AdaptiveLayerNorm(
-            d_hidden=d_hidden, d_cond=d_cond, implementation=implementation
+            d_hidden=d_hidden, d_cond=d_cond, implementation=implementation, dtype=dtype
         )
-        self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.float32)
-        self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=torch.float32)
-        self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero", dtype=torch.float32)
-        self.to_scale = Linear(d_cond, d_hidden, bias=True, init="default", dtype=torch.float32)
+        # dtype is a CONSTRUCTOR argument here, not a per-call one: unlike the attention core in
+        # AugmentedAttentionPairBias, there is no sub-part of this module a caller would want at a
+        # different precision from the rest -- the AdaLN, the SwiGLU expand/squeeze and the gate
+        # are one numerical unit, and the fused kernel allocates its intermediates as ``x.dtype``
+        # (train_fused.py), so a per-call split would only mean a cast at the door.
+        #
+        # These were pinned to fp32, which is why a bf16 input died with "expected mat1 and mat2 to
+        # have the same dtype" no matter what the caller did with .to(). fp32 stays the DEFAULT so
+        # existing callers and checkpoints are unaffected; bf16 is now reachable by asking for it.
+        self.dtype = dtype
+        self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=dtype)
+        self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=dtype)
+        self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero", dtype=dtype)
+        self.to_scale = Linear(d_cond, d_hidden, bias=True, init="default", dtype=dtype)
 
     def _reference(
         self,

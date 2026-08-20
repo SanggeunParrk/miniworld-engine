@@ -25,6 +25,7 @@ is the (LN-folded) pre-activations and ``grad_expand`` is the C operand. We comp
 load path hands it back element-aligned to the [a|b] accumulator (tRS_rC[2i]==ge_i).
 """
 
+from miniworld_engine.autotune.configs import configs_for
 from typing import NamedTuple, Optional
 
 import torch
@@ -49,7 +50,9 @@ from quack.gemm_act import GemmGatedMixin
 from quack.activation import dgate_fn_map
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels._quack_compat import jit_cache
+from miniworld_engine.kernels.transition.triton.fused import get_seq_group
 from quack.gemm_config import GemmConfig
 from quack.gemm_tvm_ffi_utils import (
     perm3d_single,
@@ -65,19 +68,24 @@ from quack.gemm_tvm_ffi_utils import (
 
 
 # fmt: off
+
+
+# Both axes are now tuned tiles; the launch used to pin BLOCK_M1=64 / BLOCK_N=128 and grid-divide by the
+# same literals, so no card could ever pick a different shape for this copy.
+@triton.autotune(configs=configs_for("transition_bwd_transpose_packed_triton"), key=['seq_group', 'N'])
 @triton.jit
-def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BM: tl.constexpr, BN: tl.constexpr):
+def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, seq_group):
     # Duplicate grad_expand (M,N) -> interleaved (M,2N): out[m,2j]=out[m,2j+1]=ge[m,j], so the
     # C operand aligns to the [a|b]-interleaved accumulator. Coalesced via tl.interleave (a
-    # single contiguous 2*BN store), ~2x faster than the eager expand().reshape().contiguous().
+    # single contiguous 2*BLOCK_N store), ~2x faster than the eager expand().reshape().contiguous().
     pidm = tl.program_id(0).to(tl.int64)
     pidn = tl.program_id(1).to(tl.int64)
-    rows = pidm * BM + tl.arange(0, BM)
-    cn = pidn * BN + tl.arange(0, BN)
+    rows = pidm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    cn = pidn * BLOCK_N + tl.arange(0, BLOCK_N)
     rm = rows < M
     v = tl.load(g_ptr + rows[:, None] * sgm + cn[None, :] * sgn, mask=rm[:, None] & (cn < N)[None, :], other=0.0)
-    vi = tl.interleave(v, v)  # (BM, 2*BN) = [v0, v0, v1, v1, ...]
-    co = pidn * 2 * BN + tl.arange(0, 2 * BN)
+    vi = tl.interleave(v, v)  # (BLOCK_M1, 2*BLOCK_N) = [v0, v0, v1, v1, ...]
+    co = pidn * 2 * BLOCK_N + tl.arange(0, 2 * BLOCK_N)
     tl.store(o_ptr + rows[:, None] * som + co[None, :], vi, mask=rm[:, None] & (co < N2)[None, :])
 # fmt: on
 
@@ -87,8 +95,10 @@ def _cdup_interleave(ge: Tensor) -> Tensor:
     # explicit col stride, fusing an upstream transpose into this (already-present) copy.
     M, N = ge.shape
     o = torch.empty(M, 2 * N, device=ge.device, dtype=ge.dtype)
-    _cdup_interleave_kernel[(triton.cdiv(M, 64), triton.cdiv(N, 128))](
-        ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0), BM=64, BN=128
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
+    _cdup_interleave_kernel[grid](
+        ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0),
+        seq_group=get_seq_group(M),
     )
     return o
 

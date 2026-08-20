@@ -13,13 +13,14 @@ x_n is (M, D) blld contiguous. B=1, K=N=D=128, bf16.
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
-from miniworld_engine.autotune.grids import brute, BLOCK_M, BLOCK_N, BLOCK_K, BLOCK_1D
 import triton.language as tl
 
-from miniworld_engine.autotune import key_bucket_of, make_cache_prune, tensor_dtype_of
+
+from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group
 
 
@@ -36,32 +37,23 @@ from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_grou
 #     ~13-15% over the prior BM=64 full-N winner at every L. Casting `norm` to
 #     bf16 up front (instead of inside each dot) further trims register pressure
 #     under the N-tiling and is faster here (it was a wash without N-tiling).
-#   - BM=64, BN=64, num_warps=4 is the winner for every L.
-# Kept a tiny pruned set around the winner plus safe fallbacks.
-_trimul_back_prune = make_cache_prune(
-    "trimul_back", dtype_of=tensor_dtype_of("tri_ptr"),
-    bucket_of=key_bucket_of("GROUP_M", "K", "N", "ADD_RESIDUAL"),
-)
+#   - BLOCK_M1=64, BLOCK_N=64, num_warps=4 is the winner for every L.
+#
+# REGISTER CEILING, and the CSV is what has to respect it: this kernel holds a live
+# (BLOCK_M1, BLOCK_N) accumulator PAIR (proj + gate) at full K=N=128 with no K-loop, so wide tiles
+# blow the 255-register budget. Rows at 256 tiles, num_warps=16, or num_stages>=4 make ptxas
+# spill/thrash for 20+ MINUTES per config. Nothing filters such a row out any more -- a config set
+# that contains one stalls the run.
+
+# BK tiles the contraction / LN-reduce axis, which used to be the raw shape constant K
+# (`tl.arange(0, K)`, a whole [BM, K] row pinned on-chip). It is a CSV tile rather
+# than the narrow BLOCK_K so the sweep can still express "one tile holds the whole row" -- that
+# schedule is what makes this kernel a single-pass LN, and the narrow set (<=128) would have
+# forced a multi-pass at every d_pair > 128. The k-loops below make the smaller candidates
+# correct; the pruned BM/BN box above is unchanged.
 
 
-# Bounded grid (NOT the full brute): this kernel keeps a live (BM,BN) accumulator PAIR
-# (proj + gate) at full K=N=128, so wide tiles blow the 255-reg budget. Empirically
-# BM/BN=256, num_warps=16 or num_stages>=4 make ptxas spill/thrash for 20+ MINUTES per
-# config (there is no K-loop, so extra stages only add noise) — that stalls the whole
-# autotune sweep. Cap the search at register-sane, launchable tiles; the documented winner
-# (BM=64,BN=64,warps=4) sits well inside this box. early_config_prune still narrows to the
-# cached best at runtime; this only bounds what the tuner will ever compile.
-_TB_BM = (16, 32, 64, 128)
-_TB_BN = (16, 32, 64, 128)
-_TB_WARPS = (2, 4, 8)
-_TB_STAGES = (1, 2, 3)
-
-
-@triton.autotune(
-    configs=brute({"BM": _TB_BM, "BN": _TB_BN}, warps=_TB_WARPS, stages=_TB_STAGES),
-    key=["GROUP_M", "K", "N", "ADD_RESIDUAL"],
-    prune_configs_by={"early_config_prune": _trimul_back_prune},
-)
+@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['GROUP_M', 'K', 'ADD_RESIDUAL'])
 @triton.jit
 def _back_kernel(
     tri_ptr,  # (D, M) channel-major: tri[k, m] at k*M + m
@@ -71,47 +63,117 @@ def _back_kernel(
     y_ptr,    # (M, D) row-major
     res_ptr,  # (M, D) row-major residual (== the module input pair); read iff ADD_RESIDUAL
     M, eps,
-    K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr,
-    GROUP_M: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
+    K: tl.constexpr, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M, ADD_RESIDUAL: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    rm = pid * BM + tl.arange(0, BM)
-    rk = tl.arange(0, K)
+    rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mmask = rm[:, None] < M
 
-    # tri (BM, K) — channel-major load (k strided by M)
-    tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None], mask=mmask, other=0.0).to(tl.float32)
-    mean = tl.sum(tri, axis=1) / K
-    xc = tri - mean[:, None]
-    var = tl.sum(xc * xc, axis=1) / K
-    rstd = 1.0 / tl.sqrt(var + eps)
-    lnw = tl.load(lnw_ptr + rk).to(tl.float32)
-    lnb = tl.load(lnb_ptr + rk).to(tl.float32)
-    # LN-normed row tile, cast to bf16 once (reused across all N-subtiles).
-    norm = ((xc * rstd[:, None]) * lnw[None, :] + lnb[None, :]).to(tl.bfloat16)  # (BM, K)
-    xn = tl.load(xn_ptr + rm[:, None] * K + rk[None, :], mask=mmask, other=0.0)  # (BM, K)
+    if BLOCK_K >= K:
+        # COVERING TILE (BLOCK_K and K are both tl.constexpr -> this branch is selected at COMPILE
+        # time and only one of the two is ever emitted). One tile holds the whole LN row, so
+        # read `tri` ONCE, keep the fp32 centered row and the bf16 `norm` in registers, and
+        # reuse them across every N-subtile. This is exactly the pre-tiling single-pass
+        # schedule; the k-tiled `else` below is the general (BLOCK_K < K) form. Numerics are
+        # identical to the else-branch at BLOCK_K >= K: the loops there are single-trip and the
+        # arithmetic is written to match term for term.
+        rk = tl.arange(0, BLOCK_K)
+        kmask1 = rk < K
+        kmask = kmask1[None, :]
+        tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
+                      mask=mmask & kmask, other=0.0).to(tl.float32)
+        mean = tl.sum(tri, axis=1) / K
+        xc = tl.where(kmask, tri - mean[:, None], 0.0)
+        var = tl.sum(xc * xc, axis=1) / K
+        rstd = 1.0 / tl.sqrt(var + eps)
+        lnw = tl.load(lnw_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
+        lnb = tl.load(lnb_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
+        norm = tl.where(
+            kmask, (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :], 0.0,
+        ).to(tl.bfloat16)
+        xn = tl.load(xn_ptr + rm[:, None] * K + rk[None, :], mask=mmask & kmask, other=0.0)
+        for j in tl.static_range(0, N, BLOCK_N):
+            rn = j + tl.arange(0, BLOCK_N)
+            nmask = rn[None, :] < N
+            wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :],
+                         mask=kmask1[:, None] & nmask, other=0.0)
+            wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :],
+                         mask=kmask1[:, None] & nmask, other=0.0)
+            proj = tl.dot(norm, wp)                              # (BLOCK_M1, BLOCK_N)
+            gate = tl.sigmoid(tl.dot(xn, wg))                    # (BLOCK_M1, BLOCK_N)
+            acc = proj * gate
+            if ADD_RESIDUAL:
+                res = tl.load(res_ptr + rm[:, None] * N + rn[None, :],
+                              mask=mmask & nmask, other=0.0).to(tl.float32)
+                acc = acc + res
+            tl.store(y_ptr + rm[:, None] * N + rn[None, :],
+                     acc.to(y_ptr.dtype.element_ty), mask=mmask & nmask)
+    else:
+        # --- LN row statistics over K-tiles. Two sweeps (mean, then CENTERED variance) so the fp32
+        # algebra at BLOCK_K >= K is exactly the original single-tile one. tri is (D, M) channel-major, so
+        # each k-slice is a coalesced run over m. ---
+        s = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            rk = k0 + tl.arange(0, BLOCK_K)
+            kmask = rk[None, :] < K
+            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
+                          mask=mmask & kmask, other=0.0).to(tl.float32)
+            s += tl.sum(tri, axis=1)
+        mean = s / K
+        s = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            rk = k0 + tl.arange(0, BLOCK_K)
+            kmask = rk[None, :] < K
+            tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
+                          mask=mmask & kmask, other=0.0).to(tl.float32)
+            xc = tl.where(kmask, tri - mean[:, None], 0.0)
+            s += tl.sum(xc * xc, axis=1)
+        var = s / K
+        rstd = 1.0 / tl.sqrt(var + eps)
 
-    # Tile the output dim N: keep only a (BM, BN) accumulator pair live at a time.
-    # rn is masked against N so BN need not divide N (a config with BN>N — e.g. the
-    # full-grid autotune fallback on a stale cache — reads/writes only in-bounds; the
-    # out-of-range weight columns load as 0 and are dropped in the masked store, so the
-    # result is identical for every BN. Without this mask BN>N faults (illegal address).
-    for j in tl.static_range(0, N, BN):
-        rn = j + tl.arange(0, BN)
-        nmask = rn[None, :] < N
-        wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :], mask=nmask, other=0.0)
-        wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :], mask=nmask, other=0.0)
-        proj = tl.dot(norm, wp)                                  # (BM, BN)
-        gate = tl.sigmoid(tl.dot(xn, wg))                        # (BM, BN)
-        acc = proj * gate
-        if ADD_RESIDUAL:
-            # Fuse the pairformer residual add y = pair + trimul(pair): the residual is the
-            # module's own (pre-LN) input, added in the same coalesced store. No dropout here
-            # (inference: dropout is identity; training uses the v6 kernel).
-            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask & nmask, other=0.0).to(tl.float32)
-            acc = acc + res
-        y = acc.to(y_ptr.dtype.element_ty)
-        tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask & nmask)
+        # Tile the output dim N: keep only a (BLOCK_M1, BLOCK_N) accumulator pair live at a time.
+        # rn is masked against N so BLOCK_N need not divide N (a config with BLOCK_N>N — e.g. the
+        # full-grid autotune fallback on a stale cache — reads/writes only in-bounds; the
+        # out-of-range weight columns load as 0 and are dropped in the masked store, so the
+        # result is identical for every BLOCK_N. Without this mask BLOCK_N>N faults (illegal address).
+        for j in tl.static_range(0, N, BLOCK_N):
+            rn = j + tl.arange(0, BLOCK_N)
+            nmask = rn[None, :] < N
+            pacc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+            gacc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                rk = k0 + tl.arange(0, BLOCK_K)
+                kmask1 = rk < K
+                kmask = kmask1[None, :]
+                tri = tl.load(tri_ptr + rk[None, :] * M + rm[:, None],
+                              mask=mmask & kmask, other=0.0).to(tl.float32)
+                lnw = tl.load(lnw_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
+                lnb = tl.load(lnb_ptr + rk, mask=kmask1, other=0.0).to(tl.float32)
+                xc = tl.where(kmask, tri - mean[:, None], 0.0)
+                # LN-normed tile, cast to bf16 once (matches the original operand dtype).
+                norm = tl.where(
+                    kmask, (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :], 0.0,
+                ).to(tl.bfloat16)
+                xn = tl.load(xn_ptr + rm[:, None] * K + rk[None, :],
+                             mask=mmask & kmask, other=0.0)
+                wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :],
+                             mask=kmask1[:, None] & nmask, other=0.0)
+                wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :],
+                             mask=kmask1[:, None] & nmask, other=0.0)
+                pacc = tl.dot(norm, wp, pacc)
+                gacc = tl.dot(xn, wg, gacc)
+            proj = pacc                                              # (BLOCK_M1, BLOCK_N)
+            gate = tl.sigmoid(gacc)                                  # (BLOCK_M1, BLOCK_N)
+            acc = proj * gate
+            if ADD_RESIDUAL:
+                # Fuse the pairformer residual add y = pair + trimul(pair): the residual is the
+                # module's own (pre-LN) input, added in the same coalesced store. No dropout here
+                # (inference: dropout is identity; training uses the v6 kernel).
+                res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask & nmask, other=0.0).to(tl.float32)
+                acc = acc + res
+            y = acc.to(y_ptr.dtype.element_ty)
+            tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask & nmask)
 
 
 def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None):
@@ -131,7 +193,7 @@ def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=Non
     y = torch.empty(M, D, device=x_n.device, dtype=x_n.dtype)
     add_residual = residual is not None
     res_flat = residual.reshape(M, D).contiguous() if add_residual else y  # dummy ptr when off
-    grid = lambda meta: (triton.cdiv(M, meta["BM"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
                        ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
                        K=D, N=D, GROUP_M=get_seq_group(M), ADD_RESIDUAL=add_residual)
