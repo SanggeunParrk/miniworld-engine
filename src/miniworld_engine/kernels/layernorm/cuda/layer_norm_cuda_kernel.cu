@@ -48,6 +48,9 @@ __inline__ __device__ float block_reduce_sum(float val, float* smem) {
     const int n_warps = (blockDim.x + 31) >> 5;
     val = (threadIdx.x < n_warps) ? smem[threadIdx.x] : 0.f;
     val = warp_reduce_sum(val);                   // reduce across warps
+    // Trailing barrier so the helper is safe to call twice on the SAME buffer: without it the
+    // caller's next write to smem can land while a slower warp is still reading the slot above.
+    __syncthreads();
     return val;
 }
 
@@ -87,6 +90,12 @@ __global__ void layer_norm_fwd_kernel(
     }
     __syncthreads();
     mean = smem[0];
+    // Passing the barrier is not the same as having issued the load. Without this second barrier,
+    // warp 0 can finish the pass-2 loop and write its partial into smem[0] (inside the next
+    // block_reduce_sum) while a slower warp has not yet read `mean` from smem[0] -- that warp then
+    // uses a partial sum as the mean and poisons the variance. compute-sanitizer racecheck
+    // reported ~70000 hazards here at BOTH d=128 and d=125, with rstd off by ~0.9 relative.
+    __syncthreads();
 
     // ── Pass 2: variance ─────────────────────
     float var = 0.f;
