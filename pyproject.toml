@@ -57,7 +57,10 @@ where = ["src"]
 #   - **/*.cu / *.cuh / *.cpp / *.h -> CUDA / CUTLASS kernel sources JIT-compiled at runtime by
 #                                 the hand-CUDA backends (transition b2b, adaln, gate-bwd wgmma);
 #                                 without them those backends fail to build in a pip install.
-miniworld_engine = ["**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h"]
+#   - build/*.csv              -> the per-GPU kernel-cache build matrix, read by the cache builder
+#                                 (miniworld_engine.build.matrix) to decide which units a card may
+#                                 build; without it the builder raises on a missing matrix.
+miniworld_engine = ["**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.csv"]
 
 # ----------------------------------------------------------------------------
 # ruff — practical repo policy.

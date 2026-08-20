@@ -46,7 +46,7 @@ _LAZY_OPS = {
         "augmented_attention_pair_bias",
     ),
     "layer_norm_linear": (
-        "miniworld_engine.kernels.layernorm_linear.pair_bias",
+        "miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
         "triton_layer_norm_linear",
     ),
     "layer_norm": (
