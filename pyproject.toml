@@ -98,7 +98,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # team-gm's tests/benchmarks relaxations (+ E402/I001 for our sys.path bootstrap).
-"submits/*" = ["D", "ANN201", "S101", "INP001", "ANN001", "PLR2004"]
 "benchmarks/**/*.py" = [
   "E402",
 ]

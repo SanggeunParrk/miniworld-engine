@@ -82,7 +82,7 @@ class BenchConfig(BaseModel):
     sweep_seq_len: int = 512
 
     # Dedicated parallel cache builder: when set, an autotune-capture run dumps its timings to
-    # THIS shard file instead of the in-repo cache (submits/build_autotune_cache.py merges shards).
+    # THIS shard file instead of the in-repo cache (autotune.builder merges shards).
     autotune_shard: str = ""
     #: directory of <op>.csv config files; every kernel's autotune grid comes from
     #: here. Applied BEFORE the kernels import -- triton keeps the config list it is
@@ -2754,7 +2754,7 @@ def main(cfg: DictConfig) -> None:
         print(_capture.summary())
         shard = getattr(conf, "autotune_shard", "") or ""
         if shard:
-            # Dedicated parallel builder (submits/build_autotune_cache.py): dump this run's
+            # Dedicated parallel builder (miniworld_engine.autotune.builder): dump this run's
             # timings to its OWN shard file instead of the in-repo cache, so many parallel
             # capture jobs never race on the committed tree. A single merge step folds shards in.
             n_ops = _capture.dump_shard(shard)
