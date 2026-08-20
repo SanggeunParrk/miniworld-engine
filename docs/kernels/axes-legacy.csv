@@ -1,0 +1,216 @@
+op,file,kernel,axis,gemm,loops_over,grid_axis,meaning,extent,cover_needed,notes
+layernorm_fwd_strided_triton,adaln/triton/fused3.py,_ln_kernel,BLOCK_M,0,,0,token,M (B*L tokens),no,grid axis; rows of the flattened (M
+layernorm_fwd_strided_triton,adaln/triton/fused3.py,_ln_kernel,BLOCK_N,0,N,0,hidden,N (d_hidden for K1 / d_cond for K2),yes,LayerNorm reduce axis; BLOCK_N>=N branch reads x once instead of twice
+adaln_gemm_gate_triton,adaln/triton/fused3.py,_gemm_gate_kernel,BLOCK_M,1,,1,token,M (B*L tokens),no,GEMM M tile; flattened 1-D grid with GROUP_M swizzle
+adaln_gemm_gate_triton,adaln/triton/fused3.py,_gemm_gate_kernel,BLOCK_N,1,,1,hidden,N (d_hidden output width),no,GEMM output-N tile
+adaln_gemm_gate_triton,adaln/triton/fused3.py,_gemm_gate_kernel,BLOCK_K,1,K,0,hidden,K (d_cond),no,GEMM contraction axis; iterated and pipelined
+adaln_bwd_pre_triton,adaln/triton/fused3.py,_bwd_elem_kernel,BLOCK_M,0,,0,token,M (B*L tokens),no,
+adaln_bwd_pre_triton,adaln/triton/fused3.py,_bwd_elem_kernel,BLOCK_N,0,N,0,hidden,N (d_hidden),no,pure elementwise single pass; no reduction
+adaln_epilogue_triton,adaln/triton/inference.py,_adaln_epilogue_kernel,BLOCK_M,0,,0,token,M (B*L tokens),no,
+adaln_epilogue_triton,adaln/triton/inference.py,_adaln_epilogue_kernel,BLOCK_N,0,N,0,hidden,N (d_hidden; SB is 2N wide),yes,LayerNorm reduce axis; covering reads x once
+adaln_fwd_triton,adaln/triton/inference.py,_adaln_fused_kernel,BLOCK_M,1,,1,token,M (B*L tokens),no,
+adaln_fwd_triton,adaln/triton/inference.py,_adaln_fused_kernel,BLOCK_NX,1,NX,0,hidden,NX (d_x / d_hidden),yes,covering makes outer x-loop single-trip; Cond reloaded once
+adaln_fwd_triton,adaln/triton/inference.py,_adaln_fused_kernel,BLOCK_NC,1,NC,0,hidden,NC (d_cond),no,GEMM contraction and cond LN reduce; iterated by design
+adaln_fwd_saveact_triton,adaln/triton/main.py,adaln_fwd_kernel,BLOCK_M,1,,1,token,M (B*L tokens),no,
+adaln_fwd_saveact_triton,adaln/triton/main.py,adaln_fwd_kernel,BLOCK_NX,1,NX,0,hidden,NX (d_hidden),yes,covering makes outer x-loop single-trip
+adaln_fwd_saveact_triton,adaln/triton/main.py,adaln_fwd_kernel,BLOCK_NC,1,NC,0,hidden,NC (d_cond),no,GEMM contraction and cond LN reduce
+adaln_bwd_dx_dbias_triton,adaln/triton/main.py,adaln_bwd_input_kernel,BLOCK_M,1,,1,token,M (B*L tokens),no,grid = cdiv(M BLOCK_M)
+adaln_bwd_dx_dbias_triton,adaln/triton/main.py,adaln_bwd_input_kernel,BLOCK_NX,1,NX,0,hidden,NX (d_hidden),yes,JOINT guard with BLOCK_NC; reads DY/XHat/Gate once instead of four times
+adaln_bwd_dx_dbias_triton,adaln/triton/main.py,adaln_bwd_input_kernel,BLOCK_NC,1,NC,0,hidden,NC (d_cond),yes,JOINT guard with BLOCK_NX; keeps grad_cond_aff in registers
+adaln_bwd_dw_triton,adaln/triton/main.py,adaln_bwd_weight_kernel,BLOCK_M,1,,0,token,M (B*L tokens),no,wgrad reduction over tokens; M runtime-large so covering impossible
+adaln_bwd_dw_triton,adaln/triton/main.py,adaln_bwd_weight_kernel,BLOCK_NX,1,,1,hidden,NX (d_hidden),no,grid axis 0; dW output tile rows
+adaln_bwd_dw_triton,adaln/triton/main.py,adaln_bwd_weight_kernel,BLOCK_NC,1,,1,hidden,NC (d_cond),no,grid axis 1; dW output tile cols
+adaln_bwd_dlnw_triton,adaln/triton/main.py,adaln_bwd_lnw_kernel,BLOCK_M,1,,0,token,M (B*L tokens),no,outer accumulation over tokens
+adaln_bwd_dlnw_triton,adaln/triton/main.py,adaln_bwd_lnw_kernel,BLOCK_NX,1,NX,0,hidden,NX (d_hidden),no,GEMM contraction of dscale@ScaleW + dy@BiasW
+adaln_bwd_dlnw_triton,adaln/triton/main.py,adaln_bwd_lnw_kernel,BLOCK_NC,1,,1,hidden,NC (d_cond),no,grid axis; dlnw output tile
+adaln_epilogue_saveact_triton,adaln/triton/training.py,_epilogue_train_kernel,BLOCK_M,0,,0,token,M (B*L tokens),no,
+adaln_epilogue_saveact_triton,adaln/triton/training.py,_epilogue_train_kernel,BLOCK_N,0,N,0,hidden,N (d_hidden; SB is 2N wide),yes,LayerNorm reduce axis; covering reads x once
+adaln_bwd_pre_dx_triton,adaln/triton/training.py,_bwd_x_kernel,BLOCK_M,0,,0,token,M (B*L tokens),no,
+adaln_bwd_pre_dx_triton,adaln/triton/training.py,_bwd_x_kernel,BLOCK_N,0,N,0,hidden,N (d_hidden = NX),yes,LN-backward c1/c2 row reduce; covering reads dy/x/gate once not three times
+adaln_bwd_dx_dlnw_triton,adaln/triton/training.py,_dgrad_condln_kernel,BLOCK_M,1,,0,token,M (B*L tokens),no,sole grid axis
+adaln_bwd_dx_dlnw_triton,adaln/triton/training.py,_dgrad_condln_kernel,BLOCK_NC,1,NC,0,hidden,NC (d_cond),yes,explicit BLOCK_NC>=NC branch; tiled form recomputes the whole Dt@Wcat GEMM
+adaln_bwd_dx_dlnw_triton,adaln/triton/training.py,_dgrad_condln_kernel,BLOCK_K,1,K2,0,hidden,K2 (2*NX concat scale+bias width),no,in-kernel GEMM contraction
+augmented_attention_fwd_triton,augmented_attention/triton/main.py,_attn_fwd,BLOCK_M,1,,0,token,N_CTX (query rows),no,grid axis 0; flash query-row tile
+augmented_attention_fwd_triton,augmented_attention/triton/main.py,_attn_fwd,BLOCK_N,1,N_CTX,0,seq,N_CTX (KV blocks),no,inner KV loop of the online softmax
+augmented_attention_fwd_triton,augmented_attention/triton/main.py,_attn_fwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,grid axis 2 splits d but partial-d qk softmax is WRONG; only launcher pinning saves it
+augmented_attention_bwd_pre_triton,augmented_attention/triton/main.py,_attn_bwd_preprocess,BLOCK_M,0,,0,token,N_CTX (query rows),no,grid axis 0; rows of delta
+augmented_attention_bwd_pre_triton,augmented_attention/triton/main.py,_attn_bwd_preprocess,BLOCK_D,0,HEAD_DIM,0,hidden,HEAD_DIM (head dim),no,accumulating d-loop for sum_d o*do; associative so any tile is exact
+augmented_attention_bwd_split_triton,augmented_attention/triton/main.py,_attn_bwd,BLOCK_M,1,N_CTX,0,token,N_CTX (query rows),no,iterated query-row loop inside _attn_bwd_dqdkdv
+augmented_attention_bwd_split_triton,augmented_attention/triton/main.py,_attn_bwd,BLOCK_N,1,,1,seq,N_CTX (KV blocks),no,grid axis 0; pid also selects the dq_expand split slot
+augmented_attention_bwd_split_triton,augmented_attention/triton/main.py,_attn_bwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,offs_k = arange(0 BLOCK_D) with no d loop or d grid; must span HEAD_DIM
+augmented_attention_bwd_reduce_triton,augmented_attention/triton/main.py,_dq_reduce,BLOCK_SIZE,0,,1,flat,N_ELEM (elements per split),no,grid-tiled linear index; split reduction loops separately over num_splits
+augmented_attention_bwd_atomic_triton,augmented_attention/triton/memory_efficient.py,_attn_bwd,BLOCK_M,1,N_CTX,0,token,N_CTX (query rows),no,iterated query-row loop
+augmented_attention_bwd_atomic_triton,augmented_attention/triton/memory_efficient.py,_attn_bwd,BLOCK_N,1,,1,seq,N_CTX (KV blocks),no,grid axis 0; dq/dbias via atomic_add so no split buffer
+augmented_attention_bwd_atomic_triton,augmented_attention/triton/memory_efficient.py,_attn_bwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,no d loop; launcher pins next_pow2(D)
+gated_projection_gate_gemm_triton,bias_only_attention/triton/gate_out.py,_gate_out_fwd,BLOCK_M,1,,1,token,M (B*L*L pair rows),no,huge row extent; standard grid tile
+gated_projection_gate_gemm_triton,bias_only_attention/triton/gate_out.py,_gate_out_fwd,BLOCK_N,1,,1,hidden,N (d_pair output width),yes,each N tile recomputes the sigmoid(gate)*out_r prologue
+gated_projection_gate_gemm_triton,bias_only_attention/triton/gate_out.py,_gate_out_fwd,BLOCK_K,1,DH,0,hidden,DH (d_hidden contraction),no,standard accumulating GEMM K loop
+gated_projection_bwd_dx_triton,bias_only_attention/triton/gate_out.py,_dgrad_epi,BM,1,,1,token,M (B*L*L pair rows),no,grid axis 0; extent far too large to cover
+gated_projection_bwd_dx_triton,bias_only_attention/triton/gate_out.py,_dgrad_epi,BN,1,N,0,hidden,N (d_pair contraction),no,deliberately tiled to bound shared memory on sm_86
+gated_projection_bwd_dx_triton,bias_only_attention/triton/gate_out.py,_dgrad_epi,BH,1,,1,hidden,DH (d_hidden output width),yes,splitting re-runs the whole N loop per h-tile
+gated_projection_gate_flat_triton,bias_only_attention/triton/gate_out.py,_sigmul_fwd,BLK,0,,0,flat,n (numel),no,elementwise 1-D grid over flattened tensor
+gated_projection_bwd_gate_flat_triton,bias_only_attention/triton/gate_out.py,_sigmul_bwd,BLK,0,,0,flat,n (numel),no,elementwise 1-D grid over flattened tensor
+bias_only_attention_fwd_triton,bias_only_attention/triton/main.py,_attn_fwd,BLOCK_M,1,,0,token,N_CTX (query rows of one pair row),no,grid axis 0
+bias_only_attention_fwd_triton,bias_only_attention/triton/main.py,_attn_fwd,BLOCK_N,1,N_CTX,0,seq,N_CTX (V/bias key blocks),no,flash-style loop; logits are the bias alone
+bias_only_attention_fwd_triton,bias_only_attention/triton/main.py,_attn_fwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,tl.static_assert(BLOCK_D >= HEAD_DIM)
+bias_only_attention_bwd_pre_triton,bias_only_attention/triton/main.py,_attn_bwd_preprocess,BLOCK_M,0,,0,token,N_CTX (query rows),no,grid axis 0
+bias_only_attention_bwd_pre_triton,bias_only_attention/triton/main.py,_attn_bwd_preprocess,BLOCK_D,0,HEAD_DIM,0,hidden,HEAD_DIM (head dim),no,accumulating d-loop; exact for any tile
+bias_only_attention_bwd_triton,bias_only_attention/triton/main.py,_attn_bwd,BLOCK_M,1,N_CTX,0,token,N_CTX (query rows),no,iterated query loop
+bias_only_attention_bwd_triton,bias_only_attention/triton/main.py,_attn_bwd,BLOCK_N,1,,1,seq,N_CTX (KV blocks),no,grid axis 0
+bias_only_attention_bwd_triton,bias_only_attention/triton/main.py,_attn_bwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,tl.static_assert(BLOCK_D >= HEAD_DIM); no d loop
+cond_transition_expand_swiglu_triton,conditioned_transition/triton/composed.py,_expand_swiglu_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid axis 0
+cond_transition_expand_swiglu_triton,conditioned_transition/triton/composed.py,_expand_swiglu_kernel,BLOCK_N,1,,1,hidden,ND (expansion*d_hidden),no,grid axis 1; SwiGLU expanded output width
+cond_transition_expand_swiglu_triton,conditioned_transition/triton/composed.py,_expand_swiglu_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),no,GEMM-1 contraction; no reuse gained by covering
+cond_transition_squeeze_gate_triton,conditioned_transition/triton/composed.py,_squeeze_gate_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,
+cond_transition_squeeze_gate_triton,conditioned_transition/triton/composed.py,_squeeze_gate_kernel,BLOCK_D,1,,1,hidden,D (d_hidden out),no,grid axis 1; squeeze/gate output width
+cond_transition_squeeze_gate_triton,conditioned_transition/triton/composed.py,_squeeze_gate_kernel,BLOCK_K,1,ND,0,hidden,ND (expansion*d_hidden),no,GEMM-2 contraction; designed to iterate
+cond_transition_squeeze_gate_triton,conditioned_transition/triton/composed.py,_squeeze_gate_kernel,BLOCK_DC,1,DC,0,hidden,DC (d_cond),no,second contraction in a separate sequential loop
+cond_transition_fwd_b2b_triton,conditioned_transition/triton/inference.py,_cond_transition_inference_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,
+cond_transition_fwd_b2b_triton,conditioned_transition/triton/inference.py,_cond_transition_inference_kernel,BLOCK_N,1,ND,1,hidden,ND loop and D grid,no,one knob serves three roles
+cond_transition_fwd_b2b_triton,conditioned_transition/triton/inference.py,_cond_transition_inference_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),yes,x tile re-loaded inside every ND chunk unless BLOCK_K covers K
+cond_transition_fwd_b2b_triton,conditioned_transition/triton/inference.py,_cond_transition_inference_kernel,BLOCK_DC,1,DC,0,hidden,DC (d_cond),no,tiled deliberately to bound smem at DC=384
+cond_transition_expand_swiglu_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_expand_swiglu_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid axis 0
+cond_transition_expand_swiglu_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_expand_swiglu_kernel,BLOCK_N,1,,1,hidden,ND (expansion*d_hidden),no,grid axis 1; shared by a/b accumulators and the ab save
+cond_transition_expand_swiglu_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_expand_swiglu_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),no,GEMM-1 contraction; no covering branch
+cond_transition_squeeze_gate_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_squeeze_gate_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid axis 0
+cond_transition_squeeze_gate_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_squeeze_gate_kernel,BLOCK_D,1,,1,hidden,D (d_hidden out),no,grid axis 1; squeeze/gate output width
+cond_transition_squeeze_gate_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_squeeze_gate_kernel,BLOCK_K,1,ND,0,hidden,ND (expansion*d_hidden),no,GEMM-2 contraction over h despite the K name
+cond_transition_squeeze_gate_saveact_triton,conditioned_transition/triton/train_fused.py,_fwd_squeeze_gate_kernel,BLOCK_DC,1,DC,0,hidden,DC (d_cond),no,second contraction in its own sequential loop
+gated_projection_bwd_gate_flat_lowp_triton,conditioned_transition/triton/train_fused.py,_gate_bwd_kernel,BLOCK,0,,1,flat,n_elem (M*D),no,1-D linear index
+cond_transition_bwd_gemm_triton,conditioned_transition/triton/train_fused.py,_dgemm_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,swizzled 1-D grid
+cond_transition_bwd_gemm_triton,conditioned_transition/triton/train_fused.py,_dgemm_kernel,BLOCK_N,1,,1,hidden,N (DC = d_cond output width),no,only live call is dcond = dscale @ Wsc
+cond_transition_bwd_gemm_triton,conditioned_transition/triton/train_fused.py,_dgemm_kernel,BLOCK_K,1,K,0,hidden,K (D = d_hidden contraction),no,
+cond_transition_bwd_swiglu_dx_triton,conditioned_transition/triton/train_fused.py,_dx_fused_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,
+cond_transition_bwd_swiglu_dx_triton,conditioned_transition/triton/train_fused.py,_dx_fused_kernel,BLOCK_K,1,,1,hidden,K (d_hidden out feature),no,grid axis 1; output width despite the K name
+cond_transition_bwd_swiglu_dx_triton,conditioned_transition/triton/train_fused.py,_dx_fused_kernel,BLOCK_D,1,ND,0,hidden,ND (expansion*d_hidden),no,the actual contraction
+cond_transition_bwd_gate_squeeze_dx_triton,conditioned_transition/triton/train_fused.py,_dh_gatebwd_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,swizzled 1-D grid with GROUP_M
+cond_transition_bwd_gate_squeeze_dx_triton,conditioned_transition/triton/train_fused.py,_dh_gatebwd_kernel,BLOCK_N,1,,1,hidden,ND (expansion*d_hidden),no,dh output width; ND too wide to cover
+cond_transition_bwd_gate_squeeze_dx_triton,conditioned_transition/triton/train_fused.py,_dh_gatebwd_kernel,BLOCK_K,1,D,0,hidden,D (d_hidden gate/out width),no,DUAL ROLE: GEMM contraction and gate-bwd prologue tile
+cond_transition_bwd_swiglu_dx_packed_triton,conditioned_transition/triton/train_fused.py,_dx_swiglubwd_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,swizzled 1-D grid with GROUP_M
+cond_transition_bwd_swiglu_dx_packed_triton,conditioned_transition/triton/train_fused.py,_dx_swiglubwd_kernel,BLOCK_N,1,,1,hidden,K (d_hidden out feature),no,grid axis despite the N name
+cond_transition_bwd_swiglu_dx_packed_triton,conditioned_transition/triton/train_fused.py,_dx_swiglubwd_kernel,BLOCK_K,1,ND2,0,hidden,ND2 (2*ND packed [da|db]),no,DUAL ROLE: reduction axis and swiglu-bwd emit tile
+cond_transition_bwd_swiglu_packed_triton,conditioned_transition/triton/train_fused.py,_swiglu_bwd_pack_kernel,BLOCK_M,0,,0,token,M (B*L or B*L*L rows),no,
+cond_transition_bwd_swiglu_packed_triton,conditioned_transition/triton/train_fused.py,_swiglu_bwd_pack_kernel,BLOCK_N,0,,0,hidden,ND (expansion*d_hidden),no,elementwise 2-D tile
+cond_transition_bwd_dw_triton,conditioned_transition/triton/train_fused.py,_wgrad_kernel,BLOCK_N,1,,1,hidden,N (dW rows: D or 2*ND),no,grid axis 0
+cond_transition_bwd_dw_triton,conditioned_transition/triton/train_fused.py,_wgrad_kernel,BLOCK_K,1,,1,hidden,K (dW cols),no,grid axis 1
+cond_transition_bwd_dw_triton,conditioned_transition/triton/train_fused.py,_wgrad_kernel,BLOCK_M,1,M,0,token,M (B*L*L tokens),no,token axis is the reduction; covering thousands of tokens impossible
+cond_transition_swiglu_triton,conditioned_transition/triton/training.py,_swiglu_fwd_kernel,BLOCK,0,,1,flat,M*ND,no,deliberately flat; 2-D tiling measured 1.5x slower
+cond_transition_bwd_swiglu_flat_triton,conditioned_transition/triton/training.py,_swiglu_bwd_kernel,BLOCK,0,,1,flat,M*ND,no,deliberately flat; 2-D form measured 822us vs under 100us
+cond_transition_fwd_b2b_saveact_triton,conditioned_transition/triton/training.py,_b2b_fwd_train_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid axis 0
+cond_transition_fwd_b2b_saveact_triton,conditioned_transition/triton/training.py,_b2b_fwd_train_kernel,BLOCK_N,1,ND,0,hidden,ND (expansion*d_hidden),no,DUAL ROLE: GEMM-1 output width and GEMM-2 contraction chunk
+cond_transition_fwd_b2b_saveact_triton,conditioned_transition/triton/training.py,_b2b_fwd_train_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),no,DUAL ROLE: K contraction and reused for the DC contraction loop
+cond_transition_fwd_b2b_saveact_triton,conditioned_transition/triton/training.py,_b2b_fwd_train_kernel,BLOCK_D,1,,1,hidden,D (d_hidden out),yes,BLOCK_D>=D leaves one d program; else every d tile recomputes the expand half
+layernorm_fwd_rowscale_triton,fused_ln_mask/cute/fused_ln_mask.py,_fused_ln_mask_kernel,BLOCK_M,0,,1,token,M (B*L*L pair rows),no,flattened B*L*L row index; grid axis
+layernorm_fwd_rowscale_triton,fused_ln_mask/cute/fused_ln_mask.py,_fused_ln_mask_kernel,BLOCK_D,0,D,0,hidden,D (d_pair feature width),yes,LayerNorm reduce axis; covering keeps the single HBM read of x
+gated_projection_gate_triton,gated_projection/triton/main.py,sigmoid_gate_fwd_kernel,BLOCK_M,0,,0,token,n_elements (M = token rows),no,n_elements is rows not elements despite the name
+gated_projection_gate_triton,gated_projection/triton/main.py,sigmoid_gate_fwd_kernel,BLOCK_N,0,R,0,hidden,R (= N = hd feature width),no,pure elementwise R-loop
+gated_projection_bwd_gate_triton,gated_projection/triton/main.py,sigmoid_gate_bwd_kernel,BLOCK_M,0,,0,token,n_elements (M = token rows),no,
+gated_projection_bwd_gate_triton,gated_projection/triton/main.py,sigmoid_gate_bwd_kernel,BLOCK_N,0,R,0,hidden,R (= N = hd feature width),no,R is a runtime arg so no constexpr covering branch is expressible
+layernorm_fwd_saveact_triton,layernorm/triton/main.py,layer_norm_fwd_fused,BLOCK_M,0,,0,token,M (B*L or B*L*L rows),no,grid = cdiv(M BLOCK_M)
+layernorm_fwd_saveact_triton,layernorm/triton/main.py,layer_norm_fwd_fused,BLOCK_N,0,N,0,hidden,N (d_hidden / d_pair),yes,LN reduce axis; covering collapses to single-pass registers
+layernorm_bwd_atomic_triton,layernorm/triton/main.py,layer_norm_bwd_dx_fused,BLOCK_M,0,,0,token,M (B*L or B*L*L rows),no,grid = cdiv(M BLOCK_M)
+layernorm_bwd_atomic_triton,layernorm/triton/main.py,layer_norm_bwd_dx_fused,BLOCK_N,0,N,0,hidden,N (d_hidden / d_pair),yes,explicit BLOCK_N>=N branch collapses two c1/c2 passes to one read
+layernorm_bwd_split_triton,layernorm/triton/persistent.py,_ln_bwd_persistent,BLOCK_M,0,,0,token,M (B*L*L rows),no,row tiles grid-strided over NUM_SM*2 programs
+layernorm_bwd_split_triton,layernorm/triton/persistent.py,_ln_bwd_persistent,BLOCK_N,0,N,1,hidden,N (d_hidden),yes,covering avoids re-reading X and DY for the c1/c2 row reduce
+layernorm_fwd_mmajor_triton,layernorm/triton/transpose.py,_ln_transpose_dbn_kernel,BLOCK_M,0,,1,token,M (B*N tokens of the (D M) channel-major view),no,grid = cdiv(M BLOCK_M)
+layernorm_fwd_mmajor_triton,layernorm/triton/transpose.py,_ln_transpose_dbn_kernel,BLOCK_D,0,D,0,hidden,D (channel width / d_hidden),yes,LN reduce over D; covering reads x once and transposes from registers
+layernorm_linear_fwd_triton,layernorm_linear/triton/fused.py,_lnl_fwd_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid is 1-D over M-blocks; N looped in-kernel
+layernorm_linear_fwd_triton,layernorm_linear/triton/fused.py,_lnl_fwd_kernel,BLOCK_N,1,N,0,hidden,N (d_out of the Linear),no,GEMM output width; streamed in tiles so LN stats are reused across N
+layernorm_linear_fwd_triton,layernorm_linear/triton/fused.py,_lnl_fwd_kernel,BLOCK_K,1,K,0,hidden,K (d_in / d_hidden),yes,covering reads x once vs 2 + N/BLOCK_N reads per row
+layernorm_bwd_split_mmajor_triton,layernorm_linear/triton/mmajor_bwd.py,_ln_bwd_mmajor_kernel,BLOCK_M,0,,0,token,M (B*L*L tokens; unit-stride in m-major),no,persistent grid-stride over M-tiles
+layernorm_bwd_split_mmajor_triton,layernorm_linear/triton/mmajor_bwd.py,_ln_bwd_mmajor_kernel,BLOCK_N,0,N,1,hidden,N (= K = d_hidden),yes,covering drops the c1/c2 gather so DXn and X are read once
+layernorm_linear_fwd_fp32_triton,layernorm_linear/triton/pair_bias.py,_layer_norm_linear_fwd,BLOCK_M,1,,0,token,M (B*L*L pair rows),no,grid = cdiv(M BLOCK_M)
+layernorm_linear_fwd_fp32_triton,layernorm_linear/triton/pair_bias.py,_layer_norm_linear_fwd,BLOCK_N,1,N,0,hidden,N (d_pair channel width),yes,LN reduce axis; covering keeps y in registers for all head subtiles
+layernorm_linear_fwd_fp32_triton,layernorm_linear/triton/pair_bias.py,_layer_norm_linear_fwd,BLOCK_NH,1,NH,0,hidden,NH (n_head projection out-width),no,projection output axis; n_head tiny so one tile usually covers anyway
+layernorm_linear_bwd_fp32_triton,layernorm_linear/triton/pair_bias.py,_layer_norm_linear_bwd,BLOCK_M,1,,0,token,M (B*L*L pair rows),no,grid = cdiv(M BLOCK_M)
+layernorm_linear_bwd_fp32_triton,layernorm_linear/triton/pair_bias.py,_layer_norm_linear_bwd,BLOCK_N,1,N,0,hidden,N (d_pair channel width),no,NO covering branch unlike its fwd sibling; both passes re-read x
+layernorm_linear_bwd_fp32_triton,layernorm_linear/triton/pair_bias.py,_layer_norm_linear_bwd,BLOCK_NH,1,NH,0,hidden,NH (n_head projection axis),no,ignored entirely on the USE_DOT=False scalar path
+layernorm_fwd_recompute_triton,layernorm_linear/triton/recompute.py,_xnormed_kernel,BLOCK_M,0,,1,token,M (B*L*L rows),no,grid = cdiv(M BLOCK_M)
+layernorm_fwd_recompute_triton,layernorm_linear/triton/recompute.py,_xnormed_kernel,BLOCK_K,0,K,0,hidden,K (d_hidden),no,pure elementwise; mean/rstd loaded not reduced
+layernorm_fwd_recompute_noaffine_triton,layernorm_linear/triton/recompute.py,_xhat_kernel,BLOCK_M,0,,1,token,M (B*L*L rows),no,grid = cdiv(M BLOCK_M)
+layernorm_fwd_recompute_noaffine_triton,layernorm_linear/triton/recompute.py,_xhat_kernel,BLOCK_K,0,K,0,hidden,K (d_hidden),no,pure elementwise recompute; no reduction over K
+layernorm_stats_triton,layernorm_linear/triton/stats.py,_stats_kernel,BLOCK_M,0,,1,token,M (B*L*L rows),no,grid = cdiv(M BLOCK_M)
+layernorm_stats_triton,layernorm_linear/triton/stats.py,_stats_kernel,BLOCK_K,0,K,0,hidden,K (d_hidden),no,single-pass sum/sumsq already reads X once; covering only raises register pressure
+layernorm_fwd_saveact_strided_triton,layernorm_linear/triton/te_style.py,_ln_mat_kernel,BLOCK_M,0,,0,token,M (B*L*L rows; arbitrary strides),no,grid = cdiv(M BLOCK_M)
+layernorm_fwd_saveact_strided_triton,layernorm_linear/triton/te_style.py,_ln_mat_kernel,BLOCK_N,0,N,0,hidden,N (= K = d_hidden),yes,LN reduce axis; covering reads x once with centred variance
+layernorm_bwd_atomic_strided_triton,layernorm_linear/triton/te_style.py,_ln_bwd_kernel,BLOCK_M,0,,0,token,M (B*L*L tokens m-major),no,dG/dB atomics reduce over tokens across blocks
+layernorm_bwd_atomic_strided_triton,layernorm_linear/triton/te_style.py,_ln_bwd_kernel,BLOCK_N,0,,0,hidden,N (= K = d_hidden),yes,NO n-loop; launcher pins next_pow2(K) so one tile MUST span N
+gated_projection_gate_inplace_flat_triton,tm1/cute/launch.py,_gate_mul_kernel,BLOCK,0,,1,flat,n (proj.numel()),no,1-D elementwise over a flat buffer
+gated_projection_gate_packed_flat_triton,tm1/cute/launch.py,_glu_wide_kernel,BLOCK,0,,1,flat,D_L2 (d_pair*L*L of one GLU half),no,flat index over the gate half
+trimul_gemm_gate_triton,tm1/triton/main.py,fused_sigmoid_gate_fwd_kernel,BLOCK_M,1,,1,pair,M (B*L*L pairs),no,
+trimul_gemm_gate_triton,tm1/triton/main.py,fused_sigmoid_gate_fwd_kernel,BLOCK_K,1,N,0,hidden,N (d_pair contraction),no,
+trimul_gemm_gate_triton,tm1/triton/main.py,fused_sigmoid_gate_fwd_kernel,BLOCK_N,1,,1,hidden,N (d_pair output width),no,same symbol N as the contraction
+trimul_bwd_gate_recompute_triton,tm1/triton/main.py,fused_sigmoid_gate_bwd_kernel,BLOCK_M,1,,1,pair,M (B*L*L pairs),no,
+trimul_bwd_gate_recompute_triton,tm1/triton/main.py,fused_sigmoid_gate_bwd_kernel,BLOCK_K,1,N,0,hidden,N (d_pair contraction),no,
+trimul_bwd_gate_recompute_triton,tm1/triton/main.py,fused_sigmoid_gate_bwd_kernel,BLOCK_N,1,,1,hidden,N (d_pair output width),no,
+trimul_outproj_gemm_gate_triton,tm2/triton/main.py,fused_sigmoid_gate2_fwd_kernel,BLOCK_M,1,,1,pair,M (B*L*L pairs),no,
+trimul_outproj_gemm_gate_triton,tm2/triton/main.py,fused_sigmoid_gate2_fwd_kernel,BLOCK_K,1,N,0,hidden,N (d_pair contraction),no,
+trimul_outproj_gemm_gate_triton,tm2/triton/main.py,fused_sigmoid_gate2_fwd_kernel,BLOCK_N,1,,1,hidden,N (d_pair output width),no,
+trimul_outproj_bwd_gate_recompute_triton,tm2/triton/main.py,fused_sigmoid_gate2_bwd_kernel,BLOCK_M,1,,1,pair,M (B*L*L pairs),no,
+trimul_outproj_bwd_gate_recompute_triton,tm2/triton/main.py,fused_sigmoid_gate2_bwd_kernel,BLOCK_K,1,N,0,hidden,N (d_pair contraction),no,
+trimul_outproj_bwd_gate_recompute_triton,tm2/triton/main.py,fused_sigmoid_gate2_bwd_kernel,BLOCK_N,1,,1,hidden,N (d_pair output width),no,
+transition_bwd_transpose_packed_triton,transition/cute/backward_gatebwd.py,_cdup_interleave_kernel,BM,0,,1,token,M (B*L or B*L*L rows),no,
+transition_bwd_transpose_packed_triton,transition/cute/backward_gatebwd.py,_cdup_interleave_kernel,BN,0,,1,hidden,N (ND = expansion*d_hidden),no,each tile writes 2*BN cols
+layernorm_fwd_recompute_foldstats_triton,transition/cute/fused.py,_xn_recompute_kernel,BM,0,,1,token,M (B*L or B*L*L rows),no,only grid axis
+layernorm_fwd_recompute_foldstats_triton,transition/cute/fused.py,_xn_recompute_kernel,BK,0,K,0,hidden,K (d_hidden),no,pure elementwise in K; rstd/c1 already reduced
+transition_bwd_epilogue_triton,transition/cute/gatebwd_sm100.py,_grad_mul_kernel,BLK,0,,1,flat,N (dA.numel() = M*ND),no,1-D elementwise over flat contiguous buffers
+transition_fold_triton,transition/triton/fold.py,_fold_kernel,BLOCK_J,0,,1,hidden,N (ND weight rows),no,tiles weight rows not tokens
+transition_fold_triton,transition/triton/fold.py,_fold_kernel,BLOCK_K,0,K,0,hidden,K (d_hidden),no,accumulates exactly across tiles; weights read once
+transition_layernorm_expand_swiglu_triton,transition/triton/fused.py,_transition_expand_gate_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,sole grid axis; ND looped in-kernel
+transition_layernorm_expand_swiglu_triton,transition/triton/fused.py,_transition_expand_gate_kernel,BLOCK_N,1,ND,0,hidden,ND (expansion*d_hidden),no,in-kernel ND chunk loop
+transition_layernorm_expand_swiglu_triton,transition/triton/fused.py,_transition_expand_gate_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),yes,compile-time BLOCK_K>=K branch: x read and normalized once
+transition_fwd_b2b_triton,transition/triton/fused.py,_transition_b2b_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid axis 0
+transition_fwd_b2b_triton,transition/triton/fused.py,_transition_b2b_kernel,BLOCK_N,1,ND,1,hidden,ND loop and D grid,no,DUAL ROLE
+transition_fwd_b2b_triton,transition/triton/fused.py,_transition_b2b_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),yes,compile-time BLOCK_K>=K keeps normalized x in registers
+transition_fwd_b2b_ktiled_triton,transition/triton/fused.py,_transition_b2b_ktiled_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,
+transition_fwd_b2b_ktiled_triton,transition/triton/fused.py,_transition_b2b_ktiled_kernel,BLOCK_N,1,ND,1,hidden,ND loop and D grid,no,dual role: GEMM-2 contraction chunk and squeeze output tile
+transition_fwd_b2b_ktiled_triton,transition/triton/fused.py,_transition_b2b_ktiled_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),yes,explicit BLOCK_K>=K branch holds normalized x in regs
+transition_bwd_swiglu_recompute_triton,transition/triton/fused.py,_transition_expand_gatebwd_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,grid axis 0
+transition_bwd_swiglu_recompute_triton,transition/triton/fused.py,_transition_expand_gatebwd_kernel,BLOCK_N,1,,1,hidden,ND (expansion*d_hidden),no,grid axis 1; ND too wide to cover
+transition_bwd_swiglu_recompute_triton,transition/triton/fused.py,_transition_expand_gatebwd_kernel,BLOCK_K,1,K,0,hidden,K (d_hidden in),no,plain accumulating contraction; NO covering branch unlike the forward
+layernorm_bwd_privatized_triton,transition/triton/fused.py,_transition_ln_bwd_kernel,BLOCK_M,0,,1,token,M (B*L or B*L*L rows),no,1-D grid; dgamma/dbeta atomics across M-blocks
+layernorm_bwd_privatized_triton,transition/triton/fused.py,_transition_ln_bwd_kernel,BLOCK_K,0,K,0,hidden,K (d_hidden),yes,compile-time BLOCK_K>=K single-pass branch
+transition_expand_swiglu_triton,transition/triton/main.py,transition_fwd_kernel,BLOCK_M,1,,1,token,M (B*L or B*L*L rows),no,
+transition_expand_swiglu_triton,transition/triton/main.py,transition_fwd_kernel,BLOCK_K,1,N,0,hidden,N (d_hidden in),no,contraction despite N symbol
+transition_expand_swiglu_triton,transition/triton/main.py,transition_fwd_kernel,BLOCK_N,1,,1,hidden,n*N (expansion*d_hidden),no,expanded output width; grid axis
+triangle_attention_fwd_contig_triton,triangle_attention/triton/atomic.py,_attn_fwd,BLOCK_M,1,,0,token,N_CTX (query rows),no,grid axis 0; feeds the EVEN_N fast path
+triangle_attention_fwd_contig_triton,triangle_attention/triton/atomic.py,_attn_fwd,BLOCK_N,1,,0,seq,N_CTX (KV blocks),no,flash KV loop; feeds EVEN_N
+triangle_attention_fwd_contig_triton,triangle_attention/triton/atomic.py,_attn_fwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,static_assert; fwd launcher does not pin it so the tuner must
+triangle_attention_bwd_pre_contig_triton,triangle_attention/triton/atomic.py,_attn_bwd_preprocess,BLOCK_M,0,,0,token,N_CTX (query rows),no,grid axis 0
+triangle_attention_bwd_pre_contig_triton,triangle_attention/triton/atomic.py,_attn_bwd_preprocess,BLOCK_D,0,HEAD_DIM,0,hidden,HEAD_DIM (head dim),no,accumulating d-loop; exact for any tile
+triangle_attention_bwd_atomic_triton,triangle_attention/triton/atomic.py,_attn_bwd,BLOCK_M,1,,0,token,N_CTX (query rows),no,iterated query loop; dq via tl.atomic_add
+triangle_attention_bwd_atomic_triton,triangle_attention/triton/atomic.py,_attn_bwd,BLOCK_N,1,,1,seq,N_CTX (KV blocks),no,grid axis 0; feeds EVEN_N
+triangle_attention_bwd_atomic_triton,triangle_attention/triton/atomic.py,_attn_bwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,static_assert; launcher pins next_pow2(D)
+triangle_attention_fwd_triton,triangle_attention/triton/main.py,_attn_fwd,BLOCK_M,1,,0,token,N_CTX (query rows within one pair row),no,grid axis 0 = cdiv(L BLOCK_M)
+triangle_attention_fwd_triton,triangle_attention/triton/main.py,_attn_fwd,BLOCK_N,1,N_CTX,0,seq,N_CTX (KV blocks),no,flash KV loop with block_ptr advance
+triangle_attention_fwd_triton,triangle_attention/triton/main.py,_attn_fwd,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,tl.static_assert(BLOCK_D >= HEAD_DIM) forces full cover
+triangle_attention_bwd_pre_triton,triangle_attention/triton/main.py,_attn_bwd_preprocess,BLOCK_M,0,,0,token,N_CTX (query rows),no,grid axis 0 over strided 5D o/do
+triangle_attention_bwd_pre_triton,triangle_attention/triton/main.py,_attn_bwd_preprocess,BLOCK_D,0,HEAD_DIM,0,hidden,HEAD_DIM (head dim),no,accumulating d-loop; exact for any tile
+triangle_attention_bwd_dkdv_triton,triangle_attention/triton/main.py,_attn_bwd_dkdv,BLOCK_M,1,N_CTX,0,token,N_CTX (query rows),no,iterated query loop via block_ptr advance
+triangle_attention_bwd_dkdv_triton,triangle_attention/triton/main.py,_attn_bwd_dkdv,BLOCK_N,1,,1,seq,N_CTX (KV blocks),no,grid axis 0; key block owning dk/dv
+triangle_attention_bwd_dkdv_triton,triangle_attention/triton/main.py,_attn_bwd_dkdv,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,static_assert; launcher pins next_pow2(D)
+triangle_attention_bwd_dq_triton,triangle_attention/triton/main.py,_attn_bwd_dq,BLOCK_M,1,,1,token,N_CTX (query rows),no,grid axis 0; query block owning dq
+triangle_attention_bwd_dq_triton,triangle_attention/triton/main.py,_attn_bwd_dq,BLOCK_N,1,N_CTX,0,seq,N_CTX (KV blocks),no,flash KV loop with block_ptr advance
+triangle_attention_bwd_dq_triton,triangle_attention/triton/main.py,_attn_bwd_dq,BLOCK_D,1,,0,hidden,HEAD_DIM (head dim),yes,static_assert; launcher pins next_pow2(D)
+trimul_transpose_triton,trimul_inproj/cute/front_sm100.py,_transpose_kernel,BM,0,,1,pair,M (L*L pairs),no,blld -> bdll transpose
+trimul_transpose_triton,trimul_inproj/cute/front_sm100.py,_transpose_kernel,BN,0,,1,hidden,N (2*d_pair channel width),no,concatenated left|right channel axis
+gated_projection_gate_packed_mmajor_triton,trimul_inproj/cute/front_train_sm100.py,_glu_bdll_kernel,BLK,0,,0,flat,H*M (channels x L*L pairs),no,1-D index decomposed into (channel d pair m)
+trimul_outproj_layernorm_gemm_gate_triton,trimul_inproj/triton/back.py,_back_kernel,BM,1,,1,pair,M (L*L pairs),no,only grid axis
+trimul_outproj_layernorm_gemm_gate_triton,trimul_inproj/triton/back.py,_back_kernel,BN,1,,0,hidden,N (d_pair output width),no,static_range N-subtiles shrink the live accumulator pair
+trimul_outproj_layernorm_gemm_gate_triton,trimul_inproj/triton/back.py,_back_kernel,BK,1,K,0,hidden,K (d_pair),yes,BK>=K picks covering branch: LN row read once else three extra tri reads
+trimul_bwd_gate_packed_triton,trimul_inproj/triton/back_fused.py,_dconcat_kernel,BLK,0,,0,flat,DM (H*M),no,flat index split into (channel d pair m)
+trimul_bwd_gate_transpose_packed_triton,trimul_inproj/triton/back_fused.py,_dconcat5_kernel,BLK,0,,0,flat,DM (H*M),no,
+trimul_bwd_gate_packed_recompute_triton,trimul_inproj/triton/back_fused.py,_dconcat_sig_kernel,BLK,0,,0,flat,DM (H*M),no,
+trimul_gemm_gate_mmajor_triton,trimul_inproj/triton/bidirectional.py,_bidir_front_kernel,BM,1,,1,pair,M (L*L pairs),no,sole grid axis
+trimul_gemm_gate_mmajor_triton,trimul_inproj/triton/bidirectional.py,_bidir_front_kernel,BK,1,K,0,hidden,K (d_pair input width),no,pointer-advancing K-loop with no k mask
+trimul_gemm_gate_mmajor_triton,trimul_inproj/triton/bidirectional.py,_bidir_front_kernel,BN,1,H2,0,hidden,H2 (per-side projection width = 2*d_hidden),yes,full-width BN is one wide GEMM; smaller BN re-reads the whole x tile
+trimul_gemm_gate_packed_mmajor_triton,trimul_inproj/triton/front.py,_lr_kernel,BM,1,,0,pair,M (L*L pairs),no,program_id(0) real grid axis
+trimul_gemm_gate_packed_mmajor_triton,trimul_inproj/triton/front.py,_lr_kernel,BN,1,,1,hidden,2*D (interleaved gate|proj column axis),no,grid = cdiv(2*D BN)
+trimul_gemm_gate_packed_mmajor_triton,trimul_inproj/triton/front.py,_lr_kernel,BK,1,K,0,hidden,K (d_pair),no,GEMM contraction over K=D
+trimul_outproj_gemm_sigmoid_triton,trimul_inproj/triton/front.py,_gate_kernel,BM,1,,0,pair,M (L*L pairs),no,program_id(0) real grid axis
+trimul_outproj_gemm_sigmoid_triton,trimul_inproj/triton/front.py,_gate_kernel,BN,1,,1,hidden,D (d_pair gate output width),no,
+trimul_outproj_gemm_sigmoid_triton,trimul_inproj/triton/front.py,_gate_kernel,BK,1,K,0,hidden,K (d_pair),no,
+gated_projection_gate_dropres_triton,trimul_inproj/triton/gate_elem.py,_gate_mul_kernel,BM,0,,0,pair,M (B*L*L pair rows),no,sole grid axis; row-broadcast dropout ds[m%L] proves rows are pairs; extent too large to cover
+gated_projection_gate_dropres_triton,trimul_inproj/triton/gate_elem.py,_gate_mul_kernel,BN,0,N,0,hidden,N (d_pair output width),no,in-kernel column loop; pure elementwise so no cross-tile reuse
+gated_projection_bwd_gate_dropres_triton,trimul_inproj/triton/gate_elem.py,_gate_elem_bwd_ew_kernel,BM,0,,0,pair,M (B*L*L pair rows),no,sole grid axis; int64 offsets because M overflows int32
+gated_projection_bwd_gate_dropres_triton,trimul_inproj/triton/gate_elem.py,_gate_elem_bwd_ew_kernel,BN,0,N,0,hidden,N (d_pair width),no,docstring rejects whole-N: it pinned the register tile and forced power-of-two N
