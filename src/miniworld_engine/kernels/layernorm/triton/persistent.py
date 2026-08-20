@@ -50,16 +50,16 @@ PERSIST_WAVES = 2
 # fmt: off
 
 
-# GROUP_M is in the key: the grid is FIXED at g programs, so BLOCK_M1 alone sets num_tiles and
+# shape_key is in the key: the grid is FIXED at g programs, so BLOCK_M1 alone sets num_tiles and
 # whether the persistent grid is even filled -- the row count picks the winner.
-@triton.autotune(configs=configs_for("layernorm_bwd_split_triton"), key=['N', 'GROUP_M'])
+@triton.autotune(configs=configs_for("layernorm_bwd_split_triton"), key=['N', 'shape_key'])
 @triton.jit
 def _ln_bwd_persistent(
     DX, PART_DW, PART_DB, DY, X, W, Mean, Rstd,
     stride_part, stride_r, stride_c,
     M, N: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     # Grid is 2-D: axis 0 = the persistent programs that grid-stride over row tiles (this is the
     # axis PART_DW/PART_DB are indexed by), axis 1 = the column tile this program owns. The column
@@ -170,7 +170,7 @@ class TritonLayerNormPersistentFunction(torch.autograd.Function):
             x_2d, y_2d, weight, bias, mean, rstd, rstd,
             x_2d.stride(0), x_2d.stride(1),
             m, n, eps,
-            GROUP_M=get_seq_group(m), HAS_ROWSCALE=False,
+            shape_key=get_seq_group(m), HAS_ROWSCALE=False,
         )
         ctx.save_for_backward(x_2d, weight, mean, rstd)
         ctx.input_shape = x.shape
@@ -193,7 +193,7 @@ class TritonLayerNormPersistentFunction(torch.autograd.Function):
         _ln_bwd_persistent[grid_bwd](
             dx_2d, partial_dw, partial_db, dy_2d, x, weight, mean, rstd,
             partial_dw.stride(0), x.stride(0), x.stride(1),
-            m, N=n, GROUP_M=get_seq_group(m),
+            m, N=n, shape_key=get_seq_group(m),
         )
 
         dw = partial_dw.sum(dim=0).to(weight.dtype)

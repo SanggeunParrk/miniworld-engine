@@ -106,7 +106,7 @@ def _attn_fwd_inner(
 
 
 @triton.autotune(configs=configs_for("augmented_attention_fwd_triton"),
-                 key=['GROUP_N', 'H', 'HEAD_DIM'])
+                 key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -147,7 +147,7 @@ def _attn_fwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     start_m = tl.program_id(0).to(tl.int64)
@@ -232,7 +232,7 @@ def _attn_fwd(
 
 
 @triton.autotune(configs=configs_for("augmented_attention_bwd_pre_triton"),
-                 key=['GROUP_N', 'H', 'HEAD_DIM'])
+                 key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_preprocess(
     O,
@@ -249,7 +249,7 @@ def _attn_bwd_preprocess(
     HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -361,7 +361,7 @@ def _attn_bwd_dqdkdv(
 
 
 @triton.autotune(configs=configs_for("augmented_attention_bwd_split_triton"),
-                 key=['GROUP_N', 'H', 'HEAD_DIM'],
+                 key=['shape_key', 'H', 'HEAD_DIM'],
                  reset_to_zero=['DQ', 'DBias'])
 @triton.jit
 def _attn_bwd(
@@ -399,7 +399,7 @@ def _attn_bwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     pid = tl.program_id(0).to(tl.int64)
@@ -516,11 +516,11 @@ def get_elem_group(n_elem) -> int:
     return bucket_mixed(n_elem)
 
 
-# AUTOTUNE KEY: ['seq_group'] -- was ['N_ELEM'], the raw element count A*B*L*H*D, so this
+# AUTOTUNE KEY: ['shape_key'] -- was ['N_ELEM'], the raw element count A*B*L*H*D, so this
 # backward-path kernel re-swept its whole config space at every new sequence length seen in a
-# training run. `N_ELEM` is still the body's bound; `seq_group` is its bucket and is never read
+# training run. `N_ELEM` is still the body's bound; `shape_key` is its bucket and is never read
 # by the kernel, so the generated code -- and the gradient -- are unchanged.
-@triton.autotune(configs=configs_for("augmented_attention_bwd_reduce_triton"), key=['seq_group'])
+@triton.autotune(configs=configs_for("augmented_attention_bwd_reduce_triton"), key=['shape_key'])
 @triton.jit
 def _dq_reduce(
     DQ_Expand,  # (num_splits, A, B, L, H, D)
@@ -530,7 +530,7 @@ def _dq_reduce(
     stride_inner,  # element stride, not the A*B*L*H*D span
     N_ELEM,  # elements in one split (= A*B*L*H*D)
     BLOCK_E: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
@@ -602,7 +602,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
 
         q, k, v, out = [x.view(A, B, L, H, D) for x in (q, k, v, out)]
@@ -639,7 +639,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             q.stride(4),
             H,
             D,
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -690,7 +690,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
 
         # sum the splits into the final dq
@@ -707,7 +707,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             dq_expand.stride(0),
             1,  # element stride (contiguous)
             n_elem,
-            seq_group=get_elem_group(n_elem),
+            shape_key=get_elem_group(n_elem),
         )
 
         dbias = dbias.sum(dim=0)

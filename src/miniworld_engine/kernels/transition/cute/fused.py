@@ -37,12 +37,12 @@ from miniworld_engine.kernels.transition.triton.fused import (
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_recompute_foldstats_triton"), key=['seq_group', 'K'])
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_foldstats_triton"), key=['shape_key', 'K'])
 @triton.jit
 def _xn_recompute_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, b_ptr, o_ptr, M, K, sm, sk,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     # xn = (x*rstd - c1)*gamma + beta from saved stats. One bandwidth-bound pass (read x,
     # write xn). Replaces the eager fp32 layer_norm recompute, which materialized several
@@ -74,7 +74,7 @@ def _xn_recompute(x2, rstd, c1, gamma, beta):
     _xn_recompute_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(), xn,
         M, K, x2.stride(0), x2.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return xn
 from miniworld_engine.kernels.transition.cute.gemm_transition_swiglu import (

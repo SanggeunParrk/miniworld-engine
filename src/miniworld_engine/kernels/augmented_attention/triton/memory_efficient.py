@@ -115,7 +115,7 @@ def _attn_bwd_dqdkdv(
 
 
 @triton.autotune(configs=configs_for("augmented_attention_bwd_atomic_triton"),
-                 key=['GROUP_N', 'H', 'HEAD_DIM'],
+                 key=['shape_key', 'H', 'HEAD_DIM'],
                  reset_to_zero=['DQ', 'DBias'])
 @triton.jit
 def _attn_bwd(
@@ -151,7 +151,7 @@ def _attn_bwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     pid = tl.program_id(0).to(tl.int64)
@@ -308,7 +308,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
 
         q, k, v, out = [x.view(A, B, L, H, D) for x in (q, k, v, out)]
@@ -344,7 +344,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             q.stride(4),
             H,
             D,
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -388,7 +388,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
 
         dbias = dbias.permute(0, 1, 3, 2).contiguous()  # (B, L, H, L) -> (B, L, L, H)

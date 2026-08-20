@@ -112,9 +112,9 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_packed_mmajor_triton"), key=['H', 'seq_group'])
+@triton.autotune(configs=configs_for("gated_projection_gate_packed_mmajor_triton"), key=['H', 'shape_key'])
 @triton.jit
-def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLOCK_E: tl.constexpr, seq_group):
+def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLOCK_E: tl.constexpr, shape_key):
     """preact (4H,M) channel-major -> lr (2H,M). Per side: even plane=gate, odd=proj.
     Grid over the (H,M) per-side positions; each program emits left plane d AND right plane d.
     int64 offsets (4*H*M can exceed int32 at L=1024, H=128)."""
@@ -197,5 +197,5 @@ def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
     grid = lambda meta: (triton.cdiv(H * M, meta["BLOCK_E"]),)  # noqa: E731
     _glu_bdll_kernel[grid](preact.view(4 * H, M), lr.view(2 * H, M), H=H, M=M,
-                           seq_group=get_seq_group(M))
+                           shape_key=get_seq_group(M))
     return lr[:, :H], lr[:, H:], preact

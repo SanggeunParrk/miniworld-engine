@@ -38,7 +38,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['seq_group', 'ND', 'K'])
+@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['shape_key', 'ND', 'K'])
 @triton.jit
 def _expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr,
@@ -47,7 +47,7 @@ def _expand_swiglu_kernel(
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_hm, stride_hn,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
@@ -90,7 +90,7 @@ def _expand_swiglu_kernel(
 
 
 # fmt: off
-@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['seq_group', 'ND', 'DC'])
+@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['shape_key', 'ND', 'DC'])
 @triton.jit
 def _squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
@@ -103,7 +103,7 @@ def _squeeze_gate_kernel(
     stride_om, stride_od,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1).to(tl.int64)
@@ -163,7 +163,7 @@ def _expand_swiglu(x, wa, wb):
         x.stride(0), x.stride(1),
         wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return h
 
@@ -183,7 +183,7 @@ def _squeeze_gate(h, cond, ws, wsc, bsc):
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return out
 

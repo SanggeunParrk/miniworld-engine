@@ -76,7 +76,7 @@ def _fp32_matmul_ctx(dtype):
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev
 
-# Keyed on (N, GROUP_M) so the config is tuned PER (d, M-bucket) — not reused across M for a given
+# Keyed on (N, shape_key) so the config is tuned PER (d, M-bucket) — not reused across M for a given
 # d (the earlier ["N"]-only key tuned on whichever M was hit first and reused it for all M).
 # BLOCK_M1 and BLOCK_K come from the CSV.
 
@@ -93,11 +93,11 @@ def _fp32_matmul_ctx(dtype):
 # register cap never won on `_ln_mat_kernel` (it was added for the m-major `_ln_bwd_kernel`).
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_saveact_strided_triton"), key=['N', 'GROUP_M'])
+@triton.autotune(configs=configs_for("layernorm_fwd_saveact_strided_triton"), key=['N', 'shape_key'])
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N: tl.constexpr, eps,
                    sx0, sx1, sn0, sn1,
-                   BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M,
+                   BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
                    ):
     row = tl.program_id(0).to(tl.int64)
     rm = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
@@ -169,7 +169,7 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
     _ln_mat_kernel[grid](
         x, xn, mean, rstd, gamma, beta, M, int(K), eps,
         x.stride(0), x.stride(1), xn.stride(0), xn.stride(1),
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return xn, mean, rstd
 
@@ -178,12 +178,12 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
 
 
 @triton.autotune(configs=configs_for("layernorm_bwd_atomic_strided_triton"),
-                 key=['N', 'GROUP_M'],
+                 key=['N', 'shape_key'],
                  reset_to_zero=['DG', 'DB'])
 @triton.jit
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,
-                   BLOCK_M1: tl.constexpr, N_PAD: tl.constexpr, GROUP_M,
+                   BLOCK_M1: tl.constexpr, N_PAD: tl.constexpr, shape_key,
                    ):
     # NOTE: one tile per program (atomic_add per block for dγ/dβ). A grid-stride variant (one
     # atomic per program) sped up CONTIGUOUS large-d (d512 0.96→1.07x) but CATASTROPHICALLY

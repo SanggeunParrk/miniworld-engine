@@ -84,7 +84,7 @@ def _fp32_matmul_ctx(dtype):
 # ───────────────────── step 1: cond_aff = LN(cond) · lnw  (no bias) ─────────────────────
 
 
-# GROUP_M is keyed: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, which had
+# shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, which had
 # no representation in the key at all.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 
@@ -111,12 +111,12 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
 
 
-@triton.autotune(configs=configs_for("adaln_epilogue_triton"), key=['N', 'GROUP_M'])
+@triton.autotune(configs=configs_for("adaln_epilogue_triton"), key=['N', 'shape_key'])
 @triton.jit
 def _adaln_epilogue_kernel(
     X, SB, Y, M, N: tl.constexpr, eps,
     sx0, sx1, ss0, ss1, sy0, sy1,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M):
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
     # SB is (M, 2N): cols [0:N] = scale (incl. scale_b), [N:2N] = bias.
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -178,7 +178,7 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float) -> torch.Tens
     _adaln_epilogue_kernel[grid](
         x, sb, y, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1), y.stride(0), y.stride(1),
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return y
 
@@ -295,14 +295,14 @@ def adaln_inference_lnfold(
 
 
 
-@triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['NX', 'NC', 'GROUP_M'])
+@triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['NX', 'NC', 'shape_key'])
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915
     X, Cond, LnW, ScaleW, ScaleB, BiasW, Y,
     sxr, sxc, scr, scc, swr, swc, sbwr, sbwc, syr, syc,
     M, NX: tl.constexpr, NC: tl.constexpr, eps_x, eps_cond,
     USE_LOW: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K_NX: tl.constexpr, BLOCK_K_NC: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -411,7 +411,7 @@ def adaln_inference_fused(
         scale_weight.stride(0), scale_weight.stride(1),
         bias_weight.stride(0), bias_weight.stride(1), y.stride(0), y.stride(1),
         m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low,
-        GROUP_M=get_seq_group(m),
+        shape_key=get_seq_group(m),
     )
     return y.reshape(orig_x_shape)
 

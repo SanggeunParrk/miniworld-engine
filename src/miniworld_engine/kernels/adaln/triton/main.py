@@ -17,7 +17,7 @@ AUTOTUNE = settings.current().autotunes("adaln")
 
 
 
-# GROUP_M, not raw M: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, so the
+# shape_key, not raw M: the grid is cdiv(M, BLOCK_M1) and M is the token/pair row count, so the
 # forward had no row axis in its key at all while its three backwards keyed the raw count.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 
@@ -27,7 +27,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"), key=['NX', 'NC', 'GROUP_M'])
+@triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"), key=['NX', 'NC', 'shape_key'])
 @triton.jit
 def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     X,
@@ -60,7 +60,7 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     BLOCK_M1: tl.constexpr,
     BLOCK_K_NX: tl.constexpr,
     BLOCK_K_NC: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -193,7 +193,7 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
 
 
 @triton.autotune(configs=configs_for("adaln_bwd_dx_dbias_triton"),
-                 key=['GROUP_M', 'NX', 'NC'],
+                 key=['shape_key', 'NX', 'NC'],
                  reset_to_zero=['DScaleB'])
 @triton.jit
 def adaln_bwd_input_kernel(  # noqa: PLR0915
@@ -225,7 +225,7 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
     BLOCK_M1: tl.constexpr,
     BLOCK_K_NX: tl.constexpr,
     BLOCK_K_NC: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -480,7 +480,7 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
 
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_dw_triton"), key=['GROUP_M', 'NX', 'NC'])
+@triton.autotune(configs=configs_for("adaln_bwd_dw_triton"), key=['shape_key', 'NX', 'NC'])
 @triton.jit
 def adaln_bwd_weight_kernel(
     DY,
@@ -506,7 +506,7 @@ def adaln_bwd_weight_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_N_NX: tl.constexpr,
     BLOCK_N_NC: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid_x = tl.program_id(0).to(tl.int64)
     pid_c = tl.program_id(1).to(tl.int64)
@@ -573,7 +573,7 @@ def adaln_bwd_weight_kernel(
 
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_dlnw_triton"), key=['GROUP_M', 'NX', 'NC'])
+@triton.autotune(configs=configs_for("adaln_bwd_dlnw_triton"), key=['shape_key', 'NX', 'NC'])
 @triton.jit
 def adaln_bwd_lnw_kernel(
     DY,
@@ -599,7 +599,7 @@ def adaln_bwd_lnw_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid_c = tl.program_id(0).to(tl.int64)
     c_cols = pid_c * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -780,7 +780,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             eps_cond=eps_cond,
             USE_BF16=compute_dtype == torch.bfloat16,
             USE_FP16=compute_dtype == torch.float16,
-            GROUP_M=get_seq_group(m),
+            shape_key=get_seq_group(m),
         )
 
         ctx.save_for_backward(
@@ -857,7 +857,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
-            GROUP_M=get_seq_group(m),
+            shape_key=get_seq_group(m),
         )
         weight_grid = lambda meta: (
             triton.cdiv(nx, meta["BLOCK_N_NX"]),
@@ -884,7 +884,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
-            GROUP_M=get_seq_group(m),
+            shape_key=get_seq_group(m),
         )
         lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_N"])]
         adaln_bwd_lnw_kernel[lnw_grid](
@@ -908,7 +908,7 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             NC=nc,
             USE_BF16=ctx.use_bfloat16,
             USE_FP16=ctx.use_float16,
-            GROUP_M=get_seq_group(m),
+            shape_key=get_seq_group(m),
         )
 
         return (

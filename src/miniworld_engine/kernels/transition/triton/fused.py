@@ -77,14 +77,14 @@ def get_seq_group(length) -> int:
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_layernorm_expand_swiglu_triton"),
-                 key=['GROUP_M', 'ND', 'K', 'SAVE_XN'])
+                 key=['shape_key', 'ND', 'K', 'SAVE_XN'])
 @triton.jit
 def _transition_expand_gate_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, out_ptr, xn_ptr,
     # K is tl.constexpr (it is the model's d, fixed per module, and already in this kernel's
     # autotune key), so `BLOCK_K_D >= K` below is a COMPILE-TIME test and only one branch is emitted.
-    M, ND, K: tl.constexpr, GROUP_M,
+    M, ND, K: tl.constexpr, shape_key,
     stride_xm, stride_xk,
     stride_wn, stride_wk,   # Wa, Wb share layout: (ND, K) row-major -> stride_wn=K, stride_wk=1
     stride_om, stride_on,
@@ -257,12 +257,12 @@ def transition_expand_gate(
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
-                 key=['GROUP_M', 'ND', 'K', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
+                 key=['shape_key', 'ND', 'K', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr, xn_ptr,
-    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M, EPS: tl.constexpr,
+    M, ND, K: tl.constexpr, D: tl.constexpr, shape_key, EPS: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
@@ -520,14 +520,14 @@ def transition_b2b(
 
 
 # fmt: off
-@triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['GROUP_M', 'ND', 'K'])
+@triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['shape_key', 'ND', 'K'])
 @triton.jit
 def _transition_b2b_ktiled_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr,
     # K is tl.constexpr (model d, fixed per module, already in this kernel's autotune key) so the
     # `BLOCK_K_D >= K` guard below resolves at COMPILE time and only one branch is emitted.
-    M, ND, K: tl.constexpr, D: tl.constexpr, GROUP_M,
+    M, ND, K: tl.constexpr, D: tl.constexpr, shape_key,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
@@ -677,12 +677,12 @@ _B2B_MAX_K = 128
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_bwd_swiglu_recompute_triton"),
-                 key=['GROUP_M', 'ND', 'K', 'NORMALIZE', 'STORE_H', 'STACK_DAB'])
+                 key=['shape_key', 'ND', 'K', 'NORMALIZE', 'STORE_H', 'STACK_DAB'])
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,
     h_ptr, dA_ptr, dB_ptr, dAB_ptr, xn_ptr,
-    M, ND, K, GROUP_M,
+    M, ND, K, shape_key,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_gm, stride_gn,    # grad_expand / h / dA / dB: (M, ND) row-major
@@ -884,14 +884,14 @@ def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand):
 # the grid by BLOCK_M1 and gives every reduction a one-element vector to sum -- keep CSV rows at
 # or above 16.
 @triton.autotune(configs=configs_for("layernorm_bwd_privatized_triton"),
-                 key=['GROUP_M', 'K'],
+                 key=['shape_key', 'K'],
                  reset_to_zero=['dg_ptr', 'db_ptr'])
 @triton.jit
 def _transition_ln_bwd_kernel(
     dxn_ptr, x_ptr, rstd_ptr, c1_ptr, g_ptr, dx_ptr, dg_ptr, db_ptr,
     # K is tl.constexpr (model d, fixed per module, already in this kernel's autotune key) so the
     # `BLOCK_K >= K` guard below resolves at COMPILE time and only one branch is emitted.
-    M, K: tl.constexpr, GROUP_M,
+    M, K: tl.constexpr, shape_key,
     stride_m, stride_k,
     dg_stride_replica, dg_stride_k,
     db_stride_replica, db_stride_k,

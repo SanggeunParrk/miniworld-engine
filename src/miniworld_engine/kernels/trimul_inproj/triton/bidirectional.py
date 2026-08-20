@@ -52,7 +52,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 
 
 
-@triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"), key=['GROUP_M', 'H2', 'K'])
+@triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"), key=['shape_key', 'H2', 'K'])
 @triton.jit
 def _bidir_front_kernel(
     x_ptr, w_ptr,
@@ -60,7 +60,7 @@ def _bidir_front_kernel(
     preact_ptr,
     M, LL,
     K: tl.constexpr, H2: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K_D: tl.constexpr, BLOCK_K_H2: tl.constexpr, GROUP_M,
+    BLOCK_M1: tl.constexpr, BLOCK_K_D: tl.constexpr, BLOCK_K_H2: tl.constexpr, shape_key,
     SAVE_PREACT: tl.constexpr = True,
 ):
     # int64 program id -> rm and all rm-derived store offsets are int64. Combined with the
@@ -167,7 +167,7 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)          # noqa: E731
     _bidir_front_kernel[grid](
         x_flat, Wlr, left, right, preact, M, M,
-        K=K, H2=H2, GROUP_M=get_seq_group(M), SAVE_PREACT=save_preact,
+        K=K, H2=H2, shape_key=get_seq_group(M), SAVE_PREACT=save_preact,
     )
     return left, right, (preact if save_preact else None)
 

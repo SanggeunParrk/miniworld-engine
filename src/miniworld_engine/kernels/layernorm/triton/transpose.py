@@ -39,7 +39,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_mmajor_triton"), key=['D', 'GROUP_M'])
+@triton.autotune(configs=configs_for("layernorm_fwd_mmajor_triton"), key=['D', 'shape_key'])
 @triton.jit
 def _ln_transpose_dbn_kernel(
     x_ptr,   # (D, M) channel-major: x[k, m] at k*M + m
@@ -47,7 +47,7 @@ def _ln_transpose_dbn_kernel(
     w_ptr, b_ptr,  # (D,)
     M, eps,
     D: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -115,7 +115,7 @@ def _ln_transpose_dbn_bnd(x, weight, bias, eps):
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _ln_transpose_dbn_kernel[grid](
         x_dm, y, weight.contiguous(), bias.contiguous(), M, float(eps), D=d,
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return y.view(b, n, d)
 

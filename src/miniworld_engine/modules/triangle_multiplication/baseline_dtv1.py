@@ -206,14 +206,14 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-# AUTOTUNE KEY: ['seq_group', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying
-# raw M (the pair row count b*i*j) minted one full config sweep per sequence length; `seq_group` is
+# AUTOTUNE KEY: ['shape_key', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying
+# raw M (the pair row count b*i*j) minted one full config sweep per sequence length; `shape_key` is
 # that count bucketed. `N` is DROPPED as redundant, not ignored -- see the proof above each launcher.
 # ALLOW_TF32 STAYS: it is a real codegen switch (it selects the tl.dot input precision for fp32
 # operands). It is read from the PROCESS-GLOBAL torch.backends.cuda.matmul.allow_tf32 at every
 # launch, so flipping torch.set_float32_matmul_precision mid-run legitimately costs a re-tune.
 @triton.autotune(configs=configs_for("trimul_gemm_gate_saveact_triton"),
-                 key=['seq_group', 'K', 'ALLOW_TF32'])
+                 key=['shape_key', 'K', 'ALLOW_TF32'])
 @triton.jit
 def _input_gated_gemm_kernel(
     xn_ptr,
@@ -232,7 +232,7 @@ def _input_gated_gemm_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     """Fused gated GEMM: out = sigmoid(xn @ wg.T) * (xn @ wp.T) [* mask].
 
@@ -371,14 +371,14 @@ def _input_gated_gemm_kernel(
         tl.store(sig_bp, sig, boundary_check=(0, 1))
 
 
-# AUTOTUNE KEY: ['seq_group', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying
-# raw M (the pair row count b*i*j) minted one full config sweep per sequence length; `seq_group` is
+# AUTOTUNE KEY: ['shape_key', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying
+# raw M (the pair row count b*i*j) minted one full config sweep per sequence length; `shape_key` is
 # that count bucketed. `N` is DROPPED as redundant, not ignored -- see the proof above each launcher.
 # ALLOW_TF32 STAYS: it is a real codegen switch (it selects the tl.dot input precision for fp32
 # operands). It is read from the PROCESS-GLOBAL torch.backends.cuda.matmul.allow_tf32 at every
 # launch, so flipping torch.set_float32_matmul_precision mid-run legitimately costs a re-tune.
 @triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_saveact_triton"),
-                 key=['seq_group', 'K', 'ALLOW_TF32'])
+                 key=['shape_key', 'K', 'ALLOW_TF32'])
 @triton.jit
 def _output_gated_gemm_kernel(
     x1n_ptr,
@@ -395,7 +395,7 @@ def _output_gated_gemm_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     """Single-pass dual-accumulator output GEMM. Also writes sig = sigmoid(x1n @ wg.T).
 
@@ -487,11 +487,11 @@ def _output_gated_gemm_kernel(
 # BLOCK the kernel is compiled with.
 
 
-# AUTOTUNE KEY: ['seq_group'] -- was ['N_total'], the raw flat element count, i.e. a fresh config
+# AUTOTUNE KEY: ['shape_key'] -- was ['N_total'], the raw flat element count, i.e. a fresh config
 # sweep for every distinct shape this backward sees. `N_total` is still the loop bound in the
-# body; only the KEY is bucketed. seq_group is never read by the kernel, so the generated code is
+# body; only the KEY is bucketed. shape_key is never read by the kernel, so the generated code is
 # unchanged and the result stays bit-identical.
-@triton.autotune(configs=configs_for("gated_projection_bwd_gate_recompute_flat_triton"), key=['seq_group'])
+@triton.autotune(configs=configs_for("gated_projection_bwd_gate_recompute_flat_triton"), key=['shape_key'])
 @triton.jit
 def _gated_gemm_bwd_elemwise_kernel(
     grad_ptr,
@@ -501,7 +501,7 @@ def _gated_gemm_bwd_elemwise_kernel(
     d_proj_ptr,
     N_total,
     BLOCK_E: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     """Fused elementwise backward for gated GEMM.
 
@@ -544,7 +544,7 @@ def _elemwise_bwd_combined(grad, ab, sig_m):
         grad.contiguous(), ab.contiguous(), sig_m.contiguous(),
         d_combined[:n], d_combined[n:],
         n_total,
-        seq_group=get_seq_group(n_total),
+        shape_key=get_seq_group(n_total),
     )
     return d_combined  # (2N, M) fully contiguous
 
@@ -559,7 +559,7 @@ def _elemwise_bwd_separate(grad, ab, sig_m):
         grad.contiguous(), ab.contiguous(), sig_m.contiguous(),
         d_gate, d_proj,
         n_total,
-        seq_group=get_seq_group(n_total),
+        shape_key=get_seq_group(n_total),
     )
     return d_gate, d_proj
 
@@ -635,7 +635,7 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out):
         APPLY_MASK=apply_mask,
         TRANSPOSE_OUT=transpose_out,
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-        seq_group=get_seq_group(m),
+        shape_key=get_seq_group(m),
     )
     return ab, sig_m
 
@@ -664,7 +664,7 @@ def _output_gemm_fwd(x_normed, x_out, w_gate, w_proj):
         m, n, k,
         w_gate.stride(0),
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-        seq_group=get_seq_group(m),
+        shape_key=get_seq_group(m),
     )
     return ab, sig
 

@@ -28,7 +28,7 @@ def get_seq_group(length) -> int:
 
 
 
-@triton.autotune(configs=configs_for("triangle_attention_fwd_triton"), key=['GROUP_N', 'H', 'HEAD_DIM'])
+@triton.autotune(configs=configs_for("triangle_attention_fwd_triton"), key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
 def _attn_fwd(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, m_ptr, out_ptr,
@@ -37,7 +37,7 @@ def _attn_fwd(
     bs_z, bs_h, bs_m, bs_n,
     ms_z, ms_h, ms_lrow, ms_tok,
     Z, H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, GROUP_N,
+    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     start_m = tl.program_id(0)
@@ -105,17 +105,17 @@ def _attn_fwd(
 
 # These three take H*L already, in the `HL` parameter the body uses. A second parameter named `H`
 # was receiving the SAME H*L value and being keyed on it: token-derived, so it partitioned the cache
-# per sequence length and made the GROUP_N bucket beside it redundant -- for a duplicate the body
+# per sequence length and made the shape_key bucket beside it redundant -- for a duplicate the body
 # never read. Both the parameter and the key entry are gone.
 @triton.autotune(configs=configs_for("triangle_attention_bwd_pre_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'])
+                 key=['shape_key', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_preprocess(
     o, DO, Delta,
     os_z, os_h, os_lrow, os_tok, os_d,
     ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     HL, Z, N_CTX, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, GROUP_N,
+    BLOCK_M1: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
 ):
     # B+C: both `o` (fwd out) and `DO` (grad_output) are STRIDED 5D (B,H,Lrow,tok,D) views
     # over projection-layout [B,L,L2,H*D] -> read via explicit strides, no .contiguous().
@@ -158,7 +158,7 @@ _SMEM_FUDGE = 2.8
 
 
 @triton.autotune(configs=configs_for("triangle_attention_bwd_dkdv_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'])
+                 key=['shape_key', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_dkdv(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
@@ -168,7 +168,7 @@ def _attn_bwd_dkdv(
     bs_z, bs_h, bs_m, bs_n,
     dbias_hl,
     N_CTX, HL, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, GROUP_N,
+    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
 ):
     # v4b: minimize tl.trans (was 4/iter -> 2/iter) by working in [key, query] space like the
     # raw-ptr v2 kernel, but with make_block_ptr strided loads. qT & biasT loaded transposed.
@@ -259,7 +259,7 @@ def _attn_bwd_dkdv(
 
 
 @triton.autotune(configs=configs_for("triangle_attention_bwd_dq_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'])
+                 key=['shape_key', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_dq(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,
@@ -268,7 +268,7 @@ def _attn_bwd_dq(
     ds_z, ds_h, ds_lrow, ds_tok, ds_d,
     bs_z, bs_h, bs_m, bs_n,
     N_CTX, HL, HEAD_DIM: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, GROUP_N,
+    BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr, shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     bhid = tl.program_id(2).to(tl.int64)
@@ -365,7 +365,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
             *bias.stride(),   # bias contiguous (B,H,m,n)
             *m.stride(),
-            B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+            B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=get_seq_group(L),
         )
         ctx.save_for_backward(q, k, v, bias, m, out)
         return out
@@ -390,7 +390,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             out, grad_output, delta,
             *out.stride(),           # out STRIDED 5D (projection layout)
             *grad_output.stride(), HL, B, L, D,
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -419,7 +419,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
             L * L,              # dbias HL-dim stride
             L, HL, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=get_seq_group(L),
         )
         grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
         _attn_bwd_dq[grid_q](
@@ -429,7 +429,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             *grad_output.stride(),
             *bias.stride(),
             L, HL, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D), GROUP_N=get_seq_group(L),
+            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=get_seq_group(L),
         )
 
         # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;

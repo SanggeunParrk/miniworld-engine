@@ -50,14 +50,14 @@ def _ln_cuda_bwd_enabled() -> bool:
 
 
 @triton.autotune(configs=configs_for("layernorm_fwd_saveact_triton"),
-                 key=['N', 'GROUP_M', 'HAS_ROWSCALE'])
+                 key=['N', 'shape_key', 'HAS_ROWSCALE'])
 @triton.jit
 def layer_norm_fwd_fused(
     X, Y, W, B, Mean, Rstd, Rowscale,
     stride_r, stride_c,
     M, N: tl.constexpr, eps: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M, HAS_ROWSCALE: tl.constexpr,
+    shape_key, HAS_ROWSCALE: tl.constexpr,
 ):
     # Map the program id to the rows of X and Y it should compute.
     row = tl.program_id(0).to(tl.int64)
@@ -150,7 +150,7 @@ def layer_norm_fwd_fused(
 # autotune cache is keyed only on `key=[...]` -- without it the tile measured on the dense path is
 # reused by the masked one, which does strictly more work per row.
 @triton.autotune(configs=configs_for("layernorm_bwd_atomic_triton"),
-                 key=['N', 'GROUP_M', 'HAS_ROWSCALE'],
+                 key=['N', 'shape_key', 'HAS_ROWSCALE'],
                  reset_to_zero=['DW', 'DB'])
 @triton.jit
 def layer_norm_bwd_dx_fused(
@@ -159,7 +159,7 @@ def layer_norm_bwd_dx_fused(
     stride_wc, stride_bc, stride_r, stride_c,
     M, N: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M, HAS_ROWSCALE: tl.constexpr,
+    shape_key, HAS_ROWSCALE: tl.constexpr,
 ):
     # Map the program id to the rows of X, DX, and DY it should compute.
     row = tl.program_id(0).to(tl.int64)
@@ -273,7 +273,7 @@ class TritonLayerNormFunction(torch.autograd.Function):
             x_2d, y_2d, weight, bias, mean, rstd, rs,  # rs (or rstd placeholder when no rowscale)
             x_2d.stride(0), x_2d.stride(1),
             M, N, eps,
-            GROUP_M=get_seq_group(M), HAS_ROWSCALE=has_rs,
+            shape_key=get_seq_group(M), HAS_ROWSCALE=has_rs,
         )
         # fmt: on
 
@@ -331,7 +331,7 @@ class TritonLayerNormFunction(torch.autograd.Function):
             x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)
             dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
             M, N,
-            GROUP_M=get_seq_group(M), HAS_ROWSCALE=has_rs,
+            shape_key=get_seq_group(M), HAS_ROWSCALE=has_rs,
         )
         # fmt: on
 
@@ -368,7 +368,7 @@ def triton_layernorm_masked(x, weight, bias, eps, row_scale):
         x_2d, y_2d, weight, bias, mean, rstd, rs,
         x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
-        GROUP_M=get_seq_group(M), HAS_ROWSCALE=True,
+        shape_key=get_seq_group(M), HAS_ROWSCALE=True,
     )
     # fmt: on
     return y_2d.view_as(x)

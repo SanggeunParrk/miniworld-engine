@@ -23,11 +23,11 @@ def get_seq_group(length) -> int:
 
 
 # Cache-narrowing prunes composed OVER the smem safety prune (see autotune package). Bucket on
-# the autotune key (GROUP_M, n, N); dtype from x (defaults bf16). Separate op ids for fwd/bwd
+# the autotune key (shape_key, n, N); dtype from x (defaults bf16). Separate op ids for fwd/bwd
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['GROUP_M', 'n', 'N'])
+@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'n', 'N'])
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -40,7 +40,7 @@ def transition_fwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(n * N, BLOCK_N)
@@ -124,7 +124,7 @@ class TritonTransitionFunction(torch.autograd.Function):
             M,
             n,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         ctx.save_for_backward(

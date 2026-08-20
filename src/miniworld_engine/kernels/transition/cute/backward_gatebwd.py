@@ -72,9 +72,9 @@ from quack.gemm_tvm_ffi_utils import (
 
 # Both axes are now tuned tiles; the launch used to pin BLOCK_M1=64 / BLOCK_N=128 and grid-divide by the
 # same literals, so no card could ever pick a different shape for this copy.
-@triton.autotune(configs=configs_for("transition_bwd_transpose_packed_triton"), key=['seq_group', 'N'])
+@triton.autotune(configs=configs_for("transition_bwd_transpose_packed_triton"), key=['shape_key', 'N'])
 @triton.jit
-def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, seq_group):
+def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, shape_key):
     # Duplicate grad_expand (M,N) -> interleaved (M,2N): out[m,2j]=out[m,2j+1]=ge[m,j], so the
     # C operand aligns to the [a|b]-interleaved accumulator. Coalesced via tl.interleave (a
     # single contiguous 2*BLOCK_N store), ~2x faster than the eager expand().reshape().contiguous().
@@ -98,7 +98,7 @@ def _cdup_interleave(ge: Tensor) -> Tensor:
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
     _cdup_interleave_kernel[grid](
         ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return o
 

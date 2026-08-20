@@ -49,15 +49,15 @@ _WAVES = 2
 # fmt: off
 
 
-# GROUP_M is keyed: the grid is FIXED at NP programs, so BLOCK_M1 alone sets how many M-tiles each
+# shape_key is keyed: the grid is FIXED at NP programs, so BLOCK_M1 alone sets how many M-tiles each
 # program grid-strides over. The atomic fallback in this file already bucketed the row count.
-@triton.autotune(configs=configs_for("layernorm_bwd_split_mmajor_triton"), key=['N', 'GROUP_M'])
+@triton.autotune(configs=configs_for("layernorm_bwd_split_mmajor_triton"), key=['N', 'shape_key'])
 @triton.jit
 def _ln_bwd_mmajor_kernel(
     DX, PDG, PDB, DXn, X, G, Mean, Rstd,
     stride_part, sc,                       # sc = feature stride (= M); row stride is 1 (m-major)
     M, N: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, VEC_HINT: tl.constexpr, GROUP_M,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, VEC_HINT: tl.constexpr, shape_key,
 ):
     # Grid is 2-D: axis 0 = the persistent programs that grid-stride over M-tiles (the axis
     # PDG/PDB are indexed by), axis 1 = the feature tile this program owns. The feature axis must
@@ -172,7 +172,7 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides):
         dxn, x, gamma, mean, rstd, dx, dg, db, M, K,
         dxn.stride(0), dxn.stride(1), x.stride(0), x.stride(1),
         dx.stride(0), dx.stride(1),
-        N_PAD=triton.next_power_of_2(K), GROUP_M=get_seq_group(M),
+        N_PAD=triton.next_power_of_2(K), shape_key=get_seq_group(M),
     )
     return dx, dg, db
 
@@ -191,7 +191,7 @@ def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides):
     _ln_bwd_mmajor_kernel[grid](
         dx, pdg, pdb, dxn, x, gamma, mean, rstd,
         pdg.stride(0), x.stride(1),      # feature stride (= M); row stride assumed 1
-        M, N=K, VEC_HINT=(K <= 128), GROUP_M=get_seq_group(M),
+        M, N=K, VEC_HINT=(K <= 128), shape_key=get_seq_group(M),
     )
     return dx, pdg.sum(0), pdb.sum(0)
 

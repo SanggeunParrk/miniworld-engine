@@ -93,7 +93,7 @@ def _attn_fwd_inner(
 
 
 @triton.autotune(configs=configs_for("triangle_attention_fwd_contig_triton"),
-                 key=['GROUP_N', 'H', 'HEAD_DIM'])
+                 key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
 def _attn_fwd(
     Q, K, V, Bias, sm_scale,
@@ -106,7 +106,7 @@ def _attn_fwd(
     stride_mz, stride_mh, stride_mt, stride_mm,
     Z, H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     start_m = tl.program_id(0).to(tl.int64)
@@ -222,15 +222,15 @@ def _attn_fwd(
 
 # The launcher hands this kernel H*L, not H, because q is the "B (H L) L2 D" rearrangement. The
 # parameter was named H and keyed on: token-derived, so it partitioned the cache per sequence length
-# and defeated the GROUP_N bucket sitting next to it -- for a value the body never reads. Dropped.
+# and defeated the shape_key bucket sitting next to it -- for a value the body never reads. Dropped.
 @triton.autotune(configs=configs_for("triangle_attention_bwd_pre_contig_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'])
+                 key=['shape_key', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_preprocess(
     O, DO, Delta,
     Z, N_CTX, HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     off_hz = tl.program_id(1).to(tl.int64)
@@ -354,10 +354,10 @@ def _attn_bwd_dqdkdv(
 
 
 # HL, not H: `bhid` runs over B*HL because q is the "B (H L) L2 D" rearrangement, so the decode
-# below divides by H*L. Keying it would partition the cache per sequence length and make GROUP_N
+# below divides by H*L. Keying it would partition the cache per sequence length and make shape_key
 # redundant, so only the bucket is keyed.
 @triton.autotune(configs=configs_for("triangle_attention_bwd_atomic_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'],
+                 key=['shape_key', 'HEAD_DIM'],
                  reset_to_zero=['DQ'])
 @triton.jit
 def _attn_bwd(
@@ -368,7 +368,7 @@ def _attn_bwd(
     bias_stride_z, bias_stride_h, bias_stride_m, bias_stride_n,
     HL, N_CTX, HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr, HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
@@ -536,7 +536,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
             M.stride(0), M.stride(1), M.stride(2), M.stride(3),
             B, H, L, D,
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
         # fmt: on
@@ -582,7 +582,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         _attn_bwd_preprocess[grid](
             o, grad_output, delta,
             B, L, D,
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
         # fmt: on
@@ -602,7 +602,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
             bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
             HL, L, D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
         # fmt: on
 

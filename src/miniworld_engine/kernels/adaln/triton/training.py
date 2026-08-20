@@ -79,13 +79,13 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("adaln_epilogue_saveact_triton"), key=['N', 'HAS_SB', 'GROUP_M'])
+@triton.autotune(configs=configs_for("adaln_epilogue_saveact_triton"), key=['N', 'HAS_SB', 'shape_key'])
 @triton.jit
 def _epilogue_train_kernel(
     X, SB, Y, MeanX, RstdX, Gate, ScaleBias, M, N: tl.constexpr, eps,
     sx0, sx1, ss0, ss1, sy0, sy1, sg0, sg1,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, HAS_SB: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -167,7 +167,7 @@ def _epilogue_train(x, sb, eps, scale_bias=None):
         x, sb, y, mean, rstd, gate, scale_bias, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1), HAS_SB=scale_bias is not None,
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return y, mean, rstd, gate
 
@@ -178,12 +178,12 @@ def _epilogue_train(x, sb, eps, scale_bias=None):
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['N', 'GROUP_M'])
+@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['N', 'shape_key'])
 @triton.jit
 def _bwd_x_kernel(
     DY, X, MeanX, RstdX, Gate, D, DX, M, N: tl.constexpr,
     sy0, sy1, sx0, sx1, sg0, sg1, sd0, sd1, sdx0, sdx1,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M):
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -270,7 +270,7 @@ def _bwd_x(dy, x, mean_x, rstd_x, gate):
         dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
         dy.stride(0), dy.stride(1), x.stride(0), x.stride(1), gate.stride(0), gate.stride(1),
         D.stride(0), D.stride(1), dx.stride(0), dx.stride(1),
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return D, dx
 
@@ -289,13 +289,13 @@ def _bwd_x(dy, x, mean_x, rstd_x, gate):
 
 
 @triton.autotune(configs=configs_for("adaln_bwd_dx_dlnw_triton"),
-                 key=['NC', 'K2', 'GROUP_M'],
+                 key=['NC', 'K2', 'shape_key'],
                  reset_to_zero=['DLNW'])
 @triton.jit
 def _dgrad_condln_kernel(
     D, Wcat, Cond, MeanC, RstdC, LNW, DCond, DLNW, M, NC: tl.constexpr, K2,
     sd0, sd1, sw0, sw1, sc0, sc1, sdc0, sdc1,
-    BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, GROUP_M):
+    BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, shape_key):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -418,7 +418,7 @@ def _dgrad_condln(D, w_cat, cond, mean_c, rstd_c, lnw):
         D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
         D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
         cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1),
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dcond, dlnw.to(lnw.dtype)
 

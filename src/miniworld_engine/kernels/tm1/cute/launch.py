@@ -48,9 +48,9 @@ def get_seq_group(rows) -> int:
 # and the autotuner runs every candidate config on the real buffers. Without it, proj would be
 # multiplied by sigmoid(gate) once per benched config instead of once, so the tuning sweep itself
 # silently corrupts the tensor. Any in-place kernel that gains an @autotune needs this.
-@triton.autotune(configs=configs_for("gated_projection_gate_inplace_flat_triton"), key=['seq_group'], restore_value=['proj_ptr'])
+@triton.autotune(configs=configs_for("gated_projection_gate_inplace_flat_triton"), key=['shape_key'], restore_value=['proj_ptr'])
 @triton.jit
-def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK_E: tl.constexpr, seq_group):
+def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK_E: tl.constexpr, shape_key):
     """In-place: proj = proj * sigmoid(gate), elementwise over a flat buffer.
 
     sigmoid + multiply are computed in fp32 (a single round to bf16 on store),
@@ -68,9 +68,9 @@ def _gate_mul_kernel(proj_ptr, gate_ptr, n, BLOCK_E: tl.constexpr, seq_group):
 
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_packed_flat_triton"), key=['seq_group'])
+@triton.autotune(configs=configs_for("gated_projection_gate_packed_flat_triton"), key=['shape_key'])
 @triton.jit
-def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK_E: tl.constexpr, seq_group):
+def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK_E: tl.constexpr, shape_key):
     """out[flat < D_L2 region] = sigmoid(wide[gate half]) * wide[proj half].
 
     ``wide`` is (2D, L, L) contiguous == gate channels [0:D] then proj channels
@@ -88,7 +88,7 @@ def _glu_wide(out: torch.Tensor, wide: torch.Tensor, D: int, L: int) -> None:
     """out[B,D,L,L] = sigmoid(wide[:,0:D]) * wide[:,D:2D], wide is (B,2D,L,L). B=1."""
     D_L2 = D * L * L
     grid = lambda meta: (triton.cdiv(D_L2, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_wide_kernel[grid](wide, out, 2 * D_L2, D_L2, seq_group=get_seq_group(D_L2))
+    _glu_wide_kernel[grid](wide, out, 2 * D_L2, D_L2, shape_key=get_seq_group(D_L2))
 
 
 def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor) -> None:
@@ -96,7 +96,7 @@ def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor) -> None:
     assert proj.is_contiguous() and gate.is_contiguous()
     n = proj.numel()
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _gate_mul_kernel[grid](proj, gate, n, seq_group=get_seq_group(n))
+    _gate_mul_kernel[grid](proj, gate, n, shape_key=get_seq_group(n))
 
 
 

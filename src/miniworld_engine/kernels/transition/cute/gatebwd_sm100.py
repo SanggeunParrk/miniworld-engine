@@ -752,10 +752,10 @@ def get_seq_group(rows) -> int:
 # configs — otherwise each candidate multiplies the gradients by `ge` again and the sweep itself
 # corrupts them. See the same note on tm1/cute/launch::_gate_mul_kernel.
 @triton.autotune(configs=configs_for("transition_bwd_epilogue_triton"),
-                 key=['seq_group'],
+                 key=['shape_key'],
                  restore_value=['dA_ptr', 'dB_ptr'])
 @triton.jit
-def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLOCK_E: tl.constexpr, seq_group):
+def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLOCK_E: tl.constexpr, shape_key):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     m = offs < N
@@ -768,7 +768,7 @@ def _grad_mul_inplace(dA, dB, ge):
     """dA *= ge; dB *= ge  in one pass (grad read once). All (M,ND) bf16 contiguous."""
     N = dA.numel()
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_E"]),)  # noqa: E731
-    _grad_mul_kernel[grid](dA, dB, ge, N, seq_group=get_seq_group(N))
+    _grad_mul_kernel[grid](dA, dB, ge, N, shape_key=get_seq_group(N))
 
 
 _CACHE = {}

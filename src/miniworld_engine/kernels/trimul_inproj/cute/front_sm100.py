@@ -34,10 +34,10 @@ from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_grou
 
 
 
-@triton.autotune(configs=configs_for("trimul_transpose_triton"), key=['GROUP_M', 'N'])
+@triton.autotune(configs=configs_for("trimul_transpose_triton"), key=['shape_key', 'N'])
 @triton.jit
 def _transpose_kernel(src_ptr, dst_ptr, M, N, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-                      GROUP_M):
+                      shape_key):
     """src (M,N) row-major -> dst (N,M) row-major. dst[n,m] = src[m,n]."""
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
@@ -59,7 +59,7 @@ def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor) -> None:
     """blld (M, 2D) row-major -> out (2D, M) row-major, in place into out_2d_m."""
     M, N = blld.shape
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
-    _transpose_kernel[grid](blld, out_2d_m, M, N, GROUP_M=get_seq_group(M))
+    _transpose_kernel[grid](blld, out_2d_m, M, N, shape_key=get_seq_group(M))
 
 
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:

@@ -32,10 +32,10 @@ from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_grou
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['GROUP_M', 'D'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
-                    GROUP_M):
+                    shape_key):
     """1D channel-major elementwise: out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR].
     Iterate over DM=D*M positions (d,m); dL=dL_ptr[idx], dR=dR_ptr[idx] (separate left/right
     buffers — no d_lr cat in the caller); preact is interleaved so needs (2d)*M+m indexing.
@@ -66,10 +66,10 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_transpose_packed_triton"), key=['GROUP_M', 'D'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_transpose_packed_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr,
-                     BLOCK_E: tl.constexpr, GROUP_M):
+                     BLOCK_E: tl.constexpr, shape_key):
     """Like `_dconcat_kernel` but builds a 5-block d_concat (5D,M):
        [d_gLlog; d_pL; d_gRlog; d_pR; d_glogit].
     Block 4 relayouts the gate input-grad d_glogit (M,D) row-major into channel-major (D,M).
@@ -122,7 +122,7 @@ def front_bwd_dW_glogit(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit
     dconc5 = torch.empty(5 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
     _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, GROUP_M=get_seq_group(M))
+        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, shape_key=get_seq_group(M))
 
     dWs = dconc5 @ xf                                            # (5H, Din) cuBLAS huge-K
     dWLg = dWs[:H].t().contiguous()
@@ -173,7 +173,7 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)   # [d_gLlog;d_pL;d_gRlog;d_pR]
     DM = H * M
     _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dconc, M, DM, D=H, GROUP_M=get_seq_group(M))
+        dL2, dR2, preact2, dconc, M, DM, D=H, shape_key=get_seq_group(M))
 
     # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
     # slower there — measured. dispatch confirms + self-documents).
@@ -190,10 +190,10 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
 # ── σ(gate) backward: reconstruct GLU grads from lr + sg (no preact) ──────────────────────────
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_recompute_triton"), key=['GROUP_M', 'D'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_recompute_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
-                        D: tl.constexpr, BLOCK_E: tl.constexpr, GROUP_M):
+                        D: tl.constexpr, BLOCK_E: tl.constexpr, shape_key):
     """out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR], built from the forward outputs lr (=left,
     right) and sg (=σ(gate), [2D,M]) instead of raw preact logits:
         d_glog = d_out·lr·(1-sg) ;  d_proj = d_out·sg    (proj = lr/sg is never needed).
@@ -233,7 +233,7 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
     dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
     _dconcat_sig_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, lrL, lrR, sg2, dconc, M, DM, D=H, GROUP_M=get_seq_group(M))
+        dL2, dR2, lrL, lrR, sg2, dconc, M, DM, D=H, shape_key=get_seq_group(M))
 
     from miniworld_engine.kernels.trimul_inproj.cute import dispatch
     dWs = dispatch.mm("dWs", dconc, xf)

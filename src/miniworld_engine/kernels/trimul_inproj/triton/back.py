@@ -53,7 +53,7 @@ from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_grou
 # correct; the pruned BM/BN box above is unchanged.
 
 
-@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['GROUP_M', 'K', 'ADD_RESIDUAL'])
+@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key', 'K', 'ADD_RESIDUAL'])
 @triton.jit
 def _back_kernel(
     tri_ptr,  # (D, M) channel-major: tri[k, m] at k*M + m
@@ -64,7 +64,7 @@ def _back_kernel(
     res_ptr,  # (M, D) row-major residual (== the module input pair); read iff ADD_RESIDUAL
     M, eps,
     K: tl.constexpr, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M, ADD_RESIDUAL: tl.constexpr,
+    shape_key, ADD_RESIDUAL: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -196,5 +196,5 @@ def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=Non
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
                        ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
-                       K=D, N=D, GROUP_M=get_seq_group(M), ADD_RESIDUAL=add_residual)
+                       K=D, N=D, shape_key=get_seq_group(M), ADD_RESIDUAL=add_residual)
     return y.view(B, L, L, D)

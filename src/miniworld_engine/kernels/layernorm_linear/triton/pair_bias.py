@@ -34,7 +34,7 @@ MIN_TL_DOT_DIM = 16
 
 
 
-# GROUP_M is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
+# shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 
@@ -45,7 +45,7 @@ def get_seq_group(rows) -> int:
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_fp32_triton"),
-                 key=['N', 'NH', 'GROUP_M'])
+                 key=['N', 'NH', 'shape_key'])
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -62,7 +62,7 @@ def _layer_norm_linear_fwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_K_D: tl.constexpr,
     BLOCK_K_NH: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     # BLOCK_K_D tiles the channel axis (d) and BLOCK_K_NH the projection axis (n_head); when the
     # tuner picks tiles >= the extents, every loop below is a single iteration and this is the
@@ -150,7 +150,7 @@ def _layer_norm_linear_fwd(
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_bwd_fp32_triton"),
-                 key=['N', 'NH', 'GROUP_M'],
+                 key=['N', 'NH', 'shape_key'],
                  reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
 @triton.jit
 def _layer_norm_linear_bwd(
@@ -171,7 +171,7 @@ def _layer_norm_linear_bwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_K_D: tl.constexpr,
     BLOCK_K_NH: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     # BLOCK_K_D tiles d, BLOCK_K_NH tiles n_head. dx needs the row sums c1/c2 over ALL of d, so the
     # channel axis is walked TWICE: pass A accumulates c1/c2 (and emits the dpw/dlnw atomics),
@@ -291,7 +291,7 @@ def _fwd_op(
         N,
         nh,
         eps,
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
 
@@ -340,7 +340,7 @@ def _bwd_op(
         N,
         nh,
         USE_DOT=nh >= MIN_TL_DOT_DIM,
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dx, dlnw.to(ln_weight.dtype), dpw.to(proj_weight.dtype)
 

@@ -40,7 +40,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"), key=['N', 'K', 'GROUP_M'])
+@triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"), key=['N', 'K', 'shape_key'])
 @triton.jit
 def _lnl_fwd_kernel(
     x_ptr, w_ptr, b_ptr, g_ptr, beta_ptr, y_ptr,
@@ -51,7 +51,7 @@ def _lnl_fwd_kernel(
     stride_wn, stride_wk,  # W is (N, K) row-major: stride_wn=K, stride_wk=1
     stride_ym, stride_yn,
     HAS_BIAS: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
 ):
     # One program owns BLOCK_M1 rows and ALL of N: the LayerNorm STATISTICS are computed once
     # per row and reused across the N-loop (vs recomputing them per (M,N) tile). Grid is 1-D
@@ -189,6 +189,6 @@ def layernorm_linear_triton_fwd(
         x2.stride(0), x2.stride(1),
         w.stride(0), w.stride(1),
         y.stride(0), y.stride(1),
-        HAS_BIAS=bias is not None, GROUP_M=get_seq_group(M),
+        HAS_BIAS=bias is not None, shape_key=get_seq_group(M),
     )
     return y.reshape(*x.shape[:-1], N)

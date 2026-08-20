@@ -49,7 +49,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['ND', 'K', 'DC', 'seq_group'])
+@triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['ND', 'K', 'DC', 'shape_key'])
 @triton.jit
 def _cond_transition_inference_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
@@ -63,7 +63,7 @@ def _cond_transition_inference_kernel(
     stride_om, stride_od,
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr,
     BLOCK_K_D: tl.constexpr, BLOCK_K_DC: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1).to(tl.int64)
@@ -156,6 +156,6 @@ def cond_transition_inference(
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return out

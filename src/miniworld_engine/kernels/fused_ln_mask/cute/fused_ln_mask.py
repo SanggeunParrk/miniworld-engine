@@ -42,7 +42,7 @@ def get_seq_group(rows) -> int:
 
 # BLOCK_K tiles the D reduction (mean/var over D), so D need not be a power of two; a row that
 # sets it >= D keeps the single-pass schedule. BLOCK_M1 is the row tile. Both come from the CSV.
-@triton.autotune(configs=configs_for("layernorm_fwd_rowscale_triton"), key=['seq_group', 'D'])
+@triton.autotune(configs=configs_for("layernorm_fwd_rowscale_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _fused_ln_mask_kernel(
     x_ptr,
@@ -55,7 +55,7 @@ def _fused_ln_mask_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     EPS: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid = tl.program_id(0)
     offs_m = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -152,6 +152,6 @@ def fused_ln_mask(
         M,
         D,
         EPS=eps,
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return out.view(B, L1, L2, D)

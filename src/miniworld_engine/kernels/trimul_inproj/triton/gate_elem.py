@@ -37,11 +37,11 @@ from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_grou
 
 
 @triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"),
-                 key=['GROUP_M', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT'])
+                 key=['shape_key', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT'])
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
                      N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, SAVE_GATE: tl.constexpr,
-                     GROUP_M, ADD_RESIDUAL: tl.constexpr, USE_DROPOUT: tl.constexpr):
+                     shape_key, ADD_RESIDUAL: tl.constexpr, USE_DROPOUT: tl.constexpr):
     """Elementwise (row x col tile, D-general): gate = sigmoid(glogit); y = proj ⊙ gate;
     [save gate].
 
@@ -79,13 +79,13 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, 
 
 
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_dropres_triton"),
-                 key=['GROUP_M', 'N', 'USE_DROPOUT'])
+                 key=['shape_key', 'N', 'USE_DROPOUT'])
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)
     dproj_ptr, dglogit_ptr,        # (M, N) out
     ds_ptr, L,                     # row-broadcast drop scale [L, N] (used iff USE_DROPOUT)
-    M, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M,
+    M, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
     FROM_PREACT: tl.constexpr = False, USE_DROPOUT: tl.constexpr = False,
 ):
     """Fused elementwise: d_proj = dy⊙gate ; d_glogit = dy⊙proj⊙gate⊙(1-gate).
@@ -150,7 +150,7 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
     ds_flat = dropscale.reshape(L, N) if use_dropout else proj_flat   # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_mul_kernel[grid](glogit, proj_flat, y, gate, res_flat, ds_flat, M, L, N=N,
-                           SAVE_GATE=return_gate, GROUP_M=get_seq_group(M),
+                           SAVE_GATE=return_gate, shape_key=get_seq_group(M),
                            ADD_RESIDUAL=add_residual, USE_DROPOUT=use_dropout)
     return (y, gate) if return_gate else y
 
@@ -208,7 +208,7 @@ def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False,
     ds_flat = dropscale.reshape(L, N) if use_dropout else dy  # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N,
-                                   GROUP_M=get_seq_group(M), FROM_PREACT=from_preact,
+                                   shape_key=get_seq_group(M), FROM_PREACT=from_preact,
                                    USE_DROPOUT=use_dropout)
     return d_proj, d_glogit
 
@@ -226,7 +226,7 @@ def gate_elem_bwd(dy, x_n, proj, gate, Wg):
     d_glogit = torch.empty_like(dy)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, dy, 0, M, N=N,
-                                   GROUP_M=get_seq_group(M), USE_DROPOUT=False)
+                                   shape_key=get_seq_group(M), USE_DROPOUT=False)
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
     dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS
     return d_proj, dx_gate, dWg

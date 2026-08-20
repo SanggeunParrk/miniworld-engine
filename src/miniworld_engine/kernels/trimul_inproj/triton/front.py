@@ -51,7 +51,7 @@ from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_grou
 
 
 
-@triton.autotune(configs=configs_for("trimul_gemm_gate_packed_mmajor_triton"), key=['GROUP_M', 'D'])
+@triton.autotune(configs=configs_for("trimul_gemm_gate_packed_mmajor_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _lr_kernel(
     x_ptr, wlr_ptr,                        # x:(M,K)  wlr:(K,4D)=[Lhalf|Rhalf]
@@ -59,7 +59,7 @@ def _lr_kernel(
     M, LL,
     K: tl.constexpr, D: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
@@ -110,7 +110,7 @@ def _lr_kernel(
 
 
 
-@triton.autotune(configs=configs_for("trimul_outproj_gemm_sigmoid_triton"), key=['GROUP_M', 'D'])
+@triton.autotune(configs=configs_for("trimul_outproj_gemm_sigmoid_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _gate_kernel(
     x_ptr, wg_ptr,                         # x:(M,K)  wg:(K,D)
@@ -118,7 +118,7 @@ def _gate_kernel(
     M,
     K: tl.constexpr, D: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
@@ -163,6 +163,6 @@ def trimul_front_triton(x, WL, WLg, WR, WRg, Wg):
     lr_grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(2 * D, meta["BLOCK_N"]))  # noqa: E731
     g_grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))       # noqa: E731
     group_m = get_seq_group(M)
-    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D, GROUP_M=group_m)
-    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D, GROUP_M=group_m)
+    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D, shape_key=group_m)
+    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D, shape_key=group_m)
     return lr[:, :D], lr[:, D:], gate.view(B, L, L, D)

@@ -42,7 +42,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['seq_group', 'N', 'DH'])
+@triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['shape_key', 'N', 'DH'])
 @triton.jit
 def _gate_out_fwd(
     gate_ptr,   # [M, DH]
@@ -58,7 +58,7 @@ def _gate_out_fwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
@@ -101,7 +101,7 @@ def _gate_out_fwd(
 # free (non-reduced) axis here -- the contraction is N -- so it moves onto the grid. ``BLOCK_N`` is not
 # constrained, so its candidate values live in the CSV like every other axis; they are the
 # canonical 2-D set.
-@triton.autotune(configs=configs_for("gated_projection_bwd_dx_triton"), key=['seq_group', 'N', 'DH'])
+@triton.autotune(configs=configs_for("gated_projection_bwd_dx_triton"), key=['shape_key', 'N', 'DH'])
 @triton.jit
 def _dgrad_epi(
     do_ptr,     # [M, N]   = grad_out
@@ -114,7 +114,7 @@ def _dgrad_epi(
     M, N: tl.constexpr, DH: tl.constexpr,
     s_dom, s_don, s_won, s_woh, s_gm, s_gh, s_rm, s_rh, s_om, s_oh,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     """Fuses the dgrad GEMM d_a = grad_out @ wo with the gate-backward epilogue:
     d_a is never materialized, gate/out_r are read once. One kernel replaces the
@@ -163,7 +163,7 @@ def _dgrad_epilogue(do2, wo, g2, r2):
         do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
         g2.stride(0), g2.stride(1), r2.stride(0), r2.stride(1),
         dr.stride(0), dr.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dr, dg, a
 
@@ -180,7 +180,7 @@ def _fwd(gate2d, outr2d, wo):
         outr2d.stride(0), outr2d.stride(1),
         wo.stride(0), wo.stride(1),
         out.stride(0), out.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return out
 
@@ -239,7 +239,7 @@ class _SigmoidGate(torch.autograd.Function):
         a = torch.empty_like(gate)
         n = gate.numel()
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, seq_group=get_seq_group(n))
+        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, shape_key=get_seq_group(n))
         ctx.save_for_backward(gate, out)
         return a
 
@@ -251,7 +251,7 @@ class _SigmoidGate(torch.autograd.Function):
         do = torch.empty_like(out)
         n = gate.numel()
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, seq_group=get_seq_group(n))
+        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, shape_key=get_seq_group(n))
         return dg, do
 
 

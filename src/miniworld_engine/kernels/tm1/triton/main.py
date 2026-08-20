@@ -31,7 +31,7 @@ def get_seq_group(length) -> int:
 
 
 
-@triton.autotune(configs=configs_for("trimul_gemm_gate_triton"), key=['GROUP_M', 'N'])
+@triton.autotune(configs=configs_for("trimul_gemm_gate_triton"), key=['shape_key', 'N'])
 @triton.jit
 def fused_sigmoid_gate_fwd_kernel(
     x_ptr,
@@ -46,7 +46,7 @@ def fused_sigmoid_gate_fwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -122,7 +122,7 @@ def fused_sigmoid_gate_fwd_kernel(
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_recompute_triton"), key=['GROUP_M', 'N'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_recompute_triton"), key=['shape_key', 'N'])
 @triton.jit
 def fused_sigmoid_gate_bwd_kernel(
     x_ptr,
@@ -141,7 +141,7 @@ def fused_sigmoid_gate_bwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -279,7 +279,7 @@ class TritonTM1Function(torch.autograd.Function):
             right,
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         ctx.save_for_backward(
@@ -338,7 +338,7 @@ class TritonTM1Function(torch.autograd.Function):
             dRB,
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         dx = dLA @ left_gate_weight.T + dLB @ left_weight.T

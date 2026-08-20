@@ -73,7 +73,7 @@ def get_seq_group(rows) -> int:
 
 
 @triton.autotune(configs=configs_for("cond_transition_expand_swiglu_saveact_triton"),
-                 key=['seq_group', 'ND', 'K'])
+                 key=['shape_key', 'ND', 'K'])
 @triton.jit
 def _fwd_expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr, ab_ptr,
@@ -83,7 +83,7 @@ def _fwd_expand_swiglu_kernel(
     stride_hm, stride_hn,    # h:  (M, ND)
     stride_abm, stride_abn,  # ab: (M, 2*ND) packed [a | b]
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_n = tl.program_id(1).to(tl.int64)
@@ -120,7 +120,7 @@ def _fwd_expand_swiglu_kernel(
 
 
 @triton.autotune(configs=configs_for("cond_transition_squeeze_gate_saveact_triton"),
-                 key=['seq_group', 'ND', 'D', 'DC'])
+                 key=['shape_key', 'ND', 'D', 'DC'])
 @triton.jit
 def _fwd_squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, y_ptr, out_ptr, scale_ptr,
@@ -135,7 +135,7 @@ def _fwd_squeeze_gate_kernel(
     stride_sm, stride_sc,     # scale:(M, D)
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1).to(tl.int64)
@@ -181,7 +181,7 @@ def _fwd_expand_swiglu(x, wa, wb):
         x, wa, wb, h, ab, M, ND, K, 2 * ND,
         x.stride(0), x.stride(1), wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1), ab.stride(0), ab.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return h, ab
 
@@ -200,7 +200,7 @@ def _fwd_squeeze_gate(h, cond, ws, wsc, bsc):
         ws.stride(0), ws.stride(1), wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), out.stride(0), out.stride(1),
         scale.stride(0), scale.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return y, out, scale
 
@@ -218,7 +218,7 @@ def _gate_bwd(out, scale, dy):
     n = out.numel()
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
     # _sigmul_bwd's order is (grad, gate_logit, value, d_gate, d_value)
-    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, seq_group=get_seq_group(n))
+    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=get_seq_group(n))
     return dout, dscale
 
 
@@ -234,7 +234,7 @@ def _gate_bwd(out, scale, dy):
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_gemm_triton"), key=['seq_group', 'N', 'K'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_gemm_triton"), key=['shape_key', 'N', 'K'])
 @triton.jit
 def _dgemm_kernel(
     a_ptr, w_ptr, c_ptr, M, N, K,
@@ -242,7 +242,7 @@ def _dgemm_kernel(
     stride_wk, stride_wn,   # logical W:(K,N); pass strides so any storage layout works
     stride_cm, stride_cn,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     # L2-friendly grouped (swizzled) program ordering — standard triton matmul scheduling.
     pid = tl.program_id(0).to(tl.int64)
@@ -277,7 +277,7 @@ def _dgemm(a, w, M, N, K, swk, swn):
     c = torch.empty(M, N, device=a.device, dtype=a.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(N, meta["BLOCK_N"]),)  # noqa: E731
     _dgemm_kernel[grid](a, w, c, M, N, K, a.stride(0), a.stride(1), swk, swn,
-                        c.stride(0), c.stride(1), seq_group=get_seq_group(M))
+                        c.stride(0), c.stride(1), shape_key=get_seq_group(M))
     return c
 
 
@@ -289,7 +289,7 @@ def _dgemm(a, w, M, N, K, swk, swn):
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_dx_triton"), key=['seq_group', 'K', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_dx_triton"), key=['shape_key', 'K', 'ND'])
 @triton.jit
 def _dx_fused_kernel(
     dh_ptr, ab_ptr, wa_ptr, wb_ptr, dx_ptr,
@@ -299,7 +299,7 @@ def _dx_fused_kernel(
     stride_wn, stride_wk,      # Wa,Wb:(ND,K) row-major
     stride_dxm, stride_dxk,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     # dx[m,:] = sum_n da[m,n]*Wa[n,:] + db[m,n]*Wb[n,:]   (BLOCK_K tiles the ND axis)
     pid_m = tl.program_id(0).to(tl.int64)
@@ -343,7 +343,7 @@ def _dx_fused(dh, ab, wa, wb):
         dh, ab, wa, wb, dx, M, K, ND,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1),
         wa.stride(0), wa.stride(1), dx.stride(0), dx.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dx
 
@@ -360,7 +360,7 @@ def _dx_fused(dh, ab, wa, wb):
 
 
 @triton.autotune(configs=configs_for("cond_transition_bwd_gate_squeeze_dx_triton"),
-                 key=['seq_group', 'ND', 'D'])
+                 key=['shape_key', 'ND', 'D'])
 @triton.jit
 def _dh_gatebwd_kernel(
     out_ptr, scale_ptr, dy_ptr, ws_ptr, dh_ptr, dout_ptr, dscale_ptr,
@@ -369,7 +369,7 @@ def _dh_gatebwd_kernel(
     stride_wk, stride_wn,       # Ws:(D,ND) logical (K=D, N=ND)
     stride_dhm, stride_dhn,     # dh:(M, ND)
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     grid_m = tl.cdiv(M, BLOCK_M1); grid_n = tl.cdiv(ND, BLOCK_N)
@@ -413,7 +413,7 @@ def _dh_gatebwd(out, scale, dy, ws, ND):
     _dh_gatebwd_kernel[grid](
         out, scale, dy, ws, dh, dout, dscale, M, ND, D,
         out.stride(0), out.stride(1), ws.stride(0), ws.stride(1), dh.stride(0), dh.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dh, dout, dscale
 
@@ -423,7 +423,7 @@ def _dh_gatebwd(out, scale, dy, ws, ND):
 
 
 @triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_dx_packed_triton"),
-                 key=['seq_group', 'K', 'ND2'])
+                 key=['shape_key', 'K', 'ND2'])
 @triton.jit
 def _dx_swiglubwd_kernel(
     dh_ptr, ab_ptr, wcat_ptr, dx_ptr, dab_ptr,
@@ -434,7 +434,7 @@ def _dx_swiglubwd_kernel(
     stride_dxm, stride_dxk,
     stride_pm, stride_pn,       # dab:(M,2ND) [da|db]
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     # dx[m,:] = sum_{j in 2ND} dab[m,j] * Wcat[j,:]   (j tiled by BLOCK_K = the reduction)
     pid = tl.program_id(0).to(tl.int64)
@@ -484,7 +484,7 @@ def _dx_swiglubwd(dh, ab, wcat):
         dh, ab, wcat, dx, dab, M, K, ND, ND2,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1),
         wcat.stride(0), wcat.stride(1), dx.stride(0), dx.stride(1), dab.stride(0), dab.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dx, dab
 
@@ -504,13 +504,13 @@ def _dx_swiglubwd(dh, ab, wcat):
 # makes the loads coalesce along the stride-1 axis.
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_packed_triton"), key=['seq_group', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_packed_triton"), key=['shape_key', 'ND'])
 @triton.jit
 def _swiglu_bwd_pack_kernel(
     dh_ptr, ab_ptr, dab_ptr, M, ND,
     stride_dhm, stride_dhn, stride_abm, stride_abn, stride_pm, stride_pn,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     row = (tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1))[:, None]
     col = (tl.program_id(1).to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N))[None, :]
@@ -534,7 +534,7 @@ def _swiglu_bwd_pack(dh, ab):
     _swiglu_bwd_pack_kernel[grid](
         dh, ab, dab, M, ND,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1), dab.stride(0), dab.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dab
 
@@ -545,7 +545,7 @@ def _swiglu_bwd_pack(dh, ab):
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_dw_triton"), key=['N', 'K', 'seq_group'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_dw_triton"), key=['N', 'K', 'shape_key'])
 @triton.jit
 def _wgrad_kernel(
     g_ptr, x_ptr, dw_ptr, M, N, K,
@@ -553,7 +553,7 @@ def _wgrad_kernel(
     stride_xm, stride_xk,
     stride_dwn, stride_dwk,
     BLOCK_N_ROW: tl.constexpr, BLOCK_N_COL: tl.constexpr, BLOCK_M1: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     # dW[n,k] = sum_m G[m,n] * X[m,k]
     pid_n = tl.program_id(0).to(tl.int64)
@@ -582,7 +582,7 @@ def _wgrad(g, x, N, K):
     dw = torch.empty(N, K, device=g.device, dtype=g.dtype)
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_N_ROW"]), triton.cdiv(K, meta["BLOCK_N_COL"]))  # noqa: E731
     _wgrad_kernel[grid](g, x, dw, M, N, K, g.stride(0), g.stride(1),
-                       x.stride(0), x.stride(1), dw.stride(0), dw.stride(1), seq_group=get_seq_group(M))
+                       x.stride(0), x.stride(1), dw.stride(0), dw.stride(1), shape_key=get_seq_group(M))
     return dw
 
 

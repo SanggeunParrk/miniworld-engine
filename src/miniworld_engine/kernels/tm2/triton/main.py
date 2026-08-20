@@ -25,7 +25,7 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 
-@triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_triton"), key=['GROUP_M', 'N'])
+@triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_triton"), key=['shape_key', 'N'])
 @triton.jit
 def fused_sigmoid_gate2_fwd_kernel(
     x_gate_ptr,
@@ -38,7 +38,7 @@ def fused_sigmoid_gate2_fwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -91,7 +91,7 @@ def fused_sigmoid_gate2_fwd_kernel(
 
 
 
-@triton.autotune(configs=configs_for("trimul_outproj_bwd_gate_recompute_triton"), key=['GROUP_M', 'N'])
+@triton.autotune(configs=configs_for("trimul_outproj_bwd_gate_recompute_triton"), key=['shape_key', 'N'])
 @triton.jit
 def fused_sigmoid_gate2_bwd_kernel(
     x_gate_ptr,
@@ -106,7 +106,7 @@ def fused_sigmoid_gate2_bwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     num_pid_n = tl.cdiv(N, BLOCK_N)
@@ -212,7 +212,7 @@ class TritonTM2Function(torch.autograd.Function):
             out,
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         ctx.save_for_backward(x, y, gate_weight, out_weight)
@@ -247,7 +247,7 @@ class TritonTM2Function(torch.autograd.Function):
             dB,
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
         dx = dA @ gate_weight.T
         dy = dB @ out_weight.T

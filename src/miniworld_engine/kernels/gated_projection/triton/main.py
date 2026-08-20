@@ -21,15 +21,15 @@ AUTOTUNE = settings.current().autotunes("tri_attention")
 
 
 
-# AUTOTUNE KEY: ['GROUP_M', 'R'].
+# AUTOTUNE KEY: ['shape_key', 'R'].
 # `n_elements` is a MISNOMER: both launch sites pass the flattened ROW count M into it (it is only
 # ever read as `offset_row < n_elements`), so keying it added the raw M back beside its own bucket
-# and minted a full config sweep per distinct M. GROUP_M = get_seq_group(M) is that axis, bucketed.
+# and minted a full config sweep per distinct M. shape_key = get_seq_group(M) is that axis, bucketed.
 # `R` (the launcher's N = hidden/projection width) IS a real config axis -- it is the extent of the
 # BLOCK_K column loop -- and was absent from the key, so a new width recompiled (it is constexpr
 # here) but silently reused the config tuned for a different width. It is a searched axis now.
 @triton.autotune(configs=configs_for("gated_projection_gate_triton"),
-                 key=['GROUP_M', 'R'])
+                 key=['shape_key', 'R'])
 @triton.jit
 def sigmoid_gate_fwd_kernel(
     gate_ptr,
@@ -41,7 +41,7 @@ def sigmoid_gate_fwd_kernel(
     R: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     row = tl.program_id(0).to(tl.int64)
     offset_row = row * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
@@ -64,11 +64,11 @@ def sigmoid_gate_fwd_kernel(
 
 
 
-# AUTOTUNE KEY: ['GROUP_M', 'R'] -- same reasoning as the forward: `n_elements` receives the raw
-# row count M (GROUP_M is its bucket), and `R` (the column-loop extent, a plain runtime arg here)
+# AUTOTUNE KEY: ['shape_key', 'R'] -- same reasoning as the forward: `n_elements` receives the raw
+# row count M (shape_key is its bucket), and `R` (the column-loop extent, a plain runtime arg here)
 # is the second real axis.
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_triton"),
-                 key=['GROUP_M', 'R'])
+                 key=['shape_key', 'R'])
 @triton.jit
 def sigmoid_gate_bwd_kernel(
     gate_ptr,
@@ -82,7 +82,7 @@ def sigmoid_gate_bwd_kernel(
     R,
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    GROUP_M,
+    shape_key,
 ):
     row = tl.program_id(0).to(tl.int64)
     offset_row = row * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
@@ -140,7 +140,7 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
             out,
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         ctx.save_for_backward(
@@ -176,7 +176,7 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
             out,
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         grad_out = rearrange(grad_out, "... W -> (...) W").contiguous()
@@ -196,7 +196,7 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
             x.stride(0),
             M,
             N,
-            GROUP_M=get_seq_group(M),
+            shape_key=get_seq_group(M),
         )
 
         dgate = dgate.reshape(original_shape)
@@ -212,9 +212,9 @@ triton_gated_projection = TritonGatedProjectionFunction.apply
 # training.py carried a bitwise-equal copy of each (.bench/direct.out); both files import
 # these now. The tiled kernels above take (M, N, strides); these take one element count and
 # assume every operand is contiguous.
-@triton.autotune(configs=configs_for("gated_projection_gate_flat_triton"), key=['seq_group'])
+@triton.autotune(configs=configs_for("gated_projection_gate_flat_triton"), key=['shape_key'])
 @triton.jit
-def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, seq_group):
+def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
     m = off < n
     g = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
@@ -222,9 +222,9 @@ def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, seq_group):
     tl.store(a_ptr + off, (g * o).to(a_ptr.dtype.element_ty), mask=m)
 
 
-@triton.autotune(configs=configs_for("gated_projection_bwd_gate_flat_triton"), key=['seq_group'])
+@triton.autotune(configs=configs_for("gated_projection_bwd_gate_flat_triton"), key=['shape_key'])
 @triton.jit
-def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, seq_group):
+def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, shape_key):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
     m = off < n
     da = tl.load(da_ptr + off, mask=m, other=0.0).to(tl.float32)

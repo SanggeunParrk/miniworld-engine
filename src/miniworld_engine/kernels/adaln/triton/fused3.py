@@ -28,7 +28,7 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 
-# seq_group is the row-count cache bucket. It is NOT GROUP_M: in this file GROUP_M is the tuned
+# shape_key is the row-count cache bucket. It is NOT GROUP_M: in this file GROUP_M is the tuned
 # L2-swizzle axis the two GEMM kernels read from the CSV, so the bucket takes a separate,
 # lowercase name -- it is a plain runtime int no kernel body ever reads.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
@@ -39,11 +39,11 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['N', 'HAS_W', 'seq_group'])
+@triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['N', 'HAS_W', 'shape_key'])
 @triton.jit
 def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
               HAS_W: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-              seq_group):
+              shape_key):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -106,7 +106,7 @@ def _layernorm(x, eps, weight=None):
     # did not already force.
     _ln_kernel[grid](x, y, weight if weight is not None else x, M, int(N), eps,
                      x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-                     HAS_W=weight is not None, seq_group=get_seq_group(M),)
+                     HAS_W=weight is not None, shape_key=get_seq_group(M),)
     return y
 
 
@@ -119,16 +119,16 @@ def _layernorm(x, eps, weight=None):
 
 
 # The row count is keyed too: this is a 2-D GEMM whose grid is cdiv(M,BLOCK_M1)*cdiv(N,BLOCK_N),
-# and both N and K are weight extents -- so without seq_group the key was constant across every
+# and both N and K are weight extents -- so without shape_key the key was constant across every
 # sequence length and one tile served a 128-row launch and a 1M-row launch alike.
-@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=['N', 'K', 'seq_group', 'SAVE_GATE'])
+@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=['N', 'K', 'shape_key', 'SAVE_GATE'])
 @triton.jit
 def _gemm_gate_kernel(
     Xn, Cn, Ws, Wb, Sb, Y, Gate, M, N, K,
     sxn0, sxn1, scn0, scn1, sws0, sws1, swb0, swb1, sy0, sy1, sg0, sg1,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
-    seq_group,
+    shape_key,
     SAVE_GATE: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
@@ -183,7 +183,7 @@ def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b):
         x_norm.stride(0), x_norm.stride(1), cond_norm.stride(0), cond_norm.stride(1),
         Ws.stride(0), Ws.stride(1), Wb.stride(0), Wb.stride(1), y.stride(0), y.stride(1),
         0, 0,                       # Gate is unread when SAVE_GATE=False
-        seq_group=get_seq_group(M), SAVE_GATE=False,
+        shape_key=get_seq_group(M), SAVE_GATE=False,
     )
     return y
 
@@ -202,7 +202,7 @@ def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b):
         x_norm.stride(0), x_norm.stride(1), cond_norm.stride(0), cond_norm.stride(1),
         Ws.stride(0), Ws.stride(1), Wb.stride(0), Wb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1),
-        seq_group=get_seq_group(M), SAVE_GATE=True,)
+        shape_key=get_seq_group(M), SAVE_GATE=True,)
     return y, gate
 
 
@@ -212,11 +212,11 @@ def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b):
 # from the same next_pow2(N) launch, so the candidate set has to keep reaching a whole row (1024)
 # rather than stopping at the canonical BLOCK_K's 256 — dropping the value the launcher used is
 # not a fix. With no reduction there is a single pass over the N tiles.
-@triton.autotune(configs=configs_for("adaln_bwd_pre_triton"), key=['N', 'seq_group'])
+@triton.autotune(configs=configs_for("adaln_bwd_pre_triton"), key=['N', 'shape_key'])
 @triton.jit
 def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                      sy0, sy1, sxn0, sxn1, sg0, sg1, sds0, sds1, sdx0, sdx1,
-                     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, seq_group):
+                     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -242,7 +242,7 @@ def _bwd_elem(dy, x_norm, gate):
     _bwd_elem_kernel[grid](dy, x_norm, gate, dscale, dxn, M, N,
                            dy.stride(0), dy.stride(1), x_norm.stride(0), x_norm.stride(1),
                            gate.stride(0), gate.stride(1), dscale.stride(0), dscale.stride(1),
-                           dxn.stride(0), dxn.stride(1), seq_group=get_seq_group(M),)
+                           dxn.stride(0), dxn.stride(1), shape_key=get_seq_group(M),)
     return dscale, dxn
 
 

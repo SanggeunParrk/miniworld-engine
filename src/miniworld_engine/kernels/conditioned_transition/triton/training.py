@@ -61,13 +61,13 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['seq_group', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['shape_key', 'ND'])
 @triton.jit
 def _swiglu_fwd_kernel(
     a_ptr, b_ptr, h_ptr, M, ND,
     stride_m, stride_n,      # a, b: (M, ND), possibly strided views (same strides)
     BLOCK_E: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
@@ -88,7 +88,7 @@ def _swiglu(a, b):
     h = torch.empty(M, ND, device=a.device, dtype=a.dtype)  # contiguous output
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1),
-                             seq_group=get_seq_group(M))
+                             shape_key=get_seq_group(M))
     return h
 
 
@@ -96,7 +96,7 @@ def _gate(out, scale):
     y = torch.empty_like(out)
     n = out.numel()
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _sigmul_fwd[grid](scale, out, y, n, seq_group=get_seq_group(n))
+    _sigmul_fwd[grid](scale, out, y, n, shape_key=get_seq_group(n))
     return y
 
 
@@ -105,7 +105,7 @@ def _gate(out, scale):
 
 # FLAT 1-D — same measurement as _swiglu_fwd_kernel; this one was the larger of the two
 # regressions (822us of GPU time as a 2-D tile).
-@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_flat_triton"), key=['seq_group', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_flat_triton"), key=['shape_key', 'ND'])
 @triton.jit
 def _swiglu_bwd_kernel(
     a_ptr, b_ptr, dh_ptr, dab_ptr, M, ND,
@@ -113,7 +113,7 @@ def _swiglu_bwd_kernel(
     stride_dhm, stride_dhn,      # dh: (M, ND) (own strides — may differ from a/b)
     stride_pm, stride_pn,        # dab: (M, 2*ND) packed [da | db]
     BLOCK_E: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     # Packs da into dab[:, :ND] and db into dab[:, ND:] so the expand-bwd is one GEMM.
     pid = tl.program_id(0).to(tl.int64)
@@ -139,7 +139,7 @@ def _gate_bwd(out, scale, dy):
     dscale = torch.empty_like(out)
     n = out.numel()
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, seq_group=get_seq_group(n))
+    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=get_seq_group(n))
     return dout, dscale
 
 
@@ -158,7 +158,7 @@ def _swiglu_bwd_packed(a, b, dh):
         a.stride(0), a.stride(1),
         dh.stride(0), dh.stride(1),
         dab.stride(0), dab.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return dab
 
@@ -192,7 +192,7 @@ def _swiglu_bwd_packed(a, b, dh):
 
 
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_saveact_triton"),
-                 key=['ND', 'K', 'DC', 'seq_group'])
+                 key=['ND', 'K', 'DC', 'shape_key'])
 @triton.jit
 def _b2b_fwd_train_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr,
@@ -211,7 +211,7 @@ def _b2b_fwd_train_kernel(
     stride_sm, stride_sc,     # scale:(M, D)
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr,
     BLOCK_K_D: tl.constexpr, BLOCK_N: tl.constexpr,
-    seq_group,
+    shape_key,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     pid_d = tl.program_id(1).to(tl.int64)
@@ -287,7 +287,7 @@ def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
         wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
         out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        seq_group=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return y, ab, h, out, scale
 

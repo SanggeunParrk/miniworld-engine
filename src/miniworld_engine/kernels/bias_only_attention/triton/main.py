@@ -71,7 +71,7 @@ def _attn_fwd_inner(
 
 
 @triton.autotune(configs=configs_for("bias_only_attention_fwd_triton"),
-                 key=['GROUP_N', 'H', 'HEAD_DIM'])
+                 key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
 def _attn_fwd(
     v_ptr,
@@ -103,7 +103,7 @@ def _attn_fwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     start_m = tl.program_id(0).to(tl.int64)
@@ -176,10 +176,10 @@ def _attn_fwd(
 
 
 # The launcher hands the backward H*L, not H: v is the "B (H L) L2 D" rearrangement. Naming it H and
-# keying on it partitioned the cache per sequence length -- defeating the GROUP_N bucket next to it --
+# keying on it partitioned the cache per sequence length -- defeating the shape_key bucket next to it --
 # for a value this kernel never reads. Dropped.
 @triton.autotune(configs=configs_for("bias_only_attention_bwd_pre_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'])
+                 key=['shape_key', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd_preprocess(
     o,
@@ -190,7 +190,7 @@ def _attn_bwd_preprocess(
     HEAD_DIM: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     off_m = tl.program_id(0).to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     off_hz = tl.program_id(1).to(tl.int64)
@@ -274,10 +274,10 @@ def _attn_bwd_dvdbias(
 
 
 
-# HL, not H: `bhid` runs over B*HL, so the decode below divides by H*L. Keyed on GROUP_N only --
+# HL, not H: `bhid` runs over B*HL, so the decode below divides by H*L. Keyed on shape_key only --
 # keying the raw product would partition the cache per sequence length.
 @triton.autotune(configs=configs_for("bias_only_attention_bwd_triton"),
-                 key=['GROUP_N', 'HEAD_DIM'])
+                 key=['shape_key', 'HEAD_DIM'])
 @triton.jit
 def _attn_bwd(
     v_ptr,
@@ -301,7 +301,7 @@ def _attn_bwd(
     BLOCK_M1: tl.constexpr,
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
-    GROUP_N,
+    shape_key,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
 
@@ -392,7 +392,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
 
         ctx.save_for_backward(v, bias, m, out)
@@ -430,7 +430,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             B,
             L,
             D,
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
             HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
 
@@ -452,7 +452,7 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
             L,
             D,
             HEAD_DIM_PAD=triton.next_power_of_2(D),
-            GROUP_N=get_seq_group(L),
+            shape_key=get_seq_group(L),
         )
 
         dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)

@@ -41,12 +41,12 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("layernorm_stats_triton"), key=['K', 'GROUP_M'])
+@triton.autotune(configs=configs_for("layernorm_stats_triton"), key=['K', 'shape_key'])
 @triton.jit
 def _stats_kernel(
     x_ptr, rstd_ptr, c1_ptr, M, K, eps,
     stride_xm, stride_xk,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, GROUP_M,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -92,6 +92,6 @@ def stats_triton(x: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tenso
     _stats_kernel[grid](
         x, rstd, c1, M, K, eps,
         x.stride(0), x.stride(1),
-        GROUP_M=get_seq_group(M),
+        shape_key=get_seq_group(M),
     )
     return rstd, c1
