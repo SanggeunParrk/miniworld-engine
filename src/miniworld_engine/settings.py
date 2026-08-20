@@ -52,6 +52,32 @@ class Settings:
     #: Worker processes used to PRE-compile an autotune round before it is timed. None = one per
     #: usable core (capped). 1 disables it. Only a build ever sets this; see autotune.capture.
     compile_jobs: int | None = None
+    #: Abandon a config once a single timed launch exceeds ``factor x`` the best time seen so far
+    #: in this tuning round. None = off (measure every config to completion, triton's default).
+    #:
+    #: Triton benches the whole pruned grid serially -- ``{c: self._bench(c) for c in configs}`` --
+    #: and only then takes the min. Measuring a config that is already 10x the best to three-decimal
+    #: precision buys nothing: the winner is decided by the minimum, not by the losers' exact times.
+    #: The factor is a margin over measurement noise, so a config that could still win is never
+    #: abandoned -- a new best runs FASTER than the current best and is therefore always inside the
+    #: budget. Abandoned configs score +inf and lose, which is the same outcome they would have had.
+    bench_budget_factor: float | None = None
+    #: Ceiling on that budget, in milliseconds, used before any config has succeeded in a round.
+    #: The kernels here run 0.05-1 ms, so this only bounds the first few probes.
+    #:
+    #: NOTE this is a post-hoc check, not a timeout: the elapsed time of a launch is only readable
+    #: once the launch has finished, so a config that runs for 468 s is judged after those 468 s
+    #: have already been spent. Lowering the cap tightens which configs are RECORDED, never how
+    #: long a bad one is allowed to run. Configs that cannot be allowed to run at all have to be
+    #: excluded before launch -- see _is_compile_monster in autotune.cache.
+    bench_budget_cap_ms: float = 300.0
+    #: Skip the untimed warm launch before the budget probe. Diagnostic: if the first-launch cost
+    #: is a one-time per-config setup, removing the warm call only MOVES that cost into the probe.
+    bench_budget_skip_warm: bool = False
+    #: How kernel entry points are exposed to ``torch.compile``: "disable" (graph break, the
+    #: measured-faster default) or "custom_op" (opaque graph node, keeps surrounding fusion).
+    #: Interchangeable -- same kernel, same numbers. Read at IMPORT time by kernels._compile.
+    compile_wrap: Literal["disable", "custom_op"] = "disable"
     #: bias_only gate epilogue calibration. Formerly MINIWORLD_BIASONLY_AUTOTUNE.
     biasonly_dispatch: DispatchMode = "auto"
     #: layernorm backend calibration. Formerly MINIWORLD_LN_AUTOTUNE.

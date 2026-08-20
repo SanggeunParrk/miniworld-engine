@@ -133,3 +133,30 @@ than the best compiled PyTorch/cuEquivariance baseline:
 
 This diagnostic confirms the old `d_pair=128/256` failure is fixed, but it is
 not the performance regime used for the final module comparison.
+
+## 시도했고 진 것: strided-gather GEMM (삭제됨)
+
+`kernels/bias_only_attention/triton/fused.py` 에 있던 `_bias_only_gemm` 은 2026-08-20 에 삭제했다.
+코드는 지웠지만 결론은 남긴다 — **다시 시도하지 말 것.**
+
+연산:
+
+    out[b,h,i,j,d] = sum_k softmax_k(bias[b,h,j,k]) * value[b,h,i,k,d]
+
+아이디어는 "torch 의 permute 왕복을 피한다"였다. `k` 가 축약축이자 softmax 축이고
+`softmax(bias)` 는 `i` 에 무관하므로, `A = softmax(bias)` 를 한 번만 구하고 `(b,h)` 당 GEMM
+하나로 접는다. torch 는 이미 그 GEMM 을 하지만 입력에서 value-permute, 출력에서 output-permute
+를 낸다. 그래서 value 를 `V'[k,(i,d)]` 로 **strided 하게 읽고** 출력도 strided 로 써서 왕복을
+둘 다 없애려 했다.
+
+**결과: torch.einsum 보다 ~8배 느리다** (정확도는 문제없음, cosine 1.0). 이유는
+`value[i,k,d]` 의 i-stride 가 `L*D` 라서, per-k 로드가 심하게 non-coalesced 가 되기 때문이다.
+torch 의 permute -> contiguous -> cuBLAS 경로가 압도적으로 이긴다. op 레벨 승자는 그냥
+`torch.einsum` 이고, 실제 이득은 모듈 레벨(LN + `.contiguous()` + gate)에 있다.
+
+덧붙여 이 커널은 축 설계 자체가 잘못돼 있었다: 누산기가
+`acc = tl.zeros([BLOCK_M1_J, BLOCK_M1_I * BLOCK_K])` 로, N extent 가 **튜닝 축 두 개의 곱**이다.
+all-64 조합이 64x4096 fp32 누산기가 되어 컴파일만 45분씩 걸렸고, 프로덕션에서 쓰이지도 않으면서
+모든 검증 실행의 벽시계를 이 하나가 좌우했다. dispatch 는 이 경로를 참조한 적이 없다
+(`modules/triangle_attention/module.py` -> `bias_only_attention.dispatch` -> `main.py` / `gate_out.py`).
+유일한 호출자는 벤치 브랜치 하나였고 그것도 함께 지웠다.
