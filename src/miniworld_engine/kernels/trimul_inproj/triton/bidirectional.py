@@ -28,14 +28,15 @@ and extended to also store ``preact``. B=1, bf16 / fp32.
 """
 
 from __future__ import annotations
+from miniworld_engine.autotune.configs import configs_for
 
 import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import make_cache_prune
+
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
-from miniworld_engine.kernels.layernorm_linear.te_style import (
+from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
 )
@@ -47,74 +48,11 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 )
 
 
-# ── FRONT forward (the one new triton kernel) ────────────────────────────────
-# ONE kernel, N-tiled over the 2*H2 output width in BN-channel chunks (contiguous
-# [BK, 2*BN] weight slice + reshape/split per chunk). BN is autotuned WITH a device-aware
-# smem prune: at small d a BN that spans the whole width in a single chunk survives and is
-# picked — identical to the original single wide GEMM — while at large d (where that would
-# OOM A100's 163KB) it is pruned and a smaller BN (more chunks, bounded smem) is used. So
-# the algorithm degrades gracefully with d instead of needing a separate kernel.
-def _front_smem_prune(configs, named_args, **kwargs):  # noqa: ARG001
-    """Drop configs whose per-chunk weight tile [BK, 2*BN] (+ x tile) exceeds device smem."""
-    import triton as _triton
-
-    try:
-        limit = _triton.runtime.driver.active.utils.get_device_properties(
-            torch.cuda.current_device(),
-        )["max_shared_mem"]
-    except Exception:  # noqa: BLE001 -- conservative sm100 budget
-        limit = 227 * 1024
-
-    # Peak smem is dominated by the [BK, 2*BN] weight tile; measured ~132 B per output col
-    # for this gated-GEMM front (the full-width form needed 270336 B at 2*H2=2048, and fit at
-    # 2*H2=1024). Estimate by width (+~6% margin) — matches the observed OOM boundary, whereas
-    # a naive stages*tile product over-counts ~2x and would drop the still-fitting configs.
-    def _smem(c):
-        return int(2 * c.kwargs["BN"]) * 140
-
-    kept = [c for c in configs if _smem(c) <= limit]
-    return kept or [min(configs, key=_smem)]
 
 
-# Cache-narrowing prune (top-K tuned configs per gpu/dtype/shape), composed OVER the smem
-# safety prune: the cache only narrows within what _front_smem_prune already deemed launchable.
-# Extractors read constexprs reliably present in named_args; dtype defaults to bf16 (production)
-# if the tensor arg isn't introspectable. Miss / stale cache -> warn once + full grid.
-def _bidir_front_dtype(na, kw):
-    x = na.get("x_ptr") if hasattr(na, "get") else None
-    return str(getattr(x, "dtype", "torch.bfloat16")).replace("torch.", "")
 
 
-def _bidir_front_bucket(na, kw):
-    from miniworld_engine.autotune import shape_bucket
-    get = (lambda n: na.get(n, kw.get(n))) if hasattr(na, "get") else (lambda n: kw.get(n))
-    return shape_bucket(GM=get("GROUP_M"), H2=get("H2"), K=get("K"))
-
-
-_bidir_front_prune = make_cache_prune(
-    "trimul_bidir_front",
-    dtype_of=_bidir_front_dtype, bucket_of=_bidir_front_bucket, base_prune=_front_smem_prune,
-)
-
-
-@triton.autotune(
-    # BN = CHANNELS per chunk. Each chunk loads the CONTIGUOUS interleaved [BK, 2*BN] weight
-    # slice (gate+proj for BN channels) in ONE coalesced GEMM, then reshape (BM, BN, 2) + split.
-    # BN=512 spans the whole width in a SINGLE chunk at d<=256 (H2<=512) — then this is exactly
-    # the original wide GEMM. At d=512 (H2=1024) that single-chunk form OOMs, so the smem prune
-    # drops the too-wide configs and autotune falls to BN=256/128 (more, bounded chunks).
-    configs=[
-        triton.Config({"BM": 64, "BK": 64, "BN": 512}, num_warps=8, num_stages=2),
-        triton.Config({"BM": 64, "BK": 32, "BN": 512}, num_warps=8, num_stages=3),
-        triton.Config({"BM": 32, "BK": 32, "BN": 512}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 64, "BK": 64, "BN": 256}, num_warps=8, num_stages=2),
-        triton.Config({"BM": 64, "BK": 32, "BN": 256}, num_warps=8, num_stages=3),
-        triton.Config({"BM": 64, "BK": 32, "BN": 128}, num_warps=4, num_stages=3),
-        triton.Config({"BM": 32, "BK": 32, "BN": 128}, num_warps=4, num_stages=3),
-    ],
-    key=["GROUP_M", "H2"],
-    prune_configs_by={"early_config_prune": _bidir_front_prune},
-)
+@triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"), key=['GROUP_M', 'H2', 'K'])
 @triton.jit
 def _bidir_front_kernel(
     x_ptr, w_ptr,
@@ -122,7 +60,7 @@ def _bidir_front_kernel(
     preact_ptr,
     M, LL,
     K: tl.constexpr, H2: tl.constexpr,
-    BM: tl.constexpr, BK: tl.constexpr, BN: tl.constexpr, GROUP_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K_D: tl.constexpr, BLOCK_K_H2: tl.constexpr, GROUP_M,
     SAVE_PREACT: tl.constexpr = True,
 ):
     # int64 program id -> rm and all rm-derived store offsets are int64. Combined with the
@@ -130,29 +68,43 @@ def _bidir_front_kernel(
     # (row_base up to 4*H2, times M) from overflowing int32 at large M -- e.g. 4096 * 768^2
     # ~ 2.4e9 > 2^31, which faulted with an illegal memory access at d=512, L>=768.
     pid = tl.program_id(0).to(tl.int64)
-    rm = pid * BM + tl.arange(0, BM)
-    rk = tl.arange(0, BK)
-    c2 = tl.arange(0, 2 * BN)                # contiguous interleaved (g,p) cols within a chunk
+    rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    rk = tl.arange(0, BLOCK_K_D)
+    c2 = tl.arange(0, 2 * BLOCK_K_H2)                # contiguous interleaved (g,p) cols within a chunk
     mmask = rm < M
     smask = rm[None, :] < M
     W4 = 4 * H2
     et = left_ptr.dtype.element_ty
+    # The K loop walks the contraction axis in BLOCK_K_D steps and `rk` is never re-bounded, so a K
+    # that is not a multiple of the tuned BLOCK_K_D made the last trip read columns K..ceil-1 --
+    # the next row's leading channels for x, and past the end of the (K, 4*H2) weight entirely
+    # (memcheck: invalid 8-byte global read 2001-4241 bytes past a 250000-byte allocation at K=125).
+    # The row/column masks cannot help: the out-of-range index is on the contraction axis. Both
+    # K and BLOCK_K_D are constexpr, so this folds at compile time and the aligned path keeps the
+    # unmasked loads -- the same EVEN_* dispatch triangle_attention/triton/atomic.py:156 uses.
+    EVEN_K = K % BLOCK_K_D == 0
 
     # ---- LEFT half: weight cols [0 : 2*H2), out -> left_ptr, preact rows [0 : 2*H2) ----
-    for c0 in range(0, H2, BN):
-        ch = c0 + tl.arange(0, BN)                       # channel indices this chunk
+    for c0 in range(0, H2, BLOCK_K_H2):
+        ch = c0 + tl.arange(0, BLOCK_K_H2)                       # channel indices this chunk
         chmask = ch < H2
         cols = 2 * c0 + c2                               # contiguous cols [2c0 : 2c0+2BN)
         colmask = cols < 2 * H2
         x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
         w_ptrs = w_ptr + rk[:, None] * W4 + cols[None, :]
-        acc = tl.zeros((BM, 2 * BN), dtype=tl.float32)
-        for _ in range(0, K, BK):
-            a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
-            acc = tl.dot(a, tl.load(w_ptrs, mask=colmask[None, :], other=0.0), acc)
-            x_ptrs += BK
-            w_ptrs += BK * W4
-        g, p = tl.split(tl.reshape(acc, (BM, BN, 2)))    # (BM, BN) each: gate-logit, proj
+        acc = tl.zeros((BLOCK_M1, 2 * BLOCK_K_H2), dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K_D):
+            if EVEN_K:
+                a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
+                w = tl.load(w_ptrs, mask=colmask[None, :], other=0.0)
+            else:
+                kmask = k0 + rk < K
+                a = tl.load(x_ptrs, mask=mmask[:, None] & kmask[None, :], other=0.0)
+                w = tl.load(w_ptrs, mask=kmask[:, None] & colmask[None, :], other=0.0)
+            acc = tl.dot(a, w, acc)
+            x_ptrs += BLOCK_K_D
+            w_ptrs += BLOCK_K_D * W4
+        g, p = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_K_H2, 2)))    # (BLOCK_M1, BLOCK_K_H2) each: gate-logit, proj
         smsk = chmask[:, None] & smask
         if SAVE_PREACT:
             tl.store(preact_ptr + (2 * ch).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
@@ -161,20 +113,26 @@ def _bidir_front_kernel(
         tl.store(left_ptr + ch.to(tl.int64)[:, None] * LL + rm[None, :], tl.trans(outl).to(et), mask=smsk)
 
     # ---- RIGHT half: weight cols [2*H2 : 4*H2), out -> right_ptr, preact rows [2*H2 : 4*H2) ----
-    for c0 in range(0, H2, BN):
-        ch = c0 + tl.arange(0, BN)
+    for c0 in range(0, H2, BLOCK_K_H2):
+        ch = c0 + tl.arange(0, BLOCK_K_H2)
         chmask = ch < H2
         cols = 2 * H2 + 2 * c0 + c2
         colmask = (2 * c0 + c2) < 2 * H2
         x_ptrs = x_ptr + rm[:, None] * K + rk[None, :]
         w_ptrs = w_ptr + rk[:, None] * W4 + cols[None, :]
-        acc = tl.zeros((BM, 2 * BN), dtype=tl.float32)
-        for _ in range(0, K, BK):
-            a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
-            acc = tl.dot(a, tl.load(w_ptrs, mask=colmask[None, :], other=0.0), acc)
-            x_ptrs += BK
-            w_ptrs += BK * W4
-        g, p = tl.split(tl.reshape(acc, (BM, BN, 2)))
+        acc = tl.zeros((BLOCK_M1, 2 * BLOCK_K_H2), dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K_D):
+            if EVEN_K:
+                a = tl.load(x_ptrs, mask=mmask[:, None], other=0.0)
+                w = tl.load(w_ptrs, mask=colmask[None, :], other=0.0)
+            else:
+                kmask = k0 + rk < K
+                a = tl.load(x_ptrs, mask=mmask[:, None] & kmask[None, :], other=0.0)
+                w = tl.load(w_ptrs, mask=kmask[:, None] & colmask[None, :], other=0.0)
+            acc = tl.dot(a, w, acc)
+            x_ptrs += BLOCK_K_D
+            w_ptrs += BLOCK_K_D * W4
+        g, p = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_K_H2, 2)))
         smsk = chmask[:, None] & smask
         if SAVE_PREACT:
             tl.store(preact_ptr + (2 * H2 + 2 * ch).to(tl.int64)[:, None] * M + rm[None, :], tl.trans(g).to(et), mask=smsk)
@@ -206,7 +164,7 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     right = torch.empty(B, H2, L, L, device=x_n.device, dtype=x_n.dtype)
     preact = (torch.empty(4 * H2, M, device=x_n.device, dtype=x_n.dtype)
               if save_preact else left)   # dummy ptr when not saving (stores guarded)
-    grid = lambda meta: (triton.cdiv(M, meta["BM"]),)          # noqa: E731
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)          # noqa: E731
     _bidir_front_kernel[grid](
         x_flat, Wlr, left, right, preact, M, M,
         K=K, H2=H2, GROUP_M=get_seq_group(M), SAVE_PREACT=save_preact,

@@ -35,11 +35,11 @@ Forward optimizations
    input and output kernels including:
    - ``maxnreg=128/96`` for Hopper register-file occupancy.
    - ``num_stages=3/4/5`` for Hopper async-copy TMA pipeline overlap.
-   - ``BLOCK_M=64, BLOCK_K=32, num_warps=4`` small-tile configs that
+   - ``BLOCK_M1=64, BLOCK_K=32, num_warps=4`` small-tile configs that
      reach up to 6 CTAs/SM for the input kernel and 4 CTAs/SM for the
      output kernel at short and medium sequence lengths.
    - **Note**: ``maxnreg ≤ 80`` is forbidden for the dual-accumulator
-     kernels (need ≈84 registers for the two BLOCK_M×BLOCK_N tiles);
+     kernels (need ≈84 registers for the two BLOCK_M1×BLOCK_N tiles);
      use ``maxnreg=128`` or none.
 
 Backward optimizations
@@ -72,13 +72,16 @@ Target: Hopper (H100/H200), fp32 or bf16, B=1, L >= 256.
 
 from __future__ import annotations
 
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
+
 import torch
 import triton
 import triton.language as tl
 from cuequivariance_ops.triton import Layout
 
-
-# ---------------------------------------------------------------------------
+from miniworld_engine.autotune import tensor_dtype_of
+from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
 # Shared helpers
 # ---------------------------------------------------------------------------
 
@@ -178,59 +181,11 @@ def _triangle_contract_bmm_dbij(
 # maxnreg=128: 128 × 256 threads = 32 768 regs/CTA → 2 CTAs/SM on H100.
 # maxnreg=96 : 96  × 128 threads = 12 288 regs/CTA → ~5 CTAs/SM.
 
-_LONG_INPUT_CONFIGS = [
-    # baselines
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 128}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 128, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    # maxnreg=128 — doubles CTA occupancy (32 768 regs/CTA → 2 CTAs/SM)
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=8, num_stages=3, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 128}, num_warps=8, num_stages=3, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=8, num_stages=4, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=8, num_stages=3, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 32, "BLOCK_N": 128}, num_warps=8, num_stages=3, maxnreg=128),
-    # maxnreg=96 — up to 5 CTAs/SM with smaller blocks
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=4, maxnreg=96),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 128}, num_warps=4, num_stages=4, maxnreg=96),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=3, maxnreg=96),
-    # BK=32 small-tile configs: 3-tensor kernel → up to 6 CTAs/SM
-    # SMEM: 3×(64×32)×2 per stage × 3 stages = 36 KB → floor(227/36) = 6 CTAs/SM
-    # NOTE: maxnreg ≤ 80 is FORBIDDEN (dual-accumulator needs ≈84 regs → spilling)
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=4, num_stages=4, maxnreg=128),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=4, num_stages=5, maxnreg=128),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-]
 
 # Output kernel: single-pass dual-accumulator (4 tensors per stage).
 # BK=32 / BM=64 small-tile configs reach up to 4 CTAs/SM.
 # SMEM: 4×(64×32)×2 per stage × 3 stages = 48 KB → floor(227/48) = 4 CTAs/SM
 # NOTE: maxnreg ≤ 80 is FORBIDDEN (need ≈84 regs → 10-15× spill slowdown)
-_OUTPUT_CONFIGS = [
-    # baselines
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 128}, num_warps=8, num_stages=2),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 128, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=8, num_stages=2),
-    # maxnreg=128
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=8, num_stages=3, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 128}, num_warps=8, num_stages=3, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=8, num_stages=4, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=8, num_stages=3, maxnreg=128),
-    triton.Config({"BLOCK_M": 128, "BLOCK_K": 32, "BLOCK_N": 128}, num_warps=8, num_stages=3, maxnreg=128),
-    # maxnreg=96
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=4, maxnreg=96),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 128}, num_warps=4, num_stages=4, maxnreg=96),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=3, maxnreg=96),
-    # BK=32 small-tile configs: 4-tensor kernel → up to 4 CTAs/SM
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=4, num_stages=3),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=4, num_stages=4, maxnreg=128),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "BLOCK_N": 64}, num_warps=4, num_stages=5, maxnreg=128),
-    triton.Config({"BLOCK_M": 64, "BLOCK_K": 64, "BLOCK_N": 64}, num_warps=4, num_stages=2),
-]
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +193,27 @@ _OUTPUT_CONFIGS = [
 # ---------------------------------------------------------------------------
 
 
-@triton.autotune(configs=_LONG_INPUT_CONFIGS, key=["M", "N", "K", "ALLOW_TF32"])
+def get_seq_group(rows) -> int:
+    """Bucket a raw row/element count for the autotune key (canonical autotune.buckets).
+
+    Every count in this file is either the pair row count M = b*i*j (the GEMMs) or a flat
+    element count (the elementwise backward), so all three ops share ONE bucketer.
+    bucket_mixed is used rather than bucket_squared even for the pair-only GEMMs because
+    COMBINED_EDGES is the UNION of the linear and squared edge sets -- it is a strict
+    refinement of the squared edges, never coarser, and it also covers the elementwise
+    op whose count is ~2*D*M and lands far above the squared edges.
+    """
+    return _bucket(rows)
+
+
+# AUTOTUNE KEY: ['seq_group', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying
+# raw M (the pair row count b*i*j) minted one full config sweep per sequence length; `seq_group` is
+# that count bucketed. `N` is DROPPED as redundant, not ignored -- see the proof above each launcher.
+# ALLOW_TF32 STAYS: it is a real codegen switch (it selects the tl.dot input precision for fp32
+# operands). It is read from the PROCESS-GLOBAL torch.backends.cuda.matmul.allow_tf32 at every
+# launch, so flipping torch.set_float32_matmul_precision mid-run legitimately costs a re-tune.
+@triton.autotune(configs=configs_for("trimul_gemm_gate_saveact_triton"),
+                 key=['seq_group', 'K', 'ALLOW_TF32'])
 @triton.jit
 def _input_gated_gemm_kernel(
     xn_ptr,
@@ -254,9 +229,10 @@ def _input_gated_gemm_kernel(
     APPLY_MASK: tl.constexpr,
     TRANSPOSE_OUT: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    seq_group,
 ):
     """Fused gated GEMM: out = sigmoid(xn @ wg.T) * (xn @ wp.T) [* mask].
 
@@ -277,8 +253,8 @@ def _input_gated_gemm_kernel(
         base=xn_ptr,
         shape=(M, K),
         strides=(K, 1),
-        offsets=(pid_m * BLOCK_M, 0),
-        block_shape=(BLOCK_M, BLOCK_K),
+        offsets=(pid_m * BLOCK_M1, 0),
+        block_shape=(BLOCK_M1, BLOCK_K),
         order=(1, 0),
     )
     wg_bp = tl.make_block_ptr(
@@ -298,13 +274,31 @@ def _input_gated_gemm_kernel(
         order=(1, 0),
     )
 
-    acc_g = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    acc_p = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # The K loop below walks the contraction axis in BLOCK_K steps. `boundary_check=(0,)` bounds
+    # only axis 0 (M/N), so a K that is not a multiple of the tuned BLOCK_K contracted out-of-range
+    # columns into every accumulator, and the weight tiles were loaded with no boundary_check at
+    # all -- unbounded on BOTH axes. Both K and N are constexpr here, so these fold at compile time
+    # and the fully aligned path keeps exactly the loads it had; the same EVEN_* dispatch as
+    # triangle_attention/triton/atomic.py:156.
+    EVEN_K = K % BLOCK_K == 0
+    EVEN_N = N % BLOCK_N == 0
+
+    acc_g = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    acc_p = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
 
     for _ in range(0, K, BLOCK_K):
-        xn = tl.load(xn_bp, boundary_check=(0,))
-        acc_g += tl.dot(xn, tl.trans(tl.load(wg_bp)), allow_tf32=ALLOW_TF32)
-        acc_p += tl.dot(xn, tl.trans(tl.load(wp_bp)), allow_tf32=ALLOW_TF32)
+        if EVEN_K:
+            xn = tl.load(xn_bp, boundary_check=(0,))
+        else:
+            xn = tl.load(xn_bp, boundary_check=(0, 1))
+        if EVEN_K and EVEN_N:
+            wg = tl.load(wg_bp)
+            wp = tl.load(wp_bp)
+        else:
+            wg = tl.load(wg_bp, boundary_check=(0, 1))
+            wp = tl.load(wp_bp, boundary_check=(0, 1))
+        acc_g += tl.dot(xn, tl.trans(wg), allow_tf32=ALLOW_TF32)
+        acc_p += tl.dot(xn, tl.trans(wp), allow_tf32=ALLOW_TF32)
         xn_bp = tl.advance(xn_bp, (0, BLOCK_K))
         wg_bp = tl.advance(wg_bp, (0, BLOCK_K))
         wp_bp = tl.advance(wp_bp, (0, BLOCK_K))
@@ -312,9 +306,11 @@ def _input_gated_gemm_kernel(
     sig = tl.sigmoid(acc_g)
     ab = sig * acc_p
 
-    row_scale = tl.full((BLOCK_M, 1), 1.0, dtype=tl.float32)
+    # (the old `row_scale = tl.full((BLOCK_M1, 1), 1.0)` initialiser is gone: it was dead outside
+    # the APPLY_MASK branch, and its literal `1` trailing dim was a tile extent that came from
+    # nowhere in the config space. The masked path builds row_scale from the loaded mask instead.)
     if APPLY_MASK:
-        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         mask_m = offs_m < M
         row_scale = tl.load(mask_ptr + offs_m, mask=mask_m, other=0.0)[:, None]
         ab = ab * row_scale
@@ -338,16 +334,16 @@ def _input_gated_gemm_kernel(
             base=out_ptr,
             shape=(N, M),
             strides=(M, 1),
-            offsets=(pid_n * BLOCK_N, pid_m * BLOCK_M),
-            block_shape=(BLOCK_N, BLOCK_M),
+            offsets=(pid_n * BLOCK_N, pid_m * BLOCK_M1),
+            block_shape=(BLOCK_N, BLOCK_M1),
             order=(1, 0),
         )
         sig_bp = tl.make_block_ptr(
             base=sig_ptr,
             shape=(N, M),
             strides=(M, 1),
-            offsets=(pid_n * BLOCK_N, pid_m * BLOCK_M),
-            block_shape=(BLOCK_N, BLOCK_M),
+            offsets=(pid_n * BLOCK_N, pid_m * BLOCK_M1),
+            block_shape=(BLOCK_N, BLOCK_M1),
             order=(1, 0),
         )
         tl.store(out_bp, tl.trans(ab_store), boundary_check=(0, 1))
@@ -357,23 +353,32 @@ def _input_gated_gemm_kernel(
             base=out_ptr,
             shape=(M, N),
             strides=(N, 1),
-            offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-            block_shape=(BLOCK_M, BLOCK_N),
+            offsets=(pid_m * BLOCK_M1, pid_n * BLOCK_N),
+            block_shape=(BLOCK_M1, BLOCK_N),
             order=(1, 0),
         )
         sig_bp = tl.make_block_ptr(
             base=sig_ptr,
             shape=(M, N),
             strides=(N, 1),
-            offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-            block_shape=(BLOCK_M, BLOCK_N),
+            offsets=(pid_m * BLOCK_M1, pid_n * BLOCK_N),
+            block_shape=(BLOCK_M1, BLOCK_N),
             order=(1, 0),
         )
-        tl.store(out_bp, ab_store, boundary_check=(0,))
-        tl.store(sig_bp, sig, boundary_check=(0,))
+        # (0, 1), not (0,): BLOCK_N columns written into an N-wide row spilled into the next
+        # row. The transposed branch above already checks both axes; this one did not.
+        tl.store(out_bp, ab_store, boundary_check=(0, 1))
+        tl.store(sig_bp, sig, boundary_check=(0, 1))
 
 
-@triton.autotune(configs=_OUTPUT_CONFIGS, key=["M", "N", "K", "ALLOW_TF32"])
+# AUTOTUNE KEY: ['seq_group', 'K', 'ALLOW_TF32'] -- was ['M', 'N', 'K', 'ALLOW_TF32']. Keying
+# raw M (the pair row count b*i*j) minted one full config sweep per sequence length; `seq_group` is
+# that count bucketed. `N` is DROPPED as redundant, not ignored -- see the proof above each launcher.
+# ALLOW_TF32 STAYS: it is a real codegen switch (it selects the tl.dot input precision for fp32
+# operands). It is read from the PROCESS-GLOBAL torch.backends.cuda.matmul.allow_tf32 at every
+# launch, so flipping torch.set_float32_matmul_precision mid-run legitimately costs a re-tune.
+@triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_saveact_triton"),
+                 key=['seq_group', 'K', 'ALLOW_TF32'])
 @triton.jit
 def _output_gated_gemm_kernel(
     x1n_ptr,
@@ -387,9 +392,10 @@ def _output_gated_gemm_kernel(
     K: tl.constexpr,
     stride_wn,
     ALLOW_TF32: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    seq_group,
 ):
     """Single-pass dual-accumulator output GEMM. Also writes sig = sigmoid(x1n @ wg.T).
 
@@ -403,19 +409,36 @@ def _output_gated_gemm_kernel(
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    x1_bp = tl.make_block_ptr(x1n_ptr, (M, K), (K, 1), (pid_m * BLOCK_M, 0), (BLOCK_M, BLOCK_K), (1, 0))
-    x2_bp = tl.make_block_ptr(x2_ptr,  (M, K), (K, 1), (pid_m * BLOCK_M, 0), (BLOCK_M, BLOCK_K), (1, 0))
+    x1_bp = tl.make_block_ptr(x1n_ptr, (M, K), (K, 1), (pid_m * BLOCK_M1, 0), (BLOCK_M1, BLOCK_K), (1, 0))
+    x2_bp = tl.make_block_ptr(x2_ptr,  (M, K), (K, 1), (pid_m * BLOCK_M1, 0), (BLOCK_M1, BLOCK_K), (1, 0))
     wg_bp = tl.make_block_ptr(wg_ptr,  (N, K), (stride_wn, 1), (pid_n * BLOCK_N, 0), (BLOCK_N, BLOCK_K), (1, 0))
     wp_bp = tl.make_block_ptr(wp_ptr,  (N, K), (stride_wn, 1), (pid_n * BLOCK_N, 0), (BLOCK_N, BLOCK_K), (1, 0))
 
-    acc_g = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    acc_p = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # The K loop below walks the contraction axis in BLOCK_K steps. `boundary_check=(0,)` bounds
+    # only axis 0 (M/N), so a K that is not a multiple of the tuned BLOCK_K contracted out-of-range
+    # columns into every accumulator, and the weight tiles were loaded with no boundary_check at
+    # all -- unbounded on BOTH axes. Both K and N are constexpr here, so these fold at compile time
+    # and the fully aligned path keeps exactly the loads it had; the same EVEN_* dispatch as
+    # triangle_attention/triton/atomic.py:156.
+    EVEN_K = K % BLOCK_K == 0
+    EVEN_N = N % BLOCK_N == 0
+
+    acc_g = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+    acc_p = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
 
     for _ in range(0, K, BLOCK_K):
-        x1 = tl.load(x1_bp, boundary_check=(0,))
-        x2 = tl.load(x2_bp, boundary_check=(0,))
-        wg = tl.load(wg_bp)
-        wp = tl.load(wp_bp)
+        if EVEN_K:
+            x1 = tl.load(x1_bp, boundary_check=(0,))
+            x2 = tl.load(x2_bp, boundary_check=(0,))
+        else:
+            x1 = tl.load(x1_bp, boundary_check=(0, 1))
+            x2 = tl.load(x2_bp, boundary_check=(0, 1))
+        if EVEN_K and EVEN_N:
+            wg = tl.load(wg_bp)
+            wp = tl.load(wp_bp)
+        else:
+            wg = tl.load(wg_bp, boundary_check=(0, 1))
+            wp = tl.load(wp_bp, boundary_check=(0, 1))
         acc_g += tl.dot(x1, tl.trans(wg), allow_tf32=ALLOW_TF32)
         acc_p += tl.dot(x2, tl.trans(wp), allow_tf32=ALLOW_TF32)
         x1_bp = tl.advance(x1_bp, (0, BLOCK_K))
@@ -434,20 +457,21 @@ def _output_gated_gemm_kernel(
         base=out_ptr,
         shape=(M, N),
         strides=(N, 1),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-        block_shape=(BLOCK_M, BLOCK_N),
+        offsets=(pid_m * BLOCK_M1, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M1, BLOCK_N),
         order=(1, 0),
     )
     sig_bp = tl.make_block_ptr(
         base=sig_ptr,
         shape=(M, N),
         strides=(N, 1),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-        block_shape=(BLOCK_M, BLOCK_N),
+        offsets=(pid_m * BLOCK_M1, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M1, BLOCK_N),
         order=(1, 0),
     )
-    tl.store(out_bp, out_tile, boundary_check=(0,))
-    tl.store(sig_bp, gate, boundary_check=(0,))
+    # (0, 1), not (0,): BLOCK_N columns written into an N-wide row spilled into the next row.
+    tl.store(out_bp, out_tile, boundary_check=(0, 1))
+    tl.store(sig_bp, gate, boundary_check=(0, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -457,9 +481,17 @@ def _output_gated_gemm_kernel(
 # Reduces kernel-launch overhead and improves vectorised HBM access patterns
 # for the 3-input / 2-output elementwise op over large M.
 
-_BWD_ELEMWISE_BLOCK = 2048
+# BLOCK_E is a CSV tile rather than the module-level literal
+# 2048 the two launch sites passed. A CSV row may still spell 2048, so that value is
+# still reachable; the grid below is a meta-lambda so the launch geometry always matches the
+# BLOCK the kernel is compiled with.
 
 
+# AUTOTUNE KEY: ['seq_group'] -- was ['N_total'], the raw flat element count, i.e. a fresh config
+# sweep for every distinct shape this backward sees. `N_total` is still the loop bound in the
+# body; only the KEY is bucketed. seq_group is never read by the kernel, so the generated code is
+# unchanged and the result stays bit-identical.
+@triton.autotune(configs=configs_for("gated_projection_bwd_gate_recompute_flat_triton"), key=['seq_group'])
 @triton.jit
 def _gated_gemm_bwd_elemwise_kernel(
     grad_ptr,
@@ -468,7 +500,8 @@ def _gated_gemm_bwd_elemwise_kernel(
     d_gate_ptr,
     d_proj_ptr,
     N_total,
-    BLOCK: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+    seq_group,
 ):
     """Fused elementwise backward for gated GEMM.
 
@@ -477,7 +510,7 @@ def _gated_gemm_bwd_elemwise_kernel(
         d_proj = grad * sig_m
     """
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
     mask = offs < N_total
 
     grad = tl.load(grad_ptr + offs, mask=mask).to(tl.float32)
@@ -506,11 +539,12 @@ def _elemwise_bwd_combined(grad, ab, sig_m):
     n, m = grad.shape  # (N, M) for TRANSPOSE_OUT=True input path
 
     d_combined = torch.empty((2 * n, m), dtype=grad.dtype, device=grad.device)
-    grid = (triton.cdiv(n_total, _BWD_ELEMWISE_BLOCK),)
+    grid = lambda META: (triton.cdiv(n_total, META["BLOCK_E"]),)  # noqa: E731
     _gated_gemm_bwd_elemwise_kernel[grid](
         grad.contiguous(), ab.contiguous(), sig_m.contiguous(),
         d_combined[:n], d_combined[n:],
-        n_total, BLOCK=_BWD_ELEMWISE_BLOCK,
+        n_total,
+        seq_group=get_seq_group(n_total),
     )
     return d_combined  # (2N, M) fully contiguous
 
@@ -520,11 +554,12 @@ def _elemwise_bwd_separate(grad, ab, sig_m):
     n_total = grad.numel()
     d_gate = torch.empty_like(grad)
     d_proj = torch.empty_like(grad)
-    grid = (triton.cdiv(n_total, _BWD_ELEMWISE_BLOCK),)
+    grid = lambda META: (triton.cdiv(n_total, META["BLOCK_E"]),)  # noqa: E731
     _gated_gemm_bwd_elemwise_kernel[grid](
         grad.contiguous(), ab.contiguous(), sig_m.contiguous(),
         d_gate, d_proj,
-        n_total, BLOCK=_BWD_ELEMWISE_BLOCK,
+        n_total,
+        seq_group=get_seq_group(n_total),
     )
     return d_gate, d_proj
 
@@ -578,6 +613,12 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out):
     sig_m (= sigmoid * mask) is stored in fp32 to avoid bf16 catastrophic
     cancellation in (1 - sig_m) when the gate is saturated (sig_m ≈ 1).
     """
+    # N == 2*K, so N is NOT in this kernel's autotune key (K is).
+    # PROOF (public entry point fused_triangle_multiplicative_update_dtv1): x is (b, i, j, d) and
+    # x_flat = x.reshape(m, d), so K = x_normed.shape[1] = d. The kernel writes ab_t of shape
+    # (n, m); the caller then does `a_t, b_t = torch.chunk(ab_t, 2, dim=0)` followed by
+    # `a_t.view(d, b, i, j)` with m = b*i*j -- a view that only succeeds if n/2 == d. Hence
+    # n == 2*d == 2*K (g_in_weight is the [left; right] combined gate weight, 2D rows).
     m, k = x_normed.shape
     n = w_gate.shape[0]
     shape = (n, m) if transpose_out else (m, n)
@@ -586,7 +627,7 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out):
     apply_mask = mask is not None
     mask_t = mask if apply_mask else torch.empty(0, device=x_normed.device, dtype=x_normed.dtype)
     _input_gated_gemm_kernel[(
-        lambda meta: (triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),)
+        lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]) * triton.cdiv(n, meta["BLOCK_N"]),)
     )](
         x_normed, w_gate, w_proj, mask_t, ab, sig_m,
         m, n, k,
@@ -594,6 +635,7 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out):
         APPLY_MASK=apply_mask,
         TRANSPOSE_OUT=transpose_out,
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        seq_group=get_seq_group(m),
     )
     return ab, sig_m
 
@@ -606,17 +648,23 @@ def _output_gemm_fwd(x_normed, x_out, w_gate, w_proj):
     sig (= sigmoid(x_normed @ w_gate.T)) is float32 so that the backward
     d_gate = grad * ab * (1 - sig) avoids bf16 catastrophic cancellation.
     """
+    # N == K, so N is NOT in this kernel's autotune key (K is).
+    # PROOF (public entry point): x_normed is the same (m, d) tensor as on the input path, so
+    # K = d. The kernel writes ab of shape (m, n) and the entry point returns
+    # `result.reshape(b, i, j, d)` with m = b*i*j -- a reshape that only succeeds if n == d.
+    # Hence n == d == K (g_out_weight has D rows, unlike the 2D-row input gate weight).
     m, k = x_normed.shape
     n = w_gate.shape[0]
     ab = torch.empty((m, n), device=x_normed.device, dtype=x_normed.dtype)
     sig = torch.empty((m, n), device=x_normed.device, dtype=torch.float32)
     _output_gated_gemm_kernel[(
-        lambda meta: (triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),)
+        lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]) * triton.cdiv(n, meta["BLOCK_N"]),)
     )](
         x_normed, x_out, w_gate, w_proj, ab, sig,
         m, n, k,
         w_gate.stride(0),
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        seq_group=get_seq_group(m),
     )
     return ab, sig
 
@@ -639,7 +687,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
     """
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(ctx, x, norm_w, norm_b, w_gate, w_proj, mask, eps, transpose_out):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -672,7 +720,7 @@ class _InputLNAndGEMM(torch.autograd.Function):
         return ab, mean, rstd, x_normed
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_ab, _grad_mean, _grad_rstd, grad_xn_ext):
         (
             x, x_normed, norm_w, w_gate, w_proj, mask,
@@ -710,7 +758,7 @@ class _OutputGEMM(torch.autograd.Function):
     """
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def forward(ctx, x_normed, x_out, w_gate, w_proj):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -723,7 +771,7 @@ class _OutputGEMM(torch.autograd.Function):
         return ab
 
     @staticmethod
-    @torch.compiler.disable()
+    @opaque()
     def backward(ctx, grad_out):
         x_normed, x_out, w_gate, w_proj, ab, sig = ctx.saved_tensors
 
