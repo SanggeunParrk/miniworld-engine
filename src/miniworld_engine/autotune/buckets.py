@@ -5,8 +5,9 @@ else: two launches with the same M tile the same way whether that M arose as a l
 length N or as a pair count L*L. So we never inspect *which* caller produced M — we bucket
 the raw M against edges placed at the scales a kernel runs at:
 
-* SQUARED edges — pair L×L work (M ~ L²): 128²…512² (capped at 512²; these saturate early).
-* LINEAR  edges — 1st-order work (M ~ N): 128…2048.
+* SQUARED edges — pair L×L work (M ~ L²): 128²…512². 512² is a SATURATING cap: any L>512
+  reuses the 512² config (these saturate early), so no distinct >512² bucket is ever tuned.
+* LINEAR  edges — 1st-order work (M ~ N): 128…2048 (2048 likewise saturates for larger M).
 * MIXED (transition / layernorm / gated_projection) run on BOTH, so bucket M against the
   UNION of the two edge sets — a small M lands among the linear edges, a large M among the
   squared edges, purely by magnitude.
@@ -24,10 +25,14 @@ COMBINED_EDGES = tuple(sorted(set(LINEAR_EDGES + SQUARED_EDGES)))
 
 
 def _idx(m: int, edges: tuple[int, ...]) -> int:
+    # The top edge is a SATURATING ceiling, not a threshold with an extra overflow bucket:
+    # any M above the largest edge reuses the largest edge's config (configs stop changing
+    # once M is big enough — "saturate early"). So bucket_squared caps at 512² — L>512 pair
+    # work reuses the 512² config instead of tuning a distinct >512² bucket.
     for i, e in enumerate(edges):
         if m <= e:
             return i
-    return len(edges)
+    return len(edges) - 1
 
 
 def bucket_squared(pair_rows: int) -> int:
