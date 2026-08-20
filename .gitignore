@@ -81,12 +81,8 @@ _fold_t.py
 # job logs (SLURM .out etc.) — sibling of artifacts/
 benchmarks/**/logs/
 
-# --- .bench: audit scratch --------------------------------------------------------------------
-# Per-run logs, result CSVs and one-off sbatch wrappers are scratch and are NOT tracked. The
-# reusable audit tools are: docs/kernels/tiling-audit.md cites them by path, so the audit it
-# records has to stay reproducible from a clean checkout.
-.bench/**
-!.bench/**/
-!.bench/*.py
-!.bench/tiling/*.py
-!.bench/*.md
+# --- .bench: audit scratch, never tracked -----------------------------------------------------
+# One-off probes, per-run logs, result CSVs and sbatch wrappers. The audit tools worth keeping
+# live in tools/kernel-audit/ instead, because docs/kernels/tiling-audit.md cites them by path and
+# the audit it records has to stay reproducible from a clean checkout.
+.bench/
