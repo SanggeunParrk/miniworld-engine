@@ -1557,7 +1557,8 @@ def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear_fused"
     elif implementation == "layernorm_linear_te":
         from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
-        kfn = lambda x: layernorm_linear_te_fn(x, lw, lb, w, None, eps)  # noqa: E731
+        # length=L: x here is the flattened (L*L, D) pair view, so L cannot be read off it.
+        kfn = lambda x: layernorm_linear_te_fn(x, lw, lb, w, None, eps, length=L)  # noqa: E731
         path = "kernels.layernorm_linear.triton.te_style"
     else:
         return as_bench_result(float("nan"))
@@ -2190,11 +2191,11 @@ def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
         out, path = F.linear(F.layer_norm(x, (D,), lw, lb, eps), w), "pytorch.autograd"
     elif implementation == "layernorm_linear_te":
         from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
-        out = layernorm_linear_te_fn(x, lw, lb, w, None, eps)
+        out = layernorm_linear_te_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
         path = "kernels.layernorm_linear.triton.te_style"
     elif implementation == "layernorm_linear_cute":
         from miniworld_engine.kernels.layernorm_linear.autograd import layernorm_linear_fn
-        out = layernorm_linear_fn(x, lw, lb, w, None, eps)
+        out = layernorm_linear_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
         path = "kernels.layernorm_linear.autograd.cute"
     else:
         return as_bench_result(float("nan"))

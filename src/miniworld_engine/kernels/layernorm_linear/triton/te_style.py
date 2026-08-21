@@ -42,7 +42,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from ...layernorm.triton.main import get_seq_group  # M-bucketing for the autotune key
+from miniworld_engine.autotune.shape_key import both_key  # every kernel here is level=both
 
 # ── dtype support ──────────────────────────────────────────────────────────────────────────────
 # The Triton LN kernels are dtype-generic (compute in fp32, store `element_ty`), so fp32/bf16/fp16
@@ -157,9 +157,16 @@ def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N: tl.constexpr, eps,
                      xn.to(Xn.dtype.element_ty), mask=mask)
 
 
-def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, eps: float):
+def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, eps: float,
+                    *, shape_key: int | None = None):
     """x_normed = LN(x)=(x-μ)·rstd·γ+β. Reads x at its OWN strides (m-major/strided OK, no
-    pre-copy), writes a CONTIGUOUS (M,K) x_normed; returns (x_normed, mean, rstd)."""
+    pre-copy), writes a CONTIGUOUS (M,K) x_normed; returns (x_normed, mean, rstd).
+
+    ``shape_key`` is ``both_key(L)`` (``_ln_mat_kernel`` is level=both in registry.csv), computed
+    by the CALLER: x arrives here already flattened to (M, K), and M alone cannot say which L
+    produced it -- a trimul pair view has M = L*L, an adaLN atom activation has M = A. None ->
+    the smallest bucket, an explicit "L not supplied" label (bench / driver entry only).
+    """
     M, K = x.shape
     xn = torch.empty(M, K, device=x.device, dtype=x.dtype)         # contiguous out
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
@@ -169,7 +176,7 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
     _ln_mat_kernel[grid](
         x, xn, mean, rstd, gamma, beta, M, int(K), eps,
         x.stride(0), x.stride(1), xn.stride(0), xn.stride(1),
-        shape_key=get_seq_group(M),
+        shape_key=both_key(0) if shape_key is None else shape_key,
     )
     return xn, mean, rstd
 
@@ -214,7 +221,7 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
     tl.atomic_add(DB + cols, pdb, mask=cmask)
 
 
-def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides):
+def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
     """ONE pass: dx = rstd·(γ·dxn − meanₖ(γ·dxn) − x̂·meanₖ(γ·dxn·x̂)) written at `dx_strides`
     (m-major in→out), plus dγ=Σ_m dxn·x̂ and dβ=Σ_m dxn. x̂ recomputed inside from x (read at its
     strides) + saved μ,rstd — no separate recompute kernel.
@@ -224,9 +231,12 @@ def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides):
     reduce, no atomic_add L2 contention) with M-contiguous vector loads — 1.10–1.21x over the
     plain-atomic kernel at large M on B200 (bidir N=256 / single N=128), size-adaptive fall-back
     to the atomic kernel at small M. Bit-exact (dx/dγ/dβ cos 1.0); math/precision unchanged.
-    Deferred import breaks the mmajor_bwd<->te_style module cycle."""
+    Deferred import breaks the mmajor_bwd<->te_style module cycle.
+
+    ``shape_key`` is ``both_key(L)`` from the caller (see ``_ln_materialize``); it is forwarded to
+    whichever of the three size-adaptive paths runs."""
     from .mmajor_bwd import ln_bwd_mmajor
-    return ln_bwd_mmajor(dx_normed, x, gamma, mean, rstd, dx_strides)
+    return ln_bwd_mmajor(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
 
 
 # ───────────────────────── db = Σ_m dY (linear bias grad) ─────────────────────────────────────
@@ -241,14 +251,15 @@ def _bias_grad(dY: torch.Tensor) -> torch.Tensor:
 
 
 # ───────────────────────── forward / backward / autograd Function ────────────────────────────
-def _te_forward(x, gamma, beta, W, bias, eps):
-    x_normed, mean, rstd = _ln_materialize(x, gamma, beta, eps)
+def _te_forward(x, gamma, beta, W, bias, eps, *, shape_key: int | None = None):
+    x_normed, mean, rstd = _ln_materialize(x, gamma, beta, eps, shape_key=shape_key)
     with _fp32_matmul_ctx(x.dtype):
         Y = F.linear(x_normed, W, bias)            # x_normed @ Wᵀ + bias  (cuBLAS; fp32→TF32 policy)
     return Y, x_normed, mean, rstd
 
 
-def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias):
+def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias, *,
+                 shape_key: int | None = None):
     """TE-matching 4-launch backward (cuBLAS dgrad + 1 LN-bwd kernel + cuBLAS wgrad + db reduce).
     dW uses the SAVED x_normed directly (TE-style) — no T-decomposition / elementwise tail."""
     dY = dY.contiguous() if dY.stride(-1) != 1 else dY
@@ -262,30 +273,48 @@ def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias):
         dx_normed = torch.matmul(W.t(), dY.t()).t()      # (dY@W) m-major → uniform LN-bwd layout
         dW = torch.matmul(dY.t(), x_normed)              # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
         db = _bias_grad(dY).to(W.dtype) if has_bias else None  # linear bias grad (cuBLAS GEMV)
-    dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride())  # dx(m-major)+dγ+dβ
+    dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride(),
+                                shape_key=shape_key)                 # dx(m-major)+dγ+dβ
     return dx, dgamma.to(gamma.dtype), dbeta.to(gamma.dtype), dW, db
 
 
 class LayerNormLinearTEFn(torch.autograd.Function):
     """TE-style trainable `Y = LayerNorm(x)@Wᵀ + b`, stride-transparent (m-major in → m-major out).
-    Portable: cuBLAS GEMMs + Triton LN kernels, no quack/SM90 dependency."""
+    Portable: cuBLAS GEMMs + Triton LN kernels, no quack/SM90 dependency.
+
+
+    ``length`` (L, the pre-flatten token/atom count) is a POSITIONAL input because
+    ``autograd.Function.apply`` takes no keywords; it carries no gradient, so ``backward``
+    returns a trailing ``None`` for it. It is bucketed once in the forward and reused by the
+    backward via ``ctx.shape_key`` -- the saved x is (M, K) and L is not recoverable from it."""
 
     @staticmethod
-    def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps):
-        Y, x_normed, mean, rstd = _te_forward(x, ln_weight, ln_bias, weight, bias, eps)
+    def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps, length):
+        shape_key = None if length is None else both_key(length)
+        Y, x_normed, mean, rstd = _te_forward(x, ln_weight, ln_bias, weight, bias, eps,
+                                              shape_key=shape_key)
         ctx.save_for_backward(x_normed, x, mean, rstd, ln_weight, weight)
         ctx.has_bias = bias is not None
+        ctx.shape_key = shape_key
         return Y
 
     @staticmethod
     def backward(ctx, dY):
         x_normed, x, mean, rstd, gamma, W = ctx.saved_tensors
-        dx, dg, db_ln, dW, db = _te_backward(dY, x_normed, x, mean, rstd, gamma, W, ctx.has_bias)
-        return dx, dg, db_ln, dW, db, None
+        dx, dg, db_ln, dW, db = _te_backward(dY, x_normed, x, mean, rstd, gamma, W, ctx.has_bias,
+                                             shape_key=ctx.shape_key)
+        return dx, dg, db_ln, dW, db, None, None
 
 
-def layernorm_linear_te_fn(x, ln_weight, ln_bias, weight, bias=None, eps: float = 1e-5):
+def layernorm_linear_te_fn(x, ln_weight, ln_bias, weight, bias=None, eps: float = 1e-5,
+                           length: int | None = None):
     """TE-style trainable LayerNormLinear (materialize+cuBLAS GEMM, stride-transparent).
     Accepts a strided/m-major x (e.g. a trimul BDLL view) with NO .contiguous() copy, and
-    returns dx in the same layout. Grads flow to x, ln_weight, ln_bias, weight, bias."""
-    return LayerNormLinearTEFn.apply(x, ln_weight, ln_bias, weight, bias, eps)
+    returns dx in the same layout. Grads flow to x, ln_weight, ln_bias, weight, bias.
+
+    ``length`` is L -- the TOKEN/ATOM count of the activation before it was flattened into the
+    (M, K) ``x`` this entry point takes. This is the only place L can enter: the trimul BDLL view
+    that reaches here has M = L*L, so nothing below can recover it. It is a pure autotune-cache
+    label (``both_key(L)``) -- no number changes with it. Omitting it labels every launch with the
+    smallest bucket; pass it whenever you know it."""
+    return LayerNormLinearTEFn.apply(x, ln_weight, ln_bias, weight, bias, eps, length)

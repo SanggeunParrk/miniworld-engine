@@ -56,13 +56,14 @@ from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtyp
 # shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
 # never the row count, and never the flat element count, a kernel receives.
 #
-# CAVEAT, and it is the one thing to know about this family: every entry point here is handed an
-# ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py does
-# `x.reshape(-1, d)` before it calls -- so the largest L reachable inside these files is `length_of`
-# of that 2-D matrix, i.e. M = B*A. That IS A when no batch axis was folded in (B == 1) and is B*A
-# otherwise; the true A can only come from the module. The inner launchers therefore take the key as
-# a `shape_key` argument instead of re-deriving it, so the thread is one hop from the entry point
-# once the module passes A down.
+# WHERE THAT L COMES FROM, and it is the one thing to know about this family: every entry point
+# here is handed an ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py
+# does `x.reshape(-1, d)` before it calls -- so `length_of` of that 2-D matrix is M = B*A, which is
+# the atom count A only when B == 1. The module therefore reads A off the un-flattened activation
+# and passes it down as the `length` argument of every entry point; the entry point buckets it once
+# and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
+# `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
+# registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
 from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
 
 
@@ -311,23 +312,26 @@ def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
 
 
 # --- token (d>=256): composed 2-kernel forward emitting ab,h,out,scale -----------------
-def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
+def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
     """token fused composed training forward -> (y, ab=[a|b], h, out, scale)."""
     from .train_fused import _fwd_expand_swiglu, _fwd_squeeze_gate
 
-    h, ab = _fwd_expand_swiglu(x, wa, wb)          # kernel A: expand+swiglu, emits h, ab
-    y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc)  # kernel B: squeeze+gate, emits out,scale
+    # One key for both kernels: they are two halves of one call at one L, and `h` between them is
+    # (M, ND), so kernel B could not re-derive the same L from its own input anyway.
+    h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=shape_key)   # kernel A: expand+swiglu -> h, ab
+    y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc,     # kernel B: squeeze+gate -> out,scale
+                                      shape_key=shape_key)
     return y, ab, h, out, scale
 
 
 _ATOM_D_MAX = 128
 
 
-def _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc):
+def _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
     """d-aware fused triton training forward; returns (y, ab, h, out, scale) for backward."""
     if x.shape[1] <= _ATOM_D_MAX:
-        return _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc)
-    return _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc)
+        return _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc, shape_key=shape_key)
+    return _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, shape_key=shape_key)
 
 
 # Forward backend for training.
@@ -358,12 +362,17 @@ def _pick_fwd(d_hidden: int, M: int) -> str:
 class ConditionedTransitionTailFunction(torch.autograd.Function):
     """fp32 / TF32 forward + backward for the post-AdaLN ConditionedTransition tail.
 
-    forward(x, cond, Wa, Wb, Ws, Wsc, bsc) -> y ; saves (x, cond, a, b, out, scale, weights).
-    Backward: cuBLAS GEMMs (dgrad+wgrad) + fused-triton elementwise (gate-bwd, swiglu-bwd).
+    forward(x, cond, Wa, Wb, Ws, Wsc, bsc, length) -> y ; saves (x, cond, a, b, out, scale,
+    weights). Backward: cuBLAS GEMMs (dgrad+wgrad) + fused-triton elementwise (gate-bwd,
+    swiglu-bwd).
+
+    ``length`` is L -- the ATOM count A of the un-flattened activation (see the CAVEAT up top).
+    It is a POSITIONAL argument because ``Function.apply`` takes no keywords, and it is an input
+    to ``forward``, so ``backward`` returns one extra ``None`` for it.
     """
 
     @staticmethod
-    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc):
+    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None):
         # FORWARD backend (see _FWD_MODE): cuBLAS GEMMs + fused-triton elementwise (default,
         # measured-best e2e under CUDA graph) OR the fused-triton b2b/composed forward.
         # Both emit the SAME saved tensors (ab=[a|b], h, out, scale) + wcat for the backward.
@@ -373,18 +382,26 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         cond = cond.contiguous()
         ND = wa.shape[0]
         wcat = torch.cat([wa, wb], dim=0)         # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
+        # ONE L for the whole call, computed once here and reused by the backward via ctx: the
+        # module hands us the real atom count A; without it all we could see is M = B*A.
+        L = int(length) if length is not None else length_of(x.shape)
+        ctx.length = L
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
         if x.dtype == torch.bfloat16 and mode == "fused":
             mode = "cublas"  # bf16 fused b2b train kernel is broken (dtype/spill); use cuBLAS split
         if mode == "fused":
-            y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc)
+            y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
+                                                    shape_key=atom_key(L))
         else:  # "cublas": cat-merged expand (one GEMM) + cuBLAS GEMMs + triton elementwise
             ab = x @ wcat.t()                     # (M, 2*ND)
             a, b = ab[:, :ND], ab[:, ND:]
-            h = _swiglu(a, b, shape_key=atom_key(length_of(x.shape)))
+            h = _swiglu(a, b, shape_key=atom_key(L))
             out = h @ ws.t()
             scale = torch.addmm(bsc, cond, wsc.t())
-            y = _gate(out, scale, shape_key=both_key(length_of(x.shape)))
+            # `_gate` launches gated_projection's `_sigmul_fwd`, which is level=BOTH in
+            # registry.csv -- same L, but bucketed in the union set so one kernel's cache does
+            # not end up holding two bucket spaces.
+            y = _gate(out, scale, shape_key=both_key(L))
         ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc)
         ctx.ND = ND
         return y
@@ -396,11 +413,11 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         a, b = ab[:, :ND], ab[:, ND:]
         dy = dy.contiguous()
         # gate bwd (fused elementwise: dout, dscale in one flat pass — measured-best)
-        # One L for the whole backward: x is already (M, K) here -- see the CAVEAT up top.
-        # `_sigmul_bwd` is a level=both kernel, so its label uses the union bucket set.
-        shape_key = atom_key(length_of(x.shape))
-        dout, dscale = _gate_bwd(out, scale, dy,
-                                 shape_key=both_key(length_of(x.shape)))  # (M, D), (M, D)
+        # The SAME L the forward keyed on, carried on ctx (x is (M, K) here, so it cannot be
+        # re-read). `_sigmul_bwd` is a level=both kernel, so its label uses the union bucket set.
+        L = ctx.length
+        shape_key = atom_key(L)
+        dout, dscale = _gate_bwd(out, scale, dy, shape_key=both_key(L))   # (M, D), (M, D)
         # conditioning grads
         dcond = dscale @ wsc                            # (M, DC)
         dWsc = dscale.t() @ cond                        # (D, DC)
@@ -414,9 +431,16 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         dx = dab @ wcat                                 # (M, K)
         dWcat = dab.t() @ x                             # (2*ND, K)
         dWa, dWb = dWcat[:ND], dWcat[ND:]
-        return dx, dcond, dWa.contiguous(), dWb.contiguous(), dWs, dWsc, db_sc
+        # 8 returns for 8 forward inputs: the trailing None is `length` (an int shape key, not a
+        # differentiable tensor). A missing one is an arity error, which is the point.
+        return dx, dcond, dWa.contiguous(), dWb.contiguous(), dWs, dWsc, db_sc, None
 
 
-def cond_transition_train(x, cond, wa, wb, ws, wsc, bsc):
-    """Differentiable ConditionedTransition tail (training fwd+bwd via autograd Function)."""
-    return ConditionedTransitionTailFunction.apply(x, cond, wa, wb, ws, wsc, bsc)
+def cond_transition_train(x, cond, wa, wb, ws, wsc, bsc, length=None):
+    """Differentiable ConditionedTransition tail (training fwd+bwd via autograd Function).
+
+    ``length`` is L -- the ATOM count A of the activation BEFORE the caller flattened it to
+    (M, K) -- and is passed POSITIONALLY to ``.apply`` because ``Function.apply`` takes no
+    keyword arguments. None falls back to M inside ``forward``.
+    """
+    return ConditionedTransitionTailFunction.apply(x, cond, wa, wb, ws, wsc, bsc, length)

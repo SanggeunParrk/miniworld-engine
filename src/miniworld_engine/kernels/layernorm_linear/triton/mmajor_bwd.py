@@ -28,7 +28,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
-from ...layernorm.triton.main import get_seq_group
+from miniworld_engine.autotune.shape_key import both_key  # kernels here are level=both
 from ...layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback
 from miniworld_engine import settings
@@ -161,8 +161,11 @@ def _persistent_grid(device) -> int:
 _PERSIST_MIN_M = 300_000
 
 
-def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides):
-    """Exact te_style atomic path (small-M fallback)."""
+def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
+    """Exact te_style atomic path (small-M fallback).
+
+    ``shape_key`` is ``both_key(L)`` from the caller: x is the flattened (M, K) matrix here and M
+    alone cannot say which L produced it. None -> smallest bucket (bench/driver entry only)."""
     M, K = x.shape
     dx = torch.empty_strided((M, K), dx_strides, device=x.device, dtype=dxn.dtype)
     dg = torch.zeros(K, dtype=torch.float32, device=x.device)
@@ -172,15 +175,19 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides):
         dxn, x, gamma, mean, rstd, dx, dg, db, M, K,
         dxn.stride(0), dxn.stride(1), x.stride(0), x.stride(1),
         dx.stride(0), dx.stride(1),
-        N_PAD=triton.next_power_of_2(K), shape_key=get_seq_group(M),
+        N_PAD=triton.next_power_of_2(K),
+        shape_key=both_key(0) if shape_key is None else shape_key,
     )
     return dx, dg, db
 
 
-def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides):
+def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *,
+                           shape_key: int | None = None):
     """Atomic-free persistent m-major path via THIS module's specialized kernel. Fastest at
     narrow N (N=128: the M-contiguous vector hint + compile-time unit row-stride let triton widen
-    the load — 1.20x vs te_style atomic at L=1024). VEC_HINT is neutral at wide N."""
+    the load — 1.20x vs te_style atomic at L=1024). VEC_HINT is neutral at wide N.
+
+    ``shape_key`` is ``both_key(L)`` from the caller (see ``_ln_bwd_atomic``)."""
     M, K = x.shape
     dx = torch.empty_strided((M, K), dx_strides, device=x.device, dtype=dxn.dtype)
     NP = _persistent_grid(x.device)
@@ -191,15 +198,21 @@ def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides):
     _ln_bwd_mmajor_kernel[grid](
         dx, pdg, pdb, dxn, x, gamma, mean, rstd,
         pdg.stride(0), x.stride(1),      # feature stride (= M); row stride assumed 1
-        M, N=K, VEC_HINT=(K <= 128), shape_key=get_seq_group(M),
+        M, N=K, VEC_HINT=(K <= 128),
+        shape_key=both_key(0) if shape_key is None else shape_key,
     )
     return dx, pdg.sum(0), pdb.sum(0)
 
 
-def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides):
+def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
+                                 shape_key: int | None = None):  # noqa: ARG001 (kernel not keyed)
     """Atomic-free persistent m-major path via the canonical layernorm persistent kernel
     (stride-generic; both operands share m-major strides). Fastest at wide N (N=256: 1.21x vs
-    te_style atomic at L=1024)."""
+    te_style atomic at L=1024).
+
+    ``shape_key`` is accepted so the three paths below share one call shape, but
+    ``_ln_bwd_persistent`` (layernorm/triton/persistent.py) is not autotuned on it, so it is
+    not forwarded."""
     M, K = x.shape
     dx = torch.empty_strided((M, K), dx_strides, device=x.device, dtype=dxn.dtype)
     NP = _persistent_grid(x.device)
@@ -214,7 +227,7 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides):
     return dx, pdw.sum(0), pdb.sum(0)
 
 
-def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides):
+def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
     """Drop-in for te_style `_ln_bwd`: dx (m-major, at dx_strides) + dγ + dβ (fp32 (N,)).
 
     Size-adaptive (all bit-exact vs te_style atomic):
@@ -222,12 +235,17 @@ def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides):
       • large M, N<=128 -> this module's specialized kernel (M-contiguous vector hint wins).
       • large M, N>128  -> canonical layernorm persistent kernel (wins at wide N).
     Requires m-major inputs (row stride 1); falls back to atomic otherwise. Env
-    settings.layernorm_out_bwd_path forces one path (A-B / debug)."""
+    settings.layernorm_out_bwd_path forces one path (A-B / debug).
+
+    ``shape_key`` is ``both_key(L)`` computed by the caller (te_style ``_ln_bwd``) and passed
+    through unchanged -- the dispatch below picks a kernel, never a key."""
     M, K = x.shape
     if _override() == "atomic" or x.stride(0) != 1 or M < _PERSIST_MIN_M:
-        return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides)
+        return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
     if _override() == "canonical":
-        return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides)
+        return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides,
+                                            shape_key=shape_key)
     if _override() == "persistent" or K <= 128:
-        return _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides)
-    return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides)
+        return _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
+    return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides,
+                                        shape_key=shape_key)

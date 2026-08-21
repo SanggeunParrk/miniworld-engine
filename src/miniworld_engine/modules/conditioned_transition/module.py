@@ -27,6 +27,7 @@ from jaxtyping import Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.autotune.shape_key import length_of
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     resolve_conditioned_transition,
@@ -125,6 +126,11 @@ class ConditionedTransition(nn.Module):
 
         if self._backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]
+            # L for the autotune shape key, read HERE because this is the last place that has it:
+            # `x` is still (..., A, d), so `length_of` gives the ATOM count A. After the reshape
+            # below the kernels only ever see M = B*A, which equals A only when B == 1 -- so the
+            # kernels cannot recover it and it is threaded down as an explicit argument instead.
+            length = length_of(x.shape)
             x2 = x.reshape(-1, d)
             cond2 = cond.reshape(-1, cond.shape[-1])
             if self.training or x2.requires_grad:
@@ -132,12 +138,14 @@ class ConditionedTransition(nn.Module):
                     x2, cond2,
                     self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
                     self.to_scale.weight, self.to_scale.bias,
+                    length,
                 )
             else:
                 y = kernels.cond_transition_inference_dispatch(
                     x2, cond2,
                     self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
                     self.to_scale.weight, self.to_scale.bias,
+                    length,
                 )
             return y.reshape(*x.shape[:-1], self.d_hidden)
 

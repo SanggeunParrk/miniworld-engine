@@ -33,13 +33,14 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 # shape_key's value is L -- the ATOM count (this family is level=atom in kernels/registry.csv) --
 # never the row count a kernel receives.
 #
-# CAVEAT, and it is the one thing to know about this family: every entry point here is handed an
-# ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py does
-# `x.reshape(-1, d)` before it calls -- so the largest L reachable inside these files is `length_of`
-# of that 2-D matrix, i.e. M = B*A. That IS A when no batch axis was folded in (B == 1) and is B*A
-# otherwise; the true A can only come from the module. The inner launchers therefore take the key as
-# a `shape_key` argument instead of re-deriving it, so the thread is one hop from the entry point
-# once the module passes A down.
+# WHERE THAT L COMES FROM, and it is the one thing to know about this family: every entry point
+# here is handed an ALREADY-FLATTENED (M, K) activation -- modules/conditioned_transition/module.py
+# does `x.reshape(-1, d)` before it calls -- so `length_of` of that 2-D matrix is M = B*A, which is
+# the atom count A only when B == 1. The module therefore reads A off the un-flattened activation
+# and passes it down as the `length` argument of every entry point; the entry point buckets it once
+# and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
+# `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
+# registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
 from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
@@ -197,19 +198,22 @@ def _squeeze_gate(h, cond, ws, wsc, bsc, *, shape_key=None):
     return out
 
 
-def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc):
+def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=None):
     """Two-kernel composed inference for the token stream (large d_hidden).
 
     Same math/signature as ``cond_transition_inference`` but K-tiled, so d>=256 compiles.
+
+    ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
+    modules/conditioned_transition/module.py. None falls back to this matrix's row count M.
     """
     wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
-    shape_key = atom_key(length_of(x.shape))   # x is already (M, K) here -- see the CAVEAT above
+    shape_key = atom_key(length if length is not None else length_of(x.shape))
     h = _expand_swiglu(x, wa, wb, shape_key=shape_key)
     return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)
 
 
-def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc):
+def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc, length=None):
     """The 1+2 | 3+4+5 two-triton-kernel forward — UNIFORM for atom (d=128) and token (d=768).
 
     Numbering the post-AdaLN ops: 1=expand(a=x@Wa^T,b=x@Wb^T) 2=SwiGLU(h=silu(a)*b)
@@ -220,9 +224,12 @@ def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc):
       - Kernel 1 (1+2): expand + SwiGLU -> h          (``_expand_swiglu``, K-tiled, tl.dot tf32)
       - Kernel 2 (3+4+5): squeeze + to_scale + gate -> y  (``_squeeze_gate``, ND- & DC-tiled, fused)
     fp32 io, TF32 tensor cores. This is the structure to ship (simpler than the b2b/CUTLASS paths).
+
+    ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
+    modules/conditioned_transition/module.py. None falls back to this matrix's row count M.
     """
     wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
-    shape_key = atom_key(length_of(x.shape))   # x is already (M, K) here -- see the CAVEAT above
+    shape_key = atom_key(length if length is not None else length_of(x.shape))
     h = _expand_swiglu(x, wa, wb, shape_key=shape_key)            # 1+2
     return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)  # 3+4+5

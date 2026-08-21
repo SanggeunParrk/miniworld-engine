@@ -38,7 +38,10 @@ from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 # from the caller that still holds the pre-flatten shape. The default covers the callers that hand
 # in a genuinely 2-D activation (no batch axis was folded in, so shape[-2] IS L) -- the drivers and
 # checkers do exactly that.
-from miniworld_engine.autotune.shape_key import atom_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
+# `both_key` is for the borrowed layernorm_linear helpers only (`_ln_materialize`/`_ln_bwd`):
+# those kernels are level=both in registry.csv, so they bucket against the union set, while
+# this family's own kernels stay on `atom_key`. Same L either way -- different bucket set.
 
 
 @triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['N', 'HAS_W', 'shape_key'])
@@ -269,8 +272,10 @@ class _Fused3TrainFn(torch.autograd.Function):
         ones = sb.new_ones(nx)
         zeros_x = sb.new_zeros(nx)
         zeros_c = sb.new_zeros(nc)
-        x_norm, mean_x, rstd_x = _ln_materialize(x2d, ones, zeros_x, eps_x)
-        cond_norm, mean_c, rstd_c = _ln_materialize(cond2d, lnw, zeros_c, eps_cond)
+        x_norm, mean_x, rstd_x = _ln_materialize(x2d, ones, zeros_x, eps_x,
+                                                 shape_key=both_key(length_of(orig)))
+        cond_norm, mean_c, rstd_c = _ln_materialize(cond2d, lnw, zeros_c, eps_cond,
+                                                    shape_key=both_key(length_of(cond.shape)))
         y, gate = _gemm_gate_train(x_norm, cond_norm, Ws, Wb, sb,
                                    shape_key=atom_key(length_of(orig)))
         ctx.save_for_backward(x2d, cond2d, x_norm, cond_norm, gate, mean_x, rstd_x, mean_c, rstd_c, lnw, Ws, Wb)
@@ -295,8 +300,10 @@ class _Fused3TrainFn(torch.autograd.Function):
             dsb = dscale.sum(0)                     # (N,)
             dcond_norm = torch.addmm(dscale @ Ws, dy2d, Wb)  # dscale@Ws + dy@Wb → (M,K)
         ones = lnw.new_ones(nx)
-        dx, _, _ = _ln_bwd(dxn, x2d, ones, mean_x, rstd_x, x2d.stride())
-        dcond, dlnw, _ = _ln_bwd(dcond_norm, cond2d, lnw, mean_c, rstd_c, cond2d.stride())
+        dx, _, _ = _ln_bwd(dxn, x2d, ones, mean_x, rstd_x, x2d.stride(),
+                           shape_key=both_key(length_of(ctx.orig)))
+        dcond, dlnw, _ = _ln_bwd(dcond_norm, cond2d, lnw, mean_c, rstd_c, cond2d.stride(),
+                                 shape_key=both_key(length_of(ctx.ocond)))
         xd, cd, lnwd, wsd, sbd, wbd = ctx.dt
         return (dx.reshape(ctx.orig).to(xd), dcond.reshape(ctx.ocond).to(cd), dlnw.to(lnwd),
                 dWs.to(wsd), dsb.to(sbd), dWb.to(wbd), None, None)
