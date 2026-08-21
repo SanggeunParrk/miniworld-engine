@@ -28,20 +28,64 @@ subtracts 3 from each and puts a partial tile at the end of every axis this fami
 
 ``N_EXPAND`` (=4) is NOT perturbed: it is the transition's expansion factor, part of the op
 the bench defines (``n=4``), not a tile extent -- ND rides on ``K_SMALL`` instead.
+
+``_pair_x`` is the one exception, and only in ragged mode: it must stay square for
+``length_of`` to read L off it, so ``ragged()`` is applied to L (61) rather than to L*L. The M
+tail is still partial -- 61*61 = 3721, and 3721 % 16 == 9 -- and in the default aligned mode it
+is exactly ``ROWS``.
+
+Shape key
+---------
+``shape_key`` is in nearly every one of these kernels' ``key=[...]``, and it is L -- never the
+flattened row count M = L*L. Every launcher in this family is handed the already-flattened
+(M, K) matrix, so it cannot read L off a tensor: ``autotune.shape_key.length_of`` says outright
+that "an inner launcher that only receives the flattened (M, D) matrix CANNOT call this; its
+caller must compute the key and pass it down". These drivers ARE that caller, so each one passes
+``shape_key=SHAPE_KEY`` (transition) or ``seq_len=TRIMUL_L`` (trimul). Left unpassed, the
+transition launchers fall back to ``both_key(M)`` = the clamped TOP bucket (8192 at any L >= 91)
+and the trimul ones to ``token_key(0)`` = the clamped BOTTOM bucket (128), so every driver length
+records the same bucket and a per-bucket sweep tunes one bucket over and over.
+
+The same applies to the ``stats_triton`` LN-stats helper three of these drivers call to build
+``rstd``/``c1``: it fires ``layernorm_stats_triton`` on the SAME activation at the same L, and
+what a capture records is every op that fired, not just the driver's own. Left unpassed it
+recorded ``shape_key=8192`` for that op at every driver length -- so it is passed here too,
+exactly as ``transition_b2b`` / ``transition_expand_gate`` already forward it internally.
 """
 
 from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import dev, driver_length, ragged, rows2d, vec
+from miniworld_engine.autotune.shape_key import both_key, token_key
+from miniworld_engine.kernels.drivers import BF16, dev, driver_length, ragged, rows2d, vec
 
 EPS = 1e-5
-ROWS = ragged(driver_length(64) ** 2)  # M: L=64 pair rows (L*L); 4096 is a multiple of 128, ragged -> 4093
+L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, L, K) before flattening
+ROWS = ragged(L_PAIR ** 2)  # M: L=64 pair rows (L*L); 4096 is a multiple of 128, ragged -> 4093
+#: What production records for this activation: ``both_key(length_of((B, L, L, D)))`` = both_key(L).
+#: Every launcher below is handed the already-flattened (M, K) matrix, so it CANNOT read L off a
+#: tensor (autotune/shape_key.py::length_of) -- it takes the key from its caller, and with nothing
+#: passed it falls back to ``both_key(M)``, i.e. the clamped top bucket 8192 at every L. Passing it
+#: is what makes the per-op sweep's work unit (op, bucket) instead of (op, top bucket) N times.
+SHAPE_KEY = both_key(L_PAIR)
 N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, not a tile extent
 K_SMALL = ragged(128)  # K: the AF3 transition d; ragged -> 125
 K_LARGE = ragged(256)  # K for the ktiled kernel's K > _B2B_MAX_K(=128) reason to exist -> 253
 ND_SMALL = N_EXPAND * K_SMALL  # expand/gate width for the K_SMALL paths: 512 -> 500
+
+
+def _pair_x(k: int = K_SMALL) -> torch.Tensor:
+    """x as the PRE-FLATTEN pair activation (1, L, L, K), for the one launcher that takes it.
+
+    ``TritonTransitionFunction.forward`` does its own ``view(-1, d)`` and reads the shape key off
+    ``x.shape`` before that (main.py:129), so it is the only entry here that can be given L at all
+    -- it takes no ``shape_key=``. ``ragged()`` is applied to L rather than to L*L so the tensor
+    stays square: the M tail is still partial (61*61 = 3721, 3721 % 16 == 9, so every one of the
+    five config sets sees it), and in the default aligned mode M = L*L = ROWS exactly.
+    """
+    n = ragged(L_PAIR)
+    return torch.randn(1, n, n, k, device=dev(), dtype=BF16)
 
 
 def _transition_operands(k: int = K_SMALL, n: int = N_EXPAND):
@@ -60,8 +104,10 @@ def transition_expand_swiglu_triton() -> None:
     """transition_fwd_kernel via TritonTransitionFunction.forward (kernels/transition/triton/main)."""
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 
-    x2, _, _, wa, wb, ws = _transition_operands()
-    triton_transition(x2, wa, wb, ws, N_EXPAND)
+    _, _, _, wa, wb, ws = _transition_operands()
+    # The pre-flatten (1, L, L, K) activation, not the flat (M, K): the launcher reads
+    # both_key(length_of(x.shape)) before its own view(-1, d), so a flat x makes it bucket M.
+    triton_transition(_pair_x(), wa, wb, ws, N_EXPAND)
 
 
 def transition_fold_triton() -> None:
@@ -77,7 +123,7 @@ def transition_layernorm_expand_swiglu_triton() -> None:
     from miniworld_engine.kernels.transition.triton.fused import transition_expand_gate
 
     x2, g, b, wa, wb, _ = _transition_operands()
-    transition_expand_gate(x2, g, b, wa, wb, EPS)
+    transition_expand_gate(x2, g, b, wa, wb, EPS, shape_key=SHAPE_KEY)
 
 
 def transition_fwd_b2b_triton() -> None:
@@ -85,7 +131,7 @@ def transition_fwd_b2b_triton() -> None:
     from miniworld_engine.kernels.transition.triton.fused import transition_b2b
 
     x2, g, b, wa, wb, ws = _transition_operands(k=K_SMALL)
-    transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False)
+    transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False, shape_key=SHAPE_KEY)
 
 
 def transition_fwd_b2b_ktiled_triton() -> None:
@@ -93,7 +139,7 @@ def transition_fwd_b2b_ktiled_triton() -> None:
     from miniworld_engine.kernels.transition.triton.fused import transition_b2b_ktiled
 
     x2, g, b, wa, wb, ws = _transition_operands(k=K_LARGE)
-    transition_b2b_ktiled(x2, g, b, wa, wb, ws, EPS)
+    transition_b2b_ktiled(x2, g, b, wa, wb, ws, EPS, shape_key=SHAPE_KEY)
 
 
 def transition_bwd_swiglu_recompute_triton() -> None:
@@ -105,9 +151,10 @@ def transition_bwd_swiglu_recompute_triton() -> None:
     )
 
     x2, g, b, wa, wb, _ = _transition_operands()
-    rstd, c1 = stats_triton(x2, EPS)
+    rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
     grad_expand = rows2d(ROWS, wa.shape[0])
-    _transition_expand_gatebwd_stacked(x2, rstd, c1, g, b, wa, wb, grad_expand)
+    _transition_expand_gatebwd_stacked(x2, rstd, c1, g, b, wa, wb, grad_expand,
+                                       shape_key=SHAPE_KEY)
 
 
 def layernorm_bwd_privatized_triton() -> None:
@@ -119,11 +166,12 @@ def layernorm_bwd_privatized_triton() -> None:
     from miniworld_engine.kernels.transition.triton.fused import _transition_ln_bwd
 
     x2, g, _, _, _, _ = _transition_operands()
-    rstd, c1 = stats_triton(x2, EPS)
+    rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
     previous = settings.current().transition_lnbwd_cuda
     settings.configure(transition_lnbwd_cuda=False)
     try:
-        _transition_ln_bwd(torch.empty_like(x2).normal_(), x2, rstd, c1, g)
+        _transition_ln_bwd(torch.empty_like(x2).normal_(), x2, rstd, c1, g,
+                           shape_key=SHAPE_KEY)
     finally:
         settings.configure(transition_lnbwd_cuda=previous)
 
@@ -134,22 +182,23 @@ def layernorm_fwd_recompute_foldstats_triton() -> None:
     from miniworld_engine.kernels.transition.cute.fused import _xn_recompute
 
     x2, g, b, _, _, _ = _transition_operands()
-    rstd, c1 = stats_triton(x2, EPS)
-    _xn_recompute(x2, rstd, c1, g, b)
+    rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
+    _xn_recompute(x2, rstd, c1, g, b, shape_key=SHAPE_KEY)
 
 
 def transition_bwd_epilogue_triton() -> None:
     """_grad_mul_kernel via _grad_mul_inplace: dA, dB, grad_expand all (M, ND) bf16 contiguous."""
     from miniworld_engine.kernels.transition.cute.gatebwd_sm100 import _grad_mul_inplace
 
-    _grad_mul_inplace(rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL))
+    _grad_mul_inplace(rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL), rows2d(ROWS, ND_SMALL),
+                      shape_key=SHAPE_KEY)
 
 
 def transition_bwd_transpose_packed_triton() -> None:
     """_cdup_interleave_kernel via _cdup_interleave: grad_expand (M, ND) -> (M, 2*ND)."""
     from miniworld_engine.kernels.transition.cute.backward_gatebwd import _cdup_interleave
 
-    _cdup_interleave(rows2d(ROWS, ND_SMALL))
+    _cdup_interleave(rows2d(ROWS, ND_SMALL), shape_key=SHAPE_KEY)
 
 
 def swiglu_gate_bwd_sm100() -> None:
@@ -168,13 +217,18 @@ def swiglu_gate_bwd_sm100() -> None:
     )
 
     xn, _, _, wa, wb, _ = _transition_operands()
-    transition_expand_gatebwd_sm100(xn, wa, wb, rows2d(ROWS, wa.shape[0]))
+    transition_expand_gatebwd_sm100(xn, wa, wb, rows2d(ROWS, wa.shape[0]), shape_key=SHAPE_KEY)
 
 
 # ------------------------------------------------------- triangle_multiplication (dt-v1)
 
-TRIMUL_ROWS = ragged(driver_length(128) ** 2)  # M = b*i*j for a (1, 128, 128, d) pair activation; ragged -> 16381
+TRIMUL_L = driver_length(128)  # L: i == j of the (1, L, L, d) pair activation the module flattens
+TRIMUL_ROWS = ragged(TRIMUL_L ** 2)  # M = b*i*j for a (1, 128, 128, d) pair activation; ragged -> 16381
 TRIMUL_D = ragged(128)  # d: the contraction width; the gate/proj weights have 2*d or d rows
+#: ``baseline_dtv1._shape_key`` is ``token_key(seq_len)``, and ``seq_len=None`` -- what a driver that
+#: passes nothing gets -- means ``token_key(0)``, the clamped BOTTOM bucket 128 at every L. These
+#: launchers already take ``seq_len=``; the driver is the caller that has to supply it.
+TRIMUL_SHAPE_KEY = token_key(TRIMUL_L)  # what ``seq_len=TRIMUL_L`` below makes them record
 
 
 def trimul_gemm_gate_saveact_triton() -> None:
@@ -183,7 +237,8 @@ def trimul_gemm_gate_saveact_triton() -> None:
     from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import _input_gemm_fwd
 
     xn = rows2d(TRIMUL_ROWS, TRIMUL_D)
-    _input_gemm_fwd(xn, rows2d(2 * TRIMUL_D, TRIMUL_D), rows2d(2 * TRIMUL_D, TRIMUL_D), None, True)
+    _input_gemm_fwd(xn, rows2d(2 * TRIMUL_D, TRIMUL_D), rows2d(2 * TRIMUL_D, TRIMUL_D), None, True,
+                    seq_len=TRIMUL_L)
 
 
 def trimul_outproj_gemm_gate_saveact_triton() -> None:
@@ -192,7 +247,8 @@ def trimul_outproj_gemm_gate_saveact_triton() -> None:
 
     xn = rows2d(TRIMUL_ROWS, TRIMUL_D)
     _output_gemm_fwd(xn, rows2d(TRIMUL_ROWS, TRIMUL_D),
-                     rows2d(TRIMUL_D, TRIMUL_D), rows2d(TRIMUL_D, TRIMUL_D))
+                     rows2d(TRIMUL_D, TRIMUL_D), rows2d(TRIMUL_D, TRIMUL_D),
+                     seq_len=TRIMUL_L)
 
 
 def gated_projection_bwd_gate_recompute_flat_triton() -> None:
@@ -204,7 +260,8 @@ def gated_projection_bwd_gate_recompute_flat_triton() -> None:
 
     n = 2 * TRIMUL_D
     sig_m = torch.rand(n, TRIMUL_ROWS, device=dev(), dtype=torch.float32)
-    _elemwise_bwd_combined(rows2d(n, TRIMUL_ROWS), rows2d(n, TRIMUL_ROWS), sig_m)
+    _elemwise_bwd_combined(rows2d(n, TRIMUL_ROWS), rows2d(n, TRIMUL_ROWS), sig_m,
+                           seq_len=TRIMUL_L)
 
 
 # ── the vendored transition_cuda extension ───────────────────────────────────────────────────

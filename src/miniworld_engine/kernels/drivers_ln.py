@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from miniworld_engine.autotune.shape_key import both_key
+
 from .drivers import BF16, aligned_only, dev, driver_length, pair, ragged, rows2d, vec
 
 # The pair row/feature extents the bench walks: `bench_kernel_layernorm` builds
@@ -19,9 +21,21 @@ from .drivers import BF16, aligned_only, dev, driver_length, pair, ragged, rows2
 #   _M      -- the row axis (one LayerNorm row per m), tiled by BLOCK_M / the persistent grid.
 #   _PAIR_N -- the pair sequence length L of the (B, L, L, D) activations, so the flattened
 #              row count B*L*L is ragged for the kernels that take a 4-D pair tensor.
-_M = ragged(driver_length(128) ** 2)
+#   _L      -- the pair sequence length L itself, the ONE quantity `autotune.shape_key` buckets.
+#              `_M` is L*L and `_PAIR_N` is L, so both move together when MINIWORLD_DRIVER_LENGTH
+#              moves and the shape the kernel records is the shape the driver asked for.
+_L = driver_length(128)
+_M = ragged(_L**2)
 _D = ragged(128)
-_PAIR_N = ragged(128)
+_PAIR_N = ragged(_L)
+
+#: The bucket a launch at `_L` must record, for the launchers that only ever see the flattened
+#: (M, D) matrix and therefore take the key as an explicit argument (`shape_key=`). `length_of`
+#: cannot be used at those: M = L*L clamps to the top bucket (8192) at every L >= 91, and their
+#: `shape_key=None` default clamps to the bottom one (128) -- either way the bucket stops moving
+#: with L. Everything else here hands the wrapper the activation BEFORE it is flattened, which is
+#: the same fix `modules/triangle_attention` took, and lets the wrapper read L = shape[-2] itself.
+_SHAPE_KEY = both_key(_L)
 
 #: n_head for the pair-bias projection, as `bench_kernel_tri_attn` derives it from d_pair.
 #: Defined once here and imported by ``checks_ln`` so the projection's output width cannot
@@ -81,8 +95,11 @@ def layernorm_fwd_saveact_triton() -> None:
 def layernorm_bwd_atomic_triton() -> None:
     from .layernorm.compile_native import _bwd_atomic_impl
 
-    x = rows2d(_M, _D)
-    mean, rstd = _ln_stats(x)
+    # The pair activation (1, L, L, D), NOT its (M, D) flattening: `_bwd_atomic_impl` reshapes
+    # internally and reads `both_key(length_of(x.shape))` off the 4-D shape, so flattening here
+    # would hand it M = L*L and clamp every L to the 8192 bucket.
+    x = pair(n=_PAIR_N, d=_D)
+    mean, rstd = _ln_stats(x.reshape(-1, _D))  # [M] fp32, one row per (b, i, j)
     _bwd_atomic_impl(torch.randn_like(x), x, vec(_D), mean, rstd)
 
 
@@ -91,15 +108,18 @@ def layernorm_bwd_split_triton() -> None:
     # partial_dw.stride(0) as stride_part, with grid (g, cdiv(N, BLOCK_K)).
     from .layernorm.compile_native import _bwd_persistent_impl
 
-    x = rows2d(_M, _D)
-    mean, rstd = _ln_stats(x)
+    x = pair(n=_PAIR_N, d=_D)  # pre-flatten, like layernorm_bwd_atomic_triton above
+    mean, rstd = _ln_stats(x.reshape(-1, _D))
     _bwd_persistent_impl(torch.randn_like(x), x, vec(_D), mean, rstd)
 
 
 def layernorm_fwd_mmajor_triton() -> None:
     from .layernorm.triton.transpose import layer_norm_transpose
 
-    x = torch.randn(_D, 1, _M, device=dev(), dtype=BF16)  # (D, B, N), M = B*N
+    # (D, B, N) with B = N = L, so M = B*N = L*L rows exactly as before. `_ln_transpose_dbn_bnd`
+    # keys on `both_key(n)` -- the token axis of the (B, N, D) result -- so the old (D, 1, L*L)
+    # packing handed it n = M and clamped to 8192 at every L.
+    x = torch.randn(_D, _PAIR_N, _PAIR_N, device=dev(), dtype=BF16)
     layer_norm_transpose(x, vec(_D), vec(_D), layout="dbn->bnd")
 
 
@@ -143,7 +163,8 @@ def layernorm_fwd_rowscale_triton() -> None:
 def layernorm_stats_triton() -> None:
     from .layernorm_linear.triton.stats import stats_triton
 
-    stats_triton(rows2d(_M, _D), 1e-5)
+    # stats_triton asserts x.dim() == 2, so L cannot travel in the shape: pass the key.
+    stats_triton(rows2d(_M, _D), 1e-5, shape_key=_SHAPE_KEY)
 
 
 def layernorm_fwd_recompute_triton() -> None:
@@ -151,7 +172,7 @@ def layernorm_fwd_recompute_triton() -> None:
 
     x = rows2d(_M, _D)
     mean, rstd = _ln_stats(x)
-    _recompute_xnormed(x, vec(_D), vec(_D), mean, rstd)
+    _recompute_xnormed(x, vec(_D), vec(_D), mean, rstd, shape_key=_SHAPE_KEY)
 
 
 def layernorm_fwd_recompute_noaffine_triton() -> None:
@@ -159,13 +180,13 @@ def layernorm_fwd_recompute_noaffine_triton() -> None:
 
     x = rows2d(_M, _D)
     mean, rstd = _ln_stats(x)
-    _recompute_xhat(x, mean, rstd)
+    _recompute_xhat(x, mean, rstd, shape_key=_SHAPE_KEY)
 
 
 def layernorm_fwd_saveact_strided_triton() -> None:
     from .layernorm_linear.triton.te_style import _ln_materialize
 
-    _ln_materialize(_mmajor(), vec(_D), vec(_D), 1e-5)
+    _ln_materialize(_mmajor(), vec(_D), vec(_D), 1e-5, shape_key=_SHAPE_KEY)
 
 
 def layernorm_bwd_atomic_strided_triton() -> None:
@@ -173,7 +194,7 @@ def layernorm_bwd_atomic_strided_triton() -> None:
 
     x = _mmajor()
     mean, rstd = _ln_stats(x)
-    _ln_bwd_atomic(_mmajor(), x, vec(_D), mean, rstd, x.stride())
+    _ln_bwd_atomic(_mmajor(), x, vec(_D), mean, rstd, x.stride(), shape_key=_SHAPE_KEY)
 
 
 def layernorm_bwd_split_mmajor_triton() -> None:
@@ -183,30 +204,39 @@ def layernorm_bwd_split_mmajor_triton() -> None:
 
     x = _mmajor()
     mean, rstd = _ln_stats(x)
-    _ln_bwd_persistent_new(_mmajor(), x, vec(_D), mean, rstd, x.stride())
+    _ln_bwd_persistent_new(
+        _mmajor(), x, vec(_D), mean, rstd, x.stride(), shape_key=_SHAPE_KEY
+    )
 
 
 def layernorm_linear_fwd_triton() -> None:
     from .layernorm_linear.triton.fused import layernorm_linear_triton_fwd
 
     w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
-    layernorm_linear_triton_fwd(rows2d(_M, _D), vec(_D), vec(_D), w, None, 1e-5)
+    # `layernorm_linear_triton_fwd` flattens to (M, K) itself and reshapes the result back, so
+    # the reshape this used to do here only destroyed L -- the same defect that was fixed in
+    # modules/triangle_attention/module.py.
+    layernorm_linear_triton_fwd(pair(n=_PAIR_N, d=_D), vec(_D), vec(_D), w, None, 1e-5)
 
 
 def layernorm_linear_fwd_fp32_triton() -> None:
     from .layernorm_linear.triton.pair_bias import _fwd_op
 
     pw = torch.randn(_NH, _D, device=dev(), dtype=BF16)
-    _fwd_op(rows2d(_M, _D), vec(_D), pw, 1e-5)
+    _fwd_op(pair(n=_PAIR_N, d=_D), vec(_D), pw, 1e-5)  # pre-flatten: _fwd_op reads shape[-2]
 
 
 def layernorm_linear_bwd_fp32_triton() -> None:
     from .layernorm_linear.triton.pair_bias import _bwd_op, _fwd_op
 
-    x = rows2d(_M, _D)
+    # Both ops run here, so both have to record the same bucket: `_fwd_op` gets the pre-flatten
+    # pair activation and reads L off it, `_bwd_op` only ever takes the (M, N) matrix and so takes
+    # the key explicitly (its own `shape_key=None` fallback is `both_key(M)` -> 8192).
+    x = pair(n=_PAIR_N, d=_D)
+    x2 = x.reshape(-1, _D).contiguous()
     lnw, pw = vec(_D), torch.randn(_NH, _D, device=dev(), dtype=BF16)
     out, mean, rstd = _fwd_op(x, lnw, pw, 1e-5)
-    _bwd_op(torch.randn_like(out), x, lnw, pw, mean, rstd)
+    _bwd_op(torch.randn_like(out), x2, lnw, pw, mean, rstd, shape_key=_SHAPE_KEY)
 
 
 def gemm_lnl_fused_sm90_kernel() -> None:

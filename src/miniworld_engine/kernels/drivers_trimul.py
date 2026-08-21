@@ -66,10 +66,16 @@ def _bdll(c: int = D) -> torch.Tensor:
 # ── gated_projection/triton/main.py ──────────────────────────────────────────────────────────
 
 def gated_projection_gate_triton() -> None:
-    """sigmoid_gate_fwd_kernel, via TritonGatedProjectionFunction."""
+    """sigmoid_gate_fwd_kernel, via TritonGatedProjectionFunction.
+
+    ``_x()``, not ``_rows()``: the wrapper takes ``* hd`` and flattens to (M, hd) itself, and it
+    reads ``both_key(length_of(original_shape))`` from the shape it was HANDED. Handing it the
+    already-flattened (M, D) makes length_of return M = L*L, which clamps to the top bucket 8192
+    at every L >= 91 -- the launched shape is identical either way, only the key differs.
+    """
     from miniworld_engine.kernels.gated_projection.triton.main import triton_gated_projection
 
-    triton_gated_projection(_rows(), _rows(), _w())
+    triton_gated_projection(_x(), _x(), _w())
 
 
 def gated_projection_bwd_gate_triton() -> None:
@@ -110,14 +116,17 @@ def trimul_gemm_gate_triton() -> None:
     """fused_sigmoid_gate_fwd_kernel, via triton_tm1."""
     from miniworld_engine.kernels.tm1.triton.main import triton_tm1
 
-    triton_tm1(_rows(), _w(), _w(), _w(), _w())
+    # _x(), not _rows(): TritonTM1Function reads token_key(length_of(x.shape)) BEFORE its own
+    # rearrange to (M, d), so a pre-flattened (M, d) gives it M = L*L -> clamped to 512.
+    triton_tm1(_x(), _w(), _w(), _w(), _w())
 
 
 def trimul_bwd_gate_recompute_triton() -> None:
     """fused_sigmoid_gate_bwd_kernel, via TritonTM1Function.backward."""
     from miniworld_engine.kernels.tm1.triton.main import triton_tm1
 
-    x = _rows().requires_grad_()
+    # _x(): same reason as the forward -- ctx.original_shape is what the backward keys on.
+    x = _x().requires_grad_()
     left, right = triton_tm1(x, _w(), _w(), _w(), _w())
     (left.sum() + right.sum()).backward()
 
@@ -126,7 +135,11 @@ def gated_projection_gate_inplace_flat_triton() -> None:
     """tm1/cute/launch.py _gate_mul_kernel, via _fused_gate_mul (proj *= sigmoid(gate))."""
     from miniworld_engine.kernels.tm1.cute.launch import _fused_gate_mul
 
-    _fused_gate_mul(_bdll().contiguous(), _bdll().contiguous())
+    # seq_len=L as tm1_cute_forward passes it: the launcher keys on
+    # ``token_key(seq_len if seq_len is not None else 0)``, so omitting it pins the key at the
+    # SMALLEST bucket (128) regardless of the shape actually launched. bdll is [B, D, L, L], so
+    # its own shape[-2] is L only by coincidence and the launcher does not read it.
+    _fused_gate_mul(_bdll().contiguous(), _bdll().contiguous(), seq_len=L)
 
 
 def gated_projection_gate_packed_flat_triton() -> None:
@@ -187,14 +200,17 @@ def trimul_outproj_gemm_gate_triton() -> None:
     """fused_sigmoid_gate2_fwd_kernel, via triton_tm2."""
     from miniworld_engine.kernels.tm2.triton.main import triton_tm2
 
-    triton_tm2(_rows(), _rows(), _w(), _w())
+    # _x(), not _rows(): TritonTM2Function reads token_key(length_of(x.shape)) before its own
+    # rearrange, so a pre-flattened (M, d) gives it M = L*L -> clamped to 512.
+    triton_tm2(_x(), _x(), _w(), _w())
 
 
 def trimul_outproj_bwd_gate_recompute_triton() -> None:
     """fused_sigmoid_gate2_bwd_kernel, via TritonTM2Function.backward."""
     from miniworld_engine.kernels.tm2.triton.main import triton_tm2
 
-    x, y = _rows().requires_grad_(), _rows().requires_grad_()
+    # _x(): same reason as the forward -- ctx.original_shape is what the backward keys on.
+    x, y = _x().requires_grad_(), _x().requires_grad_()
     triton_tm2(x, y, _w(), _w()).sum().backward()
 
 
@@ -271,14 +287,21 @@ def gated_projection_gate_dropres_triton() -> None:
     """gate_elem.py _gate_mul_kernel, via gate_elem_triton (no residual/dropout)."""
     from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
 
-    gate_elem_triton(_rows(), _rows(), _w())
+    # x_n as _x(): gate_elem_triton documents (M,K) OR (B,L,L,K) and its ``_shape_key`` reads
+    # ``length_of`` off a 4-D x_n; a 2-D x_n with no seq_len has no L in it and falls to
+    # ``token_key(0)`` -> the smallest bucket (128). It flattens x_n itself, so the launch is
+    # unchanged. seq_len=L is passed too, which is what every production caller does.
+    gate_elem_triton(_x(), _rows(), _w(), seq_len=L)
 
 
 def gated_projection_bwd_gate_dropres_triton() -> None:
     """gate_elem.py _gate_elem_bwd_ew_kernel, via gate_elem_bwd_ew."""
     from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_bwd_ew
 
-    gate_elem_bwd_ew(_rows(), _rows(), _rows())
+    # seq_len=L: every argument of gate_elem_bwd_ew is already flattened to (M, N) by contract,
+    # so its docstring says seq_len "is the only place L can come from"; without it ``_shape_key``
+    # returns ``token_key(0)`` -> the smallest bucket (128) at every length.
+    gate_elem_bwd_ew(_rows(), _rows(), _rows(), seq_len=L)
 
 
 def trimul_bwd_gate_packed_triton() -> None:
@@ -310,8 +333,11 @@ def trimul_transpose_triton() -> None:
     """front_sm100.py _transpose_kernel, via _transpose_blld_to_bdll ((M,2D) -> (2D,M))."""
     from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import _transpose_blld_to_bdll
 
+    # seq_len=L as trimul_front_sm100 passes it: both arguments are already flattened (M rows),
+    # so ``seq_len`` is the only place L can come from; without it the launcher keys on
+    # ``token_key(0)`` -> the smallest bucket (128) at every length.
     out = torch.empty(2 * D, M, device=dev(), dtype=BF16)
-    _transpose_blld_to_bdll(_rows(2 * D), out)
+    _transpose_blld_to_bdll(_rows(2 * D), out, seq_len=L)
 
 
 def gated_projection_gate_packed_mmajor_triton() -> None:

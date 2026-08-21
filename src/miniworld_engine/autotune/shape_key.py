@@ -159,9 +159,21 @@ def length_of(shape) -> int:
     its caller must compute the key and pass it down.
     """
     dims = tuple(shape)
-    if len(dims) < 2:
+    if len(dims) < 3:
+        # A PRE-flatten activation is (B, L, D) or (B, L, L, D) -- always at least 3-D. A 2-D
+        # (M, D) is one that has ALREADY been flattened, and then shape[-2] is M, not L. Returning
+        # it silently is how this went wrong everywhere: for a pair kernel M = L*L, which
+        # both_key clamps to the top bucket at any L >= 91, so every sequence length shared one
+        # cached config and nothing failed. Refusing here is the only place that catches it, since
+        # the value that comes back is a perfectly plausible integer.
+        #
+        # Measured before this was tightened: over a real module run, 25 of 25 call sites passed
+        # >= 3-D once the one genuine offender was fixed -- so nothing legitimate is being
+        # rejected. Over the driver suite, 35 of 38 passed 2-D and every one was a bug.
         raise ValueError(
-            f"shape {dims} has no channel axis to drop; pass the activation's shape before it is "
-            f"flattened, or compute the key at the caller that still has it."
+            f"shape {dims} is already flattened, so shape[-2] is M and not L. Pass the "
+            f"activation's shape BEFORE it is flattened -- (B, L, D) or (B, L, L, D) -- or "
+            f"compute the key at the caller that still has it and pass `shape_key=` down. See "
+            f"the note in length_of's docstring."
         )
     return int(dims[-2])

@@ -323,3 +323,28 @@ def test_no_constexpr_is_invisible_to_the_autotune_cache() -> None:
         "constexpr(s) invisible to the autotune cache -- add to the kernel's key=[...], or record "
         "the judgement in tools/kernel-audit/key_gaps_allowed.csv:\n  "
         + "\n  ".join(f"{op} ({f}) not-in-key={gap}" for f, op, _k, gap in findings))
+
+
+def test_length_of_refuses_an_already_flattened_shape() -> None:
+    """`length_of` returns shape[-2], which is L only BEFORE the activation is flattened.
+
+    Given a 2-D (M, D) it used to return M and say nothing. For a pair kernel M = L*L, which
+    both_key clamps to the top bucket at any L >= 91, so every sequence length shared one cached
+    config -- and the value that came back was a perfectly plausible integer, which is why this
+    survived across the whole kernel layer. Measured before the drivers were fixed: 38 of 91 drivers
+    recorded a bucket that did not move at all between L=256 and L=512.
+
+    Refusing is safe because nothing legitimate passes 2-D: over a real module run, 25 of 25 call
+    sites pass >= 3-D, and over the driver suite every 2-D call was a bug.
+    """
+    import pytest
+
+    from miniworld_engine.autotune.shape_key import length_of
+
+    assert length_of((1, 384, 384, 128)) == 384       # pair
+    assert length_of((1, 512, 128)) == 512            # token/atom
+
+    with pytest.raises(ValueError, match="already flattened"):
+        length_of((147456, 128))                      # the real defect: L=384 pair, flattened
+    with pytest.raises(ValueError, match="already flattened"):
+        length_of((4096, 128))

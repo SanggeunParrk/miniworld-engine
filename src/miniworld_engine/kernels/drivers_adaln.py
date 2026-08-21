@@ -14,6 +14,17 @@ far more than a reach-the-kernel launch needs. Those are the ALIGNED-mode values
 goes through ``drivers.ragged()`` so ``MINIWORLD_SHAPE_MODE=ragged`` makes each axis' last tile
 partial (see the constant block below for which axis each one moves).
 
+shape_key. Every kernel here has ``shape_key`` in its ``key=[...]`` and every registry row this
+file drives is ``level=atom``, so the bucket is ``atom_key(L)`` with L the ATOM count. Two layouts
+reach the kernels and they need opposite treatment. The OUTER entry points
+(``adaln_inference_fused``, ``triton_adaptive_layer_norm``, ``cond_transition_inference``) flatten
+the activation themselves and read the pre-flatten shape (or take ``length=``) for the key, so they
+are handed the ``(1, M, D)`` activation production passes -- a 2-D ``(M, D)`` is exactly what
+``length_of`` refuses, since shape[-2] of an already-flattened matrix is M and not L. Every other
+launcher reached from here is an INNER one: it unpacks ``M, N = t.shape`` and therefore can only be
+given the flat matrix, so per ``length_of``'s docstring ("its caller must compute the key and pass
+it down") this file computes ``_SHAPE_KEY`` once and passes it as ``shape_key=``.
+
 dtypes. adaLN runs bf16 (``drivers.BF16``, and ``bench_kernel_adaln`` uses bf16 unless the sweep
 asks for fp32). The conditioned_transition family runs fp32: every file in it states "fp32 io with
 TF32 tensor cores" and ``bench_kernel_cond_transition_tail`` is fp32-only. The one exception is
@@ -23,6 +34,8 @@ TF32 tensor cores" and ``bench_kernel_cond_transition_tail`` is fp32-only. The o
 from __future__ import annotations
 
 import torch
+
+from miniworld_engine.autotune.shape_key import atom_key
 
 from .drivers import BF16, dev, driver_length, ragged
 
@@ -57,6 +70,13 @@ _DC = ragged(_D_BASE, by=5)           # d_cond (NC / DC) -- separately tiled axi
 _ND = ragged(_N_EXPAND * _D_BASE)     # expand width (ND)
 _EPS = 1e-5   # nn.LayerNorm default; modules/adaptive_layernorm/module.py takes the default
 
+# The autotune SHAPE bucket for every inner launcher below (see the docstring). L is ``_M``: the
+# driver builds one batch, so its rows ARE the atoms, and ``atom_key(_M)`` is the same value the
+# outer entry points compute from the ``(1, _M, D)`` activation via ``length_of`` -- ragged mode
+# included, where both sides see _M = 509. Derived from _M rather than written out, so
+# MINIWORLD_DRIVER_LENGTH moves the recorded bucket with the shape.
+_SHAPE_KEY = atom_key(_M)
+
 
 def _rand(*shape, dtype=BF16):
     return torch.randn(*shape, device=dev(), dtype=dtype)
@@ -67,9 +87,18 @@ def _rand(*shape, dtype=BF16):
 #   ln_cond.weight (NC,) | to_scale.weight (NX, NC) + bias (NX,) | to_bias.weight (NX, NC)
 
 
-def _adaln_args(m: int = _M, nx: int = _D, nc: int = _DC, dtype=BF16):
-    """(x, cond, lnw, Ws, scale_b, Wb) -- the 6 tensor args every adaLN entry point takes."""
-    return (_rand(m, nx, dtype=dtype), _rand(m, nc, dtype=dtype), _rand(nc, dtype=dtype),
+def _adaln_args(m: int = _M, nx: int = _D, nc: int = _DC, dtype=BF16, *, batched: bool = False):
+    """(x, cond, lnw, Ws, scale_b, Wb) -- the 6 tensor args every adaLN entry point takes.
+
+    ``batched`` picks x/cond's layout, which is not cosmetic: it is what the entry point can accept.
+    The OUTER entry points reshape x/cond themselves and take the autotune key from the pre-flatten
+    shape, so they need the ``(1, M, D)`` activation production hands them. The INNER launchers
+    unpack ``M, N = t.shape`` and can only take the flat ``(M, D)``; those get ``shape_key=``
+    instead. The four weights are weights, not activations -- their rank never changes.
+    """
+    lead = (1,) if batched else ()
+    return (_rand(*lead, m, nx, dtype=dtype), _rand(*lead, m, nc, dtype=dtype),
+            _rand(nc, dtype=dtype),
             _rand(nx, nc, dtype=dtype), _rand(nx, dtype=dtype), _rand(nx, nc, dtype=dtype))
 
 
@@ -77,14 +106,15 @@ def layernorm_fwd_strided():
     """fused3._ln_kernel via inference.py's weighted-LN launcher (HAS_W=True)."""
     from .adaln.triton.inference import _cond_affine
 
-    _cond_affine(_rand(_M, _DC), _rand(_DC), _EPS)
+    _cond_affine(_rand(_M, _DC), _rand(_DC), _EPS, shape_key=_SHAPE_KEY)
 
 
 def adaln_fwd():
     """inference._adaln_fused_kernel -- the single-kernel inference path (small d)."""
     from .adaln.triton.inference import adaln_inference_fused
 
-    x, cond, lnw, ws, sb, wb = _adaln_args()
+    # OUTER entry point: it does the reshape and reads x's pre-flatten shape for the key.
+    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
     adaln_inference_fused(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
 
 
@@ -92,7 +122,7 @@ def adaln_epilogue():
     """inference._adaln_epilogue_kernel. SB is (M, 2N) = [scale | bias] (kernel comment)."""
     from .adaln.triton.inference import _adaln_epilogue
 
-    _adaln_epilogue(_rand(_M, _D), _rand(_M, 2 * _D), _EPS)
+    _adaln_epilogue(_rand(_M, _D), _rand(_M, 2 * _D), _EPS, shape_key=_SHAPE_KEY)
 
 
 def adaln_gemm_gate():
@@ -102,8 +132,8 @@ def adaln_gemm_gate():
     from .adaln.triton.fused3 import _gemm_gate, _gemm_gate_train
 
     x_norm, cond_norm, _, ws, sb, wb = _adaln_args()
-    _gemm_gate(x_norm, cond_norm, ws, wb, sb)
-    _gemm_gate_train(x_norm, cond_norm, ws, wb, sb)
+    _gemm_gate(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
+    _gemm_gate_train(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
 
 
 def adaln_bwd_pre():
@@ -111,7 +141,7 @@ def adaln_bwd_pre():
     gate comes from _gemm_gate_train as torch.empty_like(x_norm))."""
     from .adaln.triton.fused3 import _bwd_elem
 
-    _bwd_elem(_rand(_M, _D), _rand(_M, _D), _rand(_M, _D))
+    _bwd_elem(_rand(_M, _D), _rand(_M, _D), _rand(_M, _D), shape_key=_SHAPE_KEY)
 
 
 def adaln_epilogue_saveact():
@@ -119,7 +149,7 @@ def adaln_epilogue_saveact():
     folded in (HAS_SB=True)."""
     from .adaln.triton.training import _epilogue_train
 
-    _epilogue_train(_rand(_M, _D), _rand(_M, 2 * _D), _EPS, _rand(_D))
+    _epilogue_train(_rand(_M, _D), _rand(_M, 2 * _D), _EPS, _rand(_D), shape_key=_SHAPE_KEY)
 
 
 def adaln_bwd_pre_dx():
@@ -128,7 +158,8 @@ def adaln_bwd_pre_dx():
     from .adaln.triton.training import _bwd_x
 
     stat = torch.empty(_M, device=dev(), dtype=FP32).fill_(1.0)
-    _bwd_x(_rand(_M, _D), _rand(_M, _D), stat, stat.clone(), _rand(_M, _D))
+    _bwd_x(_rand(_M, _D), _rand(_M, _D), stat, stat.clone(), _rand(_M, _D),
+           shape_key=_SHAPE_KEY)
 
 
 def adaln_bwd_dx_dlnw():
@@ -138,7 +169,7 @@ def adaln_bwd_dx_dlnw():
 
     stat = torch.empty(_M, device=dev(), dtype=FP32).fill_(1.0)
     _dgrad_condln(_rand(2 * _D, _M), _rand(2 * _D, _DC), _rand(_M, _DC),
-                  stat, stat.clone(), _rand(_DC))
+                  stat, stat.clone(), _rand(_DC), shape_key=_SHAPE_KEY)
 
 
 # main.py's four kernels are launched only by TritonAdaptiveLayerNormFunction: the forward kernel
@@ -150,7 +181,9 @@ def adaln_bwd_dx_dlnw():
 def _adaln_main(*, backward: bool):
     from .adaln.triton.main import triton_adaptive_layer_norm
 
-    x, cond, lnw, ws, sb, wb = _adaln_args()
+    # OUTER entry point: TritonAdaptiveLayerNormFunction reshapes x/cond and keys both the
+    # forward and (via ctx.orig_x_shape) all three backward kernels off the pre-flatten shape.
+    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
     if backward:
         x.requires_grad_(True)
     y = triton_adaptive_layer_norm(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
@@ -197,7 +230,8 @@ def cond_transition_fwd_b2b():
     """inference._cond_transition_inference_kernel -- the fully fused b2b inference path."""
     from .conditioned_transition.triton.inference import cond_transition_inference
 
-    cond_transition_inference(*_ct_args())
+    # OUTER entry point: takes the flat matrix but names L itself, via ``length=``.
+    cond_transition_inference(*_ct_args(), length=_M)
 
 
 def cond_transition_expand_swiglu():
@@ -205,7 +239,7 @@ def cond_transition_expand_swiglu():
     from .conditioned_transition.triton.composed import _expand_swiglu
 
     x, _, wa, wb, *_ = _ct_args()
-    _expand_swiglu(x, wa, wb)
+    _expand_swiglu(x, wa, wb, shape_key=_SHAPE_KEY)
 
 
 def cond_transition_squeeze_gate():
@@ -213,14 +247,14 @@ def cond_transition_squeeze_gate():
     from .conditioned_transition.triton.composed import _squeeze_gate
 
     _, cond, _, _, ws, wsc, bsc = _ct_args()
-    _squeeze_gate(_rand(_M, _ND, dtype=FP32), cond, ws, wsc, bsc)
+    _squeeze_gate(_rand(_M, _ND, dtype=FP32), cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
 
 
 def cond_transition_swiglu():
     """training._swiglu_fwd_kernel: h = silu(a)*b, a/b the (M, ND) expand halves."""
     from .conditioned_transition.triton.training import _swiglu
 
-    _swiglu(_rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32))
+    _swiglu(_rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_swiglu_flat():
@@ -228,7 +262,7 @@ def cond_transition_bwd_swiglu_flat():
     from .conditioned_transition.triton.training import _swiglu_bwd_packed
 
     _swiglu_bwd_packed(_rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32),
-                       _rand(_M, _ND, dtype=FP32))
+                       _rand(_M, _ND, dtype=FP32), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_fwd_b2b_saveact():
@@ -240,7 +274,7 @@ def cond_transition_fwd_b2b_saveact():
     """
     from .conditioned_transition.triton.training import _b2b_fwd_train
 
-    _b2b_fwd_train(*_ct_args())
+    _b2b_fwd_train(*_ct_args(), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_expand_swiglu_saveact():
@@ -248,7 +282,7 @@ def cond_transition_expand_swiglu_saveact():
     from .conditioned_transition.triton.train_fused import _fwd_expand_swiglu
 
     x, _, wa, wb, *_ = _ct_args()
-    _fwd_expand_swiglu(x, wa, wb)
+    _fwd_expand_swiglu(x, wa, wb, shape_key=_SHAPE_KEY)
 
 
 def cond_transition_squeeze_gate_saveact():
@@ -256,7 +290,7 @@ def cond_transition_squeeze_gate_saveact():
     from .conditioned_transition.triton.train_fused import _fwd_squeeze_gate
 
     _, cond, _, _, ws, wsc, bsc = _ct_args()
-    _fwd_squeeze_gate(_rand(_M, _ND, dtype=FP32), cond, ws, wsc, bsc)
+    _fwd_squeeze_gate(_rand(_M, _ND, dtype=FP32), cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
 
 
 
@@ -265,7 +299,8 @@ def cond_transition_bwd_gemm():
     from .conditioned_transition.triton.train_fused import _dgemm
 
     wsc = _rand(_D, _DC, dtype=FP32)
-    _dgemm(_rand(_M, _D, dtype=FP32), wsc, _M, _DC, _D, wsc.stride(0), wsc.stride(1))
+    _dgemm(_rand(_M, _D, dtype=FP32), wsc, _M, _DC, _D, wsc.stride(0), wsc.stride(1),
+           shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_swiglu_dx():
@@ -273,7 +308,8 @@ def cond_transition_bwd_swiglu_dx():
     from .conditioned_transition.triton.train_fused import _dx_fused
 
     _, _, wa, wb, *_ = _ct_args()
-    _dx_fused(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32), wa, wb)
+    _dx_fused(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32), wa, wb,
+              shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_gate_squeeze_dx():
@@ -282,7 +318,7 @@ def cond_transition_bwd_gate_squeeze_dx():
 
     _, _, _, _, ws, *_ = _ct_args()
     _dh_gatebwd(_rand(_M, _D, dtype=FP32), _rand(_M, _D, dtype=FP32), _rand(_M, _D, dtype=FP32),
-                ws, _ND)
+                ws, _ND, shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_swiglu_dx_packed():
@@ -291,18 +327,20 @@ def cond_transition_bwd_swiglu_dx_packed():
 
     _, _, wa, wb, *_ = _ct_args()
     _dx_swiglubwd(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32),
-                  torch.cat([wa, wb], dim=0))
+                  torch.cat([wa, wb], dim=0), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_swiglu_packed():
     """train_fused._swiglu_bwd_pack_kernel: dab = [da|db] from (dh (M,ND), ab (M,2ND))."""
     from .conditioned_transition.triton.train_fused import _swiglu_bwd_pack
 
-    _swiglu_bwd_pack(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32))
+    _swiglu_bwd_pack(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32),
+                     shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_dw():
     """train_fused._wgrad_kernel as the backward's dWs would use it: dWs(D,ND) = dout(M,D)ᵀ @ h(M,ND)."""
     from .conditioned_transition.triton.train_fused import _wgrad
 
-    _wgrad(_rand(_M, _D, dtype=FP32), _rand(_M, _ND, dtype=FP32), _D, _ND)
+    _wgrad(_rand(_M, _D, dtype=FP32), _rand(_M, _ND, dtype=FP32), _D, _ND,
+           shape_key=_SHAPE_KEY)

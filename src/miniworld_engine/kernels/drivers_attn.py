@@ -208,6 +208,22 @@ def bias_only_attention_bwd_triton() -> None:
 # ── bias_only_attention / triton / gate_out.py ──────────────────────────────────────────────
 
 
+def _pair_key() -> int:
+    """``shape_key`` for the two gate-out launchers, computed the way the module computes it.
+
+    ``_fwd`` and ``_dgrad_epilogue`` are INNER launchers: by the time they are called the
+    activation is the flattened ``(M, DH)`` matrix and L is gone, so per
+    ``autotune/shape_key.py::length_of`` they cannot derive the key themselves -- both take it as
+    ``shape_key=`` and both fall back to ``token_key(0)`` (the BOTTOM bucket, 128) when it is
+    omitted. The drivers below used to omit it, which pinned every driver length to bucket 128.
+    Calling the module's own ``_key_of`` on the PRE-flatten pair shape ``(1, L, L, DH)`` is exactly
+    what ``_FusedGateOut.forward``/``backward`` do, so the driver now records the bucket production
+    records at this L.
+    """
+    from .bias_only_attention.triton.gate_out import _key_of
+    return _key_of((1, L, L, DH))
+
+
 def gated_projection_gate_gemm_triton() -> None:
     # M = L*L rows, DH the contraction, DP the output width -- all three tile, all three ragged.
     from .bias_only_attention.triton.gate_out import _fwd
@@ -215,7 +231,7 @@ def gated_projection_gate_gemm_triton() -> None:
     gate = torch.randn(L * L, DH, **kw)
     out_r = torch.randn(L * L, DH, **kw)
     wo = torch.randn(DP, DH, **kw)          # to_out.weight [d_pair, d_hidden]
-    _fwd(gate, out_r, wo)
+    _fwd(gate, out_r, wo, shape_key=_pair_key())
 
 
 def gated_projection_bwd_dx_triton() -> None:
@@ -225,4 +241,4 @@ def gated_projection_bwd_dx_triton() -> None:
     wo = torch.randn(DP, DH, **kw)
     g2 = torch.randn(L * L, DH, **kw)
     r2 = torch.randn(L * L, DH, **kw)
-    _dgrad_epilogue(do2, wo, g2, r2)
+    _dgrad_epilogue(do2, wo, g2, r2, shape_key=_pair_key())
