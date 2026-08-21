@@ -153,7 +153,11 @@ def trimul_gemm_gate_triton():
     from miniworld_engine.kernels.tm1.triton.main import triton_tm1
 
     _exact_fp32_matmul()
-    x = _rows()
+    # ``_x()``, not ``_rows()``: TritonTM1Function reads token_key(length_of(x.shape)) BEFORE its
+    # own rearrange to (M, d), and ``length_of`` refuses an already-flattened (M, d) -- shape[-2]
+    # there is M, not L. It reshapes left/right back to x's shape, and the reference contracts
+    # over the last axis either way, so the comparison is the same numbers at (1, L, L, D).
+    x = _x()
     WL, WLg, WR, WRg = _w(), _w(), _w(), _w()
     left, right = triton_tm1(x, WL, WLg, WR, WRg)
     ref_l, ref_r = tm1_pytorch(_f(x), _f(WL), _f(WLg), _f(WR), _f(WRg))
@@ -242,7 +246,10 @@ def trimul_outproj_gemm_gate_triton():
     from miniworld_engine.kernels.tm2.triton.main import triton_tm2
 
     _exact_fp32_matmul()
-    x, y = _rows(), _rows()
+    # ``_x()`` for both, for the same reason as tm1 above: TritonTM2Function keys on
+    # length_of(x.shape) before its rearrange. They are still two INDEPENDENT draws, so a
+    # crossed x_gate/x_out or W_gate/W_out pointer stays visible.
+    x, y = _x(), _x()
     Wg, Wo = _w(), _w()
     out = triton_tm2(x, y, Wg, Wo)
     return out, tm2_pytorch(_f(x), _f(y), _f(Wg), _f(Wo))

@@ -74,7 +74,18 @@ import contextlib
 import torch
 import torch.nn.functional as F
 
-from .drivers_adaln import FP32, _D, _DC, _EPS, _M, _ND, _adaln_args, _ct_args, _rand
+from .drivers_adaln import (
+    FP32,
+    _D,
+    _DC,
+    _EPS,
+    _M,
+    _ND,
+    _SHAPE_KEY,
+    _adaln_args,
+    _ct_args,
+    _rand,
+)
 
 
 def _fixed() -> None:
@@ -198,7 +209,10 @@ def _main_train():
     from .adaln.triton.main import triton_adaptive_layer_norm
 
     _fixed()
-    args = _adaln_args()
+    # batched=True: the Function reshapes x/cond itself and keys the forward and (via
+    # ctx.orig_x_shape) all three backward kernels off the PRE-flatten shape, so it takes the
+    # (1, M, D) activation -- the driver's call and the only one ``length_of`` accepts.
+    args = _adaln_args(batched=True)
     for t in args:
         t.requires_grad_(True)
     x, cond, lnw, ws, sb, wb = args
@@ -206,6 +220,10 @@ def _main_train():
     x_hat, cond_norm, gate, _, _, _, rstd_x, rstd_c = y.grad_fn.saved_tensors
     dy = torch.randn_like(y)
     got = torch.autograd.grad(y, args, dy)
+    # dx/dcond come back at x/cond's (1, M, D) shape (the backward reshapes them to
+    # ctx.orig_x_shape); the reference's leaves are the 2-D saved activations, so view the two
+    # activation grads at (M, D). A view of the same numbers -- nothing is dropped or reduced.
+    got = (got[0][0], got[1][0], *got[2:])
 
     # LN(x_hat/rstd) == x_hat and rstd(x_hat/rstd) == rstd exactly (LayerNorm is shift-invariant
     # and var(x_hat) = 1 - eps*rstd^2), so this leaf reproduces the SAVED activation while leaving
@@ -220,7 +238,7 @@ def _main_train():
         # aff / w_s / b_s is untouched while sigmoid(scale) lands on the gate the kernels read.
         scale = scale + (torch.logit(gate.float()) - scale).detach()
         y_ref = torch.sigmoid(scale) * F.layer_norm(xr, (_D,), eps=_EPS) + aff @ w_b.t()
-        y_ref.backward(dy.float())
+        y_ref.backward(dy[0].float())   # dy at the reference's (M, D) view of the same seed
     return got, (xr.grad, cr.grad, lw.grad, w_s.grad, b_s.grad, w_b.grad)
 
 
@@ -234,7 +252,7 @@ def layernorm_fwd_strided():
 
     _fixed()
     cond, lnw = _rand(_M, _DC), _rand(_DC)
-    aff = _cond_affine(cond, lnw, _EPS)
+    aff = _cond_affine(cond, lnw, _EPS, shape_key=_SHAPE_KEY)
     return aff, _ln(cond) * lnw.float()
 
 
@@ -243,9 +261,14 @@ def adaln_fwd():
     from .adaln.triton.inference import adaln_inference_fused
 
     _fixed()
-    x, cond, lnw, ws, sb, wb = _adaln_args()
+    # OUTER entry point: it reshapes x/cond itself and takes the key from the PRE-flatten
+    # shape, so it needs the (1, M, D) activation the driver passes (``length_of`` refuses a
+    # 2-D (M, D), where shape[-2] is M and not L). y comes back at that same shape; the
+    # reference runs on x[0]/cond[0] -- views of the very rows the kernel read, no copy and
+    # no second draw -- and y[0] is the whole of y at B=1.
+    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
     y = adaln_inference_fused(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
-    return y, _adaln_ref(x, cond, lnw, ws, sb, wb)[0]
+    return y[0], _adaln_ref(x[0], cond[0], lnw, ws, sb, wb)[0]
 
 
 def adaln_fwd_saveact():
@@ -258,12 +281,15 @@ def adaln_fwd_saveact():
     from .adaln.triton.main import triton_adaptive_layer_norm
 
     _fixed()
-    x, cond, lnw, ws, sb, wb = _adaln_args()
+    # OUTER entry point (see ``adaln_fwd``): the (1, M, D) activation, as the driver passes it.
+    # The five saved buffers are allocated off the forward's own x_2d and so are 2-D/1-D; only
+    # y carries x's shape back, so y[0] is what lines up with the 2-D reference.
+    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
     x.requires_grad_(True)
     y = triton_adaptive_layer_norm(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
     x_hat, cond_norm, gate, _, _, _, rstd_x, rstd_c = y.grad_fn.saved_tensors
-    e_y, e_xh, e_cn, e_g, e_rx, e_rc = _adaln_ref(x, cond, lnw, ws, sb, wb)
-    return {"Y": (y, e_y), "XHat": (x_hat, e_xh), "CondNorm": (cond_norm, e_cn),
+    e_y, e_xh, e_cn, e_g, e_rx, e_rc = _adaln_ref(x[0], cond[0], lnw, ws, sb, wb)
+    return {"Y": (y[0], e_y), "XHat": (x_hat, e_xh), "CondNorm": (cond_norm, e_cn),
             "Gate": (gate, e_g), "RstdX": (rstd_x, e_rx), "RstdC": (rstd_c, e_rc)}
 
 
@@ -279,7 +305,7 @@ def adaln_epilogue_saveact():
 
     _fixed()
     x, sb, scale_b = _rand(_M, _D), _rand(_M, 2 * _D), _rand(_D)
-    y, mean, rstd, gate = _epilogue_train(x, sb, _EPS, scale_b)
+    y, mean, rstd, gate = _epilogue_train(x, sb, _EPS, scale_b, shape_key=_SHAPE_KEY)
     x_hat, e_rstd = _ln_stats(x.float())
     e_gate = torch.sigmoid(sb[:, :_D].float() + scale_b.float())
     return {"Y": (y, e_gate * x_hat + sb[:, _D:].float()), "Mean": (mean, x.float().mean(dim=-1)),
@@ -299,7 +325,7 @@ def adaln_bwd_pre():
     _fixed()
     dy, x_norm = _rand(_M, _D), _rand(_M, _D)
     gate = torch.sigmoid(_rand(_M, _D).float()).to(dy.dtype)
-    dscale, dxn = _bwd_elem(dy, x_norm, gate)
+    dscale, dxn = _bwd_elem(dy, x_norm, gate, shape_key=_SHAPE_KEY)
     e_dscale, e_dxn = _gate_bwd_saved(gate, x_norm, dy)
     return {"DScale": (dscale, e_dscale), "DXn": (dxn, e_dxn)}
 
@@ -318,7 +344,7 @@ def adaln_bwd_pre_dx():
     dy, x = _rand(_M, _D), _rand(_M, _D)
     gate = torch.sigmoid(_rand(_M, _D).float()).to(dy.dtype)
     mean_x, rstd_x = _true_stats(x)
-    d_stack, dx = _bwd_x(dy, x, mean_x, rstd_x, gate)
+    d_stack, dx = _bwd_x(dy, x, mean_x, rstd_x, gate, shape_key=_SHAPE_KEY)
     xr = x.float().detach().requires_grad_(True)
     s = torch.logit(gate.float()).detach().requires_grad_(True)
     (torch.sigmoid(s) * F.layer_norm(xr, (_D,), eps=_EPS)).backward(dy.float())
@@ -340,7 +366,7 @@ def adaln_bwd_dx_dlnw():
     d_stack, w_cat = _rand(2 * _D, _M), _rand(2 * _D, _DC)
     cond, lnw = _rand(_M, _DC), _rand(_DC)
     mean_c, rstd_c = _true_stats(cond)
-    dcond, dlnw = _dgrad_condln(d_stack, w_cat, cond, mean_c, rstd_c, lnw)
+    dcond, dlnw = _dgrad_condln(d_stack, w_cat, cond, mean_c, rstd_c, lnw, shape_key=_SHAPE_KEY)
     with _no_tf32():
         dcond_aff = d_stack.float().t() @ w_cat.float()
     cr = cond.float().detach().requires_grad_(True)
@@ -377,7 +403,7 @@ def adaln_epilogue():
 
     _fixed()
     x, sb = _rand(_M, _D), _rand(_M, 2 * _D)
-    y = _adaln_epilogue(x, sb, _EPS)
+    y = _adaln_epilogue(x, sb, _EPS, shape_key=_SHAPE_KEY)
     scale, bias = sb[:, :_D].float(), sb[:, _D:].float()
     return y, torch.sigmoid(scale) * _ln(x) + bias
 
@@ -394,8 +420,8 @@ def adaln_gemm_gate():
 
     _fixed()
     x_norm, cond_norm, _, ws, sb, wb = _adaln_args()
-    y = _gemm_gate(x_norm, cond_norm, ws, wb, sb)
-    y_save, gate = _gemm_gate_train(x_norm, cond_norm, ws, wb, sb)
+    y = _gemm_gate(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
+    y_save, gate = _gemm_gate_train(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
     with _no_tf32():
         scale = torch.addmm(sb.float(), cond_norm.float(), ws.float().t())
         bias = cond_norm.float() @ wb.float().t()
@@ -417,7 +443,9 @@ def cond_transition_fwd_b2b():
 
     _fixed()
     x, cond, wa, wb, ws, wsc, bsc = _ct_args()
-    y = cond_transition_inference(x, cond, wa, wb, ws, wsc, bsc)
+    # OUTER entry point: it takes the flat matrix but names L through ``length=``, exactly as
+    # the driver does; without it the launcher falls to ``length_of(x.shape)`` on a 2-D x.
+    y = cond_transition_inference(x, cond, wa, wb, ws, wsc, bsc, length=_M)
     return y, _squeeze_gate_ref(_expand(x, wa, wb)[2], cond, ws, wsc, bsc)[2]
 
 
@@ -427,7 +455,7 @@ def cond_transition_expand_swiglu():
 
     _fixed()
     x, _, wa, wb, *_ = _ct_args()
-    h = _expand_swiglu(x, wa, wb)
+    h = _expand_swiglu(x, wa, wb, shape_key=_SHAPE_KEY)
     return h, _expand(x, wa, wb)[2]
 
 
@@ -437,7 +465,7 @@ def cond_transition_expand_swiglu_saveact():
 
     _fixed()
     x, _, wa, wb, *_ = _ct_args()
-    h, ab = _fwd_expand_swiglu(x, wa, wb)
+    h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=_SHAPE_KEY)
     a, b, exp_h = _expand(x, wa, wb)
     return {"H": (h, exp_h), "AB": (ab, torch.cat([a, b], dim=1))}
 
@@ -448,7 +476,7 @@ def cond_transition_swiglu():
 
     _fixed()
     a, b = _rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32)
-    return _swiglu(a, b), F.silu(a) * b
+    return _swiglu(a, b, shape_key=_SHAPE_KEY), F.silu(a) * b
 
 
 def cond_transition_squeeze_gate():
@@ -458,7 +486,7 @@ def cond_transition_squeeze_gate():
     _fixed()
     _, cond, _, _, ws, wsc, bsc = _ct_args()
     h = _rand(_M, _ND, dtype=FP32)
-    y = _squeeze_gate(h, cond, ws, wsc, bsc)
+    y = _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
     return y, _squeeze_gate_ref(h, cond, ws, wsc, bsc)[2]
 
 
@@ -469,7 +497,7 @@ def cond_transition_squeeze_gate_saveact():
     _fixed()
     _, cond, _, _, ws, wsc, bsc = _ct_args()
     h = _rand(_M, _ND, dtype=FP32)
-    y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc)
+    y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
     exp_out, exp_scale, exp_y = _squeeze_gate_ref(h, cond, ws, wsc, bsc)
     return {"Y": (y, exp_y), "Out": (out, exp_out), "Scale": (scale, exp_scale)}
 
@@ -485,7 +513,8 @@ def cond_transition_fwd_b2b_saveact():
 
     _fixed()
     x, cond, wa, wb, ws, wsc, bsc = _ct_args()
-    y, ab, h, out, scale = _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc)
+    y, ab, h, out, scale = _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
+                                          shape_key=_SHAPE_KEY)
     a, b, exp_h = _expand(x, wa, wb)
     exp_out, exp_scale, exp_y = _squeeze_gate_ref(exp_h, cond, ws, wsc, bsc)
     return {"Y": (y, exp_y), "AB": (ab, torch.cat([a, b], dim=1)), "H": (h, exp_h),
@@ -503,7 +532,7 @@ def cond_transition_bwd_swiglu_flat():
     a = _rand(_M, _ND, dtype=FP32)
     b = _rand(_M, _ND, dtype=FP32)
     dh = _rand(_M, _ND, dtype=FP32)
-    dab = _swiglu_bwd_packed(a, b, dh)
+    dab = _swiglu_bwd_packed(a, b, dh, shape_key=_SHAPE_KEY)
     da, db = _swiglu_bwd(a, b, dh)
     return dab, torch.cat([da, db], dim=1)
 
@@ -519,7 +548,7 @@ def cond_transition_bwd_swiglu_packed():
     _fixed()
     dh = _rand(_M, _ND, dtype=FP32)
     ab = _rand(_M, 2 * _ND, dtype=FP32)
-    dab = _swiglu_bwd_pack(dh, ab)
+    dab = _swiglu_bwd_pack(dh, ab, shape_key=_SHAPE_KEY)
     da, db = _swiglu_bwd(ab[:, :_ND], ab[:, _ND:], dh)
     return dab, torch.cat([da, db], dim=1)
 
@@ -536,7 +565,7 @@ def cond_transition_bwd_swiglu_dx():
     _, _, wa, wb, *_ = _ct_args()
     dh = _rand(_M, _ND, dtype=FP32)
     ab = _rand(_M, 2 * _ND, dtype=FP32)
-    dx = _dx_fused(dh, ab, wa, wb)
+    dx = _dx_fused(dh, ab, wa, wb, shape_key=_SHAPE_KEY)
     da, db = _swiglu_bwd(ab[:, :_ND], ab[:, _ND:], dh)
     with _no_tf32():
         exp_dx = da @ wa.float() + db @ wb.float()
@@ -556,7 +585,7 @@ def cond_transition_bwd_swiglu_dx_packed():
     dh = _rand(_M, _ND, dtype=FP32)
     ab = _rand(_M, 2 * _ND, dtype=FP32)
     wcat = torch.cat([wa, wb], dim=0)
-    dx, dab = _dx_swiglubwd(dh, ab, wcat)
+    dx, dab = _dx_swiglubwd(dh, ab, wcat, shape_key=_SHAPE_KEY)
     da, db = _swiglu_bwd(ab[:, :_ND], ab[:, _ND:], dh)
     exp_dab = torch.cat([da, db], dim=1)
     with _no_tf32():
@@ -577,7 +606,7 @@ def cond_transition_bwd_gate_squeeze_dx():
     out = _rand(_M, _D, dtype=FP32)
     scale = _rand(_M, _D, dtype=FP32)
     dy = _rand(_M, _D, dtype=FP32)
-    dh, dout, dscale = _dh_gatebwd(out, scale, dy, ws, _ND)
+    dh, dout, dscale = _dh_gatebwd(out, scale, dy, ws, _ND, shape_key=_SHAPE_KEY)
     exp_dout, exp_dscale = _gate_bwd(out, scale, dy)
     with _no_tf32():
         exp_dh = exp_dout @ ws.float()
@@ -595,7 +624,8 @@ def cond_transition_bwd_gemm():
     _fixed()
     _, _, _, _, _, wsc, _ = _ct_args()
     dscale = _rand(_M, _D, dtype=FP32)
-    dcond = _dgemm(dscale, wsc, _M, _DC, _D, wsc.stride(0), wsc.stride(1))
+    dcond = _dgemm(dscale, wsc, _M, _DC, _D, wsc.stride(0), wsc.stride(1),
+                   shape_key=_SHAPE_KEY)
     with _no_tf32():
         exp = dscale @ wsc.float()
     return dcond, exp
@@ -608,7 +638,7 @@ def cond_transition_bwd_dw():
     _fixed()
     g = _rand(_M, _D, dtype=FP32)
     x = _rand(_M, _ND, dtype=FP32)
-    dw = _wgrad(g, x, _D, _ND)
+    dw = _wgrad(g, x, _D, _ND, shape_key=_SHAPE_KEY)
     with _no_tf32():
         exp = g.t() @ x
     return dw, exp

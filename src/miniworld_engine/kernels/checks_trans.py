@@ -44,6 +44,7 @@ from miniworld_engine.kernels.drivers_trans import (
     ROWS,
     TRIMUL_D,
     TRIMUL_ROWS,
+    _pair_x,
     _transition_operands,
 )
 
@@ -88,11 +89,17 @@ def transition_expand_swiglu_triton():
     round h to bf16 exactly where the kernel stores it, then squeeze."""
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 
-    x2, _, _, wa, wb, ws = _transition_operands()
-    y = triton_transition(x2, wa, wb, ws, N_EXPAND)
+    # ``_pair_x()`` -- the driver's own helper for this one launcher. TritonTransitionFunction
+    # reads both_key(length_of(x.shape)) before its view(-1, d), and ``length_of`` refuses the
+    # flat (M, K) that ``_transition_operands`` hands every other entry point here. Only x moves;
+    # the weights still come from ``_transition_operands`` so K/ND are unchanged, and in aligned
+    # mode _pair_x's M = L*L is exactly ROWS.
+    _, _, _, wa, wb, ws = _transition_operands()
+    x = _pair_x()
+    y = triton_transition(x, wa, wb, ws, N_EXPAND)
 
-    a, b = _proj(x2, wa, wb)
-    h = (a * torch.sigmoid(a) * b).to(x2.dtype)     # kernel's bf16 `expand` store
+    a, b = _proj(x, wa, wb)
+    h = (a * torch.sigmoid(a) * b).to(x.dtype)      # kernel's bf16 `expand` store
     return y, h.float() @ ws.float().T
 
 

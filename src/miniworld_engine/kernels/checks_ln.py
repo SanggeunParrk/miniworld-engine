@@ -29,7 +29,16 @@ import contextlib
 import torch
 
 from .drivers import BF16, dev, pair, rows2d, vec
-from .drivers_ln import _D, _D_CUDA_BWD, _M, _NH, _PAIR_N, _ln_stats, _mmajor
+from .drivers_ln import (
+    _D,
+    _D_CUDA_BWD,
+    _M,
+    _NH,
+    _PAIR_N,
+    _SHAPE_KEY,
+    _ln_stats,
+    _mmajor,
+)
 
 _EPS = 1e-5
 
@@ -183,9 +192,13 @@ def layernorm_bwd_atomic_triton():
     """
     from .layernorm.compile_native import _bwd_atomic_impl
 
-    x, w = rows2d(_M, _D), vec(_D)
+    # The PRE-flatten pair activation (1, L, L, D), as the driver passes it: the impl reshapes
+    # internally and reads ``both_key(length_of(x.shape))`` off the 4-D shape, which is exactly
+    # what ``length_of`` now refuses on an already-flattened (M, D). dx comes back
+    # ``view_as(x)``, so the whole comparison simply moves to that shape.
+    x, w = pair(n=_PAIR_N, d=_D), vec(_D)
     dy = torch.randn_like(x)
-    mean, rstd = _ln_stats(x)
+    mean, rstd = _ln_stats(x.reshape(-1, _D))   # [M] fp32, one row per (b, i, j), as the driver
     dx, dw, db = _bwd_atomic_impl(dy, x, w, mean, rstd)
     rdx, rdw, rdb = _ln_bwd_ref(dy, x, w)
     return {"dx": (dx, rdx), "dw": (dw, rdw), "db": (db, rdb)}
@@ -202,9 +215,9 @@ def layernorm_bwd_split_triton():
     """
     from .layernorm.compile_native import _bwd_persistent_impl
 
-    x, w = rows2d(_M, _D), vec(_D)
+    x, w = pair(n=_PAIR_N, d=_D), vec(_D)   # pre-flatten, like layernorm_bwd_atomic_triton above
     dy = torch.randn_like(x)
-    mean, rstd = _ln_stats(x)
+    mean, rstd = _ln_stats(x.reshape(-1, _D))
     dx, dw, db = _bwd_persistent_impl(dy, x, w, mean, rstd)
     rdx, rdw, rdb = _ln_bwd_ref(dy, x, w)
     return {"dx": (dx, rdx), "dw": (dw, rdw), "db": (db, rdb)}
@@ -331,7 +344,10 @@ def layernorm_linear_fwd_triton():
     from .layernorm_linear.reference import layernorm_linear_pytorch
     from .layernorm_linear.triton.fused import layernorm_linear_triton_fwd
 
-    x, g, b = rows2d(_M, _D), vec(_D), vec(_D)
+    # The pair activation, as the driver passes it: ``layernorm_linear_triton_fwd`` flattens to
+    # (M, K) itself and reads ``both_key(length_of(x.shape))`` first, then reshapes y back, so
+    # both sides of the comparison stay at (1, L, L, N).
+    x, g, b = pair(n=_PAIR_N, d=_D), vec(_D), vec(_D)
     w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
     y = layernorm_linear_triton_fwd(x, g, b, w, None, _EPS)
     with _no_tf32():
@@ -399,11 +415,14 @@ def layernorm_linear_fwd_fp32_triton():
     from .layernorm_linear.reference import layernorm_linear_pytorch
     from .layernorm_linear.triton.pair_bias import _fwd_op
 
-    x, lnw = rows2d(_M, _D), vec(_D)
+    # ``_fwd_op`` takes the pre-flatten activation (it reads shape[-2] for the key and reshapes
+    # out back to (..., nh)); mean/rstd stay per-ROW, so the reference stats are taken on the
+    # flattened view of that same x.
+    x, lnw = pair(n=_PAIR_N, d=_D), vec(_D)
     pw = torch.randn(_NH, _D, device=dev(), dtype=BF16)
     out, mean, rstd = _fwd_op(x, lnw, pw, _EPS)
     rout = layernorm_linear_pytorch(x.float(), lnw.float(), None, pw.float(), None, _EPS)
-    rmean, rstd_ref = _ln_stats(x, _EPS)
+    rmean, rstd_ref = _ln_stats(x.reshape(-1, _D), _EPS)
     return {"out": (out, rout), "mean": (mean, rmean), "rstd": (rstd, rstd_ref)}
 
 
@@ -417,16 +436,23 @@ def layernorm_linear_bwd_fp32_triton():
     from .layernorm_linear.reference import layernorm_linear_pytorch
     from .layernorm_linear.triton.pair_bias import _bwd_op, _fwd_op
 
-    x, lnw = rows2d(_M, _D), vec(_D)
+    # Both ops run here, so both get the driver's treatment: ``_fwd_op`` is handed the
+    # pre-flatten pair activation and reads L off it, while ``_bwd_op`` only ever takes the
+    # (M, N) matrix and so is handed the key explicitly. dx is that matrix's shape, so the
+    # reference's leaf is x2 -- the same rows, contiguous -- and the backward seed is dout
+    # viewed at (M, nh), which is the view the kernel itself takes of it.
+    x, lnw = pair(n=_PAIR_N, d=_D), vec(_D)
+    x2 = x.reshape(-1, _D).contiguous()
     pw = torch.randn(_NH, _D, device=dev(), dtype=BF16)
     out, mean, rstd = _fwd_op(x, lnw, pw, _EPS)
     dout = torch.randn_like(out)
-    dx, dlnw, dpw = _bwd_op(dout, x, lnw, pw, mean, rstd)
+    dx, dlnw, dpw = _bwd_op(dout, x2, lnw, pw, mean, rstd, shape_key=_SHAPE_KEY)
 
-    xf = x.float().detach().requires_grad_(True)
+    xf = x2.float().detach().requires_grad_(True)
     lf = lnw.float().detach().requires_grad_(True)
     pf = pw.float().detach().requires_grad_(True)
-    layernorm_linear_pytorch(xf, lf, None, pf, None, _EPS).backward(dout.float())
+    layernorm_linear_pytorch(xf, lf, None, pf, None, _EPS).backward(
+        dout.reshape(-1, _NH).float())
     return {"dx": (dx, xf.grad), "dln_weight": (dlnw, lf.grad), "dproj_weight": (dpw, pf.grad)}
 
 
