@@ -219,8 +219,13 @@ class BidirectionalTriangleAttention(nn.Module):
         dv = self.to_value.weight.shape[0]
         db = self.to_bias.weight.shape[0]
         dg = self.to_gate.weight.shape[0]
+        # `pair`, NOT pair.reshape(-1, d). The wrapper flattens internally and reshapes the
+        # result back, so pre-flattening changes nothing except that `length_of` then sees
+        # M = L*L instead of L -- and both_key clamps L*L to the top bucket at any L >= 91, so
+        # every sequence length shared one cached config. Measured here at L=384: M = 147,456
+        # recorded as shape_key=8192.
         proj = layernorm_linear_triton(
-            pair.reshape(-1, d), self.ln_pair.weight, self.ln_pair.bias,
+            pair, self.ln_pair.weight, self.ln_pair.bias,
             self._inproj_weight(), None, self.ln_pair.eps,
         )
         value, bias, gate = proj.split([dv, db, dg], dim=-1)

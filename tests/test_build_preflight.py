@@ -10,7 +10,6 @@ eighth at 0% utilisation.
 from __future__ import annotations
 
 from miniworld_engine.autotune.builder import _one_config_per_op
-from miniworld_engine.autotune.configs import _LISTS
 
 
 def _fake_grid(monkeypatch, sizes):

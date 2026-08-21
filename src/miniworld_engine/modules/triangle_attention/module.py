@@ -235,8 +235,10 @@ class TriangleAttention(nn.Module):
         dv = self.to_value.weight.shape[0]
         db = self.to_bias.weight.shape[0]
         w_cat = self._inproj_weight()
+        # `pair`, NOT pair.reshape(-1, d) -- see the note in bidirectional.py: pre-flattening
+        # leaves `length_of` reading M = L*L, which both_key clamps to the top bucket.
         proj = layernorm_linear_triton(
-            pair.reshape(-1, d), self.ln_pair.weight, self.ln_pair.bias, w_cat, None,
+            pair, self.ln_pair.weight, self.ln_pair.bias, w_cat, None,
             self.ln_pair.eps,
         )
         value, bias, gate = proj.split([dv, db, dv], dim=-1)
