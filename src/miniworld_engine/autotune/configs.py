@@ -1,12 +1,35 @@
 """Autotune configs come from CSV. Nothing in this package generates them.
 
-One CSV per op, named ``<op>.csv``, under the active config directory. Its header names the
-columns: every column that is not ``num_warps`` / ``num_stages`` / ``maxnreg`` is a tile axis and
-must match the kernel's constexpr spelling exactly. One row is one config.
+One CSV per op, named ``<op>.csv``, under the active config directory. Two formats are accepted
+and told apart by the header.
+
+MATERIALISED -- one row IS one config. Every column that is not ``num_warps`` / ``num_stages`` /
+``maxnreg`` is a tile axis and must match the kernel's constexpr spelling exactly. This is the
+right shape for a tuned result: a handful of specific winning configs.
 
     BLOCK_M1,BLOCK_N,num_warps,num_stages
     64,128,4,3
     128,128,8,4
+
+GRID SPEC (header ``axis,values``) -- one row is one AXIS, and the configs are the cartesian
+product. This is the right shape for a SEARCH SPACE, where the materialised form does not scale:
+the generated sweep is 205,266 configs over 91 ops and its largest op alone is 15,552 rows, which
+restate the same six value sets 15,552 times. As a spec that op is six rows, and the whole grid is
+~550 rows rather than 205,266.
+
+    axis,values
+    BLOCK_M1,32 64 128 256
+    BLOCK_N,32 64 128 256
+    BLOCK_K,16 32 64
+    GROUP_M,1 2 4 8 16 32
+    num_warps,1 2 4 8 16 32
+    num_stages,1 2 3 4 5 6 8 10 12
+    slice,0-8000
+
+``slice,<start>-<stop>`` is optional and takes a half-open range of the product, which is what
+makes config-set sharding cheap -- a shard states which part of the grid it owns instead of
+materialising it. Expansion is ``itertools.product`` over the axes in FILE ORDER and must stay
+deterministic, since a slice names positions in that sequence.
 
 A kernel declares only which op it is::
 
@@ -26,6 +49,7 @@ raises if any op already registered empty.
 from __future__ import annotations
 
 import csv
+import itertools
 import os
 from pathlib import Path
 
@@ -41,11 +65,85 @@ _STRANDED: set[str] = set()
 _DIR: Path | None = None
 
 
+def _read_spec(path: Path, rows: list[dict]) -> list:
+    """Expand an ``axis,values`` GRID SPEC into the full cartesian product.
+
+    A search grid written out one row per config is unusable at scale: the generated sweep is
+    205,266 configs over 91 ops, and the largest single op is 15,552 rows -- 13 MB of CSV that no
+    one can read, diff, or review, restating the same six value sets 15,552 times. The spec says
+    the value sets once:
+
+        axis,values
+        BLOCK_M1,32 64 128 256
+        BLOCK_N,32 64 128 256
+        BLOCK_K,16 32 64
+        GROUP_M,1 2 4 8 16 32
+        num_warps,1 2 4 8 16 32
+        num_stages,1 2 3 4 5 6 8 10 12
+
+    Six rows for the same 15,552 configs, and the whole grid becomes ~550 rows instead of 205,266.
+
+    ``slice`` is an optional pseudo-axis, ``slice,<start>-<stop>``, taking a half-open range of the
+    product. That is what makes CONFIG-SET sharding cheap: a shard directory states which part of
+    the grid it owns instead of materialising it, so 26 shard dirs cost kilobytes rather than the
+    13 MB the materialised split took.
+
+    Expansion order is ``itertools.product`` over the axes in FILE ORDER, and it must stay
+    deterministic: a shard's ``slice`` names positions in this sequence, so reordering the rows of
+    a spec silently re-cuts every shard.
+    """
+    spec, order = {}, []
+    for i, row in enumerate(rows, start=2):
+        axis = (row.get("axis") or "").strip()
+        raw = (row.get("values") or "").strip()
+        if not axis:
+            continue
+        if axis in spec:
+            raise ValueError(f"{path}:{i}: axis {axis!r} declared twice")
+        # `slice` is written "start-stop", so it needs `-` as a separator; a tile axis never does
+        # and must not, or a typo would silently split one value into two.
+        text = raw.replace("-", " ") if axis == "slice" else raw.replace("|", " ")
+        try:
+            spec[axis] = [int(v) for v in text.split()]
+        except ValueError as exc:
+            raise ValueError(f"{path}:{i}: {axis}: {exc}") from exc
+        if not spec[axis]:
+            raise ValueError(f"{path}:{i}: axis {axis!r} has no values")
+        order.append(axis)
+
+    rng = spec.pop("slice", None)
+    if "slice" in order:
+        order.remove("slice")
+    for meta in ("num_warps", "num_stages"):
+        if meta not in spec:
+            raise ValueError(f"{path}: grid spec has no {meta} row")
+    axes = [a for a in order if a not in _META]
+    if not axes:
+        raise ValueError(f"{path}: grid spec has no tile-axis row")
+
+    out = []
+    for combo in itertools.product(*(spec[a] for a in order)):
+        v = dict(zip(order, combo))
+        out.append(triton.Config({a: v[a] for a in axes}, num_warps=v["num_warps"],
+                                 num_stages=v["num_stages"], maxnreg=v.get("maxnreg")))
+    if rng is not None:
+        # written as a single "start-stop" token, so it parses as two ints
+        if len(rng) != 2:
+            raise ValueError(f"{path}: slice must be 'start-stop', got {rng}")
+        start, stop = rng
+        out = out[start:stop]
+        if not out:
+            raise ValueError(f"{path}: slice {start}-{stop} selects nothing")
+    return out
+
+
 def _read(path: Path) -> list:
     with path.open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     if not rows:
         raise ValueError(f"{path}: no config rows")
+    if set(rows[0]) >= {"axis", "values"}:
+        return _read_spec(path, rows)
     axes = [c for c in rows[0] if c and c not in _META]
     if not axes:
         raise ValueError(f"{path}: header has no tile-axis column")
