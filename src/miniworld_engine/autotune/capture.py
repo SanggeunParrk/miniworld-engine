@@ -648,7 +648,7 @@ def record_errors() -> dict[str, int]:
     return dict(_RECORD_ERRORS)
 
 
-def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False) -> None:
+def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=None) -> None:
     op = _op_name(autotuner)
     if not op:
         return
@@ -666,7 +666,15 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False) -> Non
         return
     if ms == float("inf"):
         return
-    nargs = getattr(autotuner, "nargs", None) or {}
+    # `nargs` is passed in by the single-config path, which records AFTER Autotuner.run has
+    # finished -- and run() ends with `self.nargs = None`. Reading it off the autotuner there
+    # yields nothing, so only KEYWORD arguments reach the bucket and every positional one
+    # disappears: a kernel launched with a positional shape_key recorded a bucket with no shape
+    # in it at all. Reconstructing the binding at the call site is the fix; making kernels pass
+    # arguments by keyword to satisfy the recorder would be fixing production to suit the
+    # measurement.
+    if nargs is None:
+        nargs = getattr(autotuner, "nargs", None) or {}
     # Always derive the key here; never off `early_config_prune`. That branch used to read
     # `_miniworld_dtype_of` / `_miniworld_bucket_of` from the per-kernel prune OBJECTS, and once
     # those were deleted in fcd3c7a the `if ecp` guard was only ever false -- until the cache
@@ -855,6 +863,10 @@ def install() -> None:
         # reaches prune_configs -- which is where a round is armed for the compile hook. Arm it
         # here instead, or the one compile that matters runs serially in-process with no timeout.
         cfgs0 = getattr(self, "configs", None) or []
+        # Snapshot the positional binding NOW: triton builds exactly this
+        # (`self.nargs = dict(zip(self.arg_names, args))`) at the top of run() and clears it at
+        # the bottom, so by the time the single-config record below fires it is gone.
+        nargs0 = dict(zip(getattr(self, "arg_names", ()) or (), args))
         previous = _CURRENT.get("id")
         if len(cfgs0) == 1 and id(self) not in _ROUND:
             _ROUND[id(self)] = list(cfgs0)
@@ -871,7 +883,8 @@ def install() -> None:
             if mark not in _SINGLE_SEEN:
                 _SINGLE_SEEN.add(mark)
                 try:
-                    _record_one(self, cfgs[0], kwargs, float("nan"), unmeasured=True)
+                    _record_one(self, cfgs[0], kwargs, float("nan"), unmeasured=True,
+                                nargs=nargs0)
                 except Exception as exc:  # noqa: BLE001 -- must not perturb a real run
                     _record_failed(exc)
         return out
