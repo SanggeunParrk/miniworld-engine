@@ -120,3 +120,38 @@ def test_the_reader_is_installed_on_every_autotuner():
         pass
 
     assert _k2.early_config_prune is not None
+
+
+def test_installing_the_reader_does_not_stop_capture_recording(monkeypatch):
+    """The reader and the recorder must coexist. They did not.
+
+    `_record_one` used to read `_miniworld_dtype_of` / `_miniworld_bucket_of` off
+    `early_config_prune`, guarded by `if ecp`. Once fcd3c7a deleted the prune OBJECTS that carried
+    those attributes the guard was only ever false, so the dead branch was invisible -- until the
+    cache reader began installing a prune FUNCTION on every autotuner, which made `ecp` truthy
+    everywhere and turned every call into an AttributeError. The caller's `except: pass` swallowed
+    it, so a build ran to completion, reported success, and wrote an empty shard.
+
+    Two things stop that recurring: the key is always derived from the autotuner itself, and a
+    recording failure is counted and warned about instead of vanishing.
+    """
+    from miniworld_engine.autotune import capture
+
+    @triton.autotune(configs=[_Cfg(64), _Cfg(128)], key=["shape_key"])
+    @triton.jit
+    def _k3(x, shape_key, BLOCK_M1: triton.language.constexpr):  # noqa: ANN001, N803
+        pass
+
+    at = _k3
+    assert at.early_config_prune is not None, "the reader must be installed on this autotuner"
+
+    capture._CAPTURE.clear()
+    capture._RECORD_ERRORS.clear()
+    at.nargs = {"x": torch.empty(2, 2, dtype=torch.bfloat16), "shape_key": 256}
+    monkeypatch.setattr(capture, "_op_name", lambda _a: "op_probe")
+
+    capture._record_one(at, _Cfg(64), {}, 0.5)
+
+    assert not capture.record_errors(), capture.record_errors()
+    assert capture._CAPTURE["op_probe"]["entries"], "nothing was recorded"
+    assert list(capture._CAPTURE["op_probe"]["entries"]) == [("bfloat16", "shape_key=256")]

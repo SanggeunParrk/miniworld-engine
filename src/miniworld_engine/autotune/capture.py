@@ -628,11 +628,30 @@ def _op_name(autotuner) -> str | None:
     return op_of(getattr(autotuner, "configs", None))
 
 
+#: Recording errors, kept so a build cannot look healthy while capturing nothing.
+_RECORD_ERRORS: dict[str, int] = {}
+
+
+def _record_failed(exc: BaseException) -> None:
+    key = f"{type(exc).__name__}: {exc}"
+    first = key not in _RECORD_ERRORS
+    _RECORD_ERRORS[key] = _RECORD_ERRORS.get(key, 0) + 1
+    if first:
+        import warnings  # noqa: PLC0415
+
+        warnings.warn(f"[miniworld.autotune] capture could not record a timing -- {key}. "
+                      f"This shard will be missing measurements.", stacklevel=3)
+
+
+def record_errors() -> dict[str, int]:
+    """Recording failures seen this process, by message. Empty is what a healthy build looks like."""
+    return dict(_RECORD_ERRORS)
+
+
 def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False) -> None:
     op = _op_name(autotuner)
     if not op:
         return
-    ecp = getattr(autotuner, "early_config_prune", None)
     # inf is how a FAILED config scores and must never be stored. NaN reaches here from exactly
     # one place and on purpose: an op with a single config runs no tuning loop, so the sole config
     # is the winner by default and there is no measurement to record (`unmeasured=True`). That is
@@ -648,9 +667,15 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False) -> Non
     if ms == float("inf"):
         return
     nargs = getattr(autotuner, "nargs", None) or {}
-    dtype = str(ecp._miniworld_dtype_of(nargs, meta)) if ecp else _dtype_of(nargs)   # noqa: SLF001
-    bucket = (str(ecp._miniworld_bucket_of(nargs, meta))                             # noqa: SLF001
-              if ecp else _bucket_of(autotuner, nargs, meta))
+    # Always derive the key here; never off `early_config_prune`. That branch used to read
+    # `_miniworld_dtype_of` / `_miniworld_bucket_of` from the per-kernel prune OBJECTS, and once
+    # those were deleted in fcd3c7a the `if ecp` guard was only ever false -- until the cache
+    # reader started installing a prune FUNCTION on every autotuner, at which point `ecp` became
+    # truthy everywhere and every call raised AttributeError into the caller's `except: pass`.
+    # Capture then silently recorded nothing at all: a build that looked like it ran and produced
+    # an empty shard. Read and write share these two functions, which is the point.
+    dtype = _dtype_of(nargs)
+    bucket = _bucket_of(autotuner, nargs, meta)
     slot = _CAPTURE.setdefault(op, {"grid": None, "entries": {}})
     if slot["grid"] is None:
         slot["grid"] = list(autotuner.configs)
@@ -807,8 +832,11 @@ def install() -> None:
                 _BEST[id(self)] = med
         try:
             _record_one(self, config, meta, med)
-        except Exception:  # noqa: BLE001 -- capture must never perturb a real bench
-            pass
+        except Exception as exc:  # noqa: BLE001 -- capture must never perturb a real bench
+            # ...but it must not fail SILENTLY either. Swallowing without a word is how a
+            # recorder that raised on every single call produced an empty shard from a build
+            # that otherwise looked healthy.
+            _record_failed(exc)
         return res
 
     Autotuner._bench = _bench
@@ -844,8 +872,8 @@ def install() -> None:
                 _SINGLE_SEEN.add(mark)
                 try:
                     _record_one(self, cfgs[0], kwargs, float("nan"), unmeasured=True)
-                except Exception:  # noqa: BLE001 -- capture must never perturb a real run
-                    pass
+                except Exception as exc:  # noqa: BLE001 -- must not perturb a real run
+                    _record_failed(exc)
         return out
 
     Autotuner.run = run
