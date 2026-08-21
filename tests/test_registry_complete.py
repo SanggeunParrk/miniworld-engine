@@ -230,3 +230,88 @@ def test_launch_keywords_match_the_kernel_signature() -> None:
                                f"{name}(..., {kw.arg}=...) -- not a parameter of {name}")
     assert not bad, "launch keywords that the kernel does not accept:\n" + "\n".join(
         f"  {b}" for b in bad)
+
+
+def test_no_launch_omits_a_required_kernel_parameter() -> None:
+    """A launch must supply every parameter the kernel has no default for.
+
+    The sibling test above checks the OTHER direction -- every keyword PASSED must exist in the
+    signature -- which catches a stale keyword and cannot catch an omitted one. That gap was real:
+    the shape-key unification added ``shape_key`` to ``_ln_bwd_persistent`` and to its
+    ``key=['N', 'shape_key']``, updated the two callers inside persistent.py, and missed the one in
+    ``layernorm_linear/triton/mmajor_bwd.py``. Every launch down that branch raised
+
+        TypeError: dynamic_func() missing 1 required positional argument: 'shape_key'
+
+    and since it is the wide-N large-M branch, the trimul backward died at L >= 548 with
+    d_hidden > 128. The build recorded it as a one-line "skip", so it read as an unsupported shape
+    rather than a defect.
+
+    Scope, and why it is narrow: the ``BLOCK_*`` axes are injected by the ``@triton.autotune``
+    wrapper, never by the caller, so they must not be required here -- a first version that
+    included them reported 129 findings, essentially all noise. Kernels are resolved by name, so a
+    name defined by more than one kernel is skipped rather than guessed at (``_attn_fwd`` exists in
+    four files with different signatures), as is any name the calling file rebinds.
+    """
+    defs: dict[str, list[tuple[Path, list[str], set[str]]]] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            decs = [ast.dump(d) for d in fn.decorator_list]
+            if not any("jit" in d or "autotune" in d for d in decs):
+                continue
+            a = fn.args
+            ordered = [p.arg for p in a.posonlyargs + a.args]
+            ndef = len(a.defaults)
+            required = set(ordered[:-ndef] if ndef else ordered)
+            required |= {k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults) if d is None}
+            # tile axes come from the autotuner, not the caller
+            required = {r for r in required if not r.startswith(("BLOCK", "GROUP"))}
+            defs.setdefault(fn.name, []).append((path, ordered, required))
+
+    unique = {n: v[0] for n, v in defs.items() if len(v) == 1}
+    bad = []
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        # RESOLVE an alias, do not skip it. `from ...persistent import _ln_bwd_persistent as
+        # _ln_bwd_persistent_jit` is exactly how the bug above entered, so treating every aliased
+        # name as unknowable made this test blind to the one case it was written for -- verified
+        # by reverting the fix and watching it still pass. An `import ... as` names the original,
+        # which is all the lookup needs; only a local REBIND (an assignment) is genuinely unknown.
+        alias = {al.asname: al.name.split(".")[-1]
+                 for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+                 for al in n.names if al.asname}
+        assigned = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                    for t in n.targets if isinstance(t, ast.Name)}
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Subscript):
+                continue
+            base = call.func.value
+            local = getattr(base, "id", getattr(base, "attr", None))
+            if local in assigned:
+                continue
+            name = alias.get(local, local)
+            if name not in unique:
+                continue
+            if any(k.arg is None for k in call.keywords):        # **kwargs forward
+                continue
+            if any(isinstance(a, ast.Starred) for a in call.args):
+                # `*q.stride()` expands to five positionals at runtime but is ONE ast node, so
+                # counting nodes undercounts coverage and every such launch looks like it omits
+                # everything after the star. Four attention launches were reported that way.
+                continue
+            _, ordered, required = unique[name]
+            covered = set(ordered[:len(call.args)]) | {k.arg for k in call.keywords}
+            missing = sorted(required - covered)
+            if missing:
+                bad.append(f"{path.relative_to(SRC)}:{call.lineno} {name} omits {missing}")
+
+    assert not bad, "kernel launch(es) missing a required parameter:\n  " + "\n  ".join(bad)

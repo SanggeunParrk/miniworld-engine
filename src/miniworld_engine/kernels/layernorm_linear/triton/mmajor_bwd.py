@@ -204,14 +204,19 @@ def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *,
 
 
 def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
-                                 shape_key: int | None = None):  # noqa: ARG001 (kernel not keyed)
+                                 shape_key: int | None = None):
     """Atomic-free persistent m-major path via the canonical layernorm persistent kernel
     (stride-generic; both operands share m-major strides). Fastest at wide N (N=256: 1.21x vs
     te_style atomic at L=1024).
 
-    ``shape_key`` is accepted so the three paths below share one call shape, but
-    ``_ln_bwd_persistent`` (layernorm/triton/persistent.py) is not autotuned on it, so it is
-    not forwarded."""
+    ``shape_key`` is ``both_key(L)`` from the caller (see ``_ln_bwd_atomic``) and IS forwarded.
+    This docstring used to say ``_ln_bwd_persistent`` was not autotuned on it, so it was dropped;
+    that stopped being true when the shape-key unification added ``shape_key`` to that kernel's
+    signature and ``key=['N', 'shape_key']``. The two callers inside persistent.py were updated
+    and this one, in another file, was not -- so every launch down this path raised
+    ``dynamic_func() missing 1 required positional argument: 'shape_key'``. It is the wide-N
+    large-M branch, so the trimul backward died for any L with L*L >= 300_000 (L >= 548) at
+    d_hidden > 128."""
     M, K = x.shape
     dx = torch.empty_strided((M, K), dx_strides, device=x.device, dtype=dxn.dtype)
     NP = _persistent_grid(x.device)
@@ -222,6 +227,7 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
         dx, pdw, pdb, dxn, x, gamma, mean, rstd,
         pdw.stride(0), x.stride(0), x.stride(1),
         M, N=K,
+        shape_key=both_key(0) if shape_key is None else shape_key,
     )
     return dx, pdw.sum(0), pdb.sum(0)
 
