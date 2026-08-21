@@ -22,6 +22,7 @@ other shapes.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -550,6 +551,39 @@ def check(selected: list[Case]) -> list[str]:
     """
     problems = []
     sm = device_sm()
+    with _one_config_per_op():
+        return _check_inner(selected, sm, problems)
+
+
+@contextlib.contextmanager
+def _one_config_per_op():
+    """Pin every op to a single config for the duration.
+
+    The preflight's job is "does this module construct and run", not "which config is fastest",
+    and its docstring promises it "takes seconds". That held only while the config sets held one
+    config per op. Pointed at a real search grid it inherits the same set as the build, so the
+    forward triggers a full autotune sweep -- in the PARENT, on one card, with no compile
+    fan-out, before a single unit is dispatched. Measured on configs/grid (205,266 configs):
+    15 minutes in, zero units claimed, seven of eight GPUs still at 4 MiB.
+
+    Truncating the live lists is the whole mechanism: `configs_for` hands each autotuner the list
+    object itself, so shortening it in place reaches autotuners that already exist, and restoring
+    it afterwards leaves the build's own config space untouched.
+    """
+    from miniworld_engine.autotune.configs import _LISTS  # noqa: PLC0415
+
+    saved = {op: list(live) for op, live in _LISTS.items()}
+    for live in _LISTS.values():
+        if len(live) > 1:
+            del live[1:]
+    try:
+        yield
+    finally:
+        for op, live in _LISTS.items():
+            live[:] = saved.get(op, live)
+
+
+def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
     for case in selected:
         dims, length, dt = case.dims[0], case.lengths[0], case.dtypes[0]
         dt_name = str(dt).replace("torch.", "")
