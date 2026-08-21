@@ -17,6 +17,7 @@ fraction of the cost -- and count distinct (dtype, bucket) per op.
 from __future__ import annotations
 
 import collections
+import dataclasses
 import json
 import sys
 import time
@@ -31,7 +32,7 @@ def main() -> int:
 
     from miniworld_engine import settings
     from miniworld_engine.autotune import capture
-    from miniworld_engine.autotune.builder import cases, run_case, units
+    from miniworld_engine.autotune.builder import SWITCH_SETTINGS, cases, run_case, units
 
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     cs = list(cases())
@@ -56,9 +57,30 @@ def main() -> int:
             # raising -- an unsupported width is data, not failure. Counting the call as success
             # reported "ran 300, failed 0" for a run where all 300 skipped and nothing was
             # captured.
-            ran = run_case(by_case[u.case], u.length, u.dim_index,
-                           train=u.train, impl=u.impl, dtype=getattr(torch, u.dtype),
-                           compute_dtype=getattr(torch, u.compute) if u.compute else None)
+            #
+            # The SWITCH axis has to be applied too. Ignoring it (as the first version did)
+            # collapses 3385 units onto their default branch: every boolean autotune key --
+            # USE_DROPOUT, HAS_ROWSCALE, NORMALIZE, ADD_RESIDUAL -- then looks single-valued, and
+            # the bucket count comes out an undercount rather than a measurement. p_drop is a
+            # module ARGUMENT; everything else is a settings pin.
+            p_drop, restore = 0.0, None
+            if u.switch == "p_drop":
+                p_drop = float(u.value)
+            elif u.switch:
+                field, parse = SWITCH_SETTINGS[u.switch]
+                # configure() returns the PREVIOUS settings. builder.py gets away without
+                # restoring because it runs every unit in its own process; this loop does not, so
+                # an unrestored pin would leak into every later unit and silently rebuild the
+                # wrong side of the switch.
+                restore = settings.configure(**{field: parse(str(u.value))})
+            try:
+                ran = run_case(by_case[u.case], u.length, u.dim_index,
+                               train=u.train, p_drop=p_drop, impl=u.impl,
+                               dtype=getattr(torch, u.dtype),
+                               compute_dtype=getattr(torch, u.compute) if u.compute else None)
+            finally:
+                if restore is not None:
+                    settings.configure(**dataclasses.asdict(restore))
             if ran:
                 ok += 1
             else:
