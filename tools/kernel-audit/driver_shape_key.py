@@ -52,10 +52,12 @@ def probe(op: str, length: int, tmp: Path) -> dict:
 
 def main() -> int:
     lo, hi = (int(a) for a in (sys.argv[1:3] or ("256", "512")))
+    only = {o for o in sys.argv[3].split(",") if o} if len(sys.argv) > 3 else None
     tmp = REPO / ".bench/_shapekey"
     tmp.mkdir(parents=True, exist_ok=True)
     reg = [r for r in csv.DictReader((REPO / "src/miniworld_engine/kernels/registry.csv").open())
-           if r["backend"] == "triton" and (r["driver"] or "").strip()]
+           if r["backend"] == "triton" and (r["driver"] or "").strip()
+           and (only is None or r["kernel"] in only)]
     moved, stuck, dead = [], [], []
     for i, r in enumerate(reg, 1):
         op = r["kernel"]
