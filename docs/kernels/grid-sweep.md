@@ -125,27 +125,36 @@ bucket은 `shape_key` 단독이 아니라 **다른 key 차원과의 조합**이�
 
 ## 5. 실측: 컴파일 생존율과 config당 비용
 
-`.bench/gridcost.py` — `adaln_gemm_gate_triton`(15,552, 최대 op)의 그리드에서 **균등 샘플링**
-(앞에서 N개를 자르면 전부 가장 작은 타일 = 가장 싸고 가장 잘 살아남는 쪽만 본다).
-
-A5000/150 샘플 1차 결과:
+`.bench/gridcost.py` — `adaln_gemm_gate_triton`(15,552, 최대 op)의 그리드에서 **균등 샘플 400개**
+(앞에서 N개를 자르면 전부 가장 작은 타일 = 가장 싸고 가장 잘 살아남는 쪽만 본다). A6000 sm86.
 
 ```
-survival 62.7%   (거부 56건 전부 OutOfResources(smem))
-compile+first launch   median 0.613s   mean 13.237s
-bench per surviving    median 0.028s
+survival 60.5%   (거부 158건 전부 OutOfResources(smem))
+compile  p50=0.57s  p75=1.82s  p90=11.96s  p95=57.6s  p99=392.6s  max 454.6s
+bench    0.029s/config
+60초 넘는 config가 전체 컴파일 시간의 72%를 먹는다
 ```
 
-**median 0.6s vs mean 13.2s** — 분포가 극단적으로 치우쳐 있어서 평균으로 예산을 잡으면 안 된다.
-비용의 거의 전부가 컴파일이고(벤치는 config당 0.03s), 그 컴파일 비용은 소수의 monster가 만든다.
-게다가 이 프로브는 `capture`를 설치하지 않으므로 **60초 fork+SIGKILL 컴파일 예산이 적용되지 않는다** —
-즉 이 mean은 실제 빌드보다 과대다. 2차 측정(A6000, 400 샘플)에서 분포와 60s/30s cap 기준
-비용을 함께 낸다.
+**분포가 전부다.** median 0.57초인데 mean은 10초다. 비용의 거의 전부가 컴파일이고(벤치는
+config당 0.03초로 무시 가능), 그 컴파일 비용의 **72%가 60초 이상 걸리는 소수의 config**에 있다.
+즉 `capture.py`의 60초 fork+SIGKILL 예산은 안전장치가 아니라 **가장 큰 비용 레버**다.
 
-거부가 전부 smem이라는 점은 좋은 소식이다: 자원 할당 단계에서 실패하므로 ptxas까지 가지 않고 싸다.
+| | serial | 16 컴파일 워커 | × 4.4 bucket |
+|---|---:|---:|---:|
+| 예산 없음 | 575 GPU-h | 35.9 GPU-h | 158 GPU-h |
+| **60초 예산** (현행) | 316 GPU-h | **19.8 GPU-h** | **87 GPU-h** |
+| 30초 예산 | 209 GPU-h | 13.0 GPU-h | 57 GPU-h |
+
+30초로 줄이면 34% 더 아끼지만 **p95가 57.6초**다 — 5%의 config가 그 위에 있고 그 중에 우승자가
+있으면 잃는다. 60초는 두 분포(정상 수 초 vs 스필 수 분)를 깨끗이 가르므로 그대로 둔다.
+
+거부가 전부 smem인 것은 좋은 소식이다: 자원 할당 단계에서 실패하므로 ptxas까지 가지 않는다.
+
+**결론: 60초 예산 + 16 워커 + 26 샤드로 shape bucket 하나당 ~20 GPU-h, 실측 평균 4.4개
+bucket 기준 ~87 GPU-h.** GPU 8장이면 벽시계 ~11시간이다.
 
 ## 6. 남은 것
 
-- 60s cap 기준 config당 비용 확정 → GPU-시간과 샤드 수 결정
-- trimul 계열 460 unit skip 원인 → 47/91 op만 측정된 이유이자, bucket 수가 하한인 이유
+- trimul 계열 skip 원인 → 48/91 op만 측정된 이유이자, bucket 수가 하한인 이유
+  (525건 중 130건은 `d_hidden != d_pair`로 triton 구현이 지원 안 하는 조합 — 버그 아님)
 - b2b 커널의 독립적인 K축 2–3개를 따로 튜닝할지 (최대 27× 감축 여지)
