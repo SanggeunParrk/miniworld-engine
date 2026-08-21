@@ -754,6 +754,21 @@ def build_all(selected: list[Case], shard_dir: Path, gpus: list[int], compile_jo
     repo = Path(__file__).resolve().parents[3]
     shard_dir.mkdir(parents=True, exist_ok=True)
 
+    # DIVIDE the cores among the concurrent units. Each unit is its own process and works out its
+    # own compile fan-out from `sched_getaffinity`, which reports the WHOLE allocation -- so every
+    # unit assumes it owns the machine. Eight units on a 64-core node therefore asked for
+    # min(32, 64) = 32 workers each: 256 compile processes, measured as 529 python processes and a
+    # load average of 239. Compile is ~99% of build cost and ptxas is memory-hungry, so
+    # oversubscribing it that hard costs throughput rather than buying any.
+    if not compile_jobs:
+        try:
+            cores = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            cores = os.cpu_count() or 1
+        compile_jobs = max(1, cores // max(1, len(gpus)))
+        print(f"  [compile] {cores} cores / {len(gpus)} gpus -> {compile_jobs} compile workers "
+              f"per unit ({compile_jobs * len(gpus)} total)", flush=True)
+
     broken = check(selected)
     if broken:
         print("cases that will not build -- fix these before running units:")
