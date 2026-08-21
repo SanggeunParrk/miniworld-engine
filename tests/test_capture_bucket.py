@@ -78,12 +78,13 @@ def test_no_usable_key_still_records_rather_than_crashing():
     assert _capture([], {}) == {("any", "any")}
 
 
-def test_a_non_finite_timing_is_not_recorded():
-    """inf is how a failed config scores; NaN is how a bench that produced no number scores.
+def test_a_measured_timing_that_is_not_a_number_is_not_recorded():
+    """inf is how a FAILED config scores, and a NaN arriving from the bench is a broken reading.
 
-    Only inf was filtered, so NaN got stored -- all 37 committed caches held `"ms": NaN`. Worse
-    than a wrong number: `sorted` by a NaN key neither raises nor orders, so "fastest first"
-    quietly became "arrival order", and store_ranked_configs takes the head of that as the winner.
+    Not a blanket isfinite filter, which is what this started as and was wrong: NaN also reaches
+    `_record_one` on purpose, from the single-config path (see below). Filtering it unconditionally
+    stopped that path recording anything at all -- caught only by an end-to-end run that captured
+    zero ops.
     """
     for bad in (float("inf"), float("nan")):
         capture._CAPTURE.clear()
@@ -108,3 +109,30 @@ def test_a_finite_timing_is_recorded():
     finally:
         capture._op_name = orig
     assert capture._CAPTURE["op_probe"]["entries"]
+
+
+def test_the_sole_config_of_a_one_config_op_is_still_recorded():
+    """An op with one config runs no tuning loop, so its config is the winner by default and there
+    is no measurement. That record is wanted -- it is what tells a reader which config to use --
+    and it is why the 37 caches built from the one-config sets hold `"ms": NaN`."""
+    capture._CAPTURE.clear()
+    at = _Autotuner(["shape_key"], {"x": torch.empty(2, 2), "shape_key": 256}, [_Cfg(BLOCK_M1=64)])
+    orig = capture._op_name
+    capture._op_name = lambda a: "op_probe"
+    try:
+        capture._record_one(at, _Cfg(BLOCK_M1=64), {}, float("nan"), unmeasured=True)
+    finally:
+        capture._op_name = orig
+    assert capture._CAPTURE["op_probe"]["entries"], "the sole config must still be recorded"
+
+
+def test_an_unmeasured_entry_never_outranks_a_measured_one():
+    """`sorted` on a NaN key neither raises nor orders -- comparisons against NaN are all False --
+    so an unmeasured entry can land at the head of the ranking, where store_ranked_configs reads
+    it as the winner. It must sort last regardless of arrival order."""
+    a, b, c = _Cfg(BLOCK_M1=32), _Cfg(BLOCK_M1=64), _Cfg(BLOCK_M1=128)
+    for order in ([(a, float("nan")), (b, 2.0), (c, 1.0)],
+                  [(c, 1.0), (a, float("nan")), (b, 2.0)],
+                  [(b, 2.0), (c, 1.0), (a, float("nan"))]):
+        ranked = capture._rank(order)
+        assert [r[0].kwargs["BLOCK_M1"] for r in ranked] == [128, 64, 32], order

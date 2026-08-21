@@ -22,7 +22,6 @@ validates the capture path. Config choice is performance-only, so this never aff
 
 from __future__ import annotations
 
-import math
 
 from pathlib import Path
 
@@ -629,16 +628,24 @@ def _op_name(autotuner) -> str | None:
     return op_of(getattr(autotuner, "configs", None))
 
 
-def _record_one(autotuner, config, meta, ms) -> None:
+def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False) -> None:
     op = _op_name(autotuner)
     if not op:
         return
     ecp = getattr(autotuner, "early_config_prune", None)
-    # inf is how a failed config scores, and NaN is how a bench that produced no number scores.
-    # Only inf was filtered, so NaN readings were stored -- every one of the 37 committed caches
-    # holds `"ms": NaN`. It also makes the ranking meaningless: `sorted` by a NaN key neither
-    # raises nor orders, so "fastest first" silently became "whatever order they arrived in".
-    if not math.isfinite(ms):
+    # inf is how a FAILED config scores and must never be stored. NaN reaches here from exactly
+    # one place and on purpose: an op with a single config runs no tuning loop, so the sole config
+    # is the winner by default and there is no measurement to record (`unmeasured=True`). That is
+    # why every one of the 37 caches built from the one-config sets holds `"ms": NaN`.
+    #
+    # A blanket `isfinite` filter here looks right and is wrong -- it silently stops the
+    # single-config path recording anything at all. What actually needs handling is the ORDERING:
+    # `sorted` by a NaN key neither raises nor orders, so an unmeasured entry merged alongside
+    # measured ones could land at the head and be read as the winner. The rankers sort NaN last
+    # (see `_rank`).
+    if ms != ms and not unmeasured:
+        return
+    if ms == float("inf"):
         return
     nargs = getattr(autotuner, "nargs", None) or {}
     dtype = str(ecp._miniworld_dtype_of(nargs, meta)) if ecp else _dtype_of(nargs)   # noqa: SLF001
@@ -836,7 +843,7 @@ def install() -> None:
             if mark not in _SINGLE_SEEN:
                 _SINGLE_SEEN.add(mark)
                 try:
-                    _record_one(self, cfgs[0], kwargs, float("nan"))
+                    _record_one(self, cfgs[0], kwargs, float("nan"), unmeasured=True)
                 except Exception:  # noqa: BLE001 -- capture must never perturb a real run
                     pass
         return out
@@ -871,6 +878,16 @@ def reset() -> None:
     _CAPTURE.clear()
 
 
+def _rank(pairs):
+    """(config, ms) fastest first, with unmeasured (NaN) entries LAST.
+
+    `sorted` on a NaN key neither raises nor orders: comparisons against NaN are all False, so the
+    result depends on input order and an unmeasured entry can end up at the head, where
+    `store_ranked_configs` reads it as the winner.
+    """
+    return sorted(pairs, key=lambda cm: (cm[1] != cm[1], cm[1]))
+
+
 def flush(top_k: int = 5, gpu: str | None = None) -> list:
     """Write the captured top-K per (op, dtype, bucket) to the runtime cache. Returns a list of
     (op, dtype, bucket, n_configs, path) for logging."""
@@ -882,7 +899,7 @@ def flush(top_k: int = 5, gpu: str | None = None) -> list:
             continue
         csh = config_space_hash(grid)
         for (dtype, bucket), ent in sorted(slot["entries"].items()):
-            ranked = sorted(ent.values(), key=lambda cm: cm[1])   # (config, ms) fastest-first
+            ranked = _rank(ent.values())
             fp = store_ranked_configs(op, gk, dtype, bucket, ranked, csh, top_k=top_k)
             written.append((op, dtype, bucket, len(ranked), str(fp)))
     return written
@@ -938,7 +955,9 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
                     sig = _sig_from_dict(cd)
                     ms = float(cd.get("ms", float("inf")))
                     prev = ent.get(sig)
-                    if prev is None or ms < prev[1]:
+                    # `ms < prev[1]` is False when either side is NaN, so an unmeasured entry
+                    # never displaces a measured one -- but a measured one must displace it.
+                    if prev is None or ms < prev[1] or prev[1] != prev[1]:
                         ent[sig] = (cd, ms)
     written = []
     for op, a in sorted(agg.items()):
@@ -948,7 +967,7 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
         csh = config_space_hash(grid)
         for bk, ent in sorted(a["entries"].items()):
             dtype, bucket = bk.split("|", 1)
-            ranked = sorted(ent.values(), key=lambda cm: cm[1])
+            ranked = _rank(ent.values())
             fp = store_ranked_configs(op, gk, dtype, bucket, list(ranked), csh, top_k=top_k)
             written.append((op, bk, len(ranked), str(fp)))
     return written
