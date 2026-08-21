@@ -480,12 +480,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
     from miniworld_engine.autotune import builder
 
-    selected = [c for c in builder.cases() if args.case in ("all", c.name)]
-    if not selected:
-        names = ", ".join(c.name for c in builder.cases())
-        print(f"unknown case {args.case!r}; have: all, {names}", file=sys.stderr)
-        return 2
-
+    # Select the config directory BEFORE cases(), which imports the kernel modules. An op that
+    # calls configs_for() with no directory chosen gets triton's substitute Config({}) and can
+    # never be refilled, so use_config_dir then refuses with "15 op(s) registered before a config
+    # directory was selected" and the whole command dies -- `build` was unusable without
+    # MINIWORLD_CONFIG_DIR already exported. `_bench_build_first` has always had these two in the
+    # right order; this was a plain ordering slip.
     repo = Path(__file__).resolve().parents[2]
     directory = resolve_config_dir(args.config_type, repo)
     if isinstance(directory, int):
@@ -493,6 +493,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     rc = apply_config_dir(directory)
     if rc:
         return rc
+
+    selected = [c for c in builder.cases() if args.case in ("all", c.name)]
+    if not selected:
+        names = ", ".join(c.name for c in builder.cases())
+        print(f"unknown case {args.case!r}; have: all, {names}", file=sys.stderr)
+        return 2
 
     results = builder.build_all(selected, Path(args.shards).expanduser(),
                                 _resolve_gpus(args.gpus), args.compile_jobs,
