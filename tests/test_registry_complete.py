@@ -54,6 +54,34 @@ def test_kind_and_level_use_the_declared_vocabulary() -> None:
                      f"offending rows: {bad}")
 
 
+def test_dtypes_follow_the_level() -> None:
+    """Which operand dtypes a kernel must be tuned for, declared per level.
+
+        token          bf16          pair/token-level kernels run bf16 only
+        atom, both     bf16|fp32
+
+    Held as its own column rather than derived from ``level`` on read: level says WHERE a kernel is
+    used and dtypes says WHAT it must be tuned for, and those are different facts. Deriving it
+    would mean a kernel that later needs a different set could not say so, and changing the
+    mapping would silently rewrite every existing row.
+
+    The cache already partitions on dtype independently of the shape bucket (``_dtype_of`` in
+    autotune/capture.py), so this column is the DECLARATION of what a complete build must cover --
+    it is what makes a missing fp32 entry a visible hole rather than an absence nobody expected.
+    """
+    expected = {"token": "bf16", "atom": "bf16|fp32", "both": "bf16|fp32"}
+    bad = [(r["kernel"], r["level"], r["dtypes"]) for r in _rows()
+           if r["dtypes"] != expected[r["level"]]]
+    assert not bad, f"dtypes must follow the level {expected}; offending rows: {bad}"
+
+
+def test_dtypes_use_the_declared_vocabulary() -> None:
+    allowed = {"bf16", "fp32", "fp16"}
+    bad = [(r["kernel"], r["dtypes"]) for r in _rows()
+           if not r["dtypes"] or set(r["dtypes"].split("|")) - allowed]
+    assert not bad, f"dtypes must be '|'-joined members of {sorted(allowed)}; offending: {bad}"
+
+
 def test_level_is_consistent_within_a_family() -> None:
     """Where a family is used is a property of the family, so two rows of one family disagreeing is
     a typo, not a distinction."""

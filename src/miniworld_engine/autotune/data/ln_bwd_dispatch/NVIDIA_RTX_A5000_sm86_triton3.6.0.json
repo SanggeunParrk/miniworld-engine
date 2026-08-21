@@ -15,11 +15,27 @@
     },
     "path": "atomic"
   },
+  "128|2048": {
+    "ms": {
+      "atomic": 0.014592,
+      "partial": 0.020389,
+      "persistent": 0.021595
+    },
+    "path": "atomic"
+  },
   "128|262144": {
     "ms": {
       "atomic": 0.291182,
       "partial": 0.569408,
       "persistent": 0.299882
+    },
+    "path": "atomic"
+  },
+  "128|4096": {
+    "ms": {
+      "atomic": 0.016794,
+      "partial": 0.023447,
+      "persistent": 0.022761
     },
     "path": "atomic"
   },
@@ -95,11 +111,75 @@
     },
     "path": "atomic"
   },
+  "384|262144": {
+    "ms": {
+      "atomic": 1.388845,
+      "partial": 4.098048,
+      "persistent": 2.92864
+    },
+    "path": "atomic"
+  },
+  "384|524288": {
+    "ms": {
+      "atomic": 3.094016,
+      "partial": 9.202346,
+      "persistent": 6.916864
+    },
+    "path": "atomic"
+  },
   "384|65536": {
     "ms": {
       "atomic": 0.358175,
       "partial": 1.038141,
       "persistent": 0.702391
+    },
+    "path": "atomic"
+  },
+  "512|131072": {
+    "ms": {
+      "atomic": 1.045894,
+      "partial": 3.930112,
+      "persistent": 3.124992
+    },
+    "path": "atomic"
+  },
+  "512|262144": {
+    "ms": {
+      "atomic": 1.848793,
+      "partial": 6.97856,
+      "persistent": 5.706342
+    },
+    "path": "atomic"
+  },
+  "512|524288": {
+    "ms": {
+      "atomic": 4.126379,
+      "partial": 15.694848,
+      "persistent": 13.56032
+    },
+    "path": "atomic"
+  },
+  "512|65536": {
+    "ms": {
+      "atomic": 0.47434,
+      "partial": 1.748041,
+      "persistent": 1.31596
+    },
+    "path": "atomic"
+  },
+  "64|2048": {
+    "ms": {
+      "atomic": 0.012429,
+      "partial": 0.017914,
+      "persistent": 0.017626
+    },
+    "path": "atomic"
+  },
+  "64|4096": {
+    "ms": {
+      "atomic": 0.012979,
+      "partial": 0.018601,
+      "persistent": 0.016243
     },
     "path": "atomic"
   }

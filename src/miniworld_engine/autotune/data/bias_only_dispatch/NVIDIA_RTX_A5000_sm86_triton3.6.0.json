@@ -1,4 +1,46 @@
 {
+  "gate|1024|512|131072": {
+    "choice": "split",
+    "ms": {
+      "fused": 9.7024,
+      "split": 3.738112
+    }
+  },
+  "gate|1024|512|262144": {
+    "choice": "split",
+    "ms": {
+      "fused": 17.330688,
+      "split": 6.663168
+    }
+  },
+  "gate|1024|512|524288": {
+    "choice": "split",
+    "ms": {
+      "fused": 38.949886,
+      "split": 14.983168
+    }
+  },
+  "gate|1024|512|65536": {
+    "choice": "split",
+    "ms": {
+      "fused": 4.302848,
+      "split": 1.641472
+    }
+  },
+  "gate|128|128|131072": {
+    "choice": "split",
+    "ms": {
+      "fused": 0.39424,
+      "split": 0.330752
+    }
+  },
+  "gate|128|128|262144": {
+    "choice": "split",
+    "ms": {
+      "fused": 0.694272,
+      "split": 0.591872
+    }
+  },
   "gate|256|128|1048576": {
     "choice": "fused",
     "ms": {
@@ -34,11 +76,71 @@
       "split": 0.222208
     }
   },
+  "gate|512|256|1048576": {
+    "choice": "split",
+    "ms": {
+      "fused": 17.3952,
+      "split": 10.161152
+    }
+  },
+  "gate|512|256|131072": {
+    "choice": "split",
+    "ms": {
+      "fused": 2.383872,
+      "split": 1.421312
+    }
+  },
+  "gate|512|256|262144": {
+    "choice": "split",
+    "ms": {
+      "fused": 4.397056,
+      "split": 2.554368
+    }
+  },
+  "gate|512|256|524288": {
+    "choice": "split",
+    "ms": {
+      "fused": 9.78432,
+      "split": 5.762048
+    }
+  },
   "gate|512|256|65536": {
     "choice": "fused",
     "ms": {
       "fused": 0.434176,
       "split": 0.487424
+    }
+  },
+  "gate|768|384|1048576": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|768|384|131072": {
+    "choice": "split",
+    "ms": {
+      "fused": 5.51424,
+      "split": 2.50368
+    }
+  },
+  "gate|768|384|262144": {
+    "choice": "split",
+    "ms": {
+      "fused": 9.85088,
+      "split": 4.445696
+    }
+  },
+  "gate|768|384|524288": {
+    "choice": "split",
+    "ms": {
+      "fused": 22.059008,
+      "split": 9.96096
+    }
+  },
+  "gate|768|384|65536": {
+    "choice": "split",
+    "ms": {
+      "fused": 2.394112,
+      "split": 1.094656
     }
   }
 }
