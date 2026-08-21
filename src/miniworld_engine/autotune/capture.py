@@ -46,9 +46,10 @@ _orig_prune = None
 # make_cubin (ptxas). This is the SOLE compile-time guard and is arch-agnostic BY CONSTRUCTION: it
 # judges each config by how long it actually takes to compile on THIS GPU, so every arch keeps only
 # the configs that compile in time on it — no static num_warps/num_stages heuristic (which would be
-# tuned to one arch). This is the arch-specific BACKSTOP; a static ``_drop_compile_monsters`` prune
-# in cache.py already removes the always-bad ``num_warps>=16`` / ``num_stages>=5`` tail up front, so
-# this only has to catch a given arch's residual oddball blowups. The full grid /
+# tuned to one arch). This is the SOLE guard: cache.py used to pre-filter the ``num_warps>=16`` /
+# ``num_stages>=5`` tail statically, but that rule shrank the searched space behind the caller's
+# back and its premise did not hold -- ``num_stages`` has no compiler maximum, and its ceiling
+# (``smem_limit / operand_tile``) is far above 5 for small tiles. The full grid /
 # ``config_space_hash`` is untouched, so all caches stay valid. 60s cleanly separates the two
 # populations: a healthy config (even at large D) compiles in a few to a few-tens of seconds, while
 # a register-spill monster runs 10-20 MINUTES — so 60s never kills a usable config yet kills fast.
@@ -915,9 +916,15 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
         for op, slot in d.items():
             if only_ops is not None and op not in only_ops:
                 continue
-            a = agg.setdefault(op, {"grid": slot.get("grid", []), "entries": {}})
-            if not a["grid"]:
-                a["grid"] = slot.get("grid", [])
+            a = agg.setdefault(op, {"grid": {}, "entries": {}})
+            # UNION the grids, do not take the first shard's. Shards that split by SHAPE all carry
+            # the same full grid, so taking one was harmless. Shards that split the CONFIG SET
+            # carry DIFFERENT slices, and then the first shard's slice hashes to something no later
+            # full-grid run reproduces -- ``store_ranked_configs`` sees a changed
+            # ``config_space_hash`` and RESETS every entry, discarding the whole build. Which shard
+            # supplied it also depended on file order, so the hash was not even deterministic.
+            for cd in slot.get("grid", []):
+                a["grid"].setdefault(_sig_from_dict(cd), cd)
             for bk, lst in slot.get("entries", {}).items():
                 ent = a["entries"].setdefault(bk, {})
                 for cd in lst:
@@ -928,7 +935,7 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
                         ent[sig] = (cd, ms)
     written = []
     for op, a in sorted(agg.items()):
-        grid = a["grid"]
+        grid = list(a["grid"].values())   # dedup by signature; config_space_hash sorts them
         if not grid:
             continue
         csh = config_space_hash(grid)

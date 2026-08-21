@@ -266,35 +266,16 @@ _smem_limit_cache: dict[int, int] = {}
 
 
 # A COMPILE MONSTER is a config triton spends 10-20 MIN compiling (make_llir + ptxas), always
-# register-spill bound so it never wins. Two layers guard against it, and they compose:
-#   1) STATIC pre-filter here — drop the ``num_warps>=16`` / ``num_stages>=5`` tail before benching.
-#      These are monsters on EVERY current arch (deep pipelines / 16-warp blocks spill everywhere),
-#      so cutting them up front removes ~half the grid and the bulk of build time cheaply.
-#   2) A per-config COMPILE TIMEOUT (fork + SIGKILL) in ``autotune/capture.py`` — the arch-specific
-#      BACKSTOP that kills whatever the static rule misses on a given GPU, judged by real compile
-#      time. So the static rule can stay conservative (only the always-bad tail) without risking a
-#      hang from an arch's own oddball blowup.
-# This filters the *pruned candidate set* only; the full ``autotuner.configs`` (hence
-# ``config_space_hash``) is untouched, so every existing cache stays valid — unlike narrowing the
-# config set, which would stale all caches.
-#: Tile-axis names, used to tell a GEMM-shaped kernel from an elementwise one. A config that tiles
-#: two or more of these is walking an M x N (x K) iteration space; one that tiles a single axis is
-#: streaming a flat buffer. The distinction is read off the config itself rather than declared per
-#: kernel, so a new kernel is classified correctly without anyone remembering to annotate it.
-_TILE_AXES = frozenset({
-    "BLOCK_M1", "BLOCK_N", "BLOCK_K", "BLOCK_D", "BLOCK_DC", "BLOCK_NC", "BLOCK_NX",
-    "BM", "BN", "BK", "BD", "BLK", "BLOCK_J",
-})
-
-
-
-
-
-
-
-
-
-
+# register-spill bound so it never wins. The guard is a per-config COMPILE TIMEOUT (fork +
+# SIGKILL) in ``autotune/capture.py``, which judges each config by how long it actually takes to
+# compile on THIS GPU. There is deliberately NO static ``num_warps``/``num_stages`` pre-filter:
+# one used to drop the ``num_warps>=16`` / ``num_stages>=5`` tail as "monsters on every arch", but
+# neither claim survived measurement. ``num_stages`` has no compiler maximum and its cost is
+# exactly one operand tile of shared memory per stage, so the usable ceiling is
+# ``smem_limit / operand_tile`` -- it differs per config and is far above 5 for small tiles. A
+# static rule also silently shrinks whatever grid a tuning run declares, which makes the run a lie
+# about the space it searched. Judging by real compile time costs one timeout per bad config and
+# is arch-agnostic by construction.
 
 #: Every op that wires itself to the cache, filled as the kernel modules import. This is the only
 #: complete list of what a build OUGHT to produce -- chasing missing ops one at a time (a dispatch
