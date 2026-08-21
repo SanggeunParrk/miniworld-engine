@@ -76,3 +76,35 @@ def test_dtype_is_read_off_the_operands():
 
 def test_no_usable_key_still_records_rather_than_crashing():
     assert _capture([], {}) == {("any", "any")}
+
+
+def test_a_non_finite_timing_is_not_recorded():
+    """inf is how a failed config scores; NaN is how a bench that produced no number scores.
+
+    Only inf was filtered, so NaN got stored -- all 37 committed caches held `"ms": NaN`. Worse
+    than a wrong number: `sorted` by a NaN key neither raises nor orders, so "fastest first"
+    quietly became "arrival order", and store_ranked_configs takes the head of that as the winner.
+    """
+    for bad in (float("inf"), float("nan")):
+        capture._CAPTURE.clear()
+        at = _Autotuner(["shape_key"], {"x": torch.empty(2, 2), "shape_key": 256}, [_Cfg(BLOCK_M1=64)])
+        orig = capture._op_name
+        capture._op_name = lambda a: "op_probe"
+        try:
+            capture._record_one(at, _Cfg(BLOCK_M1=64), {}, bad)
+        finally:
+            capture._op_name = orig
+        assert not capture._CAPTURE, f"{bad} was recorded"
+
+
+def test_a_finite_timing_is_recorded():
+    """The guard must not reject real readings."""
+    capture._CAPTURE.clear()
+    at = _Autotuner(["shape_key"], {"x": torch.empty(2, 2), "shape_key": 256}, [_Cfg(BLOCK_M1=64)])
+    orig = capture._op_name
+    capture._op_name = lambda a: "op_probe"
+    try:
+        capture._record_one(at, _Cfg(BLOCK_M1=64), {}, 0.25)
+    finally:
+        capture._op_name = orig
+    assert capture._CAPTURE["op_probe"]["entries"]

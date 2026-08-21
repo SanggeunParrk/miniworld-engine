@@ -289,6 +289,122 @@ _REGISTERED_OPS: set[str] = set()
 
 
 
+def dtype_of_args(nargs) -> str:
+    """dtype of the first tensor operand, or ``any`` if none is introspectable."""
+    for v in (nargs or {}).values():
+        dt = getattr(v, "dtype", None)
+        if dt is not None and hasattr(v, "shape"):
+            return str(dt).replace("torch.", "")
+    return "any"
+
+
+def bucket_of_autotuner(autotuner, nargs, meta=None) -> str:
+    """Shape bucket from the autotuner's OWN ``key=[...]``, with no per-kernel wiring.
+
+    This used to come from a ``make_cache_prune`` object carrying a hand-written
+    ``key_bucket_of("N", "K", "DT")`` per kernel. Those were removed in fcd3c7a and nothing
+    replaced them, so every capture since has recorded the single bucket ``any|any`` -- one config
+    per op for every shape. That silently discards the whole point of the shape key: ``shape_key``
+    is in every kernel's ``key`` list, so Triton re-tunes per shape bucket in-process, and then the
+    cache threw the distinction away on the way to disk.
+
+    ``autotuner.keys`` is the same list the kernel declared, so deriving the bucket from it covers
+    every op automatically and cannot drift from what Triton actually re-tunes on -- which the
+    per-kernel version could, and did.
+    """
+    keys = getattr(autotuner, "keys", None) or []
+    dims = {}
+    for k in keys:
+        v = _named_get(nargs, meta, k)
+        if isinstance(v, bool):        # flags partition the space too, but int() would alias them
+            dims[k] = int(v)
+        elif isinstance(v, int):
+            dims[k] = v
+    return shape_bucket(**dims) if dims else "any"
+
+
+# --------------------------------------------------------------------------- #
+# runtime cache READER (triton: narrow the grid to the cached top-K)
+# --------------------------------------------------------------------------- #
+_reader_installed = False
+
+
+def _cached_subset(autotuner, configs, nargs, meta):
+    """The cached top-K for this (op, gpu, dtype, bucket), or None to keep the full grid."""
+    from .configs import op_of                       # noqa: PLC0415 -- avoid an import cycle
+
+    op = op_of(getattr(autotuner, "configs", None) or [])
+    if op is None:
+        return None
+    gk = gpu_key()
+    dtype = dtype_of_args(nargs)
+    bucket = bucket_of_autotuner(autotuner, nargs, meta)
+    data = _load(op, gk)
+    if data is None:
+        _warn_once(op, gk, dtype, "no tuned autotune cache")
+        return None
+    if data.get("config_space_hash") != config_space_hash(configs):
+        _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
+        return None
+    entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
+    if not entry:
+        _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
+        return None
+    # Intersect rather than trust: the cache names configs, the grid decides what is launchable.
+    want = {_sig_from_dict(c) for c in entry}
+    keep = [c for c in configs if _sig(c) in want]
+    return keep or None
+
+
+def install_cache_reader() -> None:
+    """Narrow every Triton autotuner's grid to the cached top-K for the shape it is running.
+
+    Without this the shipped cache is INERT for Triton. ``select_config`` is the only other reader
+    and only the CuTe/CUDA paths call it, so since fcd3c7a -- which deleted the per-kernel
+    ``make_cache_prune`` objects that used to do this and put nothing in their place -- every
+    process has re-benched the full grid in-process and the committed ``data/*.json`` has been
+    written but never read back. It went unnoticed because every shipped config set holds ONE
+    config per op, which makes a full sweep free. It stops being free the moment a real search
+    grid is installed: ``configs/grid`` is 205,266 configs, and unread means each process would
+    bench all of them, per shape bucket, inside a production forward.
+
+    Installed by patching ``Autotuner.__init__`` rather than by wiring each kernel, for the same
+    reason the write side derives its bucket from ``autotuner.keys``: the per-kernel version could
+    drift from what Triton actually re-tunes on, and did. Read and write now call ONE pair of
+    functions -- ``dtype_of_args`` / ``bucket_of_autotuner`` -- so a cache entry cannot be written
+    under one key and looked up under another.
+
+    A miss, a stale hash, or an unknown shape warns once and keeps the full grid: config choice is
+    performance-only, so the worst case is slow, never wrong.
+    """
+    global _reader_installed
+    if _reader_installed:
+        return
+    from triton.runtime.autotuner import Autotuner   # noqa: PLC0415
+
+    orig_init = Autotuner.__init__
+
+    def __init__(self, *a, **kw):                    # noqa: ANN001, ANN002, ANN003, N807
+        orig_init(self, *a, **kw)
+        base = self.early_config_prune
+
+        def prune(configs, nargs, **meta):           # noqa: ANN001, ANN003
+            cfgs = list(base(configs, nargs, **meta)) if base else list(configs)
+            from .. import settings                  # noqa: PLC0415
+            if settings.current().run_autotune or not cfgs:
+                return cfgs                          # a BUILD re-benches the whole grid on purpose
+            try:
+                hit = _cached_subset(self, cfgs, nargs, meta)
+            except Exception:                        # noqa: BLE001 -- never break a launch
+                return cfgs
+            return hit or cfgs
+
+        self.early_config_prune = prune
+
+    Autotuner.__init__ = __init__
+    _reader_installed = True
+
+
 # --------------------------------------------------------------------------- #
 # backend-agnostic config selection (cute / cuda: pick ONE, no autotune loop)
 # --------------------------------------------------------------------------- #

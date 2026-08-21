@@ -5,7 +5,10 @@ full-grid autotune tax and performance is reproducible across machines. Two runt
 points share one cache format and one storage layer:
 
 * **Triton** — the candidate list comes from :func:`autotune.configs.configs_for`, i.e. from
-  ``configs/<set>/<op>.csv``. Triton picks among those rows and nothing narrows them.
+  ``configs/<set>/<op>.csv``, and :func:`cache.install_cache_reader` narrows it to the cached
+  top-K for the shape actually running. That reader is installed HERE, at package import, because
+  it patches ``Autotuner.__init__`` and every kernel module imports this package before declaring
+  an autotuner.
 * **CuTe / CUDA** — these fix their tile/cluster/stage config at build time and have no autotune
   loop, so they call :func:`select_config` to *pick one* cached config (falling back to the
   kernel's own ``default_config`` on a miss).
@@ -24,6 +27,7 @@ from .buckets import elem_bucket_of
 from .configs import configs_for, missing_ops, registered_ops, use_config_dir
 from .cache import (
     as_cfg_dict,
+    install_cache_reader,
     config_space_hash,
     gpu_key,
     key_bucket_of,
@@ -36,6 +40,7 @@ from .cache import (
 
 __all__ = [
     "as_cfg_dict",
+    "install_cache_reader",
     "configs_for",
     "missing_ops",
     "registered_ops",
@@ -50,3 +55,9 @@ __all__ = [
     "store_ranked_configs",
     "tensor_dtype_of",
 ]
+
+
+# Must run before ANY kernel module constructs its Autotuner, which importing this package
+# guarantees: a kernel reaches `configs_for` through `miniworld_engine.autotune`, so this line has
+# already executed by the time its @triton.autotune decorator runs.
+install_cache_reader()
