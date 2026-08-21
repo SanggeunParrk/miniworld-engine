@@ -35,8 +35,11 @@ from miniworld_engine.autotune.shape_key import length_of, token_key
 
 
 
+# SAVE_GATE belongs in the key for the same reason ADD_RESIDUAL/USE_DROPOUT already do: it is a
+# compile-time branch that adds a full (M, N) store (the saved gate) to an elementwise kernel whose
+# cost IS its memory traffic -- training (return_gate=True) writes 2 tensors, inference 1.
 @triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"),
-                 key=['shape_key', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT'])
+                 key=['shape_key', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT', 'SAVE_GATE'])
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
                      N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, SAVE_GATE: tl.constexpr,
@@ -77,8 +80,12 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, 
 
 
 
+# FROM_PREACT selects a branch: the fused-forward path saves the preact instead of the gate, so
+# the kernel recomputes gate = sigmoid(preact) per tile. Same bytes moved, one extra transcendental
+# per element -- enough to move the arithmetic intensity of an otherwise pure-bandwidth pass, and
+# both values are live in production (bidir/v6 training pass True, GateElem's own bwd False).
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_dropres_triton"),
-                 key=['shape_key', 'N', 'USE_DROPOUT'])
+                 key=['shape_key', 'N', 'USE_DROPOUT', 'FROM_PREACT'])
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)

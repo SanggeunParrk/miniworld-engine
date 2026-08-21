@@ -50,6 +50,8 @@ from miniworld_engine.autotune.shape_key import token_key
 
 
 
+# K is constexpr but deliberately NOT in the key: trimul_front_triton is the only launch site and
+# it passes ``K=D, D=D`` (the in-proj is square), so D already distinguishes every compiled form.
 @triton.autotune(configs=configs_for("trimul_gemm_gate_packed_mmajor_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _lr_kernel(
@@ -109,6 +111,7 @@ def _lr_kernel(
 
 
 
+# K not in the key for the same reason as _lr_kernel: the one launch site passes K=D.
 @triton.autotune(configs=configs_for("trimul_outproj_gemm_sigmoid_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _gate_kernel(

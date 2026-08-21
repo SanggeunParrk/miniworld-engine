@@ -292,3 +292,34 @@ def test_no_launch_omits_a_required_kernel_parameter() -> None:
     assert checked > 100, f"only {checked} launches were resolved; the audit stopped resolving"
     assert not findings, "kernel launch(es) missing a required parameter:\n  " + "\n  ".join(
         f"{f}:{ln} {n} omits {miss}" for f, ln, n, miss in findings)
+
+
+def test_no_constexpr_is_invisible_to_the_autotune_cache() -> None:
+    """A constexpr that is neither a tuned tile axis nor in ``key=[...]`` cannot be told apart by
+    the cache: two differently-compiled programs share one entry, so the config tuned for one code
+    path is served to the other. Nothing fails -- Triton still specializes per constexpr value --
+    which is why these lasted.
+
+    Judgement is not automatable and is therefore RECORDED, in
+    ``tools/kernel-audit/key_gaps_allowed.csv``, one row per (op, param) with the reason: ``eps``
+    is a tolerance, ``D == K`` is a launch-site identity, ``stride_m == H*HEAD_DIM`` is a product
+    of two already-keyed dims. Without that file the check reports the same ~19 findings forever
+    and a NEW gap hides among them; with it, the signal is zero.
+
+    Resolution is by the registry's (file, symbol) PAIR. Keying a ``name -> constexprs`` dict and
+    unioning across files -- which an earlier throwaway version did -- merges the two different
+    kernels both named ``_gate_mul_kernel`` and the four both named ``_attn_fwd``, and invents
+    findings out of the union: it reported 31 ops, of which roughly a third were parameters the
+    named kernel does not have, while missing two ops in ``modules/`` entirely.
+    """
+    import sys
+
+    sys.path.insert(0, str(ROOT / "tools/kernel-audit"))
+    from key_gaps import audit
+
+    findings, checked = audit(ROOT / "configs/accuracy")
+    assert checked > 80, f"only {checked} kernels resolved; the audit stopped resolving"
+    assert not findings, (
+        "constexpr(s) invisible to the autotune cache -- add to the kernel's key=[...], or record "
+        "the judgement in tools/kernel-audit/key_gaps_allowed.csv:\n  "
+        + "\n  ".join(f"{op} ({f}) not-in-key={gap}" for f, op, _k, gap in findings))

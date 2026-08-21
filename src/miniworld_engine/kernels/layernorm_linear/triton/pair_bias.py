@@ -149,6 +149,9 @@ def _layer_norm_linear_fwd(
 
 
 
+# USE_DOT is deliberately NOT keyed even though it selects a code path (tl.dot tensor-core
+# projection vs the scalar `tl.static_range(NH)` loop): the sole launcher passes `NH=nh` and
+# `USE_DOT=nh >= MIN_TL_DOT_DIM`, so it is a pure function of NH -- already in the key.
 @triton.autotune(configs=configs_for("layernorm_linear_bwd_fp32_triton"),
                  key=['N', 'NH', 'shape_key'],
                  reset_to_zero=['dlnw_ptr', 'dpw_ptr'])

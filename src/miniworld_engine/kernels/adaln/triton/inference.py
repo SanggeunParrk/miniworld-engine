@@ -303,6 +303,13 @@ def adaln_inference_lnfold(
 
 
 
+# USE_LOW is deliberately NOT in the key. It picks the tl.dot operand precision (16-bit
+# tensor-core MMA vs the fp32 dot), so it IS a code path -- but it is set at the one launch site
+# below as `x.dtype in (bfloat16, float16)`, a pure function of X's dtype, and X is the first
+# tensor operand, i.e. exactly what the cache's own `dtype` component reads (`dtype_of_args` in
+# autotune/cache.py). The dtype component is strictly finer (it separates bf16 from fp16, which
+# USE_LOW does not), so keying on USE_LOW as well would add no partition. Unlike the training
+# kernels in main.py, nothing here consults autocast, so the two cannot diverge.
 @triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['NX', 'NC', 'shape_key'])
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915

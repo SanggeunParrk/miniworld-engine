@@ -225,8 +225,14 @@ def get_seq_group(rows) -> int:
 # ALLOW_TF32 STAYS: it is a real codegen switch (it selects the tl.dot input precision for fp32
 # operands). It is read from the PROCESS-GLOBAL torch.backends.cuda.matmul.allow_tf32 at every
 # launch, so flipping torch.set_float32_matmul_precision mid-run legitimately costs a re-tune.
+# APPLY_MASK and TRANSPOSE_OUT are code paths with different best tiles, so the cache has to tell
+# them apart: APPLY_MASK adds a per-tile row-scale load and two multiplies, and TRANSPOSE_OUT
+# writes (N, M) instead of (M, N) -- a different store pattern and different coalescing entirely.
+# N stays OUT of the key: it is 2*K (proved at the launch site in _input_gemm_fwd), and K is
+# already here, so keying it would only duplicate the partition -- the same reasoning the output
+# kernel's launcher records for its own N == K.
 @triton.autotune(configs=configs_for("trimul_gemm_gate_saveact_triton"),
-                 key=['shape_key', 'K', 'ALLOW_TF32'])
+                 key=['shape_key', 'K', 'ALLOW_TF32', 'APPLY_MASK', 'TRANSPOSE_OUT'])
 @triton.jit
 def _input_gated_gemm_kernel(
     xn_ptr,
@@ -631,7 +637,8 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out, *, seq_len=No
     # x_flat = x.reshape(m, d), so K = x_normed.shape[1] = d. The kernel writes ab_t of shape
     # (n, m); the caller then does `a_t, b_t = torch.chunk(ab_t, 2, dim=0)` followed by
     # `a_t.view(d, b, i, j)` with m = b*i*j -- a view that only succeeds if n/2 == d. Hence
-    # n == 2*d == 2*K (g_in_weight is the [left; right] combined gate weight, 2D rows).
+    # n == 2*d == 2*K (g_in_weight is the [left; right] combined gate weight, 2D rows), which is
+    # why N is not in this kernel's autotune key -- K is.
     m, k = x_normed.shape
     n = w_gate.shape[0]
     shape = (n, m) if transpose_out else (m, n)

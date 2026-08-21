@@ -24,7 +24,14 @@ AUTOTUNE = settings.current().autotunes("adaln")
 from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
-@triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"), key=['NX', 'NC', 'shape_key'])
+# USE_BF16/USE_FP16 belong in the key: they select the tl.dot operand precision -- a 16-bit
+# tensor-core MMA versus the fp32 `input_precision="ieee"` path -- so they are a code path with a
+# different best tile, not a tolerance. They are NOT implied by the cache's `dtype` component
+# (the dtype of the first tensor operand, `dtype_of_args` in autotune/cache.py): `compute_dtype`
+# below is the AUTOCAST dtype when autocast is on, while X/DY stay whatever the caller passed, so
+# one fp32 operand reaches both flag settings and the two compiles would share one cache entry.
+@triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"),
+                 key=['NX', 'NC', 'USE_BF16', 'USE_FP16', 'shape_key'])
 @triton.jit
 def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     X,
@@ -190,7 +197,8 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
 
 
 @triton.autotune(configs=configs_for("adaln_bwd_dx_dbias_triton"),
-                 key=['shape_key', 'NX', 'NC'],
+                 # USE_BF16/USE_FP16: tl.dot operand precision, see adaln_fwd_kernel.
+                 key=['shape_key', 'NX', 'NC', 'USE_BF16', 'USE_FP16'],
                  reset_to_zero=['DScaleB'])
 @triton.jit
 def adaln_bwd_input_kernel(  # noqa: PLR0915
@@ -477,7 +485,9 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
 
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_dw_triton"), key=['shape_key', 'NX', 'NC'])
+@triton.autotune(configs=configs_for("adaln_bwd_dw_triton"),
+                 # USE_BF16/USE_FP16: tl.dot operand precision, see adaln_fwd_kernel.
+                 key=['shape_key', 'NX', 'NC', 'USE_BF16', 'USE_FP16'])
 @triton.jit
 def adaln_bwd_weight_kernel(
     DY,
@@ -570,7 +580,9 @@ def adaln_bwd_weight_kernel(
 
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_dlnw_triton"), key=['shape_key', 'NX', 'NC'])
+@triton.autotune(configs=configs_for("adaln_bwd_dlnw_triton"),
+                 # USE_BF16/USE_FP16: tl.dot operand precision, see adaln_fwd_kernel.
+                 key=['shape_key', 'NX', 'NC', 'USE_BF16', 'USE_FP16'])
 @triton.jit
 def adaln_bwd_lnw_kernel(
     DY,

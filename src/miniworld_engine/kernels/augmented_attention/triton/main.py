@@ -108,6 +108,14 @@ def _attn_fwd_inner(
 
 
 
+# AUTOTUNE KEY: `A` and `B` are constexpr but stay OUT of the key. `A` (the augmentation count) is
+# never read by this body -- the grid extent A*B*H is built at the launcher from python ints -- so
+# the generated code is the same for every A and a key entry could only split the cache. `B` appears
+# only in the scalar index decomposition (`off_z // B`, `off_z % B`): no branch, no change to the
+# tile's work shape, and it varies per run, so keying it would fragment every bucket by batch size
+# for two integer ops. What does set the work shape is already keyed -- HEAD_DIM (and with it
+# HEAD_DIM_PAD = next_power_of_2(HEAD_DIM)), H (also the q/k/v row-stride multiplier H*D), and
+# shape_key (the L bucket).
 @triton.autotune(configs=configs_for("augmented_attention_fwd_triton"),
                  key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
@@ -234,6 +242,12 @@ def _attn_fwd(
 
 
 
+# AUTOTUNE KEY: `A`/`B` are not read by this body at all (see _attn_fwd above), and the four
+# constexpr strides stay out too. Both launchers pass the strides of a contiguous (A, B, L, H, D)
+# q, so stride_k == 1 always; stride_h == HEAD_DIM and stride_m == H*HEAD_DIM are products of two
+# entries already in the key; and stride_z == L*H*HEAD_DIM would key on the exact L instead of its
+# bucket -- one cache entry per sequence length, which is what shape_key exists to prevent. None of
+# them changes the tile or the loop trip count: they only shift each program's base pointer.
 @triton.autotune(configs=configs_for("augmented_attention_bwd_pre_triton"),
                  key=['shape_key', 'H', 'HEAD_DIM'])
 @triton.jit
@@ -363,6 +377,8 @@ def _attn_bwd_dqdkdv(
 
 
 
+# AUTOTUNE KEY: `A`/`B` out for the same reason as the forward -- `A` is unread here, and `B` only
+# folds into the constant M_offset stride (B*H*N_CTX).
 @triton.autotune(configs=configs_for("augmented_attention_bwd_split_triton"),
                  key=['shape_key', 'H', 'HEAD_DIM'],
                  reset_to_zero=['DQ', 'DBias'])

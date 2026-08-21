@@ -271,6 +271,20 @@ def transition_expand_gate(
 
 
 
+# TWO tl.constexprs are deliberately absent from the key below.
+#
+# `D` -- redundant with `K`, which is already keyed. D = ws.shape[0] and K = x2.shape[1] are the
+# same d_hidden at every launcher (Transition's Linears are expand d -> n*d and squeeze n*d -> d;
+# drivers_trans/checks_trans build ws as rows2d(k, nd)), and the ADD_RESIDUAL branch below relies
+# on exactly that ("D == K here") when it reloads x over the D output columns. The hand-CUDA twin
+# asserts it outright (transition_b2b_kernel.cu: `TORCH_CHECK(D == K, ...)`). Keying on D would
+# add a second copy of the partition `K` already makes. `ND` is NOT implied -- n is a module
+# argument (4 in Transition, 2 in ConditionedTransition) -- so it stays.
+#
+# `EPS` -- a numeric tolerance, not a shape and not a code path. It reaches the kernel only as
+# `tl.rsqrt(var + EPS)` under FUSE_STATS (which IS keyed), it is nn.LayerNorm's `ln_in.eps`, and
+# no value of it can change which tile is fastest. Keying on it would multiply the bucket count
+# for nothing.
 # fmt: off
 @triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
                  key=['shape_key', 'ND', 'K', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
@@ -536,6 +550,9 @@ def transition_b2b(
 
 
 
+# `D` is a tl.constexpr and is left OUT of the key on purpose: it is ws.shape[0] and K is
+# x2.shape[1], both the module's d_hidden, so `K` (keyed) already partitions this axis. See the
+# longer note on `_transition_b2b_kernel` above. `ND` is independent (n is a module argument).
 # fmt: off
 @triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['shape_key', 'ND', 'K'])
 @triton.jit
@@ -905,8 +922,21 @@ def _transition_expand_gatebwd_savedxn_stacked(xn, wa, wb, grad_expand,
 # BLOCK_M1 comes from the CSV. A 1-row tile is not a tile, it is a per-row launch: it multiplies
 # the grid by BLOCK_M1 and gives every reduction a one-element vector to sum -- keep CSV rows at
 # or above 16.
+# PRIVATIZE_DGDB is KEYED: it is a code path, not a shape. It picks between one dg/db
+# accumulator (every program atomically adding to the same K columns) and NUM_REPLICAS strided
+# private copies, and the whole reason it exists is that the contention it removes was the top
+# stall (measured 1.31x @L=1024, ncu-confirmed membar). The two paths therefore want different
+# BLOCK_M1/BLOCK_K -- the atomic path's cost scales with the number of M-blocks, the privatized
+# one's does not. Both sides really do run: settings.transition_lnbwd_privatize defaults True and
+# the autotune builder sweeps the off-default False side (builder.SWITCHES), so without this entry
+# one bucket would hold both and serve each the other's winner.
+#
+# NUM_REPLICAS is NOT keyed: it is not free. It is the module-level constant
+# _TRANSITION_LNBWD_PRIVATIZE_REPLICAS (64) when privatizing and 1 otherwise -- i.e. a function of
+# PRIVATIZE_DGDB, and dead code on the non-privatized branch. Nothing (settings, env, launcher
+# argument) can vary it independently, so PRIVATIZE_DGDB above already separates its two values.
 @triton.autotune(configs=configs_for("layernorm_bwd_privatized_triton"),
-                 key=['shape_key', 'K'],
+                 key=['shape_key', 'K', 'PRIVATIZE_DGDB'],
                  reset_to_zero=['dg_ptr', 'db_ptr'])
 @triton.jit
 def _transition_ln_bwd_kernel(

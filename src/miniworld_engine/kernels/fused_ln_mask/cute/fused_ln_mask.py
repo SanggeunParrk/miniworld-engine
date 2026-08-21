@@ -42,6 +42,8 @@ def get_seq_group(rows) -> int:
 
 # BLOCK_K tiles the D reduction (mean/var over D), so D need not be a power of two; a row that
 # sets it >= D keeps the single-pass schedule. BLOCK_M1 is the row tile. Both come from the CSV.
+# EPS is constexpr but deliberately NOT keyed: it only appears in `rsqrt(var + EPS)`, so it
+# branches nothing and shifts no work -- keying it would just multiply the bucket count.
 @triton.autotune(configs=configs_for("layernorm_fwd_rowscale_triton"), key=['shape_key', 'D'])
 @triton.jit
 def _fused_ln_mask_kernel(

@@ -108,6 +108,9 @@ def _attn_bwd_dqdkdv(
 
 
 
+# AUTOTUNE KEY: same as main.py's split backward -- `A` is never read by this body and `B` only
+# folds into the constant M_offset stride (B*H*N_CTX), so neither can change which config wins;
+# keying them would partition the cache per augmentation count and per batch size.
 @triton.autotune(configs=configs_for("augmented_attention_bwd_atomic_triton"),
                  key=['shape_key', 'H', 'HEAD_DIM'],
                  reset_to_zero=['DQ', 'DBias'])

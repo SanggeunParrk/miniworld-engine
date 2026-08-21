@@ -56,6 +56,14 @@ import triton.language as tl
 from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
+# `D` is a tl.constexpr and is NOT in the key -- deliberately, because it is not independent of
+# one that is. D comes from `ws.shape[0]` and K from `x.shape[1]`, and both are the module's
+# d_hidden: ConditionedTransition's docstring states it ("K = D = d_hidden"), its Linears are
+# expand (d_hidden -> n*d_hidden) / squeeze (n*d_hidden -> d_hidden), and every launcher in the
+# repo (module.py, drivers_adaln._ct_args, checks_adaln) builds ws as (D, ND) with D == K. So
+# `K` already partitions the cache on this axis and adding D would only duplicate it. ND is a
+# different matter and is keyed: n varies per module (2 here, 4 in transition/), and the driver
+# harness perturbs ND on its own axis, so ND is not recoverable from K.
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['ND', 'K', 'DC', 'shape_key'])
 @triton.jit
 def _cond_transition_inference_kernel(

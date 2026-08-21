@@ -40,7 +40,13 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"), key=['N', 'K', 'shape_key'])
+# HAS_BIAS is keyed: it is constexpr, so the two variants already compile separately, but the
+# autotune cache is keyed only on `key=[...]` -- without it the tile measured on the no-bias
+# epilogue is served to the bias one. Every in-repo launch site passes bias=None (HAS_BIAS=False);
+# the True side is reachable only through the public wrappers (`layernorm_linear`,
+# `layernorm_linear_triton_fn`), so it is a real code path but currently an untuned one.
+@triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"),
+                 key=['N', 'K', 'shape_key', 'HAS_BIAS'])
 @triton.jit
 def _lnl_fwd_kernel(
     x_ptr, w_ptr, b_ptr, g_ptr, beta_ptr, y_ptr,

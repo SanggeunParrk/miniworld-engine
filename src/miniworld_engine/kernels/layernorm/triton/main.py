@@ -49,6 +49,8 @@ def _ln_cuda_bwd_enabled() -> bool:
 # fmt: off
 
 
+# `eps` is constexpr but deliberately NOT keyed: it only appears in `1 / sqrt(var + eps)`, so it
+# branches nothing and shifts no work -- keying it would just multiply the bucket count.
 @triton.autotune(configs=configs_for("layernorm_fwd_saveact_triton"),
                  key=['N', 'shape_key', 'HAS_ROWSCALE'])
 @triton.jit
