@@ -494,11 +494,24 @@ def cmd_build(args: argparse.Namespace) -> int:
     if rc:
         return rc
 
-    selected = [c for c in builder.cases() if args.case in ("all", c.name)]
-    if not selected:
-        names = ", ".join(c.name for c in builder.cases())
-        print(f"unknown case {args.case!r}; have: all, {names}", file=sys.stderr)
-        return 2
+    if getattr(args, "per_op", False):
+        # One item per (op, shape bucket) instead of one per module unit. Same harness: the GPU
+        # pool, the O_EXCL claims, --resume, the shards and the merge are all unchanged -- only
+        # what a work item IS differs. Driving modules re-tunes an op once per unit that reaches
+        # it; 3,385 units, 1,950 of them one case, and a single 15,552-config op inside it costs
+        # 244 GPU-h of pure re-benching.
+        only = None if args.case == "all" else {args.case}
+        selected = builder.op_units(only)
+        if not selected:
+            print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
+            return 2
+        print(f"per-op sweep: {len(selected)} (op, shape) items", flush=True)
+    else:
+        selected = [c for c in builder.cases() if args.case in ("all", c.name)]
+        if not selected:
+            names = ", ".join(c.name for c in builder.cases())
+            print(f"unknown case {args.case!r}; have: all, {names}", file=sys.stderr)
+            return 2
 
     results = builder.build_all(selected, Path(args.shards).expanduser(),
                                 _resolve_gpus(args.gpus), args.compile_jobs,
@@ -738,6 +751,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="abandon a config once one launch exceeds this factor x the round's "
                           "best (0 = off). Post-hoc: it skips the full do_bench of a config that "
                           "is already out of the running, it does not shorten the launch itself.")
+    bld.add_argument("--per-op", action="store_true",
+                     help="work item = (op, shape bucket) driven through its registry driver, "
+                          "instead of (case, dims, length, mode) driving a whole module. No "
+                          "redundancy: each (op, bucket) is tuned exactly once.")
     bld.add_argument("--reclaim", action="store_true",
                      help="first delete claims left by a killed build (they are otherwise "
                           "skipped silently forever). Do NOT use while another build runs "

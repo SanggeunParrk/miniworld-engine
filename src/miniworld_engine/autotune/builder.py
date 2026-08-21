@@ -539,6 +539,57 @@ class Unit:
         return (f"{self.case}-{self.impl}-{self.dtype}{core}-dims{self.dim_index}-L{self.length}-"
                 f"{'train' if self.train else 'eval'}{pin}")
 
+    def cmd_args(self) -> list[str]:
+        """This unit's own arguments to the child. The runner supplies --shard/--compile-jobs."""
+        args = ["--case", self.case, "--dims", str(self.dim_index), "--length", str(self.length),
+                "--dtype", self.dtype, "--mode", "train" if self.train else "eval",
+                "--impl", self.impl]
+        if self.compute:
+            args += ["--compute-dtype", self.compute]
+        if self.switch:
+            args += ["--switch", self.switch, "--value", str(self.value)]
+        return args
+
+    def env(self) -> dict[str, str]:
+        return {}
+
+
+@dataclasses.dataclass(frozen=True)
+class OpUnit:
+    """One kernel at one shape bucket -- the unit a per-op tuning sweep is made of.
+
+    A ``Unit`` drives a whole MODULE, so it re-tunes every op that module touches, and two units
+    differing only in something an op does not key on land in the same (op, bucket) and pay the
+    full grid again -- each unit being its own process. Measured: 3,385 units, of which 1,950 are
+    one case, and a single 15,552-config op inside it costs 244 GPU-h of pure re-benching.
+
+    Keyed on (op, L) there is no redundancy: 538 items, each tuning exactly one (op, bucket) once.
+    Everything else -- the GPU pool, the O_EXCL claims, --resume, per-unit shards and logs, the
+    compile-worker split, merge_shards -- is the SAME machinery, which is why this is a unit kind
+    and not a second harness.
+    """
+
+    op: str
+    length: int
+    dtype: str = "bfloat16"
+
+    @property
+    def label(self) -> str:
+        return f"{self.op}[{self.dtype}] L={self.length}"
+
+    @property
+    def stem(self) -> str:
+        return f"op-{self.op}-{self.dtype}-L{self.length}"
+
+    def cmd_args(self) -> list[str]:
+        return ["--op", self.op, "--dtype", self.dtype, "--length", str(self.length)]
+
+    def env(self) -> dict[str, str]:
+        # The drivers read this at IMPORT time, like MINIWORLD_SHAPE_MODE -- their shape constants
+        # are module-level and the kernels reach them through helpers that close over them, so a
+        # per-call override would have to reach inside every driver module. Per-process does not.
+        return {"MINIWORLD_DRIVER_LENGTH": str(self.length)}
+
 
 def check(selected: list[Case]) -> list[str]:
     """Construct AND run every case once, at its smallest shape, reporting the ones that fail.
@@ -607,6 +658,33 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
                 continue
             problems.append(f"{case.name}: {type(exc).__name__}: {exc}")
     return problems
+
+
+def op_units(only: set[str] | None = None) -> list[OpUnit]:
+    """One item per (triton op with a driver, shape bucket of its declared level).
+
+    The level comes from registry.csv and decides the bucket set, so a token kernel is never
+    driven at an atom length and vice versa -- driving it there would tune a bucket the model
+    never asks for and miss ones it does.
+    """
+    import csv  # noqa: PLC0415
+
+    from miniworld_engine.autotune.shape_key import SHAPES_BY_LEVEL  # noqa: PLC0415
+    from miniworld_engine.autotune.configs import registered_ops  # noqa: PLC0415
+
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    known = registered_ops()
+    out = []
+    for r in csv.DictReader(reg.open()):
+        if r["backend"] != "triton" or not (r["driver"] or "").strip():
+            continue
+        if only and r["kernel"] not in only:
+            continue
+        if known and r["kernel"] not in known:
+            continue          # no configs registered for it in this process
+        for length in SHAPES_BY_LEVEL[r["level"]]:
+            out.append(OpUnit(op=r["kernel"], length=length))
+    return out
 
 
 def units(selected: list[Case]) -> list[Unit]:
@@ -711,11 +789,7 @@ def _run_unit_subprocess(unit: Unit, device: int, shard_dir: Path, repo: Path,
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = str(device)   # CUDA's own interface, not an engine switch
     cmd = [sys.executable, "-u", "-m", "miniworld_engine.autotune.builder",
-           "--case", unit.case, "--dims", str(unit.dim_index), "--length", str(unit.length),
-           "--dtype", unit.dtype,
-           "--mode", "train" if unit.train else "eval", "--shard", str(shard),
-           "--compile-jobs", str(compile_jobs)]
-    cmd += ["--impl", unit.impl]
+           "--shard", str(shard), "--compile-jobs", str(compile_jobs), *unit.cmd_args()]
     # Paths rather than the parsed configs: the child re-reads the CSVs itself, so a unit's config
     # space is reproducible from its own command line (the same reason every other knob here is an
     # argument and not inherited shell state).
@@ -723,10 +797,7 @@ def _run_unit_subprocess(unit: Unit, device: int, shard_dir: Path, repo: Path,
         cmd += ["--config-dir", str(config_dir)]
     if bench_budget:
         cmd += ["--bench-budget", str(bench_budget)]
-    if unit.compute:
-        cmd += ["--compute-dtype", unit.compute]
-    if unit.switch:
-        cmd += ["--switch", unit.switch, "--value", str(unit.value)]
+    env.update(unit.env())
     started = time.monotonic()
     with log.open("w") as handle:
         proc = subprocess.run(cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT,  # noqa: S603
@@ -744,7 +815,7 @@ def _run_unit_subprocess(unit: Unit, device: int, shard_dir: Path, repo: Path,
             "seconds": round(time.monotonic() - started, 1), "shard": str(shard), "log": str(log)}
 
 
-def build_all(selected: list[Case], shard_dir: Path, gpus: list[int], compile_jobs: int,
+def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
               bench_budget: float = 0.0,
               config_dir: Path | None = None) -> list[dict]:
@@ -769,7 +840,10 @@ def build_all(selected: list[Case], shard_dir: Path, gpus: list[int], compile_jo
         print(f"  [compile] {cores} cores / {len(gpus)} gpus -> {compile_jobs} compile workers "
               f"per unit ({compile_jobs * len(gpus)} total)", flush=True)
 
-    broken = check(selected)
+    # OpUnits carry no Case, and `check` is a per-case module smoke test, so there is nothing for
+    # it to check -- a driver that cannot run its shape reports that as a skipped unit, which is
+    # the same contract run_case has.
+    broken = check(selected) if selected and isinstance(selected[0], Case) else []
     if broken:
         print("cases that will not build -- fix these before running units:")
         for line in broken:
@@ -781,7 +855,7 @@ def build_all(selected: list[Case], shard_dir: Path, gpus: list[int], compile_jo
         print(f"reclaimed {len(freed)} orphaned claim(s) from a killed build", flush=True)
         for stem in freed[:20]:
             print(f"    {stem}", flush=True)
-    work = units(selected)
+    work = units(selected) if isinstance(selected[0], Case) else list(selected)
     if resume:
         work = [u for u in work if not _shard_has_entries(shard_dir / f"{u.stem}.json")]
     if not work:
@@ -847,6 +921,33 @@ def audit(selected: list[Case]) -> list[tuple]:
     return sorted(cache_misses())
 
 
+def _run_one_driver(op: str) -> int:
+    """Launch one kernel through the driver registry.csv names for it. 1 on success, 0 if the
+    shape is one this kernel cannot run (data, not failure -- same contract as run_case)."""
+    import csv  # noqa: PLC0415
+    import importlib  # noqa: PLC0415
+
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    row = next((r for r in csv.DictReader(reg.open()) if r["kernel"] == op), None)
+    if row is None or not (row.get("driver") or "").strip():
+        print(f"    no driver for {op!r} in registry.csv", file=sys.stderr)
+        return 0
+    mod_name, _, fn_name = row["driver"].partition(":")
+    try:
+        fn = getattr(importlib.import_module(mod_name), fn_name)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    skip {op}: driver import failed ({type(exc).__name__}: {exc})", flush=True)
+        return 0
+    try:
+        fn()
+        torch.cuda.synchronize()
+    except Exception as exc:  # noqa: BLE001 -- an unsupported shape must not stop the sweep
+        print(f"    skip {op} at this shape: {type(exc).__name__}: "
+              f"{str(exc).strip().splitlines()[0][:160]}", flush=True)
+        return 0
+    return 1
+
+
 def _child_main(argv: list[str] | None = None) -> int:
     """Entry point for ONE unit; the parent invokes this via -m."""
     import argparse
@@ -855,11 +956,14 @@ def _child_main(argv: list[str] | None = None) -> int:
     from miniworld_engine.autotune import capture
 
     ap = argparse.ArgumentParser(description="build one autotune-cache unit")
-    ap.add_argument("--case", required=True)
-    ap.add_argument("--dims", type=int, required=True)
+    ap.add_argument("--case", default="")
+    ap.add_argument("--op", default="",
+                    help="tune ONE kernel via its registry driver, at --length, instead of "
+                         "driving a whole module")
+    ap.add_argument("--dims", type=int, default=0)
     ap.add_argument("--dtype", default="bfloat16")
-    ap.add_argument("--length", type=int, required=True)
-    ap.add_argument("--mode", choices=("eval", "train"), required=True)
+    ap.add_argument("--length", type=int, default=0)
+    ap.add_argument("--mode", choices=("eval", "train"), default="eval")
     ap.add_argument("--shard", required=True)
     ap.add_argument("--compile-jobs", type=int, default=0)
     ap.add_argument("--skip-warm", action="store_true",
@@ -897,6 +1001,23 @@ def _child_main(argv: list[str] | None = None) -> int:
                   f"or the unit silently rebuilds the default side", file=sys.stderr)
             return 2
         settings.configure(**{field: parse(args.value)})
+    if args.op:
+        # ONE kernel at ONE shape, via its registry driver. The shape reached the drivers through
+        # MINIWORLD_DRIVER_LENGTH in the environment, before any of them imported.
+        capture.install()
+        n_done = capture.load_probe_state(args.shard)
+        if n_done:
+            print(f"  [resume] {n_done} probe(s) replayable", flush=True)
+        ran = _run_one_driver(args.op)
+        print(capture.precompile_summary(), flush=True)
+        print(capture.summary(), flush=True)
+        n = capture.dump_shard(args.shard)
+        errs = capture.record_errors()
+        if errs:
+            print(f"  [capture] recording failures: {errs}", flush=True)
+        print(f"unit ran={ran} ops={n}", flush=True)
+        return 0 if ran else 1
+
     case = next((c for c in cases() if c.name == args.case), None)
     if case is None:
         print(f"unknown case {args.case!r}", file=sys.stderr)

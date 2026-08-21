@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from .drivers import BF16, aligned_only, dev, pair, ragged, rows2d, vec
+from .drivers import BF16, aligned_only, dev, driver_length, pair, ragged, rows2d, vec
 
 # The pair row/feature extents the bench walks: `bench_kernel_layernorm` builds
 # x = (1, L, L, d_pair) and `bench_kernel_layernorm_bwd` / `bench_kernel_gemm_epil` build
@@ -19,7 +19,7 @@ from .drivers import BF16, aligned_only, dev, pair, ragged, rows2d, vec
 #   _M      -- the row axis (one LayerNorm row per m), tiled by BLOCK_M / the persistent grid.
 #   _PAIR_N -- the pair sequence length L of the (B, L, L, D) activations, so the flattened
 #              row count B*L*L is ragged for the kernels that take a 4-D pair tensor.
-_M = ragged(128 * 128)
+_M = ragged(driver_length(128) ** 2)
 _D = ragged(128)
 _PAIR_N = ragged(128)
 

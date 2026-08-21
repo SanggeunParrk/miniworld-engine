@@ -34,10 +34,10 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import dev, ragged, rows2d, vec
+from miniworld_engine.kernels.drivers import dev, driver_length, ragged, rows2d, vec
 
 EPS = 1e-5
-ROWS = ragged(4096)  # M: L=64 pair rows (L*L); 4096 is a multiple of 128, ragged -> 4093
+ROWS = ragged(driver_length(64) ** 2)  # M: L=64 pair rows (L*L); 4096 is a multiple of 128, ragged -> 4093
 N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, not a tile extent
 K_SMALL = ragged(128)  # K: the AF3 transition d; ragged -> 125
 K_LARGE = ragged(256)  # K for the ktiled kernel's K > _B2B_MAX_K(=128) reason to exist -> 253
@@ -173,7 +173,7 @@ def swiglu_gate_bwd_sm100() -> None:
 
 # ------------------------------------------------------- triangle_multiplication (dt-v1)
 
-TRIMUL_ROWS = ragged(16384)  # M = b*i*j for a (1, 128, 128, d) pair activation; ragged -> 16381
+TRIMUL_ROWS = ragged(driver_length(128) ** 2)  # M = b*i*j for a (1, 128, 128, d) pair activation; ragged -> 16381
 TRIMUL_D = ragged(128)  # d: the contraction width; the gate/proj weights have 2*d or d rows
 
 

@@ -44,6 +44,31 @@ if SHAPE_MODE not in ("aligned", "ragged"):
 #: label -> reason, for every extent a driver declared it cannot perturb.
 ALIGNMENT_REQUIRED: dict[str, str] = {}
 
+#: Sequence/atom length L to drive at, or None for each driver's own default.
+_ENV_LEN = os.environ.get("MINIWORLD_DRIVER_LENGTH", "").strip()
+DRIVER_LENGTH: int | None = int(_ENV_LEN) if _ENV_LEN else None
+
+
+def driver_length(default: int) -> int:
+    """The L this driver should build its activation at.
+
+    Autotune results are per SHAPE BUCKET -- ``shape_key`` is in every kernel's ``key=[...]`` --
+    so a driver frozen at one L can only ever tune one bucket. Driving the kernel directly at each
+    L is what makes the work unit ``(op, bucket)`` instead of "a whole module at whatever shape
+    that unit happened to be", which is the difference between one tuning per bucket and re-tuning
+    the same op once per unit that reaches it.
+
+    Read from the environment at import, exactly like ``SHAPE_MODE`` above, because that is the
+    only ordering that works: these constants are module-level and evaluated on import, and the
+    kernels read them through helpers that close over them. A per-call override would have to
+    reach inside every driver module; a per-process one does not.
+
+    L, not the row count. A pair kernel flattens (B, L, L, D) to M = L*L rows and a linear one to
+    M = L, so the row count means different things in different files while L means the same
+    thing everywhere -- and L is what ``token_key`` / ``atom_key`` / ``both_key`` bucket.
+    """
+    return DRIVER_LENGTH if DRIVER_LENGTH is not None else default
+
 
 def ragged(n: int, *, by: int = 3, floor: int = 16) -> int:
     """``n`` when aligned, ``n - by`` when ragged, never below ``floor``.

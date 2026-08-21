@@ -54,9 +54,9 @@ from __future__ import annotations
 
 import torch
 
-from .drivers import BF16, aligned_only, dev, ragged
+from .drivers import BF16, aligned_only, dev, driver_length, ragged
 
-L = ragged(128)   # sequence length: tiles in BOTH the query loop and the key/value loop
+L = ragged(driver_length(128))   # sequence length: tiles in BOTH the query loop and the key/value loop
 H = 4             # d_pair (128) // head dim (32); a grid extent, never a tl.arange block
 D = ragged(32)    # head dim, masked against HEAD_DIM inside the HEAD_DIM_PAD block
 A = 8             # augmentation dim, from bench_kernel_aug_attn; a grid extent, never blocked

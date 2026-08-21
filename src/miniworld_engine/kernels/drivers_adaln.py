@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import torch
 
-from .drivers import BF16, dev, ragged
+from .drivers import BF16, dev, driver_length, ragged
 
 FP32 = torch.float32
 
@@ -51,7 +51,7 @@ FP32 = torch.float32
 _D_BASE = 128  # BenchConfig.d_pair default / interface.ATOM_D_MAX
 _N_EXPAND = 4  # ConditionedTransition(D, D, n=4), as bench_kernel_cond_transition_tail builds it
 
-_M = ragged(512)                      # drivers.rows2d default row count
+_M = ragged(driver_length(512))       # drivers.rows2d default row count
 _D = ragged(_D_BASE)                  # d_hidden (NX) / the tail's K and D
 _DC = ragged(_D_BASE, by=5)           # d_cond (NC / DC) -- separately tiled axis
 _ND = ragged(_N_EXPAND * _D_BASE)     # expand width (ND)

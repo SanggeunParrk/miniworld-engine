@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 import triton
 
-from miniworld_engine.kernels.drivers import BF16, aligned_only, dev, ragged
+from miniworld_engine.kernels.drivers import BF16, aligned_only, dev, driver_length, ragged
 
 # Both extents go through ``ragged()`` (see drivers.py): unset MINIWORLD_SHAPE_MODE keeps the
 # repo values, MINIWORLD_SHAPE_MODE=ragged subtracts 3 from each.
@@ -39,7 +39,7 @@ from miniworld_engine.kernels.drivers import BF16, aligned_only, dev, ragged
 #      axes ragged at once, and M = L*L (the flattened row count every kernel tiles over) goes
 #      ragged with it: 64 -> 61, M 4096 -> 3721.
 D = ragged(128)  # BenchConfig.d_pair
-L = ragged(64)   # BenchConfig.min_seq_len
+L = ragged(driver_length(64))   # BenchConfig.min_seq_len
 M = L * L        # flattened pair rows
 
 
