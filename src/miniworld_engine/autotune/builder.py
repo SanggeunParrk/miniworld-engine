@@ -691,9 +691,46 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
             continue
         if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
             continue          # this config set declares no grid for it
-        for length in SHAPES_BY_LEVEL[r["level"]]:
+        shapes = SHAPES_BY_LEVEL[r["level"]]
+        if not _keys_on_shape(Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
+            # A kernel that does not key on shape_key has no per-shape cache to build, so driving
+            # it at every length would tune one identical bucket N times. transition_fold_triton is
+            # the only one today, and correctly so: it reads the WEIGHTS (Wa, Wb (N,K), gamma,
+            # beta (K,)) and never touches the activation, so N and K are its whole shape.
+            shapes = shapes[:1]
+        for length in shapes:
             out.append(OpUnit(op=r["kernel"], length=length))
     return out
+
+
+def _keys_on_shape(path: Path, symbol: str) -> bool:
+    """Does this kernel's ``@triton.autotune(key=[...])`` include ``shape_key``?"""
+    import ast  # noqa: PLC0415
+
+    try:
+        tree = ast.parse(path.read_text())
+    except OSError as exc:
+        # Loud, because silent was how a wrong path went unnoticed: the file could not be read,
+        # every op fell back to "keeps all shapes", and the item count came out unchanged -- which
+        # is exactly what a working filter looks like from the outside.
+        raise FileNotFoundError(
+            f"registry names {path} but it cannot be read ({exc}); the shape-key check would "
+            f"silently keep every shape for every op") from exc
+    except SyntaxError:
+        return True           # cannot tell -> keep every shape rather than drop work
+    want = symbol.split(".")[-1]
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name != want:
+            continue
+        for dec in fn.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            if getattr(dec.func, "attr", getattr(dec.func, "id", "")) != "autotune":
+                continue
+            for kw in dec.keywords:
+                if kw.arg == "key" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                    return any(getattr(e, "value", None) == "shape_key" for e in kw.value.elts)
+    return True
 
 
 def units(selected: list[Case]) -> list[Unit]:
