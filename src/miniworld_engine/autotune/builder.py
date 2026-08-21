@@ -660,28 +660,37 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
     return problems
 
 
-def op_units(only: set[str] | None = None) -> list[OpUnit]:
+def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> list[OpUnit]:
     """One item per (triton op with a driver, shape bucket of its declared level).
 
     The level comes from registry.csv and decides the bucket set, so a token kernel is never
     driven at an atom length and vice versa -- driving it there would tune a bucket the model
-    never asks for and miss ones it does.
+    never asks for while missing ones it does.
+
+    Coverage is DECLARED -- registry.csv crossed with the level -- not incidental. That is the
+    whole reason this unit kind exists for `build all`: driving modules reaches only the kernels
+    some module happens to dispatch to, measured at 48 of the 91 triton kernels on an A6000, so 43
+    declared kernels WITH WORKING DRIVERS were never tuned by a full build and nobody could see it
+    from the build's own output.
+
+    Eligibility is "the registry declares it and this config set has a grid for it". It must NOT
+    be `registered_ops()`: that reflects which kernel modules THIS process happened to import, and
+    the parent imports far fewer than the children do -- filtering on it silently dropped 8 more
+    ops that have config files and drivers.
     """
     import csv  # noqa: PLC0415
 
     from miniworld_engine.autotune.shape_key import SHAPES_BY_LEVEL  # noqa: PLC0415
-    from miniworld_engine.autotune.configs import registered_ops  # noqa: PLC0415
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
-    known = registered_ops()
     out = []
     for r in csv.DictReader(reg.open()):
         if r["backend"] != "triton" or not (r["driver"] or "").strip():
             continue
         if only and r["kernel"] not in only:
             continue
-        if known and r["kernel"] not in known:
-            continue          # no configs registered for it in this process
+        if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
+            continue          # this config set declares no grid for it
         for length in SHAPES_BY_LEVEL[r["level"]]:
             out.append(OpUnit(op=r["kernel"], length=length))
     return out
@@ -825,6 +834,11 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     repo = Path(__file__).resolve().parents[3]
     shard_dir.mkdir(parents=True, exist_ok=True)
 
+    # `selected` is either Cases (module units, decomposed here) or OpUnits (already the work
+    # items). Everything downstream -- pool, claims, resume, shards, merge -- is shared; only the
+    # three case-shaped preliminaries below differ.
+    case_build = bool(selected) and isinstance(selected[0], Case)
+
     # DIVIDE the cores among the concurrent units. Each unit is its own process and works out its
     # own compile fan-out from `sched_getaffinity`, which reports the WHOLE allocation -- so every
     # unit assumes it owns the machine. Eight units on a 64-core node therefore asked for
@@ -843,7 +857,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     # OpUnits carry no Case, and `check` is a per-case module smoke test, so there is nothing for
     # it to check -- a driver that cannot run its shape reports that as a skipped unit, which is
     # the same contract run_case has.
-    broken = check(selected) if selected and isinstance(selected[0], Case) else []
+    broken = check(selected) if case_build else []
     if broken:
         print("cases that will not build -- fix these before running units:")
         for line in broken:
@@ -855,7 +869,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
         print(f"reclaimed {len(freed)} orphaned claim(s) from a killed build", flush=True)
         for stem in freed[:20]:
             print(f"    {stem}", flush=True)
-    work = units(selected) if isinstance(selected[0], Case) else list(selected)
+    work = units(selected) if case_build else list(selected)
     if resume:
         work = [u for u in work if not _shard_has_entries(shard_dir / f"{u.stem}.json")]
     if not work:
@@ -868,7 +882,10 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     print(f"build: {len(selected)} case(s), {len(work)} unit(s), {len(gpus)} gpu(s) -> {shard_dir}",
           flush=True)
     sm = device_sm()
-    skipped = skipped_units(selected, sm)
+    # skipped_units reports which (case, impl, dtype) the build matrix denies on this card.
+    # An OpUnit has no impl axis -- it drives one kernel through its driver -- so there is nothing
+    # to report and nothing to skip.
+    skipped = skipped_units(selected, sm) if case_build else []
     if skipped:
         print(f"  {sm}: {len(skipped)} case/impl/dtype combination(s) not built here "
               f"(build/gpu_to_kernels/{sm}.csv)", flush=True)

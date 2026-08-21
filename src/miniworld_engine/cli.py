@@ -494,14 +494,21 @@ def cmd_build(args: argparse.Namespace) -> int:
     if rc:
         return rc
 
-    if getattr(args, "per_op", False):
+    # `build all` on a fresh card must produce a COMPLETE cache with no one curating a list, so
+    # the per-op sweep is the default for it: its coverage is declared (registry.csv x level),
+    # while driving modules only reaches the kernels some module happens to dispatch to -- 48 of
+    # 91 triton kernels, measured, leaving 43 with working drivers untuned and invisible.
+    # --per-module asks for the old decomposition, which is still what you want when the question
+    # is "does this module's real dispatch path work", not "is every kernel tuned".
+    per_op = args.per_op or (args.case == "all" and not args.per_module)
+    if per_op:
         # One item per (op, shape bucket) instead of one per module unit. Same harness: the GPU
         # pool, the O_EXCL claims, --resume, the shards and the merge are all unchanged -- only
         # what a work item IS differs. Driving modules re-tunes an op once per unit that reaches
         # it; 3,385 units, 1,950 of them one case, and a single 15,552-config op inside it costs
         # 244 GPU-h of pure re-benching.
         only = None if args.case == "all" else {args.case}
-        selected = builder.op_units(only)
+        selected = builder.op_units(only, config_dir=directory)
         if not selected:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
             return 2
@@ -754,7 +761,12 @@ def main(argv: list[str] | None = None) -> int:
     bld.add_argument("--per-op", action="store_true",
                      help="work item = (op, shape bucket) driven through its registry driver, "
                           "instead of (case, dims, length, mode) driving a whole module. No "
-                          "redundancy: each (op, bucket) is tuned exactly once.")
+                          "redundancy: each (op, bucket) is tuned exactly once. This is the "
+                          "DEFAULT for `build all`.")
+    bld.add_argument("--per-module", action="store_true",
+                     help="force the module-unit decomposition for `build all`. Reaches only the "
+                          "kernels a module dispatches to, so it does not produce a complete "
+                          "cache; use it to exercise real dispatch paths, not to tune.")
     bld.add_argument("--reclaim", action="store_true",
                      help="first delete claims left by a killed build (they are otherwise "
                           "skipped silently forever). Do NOT use while another build runs "
