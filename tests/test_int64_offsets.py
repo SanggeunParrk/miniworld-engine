@@ -11,19 +11,24 @@ there risks the "no perf regression" bar. Revisit only with a benchmark.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "kernels"
 
-# (file, must-contain snippet) — the M-index promotion that keeps large-L offsets int64.
+# Files whose M-index must stay promoted. The check is a REGEX over the tile-axis name, not a
+# literal: pinning ``tl.arange(0, BLOCK_M)`` made this test fail the moment fcd3c7a renamed the
+# axis to BLOCK_M1, even though the ``.to(tl.int64)`` it exists to protect was untouched. A
+# literal that names the axis fails on a rename and passes on a file that merely spells the axis
+# the old way without promoting it -- wrong in both directions.
 _HARDENED = [
-    ("trimul_inproj/triton/front.py", ".to(tl.int64)"),
-    ("trimul_inproj/triton/back_fused.py", ".to(tl.int64)"),
-    ("trimul_inproj/triton/gate_elem.py", ".to(tl.int64)"),
-    ("tm1/triton/main.py", "tl.arange(0, BLOCK_M).to(tl.int64)"),
-    ("tm2/triton/main.py", "tl.arange(0, BLOCK_M).to(tl.int64)"),
+    ("trimul_inproj/triton/front.py", r"\.to\(tl\.int64\)"),
+    ("trimul_inproj/triton/back_fused.py", r"\.to\(tl\.int64\)"),
+    ("trimul_inproj/triton/gate_elem.py", r"\.to\(tl\.int64\)"),
+    ("tm1/triton/main.py", r"tl\.arange\(0, BLOCK_M\w*\)\.to\(tl\.int64\)"),
+    ("tm2/triton/main.py", r"tl\.arange\(0, BLOCK_M\w*\)\.to\(tl\.int64\)"),
 ]
 
 # Known int32-offset kernels intentionally left as-is (hot path, int32-safe at
@@ -33,11 +38,11 @@ _KNOWN_INT32_HOT = [
 ]
 
 
-@pytest.mark.parametrize("rel,snippet", _HARDENED)
-def test_m_index_is_int64(rel: str, snippet: str):
+@pytest.mark.parametrize("rel,pattern", _HARDENED)
+def test_m_index_is_int64(rel: str, pattern: str):
     text = (_SRC / rel).read_text()
-    assert snippet in text, (
-        f"{rel} lost its int64 M-index promotion ({snippet!r}); large-L offsets "
+    assert re.search(pattern, text), (
+        f"{rel} lost its int64 M-index promotion (no match for {pattern!r}); large-L offsets "
         f"will overflow int32. See tests/test_int64_offsets.py."
     )
 

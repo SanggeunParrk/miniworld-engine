@@ -50,7 +50,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtype_of
 
 # Flat elementwise stages tile ONE axis (the linear element index) — canonical 1-D sweep,
 # replacing the literal BLOCK=2048 each was launched with.

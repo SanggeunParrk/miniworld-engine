@@ -25,10 +25,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from .cache import (
+    _named_get,
     as_cfg_dict,
     config_space_hash,
     config_to_dict,
     gpu_key,
+    shape_bucket,
     store_ranked_configs,
 )
 from .cache import _sig_from_dict as _sig_from_dict
@@ -625,6 +627,40 @@ def _op_name(autotuner) -> str | None:
     return op_of(getattr(autotuner, "configs", None))
 
 
+def _dtype_of(nargs) -> str:
+    """dtype of the first tensor operand, or ``any`` if none is introspectable."""
+    for v in (nargs or {}).values():
+        dt = getattr(v, "dtype", None)
+        if dt is not None and hasattr(v, "shape"):
+            return str(dt).replace("torch.", "")
+    return "any"
+
+
+def _bucket_of(autotuner, nargs, meta) -> str:
+    """Shape bucket from the autotuner's OWN ``key=[...]``, with no per-kernel wiring.
+
+    This used to come from a ``make_cache_prune`` object carrying a hand-written
+    ``key_bucket_of("N", "K", "DT")`` per kernel. Those were removed in fcd3c7a and nothing
+    replaced them, so every capture since has recorded the single bucket ``any|any`` -- one config
+    per op for every shape. That silently discards the whole point of the shape key: ``shape_key``
+    is in every kernel's ``key`` list, so Triton re-tunes per shape bucket in-process, and then the
+    cache threw the distinction away on the way to disk.
+
+    ``autotuner.keys`` is the same list the kernel declared, so deriving the bucket from it covers
+    every op automatically and cannot drift from what Triton actually re-tunes on -- which the
+    per-kernel version could, and did.
+    """
+    keys = getattr(autotuner, "keys", None) or []
+    dims = {}
+    for k in keys:
+        v = _named_get(nargs, meta, k)
+        if isinstance(v, bool):        # flags partition the space too, but int() would alias them
+            dims[k] = int(v)
+        elif isinstance(v, int):
+            dims[k] = v
+    return shape_bucket(**dims) if dims else "any"
+
+
 def _record_one(autotuner, config, meta, ms) -> None:
     op = _op_name(autotuner)
     if not op:
@@ -633,10 +669,9 @@ def _record_one(autotuner, config, meta, ms) -> None:
     if ms == float("inf"):
         return
     nargs = getattr(autotuner, "nargs", None) or {}
-    # dtype/bucket used to come off the prune object. Without one the reading is still valid, it
-    # just is not split by input class -- one bucket per op.
-    dtype = str(ecp._miniworld_dtype_of(nargs, meta)) if ecp else "any"   # noqa: SLF001
-    bucket = str(ecp._miniworld_bucket_of(nargs, meta)) if ecp else "any"  # noqa: SLF001
+    dtype = str(ecp._miniworld_dtype_of(nargs, meta)) if ecp else _dtype_of(nargs)   # noqa: SLF001
+    bucket = (str(ecp._miniworld_bucket_of(nargs, meta))                             # noqa: SLF001
+              if ecp else _bucket_of(autotuner, nargs, meta))
     slot = _CAPTURE.setdefault(op, {"grid": None, "entries": {}})
     if slot["grid"] is None:
         slot["grid"] = list(autotuner.configs)

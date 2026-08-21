@@ -27,7 +27,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.autotune.shape_key import both_key  # kernels here are level=both
 from ...layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback

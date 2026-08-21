@@ -20,7 +20,6 @@ import triton.language as tl
 
 from jaxtyping import Float
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine._typecheck import typecheck
 
 # tl.dot needs every dim >= 16; below this the backward uses the scalar loop.

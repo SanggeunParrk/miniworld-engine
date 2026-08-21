@@ -35,7 +35,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 # fp32 matmul precision policy (shared idea with layernorm_linear/te_style).
 _FP32_MATMUL_PRECISION = "high"  # "high" → TF32 (fast); "highest" → true fp32

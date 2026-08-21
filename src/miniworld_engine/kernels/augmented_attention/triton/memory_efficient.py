@@ -15,7 +15,6 @@ import triton.language as tl
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.autotune.shape_key import atom_key
 
 

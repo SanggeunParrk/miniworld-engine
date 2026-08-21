@@ -16,7 +16,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 # ── K1 / K2: row-wise LayerNorm ────────────────────────────────────────────────────────────
 # Both axes are tuned tiles. BLOCK_N used to arrive as next_pow2(d) from the launcher — the whole

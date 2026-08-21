@@ -29,7 +29,6 @@ from miniworld_engine.kernels._quack_compat import gemm_act
 import triton
 import triton.language as tl
 
-from miniworld_engine.autotune import tensor_dtype_of
 from miniworld_engine.autotune.shape_key import token_key
 
 # Flat elementwise glue around the cute GEMM: one tiled axis (the linear element index).

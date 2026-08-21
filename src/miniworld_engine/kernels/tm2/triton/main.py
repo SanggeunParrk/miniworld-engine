@@ -11,7 +11,6 @@ from einops import rearrange
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.autotune.shape_key import length_of, token_key
 
 # Real cross-product tile search (was: 2 fwd pinned / 3 bwd configs with BLOCK_N pinned to 64).

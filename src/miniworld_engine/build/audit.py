@@ -92,26 +92,27 @@ def autotuners() -> list[tuple[str, object]]:
 
 
 def _op_of(tuner) -> str | None:
-    p = getattr(tuner, "early_config_prune", None)
-    return getattr(p, "_miniworld_op", None)
+    # By identity of the config list the op was handed. The prune objects that used to carry
+    # ``_miniworld_op`` were removed in fcd3c7a, after which this returned None for every op and
+    # the whole audit fell back to reporting module-level variable names instead of op names.
+    from miniworld_engine.autotune.configs import op_of  # noqa: PLC0415 -- avoid an import cycle
+
+    return op_of(getattr(tuner, "configs", None) or [])
 
 
 def _bucket_keys(tuner) -> list[str] | None:
-    """The constexpr names this op's cache bucket is built from (its TUNING KEYS)."""
-    p = getattr(tuner, "early_config_prune", None)
-    f = getattr(p, "_miniworld_bucket_of", None)
-    if f is None:
-        return None
-    tagged = getattr(f, "_miniworld_keys", None)
-    if tagged:                      # custom extractor that declared its keys
-        return list(tagged)
-    if not getattr(f, "__closure__", None):
-        return None
-    for cell in f.__closure__:
-        v = cell.cell_contents
-        if isinstance(v, tuple) and v and all(isinstance(x, str) for x in v):
-            return list(v)
-    return None
+    """The constexpr names this op's cache bucket is built from (its TUNING KEYS).
+
+    Read off ``tuner.keys`` -- the kernel's own ``key=[...]`` -- which is the same source
+    ``capture._bucket_of`` derives the bucket from, so the audit cannot report keys that differ
+    from the ones the cache is actually split on.
+
+    This used to dig the names out of the closure of a per-kernel ``key_bucket_of(...)`` hung off
+    ``early_config_prune``. fcd3c7a removed those objects, after which this returned None for
+    every op and the check emitted 91 "not introspectable" warnings and verified nothing.
+    """
+    keys = getattr(tuner, "keys", None)
+    return list(keys) if keys else None
 
 
 # --------------------------------------------------------------------------- #

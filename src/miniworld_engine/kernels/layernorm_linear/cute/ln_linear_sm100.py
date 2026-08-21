@@ -45,7 +45,6 @@ from cutlass.cute.runtime import from_dlpack
 # returned -> identical launch/numerics; removes the per-call eager compile overhead.
 from quack.cute_dsl_utils import get_max_active_clusters
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective import (
     GatedPersistentGemmKernel,
 )

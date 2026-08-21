@@ -50,7 +50,6 @@ from quack.gemm_act import GemmGatedMixin
 from quack.activation import dgate_fn_map
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.kernels._quack_compat import jit_cache
 from miniworld_engine.autotune.shape_key import both_key
 from quack.gemm_config import GemmConfig

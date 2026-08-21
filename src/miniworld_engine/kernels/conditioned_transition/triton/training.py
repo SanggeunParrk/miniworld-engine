@@ -33,7 +33,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import elem_bucket_of, key_bucket_of, tensor_dtype_of
 
 # autograd Functions cannot be @typecheck'd cleanly; keep precision policy explicit.
 

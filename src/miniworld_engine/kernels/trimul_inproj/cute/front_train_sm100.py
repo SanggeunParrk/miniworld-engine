@@ -35,7 +35,6 @@ import os
 import torch
 import triton
 import triton.language as tl
-from miniworld_engine.autotune import tensor_dtype_of
 from miniworld_engine.kernels._quack_compat import gemm_act, gemm_act_tuned
 from quack.gemm_config import GemmConfig
 from miniworld_engine import settings

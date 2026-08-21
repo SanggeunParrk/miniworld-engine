@@ -92,89 +92,16 @@ def test_skips_are_reported_with_reasons():
 
 
 # --------------------------------------------------------------------------- #
-# config exclusions
+# NOTE: the "config exclusions" half of this file was removed.
+#
+# It pinned `_is_compile_monster`, a STATIC pre-filter that dropped num_warps>=16 / num_stages>=5
+# before benching. fcd3c7a deleted the function and left the import, which made this whole module
+# un-collectable -- so every test above has been silently absent since then too, not just the ones
+# about the prune.
+#
+# The tests are not restored, because the prune should not be: a static rule shrinks whatever grid
+# a tuning run declares, behind the caller's back, and its premise did not survive measurement
+# (num_stages has no compiler maximum; the ceiling is smem_limit/operand_tile, per config, far
+# above 5 for small tiles). The guard that remains is capture.py's per-config compile TIMEOUT,
+# which judges each config by real compile time on the running card.
 # --------------------------------------------------------------------------- #
-"""The pre-launch config bounds, pinned against the shapes they are meant to keep and drop.
-
-These bounds are the only thing that stops a pathological config: a launch's duration is readable
-only after it finishes, so nothing in-process can shorten one. The risk of a bound is therefore not
-that it fires late, it is that it fires on a config that would have won -- which is why each case
-below names a real winner from the shipped cache.
-"""
-import triton  # noqa: E402
-
-from miniworld_engine.autotune.cache import _is_compile_monster  # noqa: E402
-
-
-def _cfg(kwargs, warps, stages):
-    return triton.Config(kwargs, num_warps=warps, num_stages=stages)
-
-
-def test_every_kernel_declares_whether_it_is_a_matmul():
-    """The classifier is a declared flag, not a guess from the config or the axis count.
-
-    Axis count was tried and measured wrong: every layernorm/adaln reduction pins a second tile
-    axis at the launch site, so counting real axes calls them 2-D and the warps==1 bound then
-    deletes winners whose best alternative is 7.4% slower.
-    """
-    from miniworld_engine.build.audit import autotuners, import_all_kernels
-
-    import_all_kernels()
-    undeclared = [n for n, t in autotuners()
-                  if getattr(t.early_config_prune, "_miniworld_op", None)
-                  and not hasattr(t.early_config_prune, "_miniworld_matmul")]
-    assert not undeclared, undeclared
-
-
-def test_the_worst_measured_config_is_excluded():
-    """{BM:16,BK:16,BN:16,warps:1,stages:1} on trimul ran 468 s -- one launch, 85% of the unit.
-
-    Caught by the matmul num_warps==1 bound, not by any tile-size rule: the same tiles with a real
-    warp count stay in the sweep.
-    """
-    assert _is_compile_monster(_cfg({"BM": 16, "BK": 16, "BN": 16}, 1, 1), matmul=True)
-    assert not _is_compile_monster(_cfg({"BM": 16, "BK": 16, "BN": 16}, 4, 2), matmul=True)
-
-
-def test_tile_size_is_bounded_by_the_grid_not_by_a_rule():
-    """The candidate sets start at 16; nothing here restates that as an exclusion.
-
-    A prune that also dropped the smallest tier would be a second definition of the sweep, and it
-    would silently narrow any kernel that later adds a smaller candidate.
-    """
-    from miniworld_engine.autotune.grids import BLOCK_K, BLOCK_M, BLOCK_N
-
-    assert min(BLOCK_M) == min(BLOCK_N) == min(BLOCK_K) == 16
-    assert not _is_compile_monster(_cfg({"BM": 32, "BN": 16}, 4, 2), matmul=True)
-    assert not _is_compile_monster(_cfg({"BLOCK_K": 32, "BLOCK_M": 32}, 4, 4), matmul=True)
-    assert not _is_compile_monster(
-        _cfg({"BLOCK_K": 32, "BLOCK_M": 32, "BLOCK_N": 64}, 4, 4), matmul=True)
-
-
-def test_matmul_bound_does_not_touch_non_matmul_winners():
-    """Real winners from the shipped cache: one warp is routine for a reduction.
-
-    These have TWO tile axes once the launch-pinned one is counted, so an axis-count classifier
-    would have excluded them.
-    """
-    assert not _is_compile_monster(_cfg({"BLOCK_M": 8}, 1, 3), matmul=False)   # fused_ln_mask
-    assert not _is_compile_monster(_cfg({"BLOCK_M": 16}, 1, 4), matmul=False)  # aug_attn preproc
-    assert not _is_compile_monster(_cfg({"BLOCK_M": 1}, 4, 2), matmul=False)
-
-
-def test_stages_one_is_never_cut():
-    """It wins 10% of gemm entries and 14% of elementwise ones -- on both sides of the split."""
-    assert not _is_compile_monster(_cfg({"BM": 32, "BN": 64}, 4, 1), matmul=True)
-    assert not _is_compile_monster(_cfg({"BLOCK_M": 32}, 4, 1), matmul=False)
-
-
-def test_real_matmul_winners_survive():
-    assert not _is_compile_monster(_cfg({"BM": 32, "BN": 64}, 4, 2), matmul=True)
-    assert not _is_compile_monster(
-        _cfg({"BLOCK_M": 32, "BLOCK_K": 32, "BLOCK_N": 128}, 4, 3), matmul=True)
-    assert not _is_compile_monster(_cfg({"BLOCK_M": 64, "BLOCK_N": 32}, 4, 2), matmul=True)
-
-
-def test_compile_monsters_still_go():
-    assert _is_compile_monster(_cfg({"BLOCK_M": 64}, 16, 2))
-    assert _is_compile_monster(_cfg({"BLOCK_M": 64}, 4, 5))

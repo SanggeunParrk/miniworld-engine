@@ -736,7 +736,6 @@ import triton
 import triton.language as tl
 
 from miniworld_engine import settings
-from miniworld_engine.autotune import tensor_dtype_of
 
 
 

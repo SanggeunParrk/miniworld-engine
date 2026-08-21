@@ -30,7 +30,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 from miniworld_engine.autotune.shape_key import length_of, token_key
 
 

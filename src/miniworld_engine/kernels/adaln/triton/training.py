@@ -36,7 +36,6 @@ from ...layernorm_linear.triton.te_style import (
     _ln_bwd,
     _ln_materialize,
 )
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 # Both axes are tuned tiles for the two row-wise kernels below. BLOCK_N used to arrive as
 # next_pow2(NX) from the launcher — the whole row, a constant the tuner never saw, which is also

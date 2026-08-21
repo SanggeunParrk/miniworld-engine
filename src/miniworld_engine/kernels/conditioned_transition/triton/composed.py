@@ -21,7 +21,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 # --- kernel A: expand + SwiGLU -> h:(M, ND) ----------------------------------

@@ -28,7 +28,6 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune import key_bucket_of, tensor_dtype_of
 
 
 # Every tile comes from the CSV. BLOCK_K_D tiles the d_hidden contraction; a row that sets it >= K
