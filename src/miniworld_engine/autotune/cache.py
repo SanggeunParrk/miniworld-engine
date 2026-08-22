@@ -290,12 +290,31 @@ _REGISTERED_OPS: set[str] = set()
 
 
 def dtype_of_args(nargs) -> str:
-    """dtype of the first tensor operand, or ``any`` if none is introspectable."""
+    """Every distinct floating dtype among the tensor operands, sorted and ``+``-joined.
+
+    Not "the dtype of the first tensor operand", which is what this used to be. That reads
+    whichever argument the kernel happens to declare first, and a kernel that upcasts one operand
+    unconditionally then reports the same dtype no matter what it was given:
+    ``layernorm_linear/triton/pair_bias.py`` upcasts ``dout`` to fp32 at every launch, so a bf16
+    run and an fp32 run of ``layernorm_linear_bwd_fp32_triton`` recorded the byte-identical key
+    ``float32|...`` while their measured errors differed by four orders of magnitude
+    (2.8e-03 against 5.9e-07). Two activation regimes, one bucket.
+
+    The set cannot collide that way: the bf16 run of that kernel is ``bfloat16+float32`` and the
+    fp32 run is ``float32``. It also needs no rule about which operand "counts", which is the part
+    that cannot be got right in general -- an fp32 accumulator, an fp32 stats buffer and an fp32
+    activation are indistinguishable by position or by size.
+
+    Integer operands are ignored: index and count tensors do not vary with the compute dtype.
+    """
+    seen = set()
     for v in (nargs or {}).values():
         dt = getattr(v, "dtype", None)
-        if dt is not None and hasattr(v, "shape"):
-            return str(dt).replace("torch.", "")
-    return "any"
+        if dt is None or not hasattr(v, "shape"):
+            continue
+        if getattr(dt, "is_floating_point", False):
+            seen.add(str(dt).replace("torch.", ""))
+    return "+".join(sorted(seen)) if seen else "any"
 
 
 def bucket_of_autotuner(autotuner, nargs, meta=None) -> str:

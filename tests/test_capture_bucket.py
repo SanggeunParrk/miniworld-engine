@@ -136,3 +136,34 @@ def test_an_unmeasured_entry_never_outranks_a_measured_one():
                   [(b, 2.0), (c, 1.0), (a, float("nan"))]):
         ranked = capture._rank(order)
         assert [r[0].kwargs["BLOCK_M1"] for r in ranked] == [128, 64, 32], order
+
+
+def test_the_dtype_key_separates_mixed_operand_regimes():
+    """The dtype half of the cache key must distinguish a bf16 run from an fp32 run.
+
+    It used to be "the dtype of the first tensor operand", which reads whichever argument the
+    kernel declares first. A kernel that upcasts one operand unconditionally then reports the same
+    dtype whatever it was handed: `layernorm_linear/triton/pair_bias.py` upcasts `dout` to fp32 at
+    every launch, so bf16 and fp32 runs of `layernorm_linear_bwd_fp32_triton` recorded the
+    byte-identical key `float32|...` while their measured errors differed by four orders of
+    magnitude (2.8e-03 vs 5.9e-07). Two activation regimes collapsed into one bucket.
+
+    Taking the SET of floating dtypes cannot collide that way, and needs no rule about which
+    operand counts -- which is the part that has no general answer, since an fp32 accumulator, an
+    fp32 stats buffer and an fp32 activation are alike by position and by size.
+    """
+    from miniworld_engine.autotune.cache import dtype_of_args
+
+    bf, f32 = torch.bfloat16, torch.float32
+    # the real shape of the defect: same kernel, two regimes, previously the same key
+    mixed = {"dout": torch.empty(2, 2, dtype=f32), "x": torch.empty(2, 2, dtype=bf)}
+    allf32 = {"dout": torch.empty(2, 2, dtype=f32), "x": torch.empty(2, 2, dtype=f32)}
+    assert dtype_of_args(mixed) != dtype_of_args(allf32)
+    assert dtype_of_args(mixed) == "bfloat16+float32"
+    assert dtype_of_args(allf32) == "float32"
+
+    assert dtype_of_args({"x": torch.empty(2, 2, dtype=bf)}) == "bfloat16"
+    # index/count tensors do not vary with the compute dtype and must not enter the key
+    assert dtype_of_args({"i": torch.empty(2, dtype=torch.int32),
+                          "x": torch.empty(2, 2, dtype=bf)}) == "bfloat16"
+    assert dtype_of_args({"n": 5}) == "any"
