@@ -507,79 +507,144 @@ def _resolve_jit(module_path: str, fn_name: str):  # noqa: ANN201
     return fn
 
 
-def _worker_compile(payload: tuple) -> bool:
-    """Compile ONE config in a spawned worker. Must stay importable at module level (spawn).
-
-    Touches no CUDA: it rebuilds the ASTSource from plain data plus a re-imported JITFunction and
-    compiles against the ``target`` the parent resolved. The result lands in triton's on-disk cache;
-    the return value is only for accounting.
-    """
+def _compile_payload(payload, prefetched=None) -> None:
+    """The compile itself, with no process management. Raises on failure."""
     module_path, fn_name, signature, constants, attrs, target, options = payload
+    from triton.compiler.compiler import ASTSource, compile  # noqa: PLC0415, A004
+
+    fn = prefetched if prefetched is not None else _resolve_jit(module_path, fn_name)
+    src = ASTSource(fn=fn, signature=signature, attrs=attrs)
+    src.constants = constants   # already keyed by arg-index tuple, as ASTSource stores it
+    compile(src, target=target, options=options)
+
+
+def _worker_compile(chunk: list) -> list:
+    """Compile a CHUNK of configs in ONE forked child, returning one row per config.
+
+    Thin wrapper: ``_compile_chunk`` does the work and returns plain pass/fail, so the retry can
+    recurse without the accounting tuple being wrapped a second time. Must stay importable at
+    module level (spawn).
+    """
+    import time  # noqa: PLC0415
+
+    t0 = time.monotonic()
+    oks = _compile_chunk(chunk)
+    per = (time.monotonic() - t0) / max(len(chunk), 1)
+    return [(ok, 0.0, per, 0.0) for ok in oks]
+
+
+def _compile_chunk(chunk: list) -> list:
+    """Compile a CHUNK of configs in ONE forked child; returns a bool per config.
+
+    Touches no CUDA: it rebuilds each ASTSource from plain data plus a re-imported JITFunction and
+    compiles against the ``target`` the parent resolved. Results land in triton's on-disk cache;
+    the return value is only for accounting.
+
+    ONE fork per chunk, not per config. Forking a worker that holds torch + triton + the kernel
+    module costs ~1 s of page-table work and teardown, against 7.7 ms for the compile it guards:
+    measured on one unit, 1944 configs, warm cache -- 1966 worker-seconds with a fork per config
+    against 15 worker-seconds with none. The guard still has to exist (make_llir and ptxas block
+    in native code, where no Python signal can reach them, so a register-spill monster can only be
+    stopped by killing the process that is in it), so it is kept and amortised instead of dropped:
+
+      * the child reports each finished config through a pipe, one byte, pass or fail;
+      * the parent's deadline resets on every byte, so the budget is still PER CONFIG -- a chunk
+        of 32 gets 32 chances to make progress, not one 32x-longer rope;
+      * on a stall the child is SIGKILLed and the config it stalled on is known exactly (it is the
+        next one after the last byte), so that one is recorded failed and the REST of the chunk is
+        retried rather than condemned with it.
+
+    Determinism is what makes this safe to keep: a config that compiles only because it was never
+    given its own budget would be kept by a pre-compiled build and dropped by a serial one, and
+    the two would produce different caches from the same inputs.
+    """
     import os  # noqa: PLC0415
     import signal  # noqa: PLC0415
     import time  # noqa: PLC0415
 
-    # Resolve (i.e. IMPORT) the kernel module in the WORKER, before the fork. It used to be
+    if not chunk:
+        return []
+
+    # Resolve (i.e. IMPORT) the kernel modules in the WORKER, before the fork. It used to be
     # imported inside the child, which threw the import away on every ``os._exit`` -- so the same
     # module was imported once PER CONFIG. Measured on layernorm_fwd_saveact_triton against a warm
-    # ~/.triton/cache: 3082 ms per config as-shipped, of which 2589 ms was that import and 36 ms
-    # was the compile. The disk cache was being hit the whole time; the import was hiding it. The
-    # fork now inherits the already-imported module, and the child still does the compile, so the
-    # wall-clock kill guard below is unchanged. Failure falls back to resolving in the child,
-    # which is exactly the old behaviour (child exits 3 -> config counted as failed).
-    try:
-        _prefetched = _resolve_jit(module_path, fn_name)
-    except BaseException:  # noqa: BLE001
-        _prefetched = None
+    # cache: 3082 ms per config as-shipped, of which 2589 ms was that import and 36 ms was the
+    # compile. The disk cache was being hit the whole time; the import was hiding it.
+    prefetched = []
+    for payload in chunk:
+        try:
+            prefetched.append(_resolve_jit(payload[0], payload[1]))
+        except BaseException:  # noqa: BLE001 -- fall back to resolving in the child
+            prefetched.append(None)
 
-    # Same wall-clock budget the serial path enforces, for the same reason -- and enforced the same
-    # way, by running the compile in a child and SIGKILLing it on overrun (make_llir and ptxas both
-    # block in native code, where a Python signal cannot reach them).
-    #
-    # This is not only about speed. The budget is what DECIDES whether a register-spill config is
-    # usable on this GPU. If a worker compiled a 20-minute monster to completion, the serial pass
-    # would find it in the on-disk cache, sail through, and keep a config the serial build drops --
-    # so the same inputs would yield different caches depending on whether pre-compilation ran.
-    # Forking here is safe: a worker never initialises CUDA, so it has no driver state to inherit.
+    rfd, wfd = os.pipe()
     pid = os.fork()
     if pid == 0:
+        os.close(rfd)
         try:
-            from triton.compiler.compiler import ASTSource, compile  # noqa: PLC0415
-
-            fn = _prefetched if _prefetched is not None else _resolve_jit(module_path, fn_name)
-            src = ASTSource(fn=fn, signature=signature, attrs=attrs)
-            src.constants = constants   # already keyed by arg-index tuple, as ASTSource stores it
-            compile(src, target=target, options=options)
+            for payload, pre in zip(chunk, prefetched):
+                try:
+                    _compile_payload(payload, pre)
+                    os.write(wfd, b"\x01")
+                except BaseException as exc:  # noqa: BLE001, PERF203 -- one bad config, not a bad chunk
+                    if os.environ.get("_MW_PRECOMPILE_FIRST") == "1":
+                        import sys  # noqa: PLC0415
+                        print(f"  [precompile] child failed: {type(exc).__name__}: {exc}",
+                              file=sys.stderr, flush=True)
+                    os.write(wfd, b"\x00")
+        finally:
             os._exit(0)
-        except BaseException as exc:  # noqa: BLE001 -- serial pass recompiles whatever fails here
-            # A child cannot report back through memory, and "every worker failed" is otherwise
-            # indistinguishable from "the pool never ran". One line, from one child, says why.
-            if os.environ.get("_MW_PRECOMPILE_FIRST") == "1":
-                import sys  # noqa: PLC0415
-                print(f"  [precompile] child failed: {type(exc).__name__}: {exc}",
-                      file=sys.stderr, flush=True)
-            os._exit(3)
 
-    deadline = time.monotonic() + _COMPILE_BUDGET_S
-    while True:
+    os.close(wfd)
+    os.set_blocking(rfd, False)
+    results: list = []
+    last = time.monotonic()
+    killed_at = None
+    while len(results) < len(chunk):
         try:
-            done, status = os.waitpid(pid, os.WNOHANG)
+            buf = os.read(rfd, len(chunk) - len(results))
+        except BlockingIOError:
+            buf = b""
         except OSError:
-            return False
-        if done == pid:
-            return os.waitstatus_to_exitcode(status) == 0
-        if time.monotonic() > deadline:
+            buf = b""
+        if buf:
+            results.extend(b == 1 for b in buf)
+            last = time.monotonic()
+            continue
+        try:
+            done, _status = os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            break
+        if done == pid:            # exited without reporting the rest: they did not compile
+            break
+        if time.monotonic() - last > _COMPILE_BUDGET_S:
+            # Stalled on the config right after the last byte. Kill, record it failed, and hand
+            # the untouched remainder back for a fresh chunk -- one monster must not condemn 31
+            # configs that were never attempted.
             try:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
             except OSError:
                 pass
-            return False
-        # Adaptive backoff, for the same reason _fork_compile uses one: with the module import
-        # hoisted out of the child, most compiles here are on-disk cache hits that finish in tens
-        # of milliseconds, and a flat 50 ms tick charges the full tick to every one of them.
-        waited = time.monotonic() - (deadline - _COMPILE_BUDGET_S)
+            killed_at = len(results)
+            break
+        # Adaptive backoff: most compiles here are warm on-disk cache hits finishing in single-digit
+        # milliseconds, and a flat 50 ms tick would charge the full tick to every one of them.
+        waited = time.monotonic() - last
         time.sleep(0.001 if waited < 0.05 else 0.01 if waited < 0.5 else 0.05)
+    os.close(rfd)
+    if killed_at is None:
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+    else:
+        results.append(False)                       # the config that stalled
+        rest = chunk[len(results):]
+        if rest:
+            results.extend(_compile_chunk(rest))    # never attempted; give them their own child
+    results.extend([False] * (len(chunk) - len(results)))
+    return results
 
 
 def _precompile_round(src, target, options, configs) -> None:
@@ -630,18 +695,27 @@ def _precompile_round(src, target, options, configs) -> None:
         # Bound the wait so one register-spill monster cannot stall the build: stragglers keep
         # compiling into the shared on-disk cache, and the serial pass picks up whatever landed.
         budget = _COMPILE_BUDGET_S * (len(payloads) // jobs + 2)
-        results = _PRECOMPILE_POOL.map_async(_worker_compile, payloads, chunksize=1)
+        # One fork per CHUNK, not per config -- see _worker_compile. Sized so every worker gets
+        # several chunks (stragglers stay cheap to rebalance) while the ~1 s fork is amortised
+        # over enough configs to disappear: 1944 configs / 8 workers / 8 chunks each = 30.
+        csize = max(1, min(32, len(payloads) // max(jobs * 8, 1) or 1))
+        chunks = [payloads[i:i + csize] for i in range(0, len(payloads), csize)]
+        results = _PRECOMPILE_POOL.map_async(_worker_compile, chunks, chunksize=1)
         try:
-            done = results.get(timeout=budget)
+            done = [r for chunk_res in results.get(timeout=budget) for r in chunk_res]
         except Exception:  # noqa: BLE001 -- timeout: proceed, the serial pass still works
             done = []
-        ok = sum(1 for d in done if d)
-        bad = sum(1 for d in done if not d)
+        ok = sum(1 for d in done if d and d[0])
+        bad = sum(1 for d in done if not (d and d[0]))
+        wt = sum(d[2] for d in done if d)
+        print(f"  [precompile-worker] {len(chunks)} chunks x {csize} | child time"
+              f" {wt:.0f} worker-s -> {wt / max(jobs, 1):.0f}s of the round", flush=True)
         # settled = attempted and answered, pass or fail. `done` is shorter than `configs` only
         # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
         # unsettled and is retried, which is the intent.
         _mark_compiled(_cfg_sig(c) for c, _ in zip(configs, done))
-        _mark_outcome(src.fn.__name__, ((_cfg_sig(c), bool(d)) for c, d in zip(configs, done)))
+        _mark_outcome(src.fn.__name__,
+                      ((_cfg_sig(c), bool(d and d[0])) for c, d in zip(configs, done)))
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
         _PRECOMPILE["rounds"] += 1
