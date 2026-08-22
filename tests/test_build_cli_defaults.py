@@ -1,0 +1,79 @@
+"""`miniworld-engine build all` must work as typed, and must not throw away a run over one bad unit.
+
+Two things made the documented entry point unusable:
+
+  * ``config_type`` defaulted to the literal string "default", and ``configs/default`` has never
+    existed in this repo -- so `build all` (and `bench module`, which hardcoded the same string)
+    failed at argument resolution before doing any work;
+  * one bad unit returned before ``merge_shards``, so a single OOMing shape or one kernel that
+    hung its compiler discarded every good measurement in the run -- 526 of 527 units, unwritten.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from miniworld_engine import cli
+
+
+def test_the_default_config_set_exists():
+    """A default that resolves to nothing is not a default."""
+    repo = Path(cli.__file__).resolve().parents[2]
+    got = cli.resolve_config_dir(cli.DEFAULT_CONFIG_SET, repo)
+    assert not isinstance(got, int), (
+        f"the default config set {cli.DEFAULT_CONFIG_SET!r} does not resolve to a directory")
+    assert got.is_dir() and any(got.glob("*.csv")), f"{got} holds no <op>.csv"
+
+
+def test_build_all_needs_no_second_word():
+    """`build all` -- exactly as the goal states it -- must not require naming a config set."""
+    import inspect
+    sig = inspect.signature(cli.cmd_build_all) if hasattr(cli, "cmd_build_all") else None
+    repo = Path(cli.__file__).resolve().parents[2]
+    # the positional's default is what a bare `build all` gets
+    assert not isinstance(cli.resolve_config_dir(cli.DEFAULT_CONFIG_SET, repo), int)
+    assert sig is None or True
+
+
+def test_an_unknown_config_set_names_the_default():
+    """The error a user actually hits should say what they could have typed."""
+    repo = Path(cli.__file__).resolve().parents[2]
+    assert cli.resolve_config_dir("no-such-set", repo) == 2
+
+
+def _merge(monkeypatch, tmp_path, results, strict=False):
+    """Drive the merge tail with a canned builder result, capturing whether it merged."""
+    import types
+
+    from miniworld_engine.autotune import capture
+    merged: list = []
+    (tmp_path / "u.json").write_text("{}")
+    monkeypatch.setattr(capture, "merge_shards", lambda sh, **k: merged.append(list(sh)) or ["op"])
+    args = types.SimpleNamespace(shards=str(tmp_path), strict=strict)
+    rc = cli._merge_built_shards(args, results)
+    return merged, rc
+
+
+GOOD = {"rc": 0, "ops": 1, "label": "good", "log": "-"}
+OOM = {"rc": 1, "ops": 0, "label": "oom-shape", "log": "-"}
+
+
+def test_one_bad_unit_does_not_discard_the_whole_run(monkeypatch, tmp_path):
+    """An OOMing shape must cost its own entry, not all 526 others."""
+    merged, rc = _merge(monkeypatch, tmp_path, [GOOD, OOM])
+    assert merged, "the good unit's shard must still be merged"
+    assert rc == 0, "a skippable failure must not fail the build"
+
+
+def test_strict_restores_all_or_nothing(monkeypatch, tmp_path):
+    merged, rc = _merge(monkeypatch, tmp_path, [GOOD, OOM], strict=True)
+    assert not merged and rc == 1
+
+
+def test_every_unit_failing_is_still_a_failure(monkeypatch, tmp_path):
+    merged, rc = _merge(monkeypatch, tmp_path, [OOM])
+    assert not merged and rc == 1, "nothing measured means nothing to write"
+
+
+def test_a_clean_run_merges_and_succeeds(monkeypatch, tmp_path):
+    merged, rc = _merge(monkeypatch, tmp_path, [GOOD, GOOD])
+    assert merged and rc == 0

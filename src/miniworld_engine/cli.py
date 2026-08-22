@@ -326,6 +326,12 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
 #: Named config sets live here, one directory per set, one ``<op>.csv`` per op inside it.
 CONFIG_ROOT = "configs"
+#: The config set a bare ``build all`` / ``bench module`` uses. It was the literal string
+#: "default", and ``configs/default`` has never existed in this repo -- so both commands failed at
+#: argument resolution before doing any work. Building the cache MEANS searching, so the full
+#: search grid is the only sensible default; the pinned single-config sets (blk*, warp*, mixed*)
+#: exist for A/B runs and have to be asked for by name.
+DEFAULT_CONFIG_SET = "grid"
 
 
 def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
@@ -344,7 +350,8 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
             return c
     have = sorted(d.name for d in (repo / CONFIG_ROOT).glob("*") if d.is_dir())
     print(f"unknown config set {config_type!r}; have: {', '.join(have) or '(none)'}\n"
-          f"a config set is a directory of <op>.csv under {CONFIG_ROOT}/", file=sys.stderr)
+          f"a config set is a directory of <op>.csv under {CONFIG_ROOT}/ "
+          f"(the default is {DEFAULT_CONFIG_SET!r})", file=sys.stderr)
     return 2
 
 
@@ -427,16 +434,58 @@ KERNEL_BUILD_CASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
+    """Fold this build's shards into the in-repo cache and report the units that failed.
+
+    Split out of the build command so the partial-merge policy is testable without a GPU:
+    which units count as bad, whether a bad one blocks the merge, and what the exit code is.
+    """
+    from miniworld_engine.autotune import capture  # noqa: PLC0415 -- heavy; import at use
+
+    bad = [r for r in results if r["rc"] != 0 or not r["ops"]]
+    # capture.merge_shards is the sole writer of the in-repo cache; skipping it would leave the
+    # bench reading the OLD cache while the shards just built sat unread.
+    #
+    # Merge happens even when some units failed. It used to return here instead, which threw away
+    # every good measurement in the run: one shape that OOMs on this card, or one kernel that hangs
+    # its compiler, and 526 of 527 units went unwritten. A missing (op, bucket) entry is not a
+    # wrong one -- the reader warns and falls back to the full grid for exactly that entry -- so a
+    # partial cache is strictly better than no cache, and `audit` is what reports the holes.
+    # --strict restores the old all-or-nothing behaviour for CI.
+    shard_dir = Path(args.shards).expanduser()
+    shards = sorted(str(x) for x in shard_dir.glob("*.json"))
+    if bad:
+        ok_n = len(results) - len(bad)
+        print(f"build produced {len(bad)} bad unit(s) of {len(results)}; their (op, bucket) entries "
+              f"will be MISSING from the cache and will fall back to the full grid at runtime:",
+              file=sys.stderr)
+        for r in bad[:10]:
+            print(f"  {r['label']} rc={r['rc']} ops={r['ops']} -> {r['log']}", file=sys.stderr)
+        if len(bad) > 10:
+            print(f"  ... and {len(bad) - 10} more", file=sys.stderr)
+        if getattr(args, "strict", False):
+            print("--strict: not merging.", file=sys.stderr)
+            return 1
+        if not ok_n:
+            print("every unit failed; nothing to merge.", file=sys.stderr)
+            return 1
+    written = capture.merge_shards(shards) if shards else []
+    print(f"=== merged {len(written)} op file(s) into the in-repo cache"
+          f"{f' ({len(bad)} unit(s) missing -- run `audit` for the holes)' if bad else ''}",
+          flush=True)
+    return 1 if bad and getattr(args, "strict", False) else 0
+
+
 def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
                        mapping: dict[str, tuple[str, ...]], table: str,
-                       config_type: str = "default") -> int:
+                       config_type: str = DEFAULT_CONFIG_SET) -> int:
     """Build the cache for ``targets`` before benching them, using config set ``config_type``.
 
     Benching an unbuilt kernel does not measure the engine: with no configs the launch fails, and
     with a full grid the autotuner sweeps mid-measurement, so the number is a tuning run with a
     benchmark wrapped around it.
     """
-    from miniworld_engine.autotune import builder, capture
+    from miniworld_engine.autotune import builder
 
     cases: list[str] = []
     for target in targets:
@@ -460,20 +509,7 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     results = builder.build_all(selected, Path(args.shards).expanduser(),
                                 _resolve_gpus(args.gpus), args.compile_jobs,
                                 resume=args.resume, config_dir=directory)
-    bad = [r for r in results if r["rc"] != 0 or not r["ops"]]
-    if bad:
-        print(f"build produced {len(bad)} bad unit(s); benching now would measure an untuned "
-              f"kernel:", file=sys.stderr)
-        for r in bad[:10]:
-            print(f"  {r['label']} rc={r['rc']} ops={r['ops']} -> {r['log']}", file=sys.stderr)
-        return 1
-    # capture.merge_shards is the sole writer of the in-repo cache; skipping it would leave the
-    # bench reading the OLD cache while the shards just built sat unread.
-    shard_dir = Path(args.shards).expanduser()
-    shards = sorted(str(x) for x in shard_dir.glob("*.json"))
-    written = capture.merge_shards(shards) if shards else []
-    print(f"=== merged {len(written)} op file(s) into the in-repo cache", flush=True)
-    return 0
+    return _merge_built_shards(args, results)
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -696,11 +732,11 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
               f"{', '.join(sorted(MODULE_BUILD_CASES))}; groups: {', '.join(GROUPS)}",
               file=sys.stderr)
         return 2
-    # A module bench takes no config set, so the build uses "default" -- see the docstring.
+    # A module bench takes no config set, so the build uses the default one -- see the docstring.
     rc = _bench_build_first(args, targets, repo, MODULE_BUILD_CASES, "MODULE_BUILD_CASES")
     if rc:
         return rc
-    directory = resolve_config_dir("default", repo)
+    directory = resolve_config_dir(DEFAULT_CONFIG_SET, repo)
     if isinstance(directory, int):
         return directory
     rc = apply_config_dir(directory)
@@ -747,7 +783,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bld = sub.add_parser("build", help="build the cache by driving the production modules")
     bld.add_argument("case", nargs="?", default="all", help="kernel case, or 'all'")
-    bld.add_argument("config_type", nargs="?", default="default",
+    bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
     bld.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
@@ -767,6 +803,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="force the module-unit decomposition for `build all`. Reaches only the "
                           "kernels a module dispatches to, so it does not produce a complete "
                           "cache; use it to exercise real dispatch paths, not to tune.")
+    bld.add_argument("--strict", action="store_true",
+                     help="fail without merging if ANY unit failed (default: merge what "
+                          "succeeded and report the holes)")
     bld.add_argument("--reclaim", action="store_true",
                      help="first delete claims left by a killed build (they are otherwise "
                           "skipped silently forever). Do NOT use while another build runs "
