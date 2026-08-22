@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+from itertools import zip_longest
 import json
 import os
 import subprocess
@@ -698,9 +699,20 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
             # the only one today, and correctly so: it reads the WEIGHTS (Wa, Wb (N,K), gamma,
             # beta (K,)) and never touches the activation, so N and K are its whole shape.
             shapes = shapes[:1]
-        for length in shapes:
-            out.append(OpUnit(op=r["kernel"], length=length))
-    return out
+        out.append([OpUnit(op=r["kernel"], length=length) for length in shapes])
+    # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
+    #
+    # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands
+    # consecutive items to consecutive GPUs, so all 8 cards on a node get the SAME op at 8
+    # different shapes, and a shape does not change the compile key: they race to compile the
+    # identical 1440 keys, eight times over, all cold because none has landed in the shared
+    # triton cache yet. Measured that way: 972 s of precompile per unit and 6 items finished in
+    # an hour across 24 GPUs.
+    #
+    # Interleaved, the 8 cards get 8 DIFFERENT ops, so the 8 cold compiles are 8 different key
+    # sets -- no duplication -- and by the time an op's second shape is picked up its keys are
+    # already on disk, which is the warm path (0.56 vs 5.7 core-s per config).
+    return [u for row in zip_longest(*out) for u in row if u is not None]
 
 
 def _keys_on_shape(path: Path, symbol: str) -> bool:
