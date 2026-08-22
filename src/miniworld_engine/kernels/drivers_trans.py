@@ -322,21 +322,33 @@ def _transition_cuda_operands(dtype=torch.bfloat16):
 
 def transition_cast_cuda() -> None:
     """`cast_kernel`, reached from the forward's fp32<->bf16 conversion around the cublas GEMM
-    (kernel .cu:161 and :170). bf16 inputs are what make that path run at all."""
+    (kernel .cu:161 and :170). bf16 inputs are what make that path run at all.
+
+    ``torch.bfloat16`` outright, NOT ``BF16``/``MINIWORLD_DRIVER_DTYPE``: ``cast_tensor_to_dtype``
+    returns its argument untouched when it is already the destination dtype (.cu:146), and the two
+    instantiations it can reach are bf16->float and float->bf16 (.cu:157-173). An all-fp32 call
+    therefore launches no cast_kernel at all, so driving this one in fp32 would report a kernel
+    that never ran. The registry's ``bf16|fp32`` is about the PAIR the cast bridges, not about a
+    dtype this kernel can be driven at on its own."""
     ext = _transition_cuda_ext()
     ext.forward(*_transition_cuda_operands(torch.bfloat16), _CUDA_N)
 
 
 def transition_swiglu_cuda() -> None:
-    """`swish_mul_kernel` via `launch_swish_mul` (kernel .cu:325 in the forward)."""
+    """`swish_mul_kernel` via `launch_swish_mul` (kernel .cu:325 in the forward).
+
+    ``BF16`` is the activation dtype, so ``MINIWORLD_DRIVER_DTYPE=fp32`` reaches
+    ``swish_mul_kernel<float>``: the .cpp accepts float32 or bfloat16 (transition_cuda.cpp:29-37)
+    and the .cu dispatches ``transition_forward<float>`` for an fp32 x (.cu:499)."""
     ext = _transition_cuda_ext()
-    ext.forward(*_transition_cuda_operands(torch.bfloat16), _CUDA_N)
+    ext.forward(*_transition_cuda_operands(BF16), _CUDA_N)
 
 
 def transition_bwd_cuda() -> None:
     """`transition_grad_kernel` via `launch_transition_grad` (kernel .cu:411 in the backward).
     The .cpp additionally requires grad_output to be 2-D, contiguous, and to match x in shape
-    and dtype (transition_cuda.cpp:108-115)."""
+    and dtype (transition_cuda.cpp:108-115). fp32 reaches ``transition_grad_kernel<float>`` by
+    the same .cu:538 dispatch as the forward."""
     ext = _transition_cuda_ext()
-    x, wa, wb, ws = _transition_cuda_operands(torch.bfloat16)
+    x, wa, wb, ws = _transition_cuda_operands(BF16)
     ext.backward(torch.randn_like(x).contiguous(), x, wa, wb, ws, _CUDA_N)

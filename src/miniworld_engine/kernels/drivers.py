@@ -22,6 +22,13 @@ a missing or wrong ``mask=`` on a tail tile cannot be observed at these shapes.
 ``ragged()``, putting a partial tile at the end of every axis. Set it before importing any
 driver module; the constants are evaluated at import.
 
+Activation dtype
+----------------
+``registry.csv`` declares 67 of the 103 kernels ``bf16|fp32``; every driver builds bf16.
+``MINIWORLD_DRIVER_DTYPE=fp32`` builds them in fp32 instead, by the same import-time route as
+``MINIWORLD_SHAPE_MODE`` and ``MINIWORLD_DRIVER_LENGTH``: it rebinds ``BF16``/``ACT_DTYPE``,
+which every ``dtype=BF16`` default argument closes over. bf16 stays the default.
+
 An extent a kernel genuinely cannot vary -- a fixed-shape CUDA GEMM, a power-of-two head dim,
 a width baked into a weight layout -- goes through ``aligned_only(label, n, why)`` instead. That
 keeps the extent aligned *and records why*, so the sweep reports it as an alignment requirement
@@ -34,7 +41,23 @@ import os
 
 import torch
 
-BF16 = torch.bfloat16
+#: "bf16" (default) or "fp32" -- see "Activation dtype" in the module docstring.
+DTYPE_MODE = os.environ.get("MINIWORLD_DRIVER_DTYPE", "bf16").strip().lower()
+if DTYPE_MODE not in ("bf16", "fp32"):
+    raise ValueError(f"MINIWORLD_DRIVER_DTYPE must be 'bf16' or 'fp32', got {DTYPE_MODE!r}")
+
+#: The activation dtype every driver builds its inputs at. Read at import for the same reason
+#: ``SHAPE_MODE`` is: the drivers spell it as a default argument (``dtype=BF16``), which is
+#: evaluated when the driver module is imported, so a per-call override would have to reach into
+#: every driver module while a per-process one does not.
+ACT_DTYPE = torch.bfloat16 if DTYPE_MODE == "bf16" else torch.float32
+
+#: The name every driver and checker imports. It is the ACTIVATION dtype, bf16 unless
+#: ``MINIWORLD_DRIVER_DTYPE=fp32`` says otherwise -- kept under the old name so the override
+#: reaches all 90-odd ``dtype=BF16`` sites without editing them. An operand a kernel genuinely
+#: requires in bf16 (a fixed-dtype CUDA extension, a weight layout baked bf16) spells
+#: ``torch.bfloat16`` outright and is unaffected.
+BF16 = ACT_DTYPE
 
 #: "aligned" (default) or "ragged" -- see the module docstring.
 SHAPE_MODE = os.environ.get("MINIWORLD_SHAPE_MODE", "aligned").strip().lower()

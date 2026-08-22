@@ -34,7 +34,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F  # noqa: N812
 
-from miniworld_engine.kernels.drivers import dev, rows2d
+from miniworld_engine.kernels.drivers import ACT_DTYPE, dev, rows2d
 from miniworld_engine.kernels.drivers_trans import (
     EPS,
     K_LARGE,
@@ -375,11 +375,11 @@ def _transition_ref(x, wa, wb, ws):
         torch.backends.cuda.matmul.allow_tf32 = prev
 
 
-def _transition_cuda_fwd_pair():
+def _transition_cuda_fwd_pair(dtype):
     from .drivers_trans import _CUDA_N, _transition_cuda_ext, _transition_cuda_operands
 
     ext = _transition_cuda_ext()
-    x, wa, wb, ws = _transition_cuda_operands(torch.bfloat16)
+    x, wa, wb, ws = _transition_cuda_operands(dtype)
     y = ext.forward(x, wa, wb, ws, _CUDA_N)
     ref, _, _, _ = _transition_ref(x, wa, wb, ws)
     return {"y": (y, ref)}
@@ -387,12 +387,13 @@ def _transition_cuda_fwd_pair():
 
 def transition_cast_cuda():
     """Same launch as ``transition_swiglu_cuda``; both kernels run inside this one forward, and
-    the output is the only observable either of them has from Python."""
-    return _transition_cuda_fwd_pair()
+    the output is the only observable either of them has from Python. bf16 outright, matching
+    its driver -- an all-fp32 forward launches no cast_kernel (see the driver's docstring)."""
+    return _transition_cuda_fwd_pair(torch.bfloat16)
 
 
 def transition_swiglu_cuda():
-    return _transition_cuda_fwd_pair()
+    return _transition_cuda_fwd_pair(ACT_DTYPE)
 
 
 def transition_bwd_cuda():
@@ -403,7 +404,7 @@ def transition_bwd_cuda():
     from .drivers_trans import _CUDA_N, _transition_cuda_ext, _transition_cuda_operands
 
     ext = _transition_cuda_ext()
-    x, wa, wb, ws = _transition_cuda_operands(torch.bfloat16)
+    x, wa, wb, ws = _transition_cuda_operands(ACT_DTYPE)
     g = torch.randn_like(x).contiguous()
     got = ext.backward(g, x, wa, wb, ws, _CUDA_N)
 
