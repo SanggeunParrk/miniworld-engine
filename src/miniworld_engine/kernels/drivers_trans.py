@@ -62,7 +62,11 @@ from miniworld_engine.kernels.drivers import BF16, dev, driver_length, ragged, r
 
 EPS = 1e-5
 L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, L, K) before flattening
-ROWS = ragged(L_PAIR ** 2)  # M: L=64 pair rows (L*L); 4096 is a multiple of 128, ragged -> 4093
+# M = (ragged L)**2, not ragged(L**2): `_pair_x` below must stay square for `length_of`, so it
+# flattens to ragged(L)**2 rows, and ROWS is what the flat drivers here build. Deriving them
+# differently made the two disagree in ragged mode (4093 vs 3721). Aligned is 64*64 = 4096
+# either way; ragged is 61*61 = 3721, still a partial tile in all five config sets (% 16 == 9).
+ROWS = ragged(L_PAIR) ** 2  # M: pair rows L*L
 #: What production records for this activation: ``both_key(length_of((B, L, L, D)))`` = both_key(L).
 #: Every launcher below is handed the already-flattened (M, K) matrix, so it CANNOT read L off a
 #: tensor (autotune/shape_key.py::length_of) -- it takes the key from its caller, and with nothing
@@ -223,7 +227,7 @@ def swiglu_gate_bwd_sm100() -> None:
 # ------------------------------------------------------- triangle_multiplication (dt-v1)
 
 TRIMUL_L = driver_length(128)  # L: i == j of the (1, L, L, d) pair activation the module flattens
-TRIMUL_ROWS = ragged(TRIMUL_L ** 2)  # M = b*i*j for a (1, 128, 128, d) pair activation; ragged -> 16381
+TRIMUL_ROWS = ragged(TRIMUL_L) ** 2  # M = b*i*j for a (1, L, L, d) pair activation; see ROWS
 TRIMUL_D = ragged(128)  # d: the contraction width; the gate/proj weights have 2*d or d rows
 #: ``baseline_dtv1._shape_key`` is ``token_key(seq_len)``, and ``seq_len=None`` -- what a driver that
 #: passes nothing gets -- means ``token_key(0)``, the clamped BOTTOM bucket 128 at every L. These

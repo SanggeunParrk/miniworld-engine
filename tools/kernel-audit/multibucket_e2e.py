@@ -92,12 +92,17 @@ def main() -> int:
     entries = json.loads(fp.read_text())["entries"]
     print(f"  cache buckets: {sorted(entries)}")
 
-    want = {f"bfloat16|HAS_ROWSCALE=0,shape_key={L}" for L in LENGTHS}
-    got = set(entries)
+    # Compare the shape_key FIELD, not the whole bucket string: the string also carries the
+    # kernel's other key entries (N, HAS_ROWSCALE, ...), and hardcoding them made this report FAIL
+    # on a cache that was in fact correct.
+    got_keys = {int(part.split("=")[1])
+                for b in entries for part in b.split(",") if part.startswith("shape_key=")}
     print(f"\n  DISTINCT: {len(entries)} entries for {len(LENGTHS)} lengths -> "
           f"{'PASS' if len(entries) == len(LENGTHS) else 'FAIL'}")
-    print(f"  CORRECT : buckets name the driven lengths -> "
-          f"{'PASS' if got == want else 'FAIL (want ' + str(sorted(want)) + ')'}")
+    print(f"  CORRECT : shape_key values {sorted(got_keys)} vs driven {sorted(LENGTHS)} -> "
+          f"{'PASS' if got_keys == set(LENGTHS) else 'FAIL'}")
+    got = got_keys
+    want = set(LENGTHS)
     winners = {k: v[0]["kwargs"] for k, v in entries.items()}
     print(f"  winners per bucket: {json.dumps(winners, sort_keys=True)}")
 

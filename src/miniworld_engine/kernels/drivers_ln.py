@@ -25,7 +25,11 @@ from .drivers import BF16, aligned_only, dev, driver_length, pair, ragged, rows2
 #              `_M` is L*L and `_PAIR_N` is L, so both move together when MINIWORLD_DRIVER_LENGTH
 #              moves and the shape the kernel records is the shape the driver asked for.
 _L = driver_length(128)
-_M = ragged(_L**2)
+# M = (ragged L)**2, NOT ragged(L**2). The five drivers that hand over a 4-D pair activation
+# flatten to _PAIR_N**2 rows, so deriving _M any other way makes the constant disagree with the
+# tensor in ragged mode (16381 vs 15625) -- and _M is what the flat drivers in this file build.
+# Both values are ragged w.r.t. every tile width; the point is that there is only one M.
+_M = ragged(_L) ** 2   # == _PAIR_N ** 2, without depending on the order below
 _D = ragged(128)
 _PAIR_N = ragged(_L)
 

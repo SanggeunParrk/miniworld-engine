@@ -186,7 +186,9 @@ def triangle_attention_fwd_triton() -> dict[str, Pair]:
 
 
 def triangle_attention_bwd_pre_triton() -> Pair:
-    from .triangle_attention.triton.main import _attn_bwd_preprocess, get_seq_group
+    from miniworld_engine.autotune.shape_key import token_key
+
+    from .triangle_attention.triton.main import _attn_bwd_preprocess
     from einops import rearrange
     B, HL = 1, H * L
     # main.py's preprocess takes BOTH stride sets, and at runtime the two differ: `out` is the
@@ -202,7 +204,7 @@ def triangle_attention_bwd_pre_triton() -> Pair:
     _attn_bwd_preprocess[grid](
         out, do, delta,
         *out.stride(), *do.stride(), HL, B, L, D,
-        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # Delta is addressed off_hz*N_CTX + off_m with off_hz enumerating (b, h, i_row) as
     # b*HL + h*L + i_row -- i.e. exactly the [B, H*L, L] flattening of the rowsum.
@@ -236,7 +238,9 @@ def triangle_attention_fwd_contig_triton() -> dict[str, Pair]:
 
 
 def triangle_attention_bwd_pre_contig_triton() -> Pair:
-    from .triangle_attention.triton.atomic import _attn_bwd_preprocess, get_seq_group
+    from miniworld_engine.autotune.shape_key import token_key
+
+    from .triangle_attention.triton.atomic import _attn_bwd_preprocess
     B, HL = 1, H * L
     # This preprocess takes no strides at all -- it addresses o/do as off_hz*D*L + m*D + d, a
     # contiguous [B, H*L, L, D], which is what its backward rearranges to before launching.
@@ -248,7 +252,7 @@ def triangle_attention_bwd_pre_contig_triton() -> Pair:
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D32,
-        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D32),
+        shape_key=token_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D32),
     )
     return delta, _rowsum(o, do)
 
@@ -278,7 +282,9 @@ def augmented_attention_fwd_triton() -> dict[str, Pair]:
 
 
 def augmented_attention_bwd_pre_triton() -> Pair:
-    from .augmented_attention.triton.main import _attn_bwd_preprocess, get_seq_group
+    from miniworld_engine.autotune.shape_key import atom_key
+
+    from .augmented_attention.triton.main import _attn_bwd_preprocess
     B = 1
     o = torch.randn(A, B, L, H, D, device=dev(), dtype=BF16)
     do = torch.randn_like(o)
@@ -287,7 +293,7 @@ def augmented_attention_bwd_pre_triton() -> Pair:
     _attn_bwd_preprocess[grid](
         o, do, delta, A, B, L,
         o.stride(1), o.stride(2), o.stride(3), o.stride(4), H, D,
-        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=atom_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # Delta is (A,B,H,L) -- stored at off_z*H*N_CTX + off_h*N_CTX + off_m with off_z over A*B --
     # while the rowsum over d leaves (A,B,L,H), so H moves in front of L.
@@ -354,7 +360,9 @@ def bias_only_attention_fwd_triton() -> dict[str, Pair]:
 
 
 def bias_only_attention_bwd_pre_triton() -> Pair:
-    from .bias_only_attention.triton.main import _attn_bwd_preprocess, get_seq_group
+    from miniworld_engine.autotune.shape_key import token_key
+
+    from .bias_only_attention.triton.main import _attn_bwd_preprocess
     B, HL = 1, H * L
     # Contiguous addressing, no strides -- same contract as atomic.py's, and the reason its
     # backward calls grad_output.contiguous() before this launch.
@@ -364,7 +372,7 @@ def bias_only_attention_bwd_pre_triton() -> Pair:
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D,
-        shape_key=get_seq_group(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     return delta, _rowsum(o, do)
 

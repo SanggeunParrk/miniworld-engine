@@ -26,6 +26,7 @@ from __future__ import annotations
 import torch
 import triton
 
+from miniworld_engine.autotune.shape_key import both_key, token_key
 from miniworld_engine.kernels.drivers import BF16, aligned_only, dev, driver_length, ragged
 
 # Both extents go through ``ragged()`` (see drivers.py): unset MINIWORLD_SHAPE_MODE keeps the
@@ -84,7 +85,6 @@ def gated_projection_bwd_gate_triton() -> None:
     The autograd path is not used: that backward returns ``.float()`` grads for bf16 inputs.
     """
     from miniworld_engine.kernels.gated_projection.triton.main import (
-        get_seq_group,
         sigmoid_gate_bwd_kernel,
     )
 
@@ -92,7 +92,7 @@ def gated_projection_bwd_gate_triton() -> None:
     dgate, dx = torch.empty_like(gate), torch.empty_like(x)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     sigmoid_gate_bwd_kernel[grid](gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0),
-                                  M, D, shape_key=get_seq_group(M))
+                                  M, D, shape_key=both_key(L))
 
 
 def gated_projection_gate_flat_triton() -> None:
@@ -348,14 +348,13 @@ def gated_projection_gate_packed_mmajor_triton() -> None:
     """
     from miniworld_engine.kernels.trimul_inproj.cute.front_train_sm100 import (
         _glu_bdll_kernel,
-        get_seq_group,
     )
 
     h = D
     preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
     lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
     grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=get_seq_group(M))
+    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L))
 
 
 def fused_preact_gemm_kernel() -> None:
