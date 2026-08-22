@@ -121,7 +121,8 @@ _ABANDONED: dict = {"skipped": 0, "measured": 0, "warm_s": 0.0, "probe_s": 0.0,
 #: different fixes: fork is proportional to the parent's RSS, the wait is quantised by the poll
 #: interval, and the in-process call is a lookup in ~/.triton/cache, which currently holds 88k+
 #: entries. Measured apart so the fix targets the real one.
-_COMPILE_T: dict = {"calls": 0, "fork_s": 0.0, "wait_s": 0.0, "parent_s": 0.0, "polls": 0}
+_COMPILE_T: dict = {"calls": 0, "fork_s": 0.0, "wait_s": 0.0, "parent_s": 0.0, "polls": 0,
+                    "forkless": 0, "forkless_s": 0.0, "known_bad": 0}
 
 #: First-launch cost per config, split. warm_s minus compile() left ~500s unexplained on a unit
 #: whose kernels ran 2.2s of device time; these are the three things a first launch does that a
@@ -168,7 +169,18 @@ def load_probe_state(shard_path) -> int:
     cf = _P(stem + ".compiled")
     _COMPILED_FILE.append(cf)
     if cf.exists():
-        _COMPILED.update(ln.strip() for ln in cf.read_text().splitlines() if ln.strip())
+        for raw in cf.read_text().splitlines():
+            ln = raw.strip()
+            if not ln:
+                continue
+            if ln[0] in "+-":
+                # "<+|-><kernel>\t<cfg sig>": outcome-tagged, written since the fork guard learned
+                # to trust the pool. The sig alone still goes in _COMPILED so the ROUND skip works
+                # exactly as before.
+                (_COMPILE_OK if ln[0] == "+" else _COMPILE_BAD).add(ln[1:])
+                _COMPILED.add(ln[1:].partition("\t")[2] or ln[1:])
+            else:  # legacy bare sig: settled, outcome unknown -> still fork to find out
+                _COMPILED.add(ln)
     pf = _P(stem + ".probes")
     _PROBE_FILE.append(pf)
     if pf.exists():
@@ -190,6 +202,16 @@ def load_probe_state(shard_path) -> int:
 _COMPILED: set = set()
 _COMPILED_FILE: list = []
 
+#: "<kernel>\t<cfg sig>" for compiles the precompile POOL already settled, split by outcome.
+#: _COMPILED answers "should the round recompile this?"; these answer the different and much more
+#: expensive question "must the serial pass still fork a child to find out?". A config the pool
+#: compiled cannot be a compile monster -- that is exactly what the pool just proved, under the
+#: same SIGKILL budget -- so re-proving it costs a fork + a pipe + a poll loop (179 ms measured)
+#: to protect a triton.compile that is a warm on-disk cache hit (3.5 ms measured). A config the
+#: pool FAILED needs no child either: the answer is already known and the bench scores it +inf.
+_COMPILE_OK: set = set()
+_COMPILE_BAD: set = set()
+
 
 def _mark_compiled(sigs) -> None:
     """Record configs whose compile is SETTLED -- succeeded or permanently failed.
@@ -208,6 +230,25 @@ def _mark_compiled(sigs) -> None:
         try:
             with _COMPILED_FILE[0].open("a") as fh:
                 fh.write("".join(x + "\n" for x in new_sigs))
+        except OSError:
+            pass
+
+
+def _mark_outcome(kernel: str, sigs_ok) -> None:
+    """Record per-(kernel, config) compile outcomes from the pool, so the serial pass can skip
+    the fork. Appended to the same ``.compiled`` file, tagged, so a restart inherits them."""
+    rows = []
+    for sig, ok in sigs_ok:
+        key = f"{kernel}\t{sig}"
+        target = _COMPILE_OK if ok else _COMPILE_BAD
+        if key in target:
+            continue
+        target.add(key)
+        rows.append(("+" if ok else "-") + key)
+    if rows and _COMPILED_FILE:
+        try:
+            with _COMPILED_FILE[0].open("a") as fh:
+                fh.write("".join(r + "\n" for r in rows))
         except OSError:
             pass
 
@@ -408,8 +449,10 @@ def precompile_summary() -> str:
             f" {a['skipped_kernel_ms'] / 1000.0:.1f}s)"
             f" | fixed overhead {host - dev:.0f}s")
     c = _COMPILE_T
-    if c["calls"]:
-        budget += (f"\n  [compile-guard] {c['calls']} compile() calls"
+    if c["calls"] or c["forkless"] or c["known_bad"]:
+        budget += (f"\n  [compile-guard] forkless {c['forkless']} x -> {c['forkless_s']:.0f}s"
+                   f" (pool-settled) | known-bad {c['known_bad']} x -> 0s"
+                   f"\n  [compile-guard] {c['calls']} forked compile() calls"
                    f" | fork {c['fork_s']:.0f}s + wait {c['wait_s']:.0f}s"
                    f" ({c['polls']} polls x 50ms) + parent-recompile {c['parent_s']:.0f}s"
                    f" = {c['fork_s'] + c['wait_s'] + c['parent_s']:.0f}s")
@@ -598,6 +641,7 @@ def _precompile_round(src, target, options, configs) -> None:
         # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
         # unsettled and is retried, which is the intent.
         _mark_compiled(_cfg_sig(c) for c, _ in zip(configs, done))
+        _mark_outcome(src.fn.__name__, ((_cfg_sig(c), bool(d)) for c, d in zip(configs, done)))
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
         _PRECOMPILE["rounds"] += 1
@@ -792,6 +836,27 @@ def install() -> None:
             _precompile_round(src, kwargs["target"], kwargs.get("options"), armed)
         if _COMPILE_BUDGET_S <= 0:
             return _orig_compile(*args, **kwargs)
+        # The pool already answered this one. Forking again costs 179 ms to re-derive a fact we
+        # hold, and it is the single largest line item in a unit: 1944 forks = 348 s of the 366 s
+        # this unit spent, against 6.8 s of actual triton.compile. Measured with cProfile
+        # (posix.read 186 s in the child pipe, select.poll 79 s, time.sleep 47 s, fork 28 s).
+        # Only inside a round, and only when _CURRENT_CFG names the config being compiled --
+        # outside one, the sig would be stale and the shortcut would trust the wrong answer.
+        settled = None
+        if _CURRENT.get("id") is not None and _CURRENT_CFG and src is not None:
+            name = getattr(getattr(src, "fn", None), "__name__", None)
+            if name:
+                settled = f"{name}\t{_sig_line(_CURRENT_CFG)}"
+        if settled is not None and settled in _COMPILE_BAD:
+            _COMPILE_T["known_bad"] += 1
+            raise RuntimeError("triton compile failed in the precompile pool; config skipped")
+        if settled is not None and settled in _COMPILE_OK:
+            _COMPILE_T["forkless"] += 1
+            _t_skip = time.monotonic()
+            try:
+                return _orig_compile(*args, **kwargs)  # warm on-disk cache hit
+            finally:
+                _COMPILE_T["forkless_s"] += time.monotonic() - _t_skip
         _COMPILE_T["calls"] += 1
         _t_fork = time.monotonic()
         pid = os.fork()
@@ -834,7 +899,17 @@ def install() -> None:
             # whole unit down. Outside a round, compile in-process instead.
             if _CURRENT.get("id") is None:
                 return _orig_compile(*args, **kwargs)
+            if settled is not None:
+                _mark_outcome(settled.partition("\t")[0],
+                              [(settled.partition("\t")[2], False)])
             raise RuntimeError("triton compile failed in isolated child; config skipped")
+        # The child surviving IS the proof the fast path needs. Recording it here (not only from
+        # the pool) is what makes a RESTART cheap: a unit whose `.compiled` predates the outcome
+        # tags, or whose round was skipped because every config was already settled, would
+        # otherwise fork all over again on every attempt.
+        if settled is not None:
+            _mark_outcome(settled.partition("\t")[0],
+                          [(settled.partition("\t")[2], True)])
         _t_parent = time.monotonic()
         try:
             return _orig_compile(*args, **kwargs)  # expected: ~/.triton/cache hit
