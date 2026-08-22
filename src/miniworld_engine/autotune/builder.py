@@ -1014,6 +1014,31 @@ def _run_one_driver(op: str) -> int:
     return 1
 
 
+def _report_unit(shard: str) -> int:
+    """Print everything a finished unit knows, then dump its shard. Returns ops dumped.
+
+    ONE reporter for both unit kinds. They had diverged: the ``--op`` path (which is what a sweep
+    actually runs, since build_all decomposes into OpUnits) never called ``probe_log_summary``, so
+    the per-axis timing breakdown was collected for 219k configs and printed for none of them; and
+    the ``--case`` path never called ``record_errors``, so a capture that failed silently stayed
+    silent there. Neither lost data -- the probes are on disk either way -- but each path was
+    missing a different half of the diagnostics, which is exactly the shape of bug that costs an
+    afternoon later.
+    """
+    from miniworld_engine.autotune import capture
+
+    print(capture.precompile_summary(), flush=True)
+    probe = capture.probe_log_summary(top=8)
+    if probe:
+        print(probe, flush=True)
+    print(capture.summary(), flush=True)
+    n = capture.dump_shard(shard)
+    errs = capture.record_errors()
+    if errs:
+        print(f"  [capture] recording failures: {errs}", flush=True)
+    return n
+
+
 def _child_main(argv: list[str] | None = None) -> int:
     """Entry point for ONE unit; the parent invokes this via -m."""
     import argparse
@@ -1075,12 +1100,7 @@ def _child_main(argv: list[str] | None = None) -> int:
         if n_done:
             print(f"  [resume] {n_done} probe(s) replayable", flush=True)
         ran = _run_one_driver(args.op)
-        print(capture.precompile_summary(), flush=True)
-        print(capture.summary(), flush=True)
-        n = capture.dump_shard(args.shard)
-        errs = capture.record_errors()
-        if errs:
-            print(f"  [capture] recording failures: {errs}", flush=True)
+        n = _report_unit(args.shard)
         print(f"unit ran={ran} ops={n}", flush=True)
         return 0 if ran else 1
 
@@ -1096,12 +1116,7 @@ def _child_main(argv: list[str] | None = None) -> int:
     ran = run_case(case, args.length, args.dims, train=(args.mode == "train"), p_drop=p_drop,
                    impl=args.impl, dtype=getattr(torch, args.dtype),
                    compute_dtype=getattr(torch, args.compute_dtype) if args.compute_dtype else None)
-    print(capture.precompile_summary(), flush=True)
-    probe = capture.probe_log_summary(top=8)
-    if probe:
-        print(probe, flush=True)
-    print(capture.summary(), flush=True)
-    n = capture.dump_shard(args.shard)
+    n = _report_unit(args.shard)
     print(f"unit ran={ran} ops={n}", flush=True)
     return 0 if ran else 1
 
