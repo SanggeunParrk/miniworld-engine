@@ -6,7 +6,7 @@ import torch
 
 from miniworld_engine.autotune.shape_key import both_key
 
-from .drivers import BF16, aligned_only, dev, driver_length, pair, ragged, rows2d, vec
+from .drivers import BF16, aligned_only, both_level_is_pair, dev, driver_length, pair, ragged, rows2d, vec
 
 # The pair row/feature extents the bench walks: `bench_kernel_layernorm` builds
 # x = (1, L, L, d_pair) and `bench_kernel_layernorm_bwd` / `bench_kernel_gemm_epil` build
@@ -29,7 +29,10 @@ _L = driver_length(128)
 # flatten to _PAIR_N**2 rows, so deriving _M any other way makes the constant disagree with the
 # tensor in ragged mode (16381 vs 15625) -- and _M is what the flat drivers in this file build.
 # Both values are ragged w.r.t. every tile width; the point is that there is only one M.
-_M = ragged(_L) ** 2   # == _PAIR_N ** 2, without depending on the order below
+_IS_PAIR = both_level_is_pair(_L)   # token side -> (1,L,L,D); atom side -> (1,A,D)
+# M is what the FLAT drivers in this file build, and it must equal what _act()
+# flattens to: L*L on the pair side, A on the atom side.
+_M = ragged(_L) ** 2 if both_level_is_pair(_L) else ragged(_L)
 _D = ragged(128)
 _PAIR_N = ragged(_L)
 
@@ -75,6 +78,21 @@ _D_CUDA_BWD = aligned_only(
 )
 
 
+
+def _act(d: int = None) -> torch.Tensor:
+    """The PRE-FLATTEN activation for a level=both kernel at the driven bucket.
+
+    Pair (1, L, L, D) on the token side, atom (1, A, D) on the atom side -- see
+    ``drivers.both_level_is_pair``. Building a pair at every bucket asks for M = L*L rows where
+    production hands over A: 67 million rows and 16 GiB at L=8192, which is what OOM'd 20 probes
+    and drove one into an int32 offset overflow. `length_of` reads shape[-2] either way, so both
+    layouts record the same shape_key.
+    """
+    d = _D if d is None else d
+    if _IS_PAIR:
+        return pair(n=_PAIR_N, d=d)
+    return torch.randn(1, _PAIR_N, d, device=dev(), dtype=BF16)
+
 def _ln_stats(x: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor]:
     """(mean, rstd) fp32 [M] for a (M, N) x -- how bench_kernel_layernorm_bwd makes them."""
     xf = x.float()
@@ -92,7 +110,7 @@ def _mmajor(m: int = _M, n: int = _D) -> torch.Tensor:
 def layernorm_fwd_saveact_triton() -> None:
     from .layernorm.triton.main import triton_layernorm
 
-    x = pair(n=_PAIR_N, d=_D)
+    x = _act()
     triton_layernorm(x, vec(_D), vec(_D), 1e-5)
 
 
@@ -102,7 +120,7 @@ def layernorm_bwd_atomic_triton() -> None:
     # The pair activation (1, L, L, D), NOT its (M, D) flattening: `_bwd_atomic_impl` reshapes
     # internally and reads `both_key(length_of(x.shape))` off the 4-D shape, so flattening here
     # would hand it M = L*L and clamp every L to the 8192 bucket.
-    x = pair(n=_PAIR_N, d=_D)
+    x = _act()
     mean, rstd = _ln_stats(x.reshape(-1, _D))  # [M] fp32, one row per (b, i, j)
     _bwd_atomic_impl(torch.randn_like(x), x, vec(_D), mean, rstd)
 
@@ -112,7 +130,7 @@ def layernorm_bwd_split_triton() -> None:
     # partial_dw.stride(0) as stride_part, with grid (g, cdiv(N, BLOCK_K)).
     from .layernorm.compile_native import _bwd_persistent_impl
 
-    x = pair(n=_PAIR_N, d=_D)  # pre-flatten, like layernorm_bwd_atomic_triton above
+    x = _act()  # pre-flatten, like layernorm_bwd_atomic_triton above
     mean, rstd = _ln_stats(x.reshape(-1, _D))
     _bwd_persistent_impl(torch.randn_like(x), x, vec(_D), mean, rstd)
 
@@ -156,7 +174,7 @@ def layer_norm_bwd_reduce_kernel() -> None:
 def layernorm_fwd_rowscale_triton() -> None:
     from .fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
 
-    x = pair(n=_PAIR_N, d=_D)
+    x = _act()
     mask = (torch.rand(*x.shape[:-1], device=dev()) > 0.1).to(BF16)  # (B, L, L), required
     fused_ln_mask(x, vec(_D), vec(_D), mask, 1e-5)
 
@@ -220,14 +238,14 @@ def layernorm_linear_fwd_triton() -> None:
     # `layernorm_linear_triton_fwd` flattens to (M, K) itself and reshapes the result back, so
     # the reshape this used to do here only destroyed L -- the same defect that was fixed in
     # modules/triangle_attention/module.py.
-    layernorm_linear_triton_fwd(pair(n=_PAIR_N, d=_D), vec(_D), vec(_D), w, None, 1e-5)
+    layernorm_linear_triton_fwd(_act(), vec(_D), vec(_D), w, None, 1e-5)
 
 
 def layernorm_linear_fwd_fp32_triton() -> None:
     from .layernorm_linear.triton.pair_bias import _fwd_op
 
     pw = torch.randn(_NH, _D, device=dev(), dtype=BF16)
-    _fwd_op(pair(n=_PAIR_N, d=_D), vec(_D), pw, 1e-5)  # pre-flatten: _fwd_op reads shape[-2]
+    _fwd_op(_act(), vec(_D), pw, 1e-5)  # pre-flatten: _fwd_op reads shape[-2]
 
 
 def layernorm_linear_bwd_fp32_triton() -> None:
@@ -236,7 +254,7 @@ def layernorm_linear_bwd_fp32_triton() -> None:
     # Both ops run here, so both have to record the same bucket: `_fwd_op` gets the pre-flatten
     # pair activation and reads L off it, `_bwd_op` only ever takes the (M, N) matrix and so takes
     # the key explicitly (its own `shape_key=None` fallback is `both_key(M)` -> 8192).
-    x = pair(n=_PAIR_N, d=_D)
+    x = _act()
     x2 = x.reshape(-1, _D).contiguous()
     lnw, pw = vec(_D), torch.randn(_NH, _D, device=dev(), dtype=BF16)
     out, mean, rstd = _fwd_op(x, lnw, pw, 1e-5)

@@ -72,6 +72,27 @@ _ENV_LEN = os.environ.get("MINIWORLD_DRIVER_LENGTH", "").strip()
 DRIVER_LENGTH: int | None = int(_ENV_LEN) if _ENV_LEN else None
 
 
+def both_level_is_pair(length: int) -> bool:
+    """For a ``level=both`` kernel, is this bucket the PAIR side or the linear side?
+
+    ``BOTH_SHAPES`` is the UNION of the token set (128..512) and the atom set (256..8192), so a
+    both-level kernel meets 512 and below as a pair activation (B, L, L, D) flattening to
+    M = L*L, and 1024 and above as an atom activation (B, A, D) flattening to M = A. A driver that
+    builds a pair at every bucket is therefore constructing shapes production never presents:
+    at L=8192 it asks for M = 67,108,864 rows -- 16 GiB at D=128 -- where the model hands over
+    8,192.
+
+    That single mistake accounts for every skipped probe in the shape sweep: 20 CUDA OOMs at
+    L=4096/8192 (on a 48 GB card, so no card in the fleet would survive them) and the one illegal
+    memory access, which lands exactly at L=8192 because M*D = 8.6e9 is the first bucket to pass
+    the int32 offset range. Promoting that kernel's offsets to int64 would have been the wrong fix:
+    it spends registers to reach a shape the model never asks for.
+    """
+    from miniworld_engine.autotune.shape_key import TOKEN_SHAPES  # noqa: PLC0415
+
+    return length <= TOKEN_SHAPES[-1]
+
+
 def driver_length(default: int) -> int:
     """The L this driver should build its activation at.
 
