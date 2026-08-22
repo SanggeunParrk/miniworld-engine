@@ -414,6 +414,31 @@ def _compile_jobs() -> int:
     return max(1, min(32, cores))
 
 
+#: (module, fn) -> JITFunction, memoized per worker process. See _resolve_jit.
+_JIT_CACHE: dict = {}
+
+
+def _resolve_jit(module_path: str, fn_name: str):  # noqa: ANN201
+    """The JITFunction behind ``module_path.fn_name``, imported at most once per process.
+
+    The module attribute is whatever the decorators left there -- for an autotuned kernel that is
+    an Autotuner (or a Heuristics) wrapping the JITFunction, not the JITFunction itself. ASTSource
+    needs the inner one; triton unwraps the same way in ``Autotuner.check_disk_cache``.
+    """
+    hit = _JIT_CACHE.get((module_path, fn_name))
+    if hit is not None:
+        return hit
+    import importlib  # noqa: PLC0415
+
+    from triton.runtime.jit import JITFunction  # noqa: PLC0415
+
+    fn = getattr(importlib.import_module(module_path), fn_name)
+    while not isinstance(fn, JITFunction):
+        fn = fn.fn
+    _JIT_CACHE[(module_path, fn_name)] = fn
+    return fn
+
+
 def _worker_compile(payload: tuple) -> bool:
     """Compile ONE config in a spawned worker. Must stay importable at module level (spawn).
 
@@ -425,6 +450,19 @@ def _worker_compile(payload: tuple) -> bool:
     import os  # noqa: PLC0415
     import signal  # noqa: PLC0415
     import time  # noqa: PLC0415
+
+    # Resolve (i.e. IMPORT) the kernel module in the WORKER, before the fork. It used to be
+    # imported inside the child, which threw the import away on every ``os._exit`` -- so the same
+    # module was imported once PER CONFIG. Measured on layernorm_fwd_saveact_triton against a warm
+    # ~/.triton/cache: 3082 ms per config as-shipped, of which 2589 ms was that import and 36 ms
+    # was the compile. The disk cache was being hit the whole time; the import was hiding it. The
+    # fork now inherits the already-imported module, and the child still does the compile, so the
+    # wall-clock kill guard below is unchanged. Failure falls back to resolving in the child,
+    # which is exactly the old behaviour (child exits 3 -> config counted as failed).
+    try:
+        _prefetched = _resolve_jit(module_path, fn_name)
+    except BaseException:  # noqa: BLE001
+        _prefetched = None
 
     # Same wall-clock budget the serial path enforces, for the same reason -- and enforced the same
     # way, by running the compile in a child and SIGKILLing it on overrun (make_llir and ptxas both
@@ -438,19 +476,9 @@ def _worker_compile(payload: tuple) -> bool:
     pid = os.fork()
     if pid == 0:
         try:
-            import importlib  # noqa: PLC0415
-
             from triton.compiler.compiler import ASTSource, compile  # noqa: PLC0415
 
-            from triton.runtime.jit import JITFunction  # noqa: PLC0415
-
-            fn = getattr(importlib.import_module(module_path), fn_name)
-            # The module attribute is whatever the decorators left there -- for an autotuned kernel
-            # that is an Autotuner (or a Heuristics) wrapping the JITFunction, not the JITFunction
-            # itself. ASTSource needs the inner one; triton unwraps the same way in
-            # Autotuner.check_disk_cache.
-            while not isinstance(fn, JITFunction):
-                fn = fn.fn
+            fn = _prefetched if _prefetched is not None else _resolve_jit(module_path, fn_name)
             src = ASTSource(fn=fn, signature=signature, attrs=attrs)
             src.constants = constants   # already keyed by arg-index tuple, as ASTSource stores it
             compile(src, target=target, options=options)
@@ -479,7 +507,11 @@ def _worker_compile(payload: tuple) -> bool:
             except OSError:
                 pass
             return False
-        time.sleep(0.05)
+        # Adaptive backoff, for the same reason _fork_compile uses one: with the module import
+        # hoisted out of the child, most compiles here are on-disk cache hits that finish in tens
+        # of milliseconds, and a flat 50 ms tick charges the full tick to every one of them.
+        waited = time.monotonic() - (deadline - _COMPILE_BUDGET_S)
+        time.sleep(0.001 if waited < 0.05 else 0.01 if waited < 0.5 else 0.05)
 
 
 def _precompile_round(src, target, options, configs) -> None:
