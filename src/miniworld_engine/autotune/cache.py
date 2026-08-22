@@ -121,6 +121,73 @@ def config_space_hash(configs) -> str:
     return hashlib.sha1(repr(sigs).encode()).hexdigest()[:12]
 
 
+_env_identity_cache: str | None = None
+
+
+def env_identity() -> str:
+    """12-hex of everything OUTSIDE the kernel that invalidates a measurement.
+
+    A tuned config is a claim about a compiler and a device, not just about a grid. Triton picks
+    different schedules across releases and ptxas emits different code across toolkits, so a cache
+    built on triton 3.3 / cuda 12.4 says nothing about triton 3.4 -- yet the grid hash is identical
+    across both, and without this the stale entries would be served as if they were measured here.
+    This is the ``triton_X/cuda_Y/gpu_Z`` path segment triton-dejavu keys its storage on, flattened
+    into a field because our layout already keys the FILE on the GPU."""
+    global _env_identity_cache
+    if _env_identity_cache is not None:
+        return _env_identity_cache
+    parts = []
+    try:
+        import triton  # noqa: PLC0415
+        parts.append(f"triton={getattr(triton, '__version__', '?')}")
+    except Exception:  # noqa: BLE001 -- identity degrades to "unknown", never raises
+        parts.append("triton=?")
+    parts.append(f"torch={torch.__version__}")
+    parts.append(f"cuda={getattr(torch.version, 'cuda', None)}")
+    try:
+        # ptxas is what actually turns the IR into SASS; a toolkit bump changes the code for an
+        # unchanged grid. torch.version.cuda is the build-time toolkit and can differ from it.
+        import subprocess  # noqa: PLC0415
+
+        from triton.backends.nvidia.driver import _path_to_binary  # noqa: PLC0415
+        ptxas, _ = _path_to_binary("ptxas")
+        out = subprocess.run([ptxas, "--version"], capture_output=True, text=True,  # noqa: S603
+                             timeout=10, check=False).stdout
+        rel = [ln for ln in out.splitlines() if "release" in ln]
+        parts.append(f"ptxas={rel[0].strip() if rel else '?'}")
+    except Exception:  # noqa: BLE001
+        parts.append("ptxas=?")
+    _env_identity_cache = hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
+    return _env_identity_cache
+
+
+def op_identity(autotuner) -> str:
+    """12-hex of the kernel SOURCE and the autotuner's key list, for one autotuner.
+
+    Two things change what a measurement means without touching the config grid. Editing the
+    kernel body makes the winning tile a claim about code that no longer exists; editing
+    ``key=[...]`` re-partitions the entries, so a stored bucket answers a question the runtime is
+    no longer asking. dejavu hashes both (the JIT function, line numbers excluded, and the key
+    list); we had neither, so both edits degraded to silently serving the wrong config."""
+    parts = []
+    fn = getattr(autotuner, "fn", None)
+    # An Autotuner wraps a JITFunction, which may itself wrap a Heuristics/Autotuner. Walk to the
+    # JITFunction that actually owns the source.
+    for _ in range(8):
+        if fn is None or hasattr(fn, "src"):
+            break
+        fn = getattr(fn, "fn", None)
+    src = getattr(fn, "src", None)
+    if isinstance(src, str):
+        # Line numbers are not semantics: moving a kernel down a file must not invalidate it.
+        body = "\n".join(ln.rstrip() for ln in src.splitlines() if ln.strip())
+        parts.append(f"src={hashlib.sha1(body.encode()).hexdigest()}")
+    else:
+        parts.append("src=?")
+    parts.append(f"keys={list(getattr(autotuner, 'keys', ()) or ())}")
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
+
+
 # --------------------------------------------------------------------------- #
 # load / store
 # --------------------------------------------------------------------------- #
@@ -145,7 +212,7 @@ def _load(op: str, gk: str) -> dict | None:
 
 def store_ranked_configs(
     op: str, gk: str, dtype: str, bucket: str, ranked: list[tuple[object, float]],
-    config_space_h: str, *, top_k: int = 5,
+    config_space_h: str, *, top_k: int = 5, op_id: str = "", env_id: str = "",
 ) -> Path:
     """Persist the top-K (config, ms) for (op, gpu, dtype, bucket) to the in-repo cache.
 
@@ -160,7 +227,10 @@ def store_ranked_configs(
             data = json.loads(fp.read_text())
         except Exception:  # noqa: BLE001
             data = None
-    if data is None or data.get("config_space_hash") != config_space_h:
+    env_id = env_id or env_identity()
+    if (data is None or data.get("config_space_hash") != config_space_h
+            or data.get("env_identity") != env_id
+            or (op_id and data.get("op_identity") not in (None, op_id))):
         import datetime as _dt  # noqa: PLC0415 -- stamp only when writing
         try:
             import triton as _triton  # noqa: PLC0415
@@ -169,10 +239,13 @@ def store_ranked_configs(
             triton_ver = "?"
         data = {
             "schema": SCHEMA, "gpu": gk, "op": op, "config_space_hash": config_space_h,
+            "env_identity": env_id, "op_identity": op_id,
             "provenance": {"triton": triton_ver, "torch": torch.__version__,
                            "built_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")},
             "entries": {},
         }
+    if op_id:
+        data["op_identity"] = op_id
     data["entries"][f"{dtype}|{bucket}"] = [config_to_dict(c, ms) for c, ms in ranked[:top_k]]
     tmp = fp.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
@@ -364,6 +437,15 @@ def _cached_subset(autotuner, configs, nargs, meta):
         return None
     if data.get("config_space_hash") != config_space_hash(configs):
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
+        return None
+    if data.get("env_identity") != env_identity():
+        _warn_once(op, gk, dtype,
+                   "tuned autotune cache is STALE (triton/cuda/ptxas changed since it was built)")
+        return None
+    stored_op_id = data.get("op_identity")
+    if stored_op_id and stored_op_id != op_identity(autotuner):
+        _warn_once(op, gk, dtype,
+                   "tuned autotune cache is STALE (kernel source or autotune key list changed)")
         return None
     entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
     if not entry:

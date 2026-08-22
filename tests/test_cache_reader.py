@@ -49,7 +49,8 @@ def _entry_for(at, keep, tmp_path, monkeypatch, *, op="op_probe", csh=None):
     h = cache.config_space_hash(at.configs) if csh is None else csh
     dtype = cache.dtype_of_args(at.nargs)
     bucket = cache.bucket_of_autotuner(at, at.nargs, {})
-    cache.store_ranked_configs(op, cache.gpu_key(), dtype, bucket, ranked, h)
+    cache.store_ranked_configs(op, cache.gpu_key(), dtype, bucket, ranked, h,
+                               op_id=cache.op_identity(at))
     monkeypatch.setattr(cache, "op_of", lambda _c: op, raising=False)
     import miniworld_engine.autotune.configs as cfgmod
     monkeypatch.setattr(cfgmod, "op_of", lambda _c: op)
@@ -155,3 +156,85 @@ def test_installing_the_reader_does_not_stop_capture_recording(monkeypatch):
     assert not capture.record_errors(), capture.record_errors()
     assert capture._CAPTURE["op_probe"]["entries"], "nothing was recorded"
     assert list(capture._CAPTURE["op_probe"]["entries"]) == [("bfloat16", "shape_key=256")]
+
+
+# --------------------------------------------------------------------------- #
+# identity: what must invalidate an entry BESIDES the config grid
+#
+# The grid hash alone answered "are these the same candidate configs?". It never answered "was
+# this measured by the same compiler, on the same device, against the same kernel?". Three edits
+# left the hash untouched and the entry silently wrong: bumping triton/ptxas, editing the kernel
+# body, and editing the autotuner's ``key=[...]`` (which re-partitions the buckets, so a stored
+# bucket answers a question the runtime no longer asks). triton-dejavu keys its storage path on
+# all of them; these tests pin that we do too.
+# --------------------------------------------------------------------------- #
+
+class _JitFn:
+    def __init__(self, src):
+        self.src = src
+
+
+class _AutotunerWithFn(_Autotuner):
+    def __init__(self, configs, keys, nargs, src):
+        super().__init__(configs, keys, nargs)
+        self.fn = _JitFn(src)
+
+
+_SRC = "@triton.jit\ndef k(x, BLOCK_M1: tl.constexpr):\n    tl.store(x, 1)\n"
+
+
+def _at(src=_SRC, keys=("shape_key",)):
+    return _AutotunerWithFn(GRID, list(keys),
+                            {"x": torch.empty(2, 2, dtype=torch.bfloat16), "shape_key": 256}, src)
+
+
+def test_a_cache_built_by_a_different_toolchain_is_not_served(tmp_path, monkeypatch):
+    """A tuned config is a claim about a compiler, not just about a grid."""
+    at = _at()
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch)
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is not None, "sanity: it reads back"
+    cache._load_cache.clear()
+    monkeypatch.setattr(cache, "env_identity", lambda: "triton-4-0-0")
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is None
+
+
+def test_an_edited_kernel_body_invalidates_the_entry(tmp_path, monkeypatch):
+    at = _at()
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch)
+    cache._load_cache.clear()
+    edited = _at(src=_SRC.replace("tl.store(x, 1)", "tl.store(x, 2)"))
+    assert cache._cached_subset(edited, edited.configs, edited.nargs, {}) is None
+
+
+def test_an_edited_autotune_key_list_invalidates_the_entry(tmp_path, monkeypatch):
+    """``key=[...]`` decides how entries are partitioned; changing it changes what a bucket means."""
+    at = _at()
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch)
+    cache._load_cache.clear()
+    rekeyed = _at(keys=("shape_key", "dtype"))
+    assert cache._cached_subset(rekeyed, rekeyed.configs, rekeyed.nargs, {}) is None
+
+
+def test_reformatting_a_kernel_does_not_invalidate_it(tmp_path, monkeypatch):
+    """Blank lines and trailing whitespace are not semantics. dejavu hashes the JIT function with
+    line numbers excluded for the same reason: a reformat must not throw away a measured cache."""
+    at = _at()
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch)
+    cache._load_cache.clear()
+    moved = _at(src="\n\n" + _SRC.replace("\n", "   \n") + "\n\n")
+    assert cache.op_identity(moved) == cache.op_identity(at), "whitespace must not count"
+    assert cache._cached_subset(moved, moved.configs, moved.nargs, {}) is not None
+
+
+def test_an_entry_written_without_an_op_identity_still_reads(tmp_path, monkeypatch):
+    """Caches committed before this field exists must degrade to the old behaviour, not to a
+    permanent miss that silently re-benches 205k configs inside a production forward."""
+    at = _at()
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch)
+    import json
+    fp = next(tmp_path.rglob("*.json"))
+    data = json.loads(fp.read_text())
+    data.pop("op_identity")
+    fp.write_text(json.dumps(data))
+    cache._load_cache.clear()
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is not None

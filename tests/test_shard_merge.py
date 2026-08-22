@@ -48,7 +48,7 @@ def _write_shards(tmp_path, slices):
 def test_merged_hash_covers_the_union_of_every_shard(tmp_path, monkeypatch):
     seen = {}
     monkeypatch.setattr(capture, "store_ranked_configs",
-                        lambda op, gk, d, b, ranked, csh, top_k=5: seen.update(csh=csh, n=len(ranked)))
+                        lambda op, gk, d, b, ranked, csh, top_k=5, **kw: seen.update(csh=csh, n=len(ranked)))
     paths = _write_shards(tmp_path, [FULL[:4], FULL[4:]])
 
     capture.merge_shards(paths, gpu="TEST")
@@ -61,7 +61,7 @@ def test_merged_hash_covers_the_union_of_every_shard(tmp_path, monkeypatch):
 def test_merged_hash_does_not_depend_on_shard_order(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(capture, "store_ranked_configs",
-                        lambda op, gk, d, b, ranked, csh, top_k=5: seen.append(csh))
+                        lambda op, gk, d, b, ranked, csh, top_k=5, **kw: seen.append(csh))
     paths = _write_shards(tmp_path, [FULL[:4], FULL[4:]])
 
     capture.merge_shards(paths, gpu="TEST")
@@ -74,7 +74,7 @@ def test_shape_sharding_is_unaffected(tmp_path, monkeypatch):
     """The pre-existing style -- every shard carries the identical full grid -- must be unchanged."""
     seen = {}
     monkeypatch.setattr(capture, "store_ranked_configs",
-                        lambda op, gk, d, b, ranked, csh, top_k=5: seen.update(csh=csh))
+                        lambda op, gk, d, b, ranked, csh, top_k=5, **kw: seen.update(csh=csh))
     paths = _write_shards(tmp_path, [FULL, FULL])
 
     capture.merge_shards(paths, gpu="TEST")

@@ -28,6 +28,7 @@ from pathlib import Path
 from .cache import (
     as_cfg_dict,
     config_space_hash,
+    op_identity,
     config_to_dict,
     bucket_of_autotuner as _bucket_of,
     dtype_of_args as _dtype_of,
@@ -126,8 +127,15 @@ _COMPILE_T: dict = {"calls": 0, "fork_s": 0.0, "wait_s": 0.0, "parent_s": 0.0, "
 #: whose kernels ran 2.2s of device time; these are the three things a first launch does that a
 #: second one does not -- load the cubin into the context, build the launcher stub, and run the
 #: autotuner's pre_hook (which zeroes reset_to_zero tensors).
-_LAUNCH_T: dict = {"init_handles": 0, "init_s": 0.0, "launcher_s": 0.0,
-                   "prehook_calls": 0, "prehook_s": 0.0, "run_calls": 0, "run_s": 0.0}
+_LAUNCH_T: dict = {"init_handles": 0, "init_s": 0.0,
+                   "prehook_calls": 0, "prehook_s": 0.0, "run_calls": 0, "run_s": 0.0,
+                   # ``JITFunction.compile`` on the parent's FIRST launch of each config. The
+                   # precompile round runs in forked children, so the parent's kernel_cache is
+                   # empty and it re-enters compile() once per config. That is a disk-cache HIT
+                   # (no LLVM), but a hit still deserialises the metadata json + every IR level
+                   # (.ttir/.ttgir/.llir/.ptx/.cubin) -- ~6 reads per config off the cache dir.
+                   # ckinit_s is exactly those reads.
+                   "ckinit_calls": 0, "ckinit_s": 0.0}
 
 #: (device_ms, config kwargs) for every probed config. The budget knows a config is slow; it does
 #: not know WHY, and "drop the slow ones" is only actionable once the slow ones share an attribute.
@@ -280,6 +288,22 @@ def _install_launch_probes() -> None:
 
     JITFunction.run = run
 
+    # NOTE: ``JITFunction.compile`` is an INSTANCE attribute (``self.compile = compile`` in
+    # JITFunction.__init__), so it cannot be hooked on the class. CompiledKernel.__init__ is the
+    # class-level chokepoint every compile path goes through, and it is the part that deserialises
+    # the metadata json + every IR level (.ttir/.ttgir/.llir/.ptx/.cubin) off the cache dir.
+    orig_ckinit = CompiledKernel.__init__
+
+    def ckinit(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+        t = time.monotonic()
+        try:
+            return orig_ckinit(self, *a, **k)
+        finally:
+            _LAUNCH_T["ckinit_calls"] += 1
+            _LAUNCH_T["ckinit_s"] += time.monotonic() - t
+
+    CompiledKernel.__init__ = ckinit
+
     orig_pre = Autotuner.pre_hook if hasattr(Autotuner, "pre_hook") else None
     if callable(orig_pre):
         def pre_hook(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -392,6 +416,7 @@ def precompile_summary() -> str:
     lt = _LAUNCH_T
     if lt["run_calls"]:
         budget += (f"\n  [first-launch] fn.run {lt['run_calls']} calls {lt['run_s']:.0f}s"
+                   f" | CompiledKernel.__init__ {lt['ckinit_calls']} x -> {lt['ckinit_s']:.0f}s"
                    f" | init_handles {lt['init_handles']} x -> {lt['init_s']:.0f}s"
                    f" | pre_hook {lt['prehook_calls']} x -> {lt['prehook_s']:.0f}s")
     return (f"  [precompile] jobs={_compile_jobs()} rounds={p['rounds']} configs={p['configs']} "
@@ -716,9 +741,12 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
     # an empty shard. Read and write share these two functions, which is the point.
     dtype = _dtype_of(nargs)
     bucket = _bucket_of(autotuner, nargs, meta)
-    slot = _CAPTURE.setdefault(op, {"grid": None, "entries": {}})
+    slot = _CAPTURE.setdefault(op, {"grid": None, "op_id": "", "entries": {}})
     if slot["grid"] is None:
         slot["grid"] = list(autotuner.configs)
+        # The autotuner is the ONLY place the kernel source and the key list are both reachable;
+        # the writer runs long after it is gone, so snapshot the identity here.
+        slot["op_id"] = op_identity(autotuner)
     ent = slot["entries"].setdefault((dtype, bucket), {})
     sig = _sig(config)
     prev = ent.get(sig)
@@ -973,7 +1001,8 @@ def flush(top_k: int = 5, gpu: str | None = None) -> list:
         csh = config_space_hash(grid)
         for (dtype, bucket), ent in sorted(slot["entries"].items()):
             ranked = _rank(ent.values())
-            fp = store_ranked_configs(op, gk, dtype, bucket, ranked, csh, top_k=top_k)
+            fp = store_ranked_configs(op, gk, dtype, bucket, ranked, csh, top_k=top_k,
+                                      op_id=slot.get("op_id", ""))
             written.append((op, dtype, bucket, len(ranked), str(fp)))
     return written
 
@@ -989,7 +1018,8 @@ def dump_shard(path: str) -> int:
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]
                    for (d, b), ent in slot["entries"].items()}
-        out[op] = {"grid": [config_to_dict(c) for c in grid], "entries": entries}
+        out[op] = {"grid": [config_to_dict(c) for c in grid], "entries": entries,
+                   "op_id": slot.get("op_id", "")}
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out))
@@ -1013,7 +1043,8 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
         for op, slot in d.items():
             if only_ops is not None and op not in only_ops:
                 continue
-            a = agg.setdefault(op, {"grid": {}, "entries": {}})
+            a = agg.setdefault(op, {"grid": {}, "entries": {}, "op_id": ""})
+            a["op_id"] = a["op_id"] or (slot.get("op_id") or "")
             # UNION the grids, do not take the first shard's. Shards that split by SHAPE all carry
             # the same full grid, so taking one was harmless. Shards that split the CONFIG SET
             # carry DIFFERENT slices, and then the first shard's slice hashes to something no later
@@ -1041,7 +1072,8 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
         for bk, ent in sorted(a["entries"].items()):
             dtype, bucket = bk.split("|", 1)
             ranked = _rank(ent.values())
-            fp = store_ranked_configs(op, gk, dtype, bucket, list(ranked), csh, top_k=top_k)
+            fp = store_ranked_configs(op, gk, dtype, bucket, list(ranked), csh, top_k=top_k,
+                                      op_id=a.get("op_id", ""))
             written.append((op, bk, len(ranked), str(fp)))
     return written
 
