@@ -28,7 +28,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import length_of, token_key
+from miniworld_engine.autotune.shape_key import both_key, length_of, token_key
 
 
 
@@ -257,8 +257,14 @@ class _SigmoidGate(torch.autograd.Function):
         a = torch.empty_like(gate)
         n = gate.numel()
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+        # both_key, NOT _key_of. `_sigmul_fwd` belongs to gated_projection and is declared
+        # level=both, while `_key_of` is token_key -- whose top bucket is 512. Keying a
+        # level=both kernel through it makes every L >= 512 record 512, so its 1024..8192
+        # buckets are unreachable AND the same kernel ends up in two bucket spaces, since
+        # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
+        # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
         _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n,
-                          shape_key=_key_of(gate.shape))
+                          shape_key=both_key(length_of(gate.shape)))
         ctx.save_for_backward(gate, out)
         return a
 
@@ -270,8 +276,9 @@ class _SigmoidGate(torch.autograd.Function):
         do = torch.empty_like(out)
         n = gate.numel()
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+        # both_key, NOT _key_of -- see the note on _sigmul_fwd above.
         _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n,
-                          shape_key=_key_of(gate.shape))
+                          shape_key=both_key(length_of(gate.shape)))
         return dg, do
 
 
