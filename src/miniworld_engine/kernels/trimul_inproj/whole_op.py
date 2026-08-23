@@ -199,15 +199,17 @@ def triangle_multiplicative_update(
     # of them unguarded -- calling this without one raised `AttributeError: 'NoneType' object has
     # no attribute 'shape'` from inside the unpacking. They are not optional; the defaults exist
     # so the argument order can stay keyword-friendly. Say which one is missing instead.
-    required = {
-        "p_in_weight": p_in_weight, "g_in_weight": g_in_weight,
-        "norm_out_weight": norm_out_weight, "norm_out_bias": norm_out_bias,
-        "p_out_weight": p_out_weight, "g_out_weight": g_out_weight,
-    }
-    absent = [k for k, v in required.items() if v is None]
-    if absent:
-        msg = (f"triangle_multiplicative_update requires {', '.join(absent)}; they default to None only to keep "
-               f"the argument order keyword-friendly.")
+    # Written as an explicit `or` chain rather than a comprehension over a dict so a type checker
+    # narrows all six to Tensor past this point -- a comprehension proves nothing about the names.
+    if (p_in_weight is None or g_in_weight is None or norm_out_weight is None
+            or norm_out_bias is None or p_out_weight is None or g_out_weight is None):
+        absent = [k for k, v in (("p_in_weight", p_in_weight), ("g_in_weight", g_in_weight),
+                                 ("norm_out_weight", norm_out_weight),
+                                 ("norm_out_bias", norm_out_bias),
+                                 ("p_out_weight", p_out_weight), ("g_out_weight", g_out_weight))
+                  if v is None]
+        msg = (f"triangle_multiplicative_update requires {', '.join(absent)}; they default to "
+               f"None only to keep the argument order keyword-friendly.")
         raise TypeError(msg)
 
     # Unstack the packed cuequiv in-projection weights into the four (d_hidden, d_pair)

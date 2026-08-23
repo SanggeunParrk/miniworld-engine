@@ -45,7 +45,13 @@ def triangle_attention(
     """
     from .triton.main import triton_triangle_attention_pair_bias
 
-    use_self_attention = to_query_weight is not None
+    # Both weights, not just the query: the branch below uses to_key_weight too, so deriving the
+    # flag from to_query_weight alone let `to_query_weight=W, to_key_weight=None` reach
+    # F.linear(x, None). Testing the pair also narrows both to Tensor for a checker.
+    use_self_attention = to_query_weight is not None and to_key_weight is not None
+    if (to_query_weight is None) != (to_key_weight is None):
+        msg = "to_query_weight and to_key_weight must be given together (self-attention) or both omitted"
+        raise TypeError(msg)
     use_qk_norm = norm_query_weight is not None
 
     if not starting:

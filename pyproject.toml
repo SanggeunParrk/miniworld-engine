@@ -188,6 +188,13 @@ exclude = [
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
   "third_party",
+  # Vendored kernel bodies -- the same set ruff excludes with `= ["ALL"]`: faithful copies from
+  # team-gm branches and FlashAttentionBias, "not linted, exactly as the originals are not held
+  # to this repo's standards". Holding them to a type checker but not a linter was an
+  # inconsistency, not a decision.
+  "src/miniworld_engine/kernels/**/triton/**",
+  "src/miniworld_engine/kernels/**/cute/**",
+  "src/miniworld_engine/kernels/**/cuda/**",
 ]
 
 [tool.ty.rules]
