@@ -9,8 +9,9 @@ used to carry the name are gone.
 
 Usage (on the target GPU, with the full grid unlocked so every config is benched):
 
-    MINIWORLD_RUN_AUTOTUNE=1
+    from miniworld_engine import settings
     from miniworld_engine.autotune import capture
+    settings.configure(run_autotune=True)   # was MINIWORLD_RUN_AUTOTUNE=1
     capture.install()
     ... run each wired module fwd+bwd across representative shapes ...
     capture.flush(top_k=5)     # writes <cache-root>/autotune/<op>/<gpu>.json for every op seen

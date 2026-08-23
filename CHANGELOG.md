@@ -31,10 +31,11 @@ The public surface is enforced by `tests/test_public_api.py`.
   GPU-gated, asserting the fused path is actually engaged (no silent
   dtype-degrade). Promotes the benchmark cosine checks into an enforced
   correctness gate.
-- CI (`.github/workflows/ci.yml`): ruff + pyright + CPU contract/guard tests
-  on every push/PR (nested cutlass submodule skipped, package installed
-  `--no-deps`). GPU numerical suite runs via `pixi run test-gpu` on an
-  allocated node.
+- CI (`.github/workflows/ci.yml`): ruff + ty + the whole CPU suite on every
+  push/PR (nested cutlass submodule skipped; CPU torch wheel installed so the
+  type gate can see the stubs it is checking against). `ty`, not pyright, which
+  cannot parse jaxtyping shape strings; the step gates, with no `|| true`. GPU
+  numerical suite runs via `pixi run test-gpu` on an allocated node.
 
 ### Changed
 - **An autotune cache miss no longer sweeps the full grid.** Triton kernels now

@@ -14,8 +14,10 @@ points share one cache format and one storage layer:
   kernel's own ``default_config`` on a miss).
 
 Both warn ONCE on a miss (unknown GPU, unseen shape, or a stale cache — detected via
-``config_space_hash``) and fall back to the full grid / default. ``MINIWORLD_RUN_AUTOTUNE=1``
-ignores the cache (full re-tune / no pin).
+``config_space_hash``). A triton miss falls back to a BOUNDED heuristic subset
+(``settings.autotune_miss_cap``, 24 by default), not to the 205,266-config grid; a cute miss
+falls back to the kernel's ``default_config``. ``settings.configure(run_autotune=True)`` ignores
+the cache and lifts the cap (full re-tune / no pin).
 
 INVARIANT: config choice is PERFORMANCE-ONLY — every candidate config computes the same math —
 so a missing / stale / wrong cache can only ever be slower, never incorrect.

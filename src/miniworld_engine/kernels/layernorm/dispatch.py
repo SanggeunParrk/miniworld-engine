@@ -15,10 +15,13 @@ The calibrated choices persist to the in-repo ``autotune/data/ln_bwd_dispatch/``
 (committed to git, shared across machines) — never to ``~/.cache`` or an env-var path,
 so a stale per-user cache can never shadow the repo's committed choices.
 
-Controls (env):
-  MINIWORLD_LN_AUTOTUNE = auto (default) | off | force
+Controls (``miniworld_engine.settings``; these were MINIWORLD_LN_AUTOTUNE / MINIWORLD_LN_BWD
+until settings.py replaced every MINIWORLD_* switch with a field):
+  layernorm_dispatch = "auto" (default) | "off" | "force"
       off   -> never calibrate, always static heuristic
       force -> calibrate even on known archs (H100), ignoring the static fast-path
+  layernorm_bwd_path = "persistent" | "partial" | "atomic" | "cuda" | None
+      a hard pin that bypasses both the cache and the heuristic
 """
 
 from __future__ import annotations

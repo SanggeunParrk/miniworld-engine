@@ -120,11 +120,13 @@ on H100, so on other GPUs we **don't guess — we measure once and cache** it
   stale/corrupt cache at worst picks a slower valid path, and any error falls back
   to the static heuristic.
 
-Controls (env):
+Controls (`miniworld_engine.settings`, via `settings.configure(...)`) — these were the
+`MINIWORLD_LN_AUTOTUNE` / `MINIWORLD_LN_BWD` environment variables until settings.py replaced
+every `MINIWORLD_*` switch with a field; nothing reads the variables now:
 
-- `MINIWORLD_LN_AUTOTUNE=auto` (default) `| off | force` — `off` always uses the
+- `layernorm_dispatch="auto"` (default) `| "off" | "force"` — `off` always uses the
   static heuristic; `force` calibrates even on H100.
-- `MINIWORLD_LN_BWD=persistent|partial|atomic` — hard override, bypasses cache.
+- `layernorm_bwd_path="persistent"|"partial"|"atomic"|"cuda"` — hard override, bypasses cache.
 
 The calibrated path is cached in-repo at
 `src/miniworld_engine/autotune/data/ln_bwd_dispatch/<gpu_key>.json` (committed to git);

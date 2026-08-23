@@ -43,9 +43,9 @@ path is correct and self-tuning on Ampere / Ada / Hopper / future archs; only th
 
 `_resolve_bwd_path(m, n, …)` decides per backward call:
 
-1. **Env override** `MINIWORLD_LN_BWD=persistent|partial|atomic` → use it (debug /
-   manual pin), bypassing everything below.
-2. **`MINIWORLD_LN_AUTOTUNE=off`** → static H100 heuristic, no measuring.
+1. **Explicit pin** `settings.layernorm_bwd_path = "persistent"|"partial"|"atomic"|"cuda"`
+   → use it (debug / manual pin), bypassing everything below.
+2. **`settings.layernorm_dispatch = "off"`** → static H100 heuristic, no measuring.
 3. **H100 (sm_90)** and mode ≠ `force` → static heuristic directly (already
    measured; calibration on H100 reproduces it exactly).
 4. **Cache hit** for `(d, M-bucket)` on this GPU → use the cached path.
@@ -102,12 +102,16 @@ numerics. A stale or corrupt cache at worst picks a slower path; read, parse, or
 timing errors fall back to static heuristics. Calibration is skipped during
 CUDA-graph capture.
 
-## Controls (env)
+## Controls (`miniworld_engine.settings`)
 
-| var | values | effect |
+Set with `settings.configure(field=value)`; `settings.reset()` puts them back. These used to be
+`MINIWORLD_LN_AUTOTUNE` / `MINIWORLD_LN_BWD` environment variables — settings.py replaced every
+`MINIWORLD_*` switch with a field, and nothing reads the variables any more.
+
+| field | values | effect |
 |---|---|---|
-| `MINIWORLD_LN_AUTOTUNE` | `auto` (default) / `off` / `force` | `off`: static only; `force`: calibrate even on H100 |
-| `MINIWORLD_LN_BWD` | `persistent` / `partial` / `atomic` | hard override, bypasses cache + heuristic |
+| `layernorm_dispatch` | `"auto"` (default) / `"off"` / `"force"` | `off`: static only; `force`: calibrate even on H100 |
+| `layernorm_bwd_path` | `"persistent"` / `"partial"` / `"atomic"` / `"cuda"` / `None` | hard override, bypasses cache + heuristic |
 
 ## Using it on a new GPU
 
@@ -203,14 +207,21 @@ module forward/backward, keyed by the SAME `(op, dtype, bucket)` the runtime pru
 module run populates the caches of every autotune kernel it fires. Drive it through the existing
 bench harness:
 
-    MINIWORLD_RUN_AUTOTUNE=1 MINIWORLD_AUTOTUNE_CAPTURE=1 \
-      python benchmarks/runners/bench.py kernel=<module> implementations='[miniworld]' \
+    from miniworld_engine import settings
+    settings.configure(run_autotune=True, capture=True)
+
+then run the bench harness in the same process:
+
+    python benchmarks/runners/bench.py kernel=<module> implementations='[miniworld]' \
       compile=false cudagraph=manual mode=training sweep_axis=seq_len ...
 
-`RUN_AUTOTUNE=1` unlocks the full grid (no cached narrowing) so every config is benched;
-`AUTOTUNE_CAPTURE=1` installs the capture and flushes top-5 per `(op,dtype,bucket)` at the end.
-`submits/run_autotune_capture_a100.sbatch` runs this across all module targets + modes + sweeps.
+`run_autotune=True` unlocks the full grid (no cached narrowing) so every config is benched;
+`capture=True` installs the capture and flushes top-5 per `(op,dtype,bucket)` at the end.
 Validated against the hand builder: capture reproduces its top-1 selections (near-ties aside).
+
+In practice you do not drive this by hand: `miniworld-engine build all` at the top of this
+section runs the whole matrix through exactly this capture, and that is what the shipped caches
+were built with. Reach for the recipe above only to capture ONE module's kernels.
 
 **2. Explicit builder (per-kernel, for the pilot kernels).**
 
@@ -220,9 +231,9 @@ Its core `tune_bucket(op, gk, dtype, bucket, candidates, run_ms, csh)` is backen
 benches each candidate via a `run_ms(cfg) -> ms` closure and stores the top-K. Triton builders
 point `run_ms` at `do_bench(kernel.fn[grid])`.
 
-Coverage: all live Triton kernels are wired (32 op-tags across triangle_attention,
-augmented_attention, adaln, conditioned_transition, bias_only, layernorm_linear, tm1/tm2,
-transition) and populated on A100 by the capture builder.
+Coverage: every live Triton kernel is wired — 91 ops in registry.csv, 922 declared
+`(op, dtype, bucket)` units. `miniworld-engine audit` is what reports how many of them the
+shipped cache actually holds on the card you are on; do not infer it from this paragraph.
 
 ## CuTe / CUDA autotune (sm90+)
 
@@ -255,15 +266,27 @@ The cache format already stores cute configs (cluster tuples serialize to JSON l
 `as_cfg_dict` normalizes triton.Config and plain dicts uniformly. Because config choice is
 performance-only, an un-wired cute kernel simply keeps its default and loses nothing.
 
-## Controls (env)
+## Controls (`miniworld_engine.settings`)
 
-| var | values | effect |
+| field | values | effect |
 |---|---|---|
-| `MINIWORLD_RUN_AUTOTUNE` | `0` (default) / `1` | `1`: ignore the shipped cache and run the full autotune grid (re-tune) |
+| `run_autotune` | `False` (default) / `True` | `True`: ignore the shipped cache and run the full autotune grid (re-tune) |
+| `autotune_miss_cap` | `24` (default), `0` = off | on a cache MISS, how many configs a heuristic subset may keep |
 
-An unknown GPU with no cache warns like: *"[miniworld.autotune] no tuned autotune cache for
-op '<op>' on '<gpu>' (<dtype>). Falling back to the full autotune grid — this run may be
-slower and the chosen config may be suboptimal. Build a tuned cache …"*
+A miss does not fall back to the whole grid. The grid is 205,266 configs across 91 ops, and a
+forward that searches it is not slow, it is stopped: `autotune_miss_cap` bounds the search to a
+heuristic subset instead. `run_autotune=True` lifts the cap, because a build wants the whole
+space on purpose.
+
+An unknown GPU with no cache warns like: *"[miniworld.autotune] no tuned autotune cache for op
+'<op>' on '<gpu>' (<dtype>). Falling back to a heuristic 24 of 1944 configs (run
+`miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen
+config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see
+docs/operations/dispatch-cache.md)."*
+
+The same exit reports a STALE cache, and names which of the four identities moved: the kernel's
+config grid, the toolchain (`env_identity` — triton / cuda / ptxas), the kernel source or its
+autotune key list (`op_identity`), or simply no entry for this shape.
 
 
 # Systematic backend dispatch

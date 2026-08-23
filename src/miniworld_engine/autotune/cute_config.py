@@ -114,7 +114,7 @@ def resolve_config(
     """Pick the cached fastest GemmConfig for (gpu, dtype, bucket); ``default`` on miss.
 
     Passing ``candidates`` enables the config-space staleness check (a changed grid invalidates
-    the old cache). During a capture run (``MINIWORLD_RUN_AUTOTUNE=1``) this returns ``default``
+    the old cache). During a capture run (``settings.run_autotune``) this returns ``default``
     so the sweep — not the cache — drives config choice."""
     best = select_config(op, dtype=dtype, bucket=bucket, candidates=_as_cache_dicts(candidates),
                          device_index=device_index)
