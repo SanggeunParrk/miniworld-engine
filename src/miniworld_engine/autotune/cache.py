@@ -21,6 +21,7 @@ degrades to a warn + full-grid fallback instead of silently pinning old tiles.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import warnings
@@ -32,6 +33,48 @@ import torch
 from miniworld_engine._atomic import write_json
 
 SCHEMA = 1
+
+#: How a bucket key is CONSTRUCTED, independent of the file layout `SCHEMA` describes. Bumped when
+#: the same bucket string starts meaning something else, because nothing else catches that:
+#: `config_space_hash` sees the config grid, `op_identity` sees the kernel source and its
+#: `key=[...]`, and neither moves when a launcher changes what it puts IN the key.
+#:
+#:   1 -> a `level=both` kernel keyed on its LENGTH, so a pair L=1024 (1,048,576 rows) and an atom
+#:        A=1024 (1,024 rows) shared bucket `shape_key=1024`.
+#:   2 -> it keys on its ROW COUNT (autotune/shape_key.py::BOTH_ROWS).
+#:
+#: An entry written under an older scheme is a miss, not a wrong answer: the reader falls back to
+#: the bounded heuristic subset and warns, and the next build overwrites it.
+KEY_SCHEME = 2
+
+#: Which levels each scheme bump actually changed. Scheme 2 re-based only `level=both` kernels;
+#: a token or atom kernel's bucket means exactly what it did before, so invalidating its entries
+#: would discard a finished build to fix something that was never wrong. 68 of the 103 declared
+#: kernels are in that position.
+_SCHEME_AFFECTS = {2: frozenset({"both"})}
+
+
+@functools.lru_cache(maxsize=1)
+def _levels() -> dict[str, str]:
+    """kernel -> its `level` column, from registry.csv. Read once."""
+    import csv  # noqa: PLC0415
+
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    if not reg.is_file():
+        return {}
+    return {r["kernel"]: r["level"] for r in csv.DictReader(reg.open())}
+
+
+def _scheme_stale(op: str, stored) -> bool:
+    """Was ``op``'s bucket construction changed by a scheme bump this entry predates?"""
+    stored = stored if isinstance(stored, int) else 1     # absent = written before the field
+    if stored >= KEY_SCHEME:
+        return False
+    level = _levels().get(op)
+    if level is None:
+        return True          # unknown op: the strict reading
+    return any(level in _SCHEME_AFFECTS.get(v, frozenset())
+               for v in range(stored + 1, KEY_SCHEME + 1))
 # The one and only cache root: the in-repo ``data/`` dir, committed to git. Both reads
 # and writes go here — no env override, no ~/.cache — so a tuned cache is versioned with
 # the kernels and a stale per-user cache can never shadow the repo's committed configs.
@@ -267,6 +310,7 @@ def store_ranked_configs(
             data = None
     env_id = env_id or env_identity()
     if (data is None or data.get("config_space_hash") != config_space_h
+            or _scheme_stale(op, data.get("key_scheme"))
             or data.get("env_identity") != env_id
             or (op_id and data.get("op_identity") not in (None, op_id))):
         import datetime as _dt  # noqa: PLC0415 -- stamp only when writing
@@ -279,7 +323,8 @@ def store_ranked_configs(
         # `data["entries"][key] = ...` below a subscript-assign on an int as far as a checker
         # can tell. The shape is genuinely heterogeneous; say so once.
         data = {
-            "schema": SCHEMA, "gpu": gk, "op": op, "config_space_hash": config_space_h,
+            "schema": SCHEMA, "key_scheme": KEY_SCHEME,
+            "gpu": gk, "op": op, "config_space_hash": config_space_h,
             "env_identity": env_id, "op_identity": op_id,
             "provenance": {"triton": triton_ver, "torch": torch.__version__,
                            "built_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")},
@@ -539,6 +584,10 @@ def _cached_subset(autotuner, configs, nargs, meta):
     if data.get("config_space_hash") != config_space_hash(configs):
         return _miss(op, gk, dtype,
                      "tuned autotune cache is STALE (kernel config grid changed)", configs)
+    if _scheme_stale(op, data.get("key_scheme")):
+        return _miss(op, gk, dtype,
+                     "tuned autotune cache is STALE (bucket keys mean something else now; see "
+                     "cache.KEY_SCHEME)", configs)
     if data.get("env_identity") != env_identity():
         return _miss(op, gk, dtype,
                      "tuned autotune cache is STALE (triton/cuda/ptxas changed since it was built)",
@@ -639,6 +688,10 @@ def select_config(
         return None
     if candidates is not None and data.get("config_space_hash") != config_space_hash(candidates):
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
+        return None
+    if _scheme_stale(op, data.get("key_scheme")):
+        _warn_once(op, gk, dtype, "tuned autotune cache is STALE (bucket keys mean something "
+                                  "else now; see cache.KEY_SCHEME)")
         return None
     entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
     if not entry:

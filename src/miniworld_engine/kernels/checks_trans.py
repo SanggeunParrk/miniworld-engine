@@ -90,7 +90,7 @@ def transition_expand_swiglu_triton():
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 
     # ``_pair_x()`` -- the driver's own helper for this one launcher. TritonTransitionFunction
-    # reads both_key(length_of(x.shape)) before its view(-1, d), and ``length_of`` refuses the
+    # reads both_key(rows_of(x.shape)) before its view(-1, d), and ``length_of`` refuses the
     # flat (M, K) that ``_transition_operands`` hands every other entry point here. Only x moves;
     # the weights still come from ``_transition_operands`` so K/ND are unchanged, and in aligned
     # mode _pair_x's M = L*L is exactly ROWS.

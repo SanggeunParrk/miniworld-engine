@@ -105,6 +105,14 @@ def both_level_is_pair(length: int) -> bool:
     """
     from miniworld_engine.autotune.shape_key import TOKEN_SHAPES  # noqa: PLC0415
 
+    # An explicit side beats inferring one from the length. A `level=both` kernel keys on ROWS
+    # (shape_key.BOTH_ROWS), so its two sides are separate buckets at the SAME length: an atom
+    # A=256 launches 256 rows and a pair L=256 launches 65,536, and a work list that picks the
+    # side from the length can only ever build one of them. `MINIWORLD_DRIVER_SIDE` is how the
+    # builder asks for the other. Unset, the old rule stands.
+    side = os.environ.get("MINIWORLD_DRIVER_SIDE", "").strip().lower()
+    if side in ("pair", "atom"):
+        return side == "pair"
     return length <= TOKEN_SHAPES[-1]
 
 

@@ -28,7 +28,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, token_key
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, token_key
 
 
 
@@ -264,7 +264,7 @@ class _SigmoidGate(torch.autograd.Function):
         # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
         # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
         _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n,
-                          shape_key=both_key(length_of(gate.shape)))
+                          shape_key=both_key(rows_of(gate.shape)))
         ctx.save_for_backward(gate, out)
         return a
 
@@ -278,7 +278,7 @@ class _SigmoidGate(torch.autograd.Function):
         grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
         # both_key, NOT _key_of -- see the note on _sigmul_fwd above.
         _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n,
-                          shape_key=both_key(length_of(gate.shape)))
+                          shape_key=both_key(rows_of(gate.shape)))
         return dg, do
 
 

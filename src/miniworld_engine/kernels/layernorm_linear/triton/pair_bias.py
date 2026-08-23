@@ -36,7 +36,7 @@ MIN_TL_DOT_DIM = 16
 # shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 
 
 def get_seq_group(rows) -> int:
@@ -295,7 +295,7 @@ def _fwd_op(
         nh,
         eps,
         # L = x.shape[-2] (the op takes the pre-flatten activation), never the row count M.
-        shape_key=both_key(length_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape)),
     )
     return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
 
@@ -374,7 +374,7 @@ def _setup_context(ctx, inputs, output):
 def _backward(ctx, grad_out, grad_mean, grad_rstd):
     x2, ln_weight, proj_weight, mean, rstd = ctx.saved_tensors
     dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd,
-                            shape_key=both_key(length_of(ctx.xshape)))
+                            shape_key=both_key(rows_of(ctx.xshape)))
     return dx.reshape(ctx.xshape), dlnw, dpw, None
 
 

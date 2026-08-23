@@ -65,7 +65,7 @@ import triton.language as tl
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
 
 
 # ============================================================================
@@ -230,7 +230,7 @@ def _gate_bwd(out, scale, dy, *, shape_key=None):
         # `_sigmul_bwd`, which belongs to the gated_projection family (registry level=BOTH), so it
         # keys against the union bucket set -- otherwise the same L would bucket differently
         # depending on which family launched it.
-        shape_key = both_key(length_of(out.shape))
+        shape_key = both_key(rows_of(out.shape))
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
     # _sigmul_bwd's order is (grad, gate_logit, value, d_gate, d_value)
     _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key)

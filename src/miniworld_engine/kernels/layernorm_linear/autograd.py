@@ -140,7 +140,8 @@ class LayerNormLinearFn(torch.autograd.Function):
         ctx.save_for_backward(x, mean, rstd, ln_weight, ln_bias, weight)
         ctx.eps = eps
         ctx.has_bias = bias is not None
-        ctx.shape_key = None if length is None else both_key(length)
+        # Rows, not `length`: see BOTH_ROWS. x is (M, K) here, so M is readable directly.
+        ctx.shape_key = both_key(x.reshape(-1, x.shape[-1]).shape[0])
         return Y
 
     @staticmethod
@@ -190,7 +191,8 @@ class LayerNormLinearTritonFn(torch.autograd.Function):
         rstd = torch.rsqrt(xf.var(-1, unbiased=False) + eps)
         ctx.save_for_backward(x, mean, rstd, ln_weight, ln_bias, weight)
         ctx.has_bias = bias is not None
-        ctx.shape_key = None if length is None else both_key(length)
+        # Rows, not `length`: see BOTH_ROWS. x is (M, K) here, so M is readable directly.
+        ctx.shape_key = both_key(x.reshape(-1, x.shape[-1]).shape[0])
         return Y
 
     @staticmethod

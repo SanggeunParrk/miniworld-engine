@@ -740,7 +740,7 @@ from miniworld_engine import settings
 
 
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.autotune.shape_key import both_key, rows_of
 
 
 def get_seq_group(rows) -> int:
@@ -769,7 +769,7 @@ def _grad_mul_inplace(dA, dB, ge, *, shape_key: int | None = None):
     N = dA.numel()
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_E"]),)  # noqa: E731
     # N here is a FLAT ELEMENT COUNT (dA.numel()), not even a row count -- there is nothing
-    # in it to recover L from, so the key comes from the caller: both_key(length_of(<pre-
+    # in it to recover L from, so the key comes from the caller: both_key(rows_of(<pre-
     # flatten shape>)). None = drivers_trans / checks_trans (coordinator-owned).
     _grad_mul_kernel[grid](dA, dB, ge, N,
                            shape_key=both_key(N) if shape_key is None else shape_key)

@@ -83,12 +83,13 @@ L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, 
 #: same constant serves them unchanged.
 IS_PAIR = both_level_is_pair(L_PAIR)
 ROWS = ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR)  # M: pair rows L*L, or atom rows A
-#: What production records for this activation: ``both_key(length_of((B, L, L, D)))`` = both_key(L).
-#: Every launcher below is handed the already-flattened (M, K) matrix, so it CANNOT read L off a
-#: tensor (autotune/shape_key.py::length_of) -- it takes the key from its caller, and with nothing
-#: passed it falls back to ``both_key(M)``, i.e. the clamped top bucket 8192 at every L. Passing it
-#: is what makes the per-op sweep's work unit (op, bucket) instead of (op, top bucket) N times.
-SHAPE_KEY = both_key(L_PAIR)
+#: What production records for this activation: ``both_key(rows_of(<pre-flatten shape>))``, which
+#: is ROWS -- L*L on the pair side, A on the atom side. It used to be ``both_key(L_PAIR)``, and
+#: that is what put a pair L=1024 (1,048,576 rows) and an atom A=1024 (1,024 rows) in one bucket.
+#: Every launcher below is handed the already-flattened (M, K) matrix and takes the key from its
+#: caller; passing it is what makes the sweep's unit (op, bucket) instead of (op, one bucket) N
+#: times.
+SHAPE_KEY = both_key(ROWS)
 N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, not a tile extent
 K_SMALL = ragged(128)  # K: the AF3 transition d; ragged -> 125
 K_LARGE = ragged(256)  # K for the ktiled kernel's K > _B2B_MAX_K(=128) reason to exist -> 253
@@ -132,7 +133,7 @@ def transition_expand_swiglu_triton() -> None:
 
     _, _, _, wa, wb, ws = _transition_operands()
     # The pre-flatten (1, L, L, K) activation, not the flat (M, K): the launcher reads
-    # both_key(length_of(x.shape)) before its own view(-1, d), so a flat x makes it bucket M.
+    # both_key(rows_of(x.shape)) before its own view(-1, d), so a flat x makes it bucket M.
     triton_transition(_pair_x(), wa, wb, ws, N_EXPAND)
 
 

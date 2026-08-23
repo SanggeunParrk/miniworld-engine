@@ -33,7 +33,7 @@ import triton.language as tl
 # would mint a fresh autotune (a full-grid sweep on a cache miss) for every distinct M the model
 # runs, which is a per-shape stall, not a better config.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.autotune.shape_key import both_key, rows_of
 
 
 def get_seq_group(rows) -> int:
@@ -93,7 +93,7 @@ def stats_triton(x: torch.Tensor, eps: float, *, shape_key: int | None = None,
     _stats_kernel[grid](
         x, rstd, c1, M, K, eps,
         x.stride(0), x.stride(1),
-        # shape_key = both_key(length_of(<pre-flatten shape>)) from the caller that still has
+        # shape_key = both_key(rows_of(<pre-flatten shape>)) from the caller that still has
         # it (transition/triton/fused.py, transition/cute/fused.py). None = a caller not yet
         # threaded (transition/cuda/__init__.py, gemm_transition_swiglu.py, drivers/checks --
         # all outside this change's file set); it buckets the flattened ROW count, the L-vs-L*L

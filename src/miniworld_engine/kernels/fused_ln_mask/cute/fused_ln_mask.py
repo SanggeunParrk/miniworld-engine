@@ -31,7 +31,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 
 
 def get_seq_group(rows) -> int:
@@ -155,6 +155,6 @@ def fused_ln_mask(
         D,
         EPS=eps,
         # L = x.shape[-2] of the (B, L, L, D) pair activation, not M = B*L*L.
-        shape_key=both_key(length_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape)),
     )
     return out.view(B, L1, L2, D)

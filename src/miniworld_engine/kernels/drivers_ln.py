@@ -37,12 +37,12 @@ _D = ragged(128)
 _PAIR_N = ragged(_L)
 
 #: The bucket a launch at `_L` must record, for the launchers that only ever see the flattened
-#: (M, D) matrix and therefore take the key as an explicit argument (`shape_key=`). `length_of`
-#: cannot be used at those: M = L*L clamps to the top bucket (8192) at every L >= 91, and their
-#: `shape_key=None` default clamps to the bottom one (128) -- either way the bucket stops moving
-#: with L. Everything else here hands the wrapper the activation BEFORE it is flattened, which is
-#: the same fix `modules/triangle_attention` took, and lets the wrapper read L = shape[-2] itself.
-_SHAPE_KEY = both_key(_L)
+#: (M, D) matrix and therefore take the key as an explicit argument (`shape_key=`). A `level=both`
+#: kernel keys on ROWS (autotune/shape_key.py::BOTH_ROWS), so this is the row count the activation
+#: below flattens to -- pair L*L, atom A -- and not L. Everything else here hands the wrapper the
+#: activation BEFORE it is flattened, which is the same fix `modules/triangle_attention` took, and
+#: lets the wrapper read the row count itself.
+_SHAPE_KEY = both_key(_M)
 
 #: n_head for the pair-bias projection, as `bench_kernel_tri_attn` derives it from d_pair.
 #: Defined once here and imported by ``checks_ln`` so the projection's output width cannot
@@ -118,7 +118,7 @@ def layernorm_bwd_atomic_triton() -> None:
     from .layernorm.compile_native import _bwd_atomic_impl
 
     # The pair activation (1, L, L, D), NOT its (M, D) flattening: `_bwd_atomic_impl` reshapes
-    # internally and reads `both_key(length_of(x.shape))` off the 4-D shape, so flattening here
+    # internally and reads `both_key(rows_of(x.shape))` off the 4-D shape, so flattening here
     # would hand it M = L*L and clamp every L to the 8192 bucket.
     x = _act()
     mean, rstd = _ln_stats(x.reshape(-1, _D))  # [M] fp32, one row per (b, i, j)

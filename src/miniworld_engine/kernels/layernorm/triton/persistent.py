@@ -33,7 +33,7 @@ import triton
 import triton.language as tl
 
 from .main import layer_norm_fwd_fused
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 
 # Persistent grid = (#SMs * PERSIST_WAVES) blocks on axis 0. A couple of blocks per SM keeps
 # the memory system saturated while keeping the partial buffer (and its final
@@ -171,7 +171,7 @@ class TritonLayerNormPersistentFunction(torch.autograd.Function):
             x_2d.stride(0), x_2d.stride(1),
             m, n, eps,
             # L = x.shape[-2] BEFORE the reshape (pair (B,L,L,D) / token (B,L,D)), not m.
-            shape_key=both_key(length_of(x.shape)), HAS_ROWSCALE=False,
+            shape_key=both_key(rows_of(x.shape)), HAS_ROWSCALE=False,
         )
         ctx.save_for_backward(x_2d, weight, mean, rstd)
         ctx.input_shape = x.shape
@@ -194,7 +194,7 @@ class TritonLayerNormPersistentFunction(torch.autograd.Function):
         _ln_bwd_persistent[grid_bwd](
             dx_2d, partial_dw, partial_db, dy_2d, x, weight, mean, rstd,
             partial_dw.stride(0), x.stride(0), x.stride(1),
-            m, N=n, shape_key=both_key(length_of(ctx.input_shape)),
+            m, N=n, shape_key=both_key(rows_of(ctx.input_shape)),
         )
 
         dw = partial_dw.sum(dim=0).to(weight.dtype)

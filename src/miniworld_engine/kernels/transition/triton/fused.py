@@ -35,7 +35,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = settings.current().autotunes("transition")
@@ -71,7 +71,7 @@ def get_seq_group(length) -> int:
 def _shape_key(shape_key: int | None, rows: int) -> int:
     """The autotune shape key for a launch: L bucketed against the ``both`` set.
 
-    Every launcher in this module takes ``shape_key`` = ``both_key(length_of(<pre-flatten
+    Every launcher in this module takes ``shape_key`` = ``both_key(rows_of(<pre-flatten
     shape>))`` from the caller that still holds the activation's shape (the autograd Function
     below, or ``transition/cute/fused.py`` / ``transition/triton/main.py``). ``None`` is the
     TRANSITIONAL path for the driver/checker harnesses (``drivers_trans`` / ``checks_trans``,
@@ -219,7 +219,7 @@ def transition_expand_gate(
     eps: float,
     stats: tuple[torch.Tensor, torch.Tensor] | None = None,  # (rstd, c1) precomputed
     save_xn: bool = False,
-    shape_key: int | None = None,   # both_key(length_of(pre-flatten shape)) from the caller
+    shape_key: int | None = None,   # both_key(rows_of(pre-flatten shape)) from the caller
 ):
     """LayerNorm(x) then SwiGLU(expand_a, expand_b) -> expand (M, ND). Stats fused-out.
 
@@ -1124,7 +1124,7 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         # L for the autotune shape key: shape[-2] of the activation BEFORE the flatten --
         # one rule for pair (B, L, L, D) and token/atom (B, L, D). Threaded into every
         # launcher below (and saved for the backward), so no launcher buckets a row count.
-        shape_key = both_key(length_of(orig_shape))
+        shape_key = both_key(rows_of(orig_shape))
         x2 = x.reshape(-1, K)
         # Fuse the post-transition residual add y = transition(x) + x into the forward output
         # (the residual is the module input x itself; D == K). Handled in-kernel on the fast

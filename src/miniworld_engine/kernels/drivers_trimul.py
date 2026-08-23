@@ -88,7 +88,7 @@ def gated_projection_gate_triton() -> None:
     """sigmoid_gate_fwd_kernel, via TritonGatedProjectionFunction.
 
     ``_x()``, not ``_rows()``: the wrapper takes ``* hd`` and flattens to (M, hd) itself, and it
-    reads ``both_key(length_of(original_shape))`` from the shape it was HANDED. Handing it the
+    reads ``both_key(rows_of(original_shape))`` from the shape it was HANDED. Handing it the
     already-flattened (M, D) makes length_of return M = L*L, which clamps to the top bucket 8192
     at every L >= 91 -- the launched shape is identical either way, only the key differs.
     """
@@ -110,7 +110,7 @@ def gated_projection_bwd_gate_triton() -> None:
     dgate, dx = torch.empty_like(gate), torch.empty_like(x)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     sigmoid_gate_bwd_kernel[grid](gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0),
-                                  M, D, shape_key=both_key(L))
+                                  M, D, shape_key=both_key(M))
 
 
 def gated_projection_gate_flat_triton() -> None:

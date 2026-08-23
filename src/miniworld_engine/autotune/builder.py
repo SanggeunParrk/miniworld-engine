@@ -579,23 +579,33 @@ class OpUnit:
     op: str
     length: int
     dtype: str = "bfloat16"
+    #: "" for a token/atom kernel, "pair" or "atom" for a `level=both` one. A both-level kernel
+    #: keys on ROWS, so its two sides are different buckets at the same length -- atom A=256 is
+    #: 256 rows, pair L=256 is 65,536 -- and the side has to be said, not inferred.
+    side: str = ""
 
     @property
     def label(self) -> str:
-        return f"{self.op}[{self.dtype}] L={self.length}"
+        tag = f" {self.side}" if self.side else ""
+        return f"{self.op}[{self.dtype}]{tag} L={self.length}"
 
     @property
     def stem(self) -> str:
-        return f"op-{self.op}-{self.dtype}-L{self.length}"
+        tag = f"-{self.side}" if self.side else ""
+        return f"op-{self.op}-{self.dtype}{tag}-L{self.length}"
 
     def cmd_args(self) -> list[str]:
-        return ["--op", self.op, "--dtype", self.dtype, "--length", str(self.length)]
+        args = ["--op", self.op, "--dtype", self.dtype, "--length", str(self.length)]
+        return args + (["--side", self.side] if self.side else [])
 
     def env(self) -> dict[str, str]:
         # The drivers read this at IMPORT time, like MINIWORLD_SHAPE_MODE -- their shape constants
         # are module-level and the kernels reach them through helpers that close over them, so a
         # per-call override would have to reach inside every driver module. Per-process does not.
-        return {"MINIWORLD_DRIVER_LENGTH": str(self.length)}
+        env = {"MINIWORLD_DRIVER_LENGTH": str(self.length)}
+        if self.side:
+            env["MINIWORLD_DRIVER_SIDE"] = self.side
+        return env
 
 
 def check(selected: list[Case]) -> list[str]:
@@ -692,7 +702,11 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
     """
     import csv  # noqa: PLC0415
 
-    from miniworld_engine.autotune.shape_key import SHAPES_BY_LEVEL  # noqa: PLC0415
+    from miniworld_engine.autotune.shape_key import (  # noqa: PLC0415
+        ATOM_SHAPES,
+        SHAPES_BY_LEVEL,
+        TOKEN_SHAPES,
+    )
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
     out = []
@@ -703,17 +717,25 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
             continue
         if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
             continue          # this config set declares no grid for it
-        shapes = SHAPES_BY_LEVEL[r["level"]]
+        # A `level=both` kernel is TWO work lists, not one. It keys on rows (shape_key.BOTH_ROWS),
+        # so a pair L and an atom A of the same value are different buckets -- pair L=256 is
+        # 65,536 rows, atom A=256 is 256 -- and driving one length list picks a side per length
+        # and never builds the other. 4 pair + 6 atom = 10 buckets, which is exactly BOTH_ROWS.
+        # Before this, 8 units covered 8 of the 10 and two of those 8 were the wrong side.
+        if r["level"] == "both":
+            sided = [("pair", L) for L in TOKEN_SHAPES] + [("atom", A) for A in ATOM_SHAPES]
+        else:
+            sided = [("", L) for L in SHAPES_BY_LEVEL[r["level"]]]
         if not _keys_on_shape(Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
             # A kernel that does not key on shape_key has no per-shape cache to build, so driving
             # it at every length would tune one identical bucket N times. transition_fold_triton is
             # the only one today, and correctly so: it reads the WEIGHTS (Wa, Wb (N,K), gamma,
             # beta (K,)) and never touches the activation, so N and K are its whole shape.
-            shapes = shapes[:1]
+            sided = sided[:1]
         alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
         dtypes = [alias.get(x, x) for x in (r.get("dtypes") or "bf16").split("|") if x]
-        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt)
-                    for dt in dtypes for length in shapes])
+        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side)
+                    for dt in dtypes for side, length in sided])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands
@@ -1095,6 +1117,11 @@ def _child_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dims", type=int, default=0)
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--length", type=int, default=0)
+    ap.add_argument("--side", default="", choices=("", "pair", "atom"),
+                    help="which side of a `level=both` kernel to drive. It keys on rows, so pair "
+                         "L and atom A of the same value are different buckets and the side "
+                         "cannot be inferred from --length. Reaches the drivers as "
+                         "MINIWORLD_DRIVER_SIDE, which they read at import.")
     ap.add_argument("--mode", choices=("eval", "train"), default="eval")
     ap.add_argument("--shard", required=True)
     ap.add_argument("--compile-jobs", type=int, default=0)
@@ -1135,7 +1162,9 @@ def _child_main(argv: list[str] | None = None) -> int:
         settings.configure(**{field: parse(args.value)})
     if args.op:
         # ONE kernel at ONE shape, via its registry driver. The shape reached the drivers through
-        # MINIWORLD_DRIVER_LENGTH in the environment, before any of them imported.
+        # MINIWORLD_DRIVER_LENGTH (and, for a `level=both` kernel, MINIWORLD_DRIVER_SIDE) in the
+        # environment, before any of them imported. `--side` is on the command line so the unit is
+        # reproducible from it; the env var is what the drivers actually read.
         capture.install()
         n_done = capture.load_probe_state(args.shard)
         if n_done:

@@ -10,7 +10,7 @@ import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
 
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 from miniworld_engine._typecheck import typecheck
 
 AUTOTUNE = settings.current().autotunes("tri_attention")
@@ -25,7 +25,7 @@ AUTOTUNE = settings.current().autotunes("tri_attention")
 # `n_elements` is a MISNOMER: both launch sites pass the flattened ROW count M into it (it is only
 # ever read as `offset_row < n_elements`), so keying it added the raw M back beside its own bucket
 # and minted a full config sweep per distinct M. shape_key is that axis, bucketed -- and it is
-# bucketed from L (both_key(length_of(original_shape))), NOT from M: M alone cannot say whether
+# bucketed from L (both_key(rows_of(original_shape))), NOT from M: M alone cannot say whether
 # it came from L or L*L, which is what autotune/shape_key.py exists to fix.
 # `R` (the launcher's N = hidden/projection width) IS a real config axis -- it is the extent of the
 # BLOCK_K column loop -- and was absent from the key, so a new width recompiled (it is constexpr
@@ -144,7 +144,7 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
             N,
             # L = original_shape[-2], captured BEFORE the rearrange to (M, hd) -- one rule
             # for pair (B, L, L, D) and token/atom (B, L, D). Never the row count M.
-            shape_key=both_key(length_of(original_shape)),
+            shape_key=both_key(rows_of(original_shape)),
         )
 
         ctx.save_for_backward(
@@ -183,7 +183,7 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
             out,
             M,
             N,
-            shape_key=both_key(length_of(original_shape)),
+            shape_key=both_key(rows_of(original_shape)),
         )
 
         grad_out = rearrange(grad_out, "... W -> (...) W").contiguous()
@@ -203,7 +203,7 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
             x.stride(0),
             M,
             N,
-            shape_key=both_key(length_of(original_shape)),
+            shape_key=both_key(rows_of(original_shape)),
         )
 
         dgate = dgate.reshape(original_shape)

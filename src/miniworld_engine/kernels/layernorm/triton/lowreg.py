@@ -25,7 +25,7 @@ from miniworld_engine.kernels._compile import opaque
 # Its "low register" claim was not in the code: the body matched main.py's statement for
 # statement with HAS_ROWSCALE=False. Only the launcher below survives, as a bench probe.
 from .main import layer_norm_fwd_fused
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 
 import torch
 import triton
@@ -49,6 +49,6 @@ def triton_layernorm_lowreg(x: torch.Tensor, weight: torch.Tensor, bias: torch.T
         x_2d.stride(0), x_2d.stride(1),
         m, n, eps,
         # L = x.shape[-2] BEFORE the reshape, not m. (Kernel param is `shape_key` now.)
-        shape_key=both_key(length_of(x.shape)), HAS_ROWSCALE=False,
+        shape_key=both_key(rows_of(x.shape)), HAS_ROWSCALE=False,
     )
     return y_2d.view_as(x)

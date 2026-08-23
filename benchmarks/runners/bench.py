@@ -7,6 +7,7 @@ import sys
 import csv
 from collections.abc import Callable
 from pathlib import Path
+import functools
 from typing import Literal, NamedTuple, Protocol, TypedDict, cast
 
 # When run as `python benchmarks/runners/bench.py`, sys.path[0] is
@@ -316,9 +317,33 @@ def measured_result(
 
 
 def actual_compiled_flag(conf: BenchConfig) -> bool:
-    if conf.kernel == "transition" and conf.cudagraph != "disabled":
+    """Was the module under test COMPILED, as opposed to asked to be?
+
+    Four of the eight module benches guard their `model.compile()` with
+    `and conf.cudagraph == "disabled"` -- the capture takes the eager module -- so
+    `compile=true cudagraph=manual` runs eager for those and compiled for the other four. The
+    column recorded the REQUEST, and the request is not what ran: 330 of the 350 committed result
+    tables say `compiled=True, cudagraph=manual`, and for triangle_multiplication,
+    triangle_attention and bias_only_attention that is a measurement of eager code.
+
+    Read from the bench function's own source, like `target_impls`, rather than the hand-kept
+    `kernel == "transition"` list this used to be -- which is how three of the four went unnoticed.
+    """
+    if conf.compile and conf.cudagraph != "disabled" and _skips_compile_under_cudagraph(conf.kernel):
         return False
     return conf.compile
+
+
+@functools.lru_cache(maxsize=None)
+def _skips_compile_under_cudagraph(target: str) -> bool:
+    """Does ``target``'s bench guard its compile on ``cudagraph == "disabled"``?"""
+    import inspect as _inspect  # noqa: PLC0415
+
+    fn = KERNEL_MAP.get(target)
+    if fn is None:
+        return False
+    src = _inspect.getsource(fn)
+    return 'conf.cudagraph == "disabled"' in src and ".compile()" in src
 
 
 def capture_cudagraph(step: Callable, params: list, is_train: bool,

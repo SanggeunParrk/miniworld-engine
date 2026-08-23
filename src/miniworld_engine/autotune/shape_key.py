@@ -56,7 +56,28 @@ ATOM_SHAPES: tuple[int, ...] = (256, 512, 1024, 2048, 4096, 8192)
 
 #: Kernels used at both levels bucket against the union, so a call from either side lands where it
 #: would have landed in its own set (a token 192 still floors to 128, an atom 300 still to 256).
+#: This is the WORK-LIST axis -- which shapes a build drives -- not the cache key; see BOTH_ROWS.
 BOTH_SHAPES: tuple[int, ...] = tuple(sorted(set(TOKEN_SHAPES) | set(ATOM_SHAPES)))
+
+#: The cache key for a ``level=both`` kernel is its ROW COUNT, not its length. Keying on length
+#: collides: a pair activation (B, L, L, D) at L=1024 and an atom activation (B, A, D) at A=1024
+#: both have ``shape[-2] == 1024``, so both landed in bucket 1024 -- while the first launches
+#: 1,048,576 rows and the second launches 1,024. Measured, in the shipped A6000 cache for
+#: transition_layernorm_expand_swiglu_triton:
+#:
+#:     shape_key=384    0.6103 ms     pair  L=384,  M = 147,456
+#:     shape_key=1024   0.0215 ms     atom  A=1024, M =   1,024
+#:
+#: The bucket grows and the time falls 28x, because the two values are not on the same axis. The
+#: module bench then ran the pair side at L=1024 against a config tuned at 1,024 rows and lost
+#: 1.73x against its own baseline (5.50 ms -> 9.50 ms, same card, same configuration).
+#:
+#: Rows are the right axis for these kernels and length is not: a pair launch of M rows and an
+#: atom launch of M rows have the same launch geometry, so the same tile is right for both, and
+#: nothing about "which side it came from" changes that. (Length is still right for ``token`` and
+#: ``atom`` kernels, where it is unambiguous.)
+BOTH_ROWS: tuple[int, ...] = tuple(sorted(
+    set(ATOM_SHAPES) | {length * length for length in TOKEN_SHAPES}))
 
 SHAPES_BY_LEVEL: dict[str, tuple[int, ...]] = {
     "token": TOKEN_SHAPES,
@@ -135,9 +156,37 @@ def atom_key(length: int) -> int:
     return _floor_clamp(int(length), ATOM_SHAPES)
 
 
-def both_key(length: int) -> int:
-    """Shape key for a kernel used at both levels (`level=both`)."""
-    return _floor_clamp(int(length), BOTH_SHAPES)
+def both_key(rows: int) -> int:
+    """Cache key for a kernel used at both levels (`level=both`), from its ROW COUNT.
+
+    Rows, not length -- see :data:`BOTH_ROWS` for why, and for the 1.73x this cost. Call it as
+    ``both_key(rows_of(x.shape))``; a call site that already has the flattened M passes that.
+    """
+    return _floor_clamp(int(rows), BOTH_ROWS)
+
+
+def rows_of(shape) -> int:
+    """M -- the row count a launch iterates -- from an activation's PRE-flatten shape.
+
+    Every leading axis multiplied out: pair (B, L, L, D) -> B*L*L, token/atom (B, L, D) -> B*L.
+    This is what :func:`both_key` buckets, and it is the one quantity that does not depend on
+    knowing which side of a ``level=both`` kernel the call came from.
+
+    Refuses a 2-D shape for the same reason :func:`length_of` does -- not because M is unreadable
+    there (it is exactly ``shape[0]``) but because a caller holding only ``(M, D)`` cannot know
+    whether its M is the whole launch or one slice of it, and every call site in this repo that
+    passed a pre-flattened matrix was doing so by mistake.
+    """
+    dims = tuple(shape)
+    if len(dims) < 3:
+        raise ValueError(
+            f"shape {dims} is already flattened; pass the activation's shape BEFORE it is "
+            f"flattened -- (B, L, D) or (B, L, L, D) -- or compute the key at the caller that "
+            f"still has it and pass `shape_key=` down. See the note in rows_of's docstring.")
+    out = 1
+    for d in dims[:-1]:
+        out *= int(d)
+    return out
 
 
 def length_of(shape) -> int:

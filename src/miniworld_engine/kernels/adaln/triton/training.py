@@ -75,7 +75,7 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # launchers that only see the (M, D) matrices, so each takes the key from the caller that still
 # holds the pre-flatten shape; the default covers a caller that hands in a genuinely 2-D activation
 # (nothing folded into the rows, so shape[-2] IS L), which is what the drivers and checkers do.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
 # `both_key` is only for the borrowed layernorm_linear helpers (`_ln_materialize`/`_ln_bwd`):
 # those kernels are level=both in registry.csv and bucket against the union set. This family's
 # own kernels stay on `atom_key`. Same L, different bucket set.
@@ -464,7 +464,7 @@ class AdaLNTrainFn(torch.autograd.Function):
 
         beta0 = scale_bias.new_zeros(nc)
         cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
-                                                   shape_key=both_key(length_of(orig_cond_shape)))
+                                                   shape_key=both_key(rows_of(orig_cond_shape)))
 
         w_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
         sb = _mm(cond_aff, w_cat.t())                                  # (M, 2NX) raw [scale|bias]
@@ -510,7 +510,7 @@ class AdaLNTrainFn(torch.autograd.Function):
         else:
             dcond_aff = _mm(D.t(), w_cat)                             # cuBLAS dgrad → (M,NC)
             dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c, cond2d.stride(),
-                                     shape_key=both_key(length_of(ctx.orig_cond_shape)))
+                                     shape_key=both_key(rows_of(ctx.orig_cond_shape)))
 
         dW_scale = dW_cat[:nx].contiguous()
         dW_bias = dW_cat[nx:].contiguous()

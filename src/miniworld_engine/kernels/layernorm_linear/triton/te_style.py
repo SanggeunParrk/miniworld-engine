@@ -288,8 +288,11 @@ class LayerNormLinearTEFn(torch.autograd.Function):
     backward via ``ctx.shape_key`` -- the saved x is (M, K) and L is not recoverable from it."""
 
     @staticmethod
-    def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps, length):
-        shape_key = None if length is None else both_key(length)
+    def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps, length):  # noqa: ARG004
+        # `length` is no longer what the key is made of. It existed because M could not say
+        # whether it was L or L*L; the key is the row count now, and M is the tensor's own
+        # leading extent. The parameter stays because callers pass it positionally.
+        shape_key = both_key(x.reshape(-1, x.shape[-1]).shape[0])
         Y, x_normed, mean, rstd = _te_forward(x, ln_weight, ln_bias, weight, bias, eps,
                                               shape_key=shape_key)
         ctx.save_for_backward(x_normed, x, mean, rstd, ln_weight, weight)

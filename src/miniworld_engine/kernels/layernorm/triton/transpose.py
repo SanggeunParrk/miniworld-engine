@@ -115,9 +115,9 @@ def _ln_transpose_dbn_bnd(x, weight, bias, eps):
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _ln_transpose_dbn_kernel[grid](
         x_dm, y, weight.contiguous(), bias.contiguous(), M, float(eps), D=d,
-        # x is CHANNEL-major (D, B, N) here, so the token axis is x.shape[-1] = n --
-        # i.e. shape[-2] of the (B, N, D) result this returns. Not M = b*n.
-        shape_key=both_key(n),
+        # M, the row count this launch iterates. It used to pass the token axis `n` instead,
+        # because a length was what the key was made of; rows are, and M is right here.
+        shape_key=both_key(M),
     )
     return y.view(b, n, d)
 

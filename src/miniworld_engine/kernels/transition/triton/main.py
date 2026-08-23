@@ -10,7 +10,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 
 def get_seq_group(length) -> int:
     """Delegates to canonical size-bucketing (autotune.buckets)."""
@@ -126,7 +126,7 @@ class TritonTransitionFunction(torch.autograd.Function):
             N,
             # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
             # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
-            shape_key=both_key(length_of(orig_shape)),
+            shape_key=both_key(rows_of(orig_shape)),
         )
 
         ctx.save_for_backward(
@@ -171,7 +171,7 @@ class TritonTransitionFunction(torch.autograd.Function):
         grad_expand = torch.matmul(grad_output, squeeze_weight)        # dh  [M, ND]
         h, dAB = _transition_expand_gatebwd_savedxn_stacked(
             x, expand_a_weight, expand_b_weight, grad_expand,
-            shape_key=both_key(length_of(orig_shape)),   # grad_output's pre-flatten shape
+            shape_key=both_key(rows_of(orig_shape)),   # grad_output's pre-flatten shape
         )
         grad_squeeze_weight = torch.matmul(grad_output.T, h)           # dWs  [D, ND]
         grad_ab = torch.matmul(dAB.T, x)                               # [2*ND, K] = [dWa; dWb]

@@ -51,7 +51,7 @@ from quack.activation import dgate_fn_map
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from miniworld_engine.kernels._quack_compat import jit_cache
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.autotune.shape_key import both_key, rows_of
 from quack.gemm_config import GemmConfig
 from quack.gemm_tvm_ffi_utils import (
     perm3d_single,
@@ -97,7 +97,7 @@ def _cdup_interleave(ge: Tensor, *, shape_key: int | None = None) -> Tensor:
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
     _cdup_interleave_kernel[grid](
         ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0),
-        # both_key(length_of(<pre-flatten shape>)) from transition/cute/fused.py's backward.
+        # both_key(rows_of(<pre-flatten shape>)) from transition/cute/fused.py's backward.
         # None = drivers_trans / checks_trans (coordinator-owned): buckets the flattened ROW
         # count, the L-vs-L*L ambiguity autotune.shape_key removes.
         shape_key=both_key(M) if shape_key is None else shape_key,
@@ -321,7 +321,7 @@ def transition_expand_gatebwd_cute(
     *,
     prefolded_B: Tensor | None = None,   # (2N, K) interleaved [Wa|Wb] (NO gamma fold for bwd)
     config: GemmConfig | None = None,
-    shape_key: int | None = None,        # both_key(length_of(pre-flatten shape)) from caller
+    shape_key: int | None = None,        # both_key(rows_of(pre-flatten shape)) from caller
 ) -> tuple[Tensor, Tensor, Tensor]:
     """SwiGLU-gate backward via one dual-accumulator WGMMA.
 

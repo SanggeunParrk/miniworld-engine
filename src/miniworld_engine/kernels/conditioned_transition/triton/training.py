@@ -63,7 +63,7 @@ import triton.language as tl
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
 
 
 @triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['shape_key', 'ND'])
@@ -106,7 +106,7 @@ def _gate(out, scale, *, shape_key=None):
         # `n` is a flat element count (M*D), not a shape. The kernel is `_sigmul_fwd`, which belongs
         # to the gated_projection family (registry level=BOTH), so it keys against the union bucket
         # set -- otherwise the same L would bucket differently depending on the launching family.
-        shape_key = both_key(length_of(out.shape))
+        shape_key = both_key(rows_of(out.shape))
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
     _sigmul_fwd[grid](scale, out, y, n, shape_key=shape_key)
     return y
@@ -151,7 +151,7 @@ def _gate_bwd(out, scale, dy, *, shape_key=None):
     dscale = torch.empty_like(out)
     n = out.numel()
     if shape_key is None:
-        shape_key = both_key(length_of(out.shape))   # `_sigmul_bwd` is gated_projection, level=both
+        shape_key = both_key(rows_of(out.shape))   # `_sigmul_bwd` is gated_projection, level=both
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
     _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key)
     return dout, dscale
@@ -404,9 +404,9 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             out = h @ ws.t()
             scale = torch.addmm(bsc, cond, wsc.t())
             # `_gate` launches gated_projection's `_sigmul_fwd`, which is level=BOTH in
-            # registry.csv -- same L, but bucketed in the union set so one kernel's cache does
-            # not end up holding two bucket spaces.
-            y = _gate(out, scale, shape_key=both_key(L))
+            # registry.csv, so it keys on the ROW count while the atom-level kernels above key
+            # on L. `out` is the flattened (M, D) matrix, and M is what a both-level bucket is.
+            y = _gate(out, scale, shape_key=both_key(out.shape[0]))
         ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc)
         ctx.ND = ND
         return y

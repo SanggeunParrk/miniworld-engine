@@ -32,7 +32,7 @@ import triton.language as tl
 # kernel was written for) is still reachable; every smaller candidate is made correct by the
 # k-loops below rather than silently wrong.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 
 
 def get_seq_group(rows) -> int:
@@ -197,6 +197,6 @@ def layernorm_linear_triton_fwd(
         y.stride(0), y.stride(1),
         # L = x.shape[-2], read BEFORE the reshape to (M, K) -- one rule for pair
         # (B, L, L, D) and token/atom (B, L, D). Never M.
-        HAS_BIAS=bias is not None, shape_key=both_key(length_of(x.shape)),
+        HAS_BIAS=bias is not None, shape_key=both_key(rows_of(x.shape)),
     )
     return y.reshape(*x.shape[:-1], N)

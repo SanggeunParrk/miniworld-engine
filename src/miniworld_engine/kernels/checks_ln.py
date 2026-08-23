@@ -194,7 +194,7 @@ def layernorm_bwd_atomic_triton():
     from .layernorm.compile_native import _bwd_atomic_impl
 
     # The PRE-flatten pair activation (1, L, L, D), as the driver passes it: the impl reshapes
-    # internally and reads ``both_key(length_of(x.shape))`` off the 4-D shape, which is exactly
+    # internally and reads ``both_key(rows_of(x.shape))`` off the 4-D shape, which is exactly
     # what ``length_of`` now refuses on an already-flattened (M, D). dx comes back
     # ``view_as(x)``, so the whole comparison simply moves to that shape.
     x, w = pair(n=_PAIR_N, d=_D), vec(_D)
@@ -346,7 +346,7 @@ def layernorm_linear_fwd_triton():
     from .layernorm_linear.triton.fused import layernorm_linear_triton_fwd
 
     # The pair activation, as the driver passes it: ``layernorm_linear_triton_fwd`` flattens to
-    # (M, K) itself and reads ``both_key(length_of(x.shape))`` first, then reshapes y back, so
+    # (M, K) itself and reads ``both_key(rows_of(x.shape))`` first, then reshapes y back, so
     # both sides of the comparison stay at (1, L, L, N).
     x, g, b = pair(n=_PAIR_N, d=_D), vec(_D), vec(_D)
     w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)

@@ -25,7 +25,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 from miniworld_engine.kernels.transition.triton.fused import (
     _transition_expand_gatebwd_savedxn,
@@ -73,7 +73,7 @@ def _xn_recompute(x2, rstd, c1, gamma, beta, *, shape_key: int | None = None):
     _xn_recompute_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(), xn,
         M, K, x2.stride(0), x2.stride(1),
-        # both_key(length_of(<pre-flatten shape>)) from the caller (the backward below).
+        # both_key(rows_of(<pre-flatten shape>)) from the caller (the backward below).
         # None = drivers_trans / checks_trans, which the coordinator threads; that path
         # buckets the flattened ROW count, the ambiguity autotune.shape_key removes.
         shape_key=both_key(M) if shape_key is None else shape_key,
@@ -127,7 +127,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         # LN stats computed once and saved for the separate backward (no recompute there).
         # L = shape[-2] of x BEFORE the reshape -- one rule for pair (B, L, L, D) and
         # token/atom (B, L, D). Threaded into every launcher, saved for the backward.
-        shape_key = both_key(length_of(orig_shape))
+        shape_key = both_key(rows_of(orig_shape))
         rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
 
         # cute fused LN + SwiGLU expand (LN folded into the gated dual-GEMM), then cuBLAS squeeze.

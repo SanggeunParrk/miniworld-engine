@@ -82,9 +82,11 @@ def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
     x = tri_bkll.reshape(K, M)  # X[m,k] = x[k, m] (M-major)
     Y = torch.empty(M, K, device=tri_bkll.device, dtype=tri_bkll.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
-    # L is right here in the [B, K, L, L] pair activation -- not M = L*L. (The kernel
-    # parameter is `shape_key`; `GROUP_M` was a stale name from before the rename.)
-    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, shape_key=both_key(L))
+    # M = L*L, the row count this launch iterates. It used to pass L, from when the key was a
+    # length; a `level=both` kernel keys on rows now (see BOTH_ROWS) precisely so that a pair
+    # L=1024 and an atom A=1024 stop sharing a bucket. (The kernel parameter is `shape_key`;
+    # `GROUP_M` was a stale name from before the rename.)
+    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, shape_key=both_key(M))
     return Y
 
 
