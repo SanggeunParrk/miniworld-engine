@@ -40,6 +40,37 @@ def test_the_default_is_grid():
     assert d.name == "grid"
 
 
+def test_the_default_ships_inside_the_package():
+    """A wheel contains `src/miniworld_engine/**`, and nothing else.
+
+    `configs/` at the repo root is not package data, so a pip install used to have no config set
+    at all -- `default_config_dir()` would fall through to the RuntimeWarning and every triton
+    kernel would fail at launch. The default set is packaged; the A-B sets stay at the root.
+    """
+    packaged = Path(configs.__file__).parent / "configs" / "grid"
+    assert packaged.is_dir(), "the default set is not inside the package; a wheel would ship none"
+    assert configs.default_config_dir() == packaged, "the packaged copy is not the one chosen"
+    assert len(list(packaged.glob("*.csv"))) > 80
+
+
+def test_the_two_copies_of_grid_are_identical():
+    """While the repo root still has one -- every sweep launcher points at it -- it must match.
+
+    Two copies of a search space that drift apart produce a cache tuned over one and read
+    against the other, and the reader's intersection silently empties. The root copy goes away
+    once no running job depends on it.
+    """
+    packaged = Path(configs.__file__).parent / "configs" / "grid"
+    root = Path(configs.__file__).resolve().parents[3] / "configs" / "grid"
+    if not root.is_dir():
+        pytest.skip("the repo-root copy is gone, which is the intended end state")
+    names = {p.name for p in packaged.glob("*.csv")}
+    assert names == {p.name for p in root.glob("*.csv")}, "the two copies list different ops"
+    differing = [n for n in sorted(names)
+                 if (packaged / n).read_bytes() != (root / n).read_bytes()]
+    assert not differing, f"{len(differing)} file(s) differ: {differing[:5]}"
+
+
 def test_ops_get_configs_with_no_environment_variable(monkeypatch):
     monkeypatch.delenv("MINIWORLD_CONFIG_DIR", raising=False)
     assert len(configs.configs_for("transition_fold_triton")) > 1
@@ -58,3 +89,36 @@ def test_a_shipped_cache_entry_still_exists_in_the_default_config_set(op):
         for bucket, ranked in entries.items():
             hit = [c for c in ranked if cache._sig_from_dict(c) in live]
             assert hit, f"{f.name} {bucket}: none of its {len(ranked)} configs is in the grid"
+
+
+def test_every_runtime_data_extension_is_declared_as_package_data():
+    """A data file the wheel does not carry is a file that only works from a checkout.
+
+    `[tool.setuptools.package-data]` is a list of globs. Anything under the package that the
+    RUNTIME reads -- the cache JSONs, the config CSVs, the registry, the JIT-compiled CUDA
+    sources, the build matrix -- has to match one of them, or it works in an editable install and
+    vanishes on `pip install`. That is how the config set came to be missing from the wheel.
+    """
+    # `importorskip`, not `import tomllib`: stdlib TOML is 3.11+ and this package's floor is
+    # 3.10, so a plain import is a type error at the declared version even though every
+    # environment that runs the suite is newer.
+    tomllib = pytest.importorskip("tomllib")
+
+    root = Path(configs.__file__).resolve().parents[3]
+    with (root / "pyproject.toml").open("rb") as fh:
+        globs = tomllib.load(fh)["tool"]["setuptools"]["package-data"]["miniworld_engine"]
+    allowed = {g.rsplit(".", 1)[-1] for g in globs}
+
+    pkg = Path(configs.__file__).resolve().parents[1]
+    runtime = [pkg / "autotune" / "data", pkg / "autotune" / "configs",
+               pkg / "build", pkg / "kernels" / "registry.csv"]
+    # Scaffolding and prose, not data the runtime reads.
+    skip = {".py", ".pyc"}
+    skip_names = {".gitkeep", "README.md"}
+    missed = []
+    for target in runtime:
+        files = [target] if target.is_file() else [p for p in target.rglob("*") if p.is_file()]
+        missed += [p.relative_to(pkg) for p in files
+                   if p.name not in skip_names and p.suffix not in skip
+                   and p.suffix.lstrip(".") not in allowed]
+    assert not missed, f"{len(missed)} runtime file(s) no glob would ship: {missed[:5]}"
