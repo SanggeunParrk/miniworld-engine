@@ -37,6 +37,8 @@ rather than counting it as ragged coverage it never had.
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import os
 
 import torch
@@ -70,6 +72,19 @@ ALIGNMENT_REQUIRED: dict[str, str] = {}
 #: Sequence/atom length L to drive at, or None for each driver's own default.
 _ENV_LEN = os.environ.get("MINIWORLD_DRIVER_LENGTH", "").strip()
 DRIVER_LENGTH: int | None = int(_ENV_LEN) if _ENV_LEN else None
+
+
+class TensorKw(TypedDict, total=False):
+    """Keyword args splatted into a torch factory (``torch.randn(..., **kw)``).
+
+    A bare ``{"device": ..., "dtype": ..., "requires_grad": ...}`` infers as a dict with a joined
+    value type, and no ``torch.randn`` overload accepts that -- 21 of this repo's type findings
+    were one dict literal reused in three files. Naming the shape lets the splat match.
+    """
+
+    device: torch.device | str
+    dtype: torch.dtype
+    requires_grad: bool
 
 
 def both_level_is_pair(length: int) -> bool:

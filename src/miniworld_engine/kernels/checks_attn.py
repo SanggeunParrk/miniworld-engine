@@ -63,7 +63,7 @@ from collections.abc import Callable, Sequence
 import torch
 import triton
 
-from .drivers import BF16, dev
+from .drivers import BF16, TensorKw, dev
 from .drivers_attn import A, D, D32, DH, DP, H, L, _aug_qkvb, _bias_only_vb, _tri_qkvb
 
 Pair = tuple[torch.Tensor, torch.Tensor]
@@ -388,7 +388,7 @@ def bias_only_attention_bwd_triton() -> dict[str, Pair]:
 
 def gated_projection_gate_gemm_triton() -> Pair:
     from .bias_only_attention.triton.gate_out import _fwd
-    kw = {"device": dev(), "dtype": BF16}
+    kw: TensorKw = {"device": dev(), "dtype": BF16}
     gate = torch.randn(L * L, DH, **kw)
     out_r = torch.randn(L * L, DH, **kw)
     wo = torch.randn(DP, DH, **kw)          # to_out.weight [N, DH]; out = A @ wo.T
@@ -400,7 +400,7 @@ def gated_projection_gate_gemm_triton() -> Pair:
 
 def gated_projection_bwd_dx_triton() -> dict[str, Pair]:
     from .bias_only_attention.triton.gate_out import _dgrad_epilogue
-    kw = {"device": dev(), "dtype": BF16}
+    kw: TensorKw = {"device": dev(), "dtype": BF16}
     do2 = torch.randn(L * L, DP, **kw)      # grad wrt [M, N], N == d_pair
     wo = torch.randn(DP, DH, **kw)
     g2 = torch.randn(L * L, DH, **kw)

@@ -228,8 +228,14 @@ def _kernel_case(fn_path: tuple[str, str], weights: Callable[[dict, torch.dtype]
     return make
 
 
-def _w(*shapes: tuple[int, ...]):
-    """Weight-dict builder for _kernel_case: positional names keep the kernel's argument order."""
+def _w(*shapes: tuple[int | str, ...]):
+    """Weight-dict builder for _kernel_case: positional names keep the kernel's argument order.
+
+    An extent is an int, or a str naming one of the case's ``dims`` -- ``_w(("d", "d"))`` is a
+    (d, d) weight whose d comes from the dims dict the case is instantiated with. The annotation
+    said ``tuple[int, ...]``, which every caller violates and which produced 27 of this repo's
+    type findings from one wrong word.
+    """
     def build(dims: dict, dt: torch.dtype) -> dict:
         return {f"w{i}": torch.randn(*[dims.get(s, s) if isinstance(s, str) else s for s in shape],
                                      device="cuda", dtype=dt)

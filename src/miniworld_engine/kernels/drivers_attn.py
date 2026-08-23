@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import torch
 
-from .drivers import BF16, aligned_only, dev, driver_length, ragged
+from .drivers import BF16, TensorKw, aligned_only, dev, driver_length, ragged
 
 L = ragged(driver_length(128))   # sequence length: tiles in BOTH the query loop and the key/value loop
 H = 4             # d_pair (128) // head dim (32); a grid extent, never a tl.arange block
@@ -85,21 +85,21 @@ def _tri_qkvb(d: int = D) -> tuple[torch.Tensor, ...]:
     ``d`` is the head dim: ``D`` (perturbable) for ``triton/main.py``, ``D32`` for
     ``triton/atomic.py``, whose forward rejects anything else.
     """
-    kw = {"device": dev(), "dtype": BF16, "requires_grad": True}
+    kw: TensorKw = {"device": dev(), "dtype": BF16, "requires_grad": True}
     q, k, v = (torch.randn(1, H, L, L, d, **kw) for _ in range(3))
     return q, k, v, torch.randn(1, H, L, L, **kw)
 
 
 def _aug_qkvb() -> tuple[torch.Tensor, ...]:
     """q/k/v [A, 1, L, H, D] and bias [1, L, L, H] -- bench_kernel_aug_attn."""
-    kw = {"device": dev(), "dtype": BF16, "requires_grad": True}
+    kw: TensorKw = {"device": dev(), "dtype": BF16, "requires_grad": True}
     q, k, v = (torch.randn(A, 1, L, H, D, **kw) for _ in range(3))
     return q, k, v, torch.randn(1, L, L, H, **kw)
 
 
 def _bias_only_vb() -> tuple[torch.Tensor, ...]:
     """v [1, H, L, L, D] and bias [1, H, L, L] -- bench_kernel_bias_attn."""
-    kw = {"device": dev(), "dtype": BF16, "requires_grad": True}
+    kw: TensorKw = {"device": dev(), "dtype": BF16, "requires_grad": True}
     return torch.randn(1, H, L, L, D, **kw), torch.randn(1, H, L, L, **kw)
 
 
@@ -227,7 +227,7 @@ def _pair_key() -> int:
 def gated_projection_gate_gemm_triton() -> None:
     # M = L*L rows, DH the contraction, DP the output width -- all three tile, all three ragged.
     from .bias_only_attention.triton.gate_out import _fwd
-    kw = {"device": dev(), "dtype": BF16}
+    kw: TensorKw = {"device": dev(), "dtype": BF16}
     gate = torch.randn(L * L, DH, **kw)
     out_r = torch.randn(L * L, DH, **kw)
     wo = torch.randn(DP, DH, **kw)          # to_out.weight [d_pair, d_hidden]
@@ -236,7 +236,7 @@ def gated_projection_gate_gemm_triton() -> None:
 
 def gated_projection_bwd_dx_triton() -> None:
     from .bias_only_attention.triton.gate_out import _dgrad_epilogue
-    kw = {"device": dev(), "dtype": BF16}
+    kw: TensorKw = {"device": dev(), "dtype": BF16}
     do2 = torch.randn(L * L, DP, **kw)      # grad wrt [M, N], N == d_pair
     wo = torch.randn(DP, DH, **kw)
     g2 = torch.randn(L * L, DH, **kw)

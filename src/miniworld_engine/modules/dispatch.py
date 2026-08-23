@@ -35,7 +35,9 @@ policy silently — see the per-op resolvers.
 
 from __future__ import annotations
 
+import sys
 import warnings
+from enum import Enum
 
 import torch
 
@@ -44,12 +46,15 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 
-try:  # Py3.11+: StrEnum; fall back to (str, Enum) for older interpreters.
+# Py3.11+ has enum.StrEnum; 3.10 (this package's floor) does not. Guarded on sys.version_info
+# rather than try/except ImportError because a type checker can follow the first and not the
+# second: with the try form, `_StrEnum` was Unknown on the checked 3.10 target, so `KernelBackend`
+# was Unknown, so every function returning one was an invalid-return-type -- six findings from
+# one import. Same runtime behaviour, legible to both.
+if sys.version_info >= (3, 11):
     from enum import StrEnum as _StrEnum
-except ImportError:  # pragma: no cover
-    from enum import Enum
-
-    class _StrEnum(str, Enum):  # type: ignore[no-redef]
+else:  # pragma: no cover -- exercised only on 3.10
+    class _StrEnum(str, Enum):
         pass
 
 
