@@ -181,6 +181,24 @@ old behaviour rather than to a permanent miss. A config is any of: a `triton.Con
   `<dtype>` is what the kernel was OBSERVED to run in, so a kernel with mixed operands records
   `bfloat16+float32`, not the driver's dtype.
 
+## The config set (the candidate space)
+
+A cache entry names configs; something has to produce the list those names are matched against.
+That is a **config set**: one `<op>.csv` per op under a directory, either materialised (one row =
+one config) or a grid spec (`axis,values`, expanded as a cartesian product).
+
+- The default is `grid`, packaged at `src/miniworld_engine/autotune/configs/grid/` so it ships in
+  the wheel. `MINIWORLD_CONFIG_DIR` overrides it and must be set **before any kernel module is
+  imported** — `triton.Autotuner` keeps the list it was handed only if it is non-empty, so a set
+  chosen after the import updates a list nobody reads and the kernel dies at launch with
+  `dynamic_func() missing 2 required positional arguments` naming its tile axes.
+- It has to be the set the cache was tuned over. `select_config` INTERSECTS a stored entry
+  against the live list, so pointing a shipped cache at a narrower set resolves every entry to
+  nothing and re-tunes on every call, silently — right answers, no warning, just slow.
+- The repo root's `configs/` holds the A-B sets used during development (`blk16`…`blk128`,
+  `warp4`, `warp8`, `mixed1`, `mixed2`, `accuracy`). They are build inputs, not runtime data, and
+  are not packaged.
+
 ## Building the shipped cache (on the target GPU)
 
 **The normal way is `miniworld-engine build all`.** It decomposes the work into one unit per
