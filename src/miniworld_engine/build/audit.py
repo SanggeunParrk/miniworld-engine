@@ -386,7 +386,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
     from miniworld_engine.autotune.cache import _CACHE_ROOT, gpu_key
 
     gk = gpu or gpu_key()
-    have: dict[str, set[int]] = {}
+    have: dict[str, set] = {}
     for f in sorted(_CACHE_ROOT.rglob("*.json")):
         try:
             d = json.loads(f.read_text())
@@ -396,9 +396,20 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
         if not (isinstance(d, dict) and "entries" in d and d.get("gpu") == gk):
             continue
         for k in d["entries"]:
-            sk = next((int(p.split("=")[1]) for p in k.split(",")
-                       if p.startswith("shape_key=")), None)
-            have.setdefault(d["op"], set()).add(sk)
+            # Split the dtype prefix off FIRST. Scanning the whole key for a "shape_key=" field
+            # misses it whenever it is the first one after the pipe -- "bfloat16|shape_key=128"
+            # splits on "," into a single element that starts with the dtype -- and every op whose
+            # bucket is shape_key alone (no other dims) then recorded bucket None, which the check
+            # reads as "this op has no shape axis" and passes.
+            _, _, dims = k.partition("|")
+            sk = next((int(x.split("=")[1]) for x in dims.split(",")
+                       if x.startswith("shape_key=")), None)
+            # A capture records the dtypes the kernel actually SAW, e.g. "bfloat16+float32" for
+            # mixed operands. Count each declared precision the entry satisfies, so (op, dtype,
+            # bucket) is what gets checked -- not (op, bucket), which reported 527/527 over a
+            # cache that held only the bf16 half of 66 kernels.
+            for t in k.split("|", 1)[0].split("+"):
+                have.setdefault(d["op"], set()).add((t, sk))
 
     try:
         units = op_units()
@@ -406,9 +417,9 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
         rep.add("coverage", WARN, "op_units", f"cannot enumerate declared work: {exc}")
         return
 
-    want: dict[str, set[int]] = {}
+    want: dict[str, set] = {}
     for u in units:
-        want.setdefault(u.op, set()).add(u.length)
+        want.setdefault(u.op, set()).add((u.dtype, u.length))
     rep.stats["declared_ops"] = len(want)
     rep.stats["declared_pairs"] = sum(len(v) for v in want.values())
 
@@ -420,13 +431,18 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
             missing += len(want[op])
             continue
         # A bucket is covered if any entry names it; ops whose key has no shape_key record None.
-        gap = {b for b in want[op] if b not in got} if got != {None} else set()
+        # Ops whose autotune key has no shape_key record bucket None; they declare one bucket.
+        shapeless = {b for _, b in got} == {None}
+        gap = set() if shapeless else {p for p in want[op] if p not in got}
         if gap:
             missing += len(gap)
-            rep.add("coverage", WARN, op,
-                    f"{len(gap)} bucket(s) missing on {gk}: {sorted(gap)}")
+            byd: dict = {}
+            for dt, b in sorted(gap):
+                byd.setdefault(dt, []).append(b)
+            detail = "; ".join(f"{dt}: {bs}" for dt, bs in byd.items())
+            rep.add("coverage", WARN, op, f"{len(gap)} (dtype, bucket) missing on {gk} -- {detail}")
         else:
-            rep.add("coverage", OK, op, f"{len(got)} bucket(s)")
+            rep.add("coverage", OK, op, f"{len(got)} (dtype, bucket) pair(s)")
     rep.stats["missing_pairs"] = missing
 
 

@@ -662,7 +662,7 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
 
 
 def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> list[OpUnit]:
-    """One item per (triton op with a driver, shape bucket of its declared level).
+    """One item per (triton op with a driver, DECLARED dtype, shape bucket of its declared level).
 
     The level comes from registry.csv and decides the bucket set, so a token kernel is never
     driven at an atom length and vice versa -- driving it there would tune a bucket the model
@@ -678,6 +678,11 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
     be `registered_ops()`: that reflects which kernel modules THIS process happened to import, and
     the parent imports far fewer than the children do -- filtering on it silently dropped 8 more
     ops that have config files and drivers.
+
+    dtype is declared too, in registry.csv's ``dtypes`` column: token kernels are bf16, atom and
+    both are bf16|fp32. This used to emit bfloat16 for everything, so the fp32 half of 66 kernels
+    was never driven -- and the coverage check counted (op, bucket) without dtype, so it reported
+    527/527 and missing_pairs=0 over a cache that held one of the two declared precisions.
     """
     import csv  # noqa: PLC0415
 
@@ -699,7 +704,10 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
             # the only one today, and correctly so: it reads the WEIGHTS (Wa, Wb (N,K), gamma,
             # beta (K,)) and never touches the activation, so N and K are its whole shape.
             shapes = shapes[:1]
-        out.append([OpUnit(op=r["kernel"], length=length) for length in shapes])
+        alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
+        dtypes = [alias.get(x, x) for x in (r.get("dtypes") or "bf16").split("|") if x]
+        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt)
+                    for dt in dtypes for length in shapes])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands

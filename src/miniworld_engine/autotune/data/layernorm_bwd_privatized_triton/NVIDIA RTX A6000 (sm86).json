@@ -185,6 +185,17 @@
         "num_stages": 5,
         "num_warps": 1
       }
+    ],
+    "bfloat16+float32|K=128,PRIVATIZE_DGDB=1,shape_key=8192": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 1
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
+        "num_warps": 1
+      }
     ]
   },
   "env_identity": "0ef334f664e2",
