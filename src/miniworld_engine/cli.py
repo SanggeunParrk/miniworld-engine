@@ -1,9 +1,20 @@
-"""``miniworld-engine`` command line: capture autotune caches and run benchmarks.
+"""``miniworld-engine`` command line: build autotune caches and run benchmarks.
+
+    miniworld-engine build all                # the DECLARED work list: 922 (op, dtype, bucket)
+    miniworld-engine build all --resume       # skip what a previous run already claimed
+    miniworld-engine audit                    # which of them the shipped cache actually holds
 
     miniworld-engine capture all              # every kernel, every dispatch branch
     miniworld-engine capture pairformer       # one module's kernels
     miniworld-engine capture transition --gpus 4
-    miniworld-engine bench all
+    miniworld-engine merge --shards <shard-dir>   # fold captured shards into the in-repo cache
+
+    miniworld-engine bench_kernel all         # the kernel benches
+    miniworld-engine bench_module all         # the module benches
+
+``build`` is the one to reach for. ``capture`` drives production MODULES, so it only reaches the
+kernels a module's own shapes dispatch to -- 48 of 91 on an A6000; ``build`` drives the registry's
+declared list instead and covers all of them.
 
 Everything the run depends on is an argument. The engine used to take these as environment
 variables, which meant a run's behaviour lived in shell state that nothing recorded: a capture that
@@ -792,7 +803,15 @@ def _resolve_gpus(spec: str) -> list[int]:
     return list(range(count))
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The whole CLI, built but not run.
+
+    Separate from :func:`main` so a test can parse a command line without executing it -- which
+    is what lets tests/test_cli_documented_commands.py check that every `miniworld-engine ...`
+    line in the README and the docs is a command this parser accepts. The module docstring used
+    to advertise `miniworld-engine bench all`; the subcommands are `bench_kernel` and
+    `bench_module`, and there has never been a `bench`.
+    """
     parser = argparse.ArgumentParser(prog="miniworld-engine", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -890,7 +909,11 @@ def main(argv: list[str] | None = None) -> int:
     bm.add_argument("--mode", default="inference", choices=("inference", "training"))
     bm.set_defaults(func=cmd_bench_module, config_type=None)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     return args.func(args)
 
 
