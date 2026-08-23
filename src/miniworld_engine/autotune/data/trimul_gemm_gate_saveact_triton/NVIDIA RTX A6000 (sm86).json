@@ -1,0 +1,223 @@
+{
+  "config_space_hash": "97faf168cca2",
+  "entries": {
+    "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=128,TRANSPOSE_OUT=1,shape_key=128": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.04710400104522705,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.04710400104522705,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.04710400104522705,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.04761599935591221,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.048128001391887665,
+        "num_stages": 4,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=128,TRANSPOSE_OUT=1,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.17100800573825836,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.17100800573825836,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.17100800573825836,
+        "num_stages": 5,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.17100800573825836,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.17203199863433838,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=128,TRANSPOSE_OUT=1,shape_key=384": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32
+        },
+        "ms": 0.45977601408958435,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32
+        },
+        "ms": 0.4607999920845032,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32
+        },
+        "ms": 0.4607999920845032,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32
+        },
+        "ms": 0.4607999920845032,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64
+        },
+        "ms": 0.4618239998817444,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=128,TRANSPOSE_OUT=1,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.822272002696991,
+        "num_stages": 6,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 256,
+          "BLOCK_N": 32
+        },
+        "ms": 0.8232960104942322,
+        "num_stages": 3,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.8243200182914734,
+        "num_stages": 6,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 32
+        },
+        "ms": 0.8253440260887146,
+        "num_stages": 6,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.826367974281311,
+        "num_stages": 5,
+        "num_warps": 2
+      }
+    ]
+  },
+  "env_identity": "0ef334f664e2",
+  "gpu": "NVIDIA RTX A6000 (sm86)",
+  "op": "trimul_gemm_gate_saveact_triton",
+  "op_identity": "e972c12dc0fe",
+  "provenance": {
+    "built_utc": "2026-08-23T02:14:49+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

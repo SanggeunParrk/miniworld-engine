@@ -1,0 +1,203 @@
+{
+  "config_space_hash": "c2e31afab125",
+  "entries": {
+    "bfloat16|N=256,shape_key=128": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 256,
+          "BLOCK_N": 32
+        },
+        "ms": 0.026623999699950218,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.027648000046610832,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.027648000046610832,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.027648000046610832,
+        "num_stages": 5,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.027648000046610832,
+        "num_stages": 1,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16|N=256,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 4,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 6,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 256
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.09625600278377533,
+        "num_stages": 2,
+        "num_warps": 16
+      }
+    ],
+    "bfloat16|N=256,shape_key=384": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.21299199759960175,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.21299199759960175,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.21299199759960175,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.21299199759960175,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.21299199759960175,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16|N=256,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.37273600697517395,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.37273600697517395,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.37273600697517395,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.37273600697517395,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 32
+        },
+        "ms": 0.37273600697517395,
+        "num_stages": 5,
+        "num_warps": 8
+      }
+    ]
+  },
+  "env_identity": "0ef334f664e2",
+  "gpu": "NVIDIA RTX A6000 (sm86)",
+  "op": "trimul_transpose_triton",
+  "op_identity": "050c0671671c",
+  "provenance": {
+    "built_utc": "2026-08-23T02:14:49+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

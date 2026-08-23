@@ -80,3 +80,50 @@ def test_shape_sharding_is_unaffected(tmp_path, monkeypatch):
     capture.merge_shards(paths, gpu="TEST")
 
     assert seen["csh"] == cache.config_space_hash([_Cfg(c) for c in FULL])
+
+
+# --------------------------------------------------------------------------- #
+# a shard that cannot be parsed must be LOUD
+#
+# `dump_shard` used a bare write_text: truncate, then write. Two processes on one shard interleave
+# -- the shorter write lands inside the longer one and the first write's tail survives past its
+# end. That is "Extra data: line 1 column 359431", and it happened for real on a --reclaim restart
+# that handed a live unit's shard to a second worker. merge_shards then dropped the file silently,
+# so a whole unit's measurements vanished from the cache and looked exactly like a unit never run.
+# --------------------------------------------------------------------------- #
+
+def test_dump_shard_is_atomic(tmp_path, monkeypatch):
+    """A reader must never observe a half-written shard."""
+    from miniworld_engine.autotune import capture
+    monkeypatch.setattr(capture, "_CAPTURE", {"op": {"grid": [], "op_id": "", "entries": {}}})
+    p = tmp_path / "u.json"
+    capture.dump_shard(str(p))
+    import json
+    json.loads(p.read_text())                       # parses
+    assert not list(tmp_path.glob("*.tmp")), "the temp file must be renamed away, not left behind"
+
+
+def test_an_unparseable_shard_is_reported_not_swallowed(tmp_path, monkeypatch):
+    from miniworld_engine.autotune import cache, capture
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path / "data")
+    good = tmp_path / "good.json"
+    good.write_text('{"op": {"grid": [], "entries": {}, "op_id": ""}}')
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"op": {}}{"op": {}}')          # two documents, as the real corruption was
+    capture.merge_shards([str(good), str(bad)])
+    assert len(capture._MERGE_SKIPPED) == 1
+    assert "bad.json" in capture._MERGE_SKIPPED[0][0]
+    assert "Extra data" in capture._MERGE_SKIPPED[0][1]
+
+
+def test_merge_skipped_resets_between_runs(tmp_path, monkeypatch):
+    """Stale entries would make a clean merge look broken."""
+    from miniworld_engine.autotune import cache, capture
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path / "data")
+    bad = tmp_path / "bad.json"; bad.write_text("{{{")
+    capture.merge_shards([str(bad)])
+    assert capture._MERGE_SKIPPED
+    good = tmp_path / "good.json"
+    good.write_text('{"op": {"grid": [], "entries": {}, "op_id": ""}}')
+    capture.merge_shards([str(good)])
+    assert not capture._MERGE_SKIPPED

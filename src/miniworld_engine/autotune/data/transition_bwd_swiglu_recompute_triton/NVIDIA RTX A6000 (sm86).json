@@ -1,23 +1,273 @@
 {
-  "config_space_hash": "c63062e9311a",
+  "config_space_hash": "97faf168cca2",
   "entries": {
-    "any|any": [
+    "bfloat16+float32|K=128,ND=512,NORMALIZE=1,STACK_DAB=1,STORE_H=1,shape_key=128": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.131071999669075,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.13209599256515503,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 256
+        },
+        "ms": 0.13414399325847626,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.13619199395179749,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.1372160017490387,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|K=128,ND=512,NORMALIZE=1,STACK_DAB=1,STORE_H=1,shape_key=2048": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 5,
+        "num_warps": 4
+      },
       {
         "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M1": 64,
           "BLOCK_N": 64
         },
-        "ms": NaN,
-        "num_stages": 1,
-        "num_warps": 2
+        "ms": 0.02252800017595291,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|K=128,ND=512,NORMALIZE=1,STACK_DAB=1,STORE_H=1,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.5058559775352478,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.5099520087242126,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.5140479803085327,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.5181440114974976,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.5232639908790588,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|K=128,ND=512,NORMALIZE=1,STACK_DAB=1,STORE_H=1,shape_key=384": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 1.1110399961471558,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 1.1212799549102783,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 1.124351978302002,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 1.1397119760513306,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 256
+        },
+        "ms": 1.176576018333435,
+        "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|K=128,ND=512,NORMALIZE=1,STACK_DAB=1,STORE_H=1,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 1.9722239971160889,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 2.0075520277023315,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 2.0152320861816406,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 2.021375894546509,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 256
+        },
+        "ms": 2.0695040225982666,
+        "num_stages": 3,
+        "num_warps": 8
       }
     ]
   },
+  "env_identity": "0ef334f664e2",
   "gpu": "NVIDIA RTX A6000 (sm86)",
-  "op": "transition_expand_gate_bwd",
+  "op": "transition_bwd_swiglu_recompute_triton",
+  "op_identity": "a48efa688ad6",
   "provenance": {
-    "built_utc": "2026-08-19T14:31:05+00:00",
+    "built_utc": "2026-08-23T02:14:49+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

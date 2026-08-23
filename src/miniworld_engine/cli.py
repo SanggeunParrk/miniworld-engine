@@ -317,6 +317,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
         return 2
 
     written = capture.merge_shards(paths, top_k=args.top_k, gpu=gpu, only_ops=None)
+    if capture._MERGE_SKIPPED:
+        print(f"WARNING: {len(capture._MERGE_SKIPPED)} shard(s) were unreadable, so a whole "
+              f"unit's measurements are MISSING from the cache:", file=sys.stderr)
+        for sp, why in capture._MERGE_SKIPPED[:10]:
+            print(f"  {sp}\n      {why}", file=sys.stderr)
     ops = sorted({w[0] for w in written})
     print(f"merged {len(ops)} ops / {len(written)} buckets from {len(paths)} shards into {gpu!r}")
     for op in ops:
@@ -479,6 +484,11 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
         print("no shards to merge.", file=sys.stderr)
         return 1
     written = capture.merge_shards(shards)
+    if capture._MERGE_SKIPPED:
+        print(f"WARNING: {len(capture._MERGE_SKIPPED)} shard(s) were unreadable, so a whole "
+              f"unit's measurements are MISSING from the cache:", file=sys.stderr)
+        for sp, why in capture._MERGE_SKIPPED[:10]:
+            print(f"  {sp}\n      {why}", file=sys.stderr)
     print(f"=== merged {len(written)} op file(s) into the in-repo cache"
           f"{f' ({len(bad)} unit(s) missing -- run `audit` for the holes)' if bad else ''}",
           flush=True)

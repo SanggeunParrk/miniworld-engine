@@ -1,0 +1,81 @@
+{
+  "config_space_hash": "f618bf30d7a1",
+  "entries": {
+    "bfloat16|N=128,shape_key=1024": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|N=128,shape_key=2048": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.011264000087976456,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|N=128,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|N=128,shape_key=4096": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|N=128,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|N=128,shape_key=8192": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.021503999829292297,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ]
+  },
+  "env_identity": "0ef334f664e2",
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "op": "adaln_bwd_pre_triton",
+  "op_identity": "1fa0d9521422",
+  "provenance": {
+    "built_utc": "2026-08-23T07:33:52+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

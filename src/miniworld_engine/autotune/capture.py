@@ -1171,8 +1171,21 @@ def dump_shard(path: str) -> int:
                    "op_id": slot.get("op_id", "")}
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(out))
+    # Atomic, like store_ranked_configs. A bare write_text truncates and then writes, so two
+    # processes on the same shard interleave: the shorter write lands inside the longer one and
+    # the tail of the first survives past its end -- "Extra data: line 1 column 359431". Two
+    # writers happen whenever a job is cancelled mid-unit and its claim is reclaimed while the
+    # old process is still running, which is exactly what a --reclaim restart does. The result
+    # is unparseable, and merge_shards drops unparseable shards, so the unit's whole measurement
+    # disappears from the cache with nothing said.
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(out))
+    tmp.replace(p)
     return len(out)
+
+
+#: shards merge_shards could not parse, reported by the caller rather than swallowed.
+_MERGE_SKIPPED: list = []
 
 
 def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=None) -> list:
@@ -1183,11 +1196,15 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
     has a good cache. Returns ``(op, dtype|bucket, n_configs, path)`` rows for logging."""
     import json  # noqa: PLC0415
     gk = gpu or gpu_key()
+    _MERGE_SKIPPED.clear()
     agg: dict = {}
     for sp in shard_paths:
         try:
             d = json.loads(Path(sp).read_text())
-        except Exception:  # noqa: BLE001 -- skip unreadable/partial shard
+        except Exception as exc:  # noqa: BLE001 -- unreadable/partial shard
+            # Never silent: a dropped shard is a whole unit's measurement missing from the cache,
+            # and it used to look identical to a unit that was never run.
+            _MERGE_SKIPPED.append((str(sp), f"{type(exc).__name__}: {exc}"))
             continue
         for op, slot in d.items():
             if only_ops is not None and op not in only_ops:

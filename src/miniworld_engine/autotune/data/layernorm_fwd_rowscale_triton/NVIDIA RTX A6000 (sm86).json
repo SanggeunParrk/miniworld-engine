@@ -1,22 +1,165 @@
 {
-  "config_space_hash": "614fb5bb509d",
+  "config_space_hash": "0398d851d9f4",
   "entries": {
-    "any|any": [
+    "bfloat16|D=128,shape_key=128": [
       {
         "kwargs": {
           "BLOCK_K": 64,
-          "BLOCK_M1": 64
+          "BLOCK_M1": 1
         },
-        "ms": NaN,
+        "ms": 0.02457600086927414,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16|D=128,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 5,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 4
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 2,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16|D=128,shape_key=384": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.10761599987745285,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 5,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.1085439994931221,
         "num_stages": 1,
         "num_warps": 2
       }
+    ],
+    "bfloat16|D=128,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.1884160041809082,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.1884160041809082,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.1884160041809082,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.1884160041809082,
+        "num_stages": 5,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.1884160041809082,
+        "num_stages": 6,
+        "num_warps": 1
+      }
     ]
   },
+  "env_identity": "0ef334f664e2",
   "gpu": "NVIDIA RTX A6000 (sm86)",
-  "op": "fused_ln_mask",
+  "op": "layernorm_fwd_rowscale_triton",
+  "op_identity": "81295959ff46",
   "provenance": {
-    "built_utc": "2026-08-19T14:31:12+00:00",
+    "built_utc": "2026-08-23T02:14:48+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

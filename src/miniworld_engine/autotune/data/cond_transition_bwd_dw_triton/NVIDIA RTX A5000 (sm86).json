@@ -1,0 +1,187 @@
+{
+  "config_space_hash": "fbfd2f4b3274",
+  "entries": {
+    "float32|K=512,N=128,shape_key=1024": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.03379200026392937,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.04608000069856644,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|K=512,N=128,shape_key=2048": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.03993599861860275,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.08806400001049042,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|K=512,N=128,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.016383999958634377,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|K=512,N=128,shape_key=4096": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.04403200000524521,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.06451199948787689,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.06451199948787689,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.06451199948787689,
+        "num_stages": 5,
+        "num_warps": 1
+      }
+    ],
+    "float32|K=512,N=128,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|K=512,N=128,shape_key=8192": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.07372800260782242,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.07372800260782242,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.07577600330114365,
+        "num_stages": 8,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.07577600330114365,
+        "num_stages": 12,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_N_COL": 32,
+          "BLOCK_N_ROW": 32
+        },
+        "ms": 0.07577600330114365,
+        "num_stages": 4,
+        "num_warps": 2
+      }
+    ]
+  },
+  "env_identity": "0ef334f664e2",
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "op": "cond_transition_bwd_dw_triton",
+  "op_identity": "7deec4d1ef7d",
+  "provenance": {
+    "built_utc": "2026-08-23T07:33:52+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

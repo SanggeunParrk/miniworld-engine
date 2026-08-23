@@ -1,0 +1,26 @@
+{
+  "config_space_hash": "3af2f1496eff",
+  "entries": {
+    "bfloat16+float32|K=128,N=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_N": 32
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ]
+  },
+  "env_identity": "0ef334f664e2",
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "op": "transition_fold_triton",
+  "op_identity": "58d2f5286d71",
+  "provenance": {
+    "built_utc": "2026-08-23T07:33:53+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}

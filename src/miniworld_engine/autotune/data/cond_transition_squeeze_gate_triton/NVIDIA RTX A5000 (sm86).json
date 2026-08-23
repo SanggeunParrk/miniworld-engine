@@ -1,0 +1,67 @@
+{
+  "config_space_hash": "52132dda4478",
+  "entries": {
+    "float32|DC=128,ND=512,shape_key=2048": [
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 16,
+          "BLOCK_K_ND": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.03481600061058998,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|DC=128,ND=512,shape_key=256": [
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 16,
+          "BLOCK_K_ND": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.03174399957060814,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|DC=128,ND=512,shape_key=4096": [
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 16,
+          "BLOCK_K_ND": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.04198399931192398,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "float32|DC=128,ND=512,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 16,
+          "BLOCK_K_ND": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
+        "ms": 0.03174399957060814,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ]
+  },
+  "env_identity": "0ef334f664e2",
+  "gpu": "NVIDIA RTX A5000 (sm86)",
+  "op": "cond_transition_squeeze_gate_triton",
+  "op_identity": "fae7cd596f05",
+  "provenance": {
+    "built_utc": "2026-08-23T07:33:53+00:00",
+    "torch": "2.10.0+cu128",
+    "triton": "3.6.0"
+  },
+  "schema": 1
+}
