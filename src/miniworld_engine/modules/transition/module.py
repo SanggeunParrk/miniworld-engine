@@ -146,6 +146,9 @@ class Transition(nn.Module):
             return out + x if add_residual else out
 
         if backend == KernelBackend.CUDA:
+            # kernels.cuda_transition has never been implemented (see its docstring). Reaching
+            # here used to raise ImportError from four frames down; this names the module and
+            # the way out. Transition(implementation="cuda") is the only way to get here.
             xln = self.ln_in(x)
             out = kernels.cuda_transition(
                 xln,

@@ -190,6 +190,15 @@ exclude = [
   "third_party",
 ]
 
+[tool.ty.rules]
+# torch's stubs type `autograd.Function.backward` as variadic (`*grad_outputs: Any`) and
+# `nn.Module.forward` as `Callable[..., Any]`. Every concrete override in this repo is therefore
+# an "invalid override" -- 16 of them, all correctly written, 15 with @staticmethod exactly as
+# torch requires. The rule cannot distinguish a real signature break from the torch idiom here,
+# so it reports only noise; left on, it is 16 findings standing between this check and gating.
+# Revisit if torch ships tighter stubs.
+invalid-method-override = "ignore"
+
 [tool.ty.environment]
 python-version = "3.10"
 

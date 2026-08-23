@@ -66,6 +66,14 @@ The public surface is enforced by `tests/test_public_api.py`.
   the canonical path). Verified 0 importers + contract & numerical suites green.
 
 ### Fixed
+- **`kernels.cuda_transition` has never worked and now says so.** Its body
+  deferred to `transition.cuda.cuda_transition`, a symbol with no history in
+  this repo; the module binds only `cuda_transition_b2b` and
+  `cuda_transition_expand_gate`. `Transition(implementation="cuda")` resolves to
+  `KernelBackend.CUDA` and calls it in `forward`, so that path raised
+  `ImportError` from four frames down. It now raises `NotImplementedError`
+  naming what does exist. The name stays (the surface is frozen) but the
+  CUDA backend for `Transition` should be considered unavailable.
 - **`miniworld-engine build all` works as documented.** Its config-set argument
   defaulted to the string `"default"` and `configs/default` has never existed,
   so the command failed at argument parsing; `bench_module` hardcoded the same

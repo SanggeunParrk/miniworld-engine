@@ -73,11 +73,23 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
 
 
-def cuda_transition(*args, **kwargs):
-    """Lazy CUDA Transition entry (builds the .so on first call)."""
-    from .transition.cuda import cuda_transition as cuda_transition_impl
+def cuda_transition(*args, **kwargs):  # noqa: ARG001 -- signature kept for the frozen surface
+    """NOT IMPLEMENTED. Kept as a name because the public surface is frozen.
 
-    return cuda_transition_impl(*args, **kwargs)
+    This wrapper deferred to ``transition.cuda.cuda_transition``, which has never existed in this
+    repo -- git has no record of it, and the module binds only ``cuda_transition_b2b`` and
+    ``cuda_transition_expand_gate``, both of which fuse the LayerNorm and take ``eps``. The
+    ``Transition`` module's ``KernelBackend.CUDA`` branch calls this with an already-normalised
+    ``x`` and an expansion factor ``n``, a signature nothing here provides.
+
+    It raised ``ImportError`` from inside a forward. Raising here instead says what is wrong and
+    what does exist; ``tests/test_lazy_import_targets.py`` keeps any other lazy wrapper from
+    reaching the same state.
+    """
+    msg = ("kernels.cuda_transition is not implemented: transition/cuda exposes only "
+           "cuda_transition_b2b (LN-fused b2b, fixed shapes) and cuda_transition_expand_gate. "
+           "Use implementation='triton' for Transition, or call one of those directly.")
+    raise NotImplementedError(msg)
 
 
 def cuda_transition_b2b(*args, **kwargs):
