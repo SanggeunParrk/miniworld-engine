@@ -51,6 +51,7 @@ from __future__ import annotations
 import csv
 import itertools
 import os
+import warnings
 from pathlib import Path
 
 import triton
@@ -230,8 +231,42 @@ def missing_ops() -> list[str]:
     return sorted(op for op, live in _LISTS.items() if not live)
 
 
+def default_config_dir() -> Path | None:
+    """The config set used when ``MINIWORLD_CONFIG_DIR`` is not set, or None if none is present.
+
+    ``grid``, not one of the single-config sets: the cache reader INTERSECTS a tuned entry
+    against the live config list (``keep = [c for c in configs if _sig(c) in want]``), so a
+    default smaller than the space the cache was built over would resolve every shipped entry to
+    nothing and re-tune on every call.
+
+    There has to BE a default. Without one, an install that does not export the environment
+    variable leaves every op stranded with triton's substitute config, and the first launch of
+    every triton kernel dies with ``dynamic_func() missing 2 required positional arguments:
+    'BLOCK_M1' and 'BLOCK_K'`` -- a message that names neither the op nor the cause. Every entry
+    point in this repo happens to export it, which is exactly why that went unnoticed.
+    """
+    packaged = Path(__file__).parent / "configs" / "grid"
+    if packaged.is_dir():
+        return packaged
+    # Editable install / repo checkout: the sets still live at the repo root.
+    repo = Path(__file__).resolve().parents[3] / "configs" / "grid"
+    if repo.is_dir():
+        return repo
+    return None
+
+
 _ENV_DIR = os.environ.get("MINIWORLD_CONFIG_DIR", "").strip()
 if _ENV_DIR:
     # Import-time selection: this module loads before any kernel module can call configs_for,
     # which is the only ordering that lets every op keep the list it was handed.
     _DIR = Path(_ENV_DIR)
+else:
+    _DIR = default_config_dir()
+    if _DIR is None:
+        warnings.warn(
+            "[miniworld.autotune] no autotune config set found: MINIWORLD_CONFIG_DIR is unset and "
+            "neither the packaged nor the repo-root `configs/grid` exists. Every triton kernel "
+            "will fail at its first launch with `dynamic_func() missing N required positional "
+            "arguments` naming its tile axes. Set MINIWORLD_CONFIG_DIR to a config set BEFORE "
+            "importing any kernel module.",
+            RuntimeWarning, stacklevel=2)
