@@ -720,8 +720,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
 
     from miniworld_engine.autotune.shape_key import (  # noqa: PLC0415
         ATOM_SHAPES,
+        BOTH_PAIR_LENGTHS,
         SHAPES_BY_LEVEL,
-        TOKEN_SHAPES,
     )
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
@@ -739,7 +739,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
         # and never builds the other. 4 pair + 6 atom = 10 buckets, which is exactly BOTH_ROWS.
         # Before this, 8 units covered 8 of the 10 and two of those 8 were the wrong side.
         if r["level"] == "both":
-            sided = [("pair", L) for L in TOKEN_SHAPES] + [("atom", A) for A in ATOM_SHAPES]
+            sided = ([("pair", L) for L in BOTH_PAIR_LENGTHS]
+                     + [("atom", A) for A in ATOM_SHAPES])
         else:
             sided = [("", L) for L in SHAPES_BY_LEVEL[r["level"]]]
         if not _keys_on_shape(Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):

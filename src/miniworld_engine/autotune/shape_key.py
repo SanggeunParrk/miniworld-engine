@@ -76,8 +76,15 @@ BOTH_SHAPES: tuple[int, ...] = tuple(sorted(set(TOKEN_SHAPES) | set(ATOM_SHAPES)
 #: atom launch of M rows have the same launch geometry, so the same tile is right for both, and
 #: nothing about "which side it came from" changes that. (Length is still right for ``token`` and
 #: ``atom`` kernels, where it is unambiguous.)
+#: The pair lengths a both-level kernel is tuned at. TOKEN_SHAPES plus 1024, because 1024 is what
+#: the module benches actually sweep to (bench.yaml: max_seq_len 1024) and production pairformer
+#: runs there -- tuning to 512 and extrapolating is the same "close enough" this bucket set exists
+#: to stop. It stops at 1024: pair L=2048 is 4.2M rows and L=8192 is 67M, which is what OOM'd 20
+#: probes, and nothing in this repo measures either.
+BOTH_PAIR_LENGTHS: tuple[int, ...] = (*TOKEN_SHAPES, 1024)
+
 BOTH_ROWS: tuple[int, ...] = tuple(sorted(
-    set(ATOM_SHAPES) | {length * length for length in TOKEN_SHAPES}))
+    set(ATOM_SHAPES) | {length * length for length in BOTH_PAIR_LENGTHS}))
 
 SHAPES_BY_LEVEL: dict[str, tuple[int, ...]] = {
     "token": TOKEN_SHAPES,
