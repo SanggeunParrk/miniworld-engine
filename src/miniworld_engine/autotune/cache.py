@@ -332,6 +332,11 @@ def store_ranked_configs(
         }
     if op_id:
         data["op_identity"] = op_id
+    # Stamp it on every write, not only when the file is reset. A token/atom file that predates
+    # the field is valid under scheme 2 -- the bump re-based both-level keys only -- but "valid
+    # because the field is missing" is a fact you have to know `_SCHEME_AFFECTS` to reconstruct.
+    # Writing it down means a file says which scheme its keys are in.
+    data["key_scheme"] = KEY_SCHEME
     data["entries"][f"{dtype}|{bucket}"] = [config_to_dict(c, ms) for c, ms in ranked[:top_k]]
     write_json(fp, data, indent=2, sort_keys=True)
     _load_cache.pop((op, gk), None)  # invalidate memo

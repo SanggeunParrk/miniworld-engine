@@ -103,3 +103,23 @@ def test_a_token_level_kernel_keeps_its_entries():
 
 def test_an_unknown_op_is_treated_as_stale():
     assert cache._scheme_stale("not_a_kernel_triton", None) is True
+
+
+def test_every_write_stamps_the_key_scheme(tmp_path, monkeypatch):
+    """A file has to say which scheme its keys are in, not leave it to be reconstructed."""
+    import json
+
+    import triton
+
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path)
+    cfg = triton.Config({"BLOCK_M1": 64}, num_warps=4, num_stages=2)
+    fp = cache.store_ranked_configs("op_probe", "gpu0", "bfloat16", "shape_key=256",
+                                    [(cfg, 1.0)], "hash0", op_id="op0", env_id="env0")
+    assert json.loads(fp.read_text())["key_scheme"] == cache.KEY_SCHEME
+
+    # ... and again on an APPEND to a file that is not being reset.
+    fp = cache.store_ranked_configs("op_probe", "gpu0", "bfloat16", "shape_key=512",
+                                    [(cfg, 1.0)], "hash0", op_id="op0", env_id="env0")
+    data = json.loads(fp.read_text())
+    assert data["key_scheme"] == cache.KEY_SCHEME
+    assert len(data["entries"]) == 2, "the second write reset the file instead of appending"
