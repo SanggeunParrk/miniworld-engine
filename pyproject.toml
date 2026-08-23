@@ -62,6 +62,10 @@ where = ["src"]
 #   - build/*.csv              -> the per-GPU kernel-cache build matrix, read by the cache builder
 #                                 (miniworld_engine.build.matrix) to decide which units a card may
 #                                 build; without it the builder raises on a missing matrix.
+#   - autotune/configs/grid/*.csv -> the DEFAULT autotune search space. Without it a wheel has no
+#                                 config set at all and every triton kernel dies at its first
+#                                 launch with `dynamic_func() missing N positional arguments`;
+#                                 see autotune/configs/README.md.
 miniworld_engine = ["**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.csv"]
 
 # ----------------------------------------------------------------------------
