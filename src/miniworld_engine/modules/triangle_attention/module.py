@@ -2,6 +2,7 @@
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline)."""
 
+import math
 from contextlib import contextmanager
 
 import torch
@@ -186,7 +187,7 @@ class TriangleAttention(nn.Module):
         GEMM (gate folded into to_out) at small d_hidden vs the one-pass sigmoid*mul +
         cuBLAS to_out at large d_hidden, where the wide fused tile degrades."""
         dh = gate.shape[-1]
-        M = gate.shape[:-1].numel()
+        M = math.prod(gate.shape[:-1])
         if _bo_dispatch.gate_use_fused(dh, self.to_out.weight.shape[0], M,
                                        gate.device, gate.dtype):
             return kernels.fused_gate_out(gate, out, self.to_out.weight)

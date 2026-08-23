@@ -96,6 +96,9 @@ def build_transition_split_fwd(d_hiddens=(256, 512), seq_lens=(384, 512, 768, 10
 def build_trimul_bidir_front(d_pairs=(128, 256, 512), seq_lens=(384, 512, 768, 1024), top_k=5,
                              dtype=torch.bfloat16) -> None:
     from miniworld_engine.kernels.trimul_inproj.triton import bidirectional as B
+    # get_seq_group lives in the package's _autotune module, not on `bidirectional`. `B.get_seq_group`
+    # is an AttributeError, so this builder has never run past its first bucket. Found by `ty`.
+    from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group as _seq_group
 
     kernel = B._bidir_front_kernel
     full_grid = list(kernel.configs)
@@ -119,7 +122,7 @@ def build_trimul_bidir_front(d_pairs=(128, 256, 512), seq_lens=(384, 512, 768, 1
             left = torch.empty(1, h2, L, L, device=dev, dtype=dtype)
             right = torch.empty(1, h2, L, L, device=dev, dtype=dtype)
             preact = torch.empty(4 * h2, M, device=dev, dtype=dtype)
-            gm = B.get_seq_group(M)
+            gm = _seq_group(M)
             pos = (x_flat, Wlr, left, right, preact, M, M)
             grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
             bucket = shape_bucket(GM=gm, H2=h2, K=d)

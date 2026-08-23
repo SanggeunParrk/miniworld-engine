@@ -24,6 +24,8 @@ fused_gate_out / split, the inference LN+proj concat, and the per-GPU dispatch).
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -99,7 +101,7 @@ class BidirectionalTriangleAttention(nn.Module):
         choice keys on the OUTPUT width (d_pair), not the 2*d_hidden gate width — so
         at d_pair<=128 the fused kernel is used even though d_hidden=2h is large."""
         dh = gate.shape[-1]
-        m = gate.shape[:-1].numel()
+        m = math.prod(gate.shape[:-1])
         if _bo_dispatch.gate_use_fused(dh, self.to_out.weight.shape[0], m,
                                        gate.device, gate.dtype):
             return kernels.fused_gate_out(gate, out, self.to_out.weight)

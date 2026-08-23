@@ -25,6 +25,7 @@ import hashlib
 import json
 import warnings
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -256,7 +257,7 @@ def store_ranked_configs(
     committed ``data/`` tree so the builder's output is ready to ``git add`` and share."""
     fp = _CACHE_ROOT / op / f"{gk}.json"
     fp.parent.mkdir(parents=True, exist_ok=True)
-    data = None
+    data: dict[str, Any] | None = None
     if fp.exists():
         try:
             data = json.loads(fp.read_text())
@@ -272,6 +273,9 @@ def store_ranked_configs(
             triton_ver = getattr(_triton, "__version__", "?")
         except Exception:  # noqa: BLE001
             triton_ver = "?"
+        # Annotated because the literal's value types join to `int | str | dict`, which makes
+        # `data["entries"][key] = ...` below a subscript-assign on an int as far as a checker
+        # can tell. The shape is genuinely heterogeneous; say so once.
         data = {
             "schema": SCHEMA, "gpu": gk, "op": op, "config_space_hash": config_space_h,
             "env_identity": env_id, "op_identity": op_id,

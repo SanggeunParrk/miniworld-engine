@@ -992,8 +992,12 @@ def install() -> None:
 
     _install_launch_probes()
 
-    _tcc.compile = _fork_compile
-    _tc.compile = _fork_compile  # the name create_binder rebinds via `from ..compiler import compile`
+    # Deliberate monkeypatch of triton's module-level `compile`. `_fork_compile(*args, **kwargs)`
+    # forwards everything, but a checker compares it against the concrete signature and calls the
+    # rebind invalid -- which is the nature of a monkeypatch, not a defect in one.
+    _tcc.compile = _fork_compile  # ty: ignore[invalid-assignment]
+    # the name create_binder rebinds via `from ..compiler import compile`
+    _tc.compile = _fork_compile  # ty: ignore[invalid-assignment]
 
     # The pruned config list is the round's work item; hand it to the compile hook, which is where
     # the fully-resolved compile arguments to clone from first appear.
