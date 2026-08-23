@@ -654,7 +654,8 @@ def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
     mode = ("training" if target.endswith("_bwd") else "inference") if per_target_mode \
         else args.mode
     cmd = [sys.executable, "-u", "benchmarks/runners/bench.py", f"kernel={target}",
-           f"implementations=[{args.impl}]", f"mode={mode}", "metric=time"]
+           f"implementations=[{args.impl}]", f"mode={mode}", "metric=time",
+           f"sweep_axis={getattr(args, 'sweep_axis', 'seq_len')}"]
     extra = TARGETS.get(target, "")
     if extra:
         cmd.extend(extra.split())
@@ -912,6 +913,12 @@ def build_parser() -> argparse.ArgumentParser:
         parser_.add_argument("--no-build", action="store_true",
                              help="bench against the cache already in data/, skipping the "
                                   "pre-bench build (use after `build all` + a clean `audit`)")
+        # bench.py's config defaults to seq_len, so without this every run swept one axis and the
+        # d_pair half of the matrix -- which docs/benchmarks.md and the README both call for, and
+        # which is where the width-dependent kernels separate -- could only be reached by
+        # invoking bench.py directly.
+        parser_.add_argument("--sweep-axis", default="seq_len", choices=("seq_len", "d_pair"),
+                             help="which axis to sweep (default: seq_len)")
 
     aud = sub.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

@@ -169,3 +169,28 @@ def test_without_no_build_the_pre_bench_build_still_runs(monkeypatch):
     cli._bench_build_first(args, ("transition",), repo, {"transition": ("transition",)},
                            "MODULE_BUILD_CASES")
     assert called, "build_all did not run without --no-build"
+
+
+def test_the_sweep_axis_reaches_bench_py():
+    """Without this the CLI could only ever sweep seq_len.
+
+    bench.py's config defaults to `sweep_axis: seq_len` and the CLI never passed one, so the
+    d_pair half of the matrix -- which docs/benchmarks.md and the README both call for, and where
+    the width-dependent kernels separate -- was reachable only by invoking bench.py directly.
+    """
+    import argparse
+
+    for axis in ("seq_len", "d_pair"):
+        args = argparse.Namespace(impl="all", mode="inference", sweep_axis=axis)
+        cmd, _ = cli._bench_cmd(args, "transition", None, per_target_mode=False)
+        assert f"sweep_axis={axis}" in cmd, cmd
+
+
+def test_a_kernel_targets_mode_is_not_the_callers_to_choose():
+    """`*_bwd` is training, everything else inference -- the name already says which."""
+    import argparse
+
+    args = argparse.Namespace(impl="all", mode="inference", sweep_axis="seq_len")
+    bwd, _ = cli._bench_cmd(args, "layernorm_bwd", None, per_target_mode=True)
+    fwd, _ = cli._bench_cmd(args, "layernorm", None, per_target_mode=True)
+    assert "mode=training" in bwd and "mode=inference" in fwd
