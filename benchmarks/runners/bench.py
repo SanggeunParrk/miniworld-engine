@@ -2326,7 +2326,19 @@ def target_impls(target: str) -> tuple[str, ...]:
                     out.append(v.value)
     if out:
         return tuple(out)
-    return (*[m.value for m in ImplementationType], MINIWORLD_IMPL, OLD_TRITON_IMPL)
+    # Module-level targets have no `implementation == "..."` chain; their set is the enum plus
+    # `miniworld`. `old_triton` is NOT universal -- only `bias_only_attention` and `transition`
+    # define one (each builds its own `OldTriton*` subclass, which is why the name is in their
+    # source). Offering it everywhere meant `triangle_multiplication` failed 15 rows with
+    # `ValueError: Unknown implementation spec: 'old_triton'`, and the modules that merely fall
+    # through to TRITON benched the same path twice under two labels -- enough for
+    # `adaptive_layernorm`'s fastest row to be named after an implementation it does not have.
+    # Read from the source like everything else here, so it cannot drift.
+    src = _inspect.getsource(fn)
+    names = [*[m.value for m in ImplementationType], MINIWORLD_IMPL]
+    if "OLD_TRITON_IMPL" in src:
+        names.append(OLD_TRITON_IMPL)
+    return tuple(names)
 
 
 def expand_implementations(target: str, requested: list[str]) -> list[str]:
