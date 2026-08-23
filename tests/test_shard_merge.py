@@ -32,12 +32,17 @@ def _cfg(bm, warps):
 
 FULL = [_cfg(m, w) for m in (32, 64, 128, 256) for w in (4, 8)]
 
+#: A REAL registry op, not OP. The merge applies the cache reader's per-op staleness rule, so
+#: a synthetic name has no `level` and is treated as stale -- correct for the reader, and it would
+#: make these tests silently measure the skip path instead of the merge.
+OP = "triangle_attention_fwd_triton"
+
 
 def _write_shards(tmp_path, slices):
     paths = []
     for i, sl in enumerate(slices):
         p = tmp_path / f"shard{i}.json"
-        p.write_text(json.dumps({"op_x": {
+        p.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME, OP: {
             "grid": sl,
             "entries": {"bfloat16|N=128": [dict(c, ms=1.0 + i) for c in sl]},
         }}))
@@ -95,7 +100,7 @@ def test_shape_sharding_is_unaffected(tmp_path, monkeypatch):
 def test_dump_shard_is_atomic(tmp_path, monkeypatch):
     """A reader must never observe a half-written shard."""
     from miniworld_engine.autotune import capture
-    monkeypatch.setattr(capture, "_CAPTURE", {"op": {"grid": [], "op_id": "", "entries": {}}})
+    monkeypatch.setattr(capture, "_CAPTURE", {OP: {"grid": [], "op_id": "", "entries": {}}})
     p = tmp_path / "u.json"
     capture.dump_shard(str(p))
     import json
@@ -107,9 +112,10 @@ def test_an_unparseable_shard_is_reported_not_swallowed(tmp_path, monkeypatch):
     from miniworld_engine.autotune import cache, capture
     monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path / "data")
     good = tmp_path / "good.json"
-    good.write_text('{"op": {"grid": [], "entries": {}, "op_id": ""}}')
+    good.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME,
+                                OP: {"grid": [], "entries": {}, "op_id": ""}}))
     bad = tmp_path / "bad.json"
-    bad.write_text('{"op": {}}{"op": {}}')          # two documents, as the real corruption was
+    bad.write_text('{"a": {}}{"a": {}}')          # two documents, as the real corruption was
     capture.merge_shards([str(good), str(bad)])
     assert len(capture._MERGE_SKIPPED) == 1
     assert "bad.json" in capture._MERGE_SKIPPED[0][0]
@@ -124,6 +130,7 @@ def test_merge_skipped_resets_between_runs(tmp_path, monkeypatch):
     capture.merge_shards([str(bad)])
     assert capture._MERGE_SKIPPED
     good = tmp_path / "good.json"
-    good.write_text('{"op": {"grid": [], "entries": {}, "op_id": ""}}')
+    good.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME,
+                                OP: {"grid": [], "entries": {}, "op_id": ""}}))
     capture.merge_shards([str(good)])
     assert not capture._MERGE_SKIPPED
