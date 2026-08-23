@@ -655,7 +655,9 @@ def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
         else args.mode
     cmd = [sys.executable, "-u", "benchmarks/runners/bench.py", f"kernel={target}",
            f"implementations=[{args.impl}]", f"mode={mode}", "metric=time",
-           f"sweep_axis={getattr(args, 'sweep_axis', 'seq_len')}"]
+           f"sweep_axis={getattr(args, 'sweep_axis', 'seq_len')}",
+           f"cudagraph={getattr(args, 'cudagraph', 'manual')}",
+           f"compile={getattr(args, 'compile', 'true')}"]
     extra = TARGETS.get(target, "")
     if extra:
         cmd.extend(extra.split())
@@ -919,6 +921,17 @@ def build_parser() -> argparse.ArgumentParser:
         # invoking bench.py directly.
         parser_.add_argument("--sweep-axis", default="seq_len", choices=("seq_len", "d_pair"),
                              help="which axis to sweep (default: seq_len)")
+        # Every committed table under benchmarks/**/results/ was produced with cudagraph=manual,
+        # and the CLI could not ask for it. That is not a cosmetic default: a graph break at every
+        # kernel entry (settings.compile_wrap="disable") costs launch overhead that a captured
+        # graph absorbs, so the two settings measure different things and only one of them is what
+        # the shipped numbers mean.
+        parser_.add_argument("--cudagraph", default="manual",
+                             choices=("disabled", "manual", "graphed"),
+                             help="CUDA-graph mode (default: manual, matching every committed "
+                                  "result table)")
+        parser_.add_argument("--compile", default="true", choices=("true", "false"),
+                             help="torch.compile the module under test (default: true)")
 
     aud = sub.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")
