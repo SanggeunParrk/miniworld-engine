@@ -1188,7 +1188,8 @@ def dump_shard(path: str) -> int:
     in-repo cache). Parallel capture jobs each ``dump_shard`` to their OWN file; a single
     ``merge_shards`` writer folds them into the committed cache — so no env var and no
     concurrent writers ever touch the in-repo tree. Returns the number of ops dumped."""
-    import json  # noqa: PLC0415
+    from miniworld_engine._atomic import write_json  # noqa: PLC0415
+
     out: dict = {}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
@@ -1205,9 +1206,7 @@ def dump_shard(path: str) -> int:
     # old process is still running, which is exactly what a --reclaim restart does. The result
     # is unparseable, and merge_shards drops unparseable shards, so the unit's whole measurement
     # disappears from the cache with nothing said.
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(out))
-    tmp.replace(p)
+    write_json(p, out)
     return len(out)
 
 

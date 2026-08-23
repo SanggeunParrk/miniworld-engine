@@ -33,6 +33,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine._atomic import write_json
+
 _SUBDIR = "ln_bwd_dispatch"
 # In-repo, committed cache root (sibling of the autotune-config data tree). Single
 # canonical location: no env override, no ~/.cache — calibrated choices live in git.
@@ -92,9 +94,7 @@ def store(device: torch.device, n: int, mb: int, path: str, times_ms: dict[str, 
     try:
         _cache_dir().mkdir(parents=True, exist_ok=True)
         fp = _file(idx)
-        tmp = fp.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-        tmp.replace(fp)
+        write_json(fp, data, indent=2, sort_keys=True)
     except OSError:
         pass  # read-only fs etc. — keep the in-memory choice, just don't persist
     _load.cache_clear()

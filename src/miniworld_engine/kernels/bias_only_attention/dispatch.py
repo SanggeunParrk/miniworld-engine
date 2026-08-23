@@ -32,6 +32,7 @@ import torch
 
 # Reuse the shared per-GPU key (name + compute capability + triton version) and
 # M-bucketing from the layernorm dispatch cache so all kernels key GPUs identically.
+from miniworld_engine._atomic import write_json
 from miniworld_engine.kernels.layernorm.dispatch import gpu_key, mbucket
 
 # ---- static H100 thresholds (defaults / fallback) --------------------------------
@@ -76,9 +77,7 @@ def _store(idx: int, key: str, choice: str, times_ms: dict[str, float]) -> None:
     try:
         _cache_dir().mkdir(parents=True, exist_ok=True)
         fp = _file(idx)
-        tmp = fp.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-        tmp.replace(fp)
+        write_json(fp, data, indent=2, sort_keys=True)
     except OSError:
         pass  # read-only fs -> keep in-memory choice only
     _load.cache_clear()

@@ -29,6 +29,8 @@ from typing import Any
 
 import torch
 
+from miniworld_engine._atomic import write_json
+
 SCHEMA = 1
 # The one and only cache root: the in-repo ``data/`` dir, committed to git. Both reads
 # and writes go here — no env override, no ~/.cache — so a tuned cache is versioned with
@@ -286,9 +288,7 @@ def store_ranked_configs(
     if op_id:
         data["op_identity"] = op_id
     data["entries"][f"{dtype}|{bucket}"] = [config_to_dict(c, ms) for c, ms in ranked[:top_k]]
-    tmp = fp.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-    tmp.replace(fp)
+    write_json(fp, data, indent=2, sort_keys=True)
     _load_cache.pop((op, gk), None)  # invalidate memo
     return fp
 
