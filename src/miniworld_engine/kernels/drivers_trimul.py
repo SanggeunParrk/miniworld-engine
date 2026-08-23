@@ -27,7 +27,14 @@ import torch
 import triton
 
 from miniworld_engine.autotune.shape_key import both_key, token_key
-from miniworld_engine.kernels.drivers import BF16, aligned_only, dev, driver_length, ragged
+from miniworld_engine.kernels.drivers import (
+    BF16,
+    aligned_only,
+    both_level_is_pair,
+    dev,
+    driver_length,
+    ragged,
+)
 
 # Both extents go through ``ragged()`` (see drivers.py): unset MINIWORLD_SHAPE_MODE keeps the
 # repo values, MINIWORLD_SHAPE_MODE=ragged subtracts 3 from each.
@@ -41,11 +48,19 @@ from miniworld_engine.kernels.drivers import BF16, aligned_only, dev, driver_len
 #      ragged with it: 64 -> 61, M 4096 -> 3721.
 D = ragged(128)  # BenchConfig.d_pair
 L = ragged(driver_length(64))   # BenchConfig.min_seq_len
-M = L * L        # flattened pair rows
+#: A level=both kernel meets 512 and below as a PAIR activation (1, L, L, D) flattening to
+#: M = L*L, and 1024 and above as an ATOM activation (1, A, D) flattening to M = A -- see
+#: ``drivers.both_level_is_pair``. Four kernels here are level=both; the other 21 are
+#: level=token and are never driven above 512, so the same constant serves both.
+IS_PAIR = both_level_is_pair(L)
+M = L * L if IS_PAIR else L      # flattened pair rows, or atom rows A
 
 
 def _x() -> torch.Tensor:
-    """The pair activation these kernels take: (B=1, L, L, D) contiguous bf16."""
+    """The activation these kernels take: pair (1, L, L, D) on the token side, atom (1, A, D) on
+    the atom side. ``length_of`` reads shape[-2] either way, so both record the same shape_key."""
+    if not IS_PAIR:
+        return torch.randn(1, L, D, device=dev(), dtype=BF16)
     return torch.randn(1, L, L, D, device=dev(), dtype=BF16)
 
 
@@ -60,7 +75,10 @@ def _w(n: int = D) -> torch.Tensor:
 
 
 def _bdll(c: int = D) -> torch.Tensor:
-    """Channel-major pair buffer (B=1, c, L, L)."""
+    """Channel-major buffer: pair (1, c, L, L) on the token side, atom (1, c, A) on the atom
+    side -- both hold exactly M elements per channel, matching the flat drivers here."""
+    if not IS_PAIR:
+        return torch.randn(1, c, L, device=dev(), dtype=BF16)
     return torch.randn(1, c, L, L, device=dev(), dtype=BF16)
 
 

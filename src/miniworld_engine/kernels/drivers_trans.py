@@ -58,7 +58,15 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.autotune.shape_key import both_key, token_key
-from miniworld_engine.kernels.drivers import BF16, dev, driver_length, ragged, rows2d, vec
+from miniworld_engine.kernels.drivers import (
+    BF16,
+    both_level_is_pair,
+    dev,
+    driver_length,
+    ragged,
+    rows2d,
+    vec,
+)
 
 EPS = 1e-5
 L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, L, K) before flattening
@@ -66,7 +74,15 @@ L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, 
 # flattens to ragged(L)**2 rows, and ROWS is what the flat drivers here build. Deriving them
 # differently made the two disagree in ragged mode (4093 vs 3721). Aligned is 64*64 = 4096
 # either way; ragged is 61*61 = 3721, still a partial tile in all five config sets (% 16 == 9).
-ROWS = ragged(L_PAIR) ** 2  # M: pair rows L*L
+#: A level=both kernel meets 512 and below as a PAIR activation (1, L, L, D) flattening to
+#: M = L*L, and 1024 and above as an ATOM activation (1, A, D) flattening to M = A -- see
+#: ``drivers.both_level_is_pair``. Squaring at every bucket builds shapes production never
+#: presents: M = 67,108,864 at L=8192 where the model hands over 8,192. That is what OOM'd the
+#: atom probes here and what left transition_fwd_b2b_ktiled at L=4096 measuring 16.7M rows at
+#: ~420 s per config. The token-level kernels in this file are never driven above 512, so the
+#: same constant serves them unchanged.
+IS_PAIR = both_level_is_pair(L_PAIR)
+ROWS = ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR)  # M: pair rows L*L, or atom rows A
 #: What production records for this activation: ``both_key(length_of((B, L, L, D)))`` = both_key(L).
 #: Every launcher below is handed the already-flattened (M, K) matrix, so it CANNOT read L off a
 #: tensor (autotune/shape_key.py::length_of) -- it takes the key from its caller, and with nothing
@@ -87,8 +103,14 @@ def _pair_x(k: int = K_SMALL) -> torch.Tensor:
     -- it takes no ``shape_key=``. ``ragged()`` is applied to L rather than to L*L so the tensor
     stays square: the M tail is still partial (61*61 = 3721, 3721 % 16 == 9, so every one of the
     five config sets sees it), and in the default aligned mode M = L*L = ROWS exactly.
+
+    On the ATOM side there is no pair to build -- production hands (1, A, D) -- so it returns the
+    3-D activation instead, which flattens to M = A = ROWS. ``length_of`` reads shape[-2] either
+    way, so both layouts record the same shape_key.
     """
     n = ragged(L_PAIR)
+    if not IS_PAIR:
+        return torch.randn(1, n, k, device=dev(), dtype=BF16)
     return torch.randn(1, n, n, k, device=dev(), dtype=BF16)
 
 
@@ -227,7 +249,11 @@ def swiglu_gate_bwd_sm100() -> None:
 # ------------------------------------------------------- triangle_multiplication (dt-v1)
 
 TRIMUL_L = driver_length(128)  # L: i == j of the (1, L, L, d) pair activation the module flattens
-TRIMUL_ROWS = ragged(TRIMUL_L) ** 2  # M = b*i*j for a (1, L, L, d) pair activation; see ROWS
+#: Same pair/atom split as ROWS. Three token-level kernels share this constant and are never
+#: driven above 512, so they keep the pair layout they had.
+TRIMUL_IS_PAIR = both_level_is_pair(TRIMUL_L)
+TRIMUL_ROWS = (ragged(TRIMUL_L) ** 2 if TRIMUL_IS_PAIR
+               else ragged(TRIMUL_L))  # M = b*i*j for a (1, L, L, d) pair activation, or A
 TRIMUL_D = ragged(128)  # d: the contraction width; the gate/proj weights have 2*d or d rows
 #: ``baseline_dtv1._shape_key`` is ``token_key(seq_len)``, and ``seq_len=None`` -- what a driver that
 #: passes nothing gets -- means ``token_key(0)``, the clamped BOTTOM bucket 128 at every L. These
