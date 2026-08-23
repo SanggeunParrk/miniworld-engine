@@ -55,6 +55,15 @@
           "BLOCK_M2": 64
         },
         "ms": 0.32767999172210693,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 64
+        },
+        "ms": 0.32767999172210693,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -72,26 +81,17 @@
           "BLOCK_M1": 128,
           "BLOCK_M2": 64
         },
-        "ms": 0.32870399951934814,
-        "num_stages": 3,
+        "ms": 0.3307519853115082,
+        "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK_M1": 128,
+          "BLOCK_M1": 64,
           "BLOCK_M2": 64
         },
-        "ms": 0.33484798669815063,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 256,
-          "BLOCK_M2": 32
-        },
-        "ms": 0.33689600229263306,
-        "num_stages": 2,
+        "ms": 0.3343359977006912,
+        "num_stages": 3,
         "num_warps": 4
       }
     ],
@@ -158,7 +158,7 @@
           "BLOCK_M2": 64
         },
         "ms": 1.5697920322418213,
-        "num_stages": 5,
+        "num_stages": 4,
         "num_warps": 4
       }
     ],
@@ -221,6 +221,15 @@
       },
       {
         "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 128
+        },
+        "ms": 6.3354878425598145,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BLOCK_M1": 128,
           "BLOCK_M2": 64
         },
@@ -233,8 +242,8 @@
           "BLOCK_M1": 128,
           "BLOCK_M2": 64
         },
-        "ms": 6.342144012451172,
-        "num_stages": 4,
+        "ms": 6.3406081199646,
+        "num_stages": 3,
         "num_warps": 4
       },
       {
@@ -242,18 +251,9 @@
           "BLOCK_M1": 128,
           "BLOCK_M2": 64
         },
-        "ms": 6.343168020248413,
-        "num_stages": 3,
+        "ms": 6.341631889343262,
+        "num_stages": 4,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 64,
-          "BLOCK_M2": 64
-        },
-        "ms": 6.352384090423584,
-        "num_stages": 3,
-        "num_warps": 2
       }
     ]
   },
@@ -262,7 +262,7 @@
   "op": "augmented_attention_bwd_split_triton",
   "op_identity": "1e86eb118969",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

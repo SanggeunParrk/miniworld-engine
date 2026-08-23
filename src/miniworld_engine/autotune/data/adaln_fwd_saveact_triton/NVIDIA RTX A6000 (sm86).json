@@ -160,6 +160,36 @@
     "bfloat16+float32|NC=128,NX=128,USE_BF16=1,USE_FP16=0,shape_key=4096": [
       {
         "kwargs": {
+          "BLOCK_K_NC": 32,
+          "BLOCK_K_NX": 64,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 32,
+          "BLOCK_K_NX": 64,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 32,
+          "BLOCK_K_NX": 64,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
           "BLOCK_K_NC": 64,
           "BLOCK_K_NX": 64,
           "BLOCK_M1": 32
@@ -170,43 +200,13 @@
       },
       {
         "kwargs": {
-          "BLOCK_K_NC": 16,
+          "BLOCK_K_NC": 32,
           "BLOCK_K_NX": 64,
           "BLOCK_M1": 32
         },
-        "ms": 0.02252800017595291,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 64,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.02457600086927414,
+        "ms": 0.020479999482631683,
         "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.026623999699950218,
-        "num_stages": 4,
         "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 32,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.027648000046610832,
-        "num_stages": 4,
-        "num_warps": 4
       }
     ],
     "bfloat16+float32|NC=128,NX=128,USE_BF16=1,USE_FP16=0,shape_key=512": [
@@ -319,7 +319,7 @@
   "op": "adaln_fwd_saveact_triton",
   "op_identity": "de6ae178a34a",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

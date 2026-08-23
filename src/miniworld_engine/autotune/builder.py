@@ -840,7 +840,10 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 #: Measured need: with the full grid open, one config ({BM:16,BK:16,BN:16,warps:1,stages:1}) ran
 #: 468 SECONDS -- 85% of that unit's benchmarking -- and no in-process check can shorten it,
 #: because a launch's duration is only readable once it has already finished.
-def _run_unit_subprocess(unit: Unit, device: int, shard_dir: Path, repo: Path,
+# `Unit | OpUnit`: `build_all` decomposes a per-op sweep into OpUnits and puts them on the
+# same queue, so both kinds reach here. The annotation said `Unit` while every unit of the
+# 922-unit sweep that produced the shipped cache was an OpUnit.
+def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
                          compile_jobs: int, bench_budget: float = 0.0,
                          config_dir: Path | None = None) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
@@ -881,16 +884,21 @@ def _run_unit_subprocess(unit: Unit, device: int, shard_dir: Path, repo: Path,
             ops = sum(1 for v in raw.values() if isinstance(v, dict) and v.get("entries"))
         except (OSError, ValueError):
             ops = 0
-    skipped = False
-    if not ops:
-        try:
-            skipped = "[unit] SKIPPED-PERMANENT" in log.read_text()
-        except OSError:
-            skipped = False
-        if not skipped:
-            claim.unlink(missing_ok=True)  # nothing produced: let a later run retry this unit
-        # a permanent skip KEEPS its claim: the shape will not fit on the next attempt either, and
-        # releasing it made every resumed job re-claim the same OOMing units and produce nothing.
+    # Read the log whatever `ops` says. A unit is `--op <one kernel>`, but its driver fires the
+    # neighbouring kernels too, so the shard can hold entries for ops that ran while the DRIVEN
+    # one was permanently skipped -- the child then returns rc=1 for `ran=0` with `ops=3` on
+    # disk. Gating this read on `not ops` meant that case never set `skipped`, and the merge
+    # reported "1 bad unit ... entries will be MISSING" against a card that had answered
+    # correctly: `augmented_attention_bwd_split_triton[float32] L=4096` wants 153,600 B of shared
+    # memory and an A6000 has 101,376.
+    try:
+        skipped = "[unit] SKIPPED-PERMANENT" in log.read_text()
+    except OSError:
+        skipped = False
+    if not ops and not skipped:
+        claim.unlink(missing_ok=True)  # nothing produced: let a later run retry this unit
+    # a permanent skip KEEPS its claim: the shape will not fit on the next attempt either, and
+    # releasing it made every resumed job re-claim the same OOMing units and produce nothing.
     return {"label": unit.label, "gpu": device, "rc": proc.returncode, "ops": ops,
             "skipped": skipped,
             "seconds": round(time.monotonic() - started, 1), "shard": str(shard), "log": str(log)}

@@ -109,6 +109,14 @@
           "BLOCK_E": 512
         },
         "ms": 0.06143999844789505,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 512
+        },
+        "ms": 0.06143999844789505,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -126,14 +134,6 @@
         },
         "ms": 0.062463998794555664,
         "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 32
-        },
-        "ms": 0.062463998794555664,
-        "num_stages": 2,
         "num_warps": 1
       }
     ],
@@ -203,7 +203,7 @@
   "op": "cond_transition_bwd_swiglu_flat_triton",
   "op_identity": "b2603dadbe5b",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:34+00:00",
+    "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

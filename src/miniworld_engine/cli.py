@@ -456,6 +456,20 @@ KERNEL_BUILD_CASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def is_bad_unit(result: dict) -> bool:
+    """Did this unit fail, as opposed to answer "not on this GPU"?
+
+    A unit that skipped a shape this card cannot hold is not a bad unit. It is a permanent,
+    correct answer, and counting it as a failure is what made a resumed job that picked up only
+    the leftover OOM shapes report "0 ok, 9 failed" and refuse to merge.
+
+    One function, not an expression inlined at the call site, because the rule has to agree with
+    the `skipped` flag the builder sets -- see tests/test_permanent_skip_classification.py, which
+    drives both ends of it.
+    """
+    return (result["rc"] != 0 or not result["ops"]) and not result.get("skipped")
+
+
 def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     """Fold this build's shards into the in-repo cache and report the units that failed.
 
@@ -464,10 +478,7 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     """
     from miniworld_engine.autotune import capture  # noqa: PLC0415 -- heavy; import at use
 
-    # A unit that skipped a shape this card cannot hold is not a bad unit. It is a permanent,
-    # correct answer -- "not on this GPU" -- and counting it as a failure is what made a resumed
-    # job that picked up only the leftover OOM shapes report "0 ok, 9 failed" and refuse to merge.
-    bad = [r for r in results if (r["rc"] != 0 or not r["ops"]) and not r.get("skipped")]
+    bad = [r for r in results if is_bad_unit(r)]
     skipped = [r for r in results if r.get("skipped")]
     # capture.merge_shards is the sole writer of the in-repo cache; skipping it would leave the
     # bench reading the OLD cache while the shards just built sat unread.

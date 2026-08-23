@@ -134,7 +134,7 @@
           "BLOCK_M1": 64,
           "BLOCK_N": 32
         },
-        "ms": 0.05169599875807762,
+        "ms": 0.05119999870657921,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -188,9 +188,19 @@
           "BLOCK_M1": 32,
           "BLOCK_N": 128
         },
-        "ms": 0.1085439994931221,
+        "ms": 0.10751999914646149,
         "num_stages": 3,
         "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.1085439994931221,
+        "num_stages": 3,
+        "num_warps": 4
       },
       {
         "kwargs": {
@@ -205,32 +215,22 @@
       {
         "kwargs": {
           "BLOCK_K": 32,
-          "BLOCK_M1": 32,
+          "BLOCK_M1": 64,
           "BLOCK_N": 128
         },
-        "ms": 0.10956799983978271,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 32,
-          "BLOCK_M1": 32,
-          "BLOCK_N": 128
-        },
-        "ms": 0.10956799983978271,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 32,
-          "BLOCK_M1": 32,
-          "BLOCK_N": 128
-        },
-        "ms": 0.10956799983978271,
+        "ms": 0.1085439994931221,
         "num_stages": 2,
         "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ]
   },
@@ -239,7 +239,7 @@
   "op": "cond_transition_expand_swiglu_saveact_triton",
   "op_identity": "dd01ef547e11",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:34+00:00",
+    "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

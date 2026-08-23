@@ -124,15 +124,15 @@
         "kwargs": {
           "BLOCK_E": 2048
         },
-        "ms": 2.8902400732040405,
-        "num_stages": 6,
+        "ms": 2.88972806930542,
+        "num_stages": 4,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK_E": 2048
         },
-        "ms": 2.8907359838485718,
+        "ms": 2.88972806930542,
         "num_stages": 5,
         "num_warps": 4
       }
@@ -185,6 +185,14 @@
           "BLOCK_E": 2048
         },
         "ms": 11.501055717468262,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 2048
+        },
+        "ms": 11.501055717468262,
         "num_stages": 5,
         "num_warps": 4
       },
@@ -206,18 +214,10 @@
       },
       {
         "kwargs": {
-          "BLOCK_E": 2048
-        },
-        "ms": 11.501567840576172,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
           "BLOCK_E": 1024
         },
-        "ms": 11.502079963684082,
-        "num_stages": 4,
+        "ms": 11.501567840576172,
+        "num_stages": 5,
         "num_warps": 1
       }
     ]
@@ -227,7 +227,7 @@
   "op": "augmented_attention_bwd_reduce_triton",
   "op_identity": "7de4617d8ef2",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

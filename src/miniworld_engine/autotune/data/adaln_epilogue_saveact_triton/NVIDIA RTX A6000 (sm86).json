@@ -40,7 +40,7 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.015359999611973763,
+        "ms": 0.014336000196635723,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -59,12 +59,48 @@
     "bfloat16+float32|HAS_SB=1,N=128,shape_key=8192": [
       {
         "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 1
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
         },
-        "ms": 0.021503999829292297,
+        "ms": 0.01740800030529499,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.018432000651955605,
         "num_stages": 1,
         "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 5,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ]
   },
@@ -73,7 +109,7 @@
   "op": "adaln_epilogue_saveact_triton",
   "op_identity": "647edc038da8",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

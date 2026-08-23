@@ -54,7 +54,16 @@
           "BLOCK_M1": 128,
           "BLOCK_M2": 64
         },
-        "ms": 0.32767999172210693,
+        "ms": 0.3266560137271881,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 64
+        },
+        "ms": 0.3266560137271881,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -72,16 +81,7 @@
           "BLOCK_M1": 128,
           "BLOCK_M2": 64
         },
-        "ms": 0.32870399951934814,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 128,
-          "BLOCK_M2": 64
-        },
-        "ms": 0.3317759931087494,
+        "ms": 0.3307519853115082,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -90,7 +90,7 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 64
         },
-        "ms": 0.33484798669815063,
+        "ms": 0.3343359977006912,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -262,7 +262,7 @@
   "op": "augmented_attention_fwd_triton",
   "op_identity": "13a1d77c7a0b",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

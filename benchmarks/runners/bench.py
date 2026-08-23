@@ -1533,7 +1533,10 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels.tm1.triton.main import triton_tm1
 
         def run(x):
-            left, right = triton_tm1(x.reshape(L * L, D), wl, wlg, wr, wrg)
+            # The pair activation, NOT its (M, D) flattening: TritonTM1Function reads
+            # `token_key(length_of(x.shape))` before its own rearrange, so a pre-flattened
+            # (M, D) is refused outright by the shape_key guard. drivers_trimul says the same.
+            left, right = triton_tm1(x, wl, wlg, wr, wrg)
             return left.reshape(L * L, D), right.reshape(L * L, D)
         path = "kernels.tm1.triton.main"
     elif implementation == "trimul_front_sm100":
@@ -1569,8 +1572,14 @@ def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
     eps = 1e-5
 
     def _x():
+        # Pair-shaped, not pre-flattened: `layernorm_linear_triton` flattens to (M, K) itself and
+        # reads the shape key off what it was handed, so a (M, D) input is refused by the
+        # shape_key guard -- every `layernorm_linear_triton` row came back `failed`. Each backend
+        # below that genuinely wants a matrix flattens it explicitly, so all rows still measure
+        # the same numbers on the same data. drivers_ln's `layernorm_linear_fwd_triton` carries
+        # the same note.
         torch.manual_seed(1)
-        return torch.randn(L * L, D, device=DEVICE, dtype=BF16).contiguous()
+        return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16).contiguous()
 
     def ref(x):
         return F.linear(F.layer_norm(x, (D,), lw, lb, eps), w)
@@ -1585,18 +1594,22 @@ def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
             layernorm_linear_cute,
         )
-        kfn = lambda x: layernorm_linear_cute(x, lw, lb, w, None, eps)  # noqa: E731
+        kfn = lambda x: layernorm_linear_cute(  # noqa: E731
+            x.reshape(-1, D), lw, lb, w, None, eps).reshape(x.shape)
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear"
     elif implementation == "layernorm_linear_cute_fused":
         from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
             layernorm_linear_cute_fused,
         )
-        kfn = lambda x: layernorm_linear_cute_fused(x, lw, lb, w, None, eps)  # noqa: E731
+        kfn = lambda x: layernorm_linear_cute_fused(  # noqa: E731
+            x.reshape(-1, D), lw, lb, w, None, eps).reshape(x.shape)
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear_fused"
     elif implementation == "layernorm_linear_te":
         from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
-        # length=L: x here is the flattened (L*L, D) pair view, so L cannot be read off it.
-        kfn = lambda x: layernorm_linear_te_fn(x, lw, lb, w, None, eps, length=L)  # noqa: E731
+        # Flattened here, with length=L passed explicitly: TE wants a matrix, and once it is one
+        # the pair length is no longer readable from the shape.
+        kfn = lambda x: layernorm_linear_te_fn(  # noqa: E731
+            x.reshape(-1, D), lw, lb, w, None, eps, length=L).reshape(x.shape)
         path = "kernels.layernorm_linear.triton.te_style"
     else:
         return as_bench_result(float("nan"))
@@ -1927,8 +1940,8 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     elif implementation == "triton_tm2":
         from miniworld_engine.kernels.tm2.triton.main import triton_tm2
         wgt, wpt = wg.t().contiguous(), wp.t().contiguous()  # kernel computes x@W (K,N form)
-        kfn = lambda xg, xo: triton_tm2(  # noqa: E731
-            xg.reshape(L * L, D), xo.reshape(L * L, D), wgt, wpt).reshape(1, L, L, D)
+        # Pre-flatten, and TritonTM2Function's `length_of(x.shape)` sees M = L*L and refuses.
+        kfn = lambda xg, xo: triton_tm2(xg, xo, wgt, wpt).reshape(1, L, L, D)  # noqa: E731
         path = "kernels.tm2.triton.main"
     else:
         return as_bench_result(float("nan"))
@@ -1964,9 +1977,12 @@ def bench_kernel_cond_transition_tail(conf, seq_len, implementation, fabric):
         kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_cond_transition":
         raw = kernels.cond_transition_inference_dispatch
+        # `length=L`: the dispatch takes the pre-flatten L explicitly precisely because its
+        # caller has already flattened to (M, K). Omitting it left the inner path calling
+        # `length_of` on a 2-D shape, which the guard refuses.
         kfn = lambda x, c: raw(  # noqa: E731
             ref_mod.ada_ln_in(x, c).reshape(-1, D), c.reshape(-1, D),
-            wa, wb, ws, wsc, bsc).reshape(1, L, L, D)
+            wa, wb, ws, wsc, bsc, length=L).reshape(1, L, L, D)
         path = "kernels.conditioned_transition.triton"
     else:
         return as_bench_result(float("nan"))
@@ -1986,20 +2002,25 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     torch.manual_seed(0)
     w = torch.randn(D, device=DEVICE, dtype=dtype)
     torch.manual_seed(1)
-    x = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
-    dy = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
+    # The pair activation (1, L, L, D), NOT its (M, D) flattening. `_bwd_*_impl` reshapes
+    # internally and reads `both_key(length_of(x.shape))` off the 4-D shape, so a pre-flattened
+    # (M, D) is refused by the shape_key guard -- 18 of this file's bench rows came back
+    # `failed: shape (..., D) is already flattened`. drivers_ln fixed this; the bench did not.
+    x = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
+    dy = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
     eps = 1e-5
-    xf = x.float()
+    xf = x.reshape(-1, D).float()
+    dyf = dy.reshape(-1, D)
     mean = xf.mean(-1)
     rstd = torch.rsqrt(xf.var(-1, unbiased=False) + eps)
 
     def torch_bwd():
         xhat = (xf - mean[:, None]) * rstd[:, None]
-        dxhat = dy.float() * w.float()
+        dxhat = dyf.float() * w.float()
         dx = rstd[:, None] * (dxhat - dxhat.mean(-1, keepdim=True)
                               - xhat * (dxhat * xhat).mean(-1, keepdim=True))
-        dwt = (dy.float() * xhat).sum(0)
-        dbt = dy.float().sum(0)
+        dwt = (dyf.float() * xhat).sum(0)
+        dbt = dyf.float().sum(0)
         return dx.to(dtype), dwt.to(dtype), dbt.to(dtype)
 
     if implementation == "pytorch":

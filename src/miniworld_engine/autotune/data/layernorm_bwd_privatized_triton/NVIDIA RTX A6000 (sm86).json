@@ -7,7 +7,7 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.0071680000983178616,
+        "ms": 0.006144000217318535,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -212,7 +212,7 @@
   "op": "layernorm_bwd_privatized_triton",
   "op_identity": "0a2749ea20ab",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:36+00:00",
+    "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

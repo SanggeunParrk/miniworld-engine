@@ -40,7 +40,7 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.009216000325977802,
+        "ms": 0.008191999979317188,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -73,7 +73,7 @@
   "op": "layernorm_fwd_strided_triton",
   "op_identity": "842d45643763",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:36+00:00",
+    "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

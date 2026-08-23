@@ -215,7 +215,7 @@
   "op": "trimul_gemm_gate_saveact_triton",
   "op_identity": "e972c12dc0fe",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:38+00:00",
+    "built_utc": "2026-08-23T13:59:57+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

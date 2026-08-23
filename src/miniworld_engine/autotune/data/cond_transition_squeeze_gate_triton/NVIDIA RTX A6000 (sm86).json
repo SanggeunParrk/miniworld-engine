@@ -20,6 +20,17 @@
           "BLOCK_M1": 32,
           "BLOCK_N": 32
         },
+        "ms": 0.026623999699950218,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 16,
+          "BLOCK_K_ND": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32
+        },
         "ms": 0.028672000393271446,
         "num_stages": 2,
         "num_warps": 1
@@ -136,6 +147,17 @@
           "BLOCK_M1": 64,
           "BLOCK_N": 64
         },
+        "ms": 0.028672000393271446,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 16,
+          "BLOCK_K_ND": 16,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 64
+        },
         "ms": 0.02969600073993206,
         "num_stages": 5,
         "num_warps": 2
@@ -156,21 +178,10 @@
           "BLOCK_K_DC": 16,
           "BLOCK_K_ND": 16,
           "BLOCK_M1": 32,
-          "BLOCK_N": 32
+          "BLOCK_N": 64
         },
-        "ms": 0.03891199827194214,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_DC": 16,
-          "BLOCK_K_ND": 16,
-          "BLOCK_M1": 32,
-          "BLOCK_N": 32
-        },
-        "ms": 0.04095999896526337,
-        "num_stages": 1,
+        "ms": 0.035840000957250595,
+        "num_stages": 3,
         "num_warps": 1
       },
       {
@@ -180,8 +191,8 @@
           "BLOCK_M1": 32,
           "BLOCK_N": 32
         },
-        "ms": 0.043007999658584595,
-        "num_stages": 4,
+        "ms": 0.03891199827194214,
+        "num_stages": 1,
         "num_warps": 2
       }
     ],
@@ -250,18 +261,7 @@
           "BLOCK_M1": 64,
           "BLOCK_N": 128
         },
-        "ms": 0.04403200000524521,
-        "num_stages": 1,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_DC": 16,
-          "BLOCK_K_ND": 32,
-          "BLOCK_M1": 64,
-          "BLOCK_N": 128
-        },
-        "ms": 0.04403200000524521,
+        "ms": 0.043007999658584595,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -272,8 +272,8 @@
           "BLOCK_M1": 64,
           "BLOCK_N": 128
         },
-        "ms": 0.04403200000524521,
-        "num_stages": 2,
+        "ms": 0.043007999658584595,
+        "num_stages": 1,
         "num_warps": 8
       },
       {
@@ -281,20 +281,31 @@
           "BLOCK_K_DC": 16,
           "BLOCK_K_ND": 32,
           "BLOCK_M1": 64,
-          "BLOCK_N": 64
+          "BLOCK_N": 128
         },
-        "ms": 0.04505600035190582,
-        "num_stages": 2,
-        "num_warps": 2
+        "ms": 0.043007999658584595,
+        "num_stages": 3,
+        "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK_K_DC": 16,
+          "BLOCK_K_DC": 32,
           "BLOCK_K_ND": 32,
-          "BLOCK_M1": 128,
-          "BLOCK_N": 64
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
         },
-        "ms": 0.04505600035190582,
+        "ms": 0.043007999658584595,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_DC": 32,
+          "BLOCK_K_ND": 32,
+          "BLOCK_M1": 64,
+          "BLOCK_N": 128
+        },
+        "ms": 0.043007999658584595,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -305,7 +316,7 @@
   "op": "cond_transition_squeeze_gate_triton",
   "op_identity": "fae7cd596f05",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:35+00:00",
+    "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

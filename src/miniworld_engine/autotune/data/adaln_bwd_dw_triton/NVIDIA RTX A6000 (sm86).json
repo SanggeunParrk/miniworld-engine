@@ -141,10 +141,20 @@
       {
         "kwargs": {
           "BLOCK_M1": 64,
+          "BLOCK_N_NC": 64,
+          "BLOCK_N_NX": 32
+        },
+        "ms": 0.058368001133203506,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
           "BLOCK_N_NC": 32,
           "BLOCK_N_NX": 32
         },
-        "ms": 0.06143999844789505,
+        "ms": 0.060416001826524734,
         "num_stages": 3,
         "num_warps": 2
       },
@@ -157,16 +167,6 @@
         "ms": 0.06143999844789505,
         "num_stages": 4,
         "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
-          "BLOCK_N_NC": 64,
-          "BLOCK_N_NX": 32
-        },
-        "ms": 0.062463998794555664,
-        "num_stages": 4,
-        "num_warps": 4
       }
     ],
     "bfloat16+float32|NC=128,NX=128,USE_BF16=1,USE_FP16=0,shape_key=512": [
@@ -279,7 +279,7 @@
   "op": "adaln_bwd_dw_triton",
   "op_identity": "9249f604e745",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

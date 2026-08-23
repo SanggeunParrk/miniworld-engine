@@ -40,7 +40,7 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.01228800043463707,
+        "ms": 0.011264000087976456,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -62,6 +62,15 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
+        "ms": 0.016383999958634377,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 1
+        },
         "ms": 0.018432000651955605,
         "num_stages": 1,
         "num_warps": 1
@@ -73,7 +82,7 @@
   "op": "adaln_epilogue_triton",
   "op_identity": "c4919e93b2e8",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:33+00:00",
+    "built_utc": "2026-08-23T13:59:55+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

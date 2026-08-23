@@ -7,7 +7,7 @@
           "BLOCK_K": 16,
           "BLOCK_M1": 16
         },
-        "ms": 0.011264000087976456,
+        "ms": 0.010239999741315842,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -179,7 +179,7 @@
           "BLOCK_K": 16,
           "BLOCK_M1": 16
         },
-        "ms": 0.025088000111281872,
+        "ms": 0.014336000196635723,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -191,7 +191,25 @@
           "BLOCK_M1": 16
         },
         "ms": 0.46489599347114563,
+        "num_stages": 1,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.46489599347114563,
         "num_stages": 2,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 32,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.46489599347114563,
+        "num_stages": 3,
         "num_warps": 16
       },
       {
@@ -210,24 +228,6 @@
         },
         "ms": 0.46489599347114563,
         "num_stages": 5,
-        "num_warps": 16
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 32,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.46489599347114563,
-        "num_stages": 6,
-        "num_warps": 16
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 32,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.46592000126838684,
-        "num_stages": 1,
         "num_warps": 16
       }
     ],
@@ -284,7 +284,7 @@
   "op": "gated_projection_bwd_gate_triton",
   "op_identity": "e41e6f4e9cfb",
   "provenance": {
-    "built_utc": "2026-08-23T11:22:35+00:00",
+    "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
