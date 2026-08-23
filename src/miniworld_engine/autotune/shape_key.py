@@ -86,6 +86,9 @@ BOTH_PAIR_LENGTHS: tuple[int, ...] = (*TOKEN_SHAPES, 1024)
 BOTH_ROWS: tuple[int, ...] = tuple(sorted(
     set(ATOM_SHAPES) | {length * length for length in BOTH_PAIR_LENGTHS}))
 
+#: The LENGTH axis per level. `both` is here for completeness, but nothing keys on it any more:
+#: a both-level kernel is driven as two sided lists (`BOTH_PAIR_LENGTHS` + `ATOM_SHAPES`) and
+#: keyed on `BOTH_ROWS`, because one length means two different launches for it.
 SHAPES_BY_LEVEL: dict[str, tuple[int, ...]] = {
     "token": TOKEN_SHAPES,
     "atom": ATOM_SHAPES,

@@ -90,6 +90,10 @@ class TensorKw(TypedDict, total=False):
 def both_level_is_pair(length: int) -> bool:
     """For a ``level=both`` kernel, is this bucket the PAIR side or the linear side?
 
+    Only when nothing says otherwise. The builder passes the side explicitly (see below), because
+    a both-level kernel keys on ROWS and its two sides are separate buckets at the same length.
+    This fallback is the rule for a driver run outside a build -- the checkers, a hand probe.
+
     ``BOTH_SHAPES`` is the UNION of the token set (128..512) and the atom set (256..8192), so a
     both-level kernel meets 512 and below as a pair activation (B, L, L, D) flattening to
     M = L*L, and 1024 and above as an atom activation (B, A, D) flattening to M = A. A driver that
