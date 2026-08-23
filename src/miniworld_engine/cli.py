@@ -335,8 +335,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     written = capture.merge_shards(paths, top_k=args.top_k, gpu=gpu, only_ops=None)
     if capture._MERGE_SKIPPED:
-        print(f"WARNING: {len(capture._MERGE_SKIPPED)} shard(s) were unreadable, so a whole "
-              f"unit's measurements are MISSING from the cache:", file=sys.stderr)
+        # Two reasons land here and they are not the same news. An unreadable shard is a whole
+        # unit's measurements lost; a shard skipped because its bucket keys predate a scheme bump
+        # is one the build is deliberately not using. Both are named, never silent.
+        print(f"WARNING: {len(capture._MERGE_SKIPPED)} shard(s)/op(s) were NOT merged; each is "
+              f"either a lost measurement or one this scheme cannot read:", file=sys.stderr)
         for sp, why in capture._MERGE_SKIPPED[:10]:
             print(f"  {sp}\n      {why}", file=sys.stderr)
     ops = sorted({w[0] for w in written})
@@ -513,8 +516,11 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
         return 1
     written = capture.merge_shards(shards)
     if capture._MERGE_SKIPPED:
-        print(f"WARNING: {len(capture._MERGE_SKIPPED)} shard(s) were unreadable, so a whole "
-              f"unit's measurements are MISSING from the cache:", file=sys.stderr)
+        # Two reasons land here and they are not the same news. An unreadable shard is a whole
+        # unit's measurements lost; a shard skipped because its bucket keys predate a scheme bump
+        # is one the build is deliberately not using. Both are named, never silent.
+        print(f"WARNING: {len(capture._MERGE_SKIPPED)} shard(s)/op(s) were NOT merged; each is "
+              f"either a lost measurement or one this scheme cannot read:", file=sys.stderr)
         for sp, why in capture._MERGE_SKIPPED[:10]:
             print(f"  {sp}\n      {why}", file=sys.stderr)
     print(f"=== merged {len(written)} op file(s) into the in-repo cache"
