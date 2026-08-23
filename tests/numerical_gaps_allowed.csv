@@ -1,0 +1,5 @@
+kernel,reason
+trimul_gemm_gate_sm100_cute,CuTe sm100 GEMM: no torch reference written yet; runs only on Blackwell so it cannot be checked on the fleet's Ampere cards
+trimul_gemm_sm100_cute,CuTe sm100 GEMM: no torch reference written yet; Blackwell-only
+trimul_gemm_gate_packed_sm100_cute,CuTe sm100 packed GEMM: no torch reference written yet; Blackwell-only
+trimul_outproj_gemm_gate_sm90_cute,CuTe sm90 out-projection GEMM: no torch reference written yet; Hopper-only
