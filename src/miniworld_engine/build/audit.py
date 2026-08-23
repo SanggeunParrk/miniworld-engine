@@ -453,7 +453,9 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
 
     want: dict[str, set] = {}
     for u in units:
-        want.setdefault(u.op, set()).add((u.dtype, u.length))
+        # `u.bucket`, not `u.length`: a both-level unit's key is its row count (pair L records
+        # L*L), so comparing lengths against cached buckets reports every one of them missing.
+        want.setdefault(u.op, set()).add((u.dtype, u.bucket))
     rep.stats["declared_ops"] = len(want)
     rep.stats["declared_pairs"] = sum(len(v) for v in want.values())
 

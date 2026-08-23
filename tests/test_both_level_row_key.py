@@ -70,8 +70,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
     got = set()
     for u in units:
         assert u.side in ("pair", "atom"), f"{u.stem}: a both-level unit must name its side"
-        rows = u.length * u.length if u.side == "pair" else u.length
-        got.add(both_key(rows))
+        got.add(u.bucket)
     assert got == set(BOTH_ROWS), f"missing {sorted(set(BOTH_ROWS) - got)}, extra {sorted(got - set(BOTH_ROWS))}"
 
 
@@ -123,3 +122,18 @@ def test_every_write_stamps_the_key_scheme(tmp_path, monkeypatch):
     data = json.loads(fp.read_text())
     assert data["key_scheme"] == cache.KEY_SCHEME
     assert len(data["entries"]) == 2, "the second write reset the file instead of appending"
+
+
+def test_the_coverage_check_compares_buckets_not_lengths():
+    """`want` used `u.length`; a both-level unit's key is its row count, so every one would miss."""
+    units = [u for u in op_units() if u.side == "pair"]
+    assert units
+    u = units[0]
+    assert u.bucket == both_key(u.length * u.length)
+    assert u.bucket != u.length, "a pair unit's bucket must not be its length"
+
+
+def test_a_token_or_atom_unit_buckets_on_its_length():
+    units = [u for u in op_units() if not u.side]
+    assert units
+    assert all(u.bucket == u.length for u in units)

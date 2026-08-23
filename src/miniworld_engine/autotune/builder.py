@@ -585,6 +585,22 @@ class OpUnit:
     side: str = ""
 
     @property
+    def bucket(self) -> int:
+        """The ``shape_key`` value this unit's launch will record.
+
+        Not ``length``. A `level=both` kernel keys on its ROW count, so a pair unit at L records
+        ``both_key(L*L)`` -- and a coverage check that compares declared lengths against cached
+        buckets would report every both-level op as a total miss.
+        """
+        from miniworld_engine.autotune.shape_key import both_key  # noqa: PLC0415
+
+        if self.side == "pair":
+            return both_key(self.length * self.length)
+        if self.side == "atom":
+            return both_key(self.length)
+        return self.length
+
+    @property
     def label(self) -> str:
         tag = f" {self.side}" if self.side else ""
         return f"{self.op}[{self.dtype}]{tag} L={self.length}"
