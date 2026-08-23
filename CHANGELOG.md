@@ -38,6 +38,21 @@ The public surface is enforced by `tests/test_public_api.py`.
   numerical suite runs via `pixi run test-gpu` on an allocated node.
 
 ### Changed
+- **`ty` is a gate, not a report.** CI ran `ty check src tests || true` against a
+  job that installed the package with `--no-deps`, so torch and triton were
+  absent, every `import torch` was an unresolved import, and every torch
+  attribute was `Unknown` — the step could not see the types it was checking. It
+  now installs the CPU torch wheel plus `[dev]`, checks `src tests benchmarks`,
+  and has no `|| true`. The `dev` extra names `ty` instead of `pyright`, which
+  cannot parse jaxtyping shape strings and reported 144 parse errors and no real
+  findings.
+- **`pixi run test` had been dead since the checkout was renamed**
+  (miniworld-kernels → miniworld-engine): the `pytest` launcher script carries an
+  absolute shebang. The tasks use `python -m pytest`, and `pixi run ci` runs the
+  type gate like the CI job does.
+- Removed `autotune.elem_bucket_of`, a factory for the per-kernel `bucket_of`
+  objects deleted in fcd3c7a. No caller, and the `_miniworld_keys` attribute it
+  documented as "lets build.audit introspect the extractor" had no reader.
 - **An autotune cache miss no longer sweeps the full grid.** Triton kernels now
   narrow a miss to `autotune_miss_cap` configs centred on `num_warps` in {4, 8}
   and `num_stages` in {2, 3, 4}; the shipped grid is 205,266 configs, so the old
@@ -67,6 +82,40 @@ The public surface is enforced by `tests/test_public_api.py`.
   the canonical path). Verified 0 importers + contract & numerical suites green.
 
 ### Fixed
+- **The library needed an environment variable to work at all.** With
+  `MINIWORLD_CONFIG_DIR` unset, every op registered an empty config list, triton
+  substituted its own `Config({})`, and the first launch of every triton kernel
+  died with `TypeError: dynamic_func() missing 2 required positional arguments`.
+  Every sbatch script and bench entry point in the repo exports the variable, so
+  the failure only ever showed up outside the scaffolding — measured on an A6000
+  with it unset, `miniworld` was a `status=failed` row next to a healthy
+  `pytorch` one; it is now 1.795 ms against pytorch's 7.084 ms.
+  `autotune.configs.default_config_dir()` selects `grid` when nothing is set.
+- **The `pre_hook` timer never ran.** `_install_launch_probes` assigned
+  `Autotuner.pre_hook`, but triton sets that attribute per instance in
+  `__init__` and the class carries no default, so the `hasattr` guard never
+  opened and an instance would have shadowed the class attribute anyway. The
+  build report printed `pre_hook 0 x -> 0s` for the whole life of the feature.
+- **`bench_triangle_attention` crashed on the path that guards it.** Its
+  unsupported-`old_triton` branch returned `BenchResult(status=..., error=...)`;
+  `BenchResult` is a NamedTuple with neither field, so the guard raised
+  `TypeError` instead of the NaN row every other bench returns.
+- **A `str` appended to quack's `EXTRA_SOURCE_DIRS: list[Path]`.** The
+  membership guard therefore never matched, and every import of
+  `kernels/_quack_compat.py` added another copy of the same directory to the
+  list the cute JIT cache key hashes.
+- **`modules.primitives` imported scipy at module scope** for one weight
+  initializer. scipy is in the `baselines` extra, not the core, so a core-only
+  install could not import `miniworld_engine.modules.primitives` — or anything
+  built on it.
+- **`layernorm_linear_pytorch` declared `ln_bias: torch.Tensor`** while both of
+  its callers pass `None` for a LayerNorm without beta, which `F.layer_norm`
+  accepts.
+- **`audit` failed the one kernel whose autotune key correctly carries no
+  shape.** `transition_fold_triton` reads only the weights, so `N` and `K` are
+  its whole shape and one cache bucket is right; the builder already knew and
+  drove it at one length, while the audit reported `key is pinned` against a
+  correct build. Both now answer through `builder._keys_on_shape`.
 - **`kernels.cuda_transition` has never worked and now says so.** Its body
   deferred to `transition.cuda.cuda_transition`, a symbol with no history in
   this repo; the module binds only `cuda_transition_b2b` and
