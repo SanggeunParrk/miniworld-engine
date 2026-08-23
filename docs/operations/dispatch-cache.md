@@ -134,18 +134,35 @@ math — so a missing / stale / wrong cache is only ever slower, never incorrect
 
 Two runtime entry points share the cache; a kernel uses whichever fits its backend:
 
-- **Triton** — the kernel's `@triton.autotune` uses `make_cache_prune(op, ...)` as its
-  `early_config_prune` (composed OVER any device-smem safety prune). Per call it reads the
-  running `(gpu, dtype, shape-bucket)`, and on a **hit** returns only the cached top-K (autotune
-  picks among ~5, not the full grid); on a **miss/stale** returns the full grid.
+- **Triton** — `install_cache_reader()` wraps every autotuner's `early_config_prune` (composed
+  OVER any device-smem safety prune). Per call it reads the running `(gpu, dtype, shape-bucket)`,
+  and on a **hit** returns only the cached top-K (autotune picks among ~5, not the full grid).
 - **CuTe / CUDA** — these fix their tile/cluster/stage config at build time (no autotune loop),
   so they call `select_config(op, dtype=…, bucket=…, candidates=…)` to *pick one* cached config
   and apply its `kwargs` (`tile_m`/`tile_n`/`cluster`/`pingpong`/…); on a miss they fall back to
   the kernel's own `default_config`.
 
-Both paths, on a **miss** (unknown GPU, unseen shape) or **stale** (the kernel's config grid
-changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back to the full grid
-/ default (still correct). A config is any of: a `triton.Config`, a plain dict of tile params
+Both paths warn ONCE on a **miss** (unknown GPU, unseen shape) or **stale** entry. What they
+fall back TO differs, and neither is the full grid:
+
+- **Triton** narrows to `settings.autotune_miss_cap` (24) configs centred on the standard part of
+  the space — `num_warps` in {4, 8}, `num_stages` in {2, 3, 4} — plus the middle of each block
+  axis. Returning the full grid here would put a 205,266-config sweep inside a production forward
+  on any GPU nobody has built a cache for. A build (`run_autotune=True`) still gets the whole
+  space on purpose, and a grid already smaller than the cap is left alone.
+- **CuTe / CUDA** falls back to the kernel's own `default_config` — already a bounded answer.
+
+An entry is **stale** when any of these no longer match what it was measured against:
+
+| field | invalidated by |
+| --- | --- |
+| `config_space_hash` | the kernel's config grid changing |
+| `env_identity` | triton / torch / CUDA / ptxas version changing |
+| `op_identity` | the kernel's source, or its `key=[...]` list, changing |
+
+A tuned config is a claim about a compiler and a device, not only about a grid; an entry missing
+`op_identity` (written before that field existed) still reads, so committed caches degrade to the
+old behaviour rather than to a permanent miss. A config is any of: a `triton.Config`, a plain dict of tile params
 (CuTe/CUDA, cluster shapes as tuples), or a pre-shaped `{kwargs, num_warps, num_stages}` dict —
 `as_cfg_dict` normalizes all three and `config_to_dict` serializes them JSON-safely.
 
@@ -155,14 +172,29 @@ changed, detected by a `config_space_hash` mismatch) → warn ONCE and fall back
   Reads (dispatch/prune) and writes (builder / `RUN_AUTOTUNE` regen) both target this path — no
   `~/.cache` / env-var override — so a stale per-user cache can never shadow the committed configs.
 - `gpu_key` = device name + capability (e.g. `NVIDIA A100 80GB PCIe (sm80)`); entries keyed
-  `"<dtype>|<shape-bucket>"` → list of `{kwargs, num_warps, num_stages, ms}` (top-K). A
-  `config_space_hash` field invalidates the whole file's entries when the grid changes.
+  `"<dtype>|<shape-bucket>"` → list of `{kwargs, num_warps, num_stages, ms}` (top-K), plus the
+  three identity fields above, which reset the file's entries when any of them changes.
+  `<dtype>` is what the kernel was OBSERVED to run in, so a kernel with mixed operands records
+  `bfloat16+float32`, not the driver's dtype.
 
 ## Building the shipped cache (on the target GPU)
 
-There are two builders; both write directly into `src/miniworld_engine/autotune/data/`,
-so after a build you just `git add` + commit the JSONs. A new GPU (H100/B200/…) is enabled by
-running one of these on that box and committing its JSONs.
+**The normal way is `miniworld-engine build all`.** It decomposes the work into one unit per
+`(op, declared dtype, shape bucket)` — 922 units today — runs them across every GPU it is given,
+merges the shards into `data/`, and reports what it could not measure. Coverage is DECLARED
+(registry.csv crossed with each kernel's `level` and `dtypes`), not "whatever a module happened to
+dispatch to": driving modules reached 48 of 91 triton kernels on an A6000.
+
+    miniworld-engine build all                  # config set defaults to `grid`
+    miniworld-engine audit                      # did every declared (op, dtype, bucket) land?
+
+`audit` is the check that closes the loop — it compares the shipped cache against the declared
+work list and names the holes. A hole is not a wrong answer, only a bucket that pays the bounded
+fallback above at runtime.
+
+Both builders write directly into `src/miniworld_engine/autotune/data/`, so after a build you
+`git add` + commit the JSONs — as their own commit, not folded into a code change. A new GPU
+(H100/B200/…) is enabled by running the build on that box and committing its JSONs.
 
 **1. Capture builder (preferred — covers every wired kernel automatically).** Instead of
 hand-replicating each kernel's launch, `autotune/capture.py` instruments the Triton autotuner
