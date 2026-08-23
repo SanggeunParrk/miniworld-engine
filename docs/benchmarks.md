@@ -62,8 +62,10 @@ explicitly asks for a one-off experiment.
 
 - If an op is already covered by the repo's unified bench harness, use
   `benchmarks/runners/bench.py` +
-  `benchmarks/modules/<module>/configs/bench.yaml` +
-  `submits/run_bench.sbatch`.
+  `benchmarks/modules/<module>/configs/bench.yaml`, launched however your
+  cluster launches things. (`submits/` was removed in 511d905 when its work
+  moved into the package; anything still naming `submits/run_*.sbatch` is a
+  stale reference.)
 - That harness is the descendant of the `team-gm` benchmarking flow. Follow its
   shapes, dtype mode, compilation policy, and reporting format unless there is a
   concrete reason not to.
@@ -221,8 +223,8 @@ Before treating a benchmark artifact as final, check every item below.
 ## Module Benchmark Matrix
 
 `triangle_multiplication_bidirectional` already has its own final artifact set;
-`submits/run_bench.sbatch` intentionally covers the remaining repo-developed
-module kernels:
+the matrix below is the remaining repo-developed module kernels, one
+`bench.py kernel=<target>` run each:
 
 | target | implementations | sweeps | modes | notes |
 | --- | --- | --- | --- | --- |

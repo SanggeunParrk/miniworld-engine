@@ -67,7 +67,7 @@ third_party/                      # external checkouts/submodules
 benchmarks/runners/bench.py       # active bench runner
 benchmarks/modules/triangle_multiplication/configs/bench.yaml
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
-submits/run_bench.sbatch          # single SLURM launcher for benchmarks/runners/bench.py
+tools/kernel-audit/               # one-off probes + their .sbatch launchers (not shipped in a wheel)
 ```
 
 In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical),
@@ -79,7 +79,10 @@ In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical)
 
 **Benchmark policy: follow the team-gm harness unless there is a specific reason
 not to.** The active path is `benchmarks/runners/bench.py` +
-`benchmarks/modules/<module>/configs/bench.yaml` + `submits/run_bench.sbatch`.
+`benchmarks/modules/<module>/configs/bench.yaml`, launched however your cluster
+launches things. (There is no `submits/` tree any more — 511d905 removed it once
+the work moved into the package; anything still naming `submits/run_*.sbatch` is
+a stale reference.)
 Do not replace the harness with ad hoc timing snippets or custom markdown
 summaries for final results. A benchmark run writes CSV; plotting is a separate
 CSV-rendering step.
@@ -96,7 +99,6 @@ srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G
   bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
     PYTHONPATH=src python benchmarks/runners/bench.py kernel=triangle_multiplication \
       implementations=[pytorch,dtv1,cuequivariance,miniworld] mode=inference"'
-# or submit: sbatch submits/run_bench.sbatch
 ```
 
 `kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
@@ -132,11 +134,19 @@ separate from the A100/H100/B200 cluster. One parameterized launcher per bench t
 both cards (pick the card with `--gres`; the script auto-detects it and asserts `sm_86`):
 
 ```bash
-# module bench / kernel sweep / per-target / tuned-cache capture
-BENCH_TARGET=transition sbatch --gres=gpu:A6000:1 submits/run_bench_ampere.sbatch
-sbatch --gres=gpu:A5000:4 submits/run_kbench_ampere.sbatch
-CAPTURE_TARGET=all      sbatch --gres=gpu:A6000:1 submits/run_autotune_capture_ampere.sbatch
+# one module bench
+srun -p gpu --gres=gpu:A6000:1 -c 8 --mem=64G \
+  .pixi/envs/default/bin/python benchmarks/runners/bench.py kernel=transition mode=inference
+
+# the tuned cache for this card: one unit per (op, dtype, shape bucket), across every GPU given
+srun -p gpu --gres=gpu:A6000:8 --exclusive \
+  .pixi/envs/default/bin/python -m miniworld_engine.cli build all --gpus 8 --resume
 ```
+
+The cache build replaced `CAPTURE_TARGET=all submits/run_autotune_capture_ampere.sbatch`:
+capture used to be driven per bench target, which reached 48 of 91 triton kernels because a
+module only fires the kernels its own shapes dispatch to. `build all` drives the DECLARED work
+list instead — see the CLI section below and `docs/operations/dispatch-cache.md`.
 
 The A5000's 24 GB may OOM at the top of the sweep (L=1024, d=512); `bench.py` records those
 points as `status=failed` rows rather than aborting, so the CSV still shows the memory cliff.
@@ -147,10 +157,29 @@ Restructured into the kernels/modules split above. The triangle_multiplication
 cute path wins end-to-end at L ≥ 768 on H100 (≈1.75 ms at L=1024); the
 from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WIP.
 
+## CLI
+
+`miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
+
+```bash
+miniworld-engine build all            # tune this GPU: 922 (op, dtype, shape bucket) units
+miniworld-engine build all --resume   # skip what a previous run already claimed
+miniworld-engine audit                # which declared (op, dtype, bucket) the cache actually holds
+```
+
+`build` writes into `src/miniworld_engine/autotune/data/`, so a finished build is committed as
+its own commit. Full policy: `docs/operations/dispatch-cache.md`.
+
 ## Toolchain
 
 ```bash
-pixi run --frozen ruff-check
-pixi run --frozen ruff-format
-ty check
+pixi run ruff-check     # lint  (src tests benchmarks)
+pixi run types          # ty    (src tests benchmarks) -- gates CI, no findings allowed
+pixi run test           # the CPU suite (~30 s, no GPU)
+pixi run test-gpu       # tests/test_numerical.py, on an allocated node
+pixi run ci             # all three, in CI's order
 ```
+
+`ty`, not pyright: pyright cannot parse jaxtyping shape strings
+(`Float[torch.Tensor, "N S 3"]`) and reported 144 parse errors and no real findings, so
+`[tool.pyright]` turns it off and exists only to keep an editor quiet.

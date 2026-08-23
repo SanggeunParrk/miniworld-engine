@@ -95,18 +95,17 @@ Benchmark code and generated results:
 - `benchmarks/modules/triangle_multiplication/configs/bench.yaml`
 - `benchmarks/modules/triangle_multiplication/artifacts/`
 - `benchmarks/runners/bench.py`
-- `submits/run_bench.sbatch`
 
 Run the unified compiled benchmark with:
 
 ```bash
-sbatch submits/run_bench.sbatch
+python benchmarks/runners/bench.py kernel=triangle_multiplication
 ```
 
 The trimul CSV and SVG figures are generated under
 `benchmarks/modules/triangle_multiplication/artifacts/<GPU name>/`.
 
-The unified runner writes benchmark CSVs only; `submits/run_bench.sbatch` then
+The unified runner writes benchmark CSVs only; `benchmarks/runners/plot_csv.py`
 renders SVGs from those CSVs as a separate step. Current trimul runs generate
 both inference and training CSVs:
 

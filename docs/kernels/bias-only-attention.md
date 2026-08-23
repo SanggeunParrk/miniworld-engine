@@ -12,7 +12,7 @@ kernel structure. Full triangular self-attention is tracked separately under the
 - Module target: `bias_only_attention`
 - Benchmark config: `benchmarks/modules/bias_only_attention/configs/bench.yaml`
 - Runner: `benchmarks/runners/bench.py`
-- Batch entrypoint: `submits/run_bench.sbatch` with `BENCH_TARGET=bias_only_attention`
+- Run: `python benchmarks/runners/bench.py kernel=bias_only_attention`
 - Artifacts: `benchmarks/modules/bias_only_attention/artifacts/`
 
 Implementations in the final benchmark:

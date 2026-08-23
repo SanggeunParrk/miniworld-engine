@@ -11,7 +11,7 @@ gating. The bias-only case is tracked separately in
 - Module target: `triangle_attention`
 - Benchmark config: `benchmarks/modules/triangle_attention/configs/bench.yaml`
 - Runner: `benchmarks/runners/bench.py`
-- Batch entrypoint: `submits/run_bench.sbatch` with `BENCH_TARGET=triangle_attention`
+- Run: `python benchmarks/runners/bench.py kernel=triangle_attention`
 - Kernel: `src/miniworld_engine/kernels/triangle_attention/triton/main.py`
 - Artifacts: `benchmarks/modules/triangle_attention/artifacts/`
 
