@@ -286,7 +286,10 @@ smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE Layer
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
 ruff-check = "ruff check src tests benchmarks"
 ruff-format = "ruff format src tests benchmarks"
-types = "ty check src tests"
+# benchmarks too: `[tool.ty.src].include` has always listed it, but the command checked
+# src+tests only, so 53 findings in the bench harness were invisible -- among them a
+# `BenchResult(status=...)` that raised TypeError on the path it was guarding.
+types = "ty check src tests benchmarks"
 
 # The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
 # 16 test files run nowhere automatic.
@@ -298,7 +301,7 @@ types = "ty check src tests"
 test = "python -m pytest tests/ -m 'not gpu' -q"
 test-gpu = "python -m pytest tests/ -m gpu -q"
 # Mirrors the CI job, in its order: lint, then the type gate, then the suite.
-ci = "ruff check src tests benchmarks && ty check src tests && python -m pytest tests/ -m 'not gpu' -q"
+ci = "ruff check src tests benchmarks && ty check src tests benchmarks && python -m pytest tests/ -m 'not gpu' -q"
 
 [project.scripts]
 miniworld-engine = "miniworld_engine.cli:main"

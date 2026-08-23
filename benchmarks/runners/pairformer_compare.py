@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = str(_REPO_ROOT / "src")
@@ -33,6 +34,7 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 import torch
+import torch.nn as nn
 import triton
 
 from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
@@ -69,7 +71,10 @@ def apply_stability_workarounds() -> list[str]:
         notes.append("transition CUDA b2b disabled on sm_100 (build unsupported) -> triton path")
     from miniworld_engine.kernels.bias_only_attention import dispatch as _bod
 
-    _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005
+    # Deliberate monkeypatch of a module-level function; rebinding one is never
+    # assignment-compatible to a checker, because the declared type of the name IS that
+    # one function.
+    _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005  # ty: ignore[invalid-assignment]
     notes.append("triangle-attention gate forced non-fused (cudagraph-capturable, faster here)")
     return notes
 
@@ -108,7 +113,7 @@ def _capture(step, warmup: int = 10):
     return graph
 
 
-def inference_time(model: Pairformer, pair, mask, cudagraph: bool) -> float:
+def inference_time(model: nn.Module, pair, mask, cudagraph: bool) -> float:
     model.eval()
 
     def step():
@@ -126,7 +131,7 @@ def inference_time(model: Pairformer, pair, mask, cudagraph: bool) -> float:
     return float(triton.testing.do_bench(fn, warmup=25, rep=100, quantiles=[0.5]))
 
 
-def training_time(model: Pairformer, pair, mask, cudagraph: bool) -> float:
+def training_time(model: nn.Module, pair, mask, cudagraph: bool) -> float:
     model.train()
 
     def step():
@@ -163,7 +168,9 @@ TIMERS = {"inference": inference_time, "training": training_time}
 
 
 @torch.no_grad()
-def infer_out(model: Pairformer, pair, mask) -> torch.Tensor:
+# `nn.Module`, not `Pairformer`: `--compile` hands these a `torch.compile` wrapper around
+# the Pairformer, and nothing here needs anything narrower than a callable module.
+def infer_out(model: nn.Module, pair, mask) -> torch.Tensor:
     model.eval()
     return model(pair, mask).float()
 
@@ -189,11 +196,15 @@ def run_table(mode: str, args, cfg: PairformerConfig) -> None:
                 # churns guards (requires_grad / shape) and hits the default limit (8) -> eager
                 # fallback at later shapes. A high limit lets every shape compile cleanly.
                 import torch._dynamo as _dyn
-                _dyn.config.recompile_limit = 128
+                # torch's config module declares these as the literal defaults, so any
+                # assignment reads as a type error; setting them is the documented API.
+                _dyn.config.recompile_limit = 128  # ty: ignore[invalid-assignment]
                 _dyn.config.cache_size_limit = 128
                 # default mode (inductor fusion, NO internal cudagraph tree) so it composes
                 # with the manual capture below; warmup triggers+finishes compilation.
-                model = torch.compile(model)
+                # `torch.compile` types as `(...) -> Any` for the callable overload; the
+                # thing it returns for a Module is an OptimizedModule, which is one.
+                model = cast("nn.Module", torch.compile(model))
             if args.check and mode == "inference":
                 out = infer_out(model, pair, mask)
                 if label == "pytorch":

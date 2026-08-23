@@ -54,9 +54,15 @@ jobs:
         # and `capture.py` installed a pre_hook timer on the class when triton sets that attribute
         # per instance (the metric had always printed zero).
         #
+        # benchmarks/ is checked too. `[tool.ty.src].include` had always listed it while the
+        # command said `src tests`, so 53 findings in the bench harness were invisible --
+        # including a `BenchResult(status=..., error=...)` that raised TypeError on the very
+        # path it was written to guard, and `fabric: Fabric` on eight bench entry points
+        # that are only ever handed a no-op shim.
+        #
         # The count is zero and this step GATES. No `|| true`: a finding must be fixed or
         # suppressed at its line with a reason, never hidden behind a green step.
-        run: ty check src tests
+        run: ty check src tests benchmarks
 
       - name: Tests (whole suite -- every test here is CPU-only)
         # Runs ALL of tests/, not a hand-listed subset. It used to name three files, so

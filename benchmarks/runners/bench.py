@@ -7,8 +7,7 @@ import sys
 import csv
 from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple
-from typing import Literal
+from typing import Literal, NamedTuple, Protocol, TypedDict, cast
 
 # When run as `python benchmarks/runners/bench.py`, sys.path[0] is
 # `.../benchmarks/runners`, which can
@@ -26,7 +25,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import triton
-from lightning import Fabric
 from omegaconf import DictConfig
 from pydantic import BaseModel
 from triton.runtime.autotuner import Autotuner
@@ -144,6 +142,37 @@ class ImplementationSpec(NamedTuple):
     impl: ImplementationType
     ln_impl: ImplementationType | None
     label: str
+
+
+class FabricLike(Protocol):
+    """The three methods the benches use on ``fabric``.
+
+    Not ``lightning.Fabric``: this harness deliberately passes a no-op shim instead (see
+    ``_NoFabric`` in ``run_bench`` -- Fabric's setup_module wrapper and backward add ~110us/step
+    of casts and copies that have nothing to do with the kernel under test, and compress the
+    speedup ratios). Annotating the real class was therefore wrong at every call site, and it was
+    the only reason this module imported lightning at all.
+    """
+
+    def launch(self) -> None: ...
+    def setup_module(self, module: nn.Module) -> nn.Module: ...
+    def backward(self, tensor: torch.Tensor, gradient: torch.Tensor) -> None: ...
+
+
+class AccuracyFields(TypedDict, total=False):
+    """The correctness columns of :class:`BenchResult`, as a `_replace(**acc)` payload.
+
+    A bare `dict[str, float]` cannot be splatted into `_replace`: the synthesized signature
+    types each field separately, and a joined `float` value matches none of them. Twenty of this
+    file's type findings were this one dict shape reused at five call sites.
+    """
+
+    output_max_abs: float
+    output_rel_frob: float
+    output_cosine: float
+    grad_max_abs: float
+    grad_rel_frob: float
+    grad_cosine: float
 
 
 class BenchResult(NamedTuple):
@@ -540,7 +569,7 @@ def bench_triangle_multiplication(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
     bidirectional: bool = False,
 ):
     # single-dir TriangleMultiplication, or the bidirectional (outgoing+incoming) variant — the
@@ -629,8 +658,13 @@ def bench_triangle_multiplication(
                 mask_2d = None
                 if mask is not None:
                     mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-                p_in = torch.cat([layer.to_left.weight, layer.to_right.weight], dim=0)
-                g_in = torch.cat([layer.to_left_gate.weight, layer.to_right_gate.weight], dim=0)
+                # `self.layers` is an nn.ModuleList, so iterating it yields `Module` and every
+                # `layer.to_left` reads as `Tensor | Module` -- twenty findings for one loop
+                # variable. Both classes that can be in here (TriangleMultiplication and its
+                # bidirectional sibling) carry the same projection and norm names.
+                tm = cast("TriangleMultiplication", layer)
+                p_in = torch.cat([tm.to_left.weight, tm.to_right.weight], dim=0)
+                g_in = torch.cat([tm.to_left_gate.weight, tm.to_right_gate.weight], dim=0)
                 # The miniworld TriangleMultiplication now ALWAYS adds the residual (it is
                 # unconditional — see the module). The dtv1 baseline is the raw op, so add the
                 # residual explicitly here to keep the per-layer stack semantics identical for a
@@ -638,20 +672,20 @@ def bench_triangle_multiplication(
                 if bidirectional:
                     pair = pair + fused_bidirectional_dtv1(
                         pair, mask_2d,
-                        norm_in_weight=layer.ln_pair.weight, norm_in_bias=layer.ln_pair.bias,
+                        norm_in_weight=tm.ln_pair.weight, norm_in_bias=tm.ln_pair.bias,
                         p_in_weight=p_in, g_in_weight=g_in,
-                        norm_out_weight=layer.ln_out.weight, norm_out_bias=layer.ln_out.bias,
-                        p_out_weight=layer.to_out.weight, g_out_weight=layer.to_gate.weight,
-                        h=layer.d_hidden, eps=layer.ln_pair.eps,
+                        norm_out_weight=tm.ln_out.weight, norm_out_bias=tm.ln_out.bias,
+                        p_out_weight=tm.to_out.weight, g_out_weight=tm.to_gate.weight,
+                        h=tm.d_hidden, eps=tm.ln_pair.eps,
                     )
                 else:
                     pair = pair + fused_triangle_multiplicative_update_dtv1(
                         pair, direction="outgoing", mask=mask_2d,
-                        norm_in_weight=layer.ln_pair.weight, norm_in_bias=layer.ln_pair.bias,
+                        norm_in_weight=tm.ln_pair.weight, norm_in_bias=tm.ln_pair.bias,
                         p_in_weight=p_in, g_in_weight=g_in,
-                        norm_out_weight=layer.ln_out.weight, norm_out_bias=layer.ln_out.bias,
-                        p_out_weight=layer.to_out.weight, g_out_weight=layer.to_gate.weight,
-                        eps=layer.ln_pair.eps,
+                        norm_out_weight=tm.ln_out.weight, norm_out_bias=tm.ln_out.bias,
+                        p_out_weight=tm.to_out.weight, g_out_weight=tm.to_gate.weight,
+                        eps=tm.ln_pair.eps,
                     )
             return pair
 
@@ -687,7 +721,7 @@ def bench_triangle_multiplication(
         y = inference_step()
         fabric.backward(y, dy)
 
-    def correctness() -> dict[str, float]:
+    def correctness() -> AccuracyFields:
         pair_impl = pair.detach().clone().requires_grad_(not is_inference_mode(conf.mode))
         pair_ref = pair.detach().float().clone().requires_grad_(not is_inference_mode(conf.mode))
         dy_ref = dy.detach().float()
@@ -707,6 +741,7 @@ def bench_triangle_multiplication(
         fabric.backward(actual, dy)
         fabric.backward(expected, dy_ref)
         out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+        assert pair_impl.grad is not None and pair_ref.grad is not None
         grad_max, grad_rel, grad_cos = tensor_metrics(pair_impl.grad, pair_ref.grad)
         return {
             "output_max_abs": out_max,
@@ -735,7 +770,8 @@ def bench_triangle_multiplication(
             graph = capture_cudagraph(func, [], is_train=False)
             value = bench_time(graph.replay, grad_to_none=[])["median_ms"]
         else:
-            graphed = torch.cuda.make_graphed_callables(model, (pair, mask))
+            # Types as `object` in torch's stubs; for a Module in, a callable Module comes out.
+            graphed = cast("nn.Module", torch.cuda.make_graphed_callables(model, (pair, mask)))
 
             def graphed_step() -> None:
                 graphed(pair, mask).backward(dy)
@@ -760,7 +796,7 @@ def bench_bias_only_attention(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
     is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
@@ -846,15 +882,15 @@ def bench_triangle_attention(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
     if implementation.strip().lower() == OLD_TRITON_IMPL:
-        return BenchResult(
-            value=float("nan"),
-            status="failed",
-            error="old_triton is only defined for bias_only_attention",
-        )
+        # `BenchResult` is a NamedTuple with no `status` / `error` field, so this guard used to
+        # raise `TypeError: __new__() got an unexpected keyword argument 'status'` -- the check
+        # for an unsupported implementation was itself the crash. NaN is how every other bench
+        # in this file reports "not applicable".
+        return as_bench_result(float("nan"))
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -924,7 +960,7 @@ def bench_transition(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = module_miniworld_spec(implementation)
     is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
@@ -1005,7 +1041,7 @@ def bench_transition(
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, *list(model.parameters())]
 
-    def correctness() -> dict[str, float]:
+    def correctness() -> AccuracyFields:
         x_impl = x.detach().clone().requires_grad_(not is_inference_mode(conf.mode))
         x_ref = x.detach().clone().requires_grad_(not is_inference_mode(conf.mode))
         dy_ref = dy.detach().clone()
@@ -1025,6 +1061,7 @@ def bench_transition(
         fabric.backward(actual, dy)
         fabric.backward(expected, dy_ref)
         out_max, out_rel, out_cos = tensor_metrics(actual, expected)
+        assert x_impl.grad is not None and x_ref.grad is not None
         grad_max, grad_rel, grad_cos = tensor_metrics(x_impl.grad, x_ref.grad)
         return {
             "output_max_abs": out_max,
@@ -1088,7 +1125,7 @@ def bench_conditioned_transition(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = module_miniworld_spec(implementation)
     if spec.impl not in {
@@ -1178,7 +1215,7 @@ def bench_adaptive_layernorm(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
     implementation_type = spec.impl
@@ -1267,7 +1304,7 @@ def bench_augmented_attention_token(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
@@ -1326,7 +1363,7 @@ def bench_augmented_attention_atom(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
-    fabric: Fabric,
+    fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
@@ -1403,12 +1440,12 @@ def bench_bidirectional_triangle_multiplication(conf, seq_len, implementation, f
 BF16 = torch.bfloat16
 
 
-def _acc_fwd(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
+def _acc_fwd(actual: torch.Tensor, expected: torch.Tensor) -> AccuracyFields:
     mx, rel, cos = tensor_metrics(actual, expected)
     return {"output_max_abs": mx, "output_rel_frob": rel, "output_cosine": cos}
 
 
-def _acc_grad(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
+def _acc_grad(actual: torch.Tensor, expected: torch.Tensor) -> AccuracyFields:
     mx, rel, cos = tensor_metrics(actual, expected)
     return {"grad_max_abs": mx, "grad_rel_frob": rel, "grad_cosine": cos}
 
@@ -1482,6 +1519,7 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
 
         def run(x):
             left, right, gate = trimul_inproj_cute_forward(x, wl, wlg, wr, wrg, wg, compute_gate=True)
+            assert gate is not None      # compute_gate=True; None is the compute_gate=False shape
             return bdll_to_md(left), bdll_to_md(right), gate.reshape(L * L, D)
         path = "kernels.trimul_inproj.cute.launch"
     elif implementation == "tm1_cute":
