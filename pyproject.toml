@@ -33,8 +33,10 @@ cute = ["nvidia-cutlass-dsl==4.5.2", "quack-kernels==0.5.0"]
 baselines = ["cuequivariance-torch>=0.9,<0.10", "scipy"]
 # Benchmark harness (benchmarks/runners/bench.py, team-gm hydra style) + plots.
 bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
-# Dev: tests, lint, type smoke-check.
-dev = ["pytest", "ruff", "pyright"]
+# Dev: tests, lint, static typing. `ty`, not pyright -- pyright cannot parse jaxtyping shape
+# strings (`Float[Tensor, "N S 3"]`) and reported 144 parse errors and no real findings, so
+# `[tool.pyright]` now turns it off outright and `pixi run types` / CI run ty.
+dev = ["pytest", "ruff", "ty"]
 # FlashAttention-4 (Blackwell/sm_100) — EXTERNAL CuTeDSL JIT wheel, used only as a
 # benchmark comparison backend (miniworld-engine ships no flash kernel of its own).
 # Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
@@ -139,10 +141,11 @@ ignore = [
 docstring-code-format = false
 
 # ----------------------------------------------------------------------------
-# pyright / ty — team-gm ships no type-checker config. This repo contains
-# Triton/CuTe launch syntax, optional native extensions, and dynamic PyTorch
-# modules, so pyright is kept as an import/syntax smoke check rather than a full
-# static typing gate.
+# ty is the static typing gate: `pixi run types`, and a CI step with no `|| true`.
+# It runs clean, so a new finding fails the build.
+#
+# `[tool.pyright]` below is not a second gate. It exists only to keep an editor's
+# bundled Pylance quiet, because pyright cannot parse jaxtyping shape strings.
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
@@ -166,8 +169,12 @@ exclude = [
   "third_party",
 ]
 pythonVersion = "3.10"
+# ty is the static-typing gate (see `[tool.ty]` below and the `types` task). This block
+# exists only to keep an editor's bundled pyright/Pylance quiet: it cannot parse jaxtyping
+# string shapes (`Float[Tensor, "N S 3"]`), so every annotated signature became a parse
+# error. Off means off -- no individual rule is re-enabled here, or the suppression
+# comments in the source would have to name two checkers.
 typeCheckingMode = "off"
-reportMissingImports = "warning"
 
 [tool.ty.src]
 include = ["src", "tests", "benchmarks"]
@@ -208,6 +215,12 @@ invalid-method-override = "ignore"
 
 [tool.ty.environment]
 python-version = "3.10"
+# tests/test_registry_complete.py imports classify/launch_bind/key_gaps from
+# tools/kernel-audit via sys.path at call time (tools/ is not shipped in a wheel, so it
+# cannot be a package). Naming the directory here lets ty resolve those imports for real
+# instead of suppressing them; the directory itself stays out of `[tool.ty.src].include`,
+# so its own contents are not checked.
+extra-paths = ["tools/kernel-audit"]
 
 # ----------------------------------------------------------------------------
 # pixi — single unified environment for the whole repo (triton + Transformer
@@ -277,9 +290,15 @@ types = "ty check src tests"
 
 # The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
 # 16 test files run nowhere automatic.
-test = "pytest tests/ -m 'not gpu' -q"
-test-gpu = "pytest tests/ -m gpu -q"
-ci = "ruff check src tests benchmarks && pytest tests/ -m 'not gpu' -q"
+#
+# `python -m pytest`, not the `pytest` launcher: the launcher is a script with an absolute
+# shebang baked in at install time, so renaming the checkout (miniworld-kernels ->
+# miniworld-engine) left it pointing at a python that no longer exists and every
+# `pixi run test` died with "No such file or directory". `python -m` resolves at run time.
+test = "python -m pytest tests/ -m 'not gpu' -q"
+test-gpu = "python -m pytest tests/ -m gpu -q"
+# Mirrors the CI job, in its order: lint, then the type gate, then the suite.
+ci = "ruff check src tests benchmarks && ty check src tests && python -m pytest tests/ -m 'not gpu' -q"
 
 [project.scripts]
 miniworld-engine = "miniworld_engine.cli:main"

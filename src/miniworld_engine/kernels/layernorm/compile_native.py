@@ -67,8 +67,9 @@ def _time_bwd_path(impl, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
 def _resolve_bwd_path(
     m: int, n: int, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor
 ) -> str:
-    if _ln_bwd_override() in _VALID_BWD_PATHS:
-        return _ln_bwd_override()
+    override = _ln_bwd_override()
+    if override is not None and override in _VALID_BWD_PATHS:
+        return override
 
     # The hand-CUDA fast bwd path requires x AND weight to share one dtype (its kernel rejects a
     # mixed pair); the triton paths promote internally and tolerate a mixed pair. Some pairformer
@@ -99,7 +100,7 @@ def _resolve_bwd_path(
     if is_bf16 and 128 <= n <= 512:
         impls["cuda"] = _bwd_cuda_impl
     times = {name: _time_bwd_path(fn, dy, x, weight, mean, rstd) for name, fn in impls.items()}
-    best = min(times, key=times.get)
+    best = min(times, key=lambda name: times[name])  # not `times.get`: it is `float | None`
     if times[best] == float("inf"):  # nothing ran (shouldn't happen) -> heuristic
         return _static_bwd_path(m, n, is_bf16)
     dispatch_cache.store(device, n, mb, best, times)

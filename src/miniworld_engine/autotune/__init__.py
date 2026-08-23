@@ -23,7 +23,6 @@ so a missing / stale / wrong cache can only ever be slower, never incorrect.
 
 from __future__ import annotations
 
-from .buckets import elem_bucket_of
 from .configs import configs_for, missing_ops, registered_ops, use_config_dir
 from .cache import (
     as_cfg_dict,
@@ -46,7 +45,6 @@ __all__ = [
     "registered_ops",
     "use_config_dir",
     "config_space_hash",
-    "elem_bucket_of",
     "gpu_key",
     "key_bucket_of",
     "operand_bytes",

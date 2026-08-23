@@ -256,7 +256,7 @@ def check_tuning_keys(rep: Report, tuners) -> None:
         op = _op_of(t) or name
         keys = _bucket_keys(t)
         if keys is None:
-            rep.add("keys", WARN, op, "bucket_of not introspectable (not built by key_bucket_of)")
+            rep.add("keys", WARN, op, "autotune key=[] -- one cache bucket for every shape")
             continue
         rep.add("keys", OK, op, f"buckets on {keys}; autotune key={list(getattr(t, 'keys', []))}")
     rep.stats["swept_dims"] = {k: sorted(v) for k, v in sorted(swept.items())}
@@ -365,7 +365,10 @@ def check_parallelism(rep: Report) -> None:
     jobs = capture._compile_jobs()  # noqa: SLF001
     rep.add("parallel", OK if jobs > 1 else FAIL, "cpu-compile",
             f"precompile workers = {jobs}")
-    src = Path(__import__("miniworld_engine.autotune.builder", fromlist=["x"]).__file__).read_text()
+    from miniworld_engine.autotune import builder
+
+    assert builder.__file__ is not None  # a namespace package would have none; this is a module
+    src = Path(builder.__file__).read_text()
     if "ThreadPoolExecutor(max_workers=len(gpus))" in src:
         rep.add("parallel", OK, "gpu-tune", "one unit per GPU, worker pool sized to len(gpus)")
     else:

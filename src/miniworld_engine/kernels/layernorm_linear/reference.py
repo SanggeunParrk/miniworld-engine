@@ -20,7 +20,7 @@ import torch.nn.functional as F
 def layernorm_linear_pytorch(
     x: torch.Tensor,          # (..., d_in)
     ln_weight: torch.Tensor,  # (d_in,)
-    ln_bias: torch.Tensor,    # (d_in,)
+    ln_bias: torch.Tensor | None,  # (d_in,)  — None for a LayerNorm without beta
     weight: torch.Tensor,     # (d_out, d_in)   — torch.nn.Linear layout
     bias: torch.Tensor | None,  # (d_out,)
     eps: float = 1e-5,

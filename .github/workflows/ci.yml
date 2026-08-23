@@ -23,14 +23,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install tooling + package (no heavy backends)
+      - name: Install tooling + package (CPU wheels, no GPU backends)
         run: |
           python -m pip install --upgrade pip
-          pip install ruff ty pytest
-          # editable install WITHOUT deps: the contract/guard tests import only the
-          # lazy `miniworld_engine.kernels` surface (no torch/triton needed), so a
-          # CPU runner stays fast and free of the GPU stack.
-          pip install -e . --no-deps
+          # CPU torch first, from the CPU index, so the CUDA wheels are never resolved.
+          # The type gate is only as strong as the stubs it can see: with torch and triton
+          # absent, every `import torch` is an unresolved import and every torch attribute is
+          # Unknown, so ty reports a wall of noise and none of the real findings. Nothing in
+          # this job runs a kernel, so the CPU wheel is enough.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          # `[dev]` = pytest + ruff + ty; the core deps (triton, einops, jaxtyping, numpy) come
+          # with the package. The optional backends (cute/baselines/bench) stay out -- the code
+          # that needs them imports them lazily and the checker suppresses those imports by name.
+          pip install -e ".[dev]"
 
       - name: Lint (ruff)
         run: ruff check src tests benchmarks
@@ -42,13 +47,16 @@ jobs:
         # suppressible because a parse error answers to no rule. So the step reported failure
         # for a codebase with no type findings at all, which is the same as no step.
         #
-        # ty handles them and finds real ones instead: 114 in src/ today, including a probe in
-        # autotune/cache.py that imported a symbol triton has since moved, silently reducing the
-        # cache's toolchain identity to a constant.
+        # ty found 130 real ones instead. Among them: `kernels.cuda_transition` imported a symbol
+        # that has never existed (so `Transition(implementation="cuda")` could not run at all),
+        # `autotune/cache.py`'s ptxas probe imported a function triton had moved (so every cache
+        # entry recorded `ptxas=?`), `build.py` called an attribute `bidirectional` does not have,
+        # and `capture.py` installed a pre_hook timer on the class when triton sets that attribute
+        # per instance (the metric had always printed zero).
         #
-        # `|| true` while that backlog is worked down -- the step reports, it does not gate yet.
-        # Removing it is the next step and should happen before the count can grow.
-        run: ty check src tests || true
+        # The count is zero and this step GATES. No `|| true`: a finding must be fixed or
+        # suppressed at its line with a reason, never hidden behind a green step.
+        run: ty check src tests
 
       - name: Tests (whole suite -- every test here is CPU-only)
         # Runs ALL of tests/, not a hand-listed subset. It used to name three files, so

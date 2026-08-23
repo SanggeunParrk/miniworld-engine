@@ -348,6 +348,7 @@ def adaln_bwd_pre_dx():
     xr = x.float().detach().requires_grad_(True)
     s = torch.logit(gate.float()).detach().requires_grad_(True)
     (torch.sigmoid(s) * F.layer_norm(xr, (_D,), eps=_EPS)).backward(dy.float())
+    assert s.grad is not None and xr.grad is not None
     return {"D": (d_stack, torch.cat([s.grad, dy.float()], dim=1).t()), "DX": (dx, xr.grad)}
 
 

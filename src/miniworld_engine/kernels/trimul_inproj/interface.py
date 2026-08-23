@@ -32,4 +32,10 @@ def trimul_inproj_cute(
     """
     from .cute.launch import trimul_inproj_cute_forward
 
-    return trimul_inproj_cute_forward(x, WL, WLg, WR, WRg, Wg, hidden_dim=hidden_dim)
+    left, right, gate = trimul_inproj_cute_forward(
+        x, WL, WLg, WR, WRg, Wg, hidden_dim=hidden_dim
+    )
+    # `Wg` is required by this entry point, so the backend always computes the gate. It
+    # returns None only for its `Wg=None` / `compute_gate=False` variant, not exposed here.
+    assert gate is not None
+    return left, right, gate

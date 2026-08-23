@@ -84,16 +84,21 @@ class AdaLNReference(nn.Module):
         *,
         eps_x: float = 1e-5,
         eps_cond: float = 1e-5,
-        device=None,
+        device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         scale = d_cond**-0.5
-        kw = {"device": device, "dtype": dtype}
-        self.cond_ln_weight = nn.Parameter(torch.ones(d_cond, **kw))
-        self.scale_weight = nn.Parameter(torch.randn(d_hidden, d_cond, **kw) * scale)
-        self.scale_bias = nn.Parameter(torch.ones(d_hidden, **kw))
-        self.bias_weight = nn.Parameter(torch.randn(d_hidden, d_cond, **kw) * scale)
+        # Spelled out rather than splatted from a `kw` dict: a bare dict literal infers a joined
+        # value type that matches no `torch.ones`/`torch.randn` overload.
+        self.cond_ln_weight = nn.Parameter(torch.ones(d_cond, device=device, dtype=dtype))
+        self.scale_weight = nn.Parameter(
+            torch.randn(d_hidden, d_cond, device=device, dtype=dtype) * scale
+        )
+        self.scale_bias = nn.Parameter(torch.ones(d_hidden, device=device, dtype=dtype))
+        self.bias_weight = nn.Parameter(
+            torch.randn(d_hidden, d_cond, device=device, dtype=dtype) * scale
+        )
         self.eps_x = eps_x
         self.eps_cond = eps_cond
 

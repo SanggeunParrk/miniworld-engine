@@ -54,8 +54,8 @@ def _load_cute_fns():
         if str(d) not in sys.path:
             sys.path.insert(0, str(d))
     from miniworld_engine.kernels.layernorm.triton.transpose import layer_norm_transpose
-    from fused_ln_mask import fused_ln_mask  # pyright: ignore[reportMissingImports]
-    from launch import tm1_cute_forward  # pyright: ignore[reportMissingImports]
+    from fused_ln_mask import fused_ln_mask  # ty: ignore[unresolved-import]  # sys.path above
+    from launch import tm1_cute_forward  # ty: ignore[unresolved-import]  # sys.path above
 
     # NOTE: tm2 (cuequiv-backed gated GEMM) is NOT imported here — the default cute path is
     # cuequiv-free. The legacy cuequiv tm2 path lazy-imports it itself (see _forward_cute).

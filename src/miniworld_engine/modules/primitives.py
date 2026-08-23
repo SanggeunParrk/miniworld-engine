@@ -1,6 +1,5 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/primitives.py
 import math
-import numbers
 from enum import Enum
 from functools import partial
 from typing import Literal, Union
@@ -9,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from jaxtyping import Float
-from scipy.stats import truncnorm
 from torch import Size
 from torch.nn.parameter import Parameter
 
@@ -40,6 +38,12 @@ def _trunc_normal_init(
         msg = f"Invalid fan option: {fan}. Choose from 'in', 'out', 'avg'."
         raise ValueError(msg)
 
+    # Imported here, not at module scope: scipy is in the `baselines` extra, not the lean
+    # core, and this is the only thing in `miniworld_engine.modules` that wants it. At
+    # module scope it made `import miniworld_engine.modules.primitives` -- and so every
+    # module built on it -- fail outright on a core-only install.
+    from scipy.stats import truncnorm  # noqa: PLC0415
+
     scale = scale / max(1, f)
     std = math.sqrt(scale) / truncnorm.std(a=a, b=b, loc=0, scale=1)
     samples = truncnorm.rvs(a=a, b=b, loc=0, scale=std, size=weights.numel())
@@ -67,7 +71,7 @@ class InitType(Enum):
 _shape_t = Union[int, list[int], Size]
 
 
-class _Fp32ParamsMixin:
+class _Fp32ParamsMixin(nn.Module):
     """Pin this module's floating-point params/buffers to fp32 under ANY dtype cast.
 
     Norm affine params (gamma init 1.0, beta 0.0) stagnate when stored bf16: at value 1.0
@@ -76,7 +80,12 @@ class _Fp32ParamsMixin:
     lets the update land. Overriding ``_apply`` — the funnel for ``.to``/``.bfloat16`` —
     makes the pin survive later bulk ``.to(torch.bfloat16)`` of the parent trunk. The fused
     kernels already upcast the norm weight to fp32 internally and return grads in the
-    parameter dtype, so a fp32 weight flows through unchanged."""
+    parameter dtype, so a fp32 weight flows through unchanged.
+
+    Declared as an ``nn.Module`` subclass, not a bare mixin: ``super()._apply`` only exists
+    because this class is always mixed in FRONT of one (``LayerNorm(_Fp32ParamsMixin,
+    nn.LayerNorm)``), and stating that is what makes the delegation checkable. The MRO is
+    unchanged -- ``nn.Module`` still resolves after the concrete norm class."""
 
     def _apply(self, fn, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
         def fp32_fn(t):  # noqa: ANN001, ANN202
@@ -85,7 +94,7 @@ class _Fp32ParamsMixin:
                 out = out.to(torch.float32)
             return out
 
-        return super()._apply(fp32_fn, *args, **kwargs)  # type: ignore[misc]
+        return super()._apply(fp32_fn, *args, **kwargs)
 
 
 class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
@@ -109,10 +118,16 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
             bias=bias,
             **factory_kwargs,
         )
-        if isinstance(normalized_shape, numbers.Integral):
-            # mypy error: incompatible types in assignment
-            normalized_shape = (normalized_shape,)  # type: ignore[assignment]
-        self.normalized_shape = tuple(normalized_shape)  # type: ignore[arg-type]
+        # A new name rather than rebinding the parameter: `_shape_t` admits a bare int, and
+        # `tuple(int)` is not a thing -- the int case has to become a 1-tuple first. Test the
+        # sequence side rather than `numbers.Integral`, whose ABC registration is invisible
+        # to a static checker and leaves an `int & ~Integral` shard in the else branch.
+        shape: tuple[int, ...] = (
+            tuple(normalized_shape)
+            if isinstance(normalized_shape, (list, Size))
+            else (int(normalized_shape),)
+        )
+        self.normalized_shape = shape
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         self.implementation = ImplementationType(implementation)

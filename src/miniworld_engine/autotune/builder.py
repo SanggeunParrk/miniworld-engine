@@ -125,7 +125,7 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
 #: A table rather than an if/elif chain in the child: every switch added to SWITCHES must be
 #: pinnable, and a chain lets one be added without its pin -- which silently produces a duplicate
 #: of the default unit instead of the other side of the switch.
-SWITCH_SETTINGS: dict[str, tuple[str, object]] = {
+SWITCH_SETTINGS: dict[str, tuple[str, Callable[[str], object]]] = {
     "gate_backend": ("pin_gate_backend", str),
     "infer_concat": ("pin_infer_concat", lambda v: v == "True"),
     "ln_partial_reduction": ("pin_ln_partial_reduction", lambda v: v == "True"),

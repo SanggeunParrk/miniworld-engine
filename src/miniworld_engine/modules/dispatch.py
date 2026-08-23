@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import sys
 import warnings
+from collections.abc import Callable
 from enum import Enum
 
 import torch
@@ -190,8 +191,12 @@ def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     return KernelBackend.CUTE if is_sm90plus(device) else KernelBackend.TRITON
 
 
-# op name -> KernelBackend | callable(device)->KernelBackend
-_MINIWORLD_KNOWN_BEST: dict[str, object] = {
+#: A fixed backend, or a device-dependent chooser. Spelled out rather than `object` so that
+#: `resolve`'s `best(device) if callable(best) else best` narrows to `KernelBackend` on both
+#: arms instead of returning `object`.
+_KnownBest = KernelBackend | Callable[[torch.device | None], KernelBackend]
+
+_MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     "triangle_multiplication": _trimul_known_best,
     # layernorm's MINIWORLD is the auto-routing layernorm_kernel (fused triton fwd +
     # per-shape auto-dispatched backward), grouped under the CUDA-family entry.

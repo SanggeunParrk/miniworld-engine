@@ -82,7 +82,9 @@ def flash_window_seqused(
     the surrounding compiled region never recompiles and the call is CUDA-graph
     capturable. Padding query rows are zeroed on the way out (matches the old path).
     """
-    from flash_attn.cute import flash_attn_varlen_func  # lazy — pulls CUTLASS
+    from flash_attn.cute import (  # ty: ignore[unresolved-import]  # optional extra
+        flash_attn_varlen_func,  # lazy — pulls CUTLASS
+    )
 
     in_dtype = q.dtype
     nh, hd = q.shape[2], q.shape[3]

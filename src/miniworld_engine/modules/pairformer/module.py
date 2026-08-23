@@ -161,6 +161,8 @@ class PairformerBlock(nn.Module):
             # Triangle attention now OWNS its residual + dropout too (drop_row for starting,
             # drop_col for ending) — same contract as trimul. It is not kernel-fused yet (explicit
             # add inside the module), but the block just calls ``module(pair, mask)``.
+            # Both halves are built together or not at all, same as the trimul pair above.
+            assert self.tri_atten_ending is not None, "tri_atten starting is set but ending is not"
             pair = self.tri_atten_starting(pair, mask)  # y = pair + drop_row(attn_start(pair))
             pair = self.tri_atten_ending(pair, mask)    # y = pair + drop_col(attn_end(pair))
         pair = self.transition_pair(pair)  # y = pair + transition(pair) (residual fused, no dropout)

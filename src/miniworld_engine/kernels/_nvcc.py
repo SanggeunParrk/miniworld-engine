@@ -66,7 +66,10 @@ def ensure_cuda_home() -> str | None:
     os.environ["CUDA_PATH"] = home
     mod = sys.modules.get("torch.utils.cpp_extension")
     if mod is not None:
-        mod.CUDA_HOME = home
+        # torch.utils.cpp_extension caches CUDA_HOME at ITS import time, so setting the env
+        # var above is not enough once it is already in sys.modules. setattr, not attribute
+        # syntax: the name is not declared on ModuleType.
+        setattr(mod, "CUDA_HOME", home)  # noqa: B010
     return home
 
 

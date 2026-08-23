@@ -106,7 +106,9 @@ PALETTE: dict[str, str] = {
 
 # Linestyle per identity for line plots (perf_report). ours = solid & prominent;
 # baselines = dashed/dotted so they read as "reference".
-LINESTYLE: dict[str, str] = {
+#: A named style (``"-"``) or an explicit ``(offset, (on, off))`` dash pattern -- both are
+#: what matplotlib's ``linestyle=`` takes.
+LINESTYLE: dict[str, str | tuple[int, tuple[int, int]]] = {
     "pytorch": (0, (1, 1)),       # dotted
     "torch.compile": (0, (4, 2)),  # dashed
     "triton": "-",

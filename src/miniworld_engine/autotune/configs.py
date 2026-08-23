@@ -212,7 +212,7 @@ def registered_ops() -> frozenset[str]:
     return frozenset(_LISTS)
 
 
-def op_of(configs: list) -> str | None:
+def op_of(configs: list | None) -> str | None:
     """Which op was handed this exact list object, or None.
 
     ``triton.Autotuner`` stores the list ``configs_for`` returned (it substitutes its own only for

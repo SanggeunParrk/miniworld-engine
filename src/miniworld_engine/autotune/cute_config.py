@@ -168,5 +168,7 @@ def sweep_and_cache(
         ranked.sort(key=lambda t: t[1])
         # store_ranked_configs takes (config, ms); as_cfg_dict handles the dict form, so we
         # hand it the kwargs dict (cute config) rather than a GemmConfig.
-        stored = [({"kwargs": config_to_kwargs(c)}, ms) for c, ms in ranked]
+        stored: list[tuple[object, float]] = [
+            ({"kwargs": config_to_kwargs(c)}, ms) for c, ms in ranked
+        ]
         store_ranked_configs(op, gk, dtype, bucket, stored, csh, top_k=top_k)

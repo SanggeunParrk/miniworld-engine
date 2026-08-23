@@ -110,6 +110,7 @@ def _ln_bwd_ref(
     gf = w.float().detach().requires_grad_(True)
     bf = torch.zeros_like(gf).requires_grad_(True)
     layernorm_pytorch(xf, gf, bf, eps).backward(dy.float())
+    assert xf.grad is not None and gf.grad is not None and bf.grad is not None
     return xf.grad, gf.grad, bf.grad
 
 

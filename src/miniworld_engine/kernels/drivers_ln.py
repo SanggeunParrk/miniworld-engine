@@ -79,7 +79,7 @@ _D_CUDA_BWD = aligned_only(
 
 
 
-def _act(d: int = None) -> torch.Tensor:
+def _act(d: int | None = None) -> torch.Tensor:
     """The PRE-FLATTEN activation for a level=both kernel at the driven bucket.
 
     Pair (1, L, L, D) on the token side, atom (1, A, D) on the atom side -- see

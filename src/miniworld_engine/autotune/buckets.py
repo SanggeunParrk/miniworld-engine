@@ -45,34 +45,3 @@ def bucket_linear(n: int) -> int:
 def bucket_mixed(rows: int) -> int:
     """Kernel run on both single (M~N) and pair (M~L²) tensors: bucket raw M by size."""
     return _idx(rows, COMBINED_EDGES)
-
-
-def elem_bucket_of(*names: str):
-    """``bucket_of`` for a flat 1-D elementwise kernel keyed on a raw element count.
-
-    ``names`` are the kernel args whose PRODUCT is that count — one name when the kernel already
-    takes ``n_elem``, several (``"M", "ND"``) when it takes the extents instead.
-
-    A flat EW kernel has no shape-defining constexpr to bucket on — the only thing that moves
-    its best BLOCK is the total element count, which is continuous. ``key_bucket_of()`` with no
-    keys builds the SAME empty bucket for every shape (one tuned config shared by a 256-element
-    launch and a 64M-element one); the raw count is the other extreme (a bucket per exact value,
-    missing on every shape the build did not visit). Bucket it against the canonical mixed edges,
-    which is what ``bias_only``'s hand-rolled ``_sigmul_bucket`` already did — this is that, once,
-    for every EW kernel instead of copied per file.
-    """
-    def f(named_args, kwargs):
-        from .cache import shape_bucket
-
-        get = (lambda k: named_args.get(k, kwargs.get(k))) if hasattr(named_args, "get") \
-            else (lambda k: kwargs.get(k))
-        n = 1
-        for k in names:
-            v = get(k)
-            if v is None:
-                return shape_bucket(NE=0)
-            n *= int(v)
-        return shape_bucket(NE=bucket_mixed(n))
-
-    f._miniworld_keys = tuple(names)  # noqa: SLF001 -- lets build.audit introspect the extractor
-    return f

@@ -291,6 +291,12 @@ def probe_log_summary(top: int = 0) -> str:
     return "\n".join(lines)
 
 
+#: :func:`_install_launch_probes` ran. A module global, matching ``_REC_INSTALLED`` -- the flag
+#: used to be stamped onto ``CompiledKernel`` itself, which typed as an unresolved attribute on a
+#: third-party class for no gain over a local one.
+_PROBES_INSTALLED = False
+
+
 def _install_launch_probes() -> None:
     """Time the per-config first-launch path. Idempotent; build-only."""
     import time  # noqa: PLC0415
@@ -299,9 +305,10 @@ def _install_launch_probes() -> None:
     from triton.runtime.autotuner import Autotuner  # noqa: PLC0415
     from triton.runtime.jit import JITFunction  # noqa: PLC0415
 
-    if getattr(CompiledKernel, "_mw_probed", False):
+    global _PROBES_INSTALLED
+    if _PROBES_INSTALLED:
         return
-    CompiledKernel._mw_probed = True
+    _PROBES_INSTALLED = True
 
     orig_init = CompiledKernel._init_handles
 
@@ -345,17 +352,32 @@ def _install_launch_probes() -> None:
 
     CompiledKernel.__init__ = ckinit
 
-    orig_pre = Autotuner.pre_hook if hasattr(Autotuner, "pre_hook") else None
-    if callable(orig_pre):
-        def pre_hook(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
-            t = time.monotonic()
-            try:
-                return orig_pre(self, *a, **k)
-            finally:
-                _LAUNCH_T["prehook_calls"] += 1
-                _LAUNCH_T["prehook_s"] += time.monotonic() - t
+    # ``pre_hook`` is an INSTANCE attribute as well -- ``self.pre_hook = ...`` runs on every path
+    # through ``Autotuner.__init__``, and the class carries no default. The previous
+    # ``Autotuner.pre_hook = pre_hook`` was dead twice over: ``hasattr(Autotuner, "pre_hook")`` is
+    # False so the guard never opened, and an instance would have shadowed the class attribute
+    # anyway. Wrap per instance on first ``run`` instead -- that also catches autotuners built
+    # before this installer ran, which is most of them (the decorators fire at kernel import).
+    _pre_wrapped: set[int] = set()
+    orig_at_run = Autotuner.run
 
-        Autotuner.pre_hook = pre_hook
+    def at_run(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if id(self) not in _pre_wrapped:
+            _pre_wrapped.add(id(self))
+            inner = self.pre_hook
+
+            def pre_hook(*ha, **hk):  # noqa: ANN002, ANN003, ANN202
+                t = time.monotonic()
+                try:
+                    return inner(*ha, **hk)
+                finally:
+                    _LAUNCH_T["prehook_calls"] += 1
+                    _LAUNCH_T["prehook_s"] += time.monotonic() - t
+
+            self.pre_hook = pre_hook
+        return orig_at_run(self, *a, **k)
+
+    Autotuner.run = at_run
 
 
 def _budget_ms(autotuner) -> float | None:

@@ -90,7 +90,15 @@ def _grads(
 
     refs = [t.detach().float().requires_grad_(True) for t in inputs]
     ref(*refs).backward(dy.float())
-    return {n: (lf.grad, rf.grad) for n, lf, rf in zip(names, leaves, refs)}
+    out_grads: dict[str, Pair] = {}
+    for n, lf, rf in zip(names, leaves, refs):
+        # A missing grad is a kernel bug, not a comparison to skip: `None` here means the
+        # backward never touched that leaf. Name the side that dropped it.
+        if lf.grad is None or rf.grad is None:
+            missing = "kernel" if lf.grad is None else "reference"
+            raise AssertionError(f"{n}: {missing} backward produced no grad")
+        out_grads[n] = (lf.grad, rf.grad)
+    return out_grads
 
 
 def _rowsum(o: torch.Tensor, do: torch.Tensor) -> torch.Tensor:

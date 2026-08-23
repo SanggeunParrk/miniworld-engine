@@ -39,8 +39,13 @@ from __future__ import annotations
 try:
     from quack.rounding import RoundingMode as _RoundingMode
 
-    if str(_RoundingMode.RN) != str(int(_RoundingMode.RN)):  # py<3.11 only; no-op on py3.11+
-        _RoundingMode.__str__ = lambda self: str(int(self))  # type: ignore[assignment,method-assign]
+    if str(_RoundingMode.RN) != str(_RoundingMode.RN.value):  # py<3.11 only; no-op on py3.11+
+        # `.value`, not `int(self)`: every Enum has it, and it is what the py3.11+ IntEnum
+        # `__str__` already returns -- which is the behaviour being back-ported here.
+        def _rounding_str(self: object) -> str:  # `object`: it replaces `__str__`
+            return str(getattr(self, "value"))
+
+        _RoundingMode.__str__ = _rounding_str
 except Exception:  # noqa: BLE001 - older quack without quack.rounding / no schema issue
     pass
 
@@ -50,10 +55,10 @@ try:
     from quack.cache import is_compile_only, jit_cache  # noqa: E402
 except ImportError:
     # quack 0.3.11: jit_cache + module-level COMPILE_ONLY flag in quack.cache_utils.
-    from quack.cache_utils import jit_cache  # noqa: E402,F401
+    from quack.cache_utils import jit_cache  # noqa: E402,F401  # ty: ignore[unresolved-import]
 
     def is_compile_only() -> bool:  # noqa: D401 - read the flag live, not snapshot at import
-        import quack.cache_utils as _cu
+        import quack.cache_utils as _cu  # ty: ignore[unresolved-import]
 
         return bool(getattr(_cu, "COMPILE_ONLY", False))
 
@@ -66,13 +71,16 @@ except ImportError:
 # Adding our package root to EXTRA_SOURCE_DIRS makes any change under it bust the cache key, so
 # edits recompile and old .o become orphaned (never hit). Idempotent; 0.5.0-only (0.3.11 lacks it).
 try:
-    import os as _os
+    from pathlib import Path as _Path
 
     import quack.cache as _qcache  # noqa: E402
 
-    _pkg_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))  # miniworld_engine/
-    if hasattr(_qcache, "EXTRA_SOURCE_DIRS") and _pkg_root not in _qcache.EXTRA_SOURCE_DIRS:
-        _qcache.EXTRA_SOURCE_DIRS.append(_pkg_root)
+    # `EXTRA_SOURCE_DIRS` is `list[Path]`, and quack resolves each entry before hashing it.
+    # This used to append an unresolved `str`, so the membership guard never matched and every
+    # import of this module added one more copy of the same directory to the list.
+    _pkg_dir = _Path(__file__).resolve().parent.parent  # miniworld_engine/
+    if hasattr(_qcache, "EXTRA_SOURCE_DIRS") and _pkg_dir not in _qcache.EXTRA_SOURCE_DIRS:
+        _qcache.EXTRA_SOURCE_DIRS.append(_pkg_dir)
 except Exception:  # noqa: BLE001 - never let cache-key hardening break import
     pass
 

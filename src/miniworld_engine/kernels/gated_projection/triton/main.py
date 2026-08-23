@@ -159,7 +159,10 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
         return out.reshape(*original_shape[:-1], -1)
 
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):  # pyright: ignore[reportIncompatibleMethodOverride]
+    # `Function.backward(ctx, *grad_outputs)` in torch's stubs; this op has exactly one
+    # output, so the concrete signature is narrower. Covered by `invalid-method-override`
+    # being off in `[tool.ty.rules]`.
+    def backward(ctx, grad_out: torch.Tensor):
         gate, x, out_weight = ctx.saved_tensors
         op_dtype = ctx.op_dtype
         gate = gate.to(op_dtype)
