@@ -442,7 +442,11 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     """
     from miniworld_engine.autotune import capture  # noqa: PLC0415 -- heavy; import at use
 
-    bad = [r for r in results if r["rc"] != 0 or not r["ops"]]
+    # A unit that skipped a shape this card cannot hold is not a bad unit. It is a permanent,
+    # correct answer -- "not on this GPU" -- and counting it as a failure is what made a resumed
+    # job that picked up only the leftover OOM shapes report "0 ok, 9 failed" and refuse to merge.
+    bad = [r for r in results if (r["rc"] != 0 or not r["ops"]) and not r.get("skipped")]
+    skipped = [r for r in results if r.get("skipped")]
     # capture.merge_shards is the sole writer of the in-repo cache; skipping it would leave the
     # bench reading the OLD cache while the shards just built sat unread.
     #
@@ -454,8 +458,10 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     # --strict restores the old all-or-nothing behaviour for CI.
     shard_dir = Path(args.shards).expanduser()
     shards = sorted(str(x) for x in shard_dir.glob("*.json"))
+    if skipped:
+        print(f"{len(skipped)} unit(s) skipped a shape this GPU cannot hold (OOM / smem); their "
+              f"entries are absent by design, not by failure.", file=sys.stderr)
     if bad:
-        ok_n = len(results) - len(bad)
         print(f"build produced {len(bad)} bad unit(s) of {len(results)}; their (op, bucket) entries "
               f"will be MISSING from the cache and will fall back to the full grid at runtime:",
               file=sys.stderr)
@@ -466,10 +472,13 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
         if getattr(args, "strict", False):
             print("--strict: not merging.", file=sys.stderr)
             return 1
-        if not ok_n:
-            print("every unit failed; nothing to merge.", file=sys.stderr)
-            return 1
-    written = capture.merge_shards(shards) if shards else []
+    # The SHARD DIR decides, not this run's tally. With --resume a late job picks up only the
+    # leftovers -- which are exactly the units that keep failing -- so gating the merge on "did
+    # this run succeed?" left 526 finished shards unmerged while the job reported rc=1.
+    if not shards:
+        print("no shards to merge.", file=sys.stderr)
+        return 1
+    written = capture.merge_shards(shards)
     print(f"=== merged {len(written)} op file(s) into the in-repo cache"
           f"{f' ({len(bad)} unit(s) missing -- run `audit` for the holes)' if bad else ''}",
           flush=True)

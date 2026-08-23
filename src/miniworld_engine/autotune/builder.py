@@ -867,9 +867,18 @@ def _run_unit_subprocess(unit: Unit, device: int, shard_dir: Path, repo: Path,
             ops = sum(1 for v in raw.values() if isinstance(v, dict) and v.get("entries"))
         except (OSError, ValueError):
             ops = 0
+    skipped = False
     if not ops:
-        claim.unlink(missing_ok=True)   # nothing produced: let a later run retry this unit
+        try:
+            skipped = "[unit] SKIPPED-PERMANENT" in log.read_text()
+        except OSError:
+            skipped = False
+        if not skipped:
+            claim.unlink(missing_ok=True)  # nothing produced: let a later run retry this unit
+        # a permanent skip KEEPS its claim: the shape will not fit on the next attempt either, and
+        # releasing it made every resumed job re-claim the same OOMing units and produce nothing.
     return {"label": unit.label, "gpu": device, "rc": proc.returncode, "ops": ops,
+            "skipped": skipped,
             "seconds": round(time.monotonic() - started, 1), "shard": str(shard), "log": str(log)}
 
 
@@ -953,6 +962,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
+                      "skip" if res.get("skipped") else
                       "EMPTY" if res["rc"] == 0 else "FAIL")
             print(f"  [gpu{device}] {status:5s} {res['label']}  {res['seconds']}s  {res['ops']} ops",
                   flush=True)
@@ -1008,8 +1018,17 @@ def _run_one_driver(op: str) -> int:
         fn()
         torch.cuda.synchronize()
     except Exception as exc:  # noqa: BLE001 -- an unsupported shape must not stop the sweep
+        # OOM and OutOfResources are PERMANENT facts about this card at this shape, not failures
+        # to retry: the tensors do not fit, or the tiles want more smem than the SM has. Saying so
+        # in a line the parent can read is what stops a resumed run from re-claiming them forever
+        # and -- because the parent counts "did anything succeed?" -- from refusing to merge the
+        # 526 units that did.
+        perm = type(exc).__name__ in ("OutOfMemoryError", "OutOfResources") or \
+            "out of memory" in str(exc).lower()
         print(f"    skip {op} at this shape: {type(exc).__name__}: "
               f"{str(exc).strip().splitlines()[0][:160]}", flush=True)
+        if perm:
+            print(f"  [unit] SKIPPED-PERMANENT {op}: shape does not fit this GPU", flush=True)
         return 0
     return 1
 
