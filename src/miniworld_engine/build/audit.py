@@ -294,6 +294,16 @@ def check_key_spread(rep: Report, shard_dirs: list[Path]) -> None:
         dtypes = {b.split("|", 1)[0] for b in buckets}
         shapes = {b.split("|", 1)[1] for b in buckets if "|" in b}
         if len(shapes) <= 1:
+            # One bucket is CORRECT for a kernel whose autotune key carries no shape_key: it has
+            # no per-shape cache to build, and the builder already drives it at one length only
+            # (see `_keys_on_shape` there). transition_fold_triton is the one today -- it reads
+            # the weights and never touches the activation, so N and K are its whole shape.
+            # Judged by the same function the builder uses, so the two cannot drift apart.
+            if not _keys_on_shape_key(op):
+                rep.add("spread", OK, op,
+                        f"1 shape bucket: {sorted(shapes)} -- autotune key carries no shape_key, "
+                        f"so there is nothing per-shape to tune")
+                continue
             rep.add("spread", FAIL, op,
                     f"only {len(shapes)} shape bucket: {sorted(shapes)} -- key is pinned")
             continue
@@ -310,6 +320,27 @@ def check_key_spread(rep: Report, shard_dirs: list[Path]) -> None:
         else:
             rep.add("spread", OK, op,
                     f"{len(shapes)} shape buckets x {sorted(dtypes)}")
+
+
+def _keys_on_shape_key(op: str) -> bool:
+    """Does ``op``'s ``@triton.autotune(key=[...])`` include ``shape_key``?
+
+    Resolved through registry.csv (file + symbol) and answered by the builder's own
+    ``_keys_on_shape``, so the audit and the build agree on which ops have a per-shape cache.
+    An op the registry does not name is assumed to key on shape -- the strict reading.
+    """
+    import csv  # noqa: PLC0415
+
+    from miniworld_engine.autotune.builder import _keys_on_shape  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parents[2]
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    if not reg.is_file():
+        return True
+    for r in csv.DictReader(reg.open()):
+        if r["kernel"] == op and (r.get("file") or "").strip():
+            return _keys_on_shape(root / r["file"], r["symbol"])
+    return True
 
 
 def _declared_dtypes() -> dict:
