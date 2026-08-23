@@ -126,7 +126,30 @@ def check_brute(rep: Report, tuners) -> None:
     almost never a full product -- it pins warps to the tile, skips stage counts, and that is
     exactly the coverage a build silently inherits.
     """
-    from miniworld_engine.autotune.grids import STAGES, WARPS
+    # ``autotune.grids`` held one global WARPS/STAGES for every kernel; the axis values are now
+    # declared PER OP in the config set (configs/<set>/<op>.csv), so the expectation has to come
+    # from the same place the grid does. This import has been dead since the CSV format landed,
+    # which is why `audit` could not run at all -- it raised ModuleNotFoundError on the first
+    # check, and every reference telling a user to "run audit for the holes" pointed at a
+    # command that crashed on startup.
+    def _declared(op: str) -> tuple[set, set]:
+        """(num_warps, num_stages) the op's config CSV declares, or empty if it has no spec."""
+        from miniworld_engine.autotune.configs import _DIR  # noqa: PLC0415
+
+        d = _DIR
+        if not d:
+            return set(), set()
+        f = Path(d) / f"{op}.csv"
+        if not f.is_file():
+            return set(), set()
+        w = st = set()
+        for line in f.read_text().splitlines()[1:]:
+            axis, _, vals = line.partition(",")
+            if axis == "num_warps":
+                w = {int(x) for x in vals.split()}
+            elif axis == "num_stages":
+                st = {int(x) for x in vals.split()}
+        return w, st
 
     for name, t in tuners:
         held = getattr(t, "configs", []) or []
@@ -166,10 +189,11 @@ def check_brute(rep: Report, tuners) -> None:
         if len(cfgs) != expect:
             missing.append(f"not a full product{constraint}: {len(cfgs)} configs, "
                            f"product would be {expect}")
-        if not set(WARPS) <= warps:
-            missing.append(f"num_warps {sorted(warps)} misses {sorted(set(WARPS) - warps)}")
-        if not set(STAGES) <= stages:
-            missing.append(f"num_stages {sorted(stages)} misses {sorted(set(STAGES) - stages)}")
+        want_w, want_s = _declared(op)
+        if want_w and not want_w <= warps:
+            missing.append(f"num_warps {sorted(warps)} misses {sorted(want_w - warps)}")
+        if want_s and not want_s <= stages:
+            missing.append(f"num_stages {sorted(stages)} misses {sorted(want_s - stages)}")
         if missing:
             rep.add("brute", FAIL, op, "; ".join(missing))
         else:
@@ -261,17 +285,45 @@ def check_key_spread(rep: Report, shard_dirs: list[Path]) -> None:
     if not per_op:
         rep.add("spread", WARN, "(no shards)", "pass --shards from a completed build to judge this")
         return
+    # What "enough dtypes" means is DECLARED, in registry.csv's dtypes column -- a token kernel is
+    # bf16 only, atom and both are bf16|fp32. Warning on "only one dtype" measured against nothing
+    # flagged all 91 ops including the 37 that are correct by declaration, which is a report that
+    # cannot be acted on and trains you to ignore the check.
+    declared = _declared_dtypes()
     for op, buckets in sorted(per_op.items()):
         dtypes = {b.split("|", 1)[0] for b in buckets}
         shapes = {b.split("|", 1)[1] for b in buckets if "|" in b}
         if len(shapes) <= 1:
             rep.add("spread", FAIL, op,
                     f"only {len(shapes)} shape bucket: {sorted(shapes)} -- key is pinned")
-        elif len(dtypes) <= 1:
+            continue
+        want = declared.get(op)
+        # A capture records the dtypes it SAW together, e.g. "bfloat16+float32" for a kernel whose
+        # operands are mixed; that satisfies a bf16|fp32 declaration. Match on membership, not on
+        # set equality.
+        seen = {t for k in dtypes for t in k.split("+")}
+        missing = (want - seen) if want else set()
+        if missing:
             rep.add("spread", WARN, op,
-                    f"{len(shapes)} shape buckets but only dtype {sorted(dtypes)}")
+                    f"{len(shapes)} shape buckets, but declared dtype(s) {sorted(missing)} "
+                    f"never appear (saw {sorted(dtypes)})")
         else:
-            rep.add("spread", OK, op, f"{len(shapes)} shape buckets x {len(dtypes)} dtypes")
+            rep.add("spread", OK, op,
+                    f"{len(shapes)} shape buckets x {sorted(dtypes)}")
+
+
+def _declared_dtypes() -> dict:
+    """kernel -> the torch dtype names registry.csv says it must be tuned for."""
+    import csv  # noqa: PLC0415
+
+    alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
+    out = {}
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    if not reg.is_file():
+        return out
+    for r in csv.DictReader(reg.open()):
+        out[r["kernel"]] = {alias.get(x, x) for x in (r.get("dtypes") or "").split("|") if x}
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -282,7 +334,7 @@ GPU_SPECIFIC = re.compile(r"_sm(\d+)|^transition_b2b")
 
 
 def check_reachability(rep: Report, shard_dirs: list[Path]) -> None:
-    from miniworld_engine.autotune.cache import registered_ops
+    from miniworld_engine.autotune.configs import registered_ops
 
     reg = sorted(registered_ops())
     built = set()
@@ -321,11 +373,69 @@ def check_parallelism(rep: Report) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
+    """Every DECLARED (op, shape bucket) must have an entry in the shipped cache.
+
+    Declared means registry.csv crossed with the kernel's level -- exactly the work list
+    ``op_units`` builds -- not "whatever happened to get measured". A hole here is a bucket that
+    falls back to the full grid inside a production forward, which is the cost the cache exists
+    to remove, and until now nothing reported them: the build printed "run `audit` for the holes"
+    and no such check existed.
+    """
+    from miniworld_engine.autotune.builder import op_units
+    from miniworld_engine.autotune.cache import _CACHE_ROOT, gpu_key
+
+    gk = gpu or gpu_key()
+    have: dict[str, set[int]] = {}
+    for f in sorted(_CACHE_ROOT.rglob("*.json")):
+        try:
+            d = json.loads(f.read_text())
+        except Exception:  # noqa: BLE001
+            rep.add("coverage", FAIL, f.parent.name, f"unreadable cache file: {f.name}")
+            continue
+        if not (isinstance(d, dict) and "entries" in d and d.get("gpu") == gk):
+            continue
+        for k in d["entries"]:
+            sk = next((int(p.split("=")[1]) for p in k.split(",")
+                       if p.startswith("shape_key=")), None)
+            have.setdefault(d["op"], set()).add(sk)
+
+    try:
+        units = op_units()
+    except Exception as exc:  # noqa: BLE001 -- a config dir may not be set
+        rep.add("coverage", WARN, "op_units", f"cannot enumerate declared work: {exc}")
+        return
+
+    want: dict[str, set[int]] = {}
+    for u in units:
+        want.setdefault(u.op, set()).add(u.length)
+    rep.stats["declared_ops"] = len(want)
+    rep.stats["declared_pairs"] = sum(len(v) for v in want.values())
+
+    missing = 0
+    for op in sorted(want):
+        got = have.get(op)
+        if got is None:
+            rep.add("coverage", FAIL, op, f"no cache entry at all on {gk}")
+            missing += len(want[op])
+            continue
+        # A bucket is covered if any entry names it; ops whose key has no shape_key record None.
+        gap = {b for b in want[op] if b not in got} if got != {None} else set()
+        if gap:
+            missing += len(gap)
+            rep.add("coverage", WARN, op,
+                    f"{len(gap)} bucket(s) missing on {gk}: {sorted(gap)}")
+        else:
+            rep.add("coverage", OK, op, f"{len(got)} bucket(s)")
+    rep.stats["missing_pairs"] = missing
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="verify the autotune build system")
     ap.add_argument("--shards", nargs="*", default=[],
                     help="shard dirs from real builds, for reachability evidence")
     ap.add_argument("--verbose", action="store_true", help="also print OK findings")
+    ap.add_argument("--gpu", default="", help="cache key to audit; defaults to this machine's GPU")
     args = ap.parse_args(argv)
 
     rep = Report()
@@ -342,8 +452,9 @@ def main(argv=None) -> int:
     shard_dirs = [Path(s) for s in args.shards]
     check_key_spread(rep, shard_dirs)
     check_reachability(rep, shard_dirs)
+    check_cache_coverage(rep, args.gpu or None)
 
-    order = ["import", "brute", "prune", "keys", "spread", "parallel", "reach"]
+    order = ["import", "brute", "prune", "keys", "spread", "parallel", "reach", "coverage"]
     for check in order:
         rows = rep.of(check)
         bad = [f for f in rows if f.level != OK]

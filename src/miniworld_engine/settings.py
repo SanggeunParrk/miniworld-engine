@@ -74,6 +74,17 @@ class Settings:
     #: Skip the untimed warm launch before the budget probe. Diagnostic: if the first-launch cost
     #: is a one-time per-config setup, removing the warm call only MOVES that cost into the probe.
     bench_budget_skip_warm: bool = False
+
+    #: On a cache MISS, how many configs the autotuner may sweep before it gives up on tuning and
+    #: uses a heuristic subset instead. 0 disables the fallback and restores the full-grid sweep.
+    #:
+    #: A miss is the normal state on any GPU nobody has built a cache for, and the full grid is
+    #: 205,266 configs -- so without this, the first forward on a new card runs a tuning sweep
+    #: inside itself. triton-dejavu solves this with TRITON_DEJAVU_FORCE_FALLBACK and a
+    #: user-supplied heuristic; Liger-Kernel skips autotuning entirely and computes BLOCK_SIZE and
+    #: num_warps from the row width. This is the same idea: a miss should cost a small, bounded
+    #: search, not an unbounded one. A BUILD (run_autotune=True) always gets the full grid.
+    autotune_miss_cap: int = 24
     #: How kernel entry points are exposed to ``torch.compile``: "disable" (graph break, the
     #: measured-faster default) or "custom_op" (opaque graph node, keeps surrounding fusion).
     #: Interchangeable -- same kernel, same numbers. Read at IMPORT time by kernels._compile.

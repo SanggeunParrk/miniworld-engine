@@ -593,6 +593,18 @@ def cmd_build(args: argparse.Namespace) -> int:
     return _merge_built_shards(args, results)
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Verify the build system AND that every declared (op, bucket) is in the shipped cache."""
+    from miniworld_engine.build import audit as _audit  # noqa: PLC0415 -- imports every kernel
+
+    argv = ["--gpu", args.gpu] if args.gpu else []
+    if args.shards:
+        argv += ["--shards", *args.shards]
+    if args.verbose:
+        argv += ["--verbose"]
+    return _audit.main(argv)
+
+
 def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
                per_target_mode: bool) -> tuple[list[str], dict | None]:
     """The argv and env for one target's bench.py run."""
@@ -848,6 +860,14 @@ def main(argv: list[str] | None = None) -> int:
         parser_.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
         parser_.add_argument("--resume", action="store_true",
                              help="pre-bench build skips units whose shard already has entries")
+
+    aud = sub.add_parser("audit",
+                         help="verify the build system and the shipped cache's coverage")
+    aud.add_argument("--gpu", default="", help="cache key to audit; defaults to this machine's GPU")
+    aud.add_argument("--shards", nargs="*", default=[],
+                     help="shard dirs from real builds, for reachability evidence")
+    aud.add_argument("--verbose", action="store_true", help="also print OK findings")
+    aud.set_defaults(func=cmd_audit)
 
     bk = sub.add_parser("bench_kernel",
                         help="build the cache, then bench ONE kernel-level target")

@@ -238,3 +238,61 @@ def test_an_entry_written_without_an_op_identity_still_reads(tmp_path, monkeypat
     fp.write_text(json.dumps(data))
     cache._load_cache.clear()
     assert cache._cached_subset(at, at.configs, at.nargs, {}) is not None
+
+
+# --------------------------------------------------------------------------- #
+# a cache MISS must cost a bounded search, not the whole grid
+#
+# Returning None on a miss means "keep the full grid", and the shipped grid is 205,266 configs --
+# so the first production forward on a GPU nobody has built a cache for runs a tuning sweep inside
+# itself. No one in the ecosystem does that: triton-dejavu takes a user heuristic on miss
+# (TRITON_DEJAVU_FORCE_FALLBACK), Liger-Kernel skips autotuning and derives num_warps from the row
+# width, vLLM ships a default and warns. A build still gets the full space, on purpose.
+# --------------------------------------------------------------------------- #
+
+BIG = [_Cfg(m, warps=w) for m in (16, 32, 64, 128, 256) for w in (1, 2, 4, 8, 16, 32)]
+
+
+def test_a_miss_returns_a_bounded_subset_not_the_whole_grid(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path)
+    cache._load_cache.clear()
+    at = _at()
+    at.configs = BIG
+    import miniworld_engine.autotune.configs as cfgmod
+    monkeypatch.setattr(cfgmod, "op_of", lambda _c: "op_probe")
+    got = cache._cached_subset(at, BIG, at.nargs, {})
+    assert got is not None, "a miss must still narrow the grid"
+    assert len(got) <= settings.current().autotune_miss_cap < len(BIG)
+
+
+def test_a_build_still_gets_the_full_grid(tmp_path, monkeypatch):
+    """run_autotune=True is a tuning run; capping it would make the build confirm its own guess."""
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path)
+    cache._load_cache.clear()
+    at = _at(); at.configs = BIG
+    import miniworld_engine.autotune.configs as cfgmod
+    monkeypatch.setattr(cfgmod, "op_of", lambda _c: "op_probe")
+    prev = settings.configure(run_autotune=True)
+    try:
+        assert cache._cached_subset(at, BIG, at.nargs, {}) is None
+    finally:
+        settings.restore(prev) if hasattr(settings, "restore") else settings.configure(
+            run_autotune=prev.run_autotune if hasattr(prev, "run_autotune") else False)
+
+
+def test_the_fallback_prefers_the_industry_centre_of_the_space():
+    """warps in {4,8} and stages in {2,3,4} -- vLLM's whole fused_moe space -- come first."""
+    got = cache.heuristic_subset(BIG, cap=8)
+    assert all(c.num_warps in (4, 8) for c in got), [c.num_warps for c in got]
+
+
+def test_the_fallback_never_invents_a_config():
+    got = cache.heuristic_subset(BIG, cap=8)
+    sigs = {cache._sig(c) for c in BIG}
+    assert all(cache._sig(c) in sigs for c in got)
+
+
+def test_a_small_grid_is_left_alone():
+    """Capping a 4-config grid would throw away a search that is already cheap."""
+    small = BIG[:4]
+    assert cache.heuristic_subset(small, cap=24) == small

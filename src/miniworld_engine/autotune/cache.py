@@ -272,15 +272,19 @@ def cache_misses() -> frozenset:
     return frozenset(_CACHE_MISSES)
 
 
-def _warn_once(op: str, gk: str, tag: str, reason: str) -> None:
+def _warn_once(op: str, gk: str, tag: str, reason: str, fallback: str = "") -> None:
     _CACHE_MISSES.add((op, gk, tag))
     key = (op, gk, tag, reason)
     if key in _warned:
         return
     _warned.add(key)
+    # Say which fallback actually happened. "Falling back to the full autotune grid" was printed
+    # even where the grid is 205,266 configs, and it is no longer true on the Triton path: a miss
+    # now searches a bounded subset. A warning that misdescribes the recovery is worse than none.
+    what = fallback or "the full autotune grid"
     warnings.warn(
-        f"[miniworld.autotune] {reason} for op '{op}' on '{gk}' ({tag}). Falling back to the "
-        f"full autotune grid — this run may be slower and the chosen config may be suboptimal. "
+        f"[miniworld.autotune] {reason} for op '{op}' on '{gk}' ({tag}). Falling back to "
+        f"{what} — this run may be slower and the chosen config may be suboptimal. "
         f"Build a tuned cache for this GPU with the autotune cache-builder "
         f"(see docs/operations/dispatch-cache.md).",
         stacklevel=4,
@@ -421,8 +425,67 @@ def bucket_of_autotuner(autotuner, nargs, meta=None) -> str:
 _reader_installed = False
 
 
+def heuristic_subset(configs: list, cap: int = 24) -> list:
+    """A small, sane slice of ``configs`` for when there is no cached answer.
+
+    The alternative is the full grid, and the full grid is what makes an untuned GPU unusable: the
+    shipped set is 205,266 configs, so the first production forward on a card nobody has built for
+    runs a tuning sweep inside itself. Nothing in the ecosystem does that -- triton-dejavu takes a
+    user heuristic on miss (TRITON_DEJAVU_FORCE_FALLBACK), Liger-Kernel skips autotuning and picks
+    num_warps from the row width, vLLM ships a default config and warns. A miss should cost a
+    bounded search, not an unbounded one.
+
+    The slice is the industry-standard centre of the space -- num_warps in {4, 8} and num_stages
+    in {2, 3, 4}, which is vLLM's whole search space for fused_moe -- crossed with the middle
+    value of every block axis. Measured over this repo's own 374-bucket sweep, warps=4/stages=2
+    alone lands within 5% of the full-grid winner in 83% of buckets; widening it slightly and
+    letting Triton pick among the survivors is meant to recover most of the rest without a sweep.
+    It will not beat a built cache, and it does not try to: `build all` is still the answer, and
+    the caller still warns that the cache is missing.
+    """
+    if not configs or cap <= 0 or len(configs) <= cap:
+        return list(configs)          # already a cheap search; sorting it buys nothing
+    axes: dict = {}
+    for c in configs:
+        for k, v in getattr(c, "kwargs", {}).items():
+            if isinstance(v, int):
+                axes.setdefault(k, set()).add(v)
+
+    def score(c) -> tuple:
+        kw = getattr(c, "kwargs", {})
+        # distance from the middle of each block axis, then the standard warps/stages first
+        off = sum(abs(sorted(axes[k]).index(v) - len(axes[k]) // 2)
+                  for k, v in kw.items() if k in axes and isinstance(v, int))
+        return (0 if c.num_warps in (4, 8) else 1,
+                0 if c.num_stages in (2, 3, 4) else 1,
+                off,
+                abs(c.num_warps - 4), abs(c.num_stages - 2))
+
+    return sorted(configs, key=score)[:cap] or list(configs)
+
+
+def _miss(op, gk, what, why, configs):
+    """One exit for every cache miss: warn once, then hand back a BOUNDED search.
+
+    Returning None here meant "keep the full grid", and the full grid is 205,266 configs. That is
+    correct for a build and ruinous for a forward, which is the same call site."""
+    from miniworld_engine import settings  # noqa: PLC0415 -- avoid an import cycle
+
+    cur = settings.current()
+    cap = 0 if getattr(cur, "run_autotune", False) else getattr(cur, "autotune_miss_cap", 0)
+    if cap <= 0 or len(configs) <= cap:
+        # A build wants the whole space on purpose, and a grid already smaller than the cap is
+        # already a cheap search.
+        _warn_once(op, gk, what, why, f"the full grid ({len(configs)} configs)")
+        return None
+    _warn_once(op, gk, what, why,
+               f"a heuristic {cap} of {len(configs)} configs (run `miniworld-engine build all` "
+               f"to tune this GPU properly)")
+    return heuristic_subset(configs, cap)
+
+
 def _cached_subset(autotuner, configs, nargs, meta):
-    """The cached top-K for this (op, gpu, dtype, bucket), or None to keep the full grid."""
+    """The cached top-K for this (op, gpu, dtype, bucket), or a bounded fallback on a miss."""
     from .configs import op_of                       # noqa: PLC0415 -- avoid an import cycle
 
     op = op_of(getattr(autotuner, "configs", None) or [])
@@ -433,24 +496,23 @@ def _cached_subset(autotuner, configs, nargs, meta):
     bucket = bucket_of_autotuner(autotuner, nargs, meta)
     data = _load(op, gk)
     if data is None:
-        _warn_once(op, gk, dtype, "no tuned autotune cache")
-        return None
+        return _miss(op, gk, dtype, "no tuned autotune cache", configs)
     if data.get("config_space_hash") != config_space_hash(configs):
-        _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
-        return None
+        return _miss(op, gk, dtype,
+                     "tuned autotune cache is STALE (kernel config grid changed)", configs)
     if data.get("env_identity") != env_identity():
-        _warn_once(op, gk, dtype,
-                   "tuned autotune cache is STALE (triton/cuda/ptxas changed since it was built)")
-        return None
+        return _miss(op, gk, dtype,
+                     "tuned autotune cache is STALE (triton/cuda/ptxas changed since it was built)",
+                     configs)
     stored_op_id = data.get("op_identity")
     if stored_op_id and stored_op_id != op_identity(autotuner):
-        _warn_once(op, gk, dtype,
-                   "tuned autotune cache is STALE (kernel source or autotune key list changed)")
-        return None
+        return _miss(op, gk, dtype,
+                     "tuned autotune cache is STALE (kernel source or autotune key list changed)",
+                     configs)
     entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
     if not entry:
-        _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
-        return None
+        return _miss(op, gk, f"{dtype}|{bucket}",
+                     "no tuned autotune cache entry for this shape", configs)
     # Intersect rather than trust: the cache names configs, the grid decides what is launchable.
     want = {_sig_from_dict(c) for c in entry}
     keep = [c for c in configs if _sig(c) in want]
@@ -530,6 +592,9 @@ def select_config(
     except Exception:  # noqa: BLE001
         return None
     data = _load(op, gk)
+    # NOT _miss(): this path returns ONE config dict, and None means "use the kernel's own
+    # default_config" -- already a bounded answer. The heuristic subset is for the Triton path,
+    # where None means "sweep the whole grid".
     if data is None:
         _warn_once(op, gk, dtype, "no tuned autotune cache")
         return None
