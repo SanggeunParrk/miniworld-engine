@@ -47,18 +47,32 @@ def manifest_path(gpu_key: str) -> Path:
 
 
 def record(gpu_key: str, results: dict[str, tuple[bool, str]]) -> Path:
-    """Write what a run observed: ``kernel -> (ran, detail)``.
+    """Merge what a run observed -- ``kernel -> (ran, detail)`` -- into this GPU's manifest.
 
-    Kernels the run did not touch are written as ``untested`` rather than assumed either way.
+    MERGE, not overwrite. Every caller is a PARTIAL run: `bench_kernel all` reaches 29 of the 103
+    declared kernels and `bench_module all` reaches a different subset, so writing `untested` for
+    everything a run did not touch means the file only ever describes the last command. Measured:
+    one `bench_kernel all` took the committed manifest from 94 ok / 6 failed to 11 ok / 92
+    untested, discarding every result the module benches had established -- in a TRACKED file, so
+    the loss would have been committed.
+
+    A kernel this run did not touch keeps whatever the manifest already said about it; one that
+    has never been seen is `untested`. A run that DID touch a kernel always wins, so a kernel that
+    starts failing is recorded as failing.
     """
+    prior = {r["kernel"]: r for r in load_manifest(gpu_key)}
     rows = []
     for entry in registry():
         ran, detail = results.get(entry["kernel"], (None, ""))
+        if ran is None:
+            was = prior.get(entry["kernel"], {})
+            status, detail = was.get("status", "untested"), was.get("detail", "")
+        else:
+            status = "ok" if ran else "failed"
         rows.append({
             "kernel": entry["kernel"], "backend": entry["backend"],
             "family": entry["family"], "file": entry["file"],
-            "status": "untested" if ran is None else ("ok" if ran else "failed"),
-            "detail": detail,
+            "status": status, "detail": detail,
         })
     _DEVICES.mkdir(parents=True, exist_ok=True)
     path = manifest_path(gpu_key)

@@ -54,25 +54,34 @@ def test_kind_and_level_use_the_declared_vocabulary() -> None:
                      f"offending rows: {bad}")
 
 
-def test_dtypes_follow_the_level() -> None:
+def test_dtypes_stay_within_what_the_level_permits() -> None:
     """Which operand dtypes a kernel must be tuned for, declared per level.
 
-        token          bf16          pair/token-level kernels run bf16 only
-        atom, both     bf16|fp32
+        token          bf16              pair/token-level kernels run bf16 only
+        atom, both     bf16 and/or fp32
 
-    Held as its own column rather than derived from ``level`` on read: level says WHERE a kernel is
-    used and dtypes says WHAT it must be tuned for, and those are different facts. Deriving it
-    would mean a kernel that later needs a different set could not say so, and changing the
-    mapping would silently rewrite every existing row.
+    A SUBSET, not an equality. The column's whole point is that level says WHERE a kernel is used
+    and dtypes says WHAT it must be tuned for, and those are different facts -- but this test used
+    to demand `dtypes == {"atom": "bf16|fp32"}[level]`, which is the derivation the column exists
+    to avoid, and it made the over-declaration unavoidable: 29 kernels that are fixed-precision by
+    construction were forced to claim both.
 
-    The cache already partitions on dtype independently of the shape bucket (``_dtype_of`` in
-    autotune/capture.py), so this column is the DECLARATION of what a complete build must cover --
-    it is what makes a missing fp32 entry a visible hole rather than an absence nobody expected.
+    What that cost: the work list took the claim at face value and built both halves, both
+    measured the same thing, and the second wrote its result under a dtype the kernel never saw.
+    192 of 922 units were that duplicate, and `audit` reported 192 declared-but-absent pairs as
+    holes against a cache that was complete.
+
+    Narrowing is therefore allowed and has to be earned:
+    tests/test_declared_dtypes_match_reality.py checks each narrowed row against what the shipped
+    cache actually recorded, so a row cannot claim less than its kernel runs either.
     """
-    expected = {"token": "bf16", "atom": "bf16|fp32", "both": "bf16|fp32"}
-    bad = [(r["kernel"], r["level"], r["dtypes"]) for r in _rows()
-           if r["dtypes"] != expected[r["level"]]]
-    assert not bad, f"dtypes must follow the level {expected}; offending rows: {bad}"
+    permitted = {"token": {"bf16"}, "atom": {"bf16", "fp32"}, "both": {"bf16", "fp32"}}
+    bad = []
+    for r in _rows():
+        got = {x for x in (r["dtypes"] or "").split("|") if x}
+        if not got or not got <= permitted[r["level"]]:
+            bad.append((r["kernel"], r["level"], r["dtypes"]))
+    assert not bad, f"dtypes must be a non-empty subset of {permitted}; offending rows: {bad}"
 
 
 def test_dtypes_use_the_declared_vocabulary() -> None:
