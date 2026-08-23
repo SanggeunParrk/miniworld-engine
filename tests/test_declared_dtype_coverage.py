@@ -67,12 +67,15 @@ def test_coverage_counts_the_dtype_axis(tmp_path, monkeypatch):
         "gpu": "g", "op": "op_x", "entries": {"bfloat16|shape_key=128": [{"kwargs": {}}]}}))
     monkeypatch.setattr(cache, "_CACHE_ROOT", root)
 
-    class U:
-        def __init__(s, op, dt, ln): s.op, s.dtype, s.length = op, dt, ln
-    monkeypatch.setattr(audit, "_declared_dtypes", lambda: {"op_x": {"bfloat16", "float32"}})
+    # The real OpUnit, not a stub: the coverage check reads `u.bucket` (a both-level unit's key
+    # is its row count, not its length), and a stub that only carries `length` would have kept
+    # passing while the check it stands in for stopped working.
     import miniworld_engine.autotune.builder as B
+
+    monkeypatch.setattr(audit, "_declared_dtypes", lambda: {"op_x": {"bfloat16", "float32"}})
     monkeypatch.setattr(B, "op_units",
-                        lambda *a, **k: [U("op_x", "bfloat16", 128), U("op_x", "float32", 128)])
+                        lambda *a, **k: [B.OpUnit("op_x", 128, "bfloat16"),
+                                         B.OpUnit("op_x", 128, "float32")])
     rep = audit.Report()
     audit.check_cache_coverage(rep, gpu="g")
     assert rep.stats["missing_pairs"] == 1, rep.findings
