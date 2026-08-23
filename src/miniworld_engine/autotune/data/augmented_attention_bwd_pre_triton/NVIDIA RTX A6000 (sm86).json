@@ -224,6 +224,7 @@
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
+  "key_scheme": 2,
   "op": "augmented_attention_bwd_pre_triton",
   "op_identity": "ac4bd613b62a",
   "provenance": {

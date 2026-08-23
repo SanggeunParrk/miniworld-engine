@@ -137,3 +137,52 @@ def test_a_token_or_atom_unit_buckets_on_its_length():
     units = [u for u in op_units() if not u.side]
     assert units
     assert all(u.bucket == u.length for u in units)
+
+
+def test_a_shard_records_the_scheme_its_buckets_are_in(tmp_path, monkeypatch):
+    """Without this a merge after a bump folds old and new keys into one file."""
+    import json
+
+    from miniworld_engine.autotune import capture
+
+    monkeypatch.setattr(capture, "_CAPTURE", {})
+    p = tmp_path / "unit.json"
+    capture.dump_shard(str(p))
+    assert json.loads(p.read_text())["_key_scheme"] == cache.KEY_SCHEME
+
+
+def test_the_merge_skips_a_shard_from_an_older_scheme(tmp_path, monkeypatch):
+    """An old pair measurement and a new atom one both write `shape_key=256`.
+
+    Merging both means the file's 256 bucket is whichever shard the merge reached last -- a
+    65,536-row measurement served to a 256-row launch, or the reverse, by file order.
+    """
+    import json
+
+    from miniworld_engine.autotune import capture
+
+    op = "transition_expand_swiglu_triton"                     # level=both
+    entry = [{"kwargs": {"BLOCK_M1": 64}, "num_warps": 4, "num_stages": 2, "ms": 1.0}]
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps({op: {"grid": entry, "entries": {"bfloat16|shape_key=256": entry},
+                                    "op_id": "x"}}))            # no _key_scheme = scheme 1
+    new = tmp_path / "new.json"
+    new.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME,
+                               op: {"grid": entry, "entries": {"bfloat16|shape_key=256": entry},
+                                    "op_id": "x"}}))
+
+    written = []
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path / "data")
+    monkeypatch.setattr(capture, "store_ranked_configs",
+                        lambda *a, **k: written.append(a) or (tmp_path / "f.json"))
+    capture.merge_shards([str(old), str(new)], gpu="g")
+    assert any("old.json" in s for s, _ in capture._MERGE_SKIPPED), capture._MERGE_SKIPPED
+    assert not any("new.json" in s for s, _ in capture._MERGE_SKIPPED)
+
+
+def test_the_merge_keeps_an_old_shard_for_an_op_the_bump_did_not_touch():
+    """Scheme 2 re-based both-level keys only; a token op's shard is still good."""
+    from miniworld_engine.autotune import cache as c
+
+    token = next(r["kernel"] for r in csv.DictReader(REG.open()) if r["level"] == "token")
+    assert c._scheme_stale(token, None) is False

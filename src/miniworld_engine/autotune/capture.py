@@ -36,6 +36,7 @@ from .cache import (
     gpu_key,
     store_ranked_configs,
 )
+from .cache import _scheme_stale as _scheme_stale
 from .cache import _sig_from_dict as _sig_from_dict
 
 # op -> {"grid": [configs] | None, "entries": {(dtype, bucket): {sig: (config, ms)}}}
@@ -1189,8 +1190,14 @@ def dump_shard(path: str) -> int:
     ``merge_shards`` writer folds them into the committed cache — so no env var and no
     concurrent writers ever touch the in-repo tree. Returns the number of ops dumped."""
     from miniworld_engine._atomic import write_json  # noqa: PLC0415
+    from miniworld_engine.autotune.cache import KEY_SCHEME  # noqa: PLC0415
 
-    out: dict = {}
+    # `_key_scheme`, leading underscore: every other top-level key in a shard is an OP NAME, and
+    # `merge_shards` iterates them as such. Without this a shard carries no record of what its
+    # bucket strings MEAN, so a merge after a scheme bump folds old and new keys into one file --
+    # dead buckets at best, and at worst an old pair measurement landing on the bucket an atom
+    # launch now reads (both wrote `shape_key=256`).
+    out: dict = {"_key_scheme": KEY_SCHEME}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]
@@ -1232,8 +1239,19 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
             # and it used to look identical to a unit that was never run.
             _MERGE_SKIPPED.append((str(sp), f"{type(exc).__name__}: {exc}"))
             continue
+        shard_scheme = d.get("_key_scheme")
         for op, slot in d.items():
+            if op.startswith("_"):
+                continue                      # metadata, not an op
             if only_ops is not None and op not in only_ops:
+                continue
+            if _scheme_stale(op, shard_scheme):
+                # Same rule the reader applies to a cache file. A shard written before a bump
+                # that re-based THIS op's keys describes buckets that no longer mean what they
+                # say; merging it would put them back in the file the bump just cleaned.
+                _MERGE_SKIPPED.append(
+                    (f"{sp}::{op}", f"key scheme {shard_scheme} predates the bump that re-based "
+                                    f"this op's buckets"))
                 continue
             a = agg.setdefault(op, {"grid": {}, "entries": {}, "op_id": ""})
             a["op_id"] = a["op_id"] or (slot.get("op_id") or "")
