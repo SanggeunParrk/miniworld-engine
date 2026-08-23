@@ -158,9 +158,8 @@ exclude = [
   "_trans_tmp",
   "benchmark",
   # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
-  # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
-  # them; excluding only artifacts meant a working tree with local profiler captures reported
-  # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
+  # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
+  # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
@@ -183,9 +182,8 @@ exclude = [
   "_trans_tmp",
   "benchmark",
   # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
-  # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
-  # them; excluding only artifacts meant a working tree with local profiler captures reported
-  # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
+  # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
+  # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
@@ -259,13 +257,13 @@ smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE Layer
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
 ruff-check = "ruff check src tests benchmarks"
 ruff-format = "ruff format src tests benchmarks"
-pyright = "pyright"
+types = "ty check src tests"
 
 # The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
 # 16 test files run nowhere automatic.
 test = "pytest tests/ -m 'not gpu' -q"
 test-gpu = "pytest tests/ -m gpu -q"
-ci = "ruff check src tests benchmarks && pyright && pytest tests/ -m 'not gpu' -q"
+ci = "ruff check src tests benchmarks && pytest tests/ -m 'not gpu' -q"
 
 [project.scripts]
 miniworld-engine = "miniworld_engine.cli:main"

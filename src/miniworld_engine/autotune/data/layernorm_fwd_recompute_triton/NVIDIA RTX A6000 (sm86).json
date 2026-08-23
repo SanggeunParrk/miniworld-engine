@@ -18,7 +18,7 @@
           "BLOCK_K": 16,
           "BLOCK_M1": 16
         },
-        "ms": 0.01945599913597107,
+        "ms": 0.01740800030529499,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -198,12 +198,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "layernorm_fwd_recompute_triton",
   "op_identity": "ba04ad69cec4",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:48+00:00",
+    "built_utc": "2026-08-23T11:22:36+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

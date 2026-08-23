@@ -200,12 +200,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "trimul_outproj_bwd_gate_recompute_triton",
   "op_identity": "0af19ffb3a2e",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:49+00:00",
+    "built_utc": "2026-08-23T11:22:38+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

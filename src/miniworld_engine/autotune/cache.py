@@ -144,21 +144,56 @@ def env_identity() -> str:
         parts.append("triton=?")
     parts.append(f"torch={torch.__version__}")
     parts.append(f"cuda={getattr(torch.version, 'cuda', None)}")
-    try:
-        # ptxas is what actually turns the IR into SASS; a toolkit bump changes the code for an
-        # unchanged grid. torch.version.cuda is the build-time toolkit and can differ from it.
-        import subprocess  # noqa: PLC0415
-
-        from triton.backends.nvidia.driver import _path_to_binary  # noqa: PLC0415
-        ptxas, _ = _path_to_binary("ptxas")
-        out = subprocess.run([ptxas, "--version"], capture_output=True, text=True,  # noqa: S603
-                             timeout=10, check=False).stdout
-        rel = [ln for ln in out.splitlines() if "release" in ln]
-        parts.append(f"ptxas={rel[0].strip() if rel else '?'}")
-    except Exception:  # noqa: BLE001
-        parts.append("ptxas=?")
+    # ptxas is what actually turns the IR into SASS; a toolkit bump changes the code for an
+    # unchanged grid, and torch.version.cuda is the BUILD-time toolkit, which can differ from the
+    # ptxas triton actually invokes. Tried in order, because triton has moved this three times and
+    # a probe that silently misses records "ptxas=?" for everyone -- which is exactly what the
+    # first version of this did: it imported `_path_to_binary` from
+    # `triton.backends.nvidia.driver`, where it does not exist in triton 3.6, so the component
+    # this function exists to capture was absent from every identity it produced. Found by `ty`.
+    parts.append(f"ptxas={_ptxas_version()}")
     _env_identity_cache = hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
     return _env_identity_cache
+
+
+def _ptxas_version() -> str:
+    """The ptxas release string, or ``"?"`` if it genuinely cannot be found."""
+    import subprocess  # noqa: PLC0415
+
+    def _release(path) -> str | None:
+        try:
+            out = subprocess.run([str(path), "--version"], capture_output=True,  # noqa: S603
+                                 text=True, timeout=10, check=False).stdout
+        except Exception:  # noqa: BLE001
+            return None
+        return _pick(out)
+
+    def _pick(text: str) -> str | None:
+        """The release line only. get_ptxas_version() hands back the whole banner; storing all
+        five lines works but makes every identity mismatch unreadable in a warning."""
+        return next((ln.strip() for ln in str(text).splitlines() if "release" in ln), None)
+
+    try:  # triton >= 3.3: the backend exposes the version directly
+        from triton.backends.nvidia.compiler import get_ptxas_version  # noqa: PLC0415
+        rel = _pick(get_ptxas_version())
+        if rel:
+            return rel
+    except Exception:  # noqa: BLE001
+        pass
+    for getter in (
+        lambda: __import__("triton.knobs", fromlist=["nvidia"]).nvidia.ptxas.path,
+        lambda: __import__("triton.backends.nvidia.compiler",
+                           fromlist=["get_ptxas"]).get_ptxas(),
+    ):
+        try:
+            rel = _release(getter())
+        except Exception:  # noqa: BLE001
+            continue
+        if rel:
+            return rel
+    return "?"
+
+
 
 
 def op_identity(autotuner) -> str:

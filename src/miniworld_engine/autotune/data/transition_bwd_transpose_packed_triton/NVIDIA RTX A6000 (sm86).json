@@ -28,6 +28,15 @@
           "BLOCK_N": 128
         },
         "ms": 0.0727040022611618,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 128
+        },
+        "ms": 0.0727040022611618,
         "num_stages": 3,
         "num_warps": 2
       },
@@ -37,7 +46,7 @@
           "BLOCK_N": 128
         },
         "ms": 0.0727040022611618,
-        "num_stages": 5,
+        "num_stages": 4,
         "num_warps": 2
       },
       {
@@ -46,16 +55,7 @@
           "BLOCK_N": 128
         },
         "ms": 0.0727040022611618,
-        "num_stages": 6,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16,
-          "BLOCK_N": 256
-        },
-        "ms": 0.0727040022611618,
-        "num_stages": 1,
+        "num_stages": 5,
         "num_warps": 2
       }
     ],
@@ -315,12 +315,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "transition_bwd_transpose_packed_triton",
   "op_identity": "5631cdabd5ad",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:49+00:00",
+    "built_utc": "2026-08-23T11:22:37+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

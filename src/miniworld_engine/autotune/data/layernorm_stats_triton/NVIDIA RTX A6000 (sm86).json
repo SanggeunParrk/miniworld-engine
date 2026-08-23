@@ -19,6 +19,15 @@
           "BLOCK_M1": 2
         },
         "ms": 0.013311999849975109,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.013311999849975109,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -230,11 +239,29 @@
       {
         "kwargs": {
           "BLOCK_K": 64,
-          "BLOCK_M1": 1
+          "BLOCK_M1": 32
         },
-        "ms": 0.028672000393271446,
+        "ms": 0.01945599913597107,
         "num_stages": 4,
-        "num_warps": 1
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 4,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 1,
+        "num_warps": 32
       },
       {
         "kwargs": {
@@ -242,15 +269,6 @@
           "BLOCK_M1": 1
         },
         "ms": 0.028672000393271446,
-        "num_stages": 5,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 1
-        },
-        "ms": 0.02969600073993206,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -259,17 +277,8 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.030719999223947525,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 1
-        },
-        "ms": 0.030719999223947525,
-        "num_stages": 2,
+        "ms": 0.028672000393271446,
+        "num_stages": 4,
         "num_warps": 1
       }
     ],
@@ -484,12 +493,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "layernorm_stats_triton",
   "op_identity": "ab3051e2a5e6",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:48+00:00",
+    "built_utc": "2026-08-23T11:22:36+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

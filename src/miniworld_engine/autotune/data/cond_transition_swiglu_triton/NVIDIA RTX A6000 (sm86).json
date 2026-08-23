@@ -4,11 +4,27 @@
     "float32|ND=512,shape_key=1024": [
       {
         "kwargs": {
+          "BLOCK_E": 64
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
           "BLOCK_E": 32
         },
         "ms": 0.015359999611973763,
         "num_stages": 1,
         "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 16
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 5,
+        "num_warps": 2
       },
       {
         "kwargs": {
@@ -22,9 +38,9 @@
         "kwargs": {
           "BLOCK_E": 16
         },
-        "ms": 0.030719999223947525,
-        "num_stages": 3,
-        "num_warps": 4
+        "ms": 0.026623999699950218,
+        "num_stages": 4,
+        "num_warps": 1
       }
     ],
     "float32|ND=512,shape_key=2048": [
@@ -32,7 +48,7 @@
         "kwargs": {
           "BLOCK_E": 32
         },
-        "ms": 0.025599999353289604,
+        "ms": 0.02457600086927414,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -74,7 +90,7 @@
         "kwargs": {
           "BLOCK_E": 16
         },
-        "ms": 0.013311999849975109,
+        "ms": 0.010239999741315842,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -174,12 +190,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "cond_transition_swiglu_triton",
   "op_identity": "7d96ee9e791c",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:48+00:00",
+    "built_utc": "2026-08-23T11:22:35+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

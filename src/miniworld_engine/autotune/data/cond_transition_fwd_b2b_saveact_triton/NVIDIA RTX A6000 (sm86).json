@@ -152,6 +152,17 @@
       {
         "kwargs": {
           "BLOCK_K_D": 16,
+          "BLOCK_K_ND": 64,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128
+        },
+        "ms": 0.04505600035190582,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_D": 16,
           "BLOCK_K_ND": 32,
           "BLOCK_M1": 32,
           "BLOCK_N": 32
@@ -159,17 +170,6 @@
         "ms": 0.048128001391887665,
         "num_stages": 10,
         "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 64,
-          "BLOCK_K_ND": 64,
-          "BLOCK_M1": 32,
-          "BLOCK_N": 32
-        },
-        "ms": 0.048128001391887665,
-        "num_stages": 1,
-        "num_warps": 4
       }
     ],
     "float32|DC=128,K=128,ND=512,shape_key=4096": [
@@ -344,12 +344,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "cond_transition_fwd_b2b_saveact_triton",
   "op_identity": "63b11f7faa3c",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:47+00:00",
+    "built_utc": "2026-08-23T11:22:35+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

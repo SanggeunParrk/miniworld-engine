@@ -12,9 +12,42 @@
         "ms": 0.023552000522613525,
         "num_stages": 1,
         "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 128,
+          "GROUP_M": 2
+        },
+        "ms": 0.023552000522613525,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 128,
+          "BLOCK_N": 64,
+          "GROUP_M": 2
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 5,
+        "num_warps": 8
       }
     ],
     "float32|D=128,ND=512,shape_key=2048": [
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 64,
+          "GROUP_M": 1
+        },
+        "ms": 0.025631999596953392,
+        "num_stages": 2,
+        "num_warps": 2
+      },
       {
         "kwargs": {
           "BLOCK_K": 16,
@@ -25,6 +58,17 @@
         "ms": 0.027648000046610832,
         "num_stages": 2,
         "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 16,
+          "BLOCK_M1": 32,
+          "BLOCK_N": 32,
+          "GROUP_M": 1
+        },
+        "ms": 0.03276799991726875,
+        "num_stages": 3,
+        "num_warps": 4
       },
       {
         "kwargs": {
@@ -44,20 +88,9 @@
           "BLOCK_N": 32,
           "GROUP_M": 1
         },
-        "ms": 0.03481600061058998,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 16,
-          "BLOCK_M1": 32,
-          "BLOCK_N": 32,
-          "GROUP_M": 1
-        },
-        "ms": 0.03686400130391121,
+        "ms": 0.03379200026392937,
         "num_stages": 1,
-        "num_warps": 1
+        "num_warps": 4
       }
     ],
     "float32|D=128,ND=512,shape_key=256": [
@@ -138,7 +171,7 @@
           "BLOCK_N": 32,
           "GROUP_M": 1
         },
-        "ms": 0.018432000651955605,
+        "ms": 0.01740800030529499,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -201,12 +234,12 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "op": "cond_transition_bwd_gate_squeeze_dx_triton",
   "op_identity": "847f510bdb89",
   "provenance": {
-    "built_utc": "2026-08-23T02:14:47+00:00",
+    "built_utc": "2026-08-23T11:22:34+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

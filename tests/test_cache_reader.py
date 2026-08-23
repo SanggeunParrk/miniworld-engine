@@ -296,3 +296,27 @@ def test_a_small_grid_is_left_alone():
     """Capping a 4-config grid would throw away a search that is already cheap."""
     small = BIG[:4]
     assert cache.heuristic_subset(small, cap=24) == small
+
+
+def test_the_toolchain_identity_actually_contains_ptxas():
+    """`env_identity` exists to notice a compiler change; a probe that silently misses defeats it.
+
+    The first version imported `_path_to_binary` from `triton.backends.nvidia.driver`, where it
+    does not exist in triton 3.6 — so the except swallowed it and every identity ever produced
+    recorded `ptxas=?`. The component the function is for was simply absent, and nothing said so.
+    Found by `ty`, not by reading the code.
+    """
+    assert cache._ptxas_version() != "?", (
+        "ptxas could not be located; env_identity is blind to a toolkit change")
+    assert "release" in cache._ptxas_version().lower()
+
+
+def test_the_identity_changes_when_ptxas_does(monkeypatch):
+    cache._env_identity_cache = None
+    monkeypatch.setattr(cache, "_ptxas_version", lambda: "release 1.0")
+    a = cache.env_identity()
+    cache._env_identity_cache = None
+    monkeypatch.setattr(cache, "_ptxas_version", lambda: "release 2.0")
+    b = cache.env_identity()
+    cache._env_identity_cache = None
+    assert a != b
