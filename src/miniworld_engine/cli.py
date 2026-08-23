@@ -19,8 +19,14 @@ declared list instead and covers all of them.
 Everything the run depends on is an argument. The engine used to take these as environment
 variables, which meant a run's behaviour lived in shell state that nothing recorded: a capture that
 benched the PyTorch reference and reported it as ours, and one that skipped every kernel on the
-losing side of a dispatch decision, both looked like successful runs. Arguments are echoed into
-each shard, so a cache can be traced back to the command that built it.
+losing side of a dispatch decision, both looked like successful runs.
+
+What a run leaves behind: one shard JSON per unit, holding each op's config grid, its ranked
+entries and its `op_id`; one log per unit under `<shards>/logs/`, opening with the config set the
+unit resolved and closing with its precompile / bench-budget / launch accounting; and, in each
+merged `data/<op>/<gpu>.json`, a `provenance` block naming the build time and the torch and triton
+it was built with. The invoking argv is NOT among them -- reconstruct a build from the config set
+named in its logs.
 
 Multi-GPU runs inside a SINGLE job: one worker per GPU, each pulling from a shared queue of
 (target, mode, sweep axis, dispatch pin) units and running each as a subprocess pinned to its card.
