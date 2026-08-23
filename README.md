@@ -172,6 +172,12 @@ its own commit. Full policy: `docs/operations/dispatch-cache.md`.
 
 ## Toolchain
 
+One-time, per clone — git will not let a repository point itself at its own hooks:
+
+```bash
+git config core.hooksPath .githooks   # refuses to commit tuned cache data with code
+```
+
 ```bash
 pixi run ruff-check     # lint  (src tests benchmarks)
 pixi run types          # ty    (src tests benchmarks) -- gates CI, no findings allowed
