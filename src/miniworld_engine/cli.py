@@ -575,7 +575,12 @@ def cmd_build(args: argparse.Namespace) -> int:
           f"{len(failed)} failed")
     for r in empty + failed:
         print(f"  {'EMPTY' if r in empty else 'FAIL '} {r['label']} -> {r['log']}")
-    return 1 if (failed or empty) else 0
+    # THE per-op sweep is the path that actually builds the shipped cache, and it was the one path
+    # that never merged: `cmd_build` and `_bench_build_first` both folded their shards in, this
+    # returned straight to the shell. A 527-unit sweep therefore finished, wrote 145 GB of shards,
+    # and left `data/` untouched -- the build looked complete and shipped nothing. Same policy as
+    # the other two: merge what succeeded, name the holes, fail only if nothing succeeded.
+    return _merge_built_shards(args, results)
 
 
 def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
