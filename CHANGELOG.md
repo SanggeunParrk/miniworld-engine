@@ -82,6 +82,32 @@ The public surface is enforced by `tests/test_public_api.py`.
   the canonical path). Verified 0 importers + contract & numerical suites green.
 
 ### Fixed
+- **A `level=both` kernel keyed its cache on LENGTH, so its two sides shared a
+  bucket.** A pair activation `(B, L, L, D)` at L=1024 and an atom activation
+  `(B, A, D)` at A=1024 both have `shape[-2] == 1024`, so both landed in
+  `shape_key=1024` — while the first launches 1,048,576 rows and the second
+  launches 1,024. Visible in the shipped A6000 cache as two adjacent lines of one
+  op: `shape_key=384 → 0.6103 ms` (pair, 147,456 rows) next to
+  `shape_key=1024 → 0.0215 ms` (atom, 1,024 rows). Since the driver was corrected
+  to build atom activations above L=512, the sweep measured only the atom side
+  there and the module bench, which runs the pair side, was served those configs:
+  transition on an A6000 at L=1024 in its committed baseline's exact configuration
+  went from 5.498 ms to 9.504 ms while the pytorch reference reproduced within 3%.
+  `both_key` now takes the ROW count (`shape_key.BOTH_ROWS`), a both-level kernel
+  is two work lists with an explicit `side`, and `cache.KEY_SCHEME` invalidates the
+  entries the change re-based — level-aware, so the 68 token/atom kernels whose
+  buckets did not move keep theirs.
+- **The `compiled` column of every benchmark CSV recorded the request, not what
+  ran.** Four of the eight module benches guard `model.compile()` with
+  `and conf.cudagraph == "disabled"`, so `compile=true cudagraph=manual` runs eager
+  for those; `actual_compiled_flag` knew about `transition` by name and missed the
+  other three. 330 committed tables say `compiled=True, cudagraph=manual`, and for
+  triangle_multiplication, triangle_attention and bias_only_attention that is a
+  measurement of eager code.
+- **42 kernel-bench rows could not run at all** — the harness pre-flattened
+  activations that seven entry points read their cache key off, so `triton_tm1`,
+  `triton_tm2`, `triton_atomic/partial/persistent`, `triton_cond_transition` and
+  `layernorm_linear_triton` came back `failed: shape ... is already flattened`.
 - **The library needed an environment variable to work at all.** With
   `MINIWORLD_CONFIG_DIR` unset, every op registered an empty config list, triton
   substituted its own `Config({})`, and the first launch of every triton kernel
