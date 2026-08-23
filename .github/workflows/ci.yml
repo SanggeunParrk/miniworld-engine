@@ -33,20 +33,20 @@ jobs:
           pip install -e . --no-deps
 
       - name: Lint (ruff)
-        run: ruff check src benchmarks submits
+        run: ruff check src tests benchmarks
 
       - name: Type smoke (pyright)
         # pyproject sets typeCheckingMode=off + reportMissingImports=warning, so this
         # is an import/syntax smoke check (missing torch/triton -> warnings, not errors).
         run: pyright
 
-      - name: Public API contract + static guards
-        # CPU-only subset: frozen kernel surface, side-effect-free import, and the
-        # int64-offset static guard. The numerical suite (tests/test_numerical.py) and
-        # the entrypoint-resolution test need a GPU / the triton backend and run on an
-        # allocated GPU node via `pixi run test-gpu` (see README / pixi tasks).
-        run: >
-          pytest -q
-          tests/test_public_api.py
-          tests/test_lazy_kernel_exports.py
-          tests/test_int64_offsets.py
+      - name: Tests (whole suite -- every test here is CPU-only)
+        # Runs ALL of tests/, not a hand-listed subset. It used to name three files, so
+        # 13 of 16 files -- 144 of 156 tests -- ran nowhere automatic, and the bugs they
+        # cover shipped: `build all` defaulting to a config set that has never existed,
+        # `audit` dead on two removed imports, the per-op sweep never merging its shards.
+        # Measured: the whole suite is 76 s with CUDA_VISIBLE_DEVICES="" and needs no GPU.
+        # Keep it that way -- a test that needs a device belongs behind the gpu marker.
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: pytest -q tests/ -m "not gpu"

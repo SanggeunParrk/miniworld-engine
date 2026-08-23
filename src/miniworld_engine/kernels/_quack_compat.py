@@ -83,11 +83,15 @@ _GEMM_INTERFACE_SYMBOLS = frozenset(
     {"gemm", "gemm_act", "gemm_act_tuned", "default_config"}
 )
 
+# The four GEMM names are supplied lazily by the PEP 562 ``__getattr__`` below, so they are
+# genuinely exported but have no module-level binding for ruff to see -- hence F822 on each.
+# Suppressed here rather than in per-file-ignores so the reason travels with the code, and
+# narrowly so a name that is REALLY missing still fails.
 __all__ = [
-    "default_config",
-    "gemm",
-    "gemm_act",
-    "gemm_act_tuned",
+    "default_config",  # noqa: F822 -- lazy, see __getattr__
+    "gemm",  # noqa: F822 -- lazy, see __getattr__
+    "gemm_act",  # noqa: F822 -- lazy, see __getattr__
+    "gemm_act_tuned",  # noqa: F822 -- lazy, see __getattr__
     "is_compile_only",
     "jit_cache",
 ]

@@ -68,8 +68,20 @@ miniworld_engine = ["**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "*
 # This repo keeps faithful ports, benchmark probes, and module wrappers side by
 # side. `select = ["ALL"]` turns docstring, annotation, naming, print, and
 # complexity rules into noise for that shape of code. Keep ruff focused on rules
-# that catch real breakage across src/benchmarks/submits.
+# that catch real breakage across src/tests/benchmarks.
 # ----------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+# Every test in tests/ is CPU-only today and the whole suite runs in ~76 s, so CI runs all of
+# it. A test that genuinely needs a device must be marked `gpu` -- `pixi run test` excludes
+# that marker, `pixi run test-gpu` selects it. Registering the marker here is what makes an
+# unmarked typo an error instead of a silently-skipped test.
+testpaths = ["tests"]
+markers = [
+  "gpu: needs a CUDA device (excluded from the CPU suite CI runs)",
+]
+# An unregistered marker is a typo that silently disables a test; refuse it.
+addopts = "--strict-markers"
 
 [tool.ruff]
 line-length = 88
@@ -79,7 +91,13 @@ exclude = [
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
+  # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
+  # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
+  # them; excluding only artifacts meant a working tree with local profiler captures reported
+  # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
   "benchmarks/**/artifacts",
+  "benchmarks/**/profiles",
+  "benchmarks/**/plots",
   "third_party",
 ]
 
@@ -128,7 +146,7 @@ docstring-code-format = false
 # ----------------------------------------------------------------------------
 
 [tool.pyright]
-include = ["src", "benchmarks", "submits"]
+include = ["src", "tests", "benchmarks"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -139,7 +157,13 @@ exclude = [
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
+  # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
+  # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
+  # them; excluding only artifacts meant a working tree with local profiler captures reported
+  # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
   "benchmarks/**/artifacts",
+  "benchmarks/**/profiles",
+  "benchmarks/**/plots",
   "third_party",
 ]
 pythonVersion = "3.10"
@@ -147,7 +171,7 @@ typeCheckingMode = "off"
 reportMissingImports = "warning"
 
 [tool.ty.src]
-include = ["src", "benchmarks", "submits"]
+include = ["src", "tests", "benchmarks"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -158,7 +182,13 @@ exclude = [
   "_ct_tmp",
   "_trans_tmp",
   "benchmark",
+  # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
+  # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
+  # them; excluding only artifacts meant a working tree with local profiler captures reported
+  # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
   "benchmarks/**/artifacts",
+  "benchmarks/**/profiles",
+  "benchmarks/**/plots",
   "third_party",
 ]
 
@@ -227,13 +257,15 @@ fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
-ruff-check = "ruff check src benchmarks submits"
-ruff-format = "ruff format src benchmarks submits"
+ruff-check = "ruff check src tests benchmarks"
+ruff-format = "ruff format src tests benchmarks"
 pyright = "pyright"
 
-test = "pytest tests/test_public_api.py tests/test_lazy_kernel_exports.py tests/test_int64_offsets.py -q"
-test-gpu = "pytest tests/test_numerical.py -q"
-ci = "ruff check src benchmarks submits && pyright && pytest tests/test_public_api.py tests/test_lazy_kernel_exports.py tests/test_int64_offsets.py -q"
+# The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
+# 16 test files run nowhere automatic.
+test = "pytest tests/ -m 'not gpu' -q"
+test-gpu = "pytest tests/ -m gpu -q"
+ci = "ruff check src tests benchmarks && pyright && pytest tests/ -m 'not gpu' -q"
 
 [project.scripts]
 miniworld-engine = "miniworld_engine.cli:main"
