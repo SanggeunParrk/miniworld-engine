@@ -42,13 +42,15 @@ def test_an_unknown_config_set_names_the_default():
 
 def _merge(monkeypatch, tmp_path, results, strict=False):
     """Drive the merge tail with a canned builder result, capturing whether it merged."""
-    import types
+    import argparse
 
     from miniworld_engine.autotune import capture
     merged: list = []
     (tmp_path / "u.json").write_text("{}")
     monkeypatch.setattr(capture, "merge_shards", lambda sh, **k: merged.append(list(sh)) or ["op"])
-    args = types.SimpleNamespace(shards=str(tmp_path), strict=strict)
+    # argparse.Namespace, not SimpleNamespace: _merge_built_shards is annotated for the
+    # real thing, and a stand-in that merely walks like one hides a signature drift.
+    args = argparse.Namespace(shards=str(tmp_path), strict=strict)
     rc = cli._merge_built_shards(args, results)
     return merged, rc
 
@@ -114,11 +116,11 @@ def test_a_run_of_only_real_failures_still_merges_earlier_shards(monkeypatch, tm
 
 
 def test_no_shards_at_all_is_a_failure(monkeypatch, tmp_path):
-    import types
+    import argparse
 
     from miniworld_engine.autotune import capture
     called: list = []
     monkeypatch.setattr(capture, "merge_shards", lambda sh, **k: called.append(1) or [])
-    args = types.SimpleNamespace(shards=str(tmp_path / "empty"), strict=False)
+    args = argparse.Namespace(shards=str(tmp_path / "empty"), strict=False)
     assert cli._merge_built_shards(args, [OOM]) == 1
     assert not called

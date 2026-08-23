@@ -149,6 +149,12 @@ class PairformerBlock(nn.Module):
         if self.tri_multi is not None:
             pair = self.tri_multi(pair, mask)  # y = pair + drop_row(bidir_trimul(pair))
         else:
+            # The constructor sets these two together, in the branch where tri_multi is None --
+            # an invariant nothing in the types carries, so a checker reads both calls as calling
+            # `None | TriangleMultiplication`. Asserting it states the contract where it is relied
+            # on and turns a would-be `NoneType is not callable` into a named failure.
+            assert self.tri_multi_outgoing is not None, "tri_multi is None but outgoing is unset"
+            assert self.tri_multi_incoming is not None, "tri_multi is None but incoming is unset"
             pair = self.tri_multi_outgoing(pair, mask)  # y = pair + drop_row(trimul_out(pair))
             pair = self.tri_multi_incoming(pair, mask)  # y = pair + drop_row(trimul_in(pair))
         if self.tri_atten_starting is not None:

@@ -105,7 +105,7 @@ def main() -> int:
         for major, want_be, want_layout in [(10, KernelBackend.CUTE, "bdll_sm100"),
                                             (9, KernelBackend.CUTE, "bdll_direct"),
                                             (8, KernelBackend.TRITON, "bdll_direct")]:
-            dispatch.capability = lambda device=None, _m=major: (_m, 0)
+            dispatch.capability = lambda device=None, *, _m=major: (_m, 0)
             check(dispatch.resolve_triangle_multiplication(_I.MINIWORLD) is want_be,
                   f"sm_{major}0: trimul MINIWORLD -> {want_be.value}")
             check(dispatch.trimul_out_layout() == want_layout,

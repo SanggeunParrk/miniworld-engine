@@ -39,7 +39,7 @@ def _capture(keys, nargs, op="op_probe"):
     at = _Autotuner(keys, nargs, [_Cfg(BLOCK_M1=64)])
     # _op_name resolves through configs.op_of(list identity); stub it to name this fake op.
     orig = capture._op_name
-    capture._op_name = lambda a: op
+    capture._op_name = lambda a: op  # ty: ignore[invalid-assignment] -- deliberate stub
     try:
         capture._record_one(at, _Cfg(BLOCK_M1=64), {}, 1.0)
     finally:
@@ -58,7 +58,7 @@ def test_two_shape_keys_are_two_buckets():
     at = _Autotuner(["shape_key"], {"x": torch.empty(4, 4, dtype=torch.bfloat16), "shape_key": 256},
                     [_Cfg(BLOCK_M1=64)])
     orig = capture._op_name
-    capture._op_name = lambda a: "op_probe"
+    capture._op_name = lambda a: "op_probe"  # ty: ignore[invalid-assignment] -- deliberate stub
     try:
         capture._record_one(at, _Cfg(BLOCK_M1=64), {}, 1.0)
         at.nargs = {"x": torch.empty(4, 4, dtype=torch.bfloat16), "shape_key": 1024}
@@ -90,7 +90,7 @@ def test_a_measured_timing_that_is_not_a_number_is_not_recorded():
         capture._CAPTURE.clear()
         at = _Autotuner(["shape_key"], {"x": torch.empty(2, 2), "shape_key": 256}, [_Cfg(BLOCK_M1=64)])
         orig = capture._op_name
-        capture._op_name = lambda a: "op_probe"
+        capture._op_name = lambda a: "op_probe"  # ty: ignore[invalid-assignment] -- deliberate stub
         try:
             capture._record_one(at, _Cfg(BLOCK_M1=64), {}, bad)
         finally:
@@ -103,7 +103,7 @@ def test_a_finite_timing_is_recorded():
     capture._CAPTURE.clear()
     at = _Autotuner(["shape_key"], {"x": torch.empty(2, 2), "shape_key": 256}, [_Cfg(BLOCK_M1=64)])
     orig = capture._op_name
-    capture._op_name = lambda a: "op_probe"
+    capture._op_name = lambda a: "op_probe"  # ty: ignore[invalid-assignment] -- deliberate stub
     try:
         capture._record_one(at, _Cfg(BLOCK_M1=64), {}, 0.25)
     finally:
@@ -118,7 +118,7 @@ def test_the_sole_config_of_a_one_config_op_is_still_recorded():
     capture._CAPTURE.clear()
     at = _Autotuner(["shape_key"], {"x": torch.empty(2, 2), "shape_key": 256}, [_Cfg(BLOCK_M1=64)])
     orig = capture._op_name
-    capture._op_name = lambda a: "op_probe"
+    capture._op_name = lambda a: "op_probe"  # ty: ignore[invalid-assignment] -- deliberate stub
     try:
         capture._record_one(at, _Cfg(BLOCK_M1=64), {}, float("nan"), unmeasured=True)
     finally:
