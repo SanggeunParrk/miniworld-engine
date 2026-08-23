@@ -1,0 +1,30 @@
+#!/bin/bash
+# Refuse to commit tuned cache data together with code.
+#
+# `src/miniworld_engine/autotune/data/` is a build ARTIFACT that lives inside the package, so
+# `git add -A -- src` sweeps it in. That has now happened four times in one session, each time
+# putting a mid-sweep cache state -- hundreds of files, none of them final -- inside a commit
+# whose message is about something else. A cache is committed on purpose, once, when a build is
+# finished; it is not a side effect of staging source.
+#
+# Escape hatch: `git commit --no-verify`, for the deliberate cache commit itself.
+set -u
+DATA='^src/miniworld_engine/autotune/data/'
+staged=$(git diff --cached --name-only)
+data=$(printf '%s\n' "$staged" | grep -E "$DATA" || true)
+code=$(printf '%s\n' "$staged" | grep -vE "$DATA" | grep -v '^$' || true)
+if [ -n "$data" ] && [ -n "$code" ]; then
+    n_data=$(printf '%s\n' "$data" | grep -c .)
+    n_code=$(printf '%s\n' "$code" | grep -c .)
+    cat >&2 <<MSG
+pre-commit: refusing to mix $n_data tuned-cache file(s) with $n_code other change(s).
+
+  src/miniworld_engine/autotune/data/ is a build artifact. It is committed on purpose, once,
+  when a build is finished -- not as a side effect of \`git add -A -- src\`.
+
+  Stage the code alone:      git restore --staged src/miniworld_engine/autotune/data
+  Or commit the cache alone: git commit --no-verify   (after staging only data/)
+MSG
+    exit 1
+fi
+exit 0
