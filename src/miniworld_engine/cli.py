@@ -534,6 +534,19 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     """
     from miniworld_engine.autotune import builder
 
+    if getattr(args, "no_build", False):
+        # `build all` decomposes into one unit per (op, dtype, shape bucket) -- 922 of them, with
+        # no redundancy. The CASE decomposition this function uses is the older one: 1,738 module
+        # units for the same 91 ops, of which more than half re-tune a bucket another unit already
+        # covered. After a completed `build all` the pre-bench build is therefore days of work for
+        # nothing, and `audit` is what says whether the cache is complete enough to skip it.
+        directory = resolve_config_dir(config_type, repo)
+        if isinstance(directory, int):
+            return directory
+        print(f"=== --no-build: benching against the cache in data/  (config set {config_type})",
+              flush=True)
+        return apply_config_dir(directory)
+
     cases: list[str] = []
     for target in targets:
         mapped = mapping.get(target)
@@ -896,6 +909,9 @@ def build_parser() -> argparse.ArgumentParser:
         parser_.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
         parser_.add_argument("--resume", action="store_true",
                              help="pre-bench build skips units whose shard already has entries")
+        parser_.add_argument("--no-build", action="store_true",
+                             help="bench against the cache already in data/, skipping the "
+                                  "pre-bench build (use after `build all` + a clean `audit`)")
 
     aud = sub.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

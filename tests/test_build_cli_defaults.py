@@ -124,3 +124,48 @@ def test_no_shards_at_all_is_a_failure(monkeypatch, tmp_path):
     args = argparse.Namespace(shards=str(tmp_path / "empty"), strict=False)
     assert cli._merge_built_shards(args, [OOM]) == 1
     assert not called
+
+
+def test_no_build_skips_the_case_decomposition(monkeypatch, capsys):
+    """`bench_module all` re-tuned 1,738 CASE units on top of a finished 922-unit `build all`.
+
+    The two decompositions cover the same 91 ops; the case one is the older, redundant shape
+    (more than half of its units re-tune a bucket another unit already covered). After a
+    completed `build all` the pre-bench build is days of work for nothing, and there was no way
+    to say so -- `--no-build` is that way.
+    """
+    import argparse
+
+    from miniworld_engine.autotune import builder
+
+    def explode(*a, **k):  # noqa: ANN002, ANN003, ARG001
+        raise AssertionError("build_all ran despite --no-build")
+
+    monkeypatch.setattr(builder, "build_all", explode)
+    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)  # noqa: ARG005
+    repo = Path(cli.__file__).resolve().parents[2]
+    args = argparse.Namespace(no_build=True, shards="/tmp/x", gpus="1", compile_jobs=1,
+                              resume=False)
+    rc = cli._bench_build_first(args, ("transition",), repo, {"transition": ("transition",)},
+                                "MODULE_BUILD_CASES")
+    assert rc == 0
+    assert "--no-build" in capsys.readouterr().out
+
+
+def test_without_no_build_the_pre_bench_build_still_runs(monkeypatch):
+    """The flag has to be opt-in: benching an untuned kernel measures a tuning run."""
+    import argparse
+
+    from miniworld_engine.autotune import builder
+
+    called = []
+    monkeypatch.setattr(builder, "build_all", lambda *a, **k: called.append(1) or [])
+    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)  # noqa: ARG005
+    monkeypatch.setattr(cli, "_merge_built_shards", lambda a, r: 0)  # noqa: ARG005
+    monkeypatch.setattr(builder, "cases", lambda: [])
+    repo = Path(cli.__file__).resolve().parents[2]
+    args = argparse.Namespace(no_build=False, shards="/tmp/x", gpus="1", compile_jobs=1,
+                              resume=False)
+    cli._bench_build_first(args, ("transition",), repo, {"transition": ("transition",)},
+                           "MODULE_BUILD_CASES")
+    assert called, "build_all did not run without --no-build"
