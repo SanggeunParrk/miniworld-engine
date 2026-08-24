@@ -22,7 +22,8 @@ IN-GRID    The filler is taken from that op's OWN generated grid, never from ``c
 Balance is by COMBINATION COUNT, not op count: 8 of the 91 ops carry 45% of the space, so one
 shard per op would leave most jobs idle while a few ran for days.
 
-    python tools/kernel-audit/gen_shards.py --per-shard 8000 --out configs/grid
+    python tools/kernel-audit/gen_shards.py --per-shard 8000 \
+        --out src/miniworld_engine/autotune/configs/grid
 """
 from __future__ import annotations
 

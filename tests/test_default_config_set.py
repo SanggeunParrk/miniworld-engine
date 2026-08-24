@@ -53,22 +53,46 @@ def test_the_default_ships_inside_the_package():
     assert len(list(packaged.glob("*.csv"))) > 80
 
 
-def test_the_two_copies_of_grid_are_identical():
-    """While the repo root still has one -- every sweep launcher points at it -- it must match.
+def test_grid_exists_in_exactly_one_place():
+    """The stronger form of what used to be a byte-identity assertion between two copies.
 
-    Two copies of a search space that drift apart produce a cache tuned over one and read
-    against the other, and the reader's intersection silently empties. The root copy goes away
-    once no running job depends on it.
+    `configs/grid` lived at the repo root AND inside the package. Two copies of a search space
+    that drift produce a cache tuned over one and read against the other, and the reader's
+    intersection silently empties -- so the old test asserted they matched. They matched because
+    someone kept copying; the duplication existed because `cli.resolve_config_dir` mapped a short
+    name only to `repo/configs/<name>` while a wheel reached the packaged copy through
+    `default_config_dir()`. Two readers, two paths.
+
+    The resolver now falls back to the packaged set, so there is one copy and nothing to keep in
+    sync. This asserts that, rather than asserting the copies agree.
     """
     packaged = Path(configs.__file__).parent / "configs" / "grid"
     root = Path(configs.__file__).resolve().parents[3] / "configs" / "grid"
-    if not root.is_dir():
-        pytest.skip("the repo-root copy is gone, which is the intended end state")
-    names = {p.name for p in packaged.glob("*.csv")}
-    assert names == {p.name for p in root.glob("*.csv")}, "the two copies list different ops"
-    differing = [n for n in sorted(names)
-                 if (packaged / n).read_bytes() != (root / n).read_bytes()]
-    assert not differing, f"{len(differing)} file(s) differ: {differing[:5]}"
+    assert packaged.is_dir(), f"the packaged set is gone: {packaged}"
+    assert not root.is_dir(), (
+        f"{root} is back. `grid` has one home, inside the package, and `resolve_config_dir` falls "
+        f"back to it -- a second copy is a thing to keep in sync, which is what this replaced.")
+
+
+def test_a_short_name_resolves_to_the_packaged_set(tmp_path):
+    """The fallback that makes one copy possible. Without it, `build all` in a source checkout
+    with no repo-root `configs/grid` fails with "unknown config set 'grid'"."""
+    from miniworld_engine import cli
+
+    resolved = cli.resolve_config_dir("grid", tmp_path)   # a repo with no configs/ at all
+    assert not isinstance(resolved, int), resolved
+    assert resolved == Path(configs.__file__).parent / "configs" / "grid"
+    assert list(resolved.glob("*.csv")), "the packaged set is empty"
+
+
+def test_the_repo_root_sets_still_win_over_the_packaged_one(tmp_path):
+    """The A-B sets (blk16 ... warp8) live only at the repo root, and a set that exists in both
+    places must resolve to the repo's -- that is where an experiment edits it."""
+    from miniworld_engine import cli
+
+    (tmp_path / "configs" / "grid").mkdir(parents=True)
+    resolved = cli.resolve_config_dir("grid", tmp_path)
+    assert resolved == tmp_path / "configs" / "grid"
 
 
 def test_ops_get_configs_with_no_environment_variable(monkeypatch):

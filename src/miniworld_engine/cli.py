@@ -405,14 +405,24 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
     short name resolving to ``configs/<name>``. There is no second mechanism: the same directory
     drives a build, a bench and any accuracy run, which is what keeps them measuring the same thing.
     """
+    # Three places, in this order: an explicit path, the repo's own `configs/<name>` (where the
+    # A-B sets live and where the generator writes), and the PACKAGED set inside the wheel. The
+    # last is what lets `configs/grid` exist in exactly one place: it used to exist at the repo
+    # root AND under `autotune/configs/`, byte-identical and asserted so, because a short name
+    # resolved only against the repo root while a wheel install reached the packaged copy through
+    # `configs.default_config_dir()`. Two copies, two readers, one of them a manual duplicate.
+    from miniworld_engine.autotune import configs as _configs  # heavy; import at use
+
+    packaged_root = Path(_configs.__file__).parent / CONFIG_ROOT
     given = Path(config_type).expanduser()
     candidates = [given] if given.is_absolute() or given.parts[:1] == (CONFIG_ROOT,) else [
-        repo / CONFIG_ROOT / config_type, given,
+        repo / CONFIG_ROOT / config_type, packaged_root / config_type, given,
     ]
     for c in candidates:
         if c.is_dir():
             return c
-    have = sorted(d.name for d in (repo / CONFIG_ROOT).glob("*") if d.is_dir())
+    have = sorted({d.name for d in (repo / CONFIG_ROOT).glob("*") if d.is_dir()}
+                  | {d.name for d in packaged_root.glob("*") if d.is_dir()})
     print(f"unknown config set {config_type!r}; have: {', '.join(have) or '(none)'}\n"
           f"a config set is a directory of <op>.csv under {CONFIG_ROOT}/ "
           f"(the default is {DEFAULT_CONFIG_SET!r})", file=sys.stderr)

@@ -29,7 +29,7 @@ def _rows():
 
 def _declared():
     """(kernel, checker) for every row that names one."""
-    return [(r["kernel"], r["check"].strip()) for r in _rows() if (r.get("check") or "").strip()]
+    return [(r["kernel"], r["check"].strip(), r) for r in _rows() if (r.get("check") or "").strip()]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -39,12 +39,17 @@ def _needs_cuda():
         pytest.skip("no CUDA device")
 
 
-@pytest.mark.parametrize(("kernel", "checker"), _declared(), ids=[k for k, _ in _declared()])
-def test_kernel_matches_its_reference(kernel, checker):
-    """One test per kernel, so a failure names the kernel instead of the suite."""
-    from miniworld_engine.autotune.run_all import check_one
+@pytest.mark.parametrize(("kernel", "checker", "row"), _declared(),
+                         ids=[k for k, _, _ in _declared()])
+def test_kernel_matches_its_reference(kernel, checker, row):
+    """One test per kernel, so a failure names the kernel instead of the suite.
 
-    ok, detail = check_one(checker)
+    The band is the kernel's own (`registry.csv`'s `rtol`), not a constant in this file: one band
+    for all 99 is the weakest kernel's tolerance applied to every other one.
+    """
+    from miniworld_engine.autotune.run_all import check_one, declared_rtol
+
+    ok, detail = check_one(checker, declared_rtol(row))
     if not ok and _is_arch_gated(detail):
         pytest.skip(f"not runnable on this device: {detail}")
     assert ok, f"{kernel}: {detail}"

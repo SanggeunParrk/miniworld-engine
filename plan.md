@@ -13,7 +13,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P0a | D1 | plot-style entries orphaned by the label rename | **done** |
 | P0b | E1 | prove `build all` end to end | todo |
 | P1 | A3 | ship `py.typed` | **done** |
-| P2 | B2 | per-kernel numerical tolerance | todo |
+| P2 | B2 | per-kernel numerical tolerance | **P2a done**, P2b needs a GPU |
 | P3 | B4 | ragged/fp32 shape modes become a gate | todo |
 | P4 | D5 | the `configs` shadowing landmine | **done** |
 | P5 | F3 | delete the orphan pilot builder | **done** |
@@ -21,7 +21,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P7 | A5 | hardware support matrix, checked | todo |
 | P8 | B5 | determinism statement + test | todo |
 | P9 | C2 | quoted numbers traceable to a table | todo |
-| P10 | D4 | end the `configs/grid` duplication | todo (premise corrected) |
+| P10 | D4 | end the `configs/grid` duplication | **done** |
 | P11 | F4 | stale reference docs | **done** |
 | P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
 | P13 | F6 | CONTRIBUTING | **done** |
@@ -129,6 +129,27 @@ Two sub-steps, because the second needs GPU evidence:
 **Done when.** P2a: a test that `check_one` reads the row's band, with a synthetic row proving a
 tighter band actually fails. P2b: no row left at the default band unless its measured `rel`
 justifies it, recorded in the commit.
+
+**P2a done.** `registry.csv` gains an `rtol` column (blank = the documented default, never
+"unchecked"); `check_one(check, rtol=None)` compares against it and names the band in the detail
+string, so a failure says what it was measured against; `declared_rtol(row)` raises on a malformed
+or negative value rather than falling back to the loose default -- a typo that widens a kernel's
+tolerance is the thing this column exists to prevent. `tests/test_declared_tolerance.py` covers it
+with synthetic checkers, so the mechanism is verified without a device.
+
+**And it found a real bug, which is the argument for the whole item.** The old code read:
+
+    worst = max(worst, rel)
+    ok = worst < 5e-2 and worst == worst      # `worst == worst` "rejects NaN"
+
+`max()` returns its first argument when the comparison is false, and `nan > 0.0` is false, so
+`max(0.0, nan)` is `0.0`. The NaN was discarded before the guard ever saw it: **a kernel writing
+NaN scored 0.0 and passed every band**, including a declared 0. Non-finiteness is now checked per
+pair, at the point it is computed, and reported as `NON-FINITE`. Note the consequence for the
+validation run in flight: it is testing `7af55ce`, before this fix, so it cannot fail a NaN-writing
+kernel. `test_numerical` must be re-run after this merges.
+
+**P2b** stays open: calibrating each row's band needs the measured `rel` from a good GPU run.
 
 ---
 
@@ -278,8 +299,21 @@ is only one copy. Correct the README sentence either way.
 still resolves its config set in a source checkout, and a test covers the fallback (short name with
 no root copy -> packaged set).
 
-**Blocked on:** nothing, but it touches `src/` and `tests/`, so not while a GPU job is reading this
-worktree.
+**Done.** `resolve_config_dir` now tries, in order: an explicit path, `repo/configs/<name>`, then
+the packaged `autotune/configs/<name>`. The root `configs/grid` (91 CSVs, verified byte-identical
+to the packaged copy first) is deleted, and both readers -- the CLI's short name and
+`configs.default_config_dir()` -- resolve to the one remaining copy. `default_config_dir` loses its
+repo-root branch and the "neither the packaged nor the repo-root" warning loses half its text.
+
+The byte-identity test is replaced by the stronger `test_grid_exists_in_exactly_one_place`, plus
+two that pin the resolution order: a short name with no repo-root copy finds the packaged set, and
+a set present in both resolves to the repo's (the A-B sets live only there, and that is where an
+experiment edits one).
+
+**What actually caused the duplication**, since the README blamed a leftover: the generator writes
+the root copy (`gen_shards.py --out configs/grid`) and the packaged one was a manual copy of it.
+One writer, two destinations. `gen_shards.py`'s usage line and the two `tools/kernel-audit`
+launchers that exported `MINIWORLD_CONFIG_DIR=$R/configs/grid` now point at the package.
 
 ---
 

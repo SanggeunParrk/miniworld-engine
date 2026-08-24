@@ -245,14 +245,11 @@ def default_config_dir() -> Path | None:
     'BLOCK_M1' and 'BLOCK_K'`` -- a message that names neither the op nor the cause. Every entry
     point in this repo happens to export it, which is exactly why that went unnoticed.
     """
+    # One place. `grid` used to exist here AND at the repo root, byte-identical and asserted so,
+    # because `cli.resolve_config_dir` mapped a short name only against the repo root. The
+    # resolver falls back here now, so the root copy is gone and this is the single home.
     packaged = Path(__file__).parent / "configs" / "grid"
-    if packaged.is_dir():
-        return packaged
-    # Editable install / repo checkout: the sets still live at the repo root.
-    repo = Path(__file__).resolve().parents[3] / "configs" / "grid"
-    if repo.is_dir():
-        return repo
-    return None
+    return packaged if packaged.is_dir() else None
 
 
 _ENV_DIR = os.environ.get("MINIWORLD_CONFIG_DIR", "").strip()
@@ -265,7 +262,7 @@ else:
     if _DIR is None:
         warnings.warn(
             "[miniworld.autotune] no autotune config set found: MINIWORLD_CONFIG_DIR is unset and "
-            "neither the packaged nor the repo-root `configs/grid` exists. Every triton kernel "
+            "the packaged `autotune/configs/grid` is missing. Every triton kernel "
             "will fail at its first launch with `dynamic_func() missing N required positional "
             "arguments` naming its tile axes. Set MINIWORLD_CONFIG_DIR to a config set BEFORE "
             "importing any kernel module.",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import collections
 import importlib
+import math
 import sys
 import traceback
 
@@ -33,19 +34,34 @@ def _resolve(path: str):
     return getattr(importlib.import_module(mod_name), fn_name)
 
 
-def check_one(check: str) -> tuple[bool, str]:
+#: The band a kernel is held to when its registry row does not name one. bf16 carries ~3 decimal
+#: digits and this is what the bench already accepts for these ops.
+#:
+#: It used to be the ONLY band, applied to all 99 checkers -- which is the weakest kernel's
+#: tolerance applied to a transpose, a mask fold and a gate multiply. A reduction-order change
+#: costing 1e-3 is invisible under it, and 1e-3 on a residual accumulated over 48 blocks is not
+#: invisible in the model. A kernel that needs this much slack should say so in `registry.csv`,
+#: where a reviewer sees it; `rtol` is that column.
+DEFAULT_RTOL = 5e-2
+
+
+def check_one(check: str, rtol: float | None = None) -> tuple[bool, str]:
     """Run a checker and compare what the kernel produced against a torch reference.
 
     A checker returns ``(actual, expected)`` -- one tensor pair, or a dict of them. Launching a
     kernel proves it runs; it does not prove the number is right. 56 kernels reached by a driver
     had no reference at all, so "ok" meant nothing more than "did not raise".
+
+    `rtol` is the kernel's declared band (`registry.csv`'s `rtol` column); None means
+    :data:`DEFAULT_RTOL`. The band is reported in the detail string either way, so a failure says
+    what it was measured against instead of leaving the reader to find the constant.
     """
     try:
         got = _resolve(check)()
     except Exception as exc:
         return False, f"checker raised {type(exc).__name__}: {str(exc).strip().splitlines()[0][:150]}"
     pairs = got if isinstance(got, dict) else {"out": got}
-    worst, detail = 0.0, []
+    worst, detail, nonfinite = 0.0, [], []
     for name, pair in pairs.items():
         actual, expected = pair
         a, e = actual.float(), expected.float()
@@ -54,11 +70,45 @@ def check_one(check: str) -> tuple[bool, str]:
         num = (a - e).abs().max().item()
         den = e.abs().max().item() or 1.0
         rel = num / den
-        worst = max(worst, rel)
+        # Non-finite is checked HERE, per pair, and not by testing `worst` afterwards. `max()`
+        # returns the first argument when the comparison is false, and `nan > 0.0` is false -- so
+        # `max(0.0, nan)` is 0.0 and the NaN vanishes. The previous `worst == worst` guard read
+        # like a NaN check and could never fire: a kernel writing NaN scored 0.0 and passed every
+        # band, including a declared 0.
+        if not math.isfinite(rel):
+            nonfinite.append(f"{name}={rel}")
+        else:
+            worst = max(worst, rel)
         detail.append(f"{name}={rel:.2e}")
-    # bf16 carries ~3 decimal digits; 5e-2 is the band the bench already accepts for these ops
-    ok = worst < 5e-2 and worst == worst
-    return ok, ("rel " + " ".join(detail)) if detail else "checker returned nothing"
+    if not detail:
+        return False, "checker returned nothing"
+    band = DEFAULT_RTOL if rtol is None else rtol
+    suffix = f" (band {band:.0e}{'' if rtol is None else ' declared'})"
+    if nonfinite:
+        return False, f"NON-FINITE {' '.join(nonfinite)} | rel {' '.join(detail)}{suffix}"
+    return worst <= band, f"rel {' '.join(detail)}{suffix}"
+
+
+def declared_rtol(row: dict) -> float | None:
+    """The band this registry row declares, or None for :data:`DEFAULT_RTOL`.
+
+    Blank means "the default applies", not "no band": every kernel with a checker is held to
+    something. A malformed value is an error rather than a silent fall back to the default -- a
+    typo that widens a kernel's tolerance is exactly what this column exists to prevent.
+    """
+    raw = (row.get("rtol") or "").strip()
+    if not raw:
+        return None
+    try:
+        band = float(raw)
+    except ValueError:
+        msg = (f"{row.get('kernel')}: rtol={raw!r} in registry.csv is not a number. Leave it blank "
+               f"for the default ({DEFAULT_RTOL:.0e}) or give a float, e.g. 1e-3.")
+        raise ValueError(msg) from None
+    if band < 0:
+        msg = f"{row.get('kernel')}: rtol={band} is negative"
+        raise ValueError(msg)
+    return band
 
 
 def run_one(driver: str) -> tuple[bool, str]:
@@ -110,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         ok, detail = run_one(drv)
         chk = (r.get("check") or "").strip()
         if ok and chk:
-            ok, cdetail = check_one(chk)
+            ok, cdetail = check_one(chk, declared_rtol(r))
             detail = cdetail if ok else f"WRONG NUMBERS: {cdetail}"
         elif ok:
             detail = "launched (no reference -- numbers unverified)"
