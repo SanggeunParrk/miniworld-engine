@@ -20,7 +20,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P6 | A4 | deprecation policy with a mechanism | **done** |
 | P7 | A5 | hardware support matrix, checked | **done** |
 | P8 | B5 | determinism statement + test | **test written**, statement pending its first run |
-| P9 | C2 | quoted numbers traceable to a table | todo |
+| P9 | C2 | quoted numbers traceable to a table | **done** (scope corrected) |
 | P10 | D4 | end the `configs/grid` duplication | **done** |
 | P11 | F4 | stale reference docs | **done** |
 | P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
@@ -369,6 +369,30 @@ in some committed table (within float tolerance), or is explicitly marked as com
 was not committed. Extend to `docs/` only if the first is cheap.
 
 **Done when.** The test passes, and every claim that cannot be traced is either sourced or marked.
+
+**Scope corrected first.** The item assumed `benchmarks/RESULTS.md` quotes numbers. It quotes
+**zero** — measured. The real distribution: 1121 figures across `docs/`, but the overwhelming
+majority are in `docs/kernel-optimization/**/v*.md`, which are dated per-version logs ("on this
+date, v3 measured 1.75 ms"). A record does not go stale; a reference does. The live surface is 24
+figures: README 1, CHANGELOG 6, `docs/benchmarking-cautions.md` 17.
+
+**And the worst offender was the doc about not mis-measuring.** `benchmarking-cautions.md` carried
+17 latencies and named a device **once**, in a file whose stated purpose is "read this before
+trusting any trimul number".
+
+**Done, enforced at file level rather than per claim, and that is a deliberate weakening.**
+Per-claim attribution is not retroactively recoverable: back-filling would mean guessing which card
+a 2026-07 trimul run used, which is worse than saying it is unknown. So the rule is that a live doc
+making performance claims must state the hardware behind them *somewhere* — satisfied by a
+provenance paragraph, including one that admits which numbers are unattributed and why.
+
+`benchmarking-cautions.md` now opens with exactly that: the `compile_wrap` table is named as
+**A6000 (sm86), L=384, d_pair=128, bf16, reproduced 3x**; the rest is marked as evidence for the
+*effect* rather than figures to compare against, kept because the lesson survives the missing
+metadata and flagged rather than back-filled. `tests/test_performance_claims.py` holds the seven
+declared live docs to it, verified to bite (stripping the device names fails it with the 17 figures
+named), plus a vacuity guard and a check that the excluded record tree still exists — if it
+vanishes, the record/reference reasoning no longer applies and someone should notice.
 
 ---
 

@@ -7,6 +7,21 @@ easy to mis-measure. Read this before trusting any trimul number.
 
 See also `docs/benchmarks.md` for the harness/CSV/plot convention.
 
+## Provenance of the numbers in this file
+
+Every figure below is a measurement, and a latency without a machine is not a result
+(`docs/library-standards.md` C1). Where a section names its device, that is the device. Where it
+does not, **the device was not recorded at the time** — those numbers are evidence for the *effect*
+being described (a regime changes the answer; a fold removes a pass) and must not be compared
+against a number measured elsewhere. They are kept rather than deleted because the lesson survives
+the missing metadata; they are flagged rather than back-filled because guessing which card a
+2026-07 trimul run used would be worse than saying it is unknown.
+
+Known: the `compile_wrap` table under §2 ("What changed, and why the conclusion flipped") is an
+**RTX A6000 (sm86)**, L=384, `d_pair=128`, bf16,
+pairformer block, reproduced three times. The committed result tables under `benchmarks/**/results/`
+carry their device per row and are the place to get a comparable figure.
+
 ---
 
 ## 1. The measurement *regime* is the #1 variable — pick it deliberately
