@@ -74,7 +74,7 @@ def apply_stability_workarounds() -> list[str]:
     # Deliberate monkeypatch of a module-level function; rebinding one is never
     # assignment-compatible to a checker, because the declared type of the name IS that
     # one function.
-    _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005  # ty: ignore[invalid-assignment]
+    _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005
     notes.append("triangle-attention gate forced non-fused (cudagraph-capturable, faster here)")
     return notes
 

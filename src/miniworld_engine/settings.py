@@ -215,7 +215,7 @@ class Settings:
         return kernel in self.autotune_kernels
 
 
-def _compile_wrap_from_env() -> str:
+def _compile_wrap_from_env() -> Literal["disable", "custom_op"]:
     """``MINIWORLD_COMPILE_WRAP``, the one setting that has to come from the environment.
 
     ``kernels._compile`` reads ``compile_wrap`` when the decorator RUNS, i.e. at kernel-module
@@ -229,14 +229,16 @@ def _compile_wrap_from_env() -> str:
     raw = os.environ.get("MINIWORLD_COMPILE_WRAP", "").strip()
     if not raw:
         return "custom_op"
-    if raw not in ("disable", "custom_op"):
-        msg = (f"MINIWORLD_COMPILE_WRAP={raw!r} is not a compile_wrap mode; "
-               f"expected 'disable' or 'custom_op'")
-        raise ValueError(msg)
-    return raw
+    if raw == "custom_op":
+        return "custom_op"
+    if raw == "disable":
+        return "disable"
+    msg = (f"MINIWORLD_COMPILE_WRAP={raw!r} is not a compile_wrap mode; "
+           f"expected 'disable' or 'custom_op'")
+    raise ValueError(msg)
 
 
-_ACTIVE = Settings(compile_wrap=_compile_wrap_from_env())  # noqa: E501
+_ACTIVE = Settings(compile_wrap=_compile_wrap_from_env())
 
 
 def current() -> Settings:

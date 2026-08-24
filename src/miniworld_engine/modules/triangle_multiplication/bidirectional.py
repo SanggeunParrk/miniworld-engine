@@ -276,12 +276,17 @@ class BidirectionalTriangleMultiplication(nn.Module):
             m = mask.unsqueeze(-1) & mask.unsqueeze(-2)  # [B, L, L]
             row_scale = m.reshape(-1).to(pair.dtype)     # [M]
         if major < 10:  # sm90 bidir_forward fuses residual+dropout in the gate
+            # `_fwd` is one of two functions picked by arch above, and only the sm90 one takes
+            # add_residual/dropscale -- which is what this branch is. ty cannot correlate the
+            # `major < 10` guard with which function `_fwd` is bound to, so it checks the call
+            # against the union of both signatures and flags the sm100 variant.
             return _fwd(
                 pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
                 self.ln_pair.weight, self.ln_pair.bias,
                 self.ln_out.weight, self.ln_out.bias,
                 self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
-                add_residual=add_residual, dropscale=dropscale,
+                add_residual=add_residual,  # ty: ignore[unknown-argument]
+                dropscale=dropscale,  # ty: ignore[unknown-argument]
             )
         out = _fwd(
             pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,

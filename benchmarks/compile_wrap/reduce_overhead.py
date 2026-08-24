@@ -52,9 +52,24 @@ def skip_report() -> str:
 
 
 def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> None:
+    """Time one configuration and report it with inductor's cudagraph counters."""
     dynamo.reset()
     counters.clear()
     torch.cuda.empty_cache()
+    try:
+        ms = _measure(mode, manual_graph, train)
+        print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
+              f"time={ms:.4f} ms  [{skip_report()}]", flush=True)
+    except Exception as e:                                            # noqa: BLE001
+        print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
+              f"FAILED {type(e).__name__}: {str(e)[:220]}  [{skip_report()}]", flush=True)
+    finally:
+        # The model and its activations are locals of _measure, so they are already gone by here
+        # and empty_cache can actually hand the memory back before the next configuration builds.
+        torch.cuda.empty_cache()
+
+
+def _measure(mode: str | None, manual_graph: bool, train: bool) -> float:
     model = build()
     pair = torch.randn(1, L, L, D, device=DEV, dtype=DT, requires_grad=train)
     fn = model if mode == "eager" else torch.compile(model, mode=mode)
@@ -72,56 +87,43 @@ def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> None:
         for p in model.parameters():
             p.grad = None
 
-    try:
-        for _ in range(6):                        # warm + compile + cudagraph-tree record
+    for _ in range(6):                        # warm + compile + cudagraph-tree record
+        step()
+        zero()
+
+    if manual_graph:
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                step()
+        torch.cuda.current_stream().wait_stream(side)
+        zero()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            step()
+        body = g.replay
+    else:
+        def body():
             step()
             zero()
 
-        if manual_graph:
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                for _ in range(3):
-                    step()
-            torch.cuda.current_stream().wait_stream(side)
-            zero()
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-                step()
-            body = g.replay
-        else:
-            def body():
-                step()
-                zero()
-
+    torch.cuda.synchronize()
+    times = []
+    for _ in range(args.iters):
+        a, b = torch.cuda.Event(True), torch.cuda.Event(True)
+        a.record()
+        body()
+        b.record()
         torch.cuda.synchronize()
-        times = []
-        for _ in range(args.iters):
-            a, b = torch.cuda.Event(True), torch.cuda.Event(True)
-            a.record()
-            body()
-            b.record()
-            torch.cuda.synchronize()
-            times.append(a.elapsed_time(b))
-        ms = statistics.median(times)
-        print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
-              f"time={ms:.4f} ms  [{skip_report()}]", flush=True)
-    except Exception as e:                                            # noqa: BLE001
-        print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
-              f"FAILED {type(e).__name__}: {str(e)[:220]}  [{skip_report()}]", flush=True)
-    finally:
-        # Rebind rather than `del`: the closures above hold cells for these names, and deleting
-        # them makes every reference inside `step`/`zero` read as unbound to a static checker.
-        # They have already run by here; dropping the last reference is all that is needed for
-        # empty_cache to actually give the memory back before the next config builds a model.
-        model = pair = fn = None
-        torch.cuda.empty_cache()
+        times.append(a.elapsed_time(b))
+    return statistics.median(times)
 
 
-for train in (False, True):
-    run("eager",                 "eager",           False, train)
-    run("eager+manualgraph",     "eager",           True,  train)
-    run("compile",               None,              False, train)
-    run("compile+manualgraph",   None,              True,  train)
-    run("reduce-overhead",       "reduce-overhead", False, train)
-    run("max-autotune",          "max-autotune",    False, train)
+for train_mode in (False, True):
+    run("eager",               "eager",           False, train_mode)
+    run("eager+manualgraph",   "eager",           True,  train_mode)
+    run("compile",             None,              False, train_mode)
+    run("compile+manualgraph", None,              True,  train_mode)
+    run("reduce-overhead",     "reduce-overhead", False, train_mode)
+    run("max-autotune",        "max-autotune",    False, train_mode)

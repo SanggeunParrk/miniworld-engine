@@ -183,10 +183,10 @@ def _declared_op_names() -> dict[str, str]:
             fname = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
             if fname not in ("opaque", "custom_op"):
                 continue
-            name = None
+            name: str | None = None
             for kw in node.keywords:
                 if kw.arg == "name" and isinstance(kw.value, ast.Constant):
-                    name = kw.value.value
+                    name = str(kw.value.value)
             if name is None and fname == "custom_op" and node.args:
                 first = node.args[0]
                 if isinstance(first, ast.Constant):
