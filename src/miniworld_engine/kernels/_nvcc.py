@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 @functools.lru_cache(maxsize=1)
@@ -182,3 +183,94 @@ def host_flags() -> list[str]:
             "GCC <= 13 install is required."
         )
     return ["-ccbin", cc] if cc else []
+
+
+# ---------------------------------------------------------------------------------------------
+# JIT extension loading, with the two failure modes that cost five GPU-hours.
+#
+# `torch.utils.cpp_extension.load` serialises concurrent builds with a `FileBaton` on
+# `<build dir>/lock`, and `FileBaton.wait()` polls for that file to disappear FOREVER, with no
+# timeout and no message. A build that is killed -- a cancelled Slurm job, a Ctrl-C -- leaves the
+# lock behind, and every later run on that machine blocks on it indefinitely.
+#
+# That happened. A run left a 13-hour-old lock in `layer_norm_cuda/`; three subsequent GPU jobs
+# (45 min killed, 4 h timed out, one stalled at test 42 of 100) all sat on it, and all three looked
+# exactly like "slow". Deleting the file moved the stalled job forward within 20 seconds.
+#
+# So: reclaim a lock that is too old to be real, and turn an unbounded wait into an error that
+# names the file. A message beats a hang, and the remedy is one `rm`.
+# ---------------------------------------------------------------------------------------------
+
+#: A lock older than this cannot belong to a live build -- the longest real build here is a few
+#: minutes -- so it is a leftover and gets reclaimed. `build --reclaim` makes the same judgement
+#: about the builder's own O_EXCL claims.
+STALE_LOCK_SECONDS = 1800.0
+
+#: How long to wait for a FRESH lock (another process really is building) before giving up. Long
+#: enough for a genuine four-arch nvcc build, short enough that a job notices inside its time limit.
+LOCK_WAIT_SECONDS = 600.0
+
+
+def _build_lock(name: str) -> Path | None:
+    """The lock file `torch.utils.cpp_extension.load` will use for `name`, if it can be located."""
+    try:
+        from torch.utils.cpp_extension import _get_build_directory
+    except ImportError:      # torch too old / not installed: let `load` do whatever it does
+        return None
+    try:
+        return Path(_get_build_directory(name, verbose=False)) / "lock"
+    except Exception:        # locating the lock must never be what fails a build
+        return None
+
+
+def clear_stale_lock(lock: Path, stale_after: float = STALE_LOCK_SECONDS) -> bool:
+    """Delete `lock` if it is too old to belong to a running build. True if it was reclaimed."""
+    import time
+
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return False
+    if age < stale_after:
+        return False
+    try:
+        lock.unlink()
+    except OSError:
+        return False
+    print(f"[miniworld.nvcc] reclaimed a stale build lock ({age / 60:.0f} min old): {lock}",
+          file=sys.stderr)
+    return True
+
+
+def wait_for_lock(lock: Path, limit: float = LOCK_WAIT_SECONDS) -> None:
+    """Wait for a fresh `lock` to clear, or raise naming it. Never block indefinitely."""
+    import time
+
+    if not lock.exists():
+        return
+    print(f"[miniworld.nvcc] another process is building this extension; waiting up to "
+          f"{limit / 60:.0f} min for {lock}", file=sys.stderr)
+    deadline = time.time() + limit
+    while lock.exists():
+        if time.time() > deadline:
+            msg = (f"waited {limit / 60:.0f} min for another process's build lock and it is still "
+                   f"there:\n    {lock}\n"
+                   f"If no build is running, it is a leftover from a killed one -- torch waits on "
+                   f"it forever, which is why this raises instead. Remove it:\n"
+                   f"    rm {lock}")
+            raise TimeoutError(msg)
+        time.sleep(2.0)
+
+
+def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
+    """`torch.utils.cpp_extension.load`, but it cannot hang on a leftover lock.
+
+    Reclaims a lock too old to be real, then bounds the wait on a fresh one. Correctness still
+    comes from torch's own baton: this only decides how long to tolerate it.
+    """
+    from torch.utils.cpp_extension import load
+
+    lock = _build_lock(name)
+    if lock is not None and not clear_stale_lock(lock):
+        wait_for_lock(lock)
+    return load(name=name, sources=sources, **kwargs)

@@ -272,9 +272,12 @@ def _transition_cuda_ext():
     """JIT-build and return the vendored transition_cuda extension."""
     from pathlib import Path
 
-    from torch.utils.cpp_extension import load
-
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
+    from miniworld_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        gencodes,
+        host_flags,
+        load_extension,
+    )
 
     ensure_cuda_home()
     # `parents[1]`, not `parent`: this module used to be `kernels/drivers_trans.py`, where
@@ -283,7 +286,7 @@ def _transition_cuda_ext():
     # `kernels/drivers/transition/cuda/transition_cuda.cpp` -- a path that has never existed. It
     # imported fine and raised FileNotFoundError only when the driver actually ran.
     d = Path(__file__).parents[1] / "transition" / "cuda"
-    return load(
+    return load_extension(
         name="transition_cuda_ext_v2",
         sources=[str(d / "transition_cuda.cpp"), str(d / "transition_cuda_kernel.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "--use_fast_math",

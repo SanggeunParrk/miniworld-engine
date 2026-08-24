@@ -26,7 +26,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
 | P13 | F6 | CONTRIBUTING | **done** |
 | P14 | A4 | the declared Python floor is untested | **done** |
-| P15 | E2 | a stale JIT build lock hangs the GPU suite forever | todo |
+| P15 | E2 | a stale JIT build lock hangs the GPU suite forever | **done** (lazy-load half deferred) |
 | P16 | B1 | `["ALL"]` lint exemption hid a guaranteed NameError | **done** |
 | P17 | E2 | `run_all` reported "wrong card" as "wrong answer" | **done** |
 | P18 | B1 | opcheck asserted a contract the design declines | **done** |
@@ -555,6 +555,31 @@ Three separate faults, and the third is the one that matters:
 
 **Done when.** A stale lock produces an error naming it within ~2 minutes instead of a hang, and
 `python -c "import miniworld_engine.kernels.layernorm"` runs no compiler.
+
+**Done — the hang half.** `kernels/_nvcc.load_extension()` wraps torch's `load`: a lock older than
+`STALE_LOCK_SECONDS` (30 min — longer than any real build here) is reclaimed with a note, and a
+wait on a FRESH lock is bounded by `LOCK_WAIT_SECONDS` (10 min) and then raises **naming the file
+and giving the `rm`**. Correctness still comes from torch's own baton; this only decides how long
+to tolerate it. All four call sites now go through it, and
+`test_every_jit_load_goes_through_the_guard` fails if a new one imports torch's `load` directly —
+a guard is worth nothing if a call site can bypass it.
+
+`tests/test_jit_build_lock.py` (9 cases) covers the boundary in both directions. The one that
+matters as much as the reclaim is `test_a_fresh_lock_is_left_alone`: reclaiming a lock a live build
+owns would corrupt a concurrent compile, which is a worse failure than the one being fixed.
+
+**Deferred — the lazy-load half, deliberately.** Both `layernorm/cuda/__init__.py` and
+`transition/cuda/__init__.py` still build at IMPORT time, and `transition/cuda` builds three
+extensions eagerly, one of them `sm_90a`-only, so importing that module on an A6000 fails outright.
+Making them lazy is right (it is also A2, and every consumer already imports them inside a function
+body, so nothing needs the eager build) — but it changes import semantics for vendored CUDA paths
+that only a GPU run can verify, and I have no green GPU run to verify against yet. Landing the hang
+fix alone is the smaller, checkable change; the lazy conversion goes with the run that can confirm
+it.
+
+**Incidental find, not fixed:** `transition/cuda/__init__.py` passes
+`-I/home/psk6950/mathdx_dl/extracted/...` — a personal absolute path baked into a build. It works
+for one user on one machine. -> follow-up.
 
 **Operational note for whoever hits this next:**
 `rm ~/.cache/torch_extensions/py312_cu128/*/lock`

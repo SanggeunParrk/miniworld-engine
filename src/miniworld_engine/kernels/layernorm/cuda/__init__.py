@@ -3,15 +3,14 @@
 
 from pathlib import Path
 
-from torch.utils.cpp_extension import load
 
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags
+from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 ensure_cuda_home()
 
 _dir = Path(__file__).parent
 
-layer_norm_cuda = load(
+layer_norm_cuda = load_extension(
     name="layer_norm_cuda",
     sources=[str(_dir / "layer_norm_cuda_kernel.cu")],
     # Explicit -gencode so the JIT build never relies on torch's arch autodetect

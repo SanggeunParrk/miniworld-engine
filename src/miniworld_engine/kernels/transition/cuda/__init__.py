@@ -2,15 +2,14 @@
 
 from pathlib import Path
 
-from torch.utils.cpp_extension import load
 
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags
+from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 ensure_cuda_home()
 
 _dir = Path(__file__).parent
 
-transition_b2b_cuda = load(
+transition_b2b_cuda = load_extension(
     name="transition_b2b_cuda",
     sources=[str(_dir / "transition_b2b_kernel.cu")],
     extra_cuda_cflags=[
@@ -35,7 +34,7 @@ transition_b2b_cuda = load(
     verbose=False,
 )
 
-transition_expand_gate_cuda = load(
+transition_expand_gate_cuda = load_extension(
     name="transition_expand_gate_cuda",
     sources=[str(_dir / "transition_expand_gate_kernel.cu")],
     extra_cuda_cflags=[
@@ -60,7 +59,7 @@ transition_expand_gate_cuda = load(
 )
 
 
-transition_gatebwd_cuda = load(
+transition_gatebwd_cuda = load_extension(
     name="transition_gatebwd_cuda",
     sources=[str(_dir / "transition_gatebwd_kernel.cu")],
     extra_cuda_cflags=[
