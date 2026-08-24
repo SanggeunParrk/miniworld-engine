@@ -1,103 +1,25 @@
-run_name,target_kind,target,device,torch_version,cuda_version,metric,unit,mode,compiled,cudagraph,precision,allow_tf32,sweep_axis,implementation,implementation_type,ln_implementation,input_dtype,parameter_dtype,execution_path,reference,output_max_abs,output_rel_frob,output_cosine,grad_max_abs,grad_rel_frob,grad_cosine,n_layers,n_augment,mask_prob,seq_len,tokens,batch_size,d_pair,d_single,d_single_token,d_single_atom,d_pair_atom,status,error,value
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,1.0000001192092896,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.8304640054702759
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030916654504835606,0.999995231628418,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.158720001578331
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029789151158183813,0.9999955892562866,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.20684799551963806
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
-            bias += tl.dot(cond_aff, bias_w)
-
-        scale += scale_b[None, :]
-
-        if USE_BF16:
-            scale = scale.to(tl.bfloat16)
-            bias = bias.to(tl.bfloat16)
-        elif USE_FP16:
-            scale = scale.to(tl.float16)
-            bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
-               ^",
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.9999998807907104,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,1.4387199878692627
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030904458835721016,0.9999952912330627,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,0.27238398790359497
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029777265153825283,0.9999956488609314,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,0.35737600922584534
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,512,262144,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
-            bias += tl.dot(cond_aff, bias_w)
-
-        scale += scale_b[None, :]
-
-        if USE_BF16:
-            scale = scale.to(tl.bfloat16)
-            bias = bias.to(tl.bfloat16)
-        elif USE_FP16:
-            scale = scale.to(tl.float16)
-            bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
-               ^",
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,1.0,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,2.2312960624694824
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.003090818179771304,0.9999951720237732,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,0.41574400663375854
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029777565505355597,0.9999955296516418,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,0.5488640069961548
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,640,409600,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
-            bias += tl.dot(cond_aff, bias_w)
-
-        scale += scale_b[None, :]
-
-        if USE_BF16:
-            scale = scale.to(tl.bfloat16)
-            bias = bias.to(tl.bfloat16)
-        elif USE_FP16:
-            scale = scale.to(tl.float16)
-            bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
-               ^",
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.9999998211860657,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,3.220479965209961
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030907115433365107,0.9999951720237732,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,0.6031360030174255
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029780142940580845,0.9999954700469971,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,0.7905279994010925
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,768,589824,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
-            bias += tl.dot(cond_aff, bias_w)
-
-        scale += scale_b[None, :]
-
-        if USE_BF16:
-            scale = scale.to(tl.bfloat16)
-            bias = bias.to(tl.bfloat16)
-        elif USE_FP16:
-            scale = scale.to(tl.float16)
-            bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
-               ^",
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.9999997615814209,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,4.368383884429932
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.003090745536610484,0.9999951124191284,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,0.8151040077209473
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.002977801486849785,0.9999955296516418,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,1.0818560123443604
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,896,802816,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
-            bias += tl.dot(cond_aff, bias_w)
-
-        scale += scale_b[None, :]
-
-        if USE_BF16:
-            scale = scale.to(tl.bfloat16)
-            bias = bias.to(tl.bfloat16)
-        elif USE_FP16:
-            scale = scale.to(tl.float16)
-            bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
-               ^",
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.999999463558197,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,5.737472057342529
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030907790642231703,0.9999951124191284,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,1.0751999616622925
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029777572490274906,0.9999954104423523,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,1.4120960235595703
-adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,failed,"CompilationError: at 150:15:
-            bias += tl.dot(cond_aff, bias_w)
-
-        scale += scale_b[None, :]
-
-        if USE_BF16:
-            scale = scale.to(tl.bfloat16)
-            bias = bias.to(tl.bfloat16)
-        elif USE_FP16:
-            scale = scale.to(tl.float16)
-            bias = bias.to(tl.float16)
-
-        gate = tl.sigmoid(scale)
-               ^",
+run_name,target_kind,target,device,torch_version,cuda_version,metric,unit,mode,compiled,cudagraph,compile_wrap,precision,allow_tf32,sweep_axis,implementation,implementation_type,ln_implementation,input_dtype,parameter_dtype,execution_path,reference,output_max_abs,output_rel_frob,output_cosine,grad_max_abs,grad_rel_frob,grad_cosine,n_layers,n_augment,mask_prob,seq_len,tokens,batch_size,d_pair,d_single,d_single_token,d_single_atom,d_pair_atom,status,error,value
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,1.0000001192092896,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.8304640054702759
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030916654504835606,0.999995231628418,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.158720001578331
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029789151158183813,0.9999955892562866,,,,1,32,0.0,384,147456,1,128,384,768,128,16,ok,,0.20684799551963806
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,384,147456,1,128,384,768,128,16,failed,"CompilationError: at 150:15:            bias += tl.dot(cond_aff, bias_w)        scale += scale_b[None, :]        if USE_BF16:            scale = scale.to(tl.bfloat16)            bias = bias.to(tl.bfloat16)        elif USE_FP16:            scale = scale.to(tl.float16)            bias = bias.to(tl.float16)        gate = tl.sigmoid(scale)               ^",
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.9999998807907104,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,1.4387199878692627
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030904458835721016,0.9999952912330627,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,0.27238398790359497
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029777265153825283,0.9999956488609314,,,,1,32,0.0,512,262144,1,128,384,768,128,16,ok,,0.35737600922584534
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,512,262144,1,128,384,768,128,16,failed,"CompilationError: at 150:15:            bias += tl.dot(cond_aff, bias_w)        scale += scale_b[None, :]        if USE_BF16:            scale = scale.to(tl.bfloat16)            bias = bias.to(tl.bfloat16)        elif USE_FP16:            scale = scale.to(tl.float16)            bias = bias.to(tl.float16)        gate = tl.sigmoid(scale)               ^",
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,1.0,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,2.2312960624694824
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.003090818179771304,0.9999951720237732,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,0.41574400663375854
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029777565505355597,0.9999955296516418,,,,1,32,0.0,640,409600,1,128,384,768,128,16,ok,,0.5488640069961548
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,640,409600,1,128,384,768,128,16,failed,"CompilationError: at 150:15:            bias += tl.dot(cond_aff, bias_w)        scale += scale_b[None, :]        if USE_BF16:            scale = scale.to(tl.bfloat16)            bias = bias.to(tl.bfloat16)        elif USE_FP16:            scale = scale.to(tl.float16)            bias = bias.to(tl.float16)        gate = tl.sigmoid(scale)               ^",
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.9999998211860657,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,3.220479965209961
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030907115433365107,0.9999951720237732,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,0.6031360030174255
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029780142940580845,0.9999954700469971,,,,1,32,0.0,768,589824,1,128,384,768,128,16,ok,,0.7905279994010925
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,768,589824,1,128,384,768,128,16,failed,"CompilationError: at 150:15:            bias += tl.dot(cond_aff, bias_w)        scale += scale_b[None, :]        if USE_BF16:            scale = scale.to(tl.bfloat16)            bias = bias.to(tl.bfloat16)        elif USE_FP16:            scale = scale.to(tl.float16)            bias = bias.to(tl.float16)        gate = tl.sigmoid(scale)               ^",
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.9999997615814209,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,4.368383884429932
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.003090745536610484,0.9999951124191284,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,0.8151040077209473
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.002977801486849785,0.9999955296516418,,,,1,32,0.0,896,802816,1,128,384,768,128,16,ok,,1.0818560123443604
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,896,802816,1,128,384,768,128,16,failed,"CompilationError: at 150:15:            bias += tl.dot(cond_aff, bias_w)        scale += scale_b[None, :]        if USE_BF16:            scale = scale.to(tl.bfloat16)            bias = bias.to(tl.bfloat16)        elif USE_FP16:            scale = scale.to(tl.float16)            bias = bias.to(tl.float16)        gate = tl.sigmoid(scale)               ^",
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,pytorch,pytorch,,bfloat16,bfloat16,module.reference.torch,module.reference.torch,,0.0,0.999999463558197,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,5.737472057342529
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_inference,adaln_inference,,bfloat16,bfloat16,kernels.adaln.triton.inference,module.reference.torch,,0.0030907790642231703,0.9999951124191284,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,1.0751999616622925
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,adaln_fused3,adaln_fused3,,bfloat16,bfloat16,kernels.adaln.triton.fused3,module.reference.torch,,0.0029777572490274906,0.9999954104423523,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,ok,,1.4120960235595703
+adaln_n_layers=1_inference_time_bf16-mixed_compile_cudagraph-manual_seq_len_L_sweep,kernel,adaln,NVIDIA A100 80GB PCIe,2.10.0+cu128,12.8,time,ms,inference,True,manual,disable,bf16-mixed,True,seq_len,triton_adaln,triton_adaln,,,,,,,,,,,,1,32,0.0,1024,1048576,1,128,384,768,128,16,failed,"CompilationError: at 150:15:            bias += tl.dot(cond_aff, bias_w)        scale += scale_b[None, :]        if USE_BF16:            scale = scale.to(tl.bfloat16)            bias = bias.to(tl.bfloat16)        elif USE_FP16:            scale = scale.to(tl.float16)            bias = bias.to(tl.float16)        gate = tl.sigmoid(scale)               ^",

@@ -118,9 +118,22 @@ class BenchConfig(BaseModel):
     # graph-break cute/triton kernels). Module-scoped (optimizer/loss stay outside). Overrides
     # `compile` (capture is on the eager module). Modes:
     #   "manual"  — manual torch.cuda.graph capture of one static shape; what BUCKETED training
-    #               uses (one graph/bucket + per-step input copy_). Works for any impl. DEFAULT:
-    #               this is the deployment regime for the graph-breaking cute/triton kernels, so
-    #               it is the representative number; run cudagraph=disabled for the eager baseline.
+    #               uses (one graph/bucket + per-step input copy_). Works for any impl. DEFAULT.
+    #
+    #               The default's ORIGINAL justification was "this is the deployment regime for
+    #               the graph-breaking cute/triton kernels". That premise is gone: with
+    #               compile_wrap="custom_op" nothing graph-breaks, and measured at L=384 on an
+    #               A6000 the compile-only regime BEATS eager+manual-graph on the module that has
+    #               unfused work around its kernels — augmented_attention_atom inference 6.86 ms
+    #               vs 30.55 ms (4.46x), token training 9.21 vs 11.69 (1.27x) — while the
+    #               already-fused pair track is a wash (transition training 1.04x). A captured
+    #               graph removes LAUNCH overhead; it does not fuse, so it replays whatever eager
+    #               work there is. Which regime is "representative" therefore depends on the
+    #               module AND on being launch-bound, and MiniWorld's main config (n_recycle_max
+    #               > 1) cannot capture a graph at all.
+    #
+    #               The default is kept only so the 350 committed tables stay reproducible. Pick
+    #               the regime deliberately; do not read this default as a recommendation.
     #   "disabled" — no graph (compile or eager); host/launch overhead included (diagnostic).
     #   "graphed" — torch.cuda.make_graphed_callables (auto static buffers + input copy); the
     #               PAD-TO-MAX single-shape regime (e.g. fixed 384 crops / multi-GPU max-len).
@@ -2543,6 +2556,18 @@ def autotune_summary_path(results_dir: Path, run_name: str) -> Path:
     return results_dir / f"{run_name}_autotune_summary.txt"
 
 
+def _compile_wrap_now() -> str:
+    """``settings.compile_wrap`` as it stands, which is what the kernels registered under.
+
+    Read live rather than taken from a bench flag: the value is consumed at kernel-IMPORT time
+    (see kernels._compile), so by the time a row is written it is a fact about this process, not
+    a request that might not have been honoured.
+    """
+    from miniworld_engine import settings as _s  # noqa: PLC0415
+
+    return _s.current().compile_wrap
+
+
 CSV_FIELDS = [
     "run_name",
     "target_kind",
@@ -2555,6 +2580,12 @@ CSV_FIELDS = [
     "mode",
     "compiled",
     "cudagraph",
+    # WHICH compile_wrap produced the row. Every table committed before this column existed was
+    # measured with "disable" -- a graph break at every kernel entry -- and nothing said so, which
+    # is the same defect the `compiled` column had: a number whose regime is not recorded cannot
+    # be compared with a number measured in another one. Read from the live settings, not from a
+    # flag, because it is settings.compile_wrap at kernel-IMPORT time that decided what ran.
+    "compile_wrap",
     "precision",
     "allow_tf32",
     "sweep_axis",
@@ -2642,6 +2673,7 @@ def csv_row(
         "mode": mode_label(conf.mode),
         "compiled": actual_compiled_flag(conf),
         "cudagraph": conf.cudagraph,
+        "compile_wrap": _compile_wrap_now(),
         "precision": conf.precision,
         "allow_tf32": conf.allow_tf32,
         "sweep_axis": conf.sweep_axis,
@@ -2772,6 +2804,11 @@ def main(cfg: DictConfig) -> None:
         bench_args.append("compile")
     if conf.cudagraph != "disabled":
         bench_args.append(f"cudagraph-{conf.cudagraph}")
+    # ...and in the NAME too, not just the column: the run name is the CSV filename, so without
+    # this a custom_op run silently overwrites the disable run it was meant to be compared with.
+    _wrap = _compile_wrap_now()
+    if _wrap != "disable":
+        bench_args.append(f"wrap-{_wrap}")
     bench_args.append(conf.sweep_axis)
     if conf.name_suffix:
         bench_args.append(conf.name_suffix)
