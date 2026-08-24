@@ -5,11 +5,31 @@
       {
         "kwargs": {
           "BLOCK_K_NC": 16,
+          "BLOCK_K_NX": 16,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.028672000393271446,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 16,
           "BLOCK_K_NX": 64,
           "BLOCK_M1": 32
         },
         "ms": 0.02969600073993206,
         "num_stages": 10,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 16,
+          "BLOCK_K_NX": 16,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.03481600061058998,
+        "num_stages": 8,
         "num_warps": 1
       },
       {
@@ -28,18 +48,8 @@
           "BLOCK_K_NX": 16,
           "BLOCK_M1": 32
         },
-        "ms": 0.05632000043988228,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 16,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.07168000191450119,
-        "num_stages": 1,
+        "ms": 0.035840000957250595,
+        "num_stages": 6,
         "num_warps": 1
       }
     ],
@@ -112,6 +122,16 @@
           "BLOCK_K_NX": 16,
           "BLOCK_M1": 32
         },
+        "ms": 0.03174399957060814,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 16,
+          "BLOCK_K_NX": 16,
+          "BLOCK_M1": 32
+        },
         "ms": 0.03379200026392937,
         "num_stages": 4,
         "num_warps": 1
@@ -134,16 +154,6 @@
         },
         "ms": 0.05632000043988228,
         "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 16,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.0727040022611618,
-        "num_stages": 1,
         "num_warps": 1
       }
     ],
@@ -204,10 +214,10 @@
         "kwargs": {
           "BLOCK_K_NC": 16,
           "BLOCK_K_NX": 32,
-          "BLOCK_M1": 64
+          "BLOCK_M1": 32
         },
-        "ms": 0.03276799991726875,
-        "num_stages": 2,
+        "ms": 0.018432000651955605,
+        "num_stages": 5,
         "num_warps": 4
       },
       {
@@ -216,8 +226,28 @@
           "BLOCK_K_NX": 16,
           "BLOCK_M1": 32
         },
-        "ms": 0.03379200026392937,
+        "ms": 0.026623999699950218,
         "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 16,
+          "BLOCK_K_NX": 16,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.026623999699950218,
+        "num_stages": 8,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K_NC": 16,
+          "BLOCK_K_NX": 32,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.026623999699950218,
+        "num_stages": 6,
         "num_warps": 1
       },
       {
@@ -226,29 +256,9 @@
           "BLOCK_K_NX": 16,
           "BLOCK_M1": 32
         },
-        "ms": 0.03891199827194214,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 16,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.05632000043988228,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_NC": 16,
-          "BLOCK_K_NX": 16,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.0727040022611618,
-        "num_stages": 1,
-        "num_warps": 1
+        "ms": 0.028672000393271446,
+        "num_stages": 6,
+        "num_warps": 2
       }
     ],
     "bfloat16|NC=128,NX=128,shape_key=8192": [
@@ -304,12 +314,13 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "adaln_fwd_triton",
   "op_identity": "b516ebdea1fd",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:52+00:00",
+    "built_utc": "2026-08-23T23:43:21+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

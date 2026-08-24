@@ -170,12 +170,13 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "gated_projection_gate_inplace_flat_triton",
   "op_identity": "8e2291dbf8af",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:53+00:00",
+    "built_utc": "2026-08-23T23:43:24+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

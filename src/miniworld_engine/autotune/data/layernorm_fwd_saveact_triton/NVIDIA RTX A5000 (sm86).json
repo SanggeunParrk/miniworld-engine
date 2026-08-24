@@ -12,7 +12,110 @@
         "num_warps": 1
       }
     ],
-    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=128": [
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=1048576": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.7526400089263916,
+        "num_stages": 1,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.7526400089263916,
+        "num_stages": 3,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.7526400089263916,
+        "num_stages": 5,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.7526400089263916,
+        "num_stages": 6,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.7536640167236328,
+        "num_stages": 4,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=147456": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 32
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 64
+        },
+        "ms": 0.10956799983978271,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.11059200018644333,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=16384": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.016383999958634377,
+        "num_stages": 1,
+        "num_warps": 1
+      },
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -37,116 +140,22 @@
     "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=256": [
       {
         "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.05119999870657921,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.05119999870657921,
-        "num_stages": 6,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.05119999870657921,
-        "num_stages": 5,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.05119999870657921,
-        "num_stages": 5,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.05119999870657921,
-        "num_stages": 2,
-        "num_warps": 4
-      }
-    ],
-    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=384": [
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.10956799983978271,
-        "num_stages": 1,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.10956799983978271,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.10956799983978271,
-        "num_stages": 5,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.10956799983978271,
-        "num_stages": 6,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 32
-        },
-        "ms": 0.10956799983978271,
-        "num_stages": 1,
-        "num_warps": 8
-      }
-    ],
-    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=4096": [
-      {
-        "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.010239999741315842,
+        "ms": 0.005119999870657921,
         "num_stages": 1,
         "num_warps": 1
       }
     ],
-    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=512": [
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=262144": [
       {
         "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M1": 2
         },
-        "ms": 0.19251200556755066,
-        "num_stages": 1,
+        "ms": 0.19148799777030945,
+        "num_stages": 5,
         "num_warps": 1
       },
       {
@@ -155,7 +164,7 @@
           "BLOCK_M1": 2
         },
         "ms": 0.19251200556755066,
-        "num_stages": 2,
+        "num_stages": 1,
         "num_warps": 1
       },
       {
@@ -173,6 +182,66 @@
           "BLOCK_M1": 2
         },
         "ms": 0.19251200556755066,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 2
+        },
+        "ms": 0.19251200556755066,
+        "num_stages": 6,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=4096": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 1
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=512": [
+      {
+        "kwargs": {
+          "BLOCK_K": 64,
+          "BLOCK_M1": 1
+        },
+        "ms": 0.006144000217318535,
+        "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|HAS_ROWSCALE=0,N=128,shape_key=65536": [
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.05119999870657921,
         "num_stages": 5,
         "num_warps": 1
       },
@@ -181,8 +250,17 @@
           "BLOCK_K": 128,
           "BLOCK_M1": 16
         },
-        "ms": 0.19251200556755066,
-        "num_stages": 4,
+        "ms": 0.05119999870657921,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.05119999870657921,
+        "num_stages": 2,
         "num_warps": 2
       }
     ],
@@ -192,18 +270,19 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.014336000196635723,
+        "ms": 0.013311999849975109,
         "num_stages": 1,
         "num_warps": 1
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "layernorm_fwd_saveact_triton",
   "op_identity": "3667c54e8073",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:53+00:00",
+    "built_utc": "2026-08-23T23:43:25+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

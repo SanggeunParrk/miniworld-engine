@@ -24,6 +24,22 @@
         "kwargs": {
           "BLOCK_E": 16
         },
+        "ms": 0.050175998359918594,
+        "num_stages": 6,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 16
+        },
+        "ms": 0.050175998359918594,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 16
+        },
         "ms": 0.05119999870657921,
         "num_stages": 1,
         "num_warps": 2
@@ -35,22 +51,6 @@
         "ms": 0.05119999870657921,
         "num_stages": 4,
         "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 16
-        },
-        "ms": 0.05119999870657921,
-        "num_stages": 6,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 16
-        },
-        "ms": 0.05734400078654289,
-        "num_stages": 4,
-        "num_warps": 1
       }
     ],
     "float32|ND=512,shape_key=256": [
@@ -58,7 +58,7 @@
         "kwargs": {
           "BLOCK_E": 16
         },
-        "ms": 0.01228800043463707,
+        "ms": 0.011264000087976456,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -90,18 +90,18 @@
       },
       {
         "kwargs": {
-          "BLOCK_E": 128
+          "BLOCK_E": 64
         },
-        "ms": 0.04095999896526337,
+        "ms": 0.03993599861860275,
         "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_E": 32
+          "BLOCK_E": 1024
         },
-        "ms": 0.053247999399900436,
-        "num_stages": 2,
+        "ms": 0.03993599861860275,
+        "num_stages": 1,
         "num_warps": 2
       }
     ],
@@ -158,12 +158,13 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "cond_transition_swiglu_triton",
   "op_identity": "7d96ee9e791c",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:53+00:00",
+    "built_utc": "2026-08-23T23:43:24+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

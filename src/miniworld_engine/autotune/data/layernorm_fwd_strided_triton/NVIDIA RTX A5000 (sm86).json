@@ -29,7 +29,7 @@
           "BLOCK_K": 64,
           "BLOCK_M1": 1
         },
-        "ms": 0.006144000217318535,
+        "ms": 0.005119999870657921,
         "num_stages": 1,
         "num_warps": 1
       }
@@ -68,12 +68,13 @@
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "layernorm_fwd_strided_triton",
   "op_identity": "842d45643763",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:53+00:00",
+    "built_utc": "2026-08-23T23:43:25+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

@@ -99,6 +99,15 @@
           "BLOCK_N": 64
         },
         "ms": 0.12083200365304947,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16,
+          "BLOCK_N": 64
+        },
+        "ms": 0.12083200365304947,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -128,24 +137,16 @@
         "ms": 0.12083200365304947,
         "num_stages": 5,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16,
-          "BLOCK_N": 64
-        },
-        "ms": 0.12083200365304947,
-        "num_stages": 6,
-        "num_warps": 1
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "cond_transition_bwd_swiglu_packed_triton",
   "op_identity": "9c5514a87aaa",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:53+00:00",
+    "built_utc": "2026-08-23T23:43:23+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

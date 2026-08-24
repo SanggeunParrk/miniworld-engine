@@ -14,6 +14,14 @@
     "float32|ND=512,shape_key=2048": [
       {
         "kwargs": {
+          "BLOCK_E": 128
+        },
+        "ms": 0.03379200026392937,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
           "BLOCK_E": 32
         },
         "ms": 0.03481600061058998,
@@ -32,25 +40,17 @@
         "kwargs": {
           "BLOCK_E": 16
         },
-        "ms": 0.05632000043988228,
-        "num_stages": 5,
-        "num_warps": 1
+        "ms": 0.055296000093221664,
+        "num_stages": 2,
+        "num_warps": 2
       },
       {
         "kwargs": {
           "BLOCK_E": 16
         },
-        "ms": 0.05734400078654289,
-        "num_stages": 4,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 16
-        },
-        "ms": 0.06348799914121628,
-        "num_stages": 1,
-        "num_warps": 1
+        "ms": 0.055296000093221664,
+        "num_stages": 3,
+        "num_warps": 2
       }
     ],
     "float32|ND=512,shape_key=256": [
@@ -120,6 +120,30 @@
         "kwargs": {
           "BLOCK_E": 64
         },
+        "ms": 0.11878400295972824,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 64
+        },
+        "ms": 0.11878400295972824,
+        "num_stages": 5,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 64
+        },
+        "ms": 0.11878400295972824,
+        "num_stages": 6,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 64
+        },
         "ms": 0.11980800330638885,
         "num_stages": 1,
         "num_warps": 4
@@ -131,39 +155,16 @@
         "ms": 0.11980800330638885,
         "num_stages": 2,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 64
-        },
-        "ms": 0.11980800330638885,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 64
-        },
-        "ms": 0.11980800330638885,
-        "num_stages": 4,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 64
-        },
-        "ms": 0.11980800330638885,
-        "num_stages": 5,
-        "num_warps": 4
       }
     ]
   },
-  "env_identity": "0ef334f664e2",
+  "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
+  "key_scheme": 2,
   "op": "cond_transition_bwd_swiglu_flat_triton",
   "op_identity": "b2603dadbe5b",
   "provenance": {
-    "built_utc": "2026-08-23T07:33:53+00:00",
+    "built_utc": "2026-08-23T23:43:23+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
