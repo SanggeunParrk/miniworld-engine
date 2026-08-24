@@ -111,14 +111,110 @@ def test_capture_saw_ops(captured):
         f"below would pass by doing nothing")
 
 
+#: `opcheck`'s default set includes `test_aot_dispatch_static` / `_dynamic`, which compile the op
+#: forward AND BACKWARD through AOTAutograd. Every op here is a launch wrapper called from inside an
+#: `autograd.Function.forward`, and `kernels/_compile.py` says why `register_autograd` is
+#: deliberately not used: `setup_context` can only save the op's inputs and outputs, so every
+#: intermediate a backward needs (LN stats, the normalised activation) would have to become a
+#: forward return. Keeping `autograd.Function` keeps `save_for_backward` free.
+#:
+#: So differentiating one of these ops DIRECTLY is not part of its contract, and asserting it is
+#: fails 20+ ops with "no autograd formula was registered" -- a property the design does not claim.
+#: The gradients are checked one level up, where they exist: `tests/test_numerical.py` compares each
+#: kernel's dq/dk/dv/dbias against a torch reference through the Function.
+#:
+#: The compile path is NOT dropped along with it. The aot tests run with the arguments detached,
+#: which is the shape these ops are really compiled in, so they still cover what they are worth
+#: covering: that the fake's metadata survives a traced forward.
+_GRAD_FREE = ("test_schema", "test_faketensor")
+_COMPILED = ("test_aot_dispatch_static", "test_aot_dispatch_dynamic")
+
+
+def _detach(value):
+    """Same structure, nothing requiring grad."""
+    if isinstance(value, torch.Tensor):
+        return value.detach()
+    if isinstance(value, (list, tuple)):
+        return type(value)(_detach(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _detach(v) for k, v in value.items()}
+    return value
+
+
 def test_every_exercised_op_satisfies_its_contract(captured):
+    """Schema and fake, against the arguments the op is really called with."""
     failures = []
     for name, (op, args, kwargs) in sorted(captured.items()):
         try:
-            torch.library.opcheck(op, args, kwargs)
+            torch.library.opcheck(op, args, kwargs, test_utils=_GRAD_FREE)
         except Exception as e:  # noqa: PERF203 -- every op is checked; one failure is not the end
             failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
     assert not failures, "op contract violations:\n  " + "\n  ".join(failures)
+
+
+def test_every_exercised_op_survives_a_traced_forward(captured):
+    """The compile half, with the inputs detached -- see the note above `_GRAD_FREE`."""
+    failures = []
+    for name, (op, args, kwargs) in sorted(captured.items()):
+        try:
+            torch.library.opcheck(op, _detach(args), _detach(kwargs), test_utils=_COMPILED)
+        except Exception as e:  # noqa: PERF203 -- every op is checked; one failure is not the end
+            failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
+    assert not failures, "ops that do not survive a traced forward:\n  " + "\n  ".join(failures)
+
+
+def test_no_op_is_directly_differentiable(captured):
+    """The design invariant behind the split above, asserted rather than assumed.
+
+    `kernels/_compile.py` states that `register_autograd` is deliberately unused. That is what
+    makes excluding the grad half of `opcheck` honest rather than convenient -- so it is checked
+    here, positively: backward through one of these ops must RAISE.
+
+    Not by inspecting the dispatcher: `custom_op` installs a not-implemented Autograd fallback for
+    every op, so `_dispatch_has_kernel_for_dispatch_key(name, "Autograd")` is True either way and
+    cannot tell a real formula from the fallback. Verified against both shapes on a probe pair --
+    plain raises "no autograd formula", `register_autograd` succeeds -- so the backward attempt is
+    the discriminator.
+
+    If this ever passes, someone added a formula and the `test_utils` split above needs revisiting.
+    """
+    differentiable, unchecked = [], []
+    for name, (op, args, kwargs) in sorted(captured.items()):
+        grad_args, seeded = [], False
+        for a in args:
+            if not seeded and isinstance(a, torch.Tensor) and a.is_floating_point():
+                grad_args.append(a.detach().clone().requires_grad_(True))
+                seeded = True
+            else:
+                grad_args.append(a)
+        if not seeded:
+            unchecked.append(name)          # nothing to differentiate w.r.t.
+            continue
+        try:
+            out = op(*grad_args, **kwargs)
+            first = next((o for o in (out if isinstance(out, tuple) else (out,))
+                          if isinstance(o, torch.Tensor) and o.is_floating_point()), None)
+            if first is None:
+                unchecked.append(name)
+                continue
+            first.sum().backward()
+        except RuntimeError as e:
+            if "no autograd formula" not in str(e):
+                unchecked.append(f"{name} (raised something else: {str(e)[:80]})")
+            continue
+        except Exception as e:
+            unchecked.append(f"{name} ({type(e).__name__})")
+            continue
+        differentiable.append(name)
+    assert not differentiable, (
+        f"{differentiable} now have an autograd formula. kernels/_compile.py says "
+        f"register_autograd is deliberately unused (setup_context cannot save the intermediates a "
+        f"backward needs); if that changed, the test_utils split in this file needs revisiting.")
+    # Not an assertion: an op with no float input, or one this card cannot run, is simply outside
+    # what this check can say anything about. Printed so the number is visible rather than assumed.
+    if unchecked:
+        print(f"\n[opcheck] {len(unchecked)} op(s) not covered by the differentiability check: "
+              f"{unchecked}")
 
 
 def test_unexercised_ops_are_reported(captured, capsys):

@@ -29,6 +29,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P15 | E2 | a stale JIT build lock hangs the GPU suite forever | todo |
 | P16 | B1 | `["ALL"]` lint exemption hid a guaranteed NameError | **done** |
 | P17 | E2 | `run_all` reported "wrong card" as "wrong answer" | **done** |
+| P18 | B1 | opcheck asserted a contract the design declines | **done** |
 
 ---
 
@@ -637,3 +638,44 @@ whatever card it is on, so for a Triton kernel `arch` records the architecture i
 while for cute/cuda it is an enforced gate. Those are two different claims sharing one column. The
 consumer-facing table is still right (an sm100 Triton kernel is not something to rely on at sm86),
 but the column should say which kind it is. -> follow-up.
+
+---
+
+## P18 — opcheck asserted a contract the design deliberately declines  (B1)
+
+**From P0b's stage F**, the first real run of `tests/test_op_contracts_gpu.py` (4 min, so opcheck
+was never the time sink either -- all of that was P15's lock). It failed 20+ ops, every one with:
+
+    test_aot_dispatch_dynamic failed with Trying to backward through
+    miniworld_engine.<op>.default but no autograd formula was registered.
+
+That is not a defect. `kernels/_compile.py` states the decision and the reason: `register_autograd`
+is deliberately unused, because `setup_context` can only save the op's inputs and outputs, so every
+intermediate a backward needs (LN stats, the normalised activation) would have to become a forward
+return. Keeping `autograd.Function` keeps `save_for_backward` free. Every op is a launch wrapper
+called from inside `Function.forward`; **differentiating one directly was never part of its
+contract.**
+
+So the test was asserting a property the design does not claim. Fixed by splitting, not by
+deleting:
+
+* `test_schema` + `test_faketensor` run against the arguments the op is really called with.
+* `test_aot_dispatch_static` + `_dynamic` run with the arguments **detached** — which is the shape
+  these ops are actually compiled in, so the compile-path coverage is kept rather than dropped.
+* the gradients are checked where they exist, one level up: `test_numerical` compares each kernel's
+  dq/dk/dv/dbias against a torch reference through the Function.
+
+**And the exclusion is now asserted, not assumed.** `test_no_op_is_directly_differentiable` requires
+backward through each op to RAISE. If it ever succeeds, someone added a formula and the split needs
+revisiting.
+
+Getting that test right took two tries, and the first way was wrong in an instructive way: I checked
+`_dispatch_has_kernel_for_dispatch_key(name, "Autograd")`, which is **True for every custom_op** —
+`custom_op` installs a not-implemented Autograd fallback, so the dispatcher cannot tell a real
+formula from the fallback and the test would have failed for all 20+ ops. Verified the discriminator
+on a probe pair instead (plain raises "no autograd formula"; `register_autograd` succeeds), and the
+whole diagnosis on a minimal repro with no GPU: detached passes, `requires_grad` fails with exactly
+stage F's message.
+
+**Still to run:** the fix itself is unverified on a device. It is a GPU-marked file, so the CPU suite
+cannot exercise it.
