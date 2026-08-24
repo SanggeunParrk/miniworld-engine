@@ -384,8 +384,7 @@ def _ln_bwd(
                 dy_2d, x.contiguous(), weight, mean, rstd,
                 row_scale=rs if has_rs else None,
             )
-            return (dx_c.view(tuple(input_shape)), dw_c.float(), db_c.float(),
-                    None, None)
+            return dx_c.view(tuple(input_shape)), dw_c.float(), db_c.float()
         except Exception:  # noqa: BLE001 - portable triton fallback on any CUDA-path failure
             pass
 

@@ -404,7 +404,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
 
 
 @opaque(fake=lambda x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-               eps_x, eps_cond, length=None: torch.empty_like(x),
+               eps_x, eps_cond: torch.empty_like(x),
         name="adaln_inference_fused")
 def adaln_inference_fused(
     x: torch.Tensor,
