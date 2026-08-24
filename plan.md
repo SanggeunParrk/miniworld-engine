@@ -11,7 +11,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | id | criterion | title | status |
 |---|---|---|---|
 | P0a | D1 | plot-style entries orphaned by the label rename | **done** |
-| P0b | E1 | prove `build all` end to end | todo |
+| P0b | E1 | prove `build all` end to end | **doing** — found 2 regressions |
 | P1 | A3 | ship `py.typed` | **done** |
 | P2 | B2 | per-kernel numerical tolerance | **P2a done**, P2b needs a GPU |
 | P3 | B4 | ragged/fp32 shape modes become a gate | todo |
@@ -27,6 +27,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P13 | F6 | CONTRIBUTING | **done** |
 | P14 | A4 | the declared Python floor is untested | **done** |
 | P15 | E2 | a stale JIT build lock hangs the GPU suite forever | todo |
+| P16 | B1 | `["ALL"]` lint exemption hid a guaranteed NameError | **done** |
 
 ---
 
@@ -523,3 +524,40 @@ Three separate faults, and the third is the one that matters:
 
 **Operational note for whoever hits this next:**
 `rm ~/.cache/torch_extensions/py312_cu128/*/lock`
+
+---
+
+## P16 — the vendored-body lint exemption hid a guaranteed NameError  (B1, F2)
+
+**Found by P0b's GPU run**, which is the argument for having insisted on it. Two regressions from
+the harness refactor, both invisible to every CPU check:
+
+1. `triangle_attention/triton/atomic.py`'s `backward` called `token_key(L)` where `L` existed
+   only inside einops pattern STRINGS -- never bound. **Every backward of that kernel raised
+   NameError.** The module imports, the op registers, `test_registry_complete` resolves the
+   checker; the failure needs the kernel to run.
+2. `drivers/transition.py` built the hand-CUDA extension from
+   `Path(__file__).parent / "transition" / "cuda"`. That was right when the module was
+   `kernels/drivers_trans.py`; after the move to `kernels/drivers/transition.py` it resolves one
+   level deeper, to `kernels/drivers/transition/cuda/…`, a path that has never existed. Three
+   kernels raised `FileNotFoundError` on their first run.
+
+Both are the exact "import and getattr are verified, LAUNCHING is not" gap P0b was written for.
+
+**Why nothing caught the first one:** `pyproject.toml` excludes the vendored kernel bodies with
+`= ["ALL"]`, which is right for style (F2) -- but `["ALL"]` cannot be un-ignored per rule, so it
+also switched off `F821 undefined-name`, which is not a style rule. It is a guaranteed runtime
+`NameError`. Running `ruff --isolated --select F821` over the package found the bug plus four
+false positives, all jaxtyping (`Float[torch.Tensor, "d"]` -- ruff reads the shape string as a
+forward reference, the same incompatibility the global config already ignores `F722` for).
+
+**Done.** Both bugs fixed. `tests/test_no_undefined_names.py` runs F821 over the whole package with
+`--isolated`, deliberately bypassing the per-file-ignores that hid it, and declares the jaxtyping
+false positive rather than ignoring it: a finding on a line that is not a jaxtyping annotation
+fails. Verified it bites by injecting an undefined name into an `["ALL"]`-excluded file. A second
+test fails if F821 ever reports nothing at all, so a broken invocation cannot look like success.
+
+**Related gap, not yet fixed:** `run_all.check_one` catches the checker's exception and reports
+only `type(exc).__name__: first line`, so the traceback is lost. Finding *where* `L` was undefined
+took a static search instead of reading the failure. -> folded into P2b's run, which needs the
+detail anyway.

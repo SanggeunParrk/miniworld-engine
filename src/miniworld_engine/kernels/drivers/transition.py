@@ -277,7 +277,12 @@ def _transition_cuda_ext():
     from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags
 
     ensure_cuda_home()
-    d = Path(__file__).parent / "transition" / "cuda"
+    # `parents[1]`, not `parent`: this module used to be `kernels/drivers_trans.py`, where
+    # `.parent` was the kernels package. It is now `kernels/drivers/transition.py`, one level
+    # deeper, so `.parent` became `kernels/drivers/` and the sources resolved to
+    # `kernels/drivers/transition/cuda/transition_cuda.cpp` -- a path that has never existed. It
+    # imported fine and raised FileNotFoundError only when the driver actually ran.
+    d = Path(__file__).parents[1] / "transition" / "cuda"
     return load(
         name="transition_cuda_ext_v2",
         sources=[str(d / "transition_cuda.cpp"), str(d / "transition_cuda_kernel.cu")],

@@ -660,6 +660,12 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         q, k, v, bias, o = [x.to(op_dtype) for x in ctx.saved_tensors[:-1]]
         M = ctx.saved_tensors[-1]                       # stays fp32, so delta does too
+        # BEFORE the rearrange: the saved tensors are [B, H, L, L2, D] and the cache bucket keys on
+        # the sequence length, the same value forward passed. After the rearrange the row axis is
+        # H*L, so reading it there would key on a different number for every head count. `L`
+        # appeared only inside the einops pattern STRINGS below, so `token_key(L)` was a
+        # NameError -- it raised on every backward of this kernel.
+        L = q.shape[2]
         q, k, v, o, grad_output = [
             rearrange(x, "B H L L2 D -> B (H L) L2 D") for x in (q, k, v, o, grad_output)
         ]
