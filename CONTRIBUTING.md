@@ -104,7 +104,29 @@ git config core.hooksPath .githooks     # once per clone
 
 ## Deprecation
 
-Today: removing a public name fails `tests/test_public_api.py` until `_CONTRACT` and the CHANGELOG
-are updated together. That is the whole mechanism — there is no warning period and no
-`DeprecationWarning`, which is a gap, not a policy. `plan.md` P6 is the work; until it lands, treat
-a removal as a discussion rather than a procedure.
+Removing a public name is a two-step process, and both steps are enforced.
+
+**Step 1 — deprecate.** Add the name to `kernels._DEPRECATED` (or `ops`') with a message that says
+why and **what to use instead**; a bare "deprecated" just makes the consumer grep this repo. The
+name keeps working. Add a `### Deprecated` entry to the CHANGELOG for that release.
+
+**Step 2 — remove, no earlier than two releases later.** Drop it from `__all__` / `_LAZY_EXPORTS`
+and from `_CONTRACT` in `tests/test_public_api.py`, in the same commit, with a CHANGELOG entry
+under `### Removed`.
+
+What holds this up:
+
+- `tests/test_public_api.py` freezes the surface, so a removal that skips the CHANGELOG fails.
+- it also asserts every `_DEPRECATED` name is still in `__all__` (deprecated is not removed), that
+  each message names a replacement, and that using the name really does warn.
+- "using" has two shapes and both count: most of the surface resolves through `__getattr__`, so
+  for those *resolution is the use* and the warning fires on attribute access; three names are
+  plain module-level functions, where `__getattr__` never runs and access alone is not use
+  (`hasattr`, `dir()` and a re-export would all warn for nothing), so there the call is the use.
+- a deprecated lazy name is deliberately **not** cached into `globals()`. Caching is what makes
+  `__getattr__` run once per process, and a warning that fires only on the first access in a
+  long-lived process is one most callers never see.
+
+Currently deprecated: `kernels.cuda_transition` — it has never had an implementation (it deferred
+to a `transition/cuda` symbol git has no record of) and calling it raises `NotImplementedError`.
+It is in the frozen surface, so it could not simply be deleted; now it says so.

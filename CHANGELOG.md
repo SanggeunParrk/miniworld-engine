@@ -37,6 +37,15 @@ The public surface is enforced by `tests/test_public_api.py`.
   cannot parse jaxtyping shape strings; the step gates, with no `|| true`. GPU
   numerical suite runs via `pixi run test-gpu` on an allocated node.
 
+### Deprecated
+- **`kernels.cuda_transition`** — it has never had an implementation. It deferred to a
+  `transition/cuda` symbol that git has no record of, and calling it raises
+  `NotImplementedError`; the module's `KernelBackend.CUDA` branch called it with a signature
+  nothing here provides. Use `implementation='triton'` on `Transition`, or
+  `kernels.cuda_transition_b2b` for the hand-CUDA LN-fused path. It stays in the surface and now
+  emits `DeprecationWarning`; removal no earlier than two releases out, per the procedure in
+  CONTRIBUTING.md.
+
 ### Changed
 - **One vocabulary for benchmark targets, and a level to hold it.** `bench.py`'s
   targets lived in one flat dict, which forced the kernel-level ones to abbreviate

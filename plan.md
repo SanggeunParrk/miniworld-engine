@@ -17,7 +17,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P3 | B4 | ragged/fp32 shape modes become a gate | todo |
 | P4 | D5 | the `configs` shadowing landmine | **done** |
 | P5 | F3 | delete the orphan pilot builder | **done** |
-| P6 | A4 | deprecation policy with a mechanism | todo |
+| P6 | A4 | deprecation policy with a mechanism | **done** |
 | P7 | A5 | hardware support matrix, checked | todo |
 | P8 | B5 | determinism statement + test | todo |
 | P9 | C2 | quoted numbers traceable to a table | todo |
@@ -227,6 +227,29 @@ access and is still importable.
 
 **Done when.** The policy is written and the test passes with at least one entry — or, if nothing is
 currently deprecated, with a synthetic case proving the mechanism.
+
+**Done, and with a real entry rather than a synthetic one.** `kernels.cuda_transition` was the
+obvious first case: a public, frozen name that has never had an implementation (it deferred to a
+`transition/cuda` symbol git has no record of) and raises `NotImplementedError` when called. It
+could not simply be deleted — the frozen surface is what stopped that — so it is now the thing the
+mechanism was missing for.
+
+`kernels._DEPRECATED` maps name -> why-and-what-instead; `_warn_deprecated()` emits with
+`stacklevel=3` so the warning points at the caller's line. Enforced by four tests: every
+deprecated name is still in `__all__` (deprecated is not removed), each message names a
+replacement, using the name warns, and the name is still reachable. A fifth covers the lazy path
+with a synthetic entry, so the file keeps meaning something when `_DEPRECATED` is empty again.
+
+**One design point worth recording**, because the first version of the test was wrong: I asserted
+that *access* warns, and `cuda_transition` failed it — it is a plain module-level function, so
+`__getattr__` never runs. Bending the mechanism to warn on access would have been worse than the
+test: `hasattr`, `dir()` and a re-export all touch an attribute without using it. The rule is "a
+deprecated name warns when it is USED", and use has two shapes here — resolution for the ~16 lazy
+names, the call for the 3 module-level functions. The test accepts either and requires at least
+one, which is what makes a name that warns on neither fail.
+
+Also: a deprecated lazy name is deliberately not cached into `globals()`. The cache is what makes
+`__getattr__` run once per process, and a warning only the first caller sees is not a warning.
 
 ---
 

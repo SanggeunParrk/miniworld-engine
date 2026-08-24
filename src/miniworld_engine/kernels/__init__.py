@@ -13,7 +13,40 @@ triton/cutlass loaded until a name is first accessed); the name set is pinned by
 
 from __future__ import annotations
 
+import warnings
 from importlib import import_module
+
+#: Public names on their way out: ``name -> why, and what to use instead``.
+#:
+#: Removing a name from :data:`__all__` fails ``tests/test_public_api.py`` on purpose, which is
+#: the right guard and was also the whole mechanism -- so in practice nothing was ever removed.
+#: This is the missing half. A name listed here still resolves and still works exactly as before;
+#: it just says, once per process, that it is going away. See CONTRIBUTING.md ("Deprecation"):
+#: deprecated in release N, removed no earlier than N+2, listed under `### Deprecated` in the
+#: CHANGELOG for both.
+#:
+#: Keep the message actionable. "Deprecated" alone makes a consumer grep this repo to find out
+#: what to do; the replacement is the point.
+_DEPRECATED: dict[str, str] = {
+    "cuda_transition": (
+        "it has never had an implementation -- it deferred to transition/cuda's "
+        "`cuda_transition`, which git has no record of, and calling it raises "
+        "NotImplementedError. Use `implementation='triton'` on the Transition module, or "
+        "`kernels.cuda_transition_b2b` for the hand-CUDA LN-fused path."
+    ),
+}
+
+
+def _warn_deprecated(name: str) -> None:
+    """Emit the deprecation for `name`, if it has one.
+
+    `stacklevel=3` so the warning points at the CALLER's line -- through `__getattr__` or through
+    the wrapper -- rather than at this file, which is not where anyone can act on it.
+    """
+    why = _DEPRECATED.get(name)
+    if why is not None:
+        warnings.warn(f"miniworld_engine.kernels.{name} is deprecated: {why}",
+                      DeprecationWarning, stacklevel=3)
 
 _LAZY_EXPORTS = {
     # Every entry names a FAMILY INTERFACE, never a backend module. That is the promise in this
@@ -60,8 +93,13 @@ def __getattr__(name: str):
         module_name, attribute = _LAZY_EXPORTS[name]
     except KeyError:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    _warn_deprecated(name)
     value = getattr(import_module(module_name, __name__), attribute)
-    globals()[name] = value
+    # A deprecated name is deliberately NOT cached into globals(): the cache is what makes
+    # `__getattr__` run once per process, and a warning that fires only on the first access in a
+    # long-lived process is a warning most callers never see.
+    if name not in _DEPRECATED:
+        globals()[name] = value
     return value
 
 
@@ -82,6 +120,7 @@ def cuda_transition(*args, **kwargs):  # signature kept for the frozen surface
     what does exist; ``tests/test_lazy_import_targets.py`` keeps any other lazy wrapper from
     reaching the same state.
     """
+    _warn_deprecated("cuda_transition")
     msg = ("kernels.cuda_transition is not implemented: transition/cuda exposes only "
            "cuda_transition_b2b (LN-fused b2b, fixed shapes) and cuda_transition_expand_gate. "
            "Use implementation='triton' for Transition, or call one of those directly.")
