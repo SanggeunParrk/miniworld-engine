@@ -84,3 +84,62 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ""
         run: pytest -q tests/test_numerical.py --collect-only -m gpu | tail -1
+
+  floor:
+    name: declared Python floor (3.10, CPU suite only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # `requires-python = ">=3.10"` is a promise, and until this job existed nothing kept it.
+      # The repo runs 3.12 everywhere -- pixi env, the `checks` job above -- so the floor had
+      # never been executed. It is not a theoretical concern: `modules/dispatch.py` carries an
+      # explicit 3.10 branch (`enum.StrEnum` is 3.11+, so the else defines `class _StrEnum(str,
+      # Enum)`) whose own comment reads "exercised only on 3.10". This job is what exercises it.
+      #
+      # Lint and types are NOT repeated here: ruff's target-version and ty's inferred
+      # python-version both already come from `requires-python`, so the static half of the floor
+      # is checked by the job above. What is missing is the runtime half -- does it import, and
+      # does the suite pass -- which is all this job does.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install (CPU wheels, no GPU backends)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e ".[dev]"
+
+      - name: The package imports at the floor
+        # Separate from the suite so a failure here is unambiguous: an import error at 3.10 is a
+        # broken version guard, not a broken test.
+        run: python -c "import miniworld_engine, miniworld_engine.modules, miniworld_engine.cli; print('import ok')"
+
+      - name: The 3.10 branch is the one that ran
+        # Proves this job is testing what it claims: on 3.10 `KernelBackend` must come from the
+        # fallback, not from enum.StrEnum. A job that silently ran 3.12 would pass everything
+        # above and prove nothing.
+        run: |
+          python - <<'PY'
+          import enum
+          import sys
+
+          from miniworld_engine.modules.dispatch import KernelBackend
+
+          assert sys.version_info[:2] == (3, 10), f"this job must run 3.10, got {sys.version_info}"
+          assert not hasattr(enum, "StrEnum"), "3.10 should not have enum.StrEnum"
+          bases = [c.__name__ for c in KernelBackend.__mro__]
+          assert "_StrEnum" in bases, bases          # the fallback class, not enum.StrEnum
+          assert issubclass(KernelBackend, str), bases
+          # and it has to behave: the whole point of StrEnum is that a member IS its value
+          assert KernelBackend.TRITON == "triton", list(KernelBackend)
+          print("3.10 fallback exercised:", bases)
+          PY
+
+      - name: Tests (CPU suite)
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: pytest -q tests/ -m "not gpu"

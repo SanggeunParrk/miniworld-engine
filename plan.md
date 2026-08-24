@@ -25,7 +25,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P11 | F4 | stale reference docs | **done** |
 | P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
 | P13 | F6 | CONTRIBUTING | **done** |
-| P14 | A4 | the declared Python floor is untested | todo |
+| P14 | A4 | the declared Python floor is untested | **done** |
 
 ---
 
@@ -376,3 +376,28 @@ be advertised.
 
 **Done when.** The `requires-python` value is exercised by a CI job, or it equals the version CI
 runs.
+
+**Measured, and a correction to my own first reading.** A static probe over all 312 `.py` files
+under `src/tests/benchmarks/tools` (`ast.parse(feature_version=(3,10))` plus a newer-stdlib name
+check) found **0 syntax failures** and exactly one 3.11+ stdlib use:
+`modules/dispatch.py` importing `enum.StrEnum`. I first read that as "the `>=3.10` claim is false".
+It is not — the import sits inside `if sys.version_info >= (3, 11):` with an `else` that defines
+`class _StrEnum(str, Enum)`, and a comment explaining why the guard is on `version_info` rather
+than `try/except` (a checker can follow the first). So the code does support 3.10.
+
+The real gap was narrower, and the code says it itself: that `else` branch is marked
+`# pragma: no cover -- exercised only on 3.10`, and nothing has ever run 3.10. The static half of
+the floor was already covered (ruff's `target-version` and ty's `python-version` both derive from
+`requires-python`, which is how `ty` caught my `tomllib` import in P1); the runtime half was not.
+
+**Done.** A second CI job, `floor`: installs on 3.10, asserts the package imports, asserts that the
+**3.10 branch is the one that ran** (no `enum.StrEnum`, `_StrEnum` in the MRO, and
+`KernelBackend.TRITON == "triton"` so the fallback behaves like a StrEnum and not just inherits
+from one), then runs the CPU suite. Lint and types are deliberately not repeated — a job that
+silently ran 3.12 would pass every other step and prove nothing, which is what the MRO assertion is
+for.
+
+**Also a note on how this was found**, because it nearly went the other way: the first probe run
+scanned 98 files and reported zero findings. The shell's working directory had drifted to a
+different repository (`practice/team-gm`), so the measurement was of the wrong tree. Caught by the
+file count not matching `git ls-files`. Every subsequent command pins the directory.
