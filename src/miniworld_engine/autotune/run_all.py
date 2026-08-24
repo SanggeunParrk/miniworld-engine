@@ -89,6 +89,60 @@ def check_one(check: str, rtol: float | None = None) -> tuple[bool, str]:
     return worst <= band, f"rel {' '.join(detail)}{suffix}"
 
 
+#: Exception text that means "this kernel refuses to run on THIS card", for kernels whose gate is
+#: not (or not yet) declared in registry.csv. A backstop, not the primary check -- see
+#: :func:`meets_arch`, which decides from the declaration and never launches the kernel at all.
+_ARCH_GATED_MARKERS = (
+    "expects arch to be one of", "unsupported gpu architecture", "requires sm",
+    "not supported on this", "expects arch to be",
+    # checkers assert their own gate, e.g. "SM90 (H100) only"
+    "sm90", "sm100", "h100 only", "b200 only", "only on sm",
+)
+
+
+def is_arch_gated(detail: str) -> bool:
+    """Does this failure mean "wrong card" rather than "wrong answer"?
+
+    An sm100 CuTe kernel raises on an A6000 at every shape. Counting that as a failure makes the
+    report red on hardware the kernel was never meant for, and a report that is always red is one
+    nobody reads. Lives here rather than in the test that first needed it: `run_all` is what
+    produces the verdict, so it is what has to classify it, and `tests/test_numerical.py` imports
+    this instead of keeping a second copy.
+    """
+    d = detail.lower()
+    return any(m in d for m in _ARCH_GATED_MARKERS)
+
+
+def device_arch() -> str:
+    """This card's compute capability as `registry.csv`'s `arch` spells it, e.g. ``"sm86"``."""
+    import torch
+
+    major, minor = torch.cuda.get_device_capability()
+    return f"sm{major}{minor}"
+
+
+def meets_arch(row: dict, device: str | None = None) -> bool:
+    """Can the card run what this row declares it needs?
+
+    Reads the DECLARED minimum (`registry.csv`'s `arch`, see docs/library-standards.md A5) rather
+    than matching an exception after the fact, so a kernel that cannot run here is never launched
+    and never compiled. `is_arch_gated` stays as a backstop for a row whose declaration is wrong or
+    missing -- and a row that passes this check and then fails with an arch error is exactly that,
+    which `main` reports rather than swallows.
+    """
+    want = (row.get("arch") or "").strip()
+    if not want:
+        return True
+    dev = device if device is not None else device_arch()
+    return _sm(dev) >= _sm(want)
+
+
+def _sm(arch: str) -> int:
+    """``"sm86"`` -> 86. Unrecognised text sorts lowest, so it never blocks a launch."""
+    digits = arch.lower().removeprefix("sm").strip()
+    return int(digits) if digits.isdigit() else -1
+
+
 def declared_rtol(row: dict) -> float | None:
     """The band this registry row declares, or None for :data:`DEFAULT_RTOL`.
 
@@ -153,9 +207,20 @@ def main(argv: list[str] | None = None) -> int:
     want = {f for f in args.only.split(",") if f}
     rows = [r for r in devices.registry() if not want or r["family"] in want]
     results: dict[str, tuple[bool, str]] = {}
+    here = device_arch()
+    skipped: dict[str, str] = {}
+    mislabelled: list[str] = []
     for r in rows:
         drv = (r.get("driver") or "").strip()
         if not drv:
+            continue
+        # Declared gate first: a kernel this card cannot run is not launched at all, so it costs no
+        # compile and cannot be reported as a failure. Six of these on an A6000 were counted as
+        # failures before, which is the "failure vs absence" mistake `is_bad_unit` already avoids
+        # on the build side.
+        if not meets_arch(r, here):
+            skipped[r["kernel"]] = f"needs {r['arch']}, this card is {here}"
+            print(f"  [skip] {r['kernel']:46s} {skipped[r['kernel']]}", flush=True)
             continue
         ok, detail = run_one(drv)
         chk = (r.get("check") or "").strip()
@@ -164,6 +229,14 @@ def main(argv: list[str] | None = None) -> int:
             detail = cdetail if ok else f"WRONG NUMBERS: {cdetail}"
         elif ok:
             detail = "launched (no reference -- numbers unverified)"
+        if not ok and is_arch_gated(detail):
+            # It passed the declared check and still refused on arch grounds: the DECLARATION is
+            # wrong, which is worth saying out loud rather than absorbing into a skip.
+            mislabelled.append(f"{r['kernel']}: declared {r.get('arch') or '(blank)'}, refused on "
+                               f"{here} -- {detail[:80]}")
+            skipped[r["kernel"]] = f"arch-gated at runtime: {detail[:80]}"
+            print(f"  [skip] {r['kernel']:46s} {skipped[r['kernel']]}", flush=True)
+            continue
         results[r["kernel"]] = (ok, detail)
         print(f"  [{'ok  ' if ok else 'FAIL'}] {r['kernel']:46s} {detail[:90]}", flush=True)
         if not ok and args.verbose:
@@ -174,12 +247,28 @@ def main(argv: list[str] | None = None) -> int:
     have = sum(1 for v in results.values() if v[0])
     checked = sum(1 for r in rows if (r.get("check") or "").strip()
                   and results.get(r["kernel"], (False,))[0])
+    declared = len(devices.registry())
+    no_driver = sum(1 for r in devices.registry() if not (r.get("driver") or "").strip())
     print(f"\n{path}")
-    print(f"  declared {len(devices.registry())}   driven {len(results)}   "
+    # Three categories, not two. "skipped (this card)" is a permanent, correct answer -- the same
+    # distinction `is_bad_unit` draws on the build side -- and folding it into either `failed` or
+    # `no driver` is what made an A6000 run report six failures it could not have avoided.
+    print(f"  declared {declared}   driven {len(results)}   "
           f"ok {have}   failed {len(results) - have}   "
-          f"no driver {len(devices.registry()) - len(results)}")
+          f"skipped (this card is {here}) {len(skipped)}   no driver {no_driver}")
+    accounted = len(results) + len(skipped) + no_driver
+    if accounted != declared:
+        print(f"  ACCOUNTING: {accounted} of {declared} classified -- "
+              f"{declared - accounted} kernel(s) fell through every branch", file=sys.stderr)
     print(f"  numbers checked against a reference: {checked}   "
           f"launched but unverified: {have - checked}")
+    if mislabelled:
+        # A row that passed the declared gate and then refused on arch grounds anyway: the
+        # registry's `arch` column is wrong for it. Reported, never absorbed into the skip count.
+        print(f"  registry `arch` disagrees with the device for {len(mislabelled)} kernel(s):",
+              file=sys.stderr)
+        for m in mislabelled:
+            print(f"    {m}", file=sys.stderr)
     by = collections.Counter(r["family"] for r in devices.registry()
                              if not (r.get("driver") or "").strip())
     if by:

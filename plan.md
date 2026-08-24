@@ -28,6 +28,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P14 | A4 | the declared Python floor is untested | **done** |
 | P15 | E2 | a stale JIT build lock hangs the GPU suite forever | todo |
 | P16 | B1 | `["ALL"]` lint exemption hid a guaranteed NameError | **done** |
+| P17 | E2 | `run_all` reported "wrong card" as "wrong answer" | **done** |
 
 ---
 
@@ -593,3 +594,46 @@ test fails if F821 ever reports nothing at all, so a broken invocation cannot lo
 only `type(exc).__name__: first line`, so the traceback is lost. Finding *where* `L` was undefined
 took a static search instead of reading the failure. -> folded into P2b's run, which needs the
 detail anyway.
+
+---
+
+## P17 — `run_all` reported "wrong card" as "wrong answer"  (E2)
+
+**From P0b's stage D**, the first full `run_all` this repo has had: `declared 103, driven 103,
+ok 92, failed 11, no driver 0` in 77 s. Of the 11, six were CuTeDSL kernels raising
+`expects arch to be sm_90a, but got sm_86` — on an A6000, which is not a defect in them or in the
+card. The report was red for hardware those kernels were never written for, and a report that is
+always red is one nobody reads.
+
+The repo already draws this distinction on the build side (`is_bad_unit`,
+`tests/test_permanent_skip_classification.py`: "a unit that skipped a shape this card cannot hold
+is not a bad unit"). `run_all` had no notion of it — and the predicate that *does* know, in
+`tests/test_numerical.py`, was the reason: it lived in the test, so the module that produces the
+verdict never got it. A D4 violation that cost exactly what D4 says it costs.
+
+**Done, with the declaration doing the work rather than a string match.** Two mechanisms, in order:
+
+1. `meets_arch(row, device)` reads P7's `arch` column and **skips before launching**, so a kernel
+   this card cannot run costs no compile and cannot be reported as a failure.
+2. `is_arch_gated(detail)` stays as a runtime backstop for a row whose declaration is missing or
+   wrong — and a kernel that passes the declared gate then refuses on arch grounds is printed as a
+   **registry error**, not absorbed into the skip count. That is the case where `arch` is wrong,
+   and it should be loud.
+
+The summary line now has three categories (`ok / failed / skipped (this card is smXX) / no driver`)
+plus an accounting check that fails loudly if the four do not sum to `declared` — the previous line
+computed "no driver" as `declared - driven`, which silently absorbed anything that fell through.
+
+`tests/test_arch_gating.py` (25 cases) covers both directions, and the important one is the second:
+a genuine bug must NOT be classified as an arch refusal. Both bugs this run found carry text a
+sloppier predicate could have swallowed (`NameError: name 'L' is not defined`,
+`FileNotFoundError: ... transition_cuda.cpp`). It also pins `_sm()`'s numeric ordering, because
+`"sm100" < "sm86"` lexically — a string compare would have made every sm100 kernel look runnable
+on an A6000.
+
+**A refinement to P7 this exposed.** Of the 9 kernels declared above the floor, only 6 actually
+refused. The other 3 are the sm100 *Triton* kernels, which ran fine on sm86: triton compiles for
+whatever card it is on, so for a Triton kernel `arch` records the architecture it was WRITTEN for,
+while for cute/cuda it is an enforced gate. Those are two different claims sharing one column. The
+consumer-facing table is still right (an sm100 Triton kernel is not something to rely on at sm86),
+but the column should say which kind it is. -> follow-up.

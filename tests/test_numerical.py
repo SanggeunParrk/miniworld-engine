@@ -58,14 +58,14 @@ def test_kernel_matches_its_reference(kernel, checker, row):
 def _is_arch_gated(detail: str) -> bool:
     """A kernel that refuses to run on THIS card is not a wrong answer.
 
-    sm100-only CuTe kernels raise on an A6000 at every shape; failing them here would make the
-    suite red on hardware they were never meant for, and a suite that is always red is off.
+    The predicate itself lives in `autotune.run_all`, which is what produces the verdict this file
+    asserts on: two copies of "does this failure mean wrong card" would drift, and the copy here
+    was the original -- `run_all` had none, so it reported six arch-gated kernels as failures on
+    every A6000 run.
     """
-    d = detail.lower()
-    return any(m in d for m in ("expects arch to be one of", "unsupported gpu architecture",
-                                "requires sm", "not supported on this",
-                                # checkers assert their own arch gate, e.g. "SM90 (H100) only"
-                                "sm90", "sm100", "h100 only", "b200 only", "only on sm"))
+    from miniworld_engine.autotune.run_all import is_arch_gated
+
+    return is_arch_gated(detail)
 
 
 ALLOWED = Path(__file__).with_name("numerical_gaps_allowed.csv")
