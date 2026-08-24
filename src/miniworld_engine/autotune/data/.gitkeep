@@ -1,3 +1,5 @@
 # Shipped per-GPU autotune config caches live here as <op>/<gpu_key>.json.
-# Populate on-target with `python -m miniworld_engine.autotune.build --op <op>` then
-# copy the generated runtime cache here and commit.
+# Populate on-target with `miniworld-engine build all` (or `build <op> --per-op` for one
+# kernel): the build decomposes, runs and MERGES into this directory in one command -- there is
+# nothing to copy by hand. Commit the result on purpose, on its own; .githooks/pre-commit refuses
+# to mix cache files with code.

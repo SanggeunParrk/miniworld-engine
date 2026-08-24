@@ -17,8 +17,9 @@ Usage (on the target GPU, with the full grid unlocked so every config is benched
     capture.flush(top_k=5)     # writes <cache-root>/autotune/<op>/<gpu>.json for every op seen
 
 Any wired kernel that fires during the run is captured automatically — no per-kernel code. The
-cross-check against the hand-built pilot caches (transition_split_fwd / trimul_bidir_front)
-validates the capture path. Config choice is performance-only, so this never affects numerics.
+cross-check that validated this capture path was against two hand-built pilot caches
+(`transition_split_fwd` / `trimul_bidir_front`, names since retired -- see
+docs/kernels/rename-map.tsv); the script that built them is gone, the cross-check is history. Config choice is performance-only, so this never affects numerics.
 """
 
 from __future__ import annotations

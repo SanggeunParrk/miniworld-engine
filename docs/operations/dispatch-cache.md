@@ -241,13 +241,18 @@ In practice you do not drive this by hand: `miniworld-engine build all` at the t
 section runs the whole matrix through exactly this capture, and that is what the shipped caches
 were built with. Reach for the recipe above only to capture ONE module's kernels.
 
-**2. Explicit builder (per-kernel, for the pilot kernels).**
+**2. One kernel, or one module.** There is no second builder — there used to be
+(`python -m miniworld_engine.autotune.build --op ...`, two hand-written pilot builders) and it was
+removed: it stored under `transition_split_fwd` / `trimul_bidir_front`, names retired in the kernel
+rename (see `docs/kernels/rename-map.tsv`), so nothing could read what it wrote. Both ops are
+covered now, with a driver, a checker and a shipped cache under their current names. Use the one
+builder, narrowed:
 
-    PYTHONPATH=src python -m miniworld_engine.autotune.build --op all     # or --op <name>
+    miniworld-engine build <op> --per-op        # one registry kernel, every shape bucket
+    miniworld-engine build <case>               # one production module's dispatch path
 
-Its core `tune_bucket(op, gk, dtype, bucket, candidates, run_ms, csh)` is backend-agnostic: it
-benches each candidate via a `run_ms(cfg) -> ms` closure and stores the top-K. Triton builders
-point `run_ms` at `do_bench(kernel.fn[grid])`.
+`--per-op` is the decomposition the shipped caches were built with: one unit per
+`(op, shape bucket)`, each tuned exactly once.
 
 Coverage: every live Triton kernel is wired — 91 ops in registry.csv, 922 declared
 `(op, dtype, bucket)` units. `miniworld-engine dev audit` is what reports how many of them the

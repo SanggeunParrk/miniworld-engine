@@ -1,5 +1,10 @@
 # Tiling audit
 
+> **A record of one audit, not a current reference.** Kernel names here are the ones in
+> `registry.csv` at the time it ran; where a kernel has since been renamed,
+> `docs/kernels/rename-map.tsv` maps it. The *findings* — which axes are covered, which
+> extents were never ragged — are what this file is for, and those still hold.
+
 Every kernel the repo declares, measured against the tile configuration rather than the shape.
 `docs/kernels/naming.md` covers what the kernels are called; this covers whether their tiling is
 right. Nothing here is inferred from reading a kernel and deciding it looks correct — each row is

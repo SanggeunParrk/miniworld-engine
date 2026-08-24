@@ -1,5 +1,9 @@
 # GROUP_M: the L2 swizzle axis, and the 18 kernels that do not use it
 
+> **Current reference.** Every op name below is a `registry.csv` kernel and every cited path
+> is the file that registry row names — both checked. It was not always: this file carried 21
+> pre-rename names until they were mapped through `docs/kernels/rename-map.tsv`.
+
 ## What the axis is
 
 `GROUP_M` decides how a flattened 1-D program id is unpacked into a 2-D `(pid_m, pid_n)`:
@@ -54,30 +58,30 @@ Of those 23, **5 implement the swizzle**:
 
 | op | file |
 |---|---|
-| `adaln_fused3_gemm_gate` | `kernels/adaln/triton/fused3.py` |
+| `adaln_gemm_gate_triton` | `kernels/adaln/triton/fused3.py` |
 | `adaln_fused3_gemm_gate_train` | `kernels/adaln/triton/fused3.py` |
-| `cond_transition_train_fused_dgemm` | `kernels/conditioned_transition/triton/train_fused.py` |
-| `cond_transition_train_fused_dh_gatebwd` | `kernels/conditioned_transition/triton/train_fused.py` |
-| `cond_transition_train_fused_dx_swiglubwd` | `kernels/conditioned_transition/triton/train_fused.py` |
+| `cond_transition_bwd_gemm_triton` | `kernels/conditioned_transition/triton/train_fused.py` |
+| `cond_transition_bwd_gate_squeeze_dx_triton` | `kernels/conditioned_transition/triton/train_fused.py` |
+| `cond_transition_bwd_swiglu_dx_packed_triton` | `kernels/conditioned_transition/triton/train_fused.py` |
 
 The remaining **18 use plain row-major order** — `pid_m = pid // num_pid_n; pid_n = pid % num_pid_n`:
 
 | op | file |
 |---|---|
-| `bias_only_gate_out_fwd` | `kernels/bias_only_attention/triton/gate_out.py` |
-| `cond_transition_infer_expand` | `kernels/conditioned_transition/triton/composed.py` |
-| `cond_transition_train_fused_expand_swiglu` | `kernels/conditioned_transition/triton/train_fused.py` |
-| `cond_transition_train_fused_wgrad` | `kernels/conditioned_transition/triton/train_fused.py` |
-| `layernorm_linear_mmajor_bwd` | `kernels/layernorm_linear/triton/mmajor_bwd.py` |
+| `gated_projection_gate_gemm_triton` | `kernels/bias_only_attention/triton/gate_out.py` |
+| `cond_transition_expand_swiglu_triton` | `kernels/conditioned_transition/triton/composed.py` |
+| `cond_transition_expand_swiglu_saveact_triton` | `kernels/conditioned_transition/triton/train_fused.py` |
+| `cond_transition_bwd_dw_triton` | `kernels/conditioned_transition/triton/train_fused.py` |
+| `layernorm_bwd_split_mmajor_triton` | `kernels/layernorm_linear/triton/mmajor_bwd.py` |
 | `layernorm_partial_bwd` | `kernels/layernorm/triton/partial.py` |
-| `layernorm_persistent_bwd` | `kernels/layernorm/triton/persistent.py` |
-| `tm1_fwd`, `tm1_bwd` | `kernels/tm1/triton/main.py` |
-| `tm2_fwd`, `tm2_bwd` | `kernels/tm2/triton/main.py` |
-| `transition_expand_gate_bwd` | `kernels/transition/triton/fused.py` |
-| `transition_split_fwd` | `kernels/transition/triton/main.py` |
-| `trimul_cute_front_sm100_transpose` | `kernels/trimul_inproj/cute/front_sm100.py` |
-| `trimul_dtv1_input_gated_gemm`, `trimul_dtv1_output_gated_gemm` | `modules/triangle_multiplication/baseline_dtv1.py` |
-| `trimul_front_lr`, `trimul_front_gate` | `kernels/trimul_inproj/triton/front.py` |
+| `layernorm_bwd_split_triton` | `kernels/layernorm/triton/persistent.py` |
+| `trimul_gemm_gate_triton`, `trimul_bwd_gate_recompute_triton` | `kernels/tm1/triton/main.py` |
+| `trimul_outproj_gemm_gate_triton`, `trimul_outproj_bwd_gate_recompute_triton` | `kernels/tm2/triton/main.py` |
+| `transition_bwd_swiglu_recompute_triton` | `kernels/transition/triton/fused.py` |
+| `transition_expand_swiglu_triton` | `kernels/transition/triton/main.py` |
+| `trimul_transpose_triton` | `kernels/trimul_inproj/cute/front_sm100.py` |
+| `trimul_gemm_gate_saveact_triton`, `trimul_outproj_gemm_gate_saveact_triton` | `modules/triangle_multiplication/baseline_dtv1.py` |
+| `trimul_gemm_gate_packed_mmajor_triton`, `trimul_outproj_gemm_sigmoid_triton` | `kernels/trimul_inproj/triton/front.py` |
 
 These are GEMMs; the swizzle is applicable to every one of them. Nothing about their shapes rules it
 out, and the inconsistency looks unintended rather than measured. Adding it costs, per kernel, the

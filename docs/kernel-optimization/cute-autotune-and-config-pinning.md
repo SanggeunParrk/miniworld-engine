@@ -1,4 +1,14 @@
-# TODO
+# cute autotune bypass, and configs pinned for correctness
+
+> **A record of open kernel work, moved here from the repo root (was `todo.md`).** Nothing was
+> removed: 13 items are checked off and 14 are open, and every open one is cute / CUTLASS work on
+> sm90 or sm100 — several explicitly blocked on hardware ("no B200 to verify"). It lives under
+> `docs/` because a library's root is not the place for a working notebook
+> (`docs/library-standards.md` F5); the open items are tracked from `plan.md` P12, which points
+> back here rather than duplicating them.
+>
+> Dates in the section headings are the dates of the findings, not of this move.
+
 
 ## Cute kernels bypass autotune entirely (the real "hardcoding") — 2026-08-04
 **Root finding:** NO cute/CUTLASS kernel uses the autotune system. Each hardcodes ONE

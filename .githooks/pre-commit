@@ -9,7 +9,10 @@
 #
 # Escape hatch: `git commit --no-verify`, for the deliberate cache commit itself.
 set -u
-DATA='^src/miniworld_engine/autotune/data/'
+# The artifact is the tuned cache JSON. `data/.gitkeep` is that directory's own
+# documentation -- guarding it means a one-line comment fix cannot ride with the code
+# change that motivated it, which is a false positive, not caution.
+DATA='^src/miniworld_engine/autotune/data/.*\.json$'
 staged=$(git diff --cached --name-only)
 data=$(printf '%s\n' "$staged" | grep -E "$DATA" || true)
 code=$(printf '%s\n' "$staged" | grep -vE "$DATA" | grep -v '^$' || true)

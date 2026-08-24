@@ -1,5 +1,8 @@
 # 커널 명명 규칙 (확정)
 
+> 규칙 자체는 현행입니다. 규칙을 설명하려고 인용한 **옛 이름들은 기록**이며,
+> 지금 존재하는 커널 목록은 `src/miniworld_engine/kernels/registry.csv`입니다.
+
     <func>_<role>[_<detail>]_<backend>
 
 세 칸 모두 필수(detail만 선택). 소문자 snake_case. 아래 고정 어휘만 사용한다.

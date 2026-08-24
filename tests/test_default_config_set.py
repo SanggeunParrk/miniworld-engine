@@ -122,3 +122,27 @@ def test_every_runtime_data_extension_is_declared_as_package_data():
                    if p.name not in skip_names and p.suffix not in skip
                    and p.suffix.lstrip(".") not in allowed]
     assert not missed, f"{len(missed)} runtime file(s) no glob would ship: {missed[:5]}"
+
+
+def test_the_packaged_config_dir_is_not_a_package() -> None:
+    """`autotune/configs.py` and `autotune/configs/` coexist, and the module wins by accident.
+
+    CPython's finder records a matching directory with no `__init__.py` as a *possible namespace
+    portion* and keeps looking for a module file; `configs.py` then wins. Give the directory an
+    `__init__.py` -- the reflex when someone wants to make a shipped asset importable -- and it
+    becomes a regular package, which takes precedence, and every
+    `from miniworld_engine.autotune.configs import ...` resolves to an empty package instead of the
+    config reader. Verified directly:
+
+        autotune/configs.py + autotune/configs/            -> configs.py wins
+        autotune/configs.py + autotune/configs/__init__.py -> the directory wins
+
+    Nothing about that is visible in a diff that adds one empty file, so it is asserted here.
+    """
+    configs_dir = Path(__file__).resolve().parents[1] / "src/miniworld_engine/autotune/configs"
+    assert configs_dir.is_dir(), configs_dir
+    init = configs_dir / "__init__.py"
+    assert not init.exists(), (
+        f"{init} would shadow autotune/configs.py, the config-CSV reader. The directory is DATA "
+        f"(the shipped default config set); it is reached by path, never imported. If it must "
+        f"become a package, rename the module first.")
