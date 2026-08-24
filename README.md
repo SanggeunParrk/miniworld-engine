@@ -197,7 +197,7 @@ from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WI
 ```bash
 miniworld-engine build all            # tune this GPU: 922 (op, dtype, shape bucket) units
 miniworld-engine build all --resume   # skip what a previous run already claimed
-miniworld-engine audit                # which declared (op, dtype, bucket) the cache actually holds
+miniworld-engine dev audit            # which declared (op, dtype, bucket) the cache actually holds
 ```
 
 `build` writes into `src/miniworld_engine/autotune/data/`, so a finished build is committed as

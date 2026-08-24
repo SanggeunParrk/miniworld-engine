@@ -208,9 +208,9 @@ merges the shards into `data/`, and reports what it could not measure. Coverage 
 dispatch to": driving modules reached 48 of 91 triton kernels on an A6000.
 
     miniworld-engine build all                  # config set defaults to `grid`
-    miniworld-engine audit                      # did every declared (op, dtype, bucket) land?
+    miniworld-engine dev audit                  # did every declared (op, dtype, bucket) land?
 
-`audit` is the check that closes the loop — it compares the shipped cache against the declared
+`dev audit` is the check that closes the loop — it compares the shipped cache against the declared
 work list and names the holes. A hole is not a wrong answer, only a bucket that pays the bounded
 fallback above at runtime.
 
@@ -250,7 +250,7 @@ benches each candidate via a `run_ms(cfg) -> ms` closure and stores the top-K. T
 point `run_ms` at `do_bench(kernel.fn[grid])`.
 
 Coverage: every live Triton kernel is wired — 91 ops in registry.csv, 922 declared
-`(op, dtype, bucket)` units. `miniworld-engine audit` is what reports how many of them the
+`(op, dtype, bucket)` units. `miniworld-engine dev audit` is what reports how many of them the
 shipped cache actually holds on the card you are on; do not infer it from this paragraph.
 
 ## CuTe / CUDA autotune (sm90+)

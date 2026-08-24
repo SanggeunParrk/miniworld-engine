@@ -2,15 +2,25 @@
 
     miniworld-engine build all                # the DECLARED work list: 922 (op, dtype, bucket)
     miniworld-engine build all --resume       # skip what a previous run already claimed
-    miniworld-engine audit                    # which of them the shipped cache actually holds
-
-    miniworld-engine capture all              # every kernel, every dispatch branch
-    miniworld-engine capture pairformer       # one module's kernels
-    miniworld-engine capture transition --gpus 4
-    miniworld-engine merge --shards <shard-dir>   # fold captured shards into the in-repo cache
-
     miniworld-engine bench_kernel all         # the kernel benches
     miniworld-engine bench_module all         # the module benches
+
+Three commands, because there are three things to do: make this card's cache, measure a kernel,
+measure a module. `build` decomposes, runs and merges in one go -- the merge is a step of it, not
+a thing to remember.
+
+The pieces underneath are still reachable, under `dev`, where they do not clutter the answer to
+"what can I run":
+
+    miniworld-engine dev merge --shards <shard-dir>   # shards from ANOTHER machine, or a re-merge
+    miniworld-engine dev audit                        # build-system + cache-coverage checks
+    miniworld-engine dev capture all                  # shards without merging (see below)
+
+`dev audit`'s checks are already run by the CPU suite (`test_registry_complete`,
+`test_declared_dtype_coverage`, `test_spread_shape_key`); the command adds only `--shards`, i.e.
+evidence from a real build that a test cannot have. `dev capture` is the older two-step path:
+`build --per-module` is the same decomposition, and it is not the default because driving modules
+reaches 48 of 91 triton kernels while the per-op sweep reaches all of them.
 
 ``build`` is the one to reach for. ``capture`` drives production MODULES, so it only reaches the
 kernels a module's own shapes dispatch to -- 48 of 91 on an A6000; ``build`` drives the registry's
@@ -856,9 +866,28 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(prog="miniworld-engine", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    # The top level is what a USER does: make this card's cache, and measure. Everything else --
+    # the pieces `build` runs internally, and the checks the test suite already runs -- lives under
+    # `dev`, so `--help` answers "what can I do with this" instead of listing the implementation.
+    #
+    #   build         make this GPU's autotune cache (decompose -> run -> merge, in one command)
+    #   bench_kernel  measure one kernel
+    #   bench_module  measure one module
+    #   dev capture   shards without merging: the older two-step path, superseded by
+    #                 `build --per-module` (which reaches 91 kernels where driving modules reaches
+    #                  48) and kept only for its shape-ladder overrides
+    #   dev merge     fold shards in by hand -- `build` does this itself; this is for shards from
+    #                 another machine, or a re-merge after a cache-key scheme bump
+    #   dev audit     the build-system checks. tests/test_registry_complete.py,
+    #                 test_declared_dtype_coverage.py and test_spread_shape_key.py already drive
+    #                 these; the command adds only `--shards`, i.e. evidence from a real build
+    #                 that a CPU test cannot have.
     sub = parser.add_subparsers(dest="command", required=True)
+    dev_parser = sub.add_parser(
+        "dev", help="build internals and build-system checks (not needed for normal use)")
+    dev = dev_parser.add_subparsers(dest="dev_command", required=True)
 
-    cap = sub.add_parser("capture", help="build autotune caches by capturing benched configs")
+    cap = dev.add_parser("capture", help="write shards without merging (see `build`)")
     cap.add_argument("what", help=f"target or group ({', '.join(GROUPS)})")
     cap.add_argument("--gpus", default="all", help="count, comma list, or 'all' (default: all)")
     cap.add_argument("--shards", default="~/.cache/miniworld-shards", help="where shards go")
@@ -872,7 +901,7 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--d-pairs", default="", help="comma list overriding the d_pair ladder")
     cap.set_defaults(func=cmd_capture)
 
-    mrg = sub.add_parser("merge", help="fold captured shards into the in-repo cache")
+    mrg = dev.add_parser("merge", help="fold shards into the in-repo cache by hand")
     mrg.add_argument("--shards", default="~/.cache/miniworld-shards", help="dir holding the shards")
     mrg.add_argument("--gpu", default="", help="cache key; defaults to this machine's GPU")
     mrg.add_argument("--top-k", type=int, default=5, help="configs kept per bucket")
@@ -949,7 +978,7 @@ def build_parser() -> argparse.ArgumentParser:
                              help="how kernel entry points are exposed to torch.compile "
                                   "(default: leave settings alone)")
 
-    aud = sub.add_parser("audit",
+    aud = dev.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")
     aud.add_argument("--gpu", default="", help="cache key to audit; defaults to this machine's GPU")
     aud.add_argument("--shards", nargs="*", default=[],
