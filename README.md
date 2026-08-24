@@ -198,6 +198,35 @@ The default matters beyond fusion. Under `disable`, inductor's cudagraph-trees
 `torch.cuda.graph` capture over a compiled module dies with `cudaErrorStreamCaptureInvalidated`.
 Numbers, and the scripts that produced them: `benchmarks/compile_wrap/`.
 
+## Supported hardware
+
+Every kernel declares its minimum architecture in `kernels/registry.csv`'s `arch` column, and the
+table below is checked against that column by `tests/test_hardware_support.py` — so it cannot drift
+from the code.
+
+<!-- BEGIN GENERATED: hardware-support -->
+| arch | GPUs | kernels | backends |
+|---|---|---|---|
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 94 | triton 88, cuda 6 |
+| **sm90+** | H100 | 2 | cute 2 |
+| **sm100+** | B200 | 7 | cute 4, triton 3 |
+<!-- END GENERATED: hardware-support -->
+
+**The floor is sm80.** 94 of 103 kernels run there: all 88 unmarked Triton kernels (committed result
+tables exist for A100, A5000, A6000, H100 and B200) and the 6 hand-CUDA ones, whose
+`kernels/<family>/cuda/setup.py` declares `-gencode` for compute_80/86/89/90 explicitly rather than
+relying on torch's arch autodetect.
+
+**Above the floor is opt-in, and never the only path.** The 9 sm90/sm100 kernels are CuTeDSL/quack
+GEMMs and three Triton kernels written for Blackwell. Every op they serve also has a Triton
+implementation at sm80, and `modules/dispatch.py` selects between them — so an unsupported card
+loses performance, not function. `implementation='triton'` pins the portable path everywhere.
+
+One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
+which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on
+sm_86 ("Error building extension"). `autotune/builder.py` excludes `cuda` from that case's
+implementations for exactly this reason.
+
 ## Status
 
 Restructured into the kernels/modules split above. The triangle_multiplication

@@ -18,7 +18,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P4 | D5 | the `configs` shadowing landmine | **done** |
 | P5 | F3 | delete the orphan pilot builder | **done** |
 | P6 | A4 | deprecation policy with a mechanism | **done** |
-| P7 | A5 | hardware support matrix, checked | todo |
+| P7 | A5 | hardware support matrix, checked | **done** |
 | P8 | B5 | determinism statement + test | todo |
 | P9 | C2 | quoted numbers traceable to a table | todo |
 | P10 | D4 | end the `configs/grid` duplication | **done** |
@@ -266,6 +266,27 @@ State the fallback rule: every op has a triton path, and the dispatch falls back
 
 **Done when.** README carries the matrix; the test fails if a kernel's arch requirement changes
 without the table changing.
+
+**Done.** `registry.csv` gains an `arch` column -- a declared MINIMUM per kernel, not a derived
+one, because the derivation (an `sm100` in a filename) is a heuristic that breaks the moment
+someone names a file differently. Populated from what the tree already states: 94 at sm80 (88
+unmarked Triton kernels, which have committed result tables on A100/A5000/A6000/H100/B200, plus the
+6 hand-CUDA ones whose `kernels/<family>/cuda/setup.py` declares `-gencode` for
+compute_80/86/89/90 explicitly), 2 cute at sm90, 4 cute + 3 Triton at sm100.
+
+README renders it inside `BEGIN/END GENERATED` markers and `tests/test_hardware_support.py`
+regenerates and compares, so the table cannot drift from the column. Four more checks keep the
+column honest rather than decorative: every kernel declares one of the three levels; a name
+containing `sm100`/`sm90` may not claim a lower arch (the name is evidence, not the source of
+truth); no CuTeDSL kernel may claim the Triton floor; and -- the one that backs the README's actual
+promise -- **every family with an above-floor kernel also has one at the floor**, so an
+unsupported card loses performance and not function. Verified non-vacuous: 9 kernels across 5
+families are above the floor, and all 5 families have an sm80 fallback.
+
+One thing the table deliberately excludes, with the reason in the README: `transition_b2b_cuda` is
+compiled for `sm_90a` and fails to build on sm_86, but it is not a registry kernel -- the
+`Transition` module builds it on demand -- so it is named in prose instead of implied to be one of
+the 103.
 
 ---
 
