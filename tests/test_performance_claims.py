@@ -39,7 +39,9 @@ LIVE_DOCS = (
 
 #: A latency or a speedup. Deliberately narrow: version numbers, tolerances and counts are not
 #: performance claims, and a rule that fires on `2.10.0` teaches people to ignore it.
-CLAIM = re.compile(r"\d+\.\d+\s*(?:ms|µs|us|x\b|×)")
+# \u00d7 and \u00b5 spelled as escapes: written literally, ruff (RUF001) reads them as
+# homoglyphs of `x` and `u`, which is a fair warning about identifiers and noise in a regex.
+CLAIM = re.compile("\\d+\\.\\d+\\s*(?:ms|\u00b5s|us|x\\b|\u00d7)")
 DEVICE = re.compile(r"A6000|A5000|A100|H100|B200|RTX\s*\d|sm\d{2,3}|4090", re.IGNORECASE)
 
 

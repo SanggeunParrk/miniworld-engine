@@ -5,11 +5,10 @@ from pathlib import Path
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
-ensure_cuda_home()
-
 _dir = Path(__file__).parent
 
-transition_b2b_cuda = load_extension(
+def _build_transition_b2b_cuda():
+    return load_extension(
     name="transition_b2b_cuda",
     sources=[str(_dir / "transition_b2b_kernel.cu")],
     extra_cuda_cflags=[
@@ -32,9 +31,10 @@ transition_b2b_cuda = load_extension(
     ],
     extra_cflags=["-std=c++17"],
     verbose=False,
-)
+    )
 
-transition_expand_gate_cuda = load_extension(
+def _build_transition_expand_gate_cuda():
+    return load_extension(
     name="transition_expand_gate_cuda",
     sources=[str(_dir / "transition_expand_gate_kernel.cu")],
     extra_cuda_cflags=[
@@ -56,10 +56,11 @@ transition_expand_gate_cuda = load_extension(
     ],
     extra_cflags=["-std=c++17"],
     verbose=False,
-)
+    )
 
 
-transition_gatebwd_cuda = load_extension(
+def _build_transition_gatebwd_cuda():
+    return load_extension(
     name="transition_gatebwd_cuda",
     sources=[str(_dir / "transition_gatebwd_kernel.cu")],
     extra_cuda_cflags=[
@@ -82,14 +83,46 @@ transition_gatebwd_cuda = load_extension(
     ],
     extra_cflags=["-std=c++17"],
     verbose=False,
-)
+    )
+
+
+
+_BUILDERS = {n: globals()[f"_build_{n}"] for n in
+             ("transition_b2b_cuda", "transition_expand_gate_cuda", "transition_gatebwd_cuda")}
+
+
+def _ext(name: str):
+    """One of the three extensions, built on first use and cached in globals().
+
+    Functions in THIS module must call this, not the bare name. A module-level `__getattr__` is
+    consulted for `module.attr` from outside; a bare global lookup inside the module is not, so
+    `return _ext("transition_b2b_cuda").f(...)` would raise NameError at call time.
+    """
+    ext = globals().get(name)
+    if ext is None:
+        ensure_cuda_home()   # mutates os.environ; belongs with the build, not with the import
+        ext = globals()[name] = _BUILDERS[name]()
+    return ext
+
+
+def __getattr__(name: str):
+    """PEP 562: compile on first use, not at import.
+
+    This package built THREE extensions at import time, one of them (`transition_b2b_cuda`)
+    compiled for `sm_90a`. So importing it on an sm_86 card raised "Error building extension"
+    outright -- and `dev audit`'s import check, which walks every package, reported
+    `import: 0 OK, 2 not OK` on every A6000 run for a reason having nothing to do with the cache.
+    """
+    if name not in _BUILDERS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return _ext(name)
 
 
 def transition_expand_gatebwd_wgmma(x, rstd, c1, g, beta, wa, wb, grad_expand):
     """Hopper WGMMA fused expand + SwiGLU gate backward. Returns (h, dAB, xn):
     h=(M,ND) silu(a)*b, dAB=(M,2ND) [dA|dB], xn=(M,K). Matches the Triton
     ``_transition_expand_gatebwd_stacked`` (Version A) for sm90 K in {128,256,512}."""
-    return transition_gatebwd_cuda.transition_expand_gatebwd_wgmma(
+    return _ext("transition_gatebwd_cuda").transition_expand_gatebwd_wgmma(
         x, rstd, c1, g.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand.contiguous(),
     )
@@ -100,14 +133,14 @@ def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, add_residual=False):
 
     ``add_residual``: fold ``y = transition(x) + x`` into the squeeze epilogue (residual == x).
     """
-    return transition_b2b_cuda.transition_b2b_fwd(
+    return _ext("transition_b2b_cuda").transition_b2b_fwd(
         x, rstd, c1, g, beta, wa, wb, ws, add_residual
     )
 
 
 def transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb):
     """Fused LN + SwiGLU expand/gate forward returning h[M, ND]."""
-    return transition_expand_gate_cuda.transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb)
+    return _ext("transition_expand_gate_cuda").transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb)
 
 
 def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps, add_residual=False):
@@ -128,7 +161,7 @@ def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps, add_residual=Fal
     k = x.shape[-1]
     x2 = x.reshape(-1, k).contiguous()
     rstd, c1 = stats_triton(x2, eps)
-    out = transition_b2b_cuda.transition_b2b_fwd(
+    out = _ext("transition_b2b_cuda").transition_b2b_fwd(
         x2,
         rstd,
         c1,
@@ -153,7 +186,7 @@ def cuda_transition_expand_gate(x, ln_weight, ln_bias, wa, wb, eps):
     k = x.shape[-1]
     x2 = x.reshape(-1, k).contiguous()
     rstd, c1 = stats_triton(x2, eps)
-    h = transition_expand_gate_cuda.transition_expand_gate_fwd(
+    h = _ext("transition_expand_gate_cuda").transition_expand_gate_fwd(
         x2,
         rstd,
         c1,

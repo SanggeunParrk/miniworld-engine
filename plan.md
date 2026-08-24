@@ -26,7 +26,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
 | P13 | F6 | CONTRIBUTING | **done** |
 | P14 | A4 | the declared Python floor is untested | **done** |
-| P15 | E2 | a stale JIT build lock hangs the GPU suite forever | **done** (lazy-load half deferred) |
+| P15 | E2 | a stale JIT build lock hangs the GPU suite forever | **done** (both halves) |
 | P16 | B1 | `["ALL"]` lint exemption hid a guaranteed NameError | **done** |
 | P17 | E2 | `run_all` reported "wrong card" as "wrong answer" | **done** |
 | P18 | B1 | opcheck asserted a contract the design declines | **done** |
@@ -650,7 +650,23 @@ a guard is worth nothing if a call site can bypass it.
 matters as much as the reclaim is `test_a_fresh_lock_is_left_alone`: reclaiming a lock a live build
 owns would corrupt a concurrent compile, which is a worse failure than the one being fixed.
 
-**Deferred — the lazy-load half, deliberately.** Both `layernorm/cuda/__init__.py` and
+**The lazy-load half, now done too** — P0b's audit turned it from cleanup into a defect
+(`dev audit` exits 1 on any non-Hopper card because `transition.cuda` builds an sm_90a extension at
+import). Both packages are PEP 562 lazy: the build moved into a function, the names come through a
+module-level `__getattr__`, and `ensure_cuda_home()` moved with the build because it mutates
+`os.environ` and an import should not. `tests/test_no_build_at_import.py` reads the SOURCE for a
+module-scope `load`/`load_extension`, so it runs anywhere, with or without CUDA, and does not
+depend on catching a build in the act. Verified it bites by putting an eager call back.
+
+**And the conversion had a bug that my own P16 guard caught before it shipped**, which is the
+best evidence that guard was worth adding. A module-level `__getattr__` is consulted for
+`module.attr` from OUTSIDE; a bare global lookup inside the same module is not. So
+`return layer_norm_cuda.layer_norm_bwd(...)`, sitting in a function in that very module, would have
+raised `NameError` at call time -- the identical class of bug as the `token_key(L)` one this run
+found, and equally invisible to import checks. `ruff --isolated --select F821` flagged all six
+sites; each function now goes through an `_ext()` accessor that builds-and-caches.
+
+**Originally deferred, for the record:** Both `layernorm/cuda/__init__.py` and
 `transition/cuda/__init__.py` still build at IMPORT time, and `transition/cuda` builds three
 extensions eagerly, one of them `sm_90a`-only, so importing that module on an A6000 fails outright.
 Making them lazy is right (it is also A2, and every consumer already imports them inside a function
