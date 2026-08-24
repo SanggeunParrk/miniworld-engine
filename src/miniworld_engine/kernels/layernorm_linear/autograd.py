@@ -79,7 +79,7 @@ def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
             torch.empty_like(dx_normed),
             x.new_empty((x.shape[-1],), dtype=torch.float32),
             x.new_empty((x.shape[-1],), dtype=torch.float32)),
-        name="lnl_ln_backward")
+        name="layernorm_linear_ln_bwd")
 def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
                  mean: torch.Tensor, rstd: torch.Tensor, shape_key: int | None = None,
                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -166,7 +166,7 @@ def _ln_materialize_fake(x, gamma, beta, eps, shape_key=None):
     )
 
 
-@opaque(fake=_ln_materialize_fake, name="ln_materialize")
+@opaque(fake=_ln_materialize_fake, name="layernorm_linear_materialize")
 def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, eps: float,
                     shape_key: int | None = None,
                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -243,7 +243,7 @@ def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None):
     )
 
 
-@opaque(fake=_ln_bwd_fake, name="ln_bwd_mmajor")
+@opaque(fake=_ln_bwd_fake, name="layernorm_linear_bwd_mmajor")
 def _ln_bwd(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor, mean: torch.Tensor,
             rstd: torch.Tensor, dx_strides: list[int], shape_key: int | None = None,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

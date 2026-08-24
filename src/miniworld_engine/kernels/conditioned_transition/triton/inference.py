@@ -147,7 +147,7 @@ def _cond_transition_inference_kernel(
 
 @opaque(fake=lambda x, cond, wa, wb, ws, wsc, bsc, length=None: x.new_empty(
             (x.shape[0], ws.shape[0])),
-        name="cond_transition_inference")
+        name="conditioned_transition_inference")
 def cond_transition_inference(
     x: torch.Tensor,     # (M, K)  AdaLN output, K = d_hidden
     cond: torch.Tensor,  # (M, DC) conditioning, DC = d_cond

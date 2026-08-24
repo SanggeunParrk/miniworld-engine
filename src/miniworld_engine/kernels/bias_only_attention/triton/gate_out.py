@@ -164,7 +164,7 @@ def _dgrad_epi(
 
 @opaque(fake=lambda do2, wo, g2, r2, shape_key=None: (
             torch.empty_like(g2), torch.empty_like(g2), torch.empty_like(g2)),
-        name="gate_out_dgrad_epilogue")
+        name="bias_only_attention_gate_out_dgrad_epilogue")
 def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: torch.Tensor,
                     shape_key: int | None = None,
                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -192,7 +192,7 @@ def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: t
 
 @opaque(fake=lambda gate2d, outr2d, wo, shape_key=None: gate2d.new_empty(
             (gate2d.shape[0], wo.shape[0])),
-        name="gate_out_fwd")
+        name="bias_only_attention_gate_out_fwd")
 def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor,
          shape_key: int | None = None) -> torch.Tensor:
     """``shape_key`` is ``token_key(L)`` from the caller (see ``_dgrad_epilogue``)."""
@@ -261,7 +261,7 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
 
 
-@opaque(fake=lambda gate, out, shape_key: torch.empty_like(gate), name="sigmul_fwd")
+@opaque(fake=lambda gate, out, shape_key: torch.empty_like(gate), name="bias_only_attention_sigmul_fwd")
 def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tensor:
     """``sigmoid(gate) * out`` in one pass."""
     a = torch.empty_like(gate)
@@ -272,7 +272,7 @@ def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tens
 
 
 @opaque(fake=lambda da, gate, out, shape_key: (torch.empty_like(gate), torch.empty_like(out)),
-        name="sigmul_bwd")
+        name="bias_only_attention_sigmul_bwd")
 def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
                  shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""

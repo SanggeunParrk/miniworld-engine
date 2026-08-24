@@ -90,7 +90,7 @@ def _swiglu_fwd_kernel(
 
 
 
-@opaque(fake=lambda a, b, shape_key=None: a.new_empty(a.shape), name="cond_swiglu_fwd")
+@opaque(fake=lambda a, b, shape_key=None: a.new_empty(a.shape), name="conditioned_transition_swiglu_fwd")
 def _swiglu(a: torch.Tensor, b: torch.Tensor,
             shape_key: int | None = None) -> torch.Tensor:
     M, ND = a.shape
@@ -103,7 +103,7 @@ def _swiglu(a: torch.Tensor, b: torch.Tensor,
     return h
 
 
-@opaque(fake=lambda out, scale, shape_key=None: torch.empty_like(out), name="cond_gate_fwd")
+@opaque(fake=lambda out, scale, shape_key=None: torch.empty_like(out), name="conditioned_transition_gate_fwd")
 def _gate(out: torch.Tensor, scale: torch.Tensor,
           shape_key: int | None = None) -> torch.Tensor:
     y = torch.empty_like(out)
@@ -154,7 +154,7 @@ def _swiglu_bwd_kernel(
 
 @opaque(fake=lambda out, scale, dy, shape_key=None: (
             torch.empty_like(out), torch.empty_like(out)),
-        name="cond_gate_bwd")
+        name="conditioned_transition_gate_bwd")
 def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     dout = torch.empty_like(out)
@@ -173,7 +173,7 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 
 
 @opaque(fake=lambda a, b, dh, shape_key=None: a.new_empty((a.shape[0], 2 * a.shape[1])),
-        name="cond_swiglu_bwd_packed")
+        name="conditioned_transition_swiglu_bwd_packed")
 def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
                        shape_key: int | None = None) -> torch.Tensor:
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""
@@ -310,7 +310,7 @@ def _b2b_fwd_train_fake(x, cond, wa, wb, ws, wsc, bsc, shape_key=None):
             x.new_empty((m, d)), x.new_empty((m, d)))
 
 
-@opaque(fake=_b2b_fwd_train_fake, name="cond_b2b_fwd_train")
+@opaque(fake=_b2b_fwd_train_fake, name="conditioned_transition_b2b_fwd_train")
 def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
                    ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
                    shape_key: int | None = None) -> tuple[

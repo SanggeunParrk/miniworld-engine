@@ -7,7 +7,14 @@ projects to ``n_head`` in-register -- it never materializes the full normalized
 kernel plus a separate GEMM). ``ln_weight``/``proj_weight`` are the affine scale
 of an *unbiased* ``nn.LayerNorm`` and the weight of an *unbiased* ``Linear``.
 
-Registered as a ``torch.library.custom_op`` so it stays in the compiled graph
+Registered as a ``torch.library.custom_op`` DIRECTLY, not through ``kernels._compile.opaque``
+like the other ~105 ops -- the one deliberate exception. ``opaque`` degrades an op to a graph
+break under ``compile_wrap="disable"``, and this op owns its autograd (``register_autograd``
+below) instead of sitting inside an ``autograd.Function``. A plain function has no
+``register_autograd``, so degrading this one is not a slower path, it is an import error: an op
+that owns its own autograd has to be an op in every mode.
+
+Registered as a custom_op so it stays in the compiled graph
 without a graph break -- surviving ``torch.compile`` is the entire point.
 """
 
@@ -270,7 +277,7 @@ def _layer_norm_linear_bwd(
         tl.store(dx_ptr + offs, dx, mask=mask)
 
 
-@torch.library.custom_op("miniworld_engine::layer_norm_linear_fwd", mutates_args=())
+@torch.library.custom_op("miniworld_engine::layernorm_linear_pair_bias_fwd", mutates_args=())
 def _fwd_op(
     x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -312,7 +319,7 @@ def _(x, ln_weight, proj_weight, eps):
     )
 
 
-@torch.library.custom_op("miniworld_engine::layer_norm_linear_bwd", mutates_args=())
+@torch.library.custom_op("miniworld_engine::layernorm_linear_pair_bias_bwd", mutates_args=())
 def _bwd_op(
     dout: torch.Tensor,
     x2: torch.Tensor,

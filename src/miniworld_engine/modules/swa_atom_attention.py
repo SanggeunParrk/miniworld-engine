@@ -67,7 +67,7 @@ def _check_front_packed() -> bool:
 # "custom_op" it is an opaque graph node instead and nothing breaks at all.
 @opaque(fake=lambda q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale,
                half_window: torch.empty_like(q),
-        name="flash_window_seqused")
+        name="swa_atom_attention_flash_window")
 def flash_window_seqused(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, seqused: torch.Tensor, max_seqlen: int,

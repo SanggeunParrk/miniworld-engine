@@ -98,7 +98,7 @@ def _cute_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squ
     )
 
 
-@opaque(fake=_cute_fwd_fake, name="cute_transition_fused_fwd")
+@opaque(fake=_cute_fwd_fake, name="transition_cute_fused_fwd")
 def _cute_fwd(
     x2: torch.Tensor,
     ln_weight: torch.Tensor,
@@ -150,7 +150,7 @@ def _cute_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weigh
     )
 
 
-@opaque(fake=_cute_bwd_fake, name="cute_transition_fused_bwd")
+@opaque(fake=_cute_bwd_fake, name="transition_cute_fused_bwd")
 def _cute_bwd(
     grad_output: torch.Tensor,
     x2: torch.Tensor,

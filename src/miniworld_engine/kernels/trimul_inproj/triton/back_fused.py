@@ -103,7 +103,7 @@ def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.conste
 @opaque(fake=lambda d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit, Wg: (
             torch.empty_like(x_n), torch.empty_like(WL), torch.empty_like(WLg),
             torch.empty_like(WR), torch.empty_like(WRg), torch.empty_like(Wg)),
-        name="trimul_front_bwd_dW_glogit")
+        name="trimul_front_bwd_dw_glogit")
 def front_bwd_dW_glogit(d_left: torch.Tensor, d_right: torch.Tensor, preact: torch.Tensor,
                         x_n: torch.Tensor, WL: torch.Tensor, WLg: torch.Tensor,
                         WR: torch.Tensor, WRg: torch.Tensor, d_glogit: torch.Tensor,

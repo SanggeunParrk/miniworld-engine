@@ -40,7 +40,7 @@ def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, s
                  y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
 
 @opaque(fake=lambda x, gamma, beta, mean, rstd, shape_key=None: x.new_empty(x.shape),
-        name="lnl_recompute_xnormed")
+        name="layernorm_linear_recompute_xnormed")
 def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
                        mean: torch.Tensor, rstd: torch.Tensor,
                        shape_key: int | None = None) -> torch.Tensor:
@@ -78,7 +78,7 @@ def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                  y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
 
 @opaque(fake=lambda x, mean, rstd, shape_key=None: x.new_empty(x.shape),
-        name="lnl_recompute_xhat")
+        name="layernorm_linear_recompute_xhat")
 def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
                     shape_key: int | None = None) -> torch.Tensor:
     """x̂ = (x-mean)·rstd (no affine), one fused bf16 pass using the SAVED mean/rstd.

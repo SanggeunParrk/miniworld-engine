@@ -30,6 +30,10 @@ ops at small L.
 
 ## 2. `@torch.compiler.disable` ⇒ `torch.compile` can never CUDA-graph it
 
+**This section describes `compile_wrap="disable"`, which is no longer the default.** It is kept
+because it is exactly right *about that mode*, and because it explains what the default now
+avoids. See `kernels/_compile.py`.
+
 - The op is an opaque eager island. `compile` (any mode) runs it eager and only
   adds Dynamo guard/dispatch overhead — it is **slower than eager**, not faster
   (measured: fwd+bwd L=384 eager 1.33 ms → compiled 1.99 ms).
@@ -38,10 +42,36 @@ ops at small L.
 - Only **manual `torch.cuda.graph` capture** or **`make_graphed_callables`** captures
   the eager kernels and removes host overhead.
 
-Why `@disable` at all: letting Inductor trace in re-codegens our cuBLAS GEMMs into
-slower matmuls and graph-breaks at every cute/triton Function (~2× slower; the
-`custom_op` variant is ~1.9× slower from save-as-output). `@disable` is the lesser
-evil — and the cost is that cudagraph must be applied *manually*.
+### What changed, and why the conclusion flipped
+
+The old conclusion here was: *"letting Inductor trace in re-codegens our cuBLAS GEMMs into slower
+matmuls and graph-breaks at every cute/triton Function (~2× slower; the `custom_op` variant is
+~1.9× slower from save-as-output). `@disable` is the lesser evil."*
+
+That was measured when `custom_op` mode could not actually be selected: 47 of the 58 entry points
+decorated an `autograd.Function` method, which `torch.library.custom_op` cannot register, so the
+mode raised on import. Whatever the ~1.9× came from, it was not this repo running that way.
+
+Every launch now has a `fake`. Measured on an A6000, Pairformer ×4, L=384 — `disable` → `custom_op`:
+
+| regime | disable | custom_op |
+|---|---|---|
+| training, `torch.compile`, no CUDA graph | 164.5 ms | **155.9 ms** |
+| training, `mode="reduce-overhead"` | 166.0 ms (60 graphs recorded) | **155.1 ms** (1) |
+| training, compile + manual capture | **crash** (`cudaErrorStreamCaptureInvalidated`) | **153.8 ms** |
+| inference, `mode="reduce-overhead"` | 42.5 ms | **36.5 ms** |
+
+The two bullets above are *why*: a graph break does not only cost fusion, it makes cudagraph-trees
+bail and makes a manual capture over a compiled module die when part of the region drops back to
+eager mid-capture. Removing the breaks is what makes those tools usable at all.
+
+The "re-codegens our cuBLAS GEMMs into slower matmuls" worry is real in principle — Inductor can
+now see the `torch.matmul` calls inside the Functions — but it is not a net loss at these shapes,
+or the table above would not read the way it does. If a future shape regresses, that is the first
+thing to check.
+
+`disable` remains available (`MINIWORLD_COMPILE_WRAP=disable`) for A/B, and as the escape hatch if
+a `fake` is ever wrong: it is the mode that needs none.
 
 ## 3. Diagnosing a surprising number — a decision tree
 

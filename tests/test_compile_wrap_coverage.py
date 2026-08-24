@@ -139,27 +139,127 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
         + "\n  ".join(bad))
 
 
+#: The op namespace is public API: ``torch.ops.miniworld_engine.<name>`` is global and flat, and
+#: a consumer reads these names in profiles, in ``TORCH_LOGS`` output and in graph dumps. So a
+#: name is not a local variable -- it needs one scheme, and the scheme is: the FAMILY the kernel
+#: belongs to, which is the directory it lives in, then what it does, in lower_snake_case.
+#:
+#: This list is the vocabulary. It was written after an audit found 41 of 107 names not starting
+#: with their family at all (``cond_tf_dgemm``, ``lnl_recompute_xhat``, ``dtv1_input_gated_gemm``),
+#: three different prefixes for layernorm_linear alone (``lnl_``, ``ln_``, ``layer_norm_linear_``),
+#: and one name carrying a capital from maths notation (``trimul_front_bwd_dW_glogit``).
+OP_FAMILIES = (
+    "adaln",
+    "augmented_attention",
+    "bias_only_attention",
+    "conditioned_transition",
+    "fused_ln_mask",
+    "gated_projection",
+    "layernorm_linear",     # before "layernorm": it is the longer, more specific prefix
+    "layernorm",
+    "swa_atom_attention",
+    "tm1",
+    "tm2",
+    "transition",
+    "triangle_attention",
+    "triangle_multiplication",
+    "trimul",
+)
+
+
+def _declared_op_names() -> dict[str, str]:
+    """Every ``miniworld_engine::`` op name in the tree, mapped to the file that declares it.
+
+    Read from the source rather than from ``dir(torch.ops.miniworld_engine)`` so the check runs on
+    a CPU box and covers the sm90/sm100 ops this machine can never import.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            fname = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "")
+            if fname not in ("opaque", "custom_op"):
+                continue
+            name = None
+            for kw in node.keywords:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                    name = kw.value.value
+            if name is None and fname == "custom_op" and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant):
+                    name = str(first.value).split("::")[-1]
+            if name:
+                found[name] = str(path.relative_to(SRC))
+    return found
+
+
+def test_op_names_are_lower_snake_case() -> None:
+    bad = {n: f for n, f in _declared_op_names().items()
+           if n != n.lower() or not n.replace("_", "").isalnum()}
+    assert not bad, ("op names are public and must be lower_snake_case:\n  "
+                     + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items())))
+
+
+def test_op_names_start_with_their_family() -> None:
+    """A name's first token says which kernel family it belongs to -- see ``OP_FAMILIES``."""
+    bad = {n: f for n, f in _declared_op_names().items() if not n.startswith(OP_FAMILIES)}
+    assert not bad, (
+        "these op names do not start with a known family; either rename them or add the family "
+        "to OP_FAMILIES (and say why it is a family):\n  "
+        + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items())))
+
+
+def test_only_pair_bias_bypasses_the_compile_wrap_switch() -> None:
+    """``opaque`` is the one switch. One file is exempt, on purpose, and says so.
+
+    ``layernorm_linear/triton/pair_bias.py`` registers its ops directly because they own their
+    autograd via ``register_autograd``; a plain function (what ``opaque`` returns under
+    ``compile_wrap="disable"``) has no such method, so degrading them is an import error rather
+    than a slower path. Any OTHER file calling ``torch.library.custom_op`` is a site that quietly
+    ignores the switch.
+    """
+    offenders = []
+    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+        if path.name in ("pair_bias.py", "_compile.py"):
+            continue                      # the exemption, and the switch's own implementation
+        if "torch.library.custom_op(" in path.read_text():
+            offenders.append(str(path.relative_to(SRC)))
+    assert not offenders, ("these register ops outside kernels._compile.opaque, so compile_wrap "
+                           "does not reach them:\n  " + "\n  ".join(offenders))
+
+
 @pytest.mark.parametrize("wrap", ["disable", "custom_op"])
 def test_custom_op_mode_registers_every_site(wrap: str) -> None:
-    """Import the whole kernel+module tree under each mode. Registration happens at import.
+    """Import every module that HAS an ``opaque`` site, under each mode. Registration is at import.
 
     A subprocess per mode is not fussiness: ``kernels._compile`` reads ``compile_wrap`` when the
     decorator RUNS, so a single interpreter can only ever hold one of the two.
+
+    Only the 53 files that contain ``@opaque`` are imported, not all 184 under ``kernels/`` and
+    ``modules/``. The whole tree took over ten minutes -- most of it nvcc JIT-building CUDA
+    extensions that have nothing to do with op registration -- and a ten-minute test is a test
+    that gets skipped, which is exactly what happened to this one while it was being written.
+    The narrow set is also the complete set for the question being asked: a site that does not
+    exist in a file cannot fail to register from it.
     """
+    sites = sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
+                   if "@opaque" in p.read_text())
+    assert sites, "no @opaque sites found -- the test is looking in the wrong place"
+    mods = [
+        "miniworld_engine." + ".".join(
+            p.relative_to(SRC).with_suffix("").parts).removesuffix(".__init__")
+        for p in sites
+    ]
     script = f"""
 import sys
 from miniworld_engine import settings
 settings.configure(compile_wrap={wrap!r})
-import importlib, pathlib
-root = pathlib.Path({str(SRC)!r})
-mods = sorted({{
-    "miniworld_engine." + ".".join(f.relative_to(root).with_suffix("").parts).removesuffix(".__init__")
-    for d in ("kernels", "modules") for f in (root / d).rglob("*.py")
-}})
+import importlib
 missing = []
-for m in mods:
-    if "cuda.setup" in m:
-        continue
+for m in {mods!r}:
     try:
         importlib.import_module(m)
     except ValueError as e:

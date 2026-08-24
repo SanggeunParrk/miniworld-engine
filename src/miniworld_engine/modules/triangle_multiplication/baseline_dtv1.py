@@ -546,7 +546,7 @@ def _gated_gemm_bwd_elemwise_kernel(
 
 @opaque(fake=lambda grad, ab, sig_m, seq_len=None: grad.new_empty(
             (2 * grad.shape[0], grad.shape[1])),
-        name="dtv1_gated_gemm_bwd_combined")
+        name="triangle_multiplication_dtv1_gated_gemm_bwd_combined")
 def _elemwise_bwd_combined(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Tensor,
                            seq_len: int | None = None) -> torch.Tensor:
     """Backward for input gated GEMM — writes (d_gate, d_proj) into a single (2N, M) buffer.
@@ -574,7 +574,7 @@ def _elemwise_bwd_combined(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Te
 
 @opaque(fake=lambda grad, ab, sig_m, seq_len=None: (
             torch.empty_like(grad), torch.empty_like(grad)),
-        name="dtv1_gated_gemm_bwd_separate")
+        name="triangle_multiplication_dtv1_gated_gemm_bwd_separate")
 def _elemwise_bwd_separate(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Tensor,
                            seq_len: int | None = None,
                            ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -633,7 +633,7 @@ def _input_gemm_fwd_fake(x_normed, w_gate, w_proj, mask, transpose_out, seq_len=
     return x_normed.new_empty(shape), x_normed.new_empty(shape, dtype=torch.float32)
 
 
-@opaque(fake=_input_gemm_fwd_fake, name="dtv1_input_gated_gemm")
+@opaque(fake=_input_gemm_fwd_fake, name="triangle_multiplication_dtv1_input_gated_gemm")
 def _input_gemm_fwd(x_normed: torch.Tensor, w_gate: torch.Tensor, w_proj: torch.Tensor,
                     mask: torch.Tensor | None, transpose_out: bool,
                     seq_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -682,7 +682,7 @@ def _input_gemm_fwd(x_normed: torch.Tensor, w_gate: torch.Tensor, w_proj: torch.
 @opaque(fake=lambda x_normed, x_out, w_gate, w_proj, seq_len=None: (
             x_normed.new_empty((x_normed.shape[0], w_gate.shape[0])),
             x_normed.new_empty((x_normed.shape[0], w_gate.shape[0]), dtype=torch.float32)),
-        name="dtv1_output_gated_gemm")
+        name="triangle_multiplication_dtv1_output_gated_gemm")
 def _output_gemm_fwd(x_normed: torch.Tensor, x_out: torch.Tensor, w_gate: torch.Tensor,
                      w_proj: torch.Tensor, seq_len: int | None = None,
                      ) -> tuple[torch.Tensor, torch.Tensor]:

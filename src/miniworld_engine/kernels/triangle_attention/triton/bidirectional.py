@@ -95,7 +95,7 @@ def _bidir_fwd_fake(q, k, v, bs, be, n_head):
     )
 
 
-@opaque(fake=_bidir_fwd_fake, name="bidir_triangle_attention_fwd")
+@opaque(fake=_bidir_fwd_fake, name="triangle_attention_bidir_fwd")
 def _bidir_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tensor,
                be: torch.Tensor, n_head: int,
                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -137,7 +137,7 @@ def _bidir_bwd_fake(q, k, v, bs, be, m_s, m_e, out, dout, n_head):
     )
 
 
-@opaque(fake=_bidir_bwd_fake, name="bidir_triangle_attention_bwd")
+@opaque(fake=_bidir_bwd_fake, name="triangle_attention_bidir_bwd")
 def _bidir_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tensor,
                be: torch.Tensor, m_s: torch.Tensor, m_e: torch.Tensor, out: torch.Tensor,
                dout: torch.Tensor, n_head: int) -> tuple[
