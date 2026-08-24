@@ -71,6 +71,19 @@ pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cut
 tools/kernel-audit/               # one-off probes + their .sbatch launchers (not shipped in a wheel)
 ```
 
+Every kernel family has the same shape, and `tests/test_kernel_layout.py` enforces it:
+
+| file | what it is | required |
+|---|---|---|
+| `reference.py` | the torch definition. `kernels/checks_*.py` compares against it, so it is what "correct" means for that family. | yes |
+| `interface.py` | the family's ONE public door — the names the rest of the repo may import, and nothing about which backend serves them. `kernels/__init__.py` reaches only here. | yes |
+| `dispatch.py` | a CHOICE among implementations, at whatever level the choice lives: per-GPU calibration (`layernorm`), a d-aware pick between triton variants (`conditioned_transition/triton`), cuBLAS-vs-quack (`trimul_inproj/cute`). | no |
+| `whole_op.py` | a whole model-layer op with weights as arguments (LN → … → gate in one call). A property of the layer, not of the folder. | no |
+| `triton/` `cute/` `cuda/` `cutlass/` | backends, each a package. | no |
+
+`interface.py` and `dispatch.py` are not synonyms — `conditioned_transition/triton/` used the
+first name for the second job until this table existed.
+
 In each kernel's `triton/`: `main.py` is the `psk/benchmark` variant (canonical),
 `perf.py`/`miniworld.py` are alternates. Each vendored file carries a
 `# vendored from team-gm <branch>@<sha>` header. Vendored kernel bodies

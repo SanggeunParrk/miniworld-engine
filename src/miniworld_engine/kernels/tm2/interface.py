@@ -17,6 +17,11 @@ import torch
 _CUTE_DIR = Path(__file__).resolve().parent / "cute"
 
 
+from .triton.main import triton_tm2
+
+__all__ = ["tm2_cute", "triton_tm2"]
+
+
 def _load_kernel_module():
     """Load ``tm2_cute_kernel`` from the co-located cute env without polluting sys.path."""
     mod_name = "_tm2_cute_kernel_impl"

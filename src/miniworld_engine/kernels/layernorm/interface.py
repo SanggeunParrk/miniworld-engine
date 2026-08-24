@@ -1,4 +1,9 @@
-"""Public entrypoint for the new standalone LayerNorm kernel."""
+"""The LayerNorm family's public entry point.
+
+``layernorm_kernel`` is the dispatching entry (it picks a backward path per GPU via
+``dispatch.py``); ``triton_layernorm`` is the plain autograd Triton entry that callers who want
+that specific path -- ``transition``'s split fallback, the trimul front -- ask for by name.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,9 @@ import torch
 
 from .compile_native import layernorm_dispatch_compile
 from .reference import layernorm_pytorch
+from .triton.main import triton_layernorm
+
+__all__ = ["layernorm_kernel", "triton_layernorm"]
 
 def layernorm_kernel(
     x: torch.Tensor,

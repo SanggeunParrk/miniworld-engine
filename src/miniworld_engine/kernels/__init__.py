@@ -16,44 +16,40 @@ from __future__ import annotations
 from importlib import import_module
 
 _LAZY_EXPORTS = {
-    "adaln_inference": (".adaln.triton.inference", "adaln_inference"),
-    "adaln_train": (".adaln.triton.training", "adaln_train"),
+    # Every entry names a FAMILY INTERFACE, never a backend module. That is the promise in this
+    # module's docstring, and it was false for 13 of these 16 until the interfaces existed: the
+    # map pointed at `.adaln.triton.main`, `.transition.triton.fused` and so on, so moving a
+    # kernel between backends -- the whole point of having backends -- silently broke the public
+    # surface. tests/test_kernel_layout.py keeps it true.
+    "adaln_inference": (".adaln.interface", "adaln_inference"),
+    "adaln_train": (".adaln.interface", "adaln_train"),
     "cond_transition_inference_dispatch": (
-        ".conditioned_transition.triton.interface",
+        ".conditioned_transition.interface",
         "cond_transition_inference_dispatch",
     ),
     "cond_transition_train": (
-        ".conditioned_transition.triton.training",
+        ".conditioned_transition.interface",
         "cond_transition_train",
     ),
-    "fused_gate_out": (".bias_only_attention.triton.gate_out", "fused_gate_out"),
+    "fused_gate_out": (".bias_only_attention.interface", "fused_gate_out"),
     "layernorm_kernel": (".layernorm.interface", "layernorm_kernel"),
-    "sigmoid_gate_fused": (
-        ".bias_only_attention.triton.gate_out",
-        "sigmoid_gate_fused",
-    ),
-    "triton_adaptive_layer_norm": (
-        ".adaln.triton.main",
-        "triton_adaptive_layer_norm",
-    ),
+    "sigmoid_gate_fused": (".bias_only_attention.interface", "sigmoid_gate_fused"),
+    "triton_adaptive_layer_norm": (".adaln.interface", "triton_adaptive_layer_norm"),
     "triton_augmented_attention_pair_bias": (
-        ".augmented_attention",
+        ".augmented_attention.interface",
         "triton_augmented_attention_pair_bias",
     ),
     "triton_bias_only_attention": (
-        ".bias_only_attention.triton.main",
+        ".bias_only_attention.interface",
         "triton_bias_only_attention",
     ),
-    "triton_layernorm": (".layernorm.triton.main", "triton_layernorm"),
-    "triton_tm1": (".tm1.triton.main", "triton_tm1"),
-    "triton_tm2": (".tm2.triton.main", "triton_tm2"),
-    "triton_transition": (".transition.triton.main", "triton_transition"),
-    "triton_transition_fused": (
-        ".transition.triton.fused",
-        "triton_transition_fused",
-    ),
+    "triton_layernorm": (".layernorm.interface", "triton_layernorm"),
+    "triton_tm1": (".tm1.interface", "triton_tm1"),
+    "triton_tm2": (".tm2.interface", "triton_tm2"),
+    "triton_transition": (".transition.interface", "triton_transition"),
+    "triton_transition_fused": (".transition.interface", "triton_transition_fused"),
     "triton_triangle_attention_pair_bias": (
-        ".triangle_attention.triton.main",
+        ".triangle_attention.interface",
         "triton_triangle_attention_pair_bias",
     ),
 }
@@ -93,18 +89,15 @@ def cuda_transition(*args, **kwargs):  # noqa: ARG001 -- signature kept for the 
 
 
 def cuda_transition_b2b(*args, **kwargs):
-    """Lazy hand-CUDA fused b2b Transition forward (builds the .so on first call).
-
-    Fixed AF3 shapes only (d_hidden=128, n=4 -> K=128, ND=512, D=128). Beats the Triton
-    b2b forward ~1.29x at this config. Inference-only (no backward saved)."""
-    from .transition.cuda import cuda_transition_b2b as _impl
+    """Hand-CUDA fused b2b Transition forward. See ``transition.interface``, where it lives."""
+    from .transition.interface import cuda_transition_b2b as _impl
 
     return _impl(*args, **kwargs)
 
 
 def cute_transition_fused(*args, **kwargs):
-    """Lazy cute (quack SM90 WGMMA) Transition fwd+bwd entry (imports cutlass on first call)."""
-    from .transition.cute.fused import cute_transition_fused as _impl
+    """Cute (quack SM90 WGMMA) Transition fwd+bwd. See ``transition.interface``."""
+    from .transition.interface import cute_transition_fused as _impl
 
     return _impl(*args, **kwargs)
 
