@@ -635,6 +635,11 @@ def _layernorm_backward_fused(grad_x_normed, x, mean, rstd, norm_w):
 
 
 def _input_gemm_fwd_fake(x_normed, w_gate, w_proj, mask, transpose_out, seq_len=None):
+    """``(ab, sig_m)``, both (N, M) when ``transpose_out`` is set and (M, N) otherwise.
+
+    ``ab`` keeps ``x_normed``'s dtype so the downstream contraction and weight-grad GEMM stay
+    dtype-consistent; ``sig_m`` is fp32 so ``1 - sig_m`` does not cancel on a saturated gate.
+    """
     m, _k = x_normed.shape
     n = w_gate.shape[0]
     shape = (n, m) if transpose_out else (m, n)

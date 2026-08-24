@@ -98,6 +98,7 @@ def _swiglu_fake(a, b, shape_key=None):
 @opaque(fake=_swiglu_fake, name="conditioned_transition_swiglu_fwd")
 def _swiglu(a: torch.Tensor, b: torch.Tensor,
             shape_key: int | None = None) -> torch.Tensor:
+    """h = silu(a)*b, reading a and b through their shared strides and writing h contiguous."""
     M, ND = a.shape
     if shape_key is None:
         shape_key = atom_key(length_of(a.shape))
@@ -116,6 +117,7 @@ def _gate_fake(out, scale, shape_key=None):
 @opaque(fake=_gate_fake, name="conditioned_transition_gate_fwd")
 def _gate(out: torch.Tensor, scale: torch.Tensor,
           shape_key: int | None = None) -> torch.Tensor:
+    """y = sigmoid(scale)*out, through the gated_projection ``_sigmul_fwd`` launch."""
     y = torch.empty_like(out)
     n = out.numel()
     if shape_key is None:
@@ -170,6 +172,8 @@ def _gate_bwd_fake(out, scale, dy, shape_key=None):
 @opaque(fake=_gate_bwd_fake, name="conditioned_transition_gate_bwd")
 def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """dout = sg*dy and dscale = out*sg*(1-sg)*dy for sg = sigmoid(scale), one pass over (M, D),
+    through the gated_projection ``_sigmul_bwd`` launch."""
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
@@ -320,6 +324,8 @@ def _b2b_fwd_train_kernel(
 
 
 def _b2b_fwd_train_fake(x, cond, wa, wb, ws, wsc, bsc, shape_key=None):
+    """(y (M, D), ab (M, 2*ND), h (M, ND), out (M, D), scale (M, D)) -- the expand width ND comes
+    off wa and the squeeze width D off ws; neither is readable from x, whose width is K."""
     m = x.shape[0]
     nd = wa.shape[0]
     d = ws.shape[0]

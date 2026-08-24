@@ -363,6 +363,9 @@ def _attn_bwd(
 
 
 def _bias_only_fwd_fake(v, bias, shape_key):
+    """``(out, m)``: ``out`` like ``v``; ``m`` is the ``(B, H, L, L)`` per-row logsumexp, fp32
+    while the activations are bf16.
+    """
     B, H, L, _, D = v.shape
     return torch.empty_like(v), v.new_empty((B, H, L, L), dtype=torch.float32)
 
@@ -400,6 +403,11 @@ def _bias_only_fwd(v: torch.Tensor, bias: torch.Tensor,
 
 
 def _bias_only_bwd_fake(v, bias, grad_output, out, m, shape_key):
+    """``(dv, dbias)``, each shaped and typed like the argument it is the gradient of, i.e. in
+    the merged-head layout the caller rearranged into: ``dbias`` is the UNREDUCED per-row
+    ``(B, H*L3, L, L2)`` grad of the REPEATED bias, and the ``reduce`` back to ``(B, H, L, L2)``
+    stays outside.
+    """
     return v.new_empty(v.shape), bias.new_empty(bias.shape)
 
 

@@ -103,6 +103,10 @@ def _cond_affine_fake(cond, lnw, eps, out_dtype=None, shape_key=None):
 def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
                  out_dtype: torch.dtype | None = None,
                  shape_key: int | None = None) -> torch.Tensor:
+    """cond_aff = LayerNorm(cond) * lnw (no bias), materialized in ``out_dtype`` if one is given.
+    Step 1 of the materialize path; the kernel is fused3's ``_ln_kernel`` with HAS_W=True, and the
+    dtype argument lets a caller land cond_aff straight in the GEMM's operand dtype.
+    """
     M, N = cond.shape
     if shape_key is None:
         shape_key = atom_key(length_of(cond.shape))
@@ -187,6 +191,10 @@ def _adaln_epilogue_fake(x, sb, eps, shape_key=None):
 @opaque(fake=_adaln_epilogue_fake, name="adaln_inference_epilogue")
 def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
                     shape_key: int | None = None) -> torch.Tensor:
+    """y = sigmoid(scale)*LayerNorm(x) + bias, taking scale and bias from the packed (M, 2N) sb.
+    Step 3 of both inference paths (materialize and lnfold): fusing LN(x) into the gate keeps
+    x_norm out of HBM, and nothing is saved because inference has no backward.
+    """
     M, N = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))

@@ -86,6 +86,10 @@ def _split_dirs(t, H):
 
 
 def _bidir_fwd_fake(q, k, v, bs, be, n_head):
+    """``(out, m_s, m_e)``: ``out`` is the packed ``(B, L, L, 2*d_hidden)`` concat buffer both
+    directions write into; ``m_s``/``m_e`` are the ``(B, n_head, L, L)`` fp32 per-row logsumexps,
+    ``m_e`` in the ending (row=j) frame its direction ran in.
+    """
     B, L, _, D2 = q.shape
     f32 = torch.float32
     return (
@@ -127,6 +131,12 @@ def _bidir_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tens
 
 
 def _bidir_bwd_fake(q, k, v, bs, be, m_s, m_e, out, dout, n_head):
+    """``(dq, dk, dv, dbias_s, dbias_e)``: the three input grads are packed
+    ``(B, L, L, 2*d_hidden)`` like the doubled projections they mirror; the bias grads are
+    per-direction ``(B, n_head, L, L)``, already reduced over the row axis, with ``dbias_e``
+    still in the ending (row=j) frame -- the transpose back, the concat and the rearrange to the
+    packed bias layout are left to the caller.
+    """
     B, L, _, D2 = q.shape
     return (
         v.new_empty((B, L, L, D2)),

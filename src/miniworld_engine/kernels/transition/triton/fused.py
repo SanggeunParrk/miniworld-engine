@@ -899,14 +899,16 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool
     return (h, dA, dB) if store_h else (dA, dB)
 
 
-def _gatebwd_savedxn_stacked_fake(xn, wa, wb, grad_expand, shape_key=None):
+def _transition_expand_gatebwd_savedxn_stacked_fake(xn, wa, wb, grad_expand, shape_key=None):
+    """``h`` like ``grad_expand`` (M, ND), plus the stacked ``dAB`` (M, 2*ND) -- dA in the first ND
+    columns, dB in the next -- which is the packing the two larger downstream GEMMs consume."""
     return (
         torch.empty_like(grad_expand),
         grad_expand.new_empty((xn.shape[0], wa.shape[0] * 2)),
     )
 
 
-@opaque(fake=_gatebwd_savedxn_stacked_fake, name="transition_gatebwd_savedxn_stacked")
+@opaque(fake=_transition_expand_gatebwd_savedxn_stacked_fake, name="transition_gatebwd_savedxn_stacked")
 def _transition_expand_gatebwd_savedxn_stacked(
     xn: torch.Tensor,
     wa: torch.Tensor,

@@ -173,6 +173,11 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
 
 
 def _bidir_front_launch_fake(x_flat, Wlr, H2, L, save_preact, shape_key):
+    """``left`` and ``right`` as (1, H2, L, L) bdll, plus ``preact`` (4*H2, L*L) interleaved.
+
+    ``preact`` is a 0-element (0, 0) placeholder when ``save_preact`` is False: a schema has one
+    fixed return arity and cannot return None, and ``bidir_front_triton`` turns it back into one.
+    """
     m = L * L
     return (
         x_flat.new_empty((1, H2, L, L)),

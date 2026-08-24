@@ -236,6 +236,15 @@ def test_nothing_bypasses_the_compile_wrap_switch() -> None:
 def test_custom_op_mode_registers_every_site(wrap: str) -> None:
     """Import every module that HAS an ``opaque`` site, under each mode. Registration is at import.
 
+    A REGISTRATION failure is distinguished from a missing dependency by where it was raised. The
+    first version of this caught everything except "needs a fake implementation" and passed the
+    rest, on the reasoning that a CPU runner has no CuTeDSL -- and that swallowed a real one:
+    ``trimul_inproj/cute/inference.py`` had ``@torch.no_grad()`` between ``@opaque`` and its
+    function, so ``infer_schema`` could not resolve the string annotations and the op failed to
+    register on EVERY machine. It looked green for as long as the exception was discarded. Now
+    anything raised from inside ``torch/_library`` or ``torch/library.py`` fails the test, and only
+    exceptions from elsewhere (an absent CUDA/CuTeDSL extension) are tolerated.
+
     A subprocess per mode is not fussiness: ``kernels._compile`` reads ``compile_wrap`` when the
     decorator RUNS, so a single interpreter can only ever hold one of the two.
 
@@ -259,19 +268,36 @@ import sys
 from miniworld_engine import settings
 settings.configure(compile_wrap={wrap!r})
 import importlib
-missing = []
+import traceback
+bad = []
+
+
+def _from_torch_library(exc):
+    # Raised while torch.library was registering an op, as opposed to by a missing dependency?
+    # (A comment, not a docstring: this whole script is inside an f-string triple quote.)
+    tb = exc.__traceback__
+    while tb is not None:
+        f = tb.tb_frame.f_code.co_filename
+        if "/torch/_library/" in f or f.endswith("/torch/library.py"):
+            return True
+        tb = tb.tb_next
+    return False
+
+
 for m in {mods!r}:
     try:
         importlib.import_module(m)
     except ValueError as e:
-        if "needs a fake implementation" in str(e):
-            missing.append(m + " :: " + str(e))
-    except Exception:
-        pass          # CUDA/CuTeDSL absent on a CPU runner -- not what this test is about
-print("MISSING=" + str(len(missing)))
-for m in missing:
+        if "needs a fake implementation" in str(e) or _from_torch_library(e):
+            bad.append(m + " :: " + type(e).__name__ + ": " + str(e)[:300])
+    except Exception as e:
+        if _from_torch_library(e):
+            bad.append(m + " :: " + type(e).__name__ + ": " + str(e)[:300])
+        # else: an absent CUDA / CuTeDSL extension on a CPU runner -- not what this test is about
+print("BAD=" + str(len(bad)))
+for m in bad:
     print("  " + m)
-sys.exit(1 if missing else 0)
+sys.exit(1 if bad else 0)
 """
     r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                        timeout=1800, check=False)

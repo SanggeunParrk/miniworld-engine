@@ -158,6 +158,8 @@ def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N: tl.constexpr, eps,
 
 
 def _ln_materialize_fake(x, gamma, beta, eps, shape_key=None):
+    """``x_normed`` as a CONTIGUOUS (M, K) -- x itself may be m-major/strided and the kernel absorbs
+    that on the read -- plus ``mean`` and ``rstd`` as (M,) fp32 against a bf16 activation."""
     m, k = x.shape
     return (
         x.new_empty((m, k)),
@@ -233,6 +235,7 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
 
 
 def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None):
+    """``dx`` (M, K) at ``dx_strides``, plus ``dgamma`` and ``dbeta`` as (K,) fp32."""
     m, k = x.shape
     # dx is written AT dx_strides (m-major in -> m-major out), so the fake has to carry those
     # strides too: the compiled graph reads its layout decisions off this tensor.

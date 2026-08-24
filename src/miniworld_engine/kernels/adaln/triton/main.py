@@ -691,6 +691,10 @@ def adaln_bwd_lnw_kernel(
 
 def _adaln_fwd_fake(x_2d, cond_2d, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                     eps_x, eps_cond, use_bf16, use_fp16, shape_key):
+    """(y like x_2d; x_hat (m, nx), cond_norm (m, nc), rstd_x and rstd_cond both (m,), all fp32;
+    gate (m, nx)). nc comes off cond_2d, and gate's dtype off the use_bf16/use_fp16 flags -- the
+    caller's already-resolved autocast decision -- never off x_2d.
+    """
     m, nx = x_2d.shape
     nc = cond_2d.shape[1]
     gate_dtype = (torch.bfloat16 if use_bf16 else
@@ -805,6 +809,10 @@ def _adaln_fwd(
 
 def _adaln_bwd_fake(grad_output_2d, x_hat, cond_norm, gate, cond_ln_weight, scale_weight,
                     bias_weight, rstd_x, rstd_cond, use_bf16, use_fp16, shape_key):
+    """(dx like grad_output_2d; dcond (m, nc); dlnw, dscale_w and dbias_w shaped like their
+    parameters; dscale_b (nx,)) -- every gradient but dx comes back fp32, the accumulation dtype,
+    whatever dtype the parameters themselves are held in.
+    """
     m, nx = grad_output_2d.shape
     nc = cond_norm.shape[1]
     f32 = torch.float32

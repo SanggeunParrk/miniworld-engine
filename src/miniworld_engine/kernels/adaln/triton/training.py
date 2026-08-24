@@ -158,6 +158,8 @@ def _epilogue_train_kernel(
 
 
 def _epilogue_train_fake(x, sb, eps, scale_bias=None, shape_key=None):
+    """(y, mean, rstd, gate): y and gate are (M, N) like x, the two stats are (M,) and always
+    fp32 whatever x's dtype. sb is the packed (M, 2N) [scale|bias], not the output shape."""
     m, n = x.shape
     return (
         x.new_empty((m, n)),                          # y
@@ -171,6 +173,10 @@ def _epilogue_train_fake(x, sb, eps, scale_bias=None, shape_key=None):
 def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
                     scale_bias: torch.Tensor | None = None, shape_key: int | None = None,
                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """y = sigmoid(scale)·LN(x) + bias from the packed (M, 2N) sb, with the scale-bias add folded
+    in. The training twin of the inference epilogue: it also emits mean, rstd and the gate, so the
+    backward reuses them instead of recomputing the LayerNorm and the sigmoid.
+    """
     M, N = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))
@@ -276,6 +282,8 @@ def _bwd_x_kernel(
 
 
 def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None):
+    """D (2N, M) -- transposed, so the wgrad consuming it is a contiguous-K GEMM -- and dx (M, N)
+    carrying x's strides, since dx is written in x's layout rather than contiguous."""
     m, n = dy.shape
     return (
         dy.new_empty((2 * n, m)),
@@ -437,6 +445,8 @@ def _dgrad_condln_kernel(
 
 
 def _dgrad_condln_fake(D, w_cat, cond, mean_c, rstd_c, lnw, shape_key=None):
+    """dcond (M, NC) in cond's layout and dtype, and dlnw (NC,) in lnw's. M is read off D, which
+    is (2NX, M) not (M, ...), and NC off w_cat -- neither is a row axis of an activation here."""
     m = D.shape[1]
     nc = w_cat.shape[1]
     return (

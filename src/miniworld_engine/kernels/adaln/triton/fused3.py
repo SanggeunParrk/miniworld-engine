@@ -109,6 +109,10 @@ def _layernorm_fake(x, eps, weight=None, shape_key=None):
 @opaque(fake=_layernorm_fake, name="adaln_fused3_layernorm")
 def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
                shape_key: int | None = None) -> torch.Tensor:
+    """Row-wise LayerNorm of the flattened (M, N) activation, optionally scaled by ``weight``.
+    K1 (no weight) and K2 (weight=lnw) of the 3-kernel grouping are this one launch under
+    ``HAS_W``; no mean/rstd is kept, so it is the forward-only variant.
+    """
     M, N = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))
@@ -194,6 +198,10 @@ def _gemm_gate_fake(x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None):
 def _gemm_gate(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
                Wb: torch.Tensor, scale_b: torch.Tensor,
                shape_key: int | None = None) -> torch.Tensor:
+    """K3: scale = cond_norm@Wsᵀ + scale_b, bias = cond_norm@Wbᵀ, y = sigmoid(scale)*x_norm + bias.
+    One launch -- the two projections share the loaded cond_norm tile and the gate is their
+    epilogue, so neither scale nor bias ever reaches HBM. Inference: the gate is not kept.
+    """
     # Ws, Wb are the (N, K) nn.Linear weights (k-contiguous tile = MMA-friendly B layout).
     M, N = x_norm.shape
     if shape_key is None:
@@ -223,6 +231,10 @@ def _gemm_gate_train_fake(x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None):
 def _gemm_gate_train(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
                      Wb: torch.Tensor, scale_b: torch.Tensor, shape_key: int | None = None,
                      ) -> tuple[torch.Tensor, torch.Tensor]:
+    """K3 as ``_gemm_gate``, but also stores gate = sigmoid(scale).
+    The training variant: the backward needs the gate, and recovering it afterwards would mean
+    redoing the dual GEMM, so the same kernel writes it out under ``SAVE_GATE``.
+    """
     M, N = x_norm.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x_norm.shape))
@@ -275,6 +287,10 @@ def _bwd_elem_fake(dy, x_norm, gate, shape_key=None):
 @opaque(fake=_bwd_elem_fake, name="adaln_fused3_bwd_elem")
 def _bwd_elem(dy: torch.Tensor, x_norm: torch.Tensor, gate: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """dscale = dy*x_norm*gate*(1-gate) and dxn = dy*gate -- the gate's own derivative.
+    One launch of the fused3 backward: the GEMMs that consume these two (cuBLAS) and the two
+    LayerNorm-backwards around them are separate launches.
+    """
     M, N = dy.shape
     if shape_key is None:
         shape_key = atom_key(length_of(dy.shape))

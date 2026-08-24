@@ -115,3 +115,56 @@ def test_fake_return_arity_matches_the_body() -> None:
             bad.append(f"{name}  ({path.relative_to(SRC)}): body returns {sorted(body)}, "
                        f"fake returns {sorted(shadow)}")
     assert not bad, "fake/body return arity disagrees:\n  " + "\n  ".join(bad)
+
+
+def test_every_op_and_fake_is_written_the_same_way() -> None:
+    """One convention for all 107 sites, checked rather than asserted in a review.
+
+    These are not aesthetics. An op name is public (``torch.ops.miniworld_engine.<name>`` shows up
+    in profiles and graph dumps), so it is given explicitly instead of derived from whatever the
+    Python function happens to be called. A fake needs a docstring because it is a CLAIM about a
+    kernel nobody can read from the call site -- which dtype, which layout, which extent comes
+    from a non-tensor argument -- and 36 of them had none. Annotations are not optional at all:
+    ``torch.library`` infers the schema from them.
+
+    Measured before this test existed: fake style split 67 lambda / 38 named, 36 fakes and 19 ops
+    undocumented, one op unannotated -- and that one turned out not to be a style problem but a
+    registration failure, because ``@torch.no_grad()`` sat between ``@opaque`` and the function
+    and ``infer_schema`` could not resolve its annotations.
+    """
+    problems: list[str] = []
+    for name, fn, fake, path in _opaque_sites():
+        where = f"{name}  ({path.relative_to(SRC)})"
+        if fake is None or not isinstance(fake, ast.FunctionDef):
+            problems.append(f"{where}: fake= must be a named module-level function, not a lambda")
+            continue
+        base = fn.name if fn.name.startswith("_") else f"_{fn.name}"
+        if fake.name not in (f"{base}_fake", f"_{name}_fake"):
+            problems.append(f"{where}: fake is called {fake.name!r}, expected {base}_fake")
+        if not ast.get_docstring(fake):
+            problems.append(f"{where}: the fake has no docstring")
+        if not ast.get_docstring(fn):
+            problems.append(f"{where}: the op has no docstring")
+        args = fn.args
+        if any(a.annotation is None
+               for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)):
+            problems.append(f"{where}: unannotated parameter -- torch.library cannot infer a schema")
+        if fn.returns is None:
+            problems.append(f"{where}: no return annotation")
+    assert not problems, "op/fake convention:\n  " + "\n  ".join(problems)
+
+
+def test_every_opaque_site_names_its_op() -> None:
+    """``name=`` is always explicit: the fallback derives it from ``__qualname__``, and a name that
+    moves when someone renames a private helper is not a name for a public op."""
+    missing = []
+    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for dec in node.decorator_list:
+                if (isinstance(dec, ast.Call) and getattr(dec.func, "id", "") == "opaque"
+                        and not any(k.arg == "name" for k in dec.keywords)):
+                    missing.append(f"{node.name}  ({path.relative_to(SRC)})")
+    assert not missing, "opaque() without an explicit name=:\n  " + "\n  ".join(missing)

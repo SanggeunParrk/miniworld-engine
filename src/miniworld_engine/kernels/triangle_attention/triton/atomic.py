@@ -1,6 +1,8 @@
 # vendored from team-gm origin/miniworld@7c3c67e : src/team_gm/modules/kernels/triangle_attention_pair_bias.py
 from miniworld_engine.autotune.configs import configs_for
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine import settings
 import triton
 import triton.language as tl
@@ -489,6 +491,10 @@ def _attn_bwd(
 
 
 def _atomic_fwd_fake(q, k, v, bias, shape_key):
+    """``(o, M)``: ``o`` like ``q``; ``M`` is the ``(B, H, L, L)`` log2-space logsumexp and stays
+    fp32 even though the forward saves the activations as bf16 -- the backward recomputes
+    ``p = exp2(qk*scale - M)`` from it, so bf16's digits would land in an exponent.
+    """
     B, H, L, _L2, _D = q.shape
     return torch.empty_like(q), q.new_empty((B, H, L, L), dtype=torch.float32)
 
@@ -527,10 +533,23 @@ def _atomic_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.T
 
 
 def _atomic_bwd_fake(q, k, v, bias, o, M, grad_output, shape_key):
-    # q here is the MERGED-head (B, H*L, L2, D) view the caller rearranged to, not the
-    # forward's 5-D layout. dq accumulates in fp32 (atomic adds).
-    return (q.new_empty(q.shape, dtype=torch.float32), torch.empty_like(k),
-            torch.empty_like(v), torch.empty_like(bias))
+    """The four gradients in the SPLIT-head layout the body rearranges back to.
+
+    The arguments arrive merged -- ``q`` is ``(B, H*L, L2, D)``, ``bias`` the repeated
+    ``(B, H*L3, L, L2)`` -- but the returns are not: the body rearranges dq/dk/dv to
+    ``(B, H, L, L2, D)``, casts dq back to ``q``'s dtype, and reduces dbias over the repeated row
+    axis to ``(B, H, L, L2)``. A fake echoing the INPUT shapes has the right arity and the wrong
+    metadata, so nothing catches it until a compiled run does.
+    """
+    B, HL, L2, D = q.shape
+    L = L2
+    H = HL // L
+    return (
+        q.new_empty((B, H, L, L2, D)),
+        k.new_empty((B, H, L, L2, D)),
+        v.new_empty((B, H, L, L2, D)),
+        bias.new_empty((B, H, L, L2)),
+    )
 
 
 @opaque(fake=_atomic_bwd_fake, name="triangle_attention_atomic_bwd")
@@ -572,7 +591,9 @@ def _atomic_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.T
     )
     # fmt: on
 
-    dq = rearrange(dq, "B (H L) L2 D -> B H L L2 D", L=L).to(op_dtype)
+    # q was cast to the Function's op_dtype before it got here, so this IS that dtype --
+    # named off an argument instead of a caller local, which was a NameError.
+    dq = rearrange(dq, "B (H L) L2 D -> B H L L2 D", L=L).to(q.dtype)
     dk = rearrange(dk, "B (H L) L2 D -> B H L L2 D", L=L)
     dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)
     dbias = reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)

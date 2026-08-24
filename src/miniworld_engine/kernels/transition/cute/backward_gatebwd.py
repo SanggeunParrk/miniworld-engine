@@ -98,6 +98,10 @@ def _cdup_interleave_fake(ge, shape_key=None):
 
 @opaque(fake=_cdup_interleave_fake, name="transition_cdup_interleave")
 def _cdup_interleave(ge: Tensor, shape_key: int | None = None) -> Tensor:
+    """The duplicate-interleave launch: ``ge`` (M, N) -> a contiguous (M, 2N) with
+    ``out[m, 2j] == out[m, 2j+1] == ge[m, j]``, so the C operand lands element-aligned to the
+    gatebwd GEMM's interleaved [a|b] accumulator (``tRS_rC[2i] == ge_i``).
+    """
     # ge may be a strided/transposed VIEW (col stride != 1); the kernel reads it with an
     # explicit col stride, fusing an upstream transpose into this (already-present) copy.
     M, N = ge.shape

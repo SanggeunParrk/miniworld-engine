@@ -90,6 +90,9 @@ from miniworld_engine.kernels.transition.cute.backward_gatebwd import (
 
 def _cute_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
                    n, eps, shape_key):
+    """``out`` (M, D) -- still flat, ``CuteTransitionFusedFunction.forward`` does the reshape --
+    plus the saved LN stats ``rstd`` and ``c1`` as (M,) fp32 against a bf16 activation. The (M, ND)
+    expand/h activation is deliberately not among the outputs: the backward recomputes it."""
     m = x2.shape[0]
     return (
         x2.new_empty((m, squeeze_weight.shape[0])),
@@ -140,6 +143,13 @@ def _cute_fwd(
 def _cute_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight,
                    expand_b_weight, squeeze_weight, eps, backward_backend, orig_shape,
                    shape_key):
+    """``dx`` at the forward's pre-flatten ``orig_shape`` and in ``x2``'s dtype (the autocast one,
+    which ``grad_output`` need not share), then ``dgamma``, ``dbeta``, ``dWa``, ``dWb`` and ``dWs``
+    each shaped like the weight they belong to.
+
+    Six values whichever ``backward_backend`` is asked for -- the "cute" and "triton" branches
+    differ only in how they get there.
+    """
     return (
         grad_output.new_empty(tuple(orig_shape), dtype=x2.dtype),
         torch.empty_like(ln_weight),

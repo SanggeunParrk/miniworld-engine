@@ -568,6 +568,10 @@ def _dq_reduce(
 
 
 def _aa_fwd_fake(q, k, v, bias, mask, shape_key):
+    """``(out, m)``: ``out`` like ``q``; ``m`` is the per-row logsumexp, ``(A, B, H, L)`` and
+    fp32 while the activations are bf16 -- the backward recomputes ``p = exp2(qk*scale - m)``
+    from it, so its digits land in an exponent.
+    """
     A, B, L, H, D = q.shape
     return torch.empty_like(q), q.new_empty((A, B, H, L), dtype=torch.float32)
 
@@ -627,6 +631,11 @@ def _aa_fwd(
 
 
 def _aa_bwd_fake(dy, q, k, v, bias, mask, o, m, shape_key):
+    """``(dq, dk, dv, dbias_raw)``: ``dq`` comes back fp32 -- it is summed out of the fp32
+    per-split ``dq_expand`` buffer -- while ``dk``/``dv`` keep their inputs' dtype.
+    ``dbias_raw`` is the UNREDUCED ``(A, B, H, L, L)`` fp32 accumulator: the sum over A and the
+    permute to the caller's ``(B, L, L, H)`` layout stay outside the op, where they fuse.
+    """
     A, B, L, H, D = q.shape
     return (
         q.new_empty((A, B, L, H, D), dtype=torch.float32),

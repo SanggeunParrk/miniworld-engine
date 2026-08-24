@@ -248,6 +248,9 @@ def layer_norm_bwd_dx_fused(
 
 
 def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key):
+    """``y`` like ``x_2d``, plus ``mean`` and ``rstd`` as (M,) -- fp32, not the bf16 of the
+    activation: the kernel reduces and stores the row statistics in fp32 and the backward reloads
+    them as such."""
     m = x_2d.shape[0]
     return (
         torch.empty_like(x_2d),
@@ -336,6 +339,12 @@ class TritonLayerNormFunction(torch.autograd.Function):
 
 
 def _ln_bwd_fake(dy_2d, x, weight, mean, rstd, rs, has_rs, input_shape, shape_key):
+    """``dx`` at the forward's PRE-flatten ``input_shape`` (not ``dy_2d``'s flat (M, N)), plus
+    ``dweight`` and ``dbias`` as (N,) fp32.
+
+    Both of the body's paths agree on that: the triton one allocates fp32 accumulators, and the
+    hand-CUDA one calls ``.float()`` on its results before returning them.
+    """
     n = x.shape[-1]
     return (
         dy_2d.new_empty(tuple(input_shape)),

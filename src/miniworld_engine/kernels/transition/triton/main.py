@@ -89,6 +89,8 @@ def transition_fwd_kernel(
 
 
 def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, n, shape_key):
+    """The expand activation, (M, n*d) in ``x``'s dtype: the two SwiGLU halves are already
+    multiplied together in the epilogue, so the width is ``n*d`` and not ``2*n*d``."""
     return x.new_empty((x.shape[0], n * x.shape[1]))
 
 

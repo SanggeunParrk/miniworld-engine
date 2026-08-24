@@ -72,12 +72,14 @@ def _stats_kernel(
     tl.store(c1_ptr + rows, mean * rstd, mask=row_mask)
 
 
-def _stats_fake(x, eps, shape_key=None):
+def _stats_triton_fake(x, eps, shape_key=None):
+    """``rstd`` and ``c1`` as (M,) -- fp32 even though X is bf16, since the kernel accumulates and
+    stores the row statistics in fp32."""
     m = x.shape[0]
     return (x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32))
 
 
-@opaque(fake=_stats_fake, name="layernorm_stats")
+@opaque(fake=_stats_triton_fake, name="layernorm_stats")
 def stats_triton(x: torch.Tensor, eps: float, shape_key: int | None = None,
                  ) -> tuple[torch.Tensor, torch.Tensor]:
     """rstd[m], c1[m]=mean*rstd over the last dim of X (M, K). Both fp32 [M].

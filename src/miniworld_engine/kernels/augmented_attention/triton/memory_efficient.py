@@ -243,6 +243,9 @@ def _attn_bwd(
 
 
 def _memeff_fwd_fake(q, k, v, bias, mask, shape_key):
+    """``(out, m)``: ``out`` like ``q``; ``m`` is the ``(A, B, H, L)`` per-row logsumexp, fp32
+    while the activations are bf16 -- the backward rebuilds ``p`` from it.
+    """
     A, B, L, H, D = q.shape
     return torch.empty_like(q), q.new_empty((A, B, H, L), dtype=torch.float32)
 
@@ -303,6 +306,11 @@ def _memeff_fwd(
 
 
 def _memeff_bwd_fake(grad_output, q, k, v, bias, mask, o, m, shape_key):
+    """``(dq, dk, dv, dbias)``: ``dq`` is fp32 because the backward accumulates into it with
+    atomic adds; ``dk``/``dv`` match their inputs. ``dbias`` is the fp32 ``(B, L, H, L)`` atomic
+    accumulator -- already summed over A, but still in the kernel's bias frame; the permute back
+    to ``(B, L, L, H)`` is left to the caller.
+    """
     A, B, L, H, D = q.shape
     return (
         q.new_empty((A, B, L, H, D), dtype=torch.float32),

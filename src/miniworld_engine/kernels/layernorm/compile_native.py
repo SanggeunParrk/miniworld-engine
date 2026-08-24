@@ -287,6 +287,10 @@ def _dispatch_fwd_fake(x, weight, bias, eps):
 @opaque(fake=_dispatch_fwd_fake, name="layernorm_dispatch_fwd")
 def _dispatch_fwd(x: Tensor, weight: Tensor, bias: Tensor,
                   eps: float) -> tuple[Tensor, Tensor, Tensor]:
+    """LayerNorm forward with affine weight and bias, plus each row's mean and rstd.
+    The stats leave the op rather than being recomputed because all four backward paths consume
+    them; which of those paths runs is decided later, in ``_dispatch_bwd``.
+    """
     return _fwd_impl(x, weight, bias, eps)
 
 

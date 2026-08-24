@@ -157,6 +157,7 @@ def _persistent_grid(device: torch.device) -> int:
 
 
 def _persist_fwd_fake(x_2d, weight, bias, eps, shape_key):
+    """``y`` like ``x_2d``, plus ``mean`` and ``rstd`` as (M,) fp32 against a bf16 activation."""
     m = x_2d.shape[0]
     return (
         torch.empty_like(x_2d),
@@ -193,6 +194,9 @@ def _persist_fwd(
 
 
 def _persist_bwd_fake(dy_2d, x, weight, mean, rstd, input_shape, shape_key):
+    """``dx`` at the forward's PRE-flatten ``input_shape``, plus ``dweight`` and ``dbias`` as (N,)
+    in ``weight``'s dtype -- the ``[G, N]`` fp32 partial buffer is summed and cast inside the op,
+    and G comes from the running card's SM count, which a fake must not depend on."""
     n = x.shape[-1]
     return (
         dy_2d.new_empty(tuple(input_shape)),

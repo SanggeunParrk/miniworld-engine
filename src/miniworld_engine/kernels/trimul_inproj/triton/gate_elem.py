@@ -147,7 +147,10 @@ def _shape_key(seq_len, x_n=None) -> int:
     return token_key(0)
 
 
-def _gate_elem_fake(x_n, proj, Wg, return_gate, residual, dropscale, seq_len):
+def _gate_elem_launch_fake(x_n, proj, Wg, return_gate, residual, dropscale, seq_len):
+    """``y`` (M, N) over ``x_n``'s flattened row count, plus ``gate`` (M, N) -- a 0-element (0, 0)
+    placeholder when ``return_gate`` is False, since a schema has one fixed return arity and cannot
+    return None."""
     m = x_n.numel() // x_n.shape[-1]
     n = proj.shape[-1]
     return (
@@ -156,7 +159,7 @@ def _gate_elem_fake(x_n, proj, Wg, return_gate, residual, dropscale, seq_len):
     )
 
 
-@opaque(fake=_gate_elem_fake, name="trimul_gate_elem_fwd")
+@opaque(fake=_gate_elem_launch_fake, name="trimul_gate_elem_fwd")
 def _gate_elem_launch(
     x_n: torch.Tensor,
     proj: torch.Tensor,

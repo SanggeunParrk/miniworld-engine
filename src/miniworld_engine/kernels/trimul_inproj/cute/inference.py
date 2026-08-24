@@ -34,10 +34,28 @@ def _trimul_inproj_inference_fake(pair, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in
     return torch.empty_like(pair)
 
 
-@opaque(fake=_trimul_inproj_inference_fake, name="trimul_inproj_inference")
+# `no_grad` OUTSIDE `opaque`, not between it and the function. torch.library reads the schema off
+# the object it is handed, and `torch.no_grad()` returns a wrapper whose string annotations (this
+# module has `from __future__ import annotations`) it cannot resolve -- "Unsupported type
+# annotation torch.Tensor. It is not a type." Registration then fails at import.
 @torch.no_grad()
-def trimul_inproj_inference(pair, WL, WLg, WR, WRg, Wg, Wp,
-                            ln_in_w, ln_in_b, ln_out_w, ln_out_b, eps, b_lr, rmask=None):
+@opaque(fake=_trimul_inproj_inference_fake, name="trimul_inproj_inference")
+def trimul_inproj_inference(
+    pair: torch.Tensor,
+    WL: torch.Tensor,
+    WLg: torch.Tensor,
+    WR: torch.Tensor,
+    WRg: torch.Tensor,
+    Wg: torch.Tensor,
+    Wp: torch.Tensor,
+    ln_in_w: torch.Tensor,
+    ln_in_b: torch.Tensor,
+    ln_out_w: torch.Tensor,
+    ln_out_b: torch.Tensor,
+    eps: float,
+    b_lr: torch.Tensor,
+    rmask: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Whole trimul (outgoing) forward, inference-only. Returns y [B,L,L,D].
 
     rmask: [M] AF pair-mask, folded into LN_in for free (proj(0)=0 -> left/right

@@ -40,6 +40,7 @@ def _bwd_num_warps(n: int) -> int:
 
 
 def _partial_fwd_fake(x_2d, weight, bias, eps, shape_key):
+    """``y`` like ``x_2d``, plus ``mean`` and ``rstd`` as (M,) fp32 against a bf16 activation."""
     m = x_2d.shape[0]
     return (
         torch.empty_like(x_2d),
@@ -87,6 +88,9 @@ def _partial_fwd(
 
 
 def _partial_bwd_fake(dy_2d, x, weight, mean, rstd, input_shape, shape_key):
+    """``dx`` at the forward's PRE-flatten ``input_shape``, plus ``dweight`` and ``dbias`` as (N,)
+    in ``weight``'s dtype -- the ``[num_partials, N]`` fp32 partial buffer is summed and cast back
+    inside the op, so neither it nor its row count is visible here."""
     n = x.shape[-1]
     return (
         dy_2d.new_empty(tuple(input_shape)),

@@ -335,6 +335,10 @@ def _attn_bwd_dq(
 
 
 def _tri_attn_fwd_fake(q, k, v, bias, shape_key):
+    """``(out, m)``: ``out`` a ``(B, H, L, L2, D)`` STRIDED view over a ``[B, L, L2, H*D]``
+    projection-layout buffer -- its strides are part of the contract, not just its shape (see
+    below) -- and ``m`` the ``(B, H, L, L)`` fp32 per-row logsumexp.
+    """
     B, H, L, _, D = q.shape
     # Mirror the real allocation EXACTLY, strides included: `out` is a strided view over a
     # [B, L, L2, H*D] projection-layout buffer, and the module's rearrange back to that layout is
@@ -374,6 +378,12 @@ def _tri_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
 
 
 def _tri_attn_bwd_fake(q, k, v, bias, m, out, grad_output, shape_key):
+    """``(dq, dk, dv, dbias_raw)``: the three grads are ``(B, H, L, L2, D)`` STRIDED views over
+    ``[B, L, L2, H*D]`` projection buffers exactly as the real backward allocates them -- a
+    contiguous fake would reinstate the module's grad-transpose copy -- and carry ``v``'s dtype,
+    not fp32: the kernels accumulate in fp32 registers and store once. ``dbias_raw`` is the
+    UNREDUCED per-row ``(B, H*L, L, L)`` accumulator; the caller reduces it.
+    """
     B, H, L, _, D = q.shape
     def _proj():   # same projection-layout strided view the real backward allocates
         return rearrange(v.new_empty((B, L, L, H * D)), "B L L2 (H D) -> B H L L2 D", H=H)

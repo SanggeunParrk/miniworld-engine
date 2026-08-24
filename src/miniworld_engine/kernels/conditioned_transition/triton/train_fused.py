@@ -187,6 +187,10 @@ def _fwd_expand_swiglu_fake(x, wa, wb, shape_key=None):
 @opaque(fake=_fwd_expand_swiglu_fake, name="conditioned_transition_train_fused_expand_swiglu")
 def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
                        shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """a = x@Waᵀ, b = x@Wbᵀ, h = silu(a)*b -- the expand half, both GEMMs in one launch.
+    Training forward: the SwiGLU is the GEMM epilogue, and the pre-activations are packed into ab
+    because the backward's silu'(a) needs a and b, which h alone cannot give back.
+    """
     M, K = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))
@@ -213,6 +217,10 @@ def _fwd_squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None):
 @opaque(fake=_fwd_squeeze_gate_fake, name="conditioned_transition_train_fused_squeeze_gate")
 def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
                       shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """out = h@Wsᵀ, scale = cond@Wscᵀ + bsc, y = sigmoid(scale)*out -- the squeeze half, one launch.
+    Training forward: out and scale are materialized next to y because the gate backward and the
+    dWs/dWsc wgrads both read them.
+    """
     M, ND = h.shape
     if shape_key is None:
         shape_key = atom_key(length_of(h.shape))
@@ -248,6 +256,10 @@ def _gate_bwd_fake(out, scale, dy, shape_key=None):
 @opaque(fake=_gate_bwd_fake, name="conditioned_transition_train_fused_gate_bwd")
 def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """dout = sg*dy and dscale = out*sg*(1-sg)*dy for sg = sigmoid(scale), one pass over (M, D).
+    The unfused gate backward, for the dh path that keeps the GEMM separate; ``_dh_gatebwd`` is
+    the variant that folds this same maths into the dh-GEMM prologue.
+    """
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
@@ -393,6 +405,10 @@ def _dx_fused_fake(dh, ab, wa, wb, shape_key=None):
 @opaque(fake=_dx_fused_fake, name="conditioned_transition_train_fused_dx")
 def _dx_fused(dh: torch.Tensor, ab: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
               shape_key: int | None = None) -> torch.Tensor:
+    """dx = da@Wa + db@Wb, with da, db formed in-register per ND-tile from (dh, ab).
+    The swiglu backward sits in the GEMM prologue, so dab never reaches HBM -- use it when dWa and
+    dWb are not wanted; ``_dx_swiglubwd`` is the variant that also emits dab for those wgrads.
+    """
     M, ND = dh.shape
     if shape_key is None:
         shape_key = atom_key(length_of(dh.shape))
@@ -612,6 +628,10 @@ def _swiglu_bwd_pack_fake(dh, ab, shape_key=None):
 
 @opaque(fake=_swiglu_bwd_pack_fake, name="conditioned_transition_train_fused_swiglu_bwd_pack")
 def _swiglu_bwd_pack(dh: torch.Tensor, ab: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
+    """da = dh*b*silu'(a) and db = dh*silu(a), packed side by side as dab = [da | db].
+    Standalone (not folded into a GEMM) for the path whose dx comes from cuBLAS: the packing is
+    what makes the dWa/dWb expand-backward a single concatenated GEMM.
+    """
     M, ND = dh.shape
     if shape_key is None:
         shape_key = atom_key(length_of(dh.shape))

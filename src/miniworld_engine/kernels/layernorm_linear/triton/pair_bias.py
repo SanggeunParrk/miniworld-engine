@@ -287,6 +287,13 @@ def _fwd_op_fake(x, ln_weight, proj_weight, eps):
 def _fwd_op(
     x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The launch: fused ``Linear(LayerNorm(x))`` -> ``(out, mean, rstd)``.
+
+    ``out`` is ``(..., n_head)`` back in ``x``'s dtype (the projection accumulates in fp32); the
+    normalized ``(..., d)`` is never materialized, which is the whole point of the fusion. The (M,)
+    fp32 LN stats are RETURNED rather than kept, because ``_bwd_op`` needs them and an op hands
+    tensors back only through its return.
+    """
     x2 = x.reshape(-1, x.shape[-1]).contiguous()
     M, N = x2.shape
     nh = proj_weight.shape[0]
@@ -335,6 +342,13 @@ def _bwd_op(
     # None only for the coordinator-owned drivers_ln / checks_ln call sites.
     shape_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward launch -> ``(dx, dln_weight, dproj_weight)``, each shaped like the tensor it
+    is the gradient of.
+
+    ``dout`` is flattened to (M, n_head) and promoted to fp32 in here. ``dlnw``/``dpw`` are fp32
+    atomic accumulators (hence the kernel's ``reset_to_zero``) cast back to the weights' dtype
+    on the way out; ``dx`` is left flat and the caller reshapes it to ``ctx.xshape``.
+    """
     M, N = x2.shape
     nh = proj_weight.shape[0]
     dout2 = dout.reshape(M, nh).contiguous().to(torch.float32)

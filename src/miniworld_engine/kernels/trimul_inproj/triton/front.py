@@ -169,6 +169,11 @@ def trimul_front_triton(x, WL, WLg, WR, WRg, Wg):
 
 
 def _front_launch_fake(x_flat, Wlr, Wg, L, D, shape_key):
+    """The UNSPLIT ``lr`` (1, 2D, L, L) bdll buffer and ``gate`` (L*L, D).
+
+    The left/right halves stay in one tensor because an op's outputs may not alias each other;
+    ``trimul_front_triton`` slices them apart afterwards, in the graph.
+    """
     return x_flat.new_empty((1, 2 * D, L, L)), x_flat.new_empty((L * L, D))
 
 

@@ -586,6 +586,8 @@ _CACHE = {}
 
 
 def _gate_gemm_fake(A, Bp, Bg, mmajor=False):
+    """One bf16 tensor: (M, N) row-major, or the (N, M) storage -- an M-major (M, N) view for the
+    caller -- when ``mmajor`` is set, so the SHAPE flips with that flag, not just the layout."""
     M = A.shape[0]
     N = Bp.shape[0]
     # mmajor returns the (N, M) STORAGE (an M-major (M, N) view for the caller), so the fake
