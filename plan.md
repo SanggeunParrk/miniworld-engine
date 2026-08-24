@@ -14,7 +14,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P0b | E1 | prove `build all` end to end | **doing** — found 2 regressions |
 | P1 | A3 | ship `py.typed` | **done** |
 | P2 | B2 | per-kernel numerical tolerance | **P2a done**, P2b needs a GPU |
-| P3 | B4 | ragged/fp32 shape modes become a gate | todo |
+| P3 | B4 | ragged/fp32 shape modes become a gate | **measured** — 3 candidate bugs found |
 | P4 | D5 | the `configs` shadowing landmine | **done** |
 | P5 | F3 | delete the orphan pilot builder | **done** |
 | P6 | A4 | deprecation policy with a mechanism | **done** |
@@ -168,6 +168,38 @@ suite and aligned the opt-in — aligned shapes are the weaker test.
 
 **Done when.** `pixi run test-gpu` covers at least the ragged mode, and a deliberately broken tail
 mask fails it. Runtime for each mode recorded here.
+
+**First run ever. It found three failures, which is the point of the mode.** Under
+`MINIWORLD_SHAPE_MODE=ragged` the first three kernels in collection order fail:
+
+    adaln_bwd_dlnw_triton
+    adaln_bwd_dw_triton
+    adaln_bwd_dx_dbias_triton
+
+All three are adaln backward weight-gradient kernels, and all three pass at aligned extents. That
+is the boundary-mask signature this mode exists to expose: every default driver extent is a multiple
+of 128, so no tail tile had ever been executed. Their drivers use `ragged()` rather than
+`aligned_only(label, n, why)`, so the author's own declaration says they are meant to handle a
+partial tile. Candidate bugs, not confirmed: fixing them needs a device to iterate on, and I have
+not read the kernels yet. **Do not treat these as verified defects until someone has.**
+
+**On making it a gate — the cost is NOT what I first assumed.** The stage hit its 900 s cap having
+done 12 of 100. My first guess was a cache miss; the measurement says otherwise:
+
+* `token_key` FLOORS to the tuned ladder, so a ragged extent lands in an existing bucket, not a
+  new one: 512 -> 512 but 509 -> 384, 128 and 125 -> 128, 384 -> 384 but 381 -> 256.
+* the stage's output contains **zero** "no tuned autotune cache" / STALE warnings.
+
+So the cache hits. The most likely cost is a cold **triton** recompile: triton specialises on
+divisibility-by-16 of its integer arguments, and 509 is not 512, so every kernel JITs a second
+specialisation the aligned runs never produced. Evidence is consistent (aligned stage A did 100
+cases in 776 s with a warm triton cache; ragged did 12 in 900 s) but this is not proven -- I have
+not instrumented the compile. If it is right, the cost is paid ONCE per triton cache and the mode is
+gateable; if it is not, this needs a different answer.
+
+**Next step, in order:** (1) confirm the cold-compile theory by running the ragged stage twice in
+one job and comparing wall times; (2) read the three adaln kernels and decide whether they are tail
+bugs or drivers that should have said `aligned_only`; (3) only then make it a gate.
 
 ---
 
