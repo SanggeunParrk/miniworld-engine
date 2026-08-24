@@ -19,7 +19,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P5 | F3 | delete the orphan pilot builder | **done** |
 | P6 | A4 | deprecation policy with a mechanism | **done** |
 | P7 | A5 | hardware support matrix, checked | **done** |
-| P8 | B5 | determinism statement + test | todo |
+| P8 | B5 | determinism statement + test | **test written**, statement pending its first run |
 | P9 | C2 | quoted numbers traceable to a table | todo |
 | P10 | D4 | end the `configs/grid` duplication | **done** |
 | P11 | F4 | stale reference docs | **done** |
@@ -337,6 +337,25 @@ are not order-stable across configs. Add a GPU test that two calls under one cac
 bitwise equal.
 
 **Done when.** The statement is in the README and the test passes.
+
+**Test written, statement deliberately withheld.** `tests/test_determinism_gpu.py` asserts the half
+that IS a promise: two calls in one process, one cache state, identical inputs -> **bitwise** equal
+(`torch.equal`, not `allclose` — a tolerance here would hide the exact thing being asked). Ten
+kernels, one per family with a checker, chosen for launch-path variety (an atomic accumulation, a
+split reduction, a persistent grid, a fused epilogue) rather than for coverage; declared in `SAMPLE`
+with a guard test that fails if a name in it stops having a checker, so a rename cannot quietly
+shrink the file to nothing.
+
+The README statement is NOT written yet, on purpose. Writing "this is deterministic" before the
+test has ever run is precisely the unverified claim `docs/library-standards.md` is about — and B5's
+answer has two halves, only one of which is a promise:
+
+* within one process and one cache state: bitwise identical (what the test asserts);
+* across cache states — a rebuild, another GPU, another config set — a different config may win, and
+  a different tile shape is a different reduction order, so the last bits may move. Not a bug; that
+  is what tuning is, and it is the half that produces "your library is non-deterministic" reports.
+
+The statement lands when the test has passed once. The test rides the next GPU job.
 
 ---
 
