@@ -11,10 +11,20 @@ runs the same and returns the same numbers either way:
 This is a backend choice like ``layernorm_bwd_path`` or ``trimul_impl``, not a per-kernel property,
 so it is one ``settings`` field applied uniformly rather than a decision hardcoded per file.
 
-``disable`` is the default because it is what this repo measures faster on a SINGLE module: the
-``custom_op`` variant pays for saving activations as graph outputs (docs/benchmarking-cautions.md),
-and the benchmarks capture CUDA graphs manually, which removes the launch overhead a graph break
-would otherwise cost. Whole-model training is the case that can differ -- see WHAT GOES IN AN OP.
+``custom_op`` is the default. ``disable`` held that spot only because it was the only mode that
+could LOAD: 47 of the 58 entry points wrapped an ``autograd.Function`` method, which ``custom_op``
+cannot register, so choosing it raised on import. Measured on an A6000 (Pairformer x4, L=384),
+once every launch has a fake:
+
+    training, torch.compile, no CUDA graph   164.4 ms -> 156.0 ms
+    training, mode="reduce-overhead"         166.0 ms -> 155.1 ms   (was slower than eager)
+    training, compile + captured graph       CRASHED  -> 153.8 ms
+
+The last two are the point. A graph break does not merely cost fusion: inductor's cudagraph-trees
+bail on one, so ``reduce-overhead`` silently degraded into something slower than eager, and a
+manual capture over a compiled module died with ``cudaErrorStreamCaptureInvalidated`` because part
+of the region dropped back to eager mid-capture. ``disable`` stays available for A/B, and as the
+escape hatch if a fake is ever wrong -- it needs none.
 
 The mode is read at import time because registration has to happen at import; changing it after the
 kernel modules are loaded has no effect.

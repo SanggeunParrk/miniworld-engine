@@ -86,10 +86,21 @@ class Settings:
     #: num_warps from the row width. This is the same idea: a miss should cost a small, bounded
     #: search, not an unbounded one. A BUILD (run_autotune=True) always gets the full grid.
     autotune_miss_cap: int = 24
-    #: How kernel entry points are exposed to ``torch.compile``: "disable" (graph break, the
-    #: measured-faster default) or "custom_op" (opaque graph node, keeps surrounding fusion).
-    #: Interchangeable -- same kernel, same numbers. Read at IMPORT time by kernels._compile.
-    compile_wrap: Literal["disable", "custom_op"] = "disable"
+    #: How kernel entry points are exposed to ``torch.compile``: "custom_op" (opaque graph node,
+    #: keeps surrounding fusion) or "disable" (graph break). Same kernel, same numbers -- the
+    #: gradients are bit-identical either way. Read at IMPORT time by kernels._compile.
+    #:
+    #: "disable" was the default while it was the only mode that could load: 47 of the 58 entry
+    #: points wrapped an ``autograd.Function`` method, which ``custom_op`` cannot register, so
+    #: selecting the other mode raised on import. Now that every launch has a fake, measured on
+    #: an A6000 (Pairformer x4, L=384) "custom_op" is the better default:
+    #:
+    #:   training, torch.compile, no CUDA graph   164.4 ms -> 156.0 ms   (the main-config regime)
+    #:   training, mode="reduce-overhead"         166.0 ms -> 155.1 ms   (was SLOWER than eager)
+    #:   training, compile + captured graph       CRASHED  -> 153.8 ms
+    #:
+    #: "disable" remains for A/B and as the escape hatch if a fake is ever wrong: it needs none.
+    compile_wrap: Literal["disable", "custom_op"] = "custom_op"
     #: bias_only gate epilogue calibration. Formerly MINIWORLD_BIASONLY_AUTOTUNE.
     biasonly_dispatch: DispatchMode = "auto"
     #: layernorm backend calibration. Formerly MINIWORLD_LN_AUTOTUNE.
@@ -217,7 +228,7 @@ def _compile_wrap_from_env() -> str:
     """
     raw = os.environ.get("MINIWORLD_COMPILE_WRAP", "").strip()
     if not raw:
-        return "disable"
+        return "custom_op"
     if raw not in ("disable", "custom_op"):
         msg = (f"MINIWORLD_COMPILE_WRAP={raw!r} is not a compile_wrap mode; "
                f"expected 'disable' or 'custom_op'")
@@ -225,7 +236,7 @@ def _compile_wrap_from_env() -> str:
     return raw
 
 
-_ACTIVE = Settings(compile_wrap=_compile_wrap_from_env())
+_ACTIVE = Settings(compile_wrap=_compile_wrap_from_env())  # noqa: E501
 
 
 def current() -> Settings:

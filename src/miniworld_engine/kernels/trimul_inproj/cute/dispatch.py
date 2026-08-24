@@ -29,28 +29,47 @@ _LOG = settings.current().trimul_dispatch_log
 
 def pick(name, key, candidates):
     """Run the fastest of `candidates` for `key`, caching the choice. candidates: list of
-    (label, thunk()->result)."""
+    (label, thunk()->result).
+
+    A cache MISS calibrates, and calibrating is two things Dynamo cannot have inside a trace: it
+    writes ``_CACHE`` (a module global -- "Mutating a variable not in the current scope", which
+    graph-breaks the whole enclosing region) and it runs ``do_bench``, which on the fake tensors
+    a trace carries would time nothing. So under tracing a miss falls back to ``candidates[0]``
+    instead. That is not an arbitrary pick: candidate 0 is cuBLAS everywhere in this file, the
+    always-valid variant the others are compared against.
+
+    A HIT traces fine -- reading a global dict is just a guard -- so a run that calibrates before
+    it compiles (any eager warm-up step) still gets the tuned choice inside the graph. This was
+    found by tests/test_compile_regimes_gpu.py: with a cold cache a pairformer block traced to 6
+    graphs, with a warm one to 1, and the whole difference was this function.
+    """
     if not _ENABLED or len(candidates) == 1:
         return candidates[0][1]()
-    cache = _CACHE.setdefault(name, {})
-    idx = cache.get(key)
+    idx = _CACHE.get(name, {}).get(key)          # plain read: no setdefault, no mutation
     if idx is None:
-        best_i, best_t = 0, float("inf")
-        for i, (label, thunk) in enumerate(candidates):
-            try:
-                for _ in range(3):       # warm (compile/autotune the variant)
-                    thunk()
-                t = triton.testing.do_bench(thunk, warmup=10, rep=30, return_mode="median")
-            except Exception:            # noqa: BLE001 — a variant may not support this shape
-                t = float("inf")
-            if t < best_t:
-                best_t, best_i = t, i
-        cache[key] = best_i
-        idx = best_i
-        if _LOG:
-            print(f"[dispatch] {name} key={key} -> {candidates[idx][0]} "
-                  f"({best_t:.4f} ms)", flush=True)
+        if torch.compiler.is_compiling():
+            return candidates[0][1]()
+        idx = _calibrate(name, key, candidates)
     return candidates[idx][1]()
+
+
+def _calibrate(name, key, candidates) -> int:
+    """Time every candidate for `key`, remember the winner, return its index. EAGER ONLY."""
+    best_i, best_t = 0, float("inf")
+    for i, (_label, thunk) in enumerate(candidates):
+        try:
+            for _ in range(3):       # warm (compile/autotune the variant)
+                thunk()
+            t = triton.testing.do_bench(thunk, warmup=10, rep=30, return_mode="median")
+        except Exception:            # noqa: BLE001 — a variant may not support this shape
+            t = float("inf")
+        if t < best_t:
+            best_t, best_i = t, i
+    _CACHE.setdefault(name, {})[key] = best_i
+    if _LOG:
+        print(f"[dispatch] {name} key={key} -> {candidates[best_i][0]} "
+              f"({best_t:.4f} ms)", flush=True)
+    return best_i
 
 
 def reset():
