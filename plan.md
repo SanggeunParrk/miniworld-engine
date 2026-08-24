@@ -26,6 +26,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
 | P13 | F6 | CONTRIBUTING | **done** |
 | P14 | A4 | the declared Python floor is untested | **done** |
+| P15 | E2 | a stale JIT build lock hangs the GPU suite forever | todo |
 
 ---
 
@@ -479,3 +480,46 @@ for.
 scanned 98 files and reported zero findings. The shell's working directory had drifted to a
 different repository (`practice/team-gm`), so the measurement was of the wrong tree. Caught by the
 file count not matching `git ls-files`. Every subsequent command pins the directory.
+
+---
+
+## P15 — a stale JIT build lock hangs the GPU suite forever  (E2)
+
+**Found by losing three runs to it**, ~5 GPU-hours: a 45-minute job I killed, a 4-hour job that hit
+its time limit, and a third that stalled at test 42 of 100. All three looked identical to "slow".
+
+`kernels/layernorm/cuda/__init__.py` calls `torch.utils.cpp_extension.load(...)` **at module import
+time**, building `layer_norm_cuda_kernel.cu` for `gencodes("80","90","100", ptx=("100",))`. `load()`
+serialises concurrent builds with a `FileBaton` on `~/.cache/torch_extensions/<abi>/<ext>/lock`, and
+`FileBaton.wait()` polls for that file to disappear **with no timeout and no message**.
+
+A run at 09:44 rewrote `build.ninja`, created the lock, and died. Every run afterwards blocked on it
+forever. Proof: the lock was 13 hours old with no process holding it, and deleting it moved the
+stalled job from test 41 to 48 within 20 seconds.
+
+Three separate faults, and the third is the one that matters:
+
+1. **The lock is never reclaimed.** A killed build leaves a file that stops every future run on this
+   machine, for every extension it had started.
+2. **The wait is unbounded and silent.** No timeout, no "waiting for another build", nothing to
+   distinguish it from a long compile — which is exactly why it survived three investigations.
+3. **The build happens at import.** Importing `kernels.layernorm` compiles CUDA for four
+   architectures, so any consumer that touches that family pays it, and `test_numerical` pays it in
+   the middle of an unrelated kernel's test.
+
+**Action.**
+- Wrap the extension load so a wait longer than a threshold (say 120 s) raises, naming the lock file
+  and saying to delete it. A message beats a hang, and the fix is one `rm`.
+- Reclaim a lock whose mtime is older than the build could plausibly be, the way
+  `build --reclaim` already does for the builder's own O_EXCL claims — that precedent is in this
+  repo and this is the same problem.
+- Make the load lazy so importing the family does not compile anything, and only the tests and
+  dispatch paths that need the CUDA backend pay for it. This is also A2 (importing the package does
+  nothing) — the criterion is met for the package's own import only because nothing imports
+  `layernorm.cuda` eagerly today.
+
+**Done when.** A stale lock produces an error naming it within ~2 minutes instead of a hang, and
+`python -c "import miniworld_engine.kernels.layernorm"` runs no compiler.
+
+**Operational note for whoever hits this next:**
+`rm ~/.cache/torch_extensions/py312_cu128/*/lock`
