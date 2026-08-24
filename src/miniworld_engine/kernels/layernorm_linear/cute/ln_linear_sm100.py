@@ -74,9 +74,12 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@opaque(fake=lambda tri_bkll, w, b, eps: tri_bkll.new_empty(
-            (tri_bkll.shape[2] * tri_bkll.shape[3], tri_bkll.shape[1])),
-        name="layernorm_linear_out_mmajor_sm100")
+def _ln_out_mmajor_fake(tri_bkll, w, b, eps):
+    """(M, K) = (L*L, K) from tri_bkll [B, K, L, L] — the LN output is written back M-major."""
+    return tri_bkll.new_empty((tri_bkll.shape[2] * tri_bkll.shape[3], tri_bkll.shape[1]))
+
+
+@opaque(fake=_ln_out_mmajor_fake, name="layernorm_linear_out_mmajor_sm100")
 def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
                   eps: float) -> torch.Tensor:
     """LayerNorm over K of ``tri`` [B,K,L,L] (B=1), read M-major. Returns (M, K)

@@ -414,8 +414,12 @@ def triton_layernorm(x, weight, bias, eps, row_scale=None):
     return TritonLayerNormFunction.apply(x, weight, bias, eps, row_scale)
 
 
-@opaque(fake=lambda x, weight, bias, eps, row_scale: torch.empty_like(x),
-        name="layernorm_masked_fwd")
+def _triton_layernorm_masked_fake(x, weight, bias, eps, row_scale):
+    """Same shape and dtype as x -- row_scale is a per-row factor, it does not reshape."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_triton_layernorm_masked_fake, name="layernorm_masked_fwd")
 def triton_layernorm_masked(
     x: torch.Tensor,
     weight: torch.Tensor | None,

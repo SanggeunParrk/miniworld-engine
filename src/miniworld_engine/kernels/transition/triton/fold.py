@@ -82,11 +82,16 @@ def _fold_kernel(
     tl.store(b2_ptr + 2 * j + 1, b2b, mask=j_mask)
 
 
-@opaque(fake=lambda Wa, Wb, ln_weight, ln_bias, w2_dtype=torch.bfloat16: (
-            Wa.new_empty((2 * Wa.shape[0], Wa.shape[1]), dtype=w2_dtype),
-            Wa.new_empty((2 * Wa.shape[0],), dtype=torch.float32),
-            Wa.new_empty((2 * Wa.shape[0],), dtype=torch.float32)),
-        name="transition_fold_swiglu")
+def _fold_swiglu_triton_fake(Wa, Wb, ln_weight, ln_bias, w2_dtype=torch.bfloat16):
+    """(B (2N, K) in the requested w2_dtype, S (2N,) f32, B2 (2N,) f32); 2N = gate|up rows."""
+    return (
+        Wa.new_empty((2 * Wa.shape[0], Wa.shape[1]), dtype=w2_dtype),
+        Wa.new_empty((2 * Wa.shape[0],), dtype=torch.float32),
+        Wa.new_empty((2 * Wa.shape[0],), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_fold_swiglu_triton_fake, name="transition_fold_swiglu")
 def fold_swiglu_triton(
     Wa: torch.Tensor,        # (N, K)
     Wb: torch.Tensor,        # (N, K)

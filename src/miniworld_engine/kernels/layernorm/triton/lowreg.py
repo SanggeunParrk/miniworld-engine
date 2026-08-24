@@ -34,8 +34,12 @@ import triton
 # fmt: off
 
 
-@opaque(fake=lambda x, weight, bias, eps: torch.empty_like(x),
-        name="layernorm_lowreg_fwd")
+def _triton_layernorm_lowreg_fake(x, weight, bias, eps):
+    """Same shape and dtype as x."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_triton_layernorm_lowreg_fake, name="layernorm_lowreg_fwd")
 def triton_layernorm_lowreg(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float) -> torch.Tensor:
     """Forward-only low-register LayerNorm (bench probe)."""
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()

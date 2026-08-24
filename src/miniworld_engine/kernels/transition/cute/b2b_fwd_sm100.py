@@ -151,9 +151,12 @@ class SwiGLUExpandKernel(GatedPersistentGemmKernel):
 _CACHE = {}
 
 
-@opaque(fake=lambda xn, wb, wa: xn.new_empty((xn.shape[0], wb.shape[0]),
-                                             dtype=torch.bfloat16),
-        name="transition_swiglu_expand_gemm_sm100")
+def _swiglu_expand_gemm_fake(xn, wb, wa):
+    """(M, ND) = (xn rows, wb rows), always bf16 — the kernel writes bf16 whatever xn's dtype."""
+    return xn.new_empty((xn.shape[0], wb.shape[0]), dtype=torch.bfloat16)
+
+
+@opaque(fake=_swiglu_expand_gemm_fake, name="transition_swiglu_expand_gemm_sm100")
 def swiglu_expand_gemm(xn: torch.Tensor, wb: torch.Tensor, wa: torch.Tensor) -> torch.Tensor:
     """h = silu(xn @ wa^T) * (xn @ wb^T).  xn:(M,K), wa/wb:(ND,K) bf16 -> h:(M,ND) row-major.
     (wa is the gate/silu weight, wb the up weight — matching swish_gate(a,b)=silu(a)*b.)"""

@@ -158,8 +158,12 @@ def _squeeze_gate_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda x, wa, wb, shape_key=None: x.new_empty((x.shape[0], wa.shape[0])),
-        name="conditioned_transition_composed_expand_swiglu")
+def _expand_swiglu_fake(x, wa, wb, shape_key=None):
+    """(M, ND) h -- ND = wa.shape[0], the expanded width."""
+    return x.new_empty((x.shape[0], wa.shape[0]))
+
+
+@opaque(fake=_expand_swiglu_fake, name="conditioned_transition_composed_expand_swiglu")
 def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
                    shape_key: int | None = None) -> torch.Tensor:
     """h = silu(x @ Wa^T) * (x @ Wb^T) -> (M, ND)."""
@@ -180,9 +184,12 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     return h
 
 
-@opaque(fake=lambda h, cond, ws, wsc, bsc, shape_key=None: h.new_empty(
-            (h.shape[0], ws.shape[0])),
-        name="conditioned_transition_composed_squeeze_gate")
+def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None):
+    """(M, D) y -- D = ws.shape[0], the squeezed width, not h's ND."""
+    return h.new_empty((h.shape[0], ws.shape[0]))
+
+
+@opaque(fake=_squeeze_gate_fake, name="conditioned_transition_composed_squeeze_gate")
 def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor,
                   bsc: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D)."""

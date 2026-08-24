@@ -7,14 +7,7 @@ projects to ``n_head`` in-register -- it never materializes the full normalized
 kernel plus a separate GEMM). ``ln_weight``/``proj_weight`` are the affine scale
 of an *unbiased* ``nn.LayerNorm`` and the weight of an *unbiased* ``Linear``.
 
-Registered as a ``torch.library.custom_op`` DIRECTLY, not through ``kernels._compile.opaque``
-like the other ~105 ops -- the one deliberate exception. ``opaque`` degrades an op to a graph
-break under ``compile_wrap="disable"``, and this op owns its autograd (``register_autograd``
-below) instead of sitting inside an ``autograd.Function``. A plain function has no
-``register_autograd``, so degrading this one is not a slower path, it is an import error: an op
-that owns its own autograd has to be an op in every mode.
-
-Registered as a custom_op so it stays in the compiled graph
+Registered through ``kernels._compile.opaque`` like every other kernel launch, so it stays in the compiled graph
 without a graph break -- surviving ``torch.compile`` is the entire point.
 """
 
@@ -28,6 +21,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.kernels._compile import opaque
 
 # tl.dot needs every dim >= 16; below this the backward uses the scalar loop.
 MIN_TL_DOT_DIM = 16
@@ -277,7 +271,19 @@ def _layer_norm_linear_bwd(
         tl.store(dx_ptr + offs, dx, mask=mask)
 
 
-@torch.library.custom_op("miniworld_engine::layernorm_linear_pair_bias_fwd", mutates_args=())
+def _fwd_op_fake(x, ln_weight, proj_weight, eps):
+    """(..., n_head) projection, plus the flat (M,) fp32 LN mean and rstd the backward reuses."""
+    rows = 1
+    for size in x.shape[:-1]:
+        rows *= size
+    return (
+        x.new_empty(*x.shape[:-1], proj_weight.shape[0]),
+        x.new_empty(rows, dtype=torch.float32),
+        x.new_empty(rows, dtype=torch.float32),
+    )
+
+
+@opaque(fake=_fwd_op_fake, name="layernorm_linear_pair_bias_fwd")
 def _fwd_op(
     x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -307,19 +313,16 @@ def _fwd_op(
     return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
 
 
-@_fwd_op.register_fake
-def _(x, ln_weight, proj_weight, eps):
-    rows = 1
-    for s in x.shape[:-1]:
-        rows *= s
+def _bwd_op_fake(dout, x2, ln_weight, proj_weight, mean, rstd, shape_key=None):
+    """(dx, dln_weight, dproj_weight), each shaped like the tensor it is the gradient of."""
     return (
-        x.new_empty(*x.shape[:-1], proj_weight.shape[0]),
-        x.new_empty(rows, dtype=torch.float32),
-        x.new_empty(rows, dtype=torch.float32),
+        torch.empty_like(x2),
+        torch.empty_like(ln_weight),
+        torch.empty_like(proj_weight),
     )
 
 
-@torch.library.custom_op("miniworld_engine::layernorm_linear_pair_bias_bwd", mutates_args=())
+@opaque(fake=_bwd_op_fake, name="layernorm_linear_pair_bias_bwd")
 def _bwd_op(
     dout: torch.Tensor,
     x2: torch.Tensor,
@@ -360,32 +363,31 @@ def _bwd_op(
     return dx, dlnw.to(ln_weight.dtype), dpw.to(proj_weight.dtype)
 
 
-@_bwd_op.register_fake
-def _(dout, x2, ln_weight, proj_weight, mean, rstd, shape_key=None):
-    return (
-        torch.empty_like(x2),
-        torch.empty_like(ln_weight),
-        torch.empty_like(proj_weight),
-    )
+class _LayerNormLinearPairBias(torch.autograd.Function):
+    """Autograd for the fused LN+proj, in this repo's one shape: the launches are ops and the
+    Function owns ``ctx``.
 
+    It used to be ``_fwd_op.register_autograd(...)`` instead, which worked -- everything the
+    backward needs (mean, rstd) is a forward OUTPUT, which is all ``setup_context`` may save. But
+    it made this the only file whose ops bypassed ``kernels._compile.opaque``, and so the only
+    file ``compile_wrap`` did not reach. Two patterns for one job is worse than the marginal
+    tidiness of the torch-native one.
+    """
 
-def _setup_context(ctx, inputs, output):
-    x, ln_weight, proj_weight, _eps = inputs
-    _, mean, rstd = output
-    ctx.save_for_backward(
-        x.reshape(-1, x.shape[-1]).contiguous(), ln_weight, proj_weight, mean, rstd
-    )
-    ctx.xshape = x.shape
+    @staticmethod
+    def forward(ctx, x, ln_weight, proj_weight, eps):
+        out, mean, rstd = _fwd_op(x, ln_weight, proj_weight, eps)
+        ctx.save_for_backward(
+            x.reshape(-1, x.shape[-1]).contiguous(), ln_weight, proj_weight, mean, rstd)
+        ctx.xshape = x.shape
+        return out
 
-
-def _backward(ctx, grad_out, grad_mean, grad_rstd):
-    x2, ln_weight, proj_weight, mean, rstd = ctx.saved_tensors
-    dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd,
-                            shape_key=both_key(rows_of(ctx.xshape)))
-    return dx.reshape(ctx.xshape), dlnw, dpw, None
-
-
-_fwd_op.register_autograd(_backward, setup_context=_setup_context)
+    @staticmethod
+    def backward(ctx, grad_out):
+        x2, ln_weight, proj_weight, mean, rstd = ctx.saved_tensors
+        dx, dlnw, dpw = _bwd_op(grad_out, x2, ln_weight, proj_weight, mean, rstd,
+                                shape_key=both_key(rows_of(ctx.xshape)))
+        return dx.reshape(ctx.xshape), dlnw, dpw, None   # eps takes no gradient
 
 
 @typecheck
@@ -406,4 +408,4 @@ def triton_layer_norm_linear(
     if nh >= MIN_TL_DOT_DIM and (nh & (nh - 1)):
         msg = f"n_head={nh} must be a power of two when >= {MIN_TL_DOT_DIM}"
         raise ValueError(msg)
-    return _fwd_op(x, ln_weight, proj_weight, eps)[0]
+    return _LayerNormLinearPairBias.apply(x, ln_weight, proj_weight, eps)

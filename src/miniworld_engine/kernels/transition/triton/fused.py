@@ -795,10 +795,18 @@ def _transition_expand_gatebwd_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda x2, rstd, c1, gamma, beta, wa, wb, grad_expand, shape_key=None: (
-            torch.empty_like(grad_expand), torch.empty_like(grad_expand),
-            torch.empty_like(grad_expand), torch.empty_like(x2)),
-        name="transition_expand_gatebwd_recompute")
+def _transition_expand_gatebwd_fake(x2, rstd, c1, gamma, beta, wa, wb, grad_expand,
+                                    shape_key=None):
+    """(h, dA, dB) each shaped like grad_expand (M, ND), plus the recomputed xn shaped like x2."""
+    return (
+        torch.empty_like(grad_expand),
+        torch.empty_like(grad_expand),
+        torch.empty_like(grad_expand),
+        torch.empty_like(x2),
+    )
+
+
+@opaque(fake=_transition_expand_gatebwd_fake, name="transition_expand_gatebwd_recompute")
 def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
                                gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor,
                                wb: torch.Tensor, grad_expand: torch.Tensor,

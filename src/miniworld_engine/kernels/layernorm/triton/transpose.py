@@ -106,9 +106,12 @@ def _ln_transpose_dbn_kernel(
             tl.store(y_ptr + rm[:, None] * D + rk[None, :], y, mask=mask)
 
 
-@opaque(fake=lambda x, weight, bias, eps: x.new_empty(
-            (x.shape[1], x.shape[2], x.shape[0])),
-        name="layernorm_transpose_dbn_bnd")
+def _ln_transpose_dbn_bnd_fake(x, weight, bias, eps):
+    """(B, N, D): the op transposes x's (D, B, N) layout as it normalizes over D."""
+    return x.new_empty((x.shape[1], x.shape[2], x.shape[0]))
+
+
+@opaque(fake=_ln_transpose_dbn_bnd_fake, name="layernorm_transpose_dbn_bnd")
 def _ln_transpose_dbn_bnd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
                           eps: float) -> torch.Tensor:
     """x: (D, B, N) -> LN over D -> (B, N, D), fused (no materialised transpose)."""

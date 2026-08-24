@@ -246,10 +246,13 @@ def gate_elem_quack_fused(x_n, proj, Wg, *, return_preact: bool = False):
     return (y.reshape(M, N), preact) if return_preact else y.reshape(M, N)
 
 
-@opaque(fake=lambda dy, proj, gate, from_preact=False, dropscale=None, seq_len=None: (
-            torch.empty_like(dy.reshape(-1, dy.shape[-1])),
-            torch.empty_like(dy.reshape(-1, dy.shape[-1]))),
-        name="trimul_gate_elem_bwd_ew")
+def _gate_elem_bwd_ew_fake(dy, proj, gate, from_preact=False, dropscale=None, seq_len=None):
+    """(d_proj, d_glogit), both (M, N) == dy flattened over its last dim."""
+    return (torch.empty_like(dy.reshape(-1, dy.shape[-1])),
+            torch.empty_like(dy.reshape(-1, dy.shape[-1])))
+
+
+@opaque(fake=_gate_elem_bwd_ew_fake, name="trimul_gate_elem_bwd_ew")
 def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
                      from_preact: bool = False,
                      dropscale: torch.Tensor | None = None,
@@ -278,11 +281,14 @@ def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
     return d_proj, d_glogit
 
 
-@opaque(fake=lambda dy, x_n, proj, gate, Wg: (
-            torch.empty_like(dy.reshape(-1, dy.shape[-1])),
+def _gate_elem_bwd_fake(dy, x_n, proj, gate, Wg):
+    """(d_proj (M, N), dx_gate (M, K), dWg (K, N)); M is dy flattened over its last dim."""
+    return (torch.empty_like(dy.reshape(-1, dy.shape[-1])),
             x_n.new_empty((dy.numel() // dy.shape[-1], x_n.shape[-1])),
-            Wg.new_empty(Wg.shape)),
-        name="trimul_gate_elem_bwd")
+            Wg.new_empty(Wg.shape))
+
+
+@opaque(fake=_gate_elem_bwd_fake, name="trimul_gate_elem_bwd")
 def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
                   Wg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward of GateElem. Returns (d_proj, dx_gate, dWg).

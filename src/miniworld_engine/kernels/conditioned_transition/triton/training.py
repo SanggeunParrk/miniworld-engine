@@ -90,7 +90,12 @@ def _swiglu_fwd_kernel(
 
 
 
-@opaque(fake=lambda a, b, shape_key=None: a.new_empty(a.shape), name="conditioned_transition_swiglu_fwd")
+def _swiglu_fake(a, b, shape_key=None):
+    """(M, ND) h -- same shape as `a`, but contiguous where `a` may be a strided view."""
+    return a.new_empty(a.shape)
+
+
+@opaque(fake=_swiglu_fake, name="conditioned_transition_swiglu_fwd")
 def _swiglu(a: torch.Tensor, b: torch.Tensor,
             shape_key: int | None = None) -> torch.Tensor:
     M, ND = a.shape
@@ -103,7 +108,12 @@ def _swiglu(a: torch.Tensor, b: torch.Tensor,
     return h
 
 
-@opaque(fake=lambda out, scale, shape_key=None: torch.empty_like(out), name="conditioned_transition_gate_fwd")
+def _gate_fake(out, scale, shape_key=None):
+    """(M, D) y -- same shape as `out`."""
+    return torch.empty_like(out)
+
+
+@opaque(fake=_gate_fake, name="conditioned_transition_gate_fwd")
 def _gate(out: torch.Tensor, scale: torch.Tensor,
           shape_key: int | None = None) -> torch.Tensor:
     y = torch.empty_like(out)
@@ -152,9 +162,12 @@ def _swiglu_bwd_kernel(
     tl.store(dab_ptr + base + (col + ND) * stride_pn, db.to(dab_ptr.dtype.element_ty), mask=mask)
 
 
-@opaque(fake=lambda out, scale, dy, shape_key=None: (
-            torch.empty_like(out), torch.empty_like(out)),
-        name="conditioned_transition_gate_bwd")
+def _gate_bwd_fake(out, scale, dy, shape_key=None):
+    """dout and dscale, both (M, D) like `out`."""
+    return torch.empty_like(out), torch.empty_like(out)
+
+
+@opaque(fake=_gate_bwd_fake, name="conditioned_transition_gate_bwd")
 def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     dout = torch.empty_like(out)
@@ -172,8 +185,12 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 # is a fast cuBLAS-adjacent reduction; keep it separate.
 
 
-@opaque(fake=lambda a, b, dh, shape_key=None: a.new_empty((a.shape[0], 2 * a.shape[1])),
-        name="conditioned_transition_swiglu_bwd_packed")
+def _swiglu_bwd_packed_fake(a, b, dh, shape_key=None):
+    """(M, 2*ND) -- the packed [da | db], twice the width of `a`."""
+    return a.new_empty((a.shape[0], 2 * a.shape[1]))
+
+
+@opaque(fake=_swiglu_bwd_packed_fake, name="conditioned_transition_swiglu_bwd_packed")
 def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
                        shape_key: int | None = None) -> torch.Tensor:
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""

@@ -180,9 +180,12 @@ def _back_kernel(
             tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask & nmask)
 
 
-@opaque(fake=lambda tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None:
-            x_n.new_empty(x_n.shape),
-        name="trimul_back_fused")
+def _trimul_back_triton_fake(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None):
+    """y [B, L, L, D]: the back half is shape-preserving, so it matches x_n's shape/dtype."""
+    return x_n.new_empty(x_n.shape)
+
+
+@opaque(fake=_trimul_back_triton_fake, name="trimul_back_fused")
 def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tensor,
                        Wg: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor,
                        eps: float = 1e-5,

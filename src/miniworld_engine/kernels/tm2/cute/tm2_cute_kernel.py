@@ -374,9 +374,12 @@ class TM2DualKernel:
 _COMPILE_CACHE: dict = {}
 
 
-@opaque(fake=lambda x1, x2, Wg_nk, Wp_nk, tile_m=None: x1.new_empty(
-            (*x1.shape[:-1], Wg_nk.shape[0])),
-        name="tm2_dual_from_scratch")
+def _tm2_dual_from_scratch_fake(x1, x2, Wg_nk, Wp_nk, tile_m=None):
+    """(..., N) -- x1's leading dims with Wg_nk's output-column count N, in x1's dtype."""
+    return x1.new_empty((*x1.shape[:-1], Wg_nk.shape[0]))
+
+
+@opaque(fake=_tm2_dual_from_scratch_fake, name="tm2_dual_from_scratch")
 def tm2_dual_from_scratch(
     x1: torch.Tensor,
     x2: torch.Tensor,

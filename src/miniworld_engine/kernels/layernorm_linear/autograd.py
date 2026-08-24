@@ -75,11 +75,16 @@ def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
     return dx.to(x.dtype), dgamma, dbeta, dW, db_out
 
 
-@opaque(fake=lambda dx_normed, x, gamma, mean, rstd, shape_key=None: (
-            torch.empty_like(dx_normed),
-            x.new_empty((x.shape[-1],), dtype=torch.float32),
-            x.new_empty((x.shape[-1],), dtype=torch.float32)),
-        name="layernorm_linear_ln_bwd")
+def _ln_backward_fake(dx_normed, x, gamma, mean, rstd, shape_key=None):
+    """(dx like dx_normed, dgamma (K,), dbeta (K,)); dγ/dβ are fp32 — atomic-accumulated over M."""
+    return (
+        torch.empty_like(dx_normed),
+        x.new_empty((x.shape[-1],), dtype=torch.float32),
+        x.new_empty((x.shape[-1],), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_ln_backward_fake, name="layernorm_linear_ln_bwd")
 def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
                  mean: torch.Tensor, rstd: torch.Tensor, shape_key: int | None = None,
                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

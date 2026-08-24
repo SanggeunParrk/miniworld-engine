@@ -212,19 +212,20 @@ def test_op_names_start_with_their_family() -> None:
         + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items())))
 
 
-def test_only_pair_bias_bypasses_the_compile_wrap_switch() -> None:
-    """``opaque`` is the one switch. One file is exempt, on purpose, and says so.
+def test_nothing_bypasses_the_compile_wrap_switch() -> None:
+    """``opaque`` is the ONE way a kernel launch becomes an op. No exceptions.
 
-    ``layernorm_linear/triton/pair_bias.py`` registers its ops directly because they own their
-    autograd via ``register_autograd``; a plain function (what ``opaque`` returns under
-    ``compile_wrap="disable"``) has no such method, so degrading them is an import error rather
-    than a slower path. Any OTHER file calling ``torch.library.custom_op`` is a site that quietly
-    ignores the switch.
+    ``layernorm_linear/triton/pair_bias.py`` used to be one: it registered its two ops with
+    ``torch.library.custom_op`` directly and wired autograd with ``register_autograd``, so
+    ``compile_wrap`` never reached them. That pattern is legitimate on its own terms -- everything
+    its backward needs is a forward output, which is all ``setup_context`` may save -- but two
+    patterns for one job cost more than the tidiness of the second one was worth. It is an
+    ``autograd.Function`` over ``opaque`` launches now, like the other 105.
     """
     offenders = []
     for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
-        if path.name in ("pair_bias.py", "_compile.py"):
-            continue                      # the exemption, and the switch's own implementation
+        if path.name == "_compile.py":
+            continue                      # the switch's own implementation
         if "torch.library.custom_op(" in path.read_text():
             offenders.append(str(path.relative_to(SRC)))
     assert not offenders, ("these register ops outside kernels._compile.opaque, so compile_wrap "

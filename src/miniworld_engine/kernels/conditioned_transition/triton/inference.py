@@ -145,9 +145,12 @@ def _cond_transition_inference_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda x, cond, wa, wb, ws, wsc, bsc, length=None: x.new_empty(
-            (x.shape[0], ws.shape[0])),
-        name="conditioned_transition_inference")
+def _cond_transition_inference_fake(x, cond, wa, wb, ws, wsc, bsc, length=None):
+    """(M, D) y -- D = ws.shape[0]; `length` is only a shape key and never changes the output."""
+    return x.new_empty((x.shape[0], ws.shape[0]))
+
+
+@opaque(fake=_cond_transition_inference_fake, name="conditioned_transition_inference")
 def cond_transition_inference(
     x: torch.Tensor,     # (M, K)  AdaLN output, K = d_hidden
     cond: torch.Tensor,  # (M, DC) conditioning, DC = d_cond

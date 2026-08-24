@@ -94,9 +94,12 @@ def _fp32_matmul_ctx(dtype):
 from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
-@opaque(fake=lambda cond, lnw, eps, out_dtype=None, shape_key=None: cond.new_empty(
-            cond.shape, dtype=out_dtype or cond.dtype),
-        name="adaln_cond_affine")
+def _cond_affine_fake(cond, lnw, eps, out_dtype=None, shape_key=None):
+    """(M, NC) like cond; the dtype is ``out_dtype`` when the caller asks for one, not cond's."""
+    return cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype)
+
+
+@opaque(fake=_cond_affine_fake, name="adaln_cond_affine")
 def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
                  out_dtype: torch.dtype | None = None,
                  shape_key: int | None = None) -> torch.Tensor:
@@ -176,8 +179,12 @@ def _adaln_epilogue_kernel(
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-@opaque(fake=lambda x, sb, eps, shape_key=None: torch.empty_like(x),
-        name="adaln_inference_epilogue")
+def _adaln_epilogue_fake(x, sb, eps, shape_key=None):
+    """(M, N) gated output like x -- sb is the (M, 2N) [scale|bias] pair, not the output shape."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_adaln_epilogue_fake, name="adaln_inference_epilogue")
 def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
                     shape_key: int | None = None) -> torch.Tensor:
     M, N = x.shape
@@ -403,9 +410,13 @@ def _adaln_fused_kernel(  # noqa: PLR0915
         tl.store(Y + yo, y.to(Y.dtype.element_ty), mask=xm)
 
 
-@opaque(fake=lambda x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-               eps_x, eps_cond: torch.empty_like(x),
-        name="adaln_inference_fused")
+def _adaln_inference_fused_fake(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
+                                eps_x, eps_cond):
+    """Same shape and dtype as x -- cond only supplies the scale/bias."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_adaln_inference_fused_fake, name="adaln_inference_fused")
 def adaln_inference_fused(
     x: torch.Tensor,
     cond: torch.Tensor,

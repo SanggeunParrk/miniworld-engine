@@ -544,8 +544,12 @@ def _gated_gemm_bwd_elemwise_kernel(
     tl.store(d_proj_ptr + offs, d_proj.to(out_dtype), mask=mask)
 
 
-@opaque(fake=lambda grad, ab, sig_m, seq_len=None: grad.new_empty(
-            (2 * grad.shape[0], grad.shape[1])),
+def _elemwise_bwd_combined_fake(grad, ab, sig_m, seq_len=None):
+    """(2N, M): d_gate and d_proj stacked into one buffer, so twice grad's (N, M) rows."""
+    return grad.new_empty((2 * grad.shape[0], grad.shape[1]))
+
+
+@opaque(fake=_elemwise_bwd_combined_fake,
         name="triangle_multiplication_dtv1_gated_gemm_bwd_combined")
 def _elemwise_bwd_combined(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Tensor,
                            seq_len: int | None = None) -> torch.Tensor:
@@ -572,8 +576,12 @@ def _elemwise_bwd_combined(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Te
     return d_combined  # (2N, M) fully contiguous
 
 
-@opaque(fake=lambda grad, ab, sig_m, seq_len=None: (
-            torch.empty_like(grad), torch.empty_like(grad)),
+def _elemwise_bwd_separate_fake(grad, ab, sig_m, seq_len=None):
+    """(d_gate, d_proj), each with grad's shape and dtype."""
+    return torch.empty_like(grad), torch.empty_like(grad)
+
+
+@opaque(fake=_elemwise_bwd_separate_fake,
         name="triangle_multiplication_dtv1_gated_gemm_bwd_separate")
 def _elemwise_bwd_separate(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Tensor,
                            seq_len: int | None = None,
@@ -679,10 +687,15 @@ def _input_gemm_fwd(x_normed: torch.Tensor, w_gate: torch.Tensor, w_proj: torch.
     return ab, sig_m
 
 
-@opaque(fake=lambda x_normed, x_out, w_gate, w_proj, seq_len=None: (
-            x_normed.new_empty((x_normed.shape[0], w_gate.shape[0])),
-            x_normed.new_empty((x_normed.shape[0], w_gate.shape[0]), dtype=torch.float32)),
-        name="triangle_multiplication_dtv1_output_gated_gemm")
+def _output_gemm_fwd_fake(x_normed, x_out, w_gate, w_proj, seq_len=None):
+    """(ab, sig), both (M, w_gate rows); sig is fp32 because (1 - sig) would cancel in bf16."""
+    return (
+        x_normed.new_empty((x_normed.shape[0], w_gate.shape[0])),
+        x_normed.new_empty((x_normed.shape[0], w_gate.shape[0]), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_output_gemm_fwd_fake, name="triangle_multiplication_dtv1_output_gated_gemm")
 def _output_gemm_fwd(x_normed: torch.Tensor, x_out: torch.Tensor, w_gate: torch.Tensor,
                      w_proj: torch.Tensor, seq_len: int | None = None,
                      ) -> tuple[torch.Tensor, torch.Tensor]:

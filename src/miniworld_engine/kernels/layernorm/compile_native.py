@@ -253,9 +253,12 @@ def _bwd_cuda_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Te
 
 
 
-@opaque(fake=lambda dy, x, weight, mean, rstd: (
-    x.new_empty(x.shape), weight.new_empty(weight.shape), weight.new_empty(weight.shape)),
-    name="layernorm_dispatch_bwd")
+def _dispatch_bwd_fake(dy, x, weight, mean, rstd):
+    """(dx, dweight, dbias): dx like x, the two parameter grads like weight (N,)."""
+    return x.new_empty(x.shape), weight.new_empty(weight.shape), weight.new_empty(weight.shape)
+
+
+@opaque(fake=_dispatch_bwd_fake, name="layernorm_dispatch_bwd")
 def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor,
                   rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
     """Backward through whichever reduction path this shape and card resolve to."""
@@ -271,11 +274,17 @@ def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor,
     return _bwd_atomic_impl(dy, x, weight, mean, rstd)
 
 
-@opaque(fake=lambda x, weight, bias, eps: (
-    x.new_empty(x.shape),
-    x.new_empty((x.numel() // x.shape[-1],), dtype=torch.float32),
-    x.new_empty((x.numel() // x.shape[-1],), dtype=torch.float32)),
-    name="layernorm_dispatch_fwd")
+def _dispatch_fwd_fake(x, weight, bias, eps):
+    """(y like x, mean, rstd): the stats are (M,) and always fp32, whatever x's dtype is."""
+    m = x.numel() // x.shape[-1]
+    return (
+        x.new_empty(x.shape),
+        x.new_empty((m,), dtype=torch.float32),
+        x.new_empty((m,), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_dispatch_fwd_fake, name="layernorm_dispatch_fwd")
 def _dispatch_fwd(x: Tensor, weight: Tensor, bias: Tensor,
                   eps: float) -> tuple[Tensor, Tensor, Tensor]:
     return _fwd_impl(x, weight, bias, eps)

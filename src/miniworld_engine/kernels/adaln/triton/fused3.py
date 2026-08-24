@@ -101,8 +101,12 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
 
 
-@opaque(fake=lambda x, eps, weight=None, shape_key=None: torch.empty_like(x),
-        name="adaln_fused3_layernorm")
+def _layernorm_fake(x, eps, weight=None, shape_key=None):
+    """(M, N) normalized rows -- same shape and dtype as x."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_layernorm_fake, name="adaln_fused3_layernorm")
 def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
                shape_key: int | None = None) -> torch.Tensor:
     M, N = x.shape
@@ -181,9 +185,12 @@ def _gemm_gate_kernel(
                  gate.to(Gate.dtype.element_ty), mask=om)
 
 
-@opaque(fake=lambda x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None:
-            torch.empty_like(x_norm),
-        name="adaln_fused3_gemm_gate")
+def _gemm_gate_fake(x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None):
+    """(M, N) gated output -- same shape and dtype as x_norm."""
+    return torch.empty_like(x_norm)
+
+
+@opaque(fake=_gemm_gate_fake, name="adaln_fused3_gemm_gate")
 def _gemm_gate(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
                Wb: torch.Tensor, scale_b: torch.Tensor,
                shape_key: int | None = None) -> torch.Tensor:
@@ -207,9 +214,12 @@ def _gemm_gate(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
 # ── training: K3 variant that also stores gate=sigmoid(scale); + backward elementwise ──────────
 
 
-@opaque(fake=lambda x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None: (
-            torch.empty_like(x_norm), torch.empty_like(x_norm)),
-        name="adaln_gemm_gate_train")
+def _gemm_gate_train_fake(x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None):
+    """(y, gate), both (M, N) like x_norm -- gate is sigmoid(scale), kept for the backward."""
+    return torch.empty_like(x_norm), torch.empty_like(x_norm)
+
+
+@opaque(fake=_gemm_gate_train_fake, name="adaln_gemm_gate_train")
 def _gemm_gate_train(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
                      Wb: torch.Tensor, scale_b: torch.Tensor, shape_key: int | None = None,
                      ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -257,9 +267,12 @@ def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                  dxn.to(Dxn.dtype.element_ty), mask=mask)
 
 
-@opaque(fake=lambda dy, x_norm, gate, shape_key=None: (
-            torch.empty_like(dy), torch.empty_like(dy)),
-        name="adaln_fused3_bwd_elem")
+def _bwd_elem_fake(dy, x_norm, gate, shape_key=None):
+    """(dscale, dxn), both (M, N) like dy."""
+    return torch.empty_like(dy), torch.empty_like(dy)
+
+
+@opaque(fake=_bwd_elem_fake, name="adaln_fused3_bwd_elem")
 def _bwd_elem(dy: torch.Tensor, x_norm: torch.Tensor, gate: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = dy.shape

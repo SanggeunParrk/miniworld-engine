@@ -232,9 +232,12 @@ def fused_sigmoid_gate_bwd_kernel(
     )
 
 
-@opaque(fake=lambda x, left_gate_weight, left_weight, right_gate_weight, right_weight,
-               shape_key: (torch.empty_like(x), torch.empty_like(x)),
-        name="tm1_fwd")
+def _tm1_fwd_fake(x, left_gate_weight, left_weight, right_gate_weight, right_weight, shape_key):
+    """(left, right), both shaped and typed like the flat (M, N) `x`."""
+    return torch.empty_like(x), torch.empty_like(x)
+
+
+@opaque(fake=_tm1_fwd_fake, name="tm1_fwd")
 def _tm1_fwd(
     x: torch.Tensor,
     left_gate_weight: torch.Tensor,
@@ -269,11 +272,14 @@ def _tm1_fwd(
     return left, right
 
 
-@opaque(fake=lambda x, left_gate_weight, left_weight, right_gate_weight, right_weight,
-               grad_out_left, grad_out_right, shape_key: (
-                   torch.empty_like(x), torch.empty_like(x),
-                   torch.empty_like(x), torch.empty_like(x)),
-        name="tm1_bwd")
+def _tm1_bwd_fake(x, left_gate_weight, left_weight, right_gate_weight, right_weight,
+                  grad_out_left, grad_out_right, shape_key):
+    """(dLA, dLB, dRA, dRB), all shaped and typed like the flat (M, N) `x`."""
+    return (torch.empty_like(x), torch.empty_like(x),
+            torch.empty_like(x), torch.empty_like(x))
+
+
+@opaque(fake=_tm1_bwd_fake, name="tm1_bwd")
 def _tm1_bwd(
     x: torch.Tensor,
     left_gate_weight: torch.Tensor,

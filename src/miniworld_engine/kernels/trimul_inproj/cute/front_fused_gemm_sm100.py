@@ -602,7 +602,11 @@ class FusedPreactGemmKernel(GatedPersistentGemmKernel):
 _CACHE = {}
 
 
-@opaque(fake=lambda A, Bp, Bg, lr, preact: None, name="trimul_fused_front_gemm_sm100",
+def _fused_front_gemm_fake(A, Bp, Bg, lr, preact):
+    """Writes into `lr` (2H, M) and `preact` (4H, M); returns nothing."""
+
+
+@opaque(fake=_fused_front_gemm_fake, name="trimul_fused_front_gemm_sm100",
         mutates_args=("lr", "preact"))
 def fused_front_gemm(A: torch.Tensor, Bp: torch.Tensor, Bg: torch.Tensor, lr: torch.Tensor,
                      preact: torch.Tensor) -> None:
@@ -654,7 +658,11 @@ class FusedSigGemmKernel(FusedPreactGemmKernel):
 _CACHE_SIG = {}
 
 
-@opaque(fake=lambda A, Bp, Bg, lr, sg: None, name="trimul_fused_front_gemm_sig_sm100",
+def _fused_front_gemm_sig_fake(A, Bp, Bg, lr, sg):
+    """Writes into `lr` (2H, M) and `sg` (2H, M); returns nothing."""
+
+
+@opaque(fake=_fused_front_gemm_sig_fake, name="trimul_fused_front_gemm_sig_sm100",
         mutates_args=("lr", "sg"))
 def fused_front_gemm_sig(A: torch.Tensor, Bp: torch.Tensor, Bg: torch.Tensor,
                          lr: torch.Tensor, sg: torch.Tensor) -> None:

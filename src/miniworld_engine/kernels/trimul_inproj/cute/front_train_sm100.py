@@ -159,8 +159,11 @@ def trimul_front_sm100_train_sig(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     return lr[:, :H], lr[:, H:], sg
 
 
-@opaque(fake=lambda preact_2d, lr_2d, H, M, shape_key: None, name="trimul_glu_bdll",
-        mutates_args=("lr_2d",))
+def _glu_bdll_fake(preact_2d, lr_2d, H, M, shape_key):
+    """Writes the GLU result into `lr_2d` (2H, M); returns nothing."""
+
+
+@opaque(fake=_glu_bdll_fake, name="trimul_glu_bdll", mutates_args=("lr_2d",))
 def _glu_bdll(preact_2d: torch.Tensor, lr_2d: torch.Tensor, H: int, M: int,
               shape_key: int) -> None:
     """The GLU pass of the v13 fallback front: writes lr from the raw preact planes, in place.

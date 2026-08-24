@@ -766,7 +766,12 @@ def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLOCK_E: tl.constexpr, shape_key
     tl.store(dB_ptr + offs, tl.load(dB_ptr + offs, mask=m) * ge, mask=m)
 
 
-@opaque(fake=lambda dA, dB, ge, shape_key=None: None,
+def _grad_mul_inplace_fake(dA, dB, ge, shape_key=None):
+    """None: in-place op (mutates_args=("dA", "dB")) — it scales dA/dB and allocates nothing."""
+    return None
+
+
+@opaque(fake=_grad_mul_inplace_fake,
         name="transition_grad_mul_inplace", mutates_args=("dA", "dB"))
 def _grad_mul_inplace(dA: torch.Tensor, dB: torch.Tensor, ge: torch.Tensor,
                       shape_key: int | None = None) -> None:

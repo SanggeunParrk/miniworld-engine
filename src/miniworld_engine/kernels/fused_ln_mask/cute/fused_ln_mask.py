@@ -131,8 +131,12 @@ def _fused_ln_mask_kernel(
             )
 
 
-@opaque(fake=lambda x, weight, bias, mask, eps=1e-5: torch.empty_like(x),
-        name="fused_ln_mask")
+def _fused_ln_mask_fake(x, weight, bias, mask, eps=1e-5):
+    """(B, L, L, D): masked LN is elementwise, so the output matches x's shape and dtype."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_fused_ln_mask_fake, name="fused_ln_mask")
 def fused_ln_mask(
     x: torch.Tensor,  # (B, L, L, D), bf16/fp16
     weight: torch.Tensor,  # (D,)

@@ -178,10 +178,13 @@ def _fwd_squeeze_gate_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda x, wa, wb, shape_key=None: (
-            x.new_empty((x.shape[0], wa.shape[0])),
-            x.new_empty((x.shape[0], 2 * wa.shape[0]))),
-        name="conditioned_transition_train_fused_expand_swiglu")
+def _fwd_expand_swiglu_fake(x, wa, wb, shape_key=None):
+    """(M, ND) h and (M, 2*ND) ab -- ab packs the saved pre-activations [a | b]."""
+    return (x.new_empty((x.shape[0], wa.shape[0])),
+            x.new_empty((x.shape[0], 2 * wa.shape[0])))
+
+
+@opaque(fake=_fwd_expand_swiglu_fake, name="conditioned_transition_train_fused_expand_swiglu")
 def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
                        shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     M, K = x.shape
@@ -200,11 +203,14 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     return h, ab
 
 
-@opaque(fake=lambda h, cond, ws, wsc, bsc, shape_key=None: (
+def _fwd_squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None):
+    """y, out and scale, all (M, D) -- D = ws.shape[0], the squeeze output width, not h's ND."""
+    return (h.new_empty((h.shape[0], ws.shape[0])),
             h.new_empty((h.shape[0], ws.shape[0])),
-            h.new_empty((h.shape[0], ws.shape[0])),
-            h.new_empty((h.shape[0], ws.shape[0]))),
-        name="conditioned_transition_train_fused_squeeze_gate")
+            h.new_empty((h.shape[0], ws.shape[0])))
+
+
+@opaque(fake=_fwd_squeeze_gate_fake, name="conditioned_transition_train_fused_squeeze_gate")
 def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
                       shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     M, ND = h.shape
@@ -234,9 +240,12 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
 # --- gate-bwd: dout = sg*dy ; dscale = out*sg*(1-sg)*dy  (one HBM pass over (M,D)) ---
 
 
-@opaque(fake=lambda out, scale, dy, shape_key=None: (
-            torch.empty_like(out), torch.empty_like(out)),
-        name="conditioned_transition_train_fused_gate_bwd")
+def _gate_bwd_fake(out, scale, dy, shape_key=None):
+    """dout and dscale, both (M, D) like `out`."""
+    return torch.empty_like(out), torch.empty_like(out)
+
+
+@opaque(fake=_gate_bwd_fake, name="conditioned_transition_train_fused_gate_bwd")
 def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
               shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     dout = torch.empty_like(out)
@@ -304,8 +313,12 @@ def _dgemm_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda a, w, M, N, K, swk, swn, shape_key=None: a.new_empty((M, N)),
-        name="conditioned_transition_train_fused_dgemm")
+def _dgemm_fake(a, w, M, N, K, swk, swn, shape_key=None):
+    """(M, N) -- the output extents are the int args M, N, not readable off `a`/`w`."""
+    return a.new_empty((M, N))
+
+
+@opaque(fake=_dgemm_fake, name="conditioned_transition_train_fused_dgemm")
 def _dgemm(a: torch.Tensor, w: torch.Tensor, M: int, N: int, K: int, swk: int, swn: int,
            shape_key: int | None = None) -> torch.Tensor:
     """C = a(M,K) @ W(K,N) via TF32 triton. swk,swn = W strides for the (K,N) logical view."""
@@ -372,9 +385,12 @@ def _dx_fused_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda dh, ab, wa, wb, shape_key=None: dh.new_empty(
-            (dh.shape[0], wa.shape[1])),
-        name="conditioned_transition_train_fused_dx")
+def _dx_fused_fake(dh, ab, wa, wb, shape_key=None):
+    """(M, K) dx -- K = wa.shape[1], the d_hidden axis Wa contracts back to."""
+    return dh.new_empty((dh.shape[0], wa.shape[1]))
+
+
+@opaque(fake=_dx_fused_fake, name="conditioned_transition_train_fused_dx")
 def _dx_fused(dh: torch.Tensor, ab: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
               shape_key: int | None = None) -> torch.Tensor:
     M, ND = dh.shape
@@ -447,10 +463,13 @@ def _dh_gatebwd_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda out, scale, dy, ws, ND, shape_key=None: (
-            out.new_empty((out.shape[0], ND)),
-            torch.empty_like(out), torch.empty_like(out)),
-        name="conditioned_transition_train_fused_dh_gatebwd")
+def _dh_gatebwd_fake(out, scale, dy, ws, ND, shape_key=None):
+    """(M, ND) dh -- its width is the int arg ND -- plus dout, dscale, both (M, D) like `out`."""
+    return (out.new_empty((out.shape[0], ND)),
+            torch.empty_like(out), torch.empty_like(out))
+
+
+@opaque(fake=_dh_gatebwd_fake, name="conditioned_transition_train_fused_dh_gatebwd")
 def _dh_gatebwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor, ws: torch.Tensor, ND: int,
                 shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """dh = (sigmoid(scale)*dy) @ Ws ; also returns materialized dout, dscale for wgrad."""
@@ -523,10 +542,13 @@ def _dx_swiglubwd_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda dh, ab, wcat, shape_key=None: (
-            dh.new_empty((dh.shape[0], wcat.shape[1])),
-            dh.new_empty((dh.shape[0], 2 * dh.shape[1]))),
-        name="conditioned_transition_train_fused_dx_swiglubwd")
+def _dx_swiglubwd_fake(dh, ab, wcat, shape_key=None):
+    """(M, K) dx with K = wcat.shape[1], and (M, 2*ND) dab -- the packed [da | db]."""
+    return (dh.new_empty((dh.shape[0], wcat.shape[1])),
+            dh.new_empty((dh.shape[0], 2 * dh.shape[1])))
+
+
+@opaque(fake=_dx_swiglubwd_fake, name="conditioned_transition_train_fused_dx_swiglubwd")
 def _dx_swiglubwd(dh: torch.Tensor, ab: torch.Tensor, wcat: torch.Tensor,
                   shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """dx = dab @ Wcat (one GEMM), dab formed in-register from (dh, ab); emits dab for wgrad."""
@@ -583,9 +605,12 @@ def _swiglu_bwd_pack_kernel(
     tl.store(dab_ptr + row * stride_pm + (col + ND) * stride_pn, dh * silu, mask=mask)
 
 
-@opaque(fake=lambda dh, ab, shape_key=None: dh.new_empty(
-            (dh.shape[0], 2 * dh.shape[1])),
-        name="conditioned_transition_train_fused_swiglu_bwd_pack")
+def _swiglu_bwd_pack_fake(dh, ab, shape_key=None):
+    """(M, 2*ND) -- the packed [da | db], twice dh's width."""
+    return dh.new_empty((dh.shape[0], 2 * dh.shape[1]))
+
+
+@opaque(fake=_swiglu_bwd_pack_fake, name="conditioned_transition_train_fused_swiglu_bwd_pack")
 def _swiglu_bwd_pack(dh: torch.Tensor, ab: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     M, ND = dh.shape
     if shape_key is None:
@@ -639,8 +664,12 @@ def _wgrad_kernel(
 # fmt: on
 
 
-@opaque(fake=lambda g, x, N, K, shape_key=None: g.new_empty((N, K)),
-        name="conditioned_transition_train_fused_wgrad")
+def _wgrad_fake(g, x, N, K, shape_key=None):
+    """(N, K) -- a weight gradient: the M axis of both operands is reduced away."""
+    return g.new_empty((N, K))
+
+
+@opaque(fake=_wgrad_fake, name="conditioned_transition_train_fused_wgrad")
 def _wgrad(g: torch.Tensor, x: torch.Tensor, N: int, K: int, shape_key: int | None = None) -> torch.Tensor:
     """dW(N,K) = g(M,N)^T @ x(M,K) via TF32 triton (reduce over M)."""
     M = g.shape[0]

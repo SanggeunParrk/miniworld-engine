@@ -117,7 +117,12 @@ def get_seq_group(length) -> int:
     return bucket_mixed(length)
 
 
-@opaque(fake=lambda gate, x, shape_key: torch.empty_like(x), name="gated_projection_sigmoid_gate_fwd")
+def _sigmoid_gate_fake(gate, x, shape_key):
+    """(M, N) like x -- the gate is applied elementwise."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_sigmoid_gate_fake, name="gated_projection_sigmoid_gate_fwd")
 def _sigmoid_gate(gate: torch.Tensor, x: torch.Tensor, shape_key: int) -> torch.Tensor:
     """``sigmoid(gate) * x``. Both operands arrive already flattened to (M, N) and contiguous.
 
@@ -133,9 +138,12 @@ def _sigmoid_gate(gate: torch.Tensor, x: torch.Tensor, shape_key: int) -> torch.
     return out
 
 
-@opaque(fake=lambda gate, x, grad_out, shape_key: (
-            torch.empty_like(gate), torch.empty_like(x)),
-        name="gated_projection_sigmoid_gate_bwd")
+def _sigmoid_gate_bwd_fake(gate, x, grad_out, shape_key):
+    """(dgate, dx), shaped like gate and x respectively."""
+    return torch.empty_like(gate), torch.empty_like(x)
+
+
+@opaque(fake=_sigmoid_gate_bwd_fake, name="gated_projection_sigmoid_gate_bwd")
 def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tensor,
                       shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Gradients of ``sigmoid(gate) * x`` -> ``(dgate, dx)``, both flat. The two GEMMs that

@@ -174,8 +174,12 @@ def get_seq_group(length) -> int:
     return bucket_squared(length)
 
 
-@opaque(fake=lambda x, y, gate_weight, out_weight, shape_key: torch.empty_like(x),
-        name="tm2_fwd")
+def _tm2_fwd_fake(x, y, gate_weight, out_weight, shape_key):
+    """`out`, shaped and typed like the flat `x`."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_tm2_fwd_fake, name="tm2_fwd")
 def _tm2_fwd(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -206,9 +210,12 @@ def _tm2_fwd(
     return out
 
 
-@opaque(fake=lambda x, y, gate_weight, out_weight, grad_out, shape_key: (
-            torch.empty_like(x), torch.empty_like(x)),
-        name="tm2_bwd")
+def _tm2_bwd_fake(x, y, gate_weight, out_weight, grad_out, shape_key):
+    """(dA, dB), both shaped and typed like the flat `x`."""
+    return torch.empty_like(x), torch.empty_like(x)
+
+
+@opaque(fake=_tm2_bwd_fake, name="tm2_bwd")
 def _tm2_bwd(
     x: torch.Tensor,
     y: torch.Tensor,

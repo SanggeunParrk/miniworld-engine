@@ -61,13 +61,17 @@ def _check_front_packed() -> bool:
     return settings.current().swa_check_front_packed
 
 
+def _flash_window_seqused_fake(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale,
+                               half_window):
+    """[N, S, H, D] — the attention output carries q's shape and dtype."""
+    return torch.empty_like(q)
+
+
 # FA4's CuTeDSL kernel is opaque to dynamo. Under compile_wrap="disable" this is a clean
 # eager leaf so torch.compile breaks here once (no per-trace resume churn / cache pressure)
 # and CUDA graphs (reduce-overhead) capture the compiled regions around it; under
 # "custom_op" it is an opaque graph node instead and nothing breaks at all.
-@opaque(fake=lambda q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale,
-               half_window: torch.empty_like(q),
-        name="swa_atom_attention_flash_window")
+@opaque(fake=_flash_window_seqused_fake, name="swa_atom_attention_flash_window")
 def flash_window_seqused(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, seqused: torch.Tensor, max_seqlen: int,

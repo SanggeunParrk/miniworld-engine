@@ -163,9 +163,12 @@ def _lnl_fwd_kernel(
             )
 
 
-@opaque(fake=lambda x, ln_weight, ln_bias, weight, bias, eps=1e-5: x.new_empty(
-            (*x.shape[:-1], weight.shape[0])),
-        name="layernorm_linear_fwd")
+def _layernorm_linear_triton_fwd_fake(x, ln_weight, ln_bias, weight, bias, eps=1e-5):
+    """(*x.shape[:-1], N): x's leading dims with the last axis replaced by weight's row count."""
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+@opaque(fake=_layernorm_linear_triton_fwd_fake, name="layernorm_linear_fwd")
 def layernorm_linear_triton_fwd(
     x: torch.Tensor,          # (..., K) = (..., d_in)
     ln_weight: torch.Tensor,  # (K,)

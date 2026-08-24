@@ -162,9 +162,12 @@ def _dgrad_epi(
     tl.store(a_ptr + off, (s * r).to(a_ptr.dtype.element_ty), mask=em)
 
 
-@opaque(fake=lambda do2, wo, g2, r2, shape_key=None: (
-            torch.empty_like(g2), torch.empty_like(g2), torch.empty_like(g2)),
-        name="bias_only_attention_gate_out_dgrad_epilogue")
+def _dgrad_epilogue_fake(do2, wo, g2, r2, shape_key=None):
+    """(d_out_r, d_gate, gated), all (M, DH) like g2 -- not do2's (M, N)."""
+    return torch.empty_like(g2), torch.empty_like(g2), torch.empty_like(g2)
+
+
+@opaque(fake=_dgrad_epilogue_fake, name="bias_only_attention_gate_out_dgrad_epilogue")
 def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: torch.Tensor,
                     shape_key: int | None = None,
                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -190,9 +193,12 @@ def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: t
     return dr, dg, a
 
 
-@opaque(fake=lambda gate2d, outr2d, wo, shape_key=None: gate2d.new_empty(
-            (gate2d.shape[0], wo.shape[0])),
-        name="bias_only_attention_gate_out_fwd")
+def _fwd_fake(gate2d, outr2d, wo, shape_key=None):
+    """(M, N): the projection replaces DH with wo's out_features, so the width comes from wo."""
+    return gate2d.new_empty((gate2d.shape[0], wo.shape[0]))
+
+
+@opaque(fake=_fwd_fake, name="bias_only_attention_gate_out_fwd")
 def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor,
          shape_key: int | None = None) -> torch.Tensor:
     """``shape_key`` is ``token_key(L)`` from the caller (see ``_dgrad_epilogue``)."""
@@ -261,7 +267,12 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
 
 
-@opaque(fake=lambda gate, out, shape_key: torch.empty_like(gate), name="bias_only_attention_sigmul_fwd")
+def _sigmul_fake(gate, out, shape_key):
+    """Same shape and dtype as gate."""
+    return torch.empty_like(gate)
+
+
+@opaque(fake=_sigmul_fake, name="bias_only_attention_sigmul_fwd")
 def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tensor:
     """``sigmoid(gate) * out`` in one pass."""
     a = torch.empty_like(gate)
@@ -271,8 +282,12 @@ def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tens
     return a
 
 
-@opaque(fake=lambda da, gate, out, shape_key: (torch.empty_like(gate), torch.empty_like(out)),
-        name="bias_only_attention_sigmul_bwd")
+def _sigmul_grad_fake(da, gate, out, shape_key):
+    """(dgate, dout), shaped like gate and out respectively."""
+    return torch.empty_like(gate), torch.empty_like(out)
+
+
+@opaque(fake=_sigmul_grad_fake, name="bias_only_attention_sigmul_bwd")
 def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
                  shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""

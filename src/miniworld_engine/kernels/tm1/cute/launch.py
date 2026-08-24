@@ -86,7 +86,11 @@ def _glu_wide_kernel(wide_ptr, out_ptr, MD, D_L2, BLOCK_E: tl.constexpr, shape_k
     tl.store(out_ptr + offs, (p * tl.sigmoid(g)).to(tl.bfloat16), mask=m)
 
 
-@opaque(fake=lambda out, wide, D, L: None, name="tm1_glu_wide", mutates_args=("out",))
+def _glu_wide_fake(out, wide, D, L):
+    """Writes the (B, D, L, L) GLU result into `out`; returns nothing."""
+
+
+@opaque(fake=_glu_wide_fake, name="tm1_glu_wide", mutates_args=("out",))
 def _glu_wide(out: torch.Tensor, wide: torch.Tensor, D: int, L: int) -> None:
     """out[B,D,L,L] = sigmoid(wide[:,0:D]) * wide[:,D:2D], wide is (B,2D,L,L). B=1."""
     D_L2 = D * L * L
@@ -95,8 +99,11 @@ def _glu_wide(out: torch.Tensor, wide: torch.Tensor, D: int, L: int) -> None:
     _glu_wide_kernel[grid](wide, out, 2 * D_L2, D_L2, shape_key=token_key(L))
 
 
-@opaque(fake=lambda proj, gate, seq_len=None: None, name="tm1_fused_gate_mul",
-        mutates_args=("proj",))
+def _fused_gate_mul_fake(proj, gate, seq_len=None):
+    """Scales `proj` in place by sigmoid(`gate`); returns nothing."""
+
+
+@opaque(fake=_fused_gate_mul_fake, name="tm1_fused_gate_mul", mutates_args=("proj",))
 def _fused_gate_mul(proj: torch.Tensor, gate: torch.Tensor,
                     seq_len: int | None = None) -> None:
     """proj *= sigmoid(gate), fused single-pass Triton kernel. In-place on proj.

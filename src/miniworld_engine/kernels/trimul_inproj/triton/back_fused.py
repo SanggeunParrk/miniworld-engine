@@ -100,10 +100,13 @@ def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.conste
     tl.store(out + 4 * DMi + idx, dglog.to(et), mask=mask)                      # d_glogit
 
 
-@opaque(fake=lambda d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit, Wg: (
-            torch.empty_like(x_n), torch.empty_like(WL), torch.empty_like(WLg),
-            torch.empty_like(WR), torch.empty_like(WRg), torch.empty_like(Wg)),
-        name="trimul_front_bwd_dw_glogit")
+def _front_bwd_dW_glogit_fake(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit, Wg):
+    """(dx_n, dWL, dWLg, dWR, dWRg, dWg) -- each shaped like the input it is the gradient of."""
+    return (torch.empty_like(x_n), torch.empty_like(WL), torch.empty_like(WLg),
+            torch.empty_like(WR), torch.empty_like(WRg), torch.empty_like(Wg))
+
+
+@opaque(fake=_front_bwd_dW_glogit_fake, name="trimul_front_bwd_dw_glogit")
 def front_bwd_dW_glogit(d_left: torch.Tensor, d_right: torch.Tensor, preact: torch.Tensor,
                         x_n: torch.Tensor, WL: torch.Tensor, WLg: torch.Tensor,
                         WR: torch.Tensor, WRg: torch.Tensor, d_glogit: torch.Tensor,
@@ -166,8 +169,12 @@ def front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     return dxn, dWL, dWLg, dWR, dWRg
 
 
-@opaque(fake=lambda dL2, dR2, preact2, M, D, shape_key: dL2.new_empty((4 * D, M)),
-        name="trimul_front_bwd_dconcat")
+def _dconcat_fake(dL2, dR2, preact2, M, D, shape_key):
+    """The (4D, M) d_concat block [d_gLlog; d_pL; d_gRlog; d_pR], in dL2's dtype."""
+    return dL2.new_empty((4 * D, M))
+
+
+@opaque(fake=_dconcat_fake, name="trimul_front_bwd_dconcat")
 def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int, D: int,
              shape_key: int) -> torch.Tensor:
     """The elementwise GLU backward -> dconc (4D, M) = [d_gLlog; d_pL; d_gRlog; d_pR].
@@ -237,8 +244,12 @@ def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
     tl.store(out + 3 * DMi + idx, (dR * sgR).to(et), mask=mask)                # d_pR
 
 
-@opaque(fake=lambda dL2, dR2, lrL, lrR, sg2, M, D, shape_key: dL2.new_empty((4 * D, M)),
-        name="trimul_front_bwd_dconcat_sig")
+def _dconcat_sig_fake(dL2, dR2, lrL, lrR, sg2, M, D, shape_key):
+    """The same (4D, M) d_concat block as :func:`_dconcat_fake`, in dL2's dtype."""
+    return dL2.new_empty((4 * D, M))
+
+
+@opaque(fake=_dconcat_sig_fake, name="trimul_front_bwd_dconcat_sig")
 def _dconcat_sig(dL2: torch.Tensor, dR2: torch.Tensor, lrL: torch.Tensor, lrR: torch.Tensor,
                  sg2: torch.Tensor, M: int, D: int, shape_key: int) -> torch.Tensor:
     """The sigma(gate) variant of :func:`_dconcat` -- same output, rebuilt from the forward's

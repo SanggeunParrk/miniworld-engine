@@ -83,22 +83,27 @@ the launch underneath it and give THAT a fake.
 
 HOW MUCH GOES IN ONE OP
 -----------------------
-The unit is "the launch", but two shapes of kernel read that differently and both are here:
+One rule, and it decides every site: **an op is the largest region Dynamo cannot trace, and no
+larger.** Nothing traceable is swallowed, and nothing untraceable is left outside. Applied to the
+105 ops here that produces exactly three shapes, and the counts are worth knowing because they say
+where the compiler's remaining leverage is:
 
-* **launch-only** (most of them). One op per kernel launch, with the GEMMs, reductions, reshapes
-  and dtype casts around it left in the graph. ``tm1``, ``tm2``, ``gated_projection``,
-  ``trimul``'s front/back all look like this, and it is the default choice: it gives the compiler
-  the most to work with.
-* **whole-body** (``transition/triton/fused.py``, ``transition/cute/fused.py``,
-  ``adaln/triton/main.py``). One op for the entire forward and one for the entire backward,
-  because the body is an arch dispatch -- ``torch.cuda.get_device_capability`` branches,
-  ``try``/``except`` build fallbacks, several launches picked at runtime -- and a fake must return
-  the same STRUCTURE regardless of which branch runs. Splitting these into per-launch ops would
-  mean one op per branch and a caller that has to re-derive the branch outside the op, which is
-  the dispatch logic duplicated in a place that cannot see the device.
+* **87 ops wrap ONE launch.** The GEMMs, reductions, reshapes and dtype casts around it are aten,
+  so they stay in the graph. This is what most kernels look like.
+* **7 wrap a fixed sequence of 2-3 launches** -- a preprocess, its main kernel and a split-reduce,
+  or two projections read off one input. Nothing between them is computation the compiler could
+  fuse; it is buffer scaffolding for the next launch. Splitting them would buy no graph and cost
+  two more dispatches.
+* **11 wrap a DISPATCH** -- ``layernorm``'s bwd-path choice, ``transition``'s fused fwd/bwd, the
+  bidirectional triangle attention, the FA4 entry. These pick among launchers using
+  ``torch.cuda.get_device_capability``, a ``settings`` read, or a ``try``/``except`` around a
+  build that may not exist. The choice is as untraceable as the launch, so the rule puts it in the
+  same op. Hoisting it to the caller would not shrink the opaque region, it would only move the
+  device knowledge somewhere that has no business holding it.
 
-Prefer launch-only. Reach for whole-body when the launches are chosen by a runtime property the
-caller must not have to know about.
+An op is therefore allowed to contain aten calls -- ``transition``'s split fallback does a
+``matmul`` -- but only where they sit inside a branch that is itself untraceable. An aten op that
+could have been left outside and was not is a bug against this rule, not a style preference.
 
 ``register_autograd`` is deliberately NOT used. It only lets ``setup_context`` save the op's inputs
 and outputs, so every intermediate the backward needs (LN stats, the normalized activation) would
