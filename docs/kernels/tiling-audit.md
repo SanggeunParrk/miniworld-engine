@@ -92,7 +92,7 @@ these edits reverted, and the audit still flags all 4 loops and all 4 stores on 
 Three properties of the test matrix, each measured:
 
 1. **Every driver extent is a multiple of 128** — `pair()` 128, `single()` 384, `rows2d()` 512x384,
-   `drivers_ln._M` 16384 — and every config set tiles at 16/32/64/128. So every extent divided
+   `drivers.layernorm_linear._M` 16384 — and every config set tiles at 16/32/64/128. So every extent divided
    every tile exactly and **no kernel's boundary mask had ever executed.**
 2. **Every config set is axis-uniform.** All 91 ops in all 5 shipped sets gave every tile axis of
    an op the same value. A grid lambda dividing by the wrong axis name therefore computes the

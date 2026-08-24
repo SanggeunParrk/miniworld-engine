@@ -74,7 +74,7 @@ def _shape_key(shape_key: int | None, rows: int) -> int:
     Every launcher in this module takes ``shape_key`` = ``both_key(rows_of(<pre-flatten
     shape>))`` from the caller that still holds the activation's shape (the autograd Function
     below, or ``transition/cute/fused.py`` / ``transition/triton/main.py``). ``None`` is the
-    TRANSITIONAL path for the driver/checker harnesses (``drivers_trans`` / ``checks_trans``,
+    TRANSITIONAL path for the driver/checker harnesses (``drivers/transition.py`` / ``checks/transition.py``,
     owned by the coordinator), which still call these launchers with no key: it buckets the
     flattened ROW count, which is exactly the L-vs-L*L ambiguity ``autotune.shape_key`` exists
     to remove. No model path reaches it.
@@ -275,7 +275,7 @@ def transition_expand_gate(
 #
 # `D` -- redundant with `K`, which is already keyed. D = ws.shape[0] and K = x2.shape[1] are the
 # same d_hidden at every launcher (Transition's Linears are expand d -> n*d and squeeze n*d -> d;
-# drivers_trans/checks_trans build ws as rows2d(k, nd)), and the ADD_RESIDUAL branch below relies
+# drivers/checks transition build ws as rows2d(k, nd)), and the ADD_RESIDUAL branch below relies
 # on exactly that ("D == K here") when it reloads x over the D output columns. The hand-CUDA twin
 # asserts it outright (transition_b2b_kernel.cu: `TORCH_CHECK(D == K, ...)`). Keying on D would
 # add a second copy of the partition `K` already makes. `ND` is NOT implied -- n is a module

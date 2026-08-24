@@ -99,7 +99,7 @@ Benchmark code and generated results:
 Run the unified compiled benchmark with:
 
 ```bash
-python benchmarks/runners/bench.py kernel=triangle_multiplication
+python benchmarks/runners/bench.py target=triangle_multiplication level=module
 ```
 
 The trimul CSV and SVG figures are generated under

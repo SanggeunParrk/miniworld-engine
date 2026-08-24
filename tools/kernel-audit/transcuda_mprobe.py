@@ -19,7 +19,7 @@ import torch
 def one(m: int, k: int, seed: int = 1234):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    from miniworld_engine.kernels.drivers_trans import _CUDA_N, _transition_cuda_ext
+    from miniworld_engine.kernels.drivers.transition import _CUDA_N, _transition_cuda_ext
     ext = _transition_cuda_ext()
     nk = _CUDA_N * k
     dev = torch.device("cuda")

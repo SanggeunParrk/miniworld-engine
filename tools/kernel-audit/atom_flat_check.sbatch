@@ -15,15 +15,16 @@ export MINIWORLD_CONFIG_DIR=$R/configs/blk64   # pinned: this checks SHAPES, not
 export TRITON_CACHE_DIR=/public_data02/psk6950/tritoncache
 PY=.pixi/envs/default/bin/python
 
-# The 18 level=both kernels in drivers_trans / drivers_trimul, at the atom buckets that used to
+# The 18 level=both kernels of the transition / trimul families, at the atom buckets that used to
 # build M = L*L. L=8192 asked for 67,108,864 rows (16 GiB at D=128) and OOM'd; it should now be
 # 8,192 rows and run in milliseconds.
 $PY - <<'PY'
 import csv, os, time, importlib, torch
 reg = list(csv.DictReader(open("src/miniworld_engine/kernels/registry.csv")))
 both = [r for r in reg if r["level"] == "both"
-        and any(m in r["driver"] for m in ("drivers_trans", "drivers_trimul"))]
-print(f"level=both kernels in the two fixed modules: {len(both)}\n")
+        and r["family"] in ("transition", "triangle_multiplication", "trimul_inproj",
+                            "tm1", "tm2", "gated_projection")]
+print(f"level=both kernels in the transition / trimul families: {len(both)}\n")
 for L in (1024, 4096, 8192):
     os.environ["MINIWORLD_DRIVER_LENGTH"] = str(L)
     for m in list(importlib.sys.modules):

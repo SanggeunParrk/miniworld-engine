@@ -339,7 +339,7 @@ def _bwd_op(
     rstd: torch.Tensor,
     # x2 arrives already flattened to (M, N), so L is gone by here: the key is computed by
     # `_backward` below from ctx.xshape (the forward's pre-flatten shape) and passed in.
-    # None only for the coordinator-owned drivers_ln / checks_ln call sites.
+    # None only for the coordinator-owned drivers/checks layernorm_linear call sites.
     shape_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The backward launch -> ``(dx, dln_weight, dproj_weight)``, each shaped like the tensor it

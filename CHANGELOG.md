@@ -9,7 +9,7 @@ The public surface is enforced by `tests/test_public_api.py`.
 ## [Unreleased]
 
 ### Added
-- **`miniworld-engine audit`** — verifies the build system and, new, that every
+- **`miniworld-engine dev audit`** — verifies the build system and, new, that every
   DECLARED `(op, dtype, shape-bucket)` is present in the shipped autotune cache.
   Declared means `registry.csv` crossed with each kernel's `level` and `dtypes`,
   so a hole is reported against the contract rather than against whatever the
@@ -38,6 +38,61 @@ The public surface is enforced by `tests/test_public_api.py`.
   numerical suite runs via `pixi run test-gpu` on an allocated node.
 
 ### Changed
+- **One vocabulary for benchmark targets, and a level to hold it.** `bench.py`'s
+  targets lived in one flat dict, which forced the kernel-level ones to abbreviate
+  around the module-level ones: `tri_attn`, `bias_attn`, `aug_attn`, `ln_mask`,
+  `gate_bwd`, `gemm_epil`. `bench_kernel triangle_attention` — the family's own name —
+  came back "unknown target". `BenchConfig.kernel` is now `target` + `level`
+  (`kernel` | `module`), the two levels are separate namespaces, and every target is
+  spelled the way the engine spells it: a kernel target names its family in
+  `kernels/registry.csv`, a module target names the module it constructs. So
+  `triangle_attention` is now a legal name at both levels and means the right thing at
+  each. Renamed: kernel `tri_attn`→`triangle_attention`, `bias_attn`→
+  `bias_only_attention`, `aug_attn`→`augmented_attention`, `ln_mask`→`fused_ln_mask`,
+  `gate_bwd`→`gemm_gate_bwd`, `gemm_epil[_bwd]`→`gemm_epilogue[_bwd]`,
+  `dual_gemm_epil[_bwd]`→`dual_gemm_epilogue[_bwd]`, `cond_transition_tail`→
+  `conditioned_transition_tail`; module `bias_only_attention`→`attention_pair_bias`
+  (it benches `AttentionPairBias`, and the old name belongs to the kernel family);
+  build cases `*_bidir`→`*_bidirectional`, `tm1_triton`/`tm2_triton`→`tm1`/`tm2`;
+  implementation labels `triton_tri_attn*`/`triton_bias_attn`/`triton_aug_attn`/
+  `aug_attn_memory_efficient` spelled out. The 120 committed result tables that carried
+  an old name in their `run_name`/`target`/`implementation` columns were rewritten in
+  place; **no measured value changed** (checked cell by cell), and the 40 plots whose
+  drawn title named the old target were re-rendered from those same tables.
+  `tests/test_bench_target_vocabulary.py` now holds the four name spaces —
+  bench.py's tables, the CLI's, `builder.CASE_NAMES`, and the directory tree — to
+  each other.
+- **Each bench target loads its own config.** `@hydra.main(config_path=...)` was the
+  constant `../modules/triangle_multiplication/configs`, so every run — kernel, module,
+  atom — loaded that one file and the other 25 `configs/bench.yaml` were read by
+  nothing. They disagreed with what ran: `augmented_attention_atom` declares a 128–384
+  ladder and was swept at 384–1024, while its own committed tables show 128/256/384.
+  The path is now computed from the `target=`/`level=` overrides before hydra starts,
+  every one of the 26 targets owns a `configs/bench.yaml` (the 17 kernel targets' are
+  copies of the base they already loaded, so nothing they measure changed), and a
+  target with no config is an error instead of a silent fall back to another target's
+  ladders.
+- **`bench_module all` means all of them.** The "all" group read a table that
+  `triangle_multiplication_bidirectional` had never been added to, so it ran eight of
+  the nine module targets. The bench-args table and the build-case table — keyed by the
+  same names, maintained apart — are now one `MODULE_TARGETS`.
+- **Coverage no longer guesses a target's directory.** `_report_coverage` rebuilt the
+  path from `target in KERNEL_BUILD_CASES`, which was wrong for
+  `augmented_attention_token`/`_atom`: they shared one directory named after neither, so
+  the lookup missed and both targets' kernels were reported as never launched. Each
+  target now owns exactly one directory and the path is derived from `level`.
+- **`miniworld-engine build <typo>` fails immediately.** It used to resolve the config
+  set and import every kernel — minutes of triton compilation — before saying "unknown
+  case". `builder.CASE_NAMES` is a declared tuple (`test_case_names_are_declared` pins it
+  to `cases()`), and the per-op name space is read straight from `registry.csv`, so both
+  are checked before the first import.
+- **Every model-level op is a folder.** `modules/__init__.py` has always opened with the
+  rule; `attention_pair_bias.py`, `msa_pair_weighted_averaging.py` and
+  `swa_atom_attention.py` were flat files. They are now packages like the other eight,
+  and `modules/ops.py` — one level below `miniworld_engine.ops`, the public whole-op
+  contract, and meaning the opposite thing — is `modules/functional.py`.
+  `tests/test_module_layout.py` holds the rule and the four shared modules that are
+  legitimately flat.
 - **`ty` is a gate, not a report.** CI ran `ty check src tests || true` against a
   job that installed the package with `--no-deps`, so torch and triton were
   absent, every `import torch` was an unresolved import, and every torch

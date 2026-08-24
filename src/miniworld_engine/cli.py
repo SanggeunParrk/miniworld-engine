@@ -19,12 +19,10 @@ The pieces underneath are still reachable, under `dev`, where they do not clutte
 `dev audit`'s checks are already run by the CPU suite (`test_registry_complete`,
 `test_declared_dtype_coverage`, `test_spread_shape_key`); the command adds only `--shards`, i.e.
 evidence from a real build that a test cannot have. `dev capture` is the older two-step path:
-`build --per-module` is the same decomposition, and it is not the default because driving modules
-reaches 48 of 91 triton kernels while the per-op sweep reaches all of them.
-
-``build`` is the one to reach for. ``capture`` drives production MODULES, so it only reaches the
-kernels a module's own shapes dispatch to -- 48 of 91 on an A6000; ``build`` drives the registry's
-declared list instead and covers all of them.
+`build --per-module` is the same decomposition, and neither is the default, because driving
+production MODULES only reaches the kernels a module's own shapes dispatch to -- 48 of 91 triton
+kernels on an A6000 -- while `build`'s per-op sweep drives the registry's declared list and
+reaches all of them.
 
 Everything the run depends on is an argument. The engine used to take these as environment
 variables, which meant a run's behaviour lived in shell state that nothing recorded: a capture that
@@ -58,27 +56,55 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
-#: Bench targets that make up "all", with the hydra kernel name and any extra bench args.
-TARGETS: dict[str, str] = {
-    "transition": "",
-    "triangle_attention": "",
-    "bias_only_attention": "",
-    "triangle_multiplication": "",
-    "conditioned_transition": "precision=32 d_single_token=384",
-    "adaptive_layernorm": "",
-    "augmented_attention_token": "",
-    "augmented_attention_atom": "",
+@dataclasses.dataclass(frozen=True)
+class ModuleTarget:
+    """One module-level bench target: what fills its cache, and what its bench needs on argv.
+
+    The two used to be separate dicts keyed by the same names -- ``TARGETS`` for the bench args and
+    ``MODULE_BUILD_CASES`` for the build cases -- and they had already drifted apart:
+    ``triangle_multiplication_bidirectional`` was in the second and not the first, and
+    ``bench_module all`` reads the first, so `all` silently meant 8 of the 9 module targets.
+    """
+
+    #: The build case(s) that drive the same kernels, i.e. what fills this target's cache.
+    cases: tuple[str, ...]
+    #: Extra bench.py argv this target needs beyond the flags every bench run passes.
+    bench_args: str = ""
+
+
+#: Every module-level bench target. `bench_module <name>` and `dev capture <name>` take these.
+#:
+#: A module target is named after the production MODULE it benches, spelled the way the engine
+#: spells it -- while a kernel target (:data:`KERNEL_TARGETS`) is named after the kernel FAMILY it
+#: benches. The two are separate namespaces, which is why `triangle_attention` can be both.
+#: `attention_pair_bias` was called `bias_only_attention` until now, after the kernel family it
+#: dispatches to: that both misnamed it (the bench builds an ``AttentionPairBias``) and occupied
+#: the name the kernel-level target needs.
+MODULE_TARGETS: dict[str, ModuleTarget] = {
+    "transition": ModuleTarget(("transition",)),
+    "triangle_multiplication": ModuleTarget(("triangle_multiplication",)),
+    "triangle_multiplication_bidirectional": ModuleTarget(
+        ("triangle_multiplication_bidirectional",)),
+    "triangle_attention": ModuleTarget(
+        ("triangle_attention_bidirectional", "triangle_attention_heads")),
+    "attention_pair_bias": ModuleTarget(("attention_pair_bias",)),
+    "conditioned_transition": ModuleTarget(("conditioned_transition",),
+                                           "precision=32 d_single_token=384"),
+    "adaptive_layernorm": ModuleTarget(("adaptive_layernorm",)),
+    "augmented_attention_token": ModuleTarget(("augmented_attention",)),
+    "augmented_attention_atom": ModuleTarget(("augmented_attention",)),
 }
 
 #: Named groups so `capture pairformer` means something. A group is just a set of targets.
+#: `pairformer` holds the bidirectional trimul because that is what a ``PairformerBlock`` builds
+#: (see modules/pairformer/module.py); leaving it out was the same drift as above.
 GROUPS: dict[str, tuple[str, ...]] = {
-    "all": tuple(TARGETS),
-    "pairformer": (
-        "transition", "triangle_attention", "bias_only_attention", "triangle_multiplication",
-    ),
+    "all": tuple(MODULE_TARGETS),
+    "pairformer": ("transition", "triangle_attention", "attention_pair_bias",
+                   "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom"),
-    "attention": ("triangle_attention", "bias_only_attention",
+    "attention": ("triangle_attention", "attention_pair_bias",
                   "augmented_attention_token", "augmented_attention_atom"),
 }
 
@@ -99,10 +125,10 @@ SHAPES = {
 #: switch -> (values, applicable targets, applicable modes)
 PINS: dict[str, tuple[tuple, tuple[str, ...], tuple[str, ...]]] = {
     # bias_only gate epilogue: fused_gate_out vs sigmoid_gate_fused + the split backward
-    "gate_backend": (("fused", "split"), ("bias_only_attention", "triangle_attention"),
+    "gate_backend": (("fused", "split"), ("attention_pair_bias", "triangle_attention"),
                      ("inference", "training")),
     # inference LN+proj concat fusion (layernorm_linear) -- consulted on the inference path only
-    "infer_concat": ((True, False), ("bias_only_attention", "triangle_attention"),
+    "infer_concat": ((True, False), ("attention_pair_bias", "triangle_attention"),
                      ("inference",)),
     # Row-broadcast dropout in the trimul residual epilogue. USE_DROPOUT is part of
     # trimul_gate_elem_mul / _bwd_ew's autotune KEY, so dropout on and off are DIFFERENT cache
@@ -143,7 +169,8 @@ class Job:
             shape = (f"min_seq_len={fixed_seq} max_seq_len={fixed_seq} seq_len_step=128 "
                      f"d_pair_values=[{','.join(str(d) for d in d_pairs)}]")
         args = [
-            f"kernel={self.target}",
+            f"target={self.target}",
+            "level=module",
             f"implementations=[{impl}]",
             f"mode={self.mode}",
             "metric=time",
@@ -156,8 +183,8 @@ class Job:
             f"sweep_seq_len={fixed_seq}",
             *shape.split(),
         ]
-        if TARGETS[self.target]:
-            args.extend(TARGETS[self.target].split())
+        if MODULE_TARGETS[self.target].bench_args:
+            args.extend(MODULE_TARGETS[self.target].bench_args.split())
         if self.pin:
             name, value = self.pin
             # dropout is a plain bench setting; the others are capture-time dispatch pins
@@ -261,10 +288,11 @@ def cmd_capture(args: argparse.Namespace) -> int:
 
     repo = Path(__file__).resolve().parents[2]
     targets = GROUPS.get(args.what, (args.what,))
-    unknown = [t for t in targets if t not in TARGETS]
+    unknown = [t for t in targets if t not in MODULE_TARGETS]
     if unknown:
         print(f"unknown target(s): {', '.join(unknown)}\n"
-              f"targets: {', '.join(TARGETS)}\ngroups : {', '.join(GROUPS)}", file=sys.stderr)
+              f"targets: {', '.join(MODULE_TARGETS)}\ngroups : {', '.join(GROUPS)}",
+              file=sys.stderr)
         return 2
 
     shard_dir = Path(args.shards).expanduser()
@@ -415,57 +443,48 @@ def apply_config_dir(directory: Path) -> int:
     return 0
 
 
-#: bench target -> the build case(s) that drive the same kernels.
+#: Kernel-level bench target -> the build case(s) that drive the same kernels.
 #:
-#: The name spaces are not the same and never were. ``benchmarks/runners/bench.py`` has two families
-#: of entry point -- ``bench_kernel_*`` (17 kernel-level targets) and ``bench_<module>`` (the
-#: module-level ones) -- while ``build`` names the 23 cases that drive the production modules. That
-#: gap is why ``bench adaln_bwd`` was rejected as an unknown target: the CLI only ever listed the
-#: module family. A bench that auto-builds has to cross the gap explicitly; deriving it by string
-#: match would silently build nothing for every target whose name differs.
+#: A kernel target is named after the kernel FAMILY in ``kernels/registry.csv`` that it benches --
+#: `triangle_attention`, `bias_only_attention`, `augmented_attention`, `fused_ln_mask`,
+#: `layernorm`, `adaln` -- except for the four that bench a fused op SHAPE implemented by several
+#: families rather than one family (`dual_gemm_epilogue`, `gemm_epilogue`, `gemm_gate`,
+#: `transition_b2b`), which are named after the shape. No abbreviations, in either case: the
+#: targets used to read `tri_attn` / `bias_attn` / `aug_attn` / `ln_mask`, which is why
+#: `bench_kernel triangle_attention` -- the family's own name -- came back "unknown target".
 #:
-#: Kernel-target rows come from what each ``bench_kernel_*`` function actually imports, not from its
-#: name. A wrong entry degrades to today's behaviour and says so: the build fills the wrong case and
-#: the bench then prints the engine's own per-op "no tuned autotune cache" warning, so it cannot
+#: Target names and BUILD CASE names are still different name spaces and always were: a target is
+#: a measurement, a case is a module driven to fill a cache, and `build` names 21 of the latter.
+#: A bench that auto-builds has to cross that gap explicitly; deriving it by string match would
+#: silently build nothing for every target whose name differs.
+#:
+#: Rows come from what each ``bench_kernel_*`` function actually imports, not from its name. A
+#: wrong entry degrades to the old behaviour and says so: the build fills the wrong case and the
+#: bench then prints the engine's own per-op "no tuned autotune cache" warning, so it cannot
 #: silently produce a fast-looking number from an untuned kernel.
-MODULE_BUILD_CASES: dict[str, tuple[str, ...]] = {
-    "transition": ("transition",),
-    "triangle_multiplication": ("triangle_multiplication",),
-    "triangle_multiplication_bidirectional": ("triangle_multiplication_bidir",),
-    "triangle_attention": ("triangle_attention_bidir", "triangle_attention_heads"),
-    # bench's bias_only_attention target drives kernels.bias_only_attention.triton.main directly;
-    # AttentionPairBias is the production module that dispatches those kernels, so its case is what
-    # fills their cache.
-    "bias_only_attention": ("attention_pair_bias",),
-    "conditioned_transition": ("conditioned_transition",),
-    "adaptive_layernorm": ("adaptive_layernorm",),
-    "augmented_attention_token": ("augmented_attention",),
-    "augmented_attention_atom": ("augmented_attention",),
-}
-
-KERNEL_BUILD_CASES: dict[str, tuple[str, ...]] = {
-    "dual_gemm_epil": ("tm1_triton", "triangle_multiplication"),
-    "dual_gemm_epil_bwd": ("triangle_multiplication",),
-    "gemm_epil": ("layernorm_linear_pair_bias",),
-    "gemm_gate": ("tm2_triton",),
-    "gate_bwd": ("triangle_multiplication",),
+KERNEL_TARGETS: dict[str, tuple[str, ...]] = {
+    "dual_gemm_epilogue": ("tm1", "triangle_multiplication"),
+    "dual_gemm_epilogue_bwd": ("triangle_multiplication",),
+    "gemm_epilogue": ("layernorm_linear_pair_bias",),
+    # gemm_epilogue_bwd imports adaln, augmented_attention, bias_only_attention,
+    # conditioned_transition, layernorm and layernorm_linear -- it benches the shared GEMM-epilogue
+    # backward across all of them, so its cache comes from all of their cases.
+    "gemm_epilogue_bwd": ("adaptive_layernorm", "augmented_attention", "attention_pair_bias",
+                          "conditioned_transition", "layernorm_lowreg",
+                          "layernorm_linear_pair_bias"),
+    "gemm_gate": ("tm2",),
+    "gemm_gate_bwd": ("triangle_multiplication",),
     "transition_b2b": ("transition",),
     "transition_b2b_bwd": ("transition",),
     "layernorm": ("layernorm_lowreg", "layernorm_transpose"),
     "layernorm_bwd": ("layernorm_lowreg", "layernorm_transpose"),
-    "ln_mask": ("layernorm_lowreg",),
+    "fused_ln_mask": ("layernorm_lowreg",),
     "adaln": ("adaptive_layernorm", "layernorm_linear_pair_bias"),
     "adaln_bwd": ("adaptive_layernorm",),
-    "tri_attn": ("triangle_attention_bidir", "triangle_attention_heads"),
-    "bias_attn": ("attention_pair_bias",),
-    "aug_attn": ("augmented_attention",),
-    "cond_transition_tail": ("conditioned_transition",),
-    # gemm_epil_bwd imports adaln, augmented_attention, bias_only_attention,
-    # conditioned_transition, layernorm and layernorm_linear -- it benches the shared GEMM-epilogue
-    # backward across all of them, so its cache comes from all of their cases.
-    "gemm_epil_bwd": ("adaptive_layernorm", "augmented_attention", "attention_pair_bias",
-                      "conditioned_transition", "layernorm_lowreg",
-                      "layernorm_linear_pair_bias"),
+    "triangle_attention": ("triangle_attention_bidirectional", "triangle_attention_heads"),
+    "bias_only_attention": ("attention_pair_bias",),
+    "augmented_attention": ("augmented_attention",),
+    "conditioned_transition_tail": ("conditioned_transition",),
 }
 
 
@@ -588,9 +607,45 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     return _merge_built_shards(args, results)
 
 
+def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
+    """0 if `build`'s positional names something real, 2 (having said what is real) if not.
+
+    Which name space applies is the same choice `cmd_build` makes below: `--per-op` (and `all`,
+    which defaults to it) selects ops, anything else selects cases. Read from the declarations,
+    never by importing: :data:`~miniworld_engine.autotune.builder.CASE_NAMES` is a literal tuple
+    and the ops are the first column of ``kernels/registry.csv``.
+    """
+    from miniworld_engine.autotune.builder import CASE_NAMES  # noqa: PLC0415 -- literal, no imports
+
+    if args.case == "all":
+        return 0
+    if args.per_op:
+        rows = (repo / "src" / "miniworld_engine" / "kernels" / "registry.csv").read_text()
+        ops = {line.split(",", 1)[0] for line in rows.splitlines()[1:] if line.strip()}
+        if args.case in ops:
+            return 0
+        print(f"unknown op {args.case!r}; --per-op takes a kernel from registry.csv "
+              f"({len(ops)} of them), or 'all'", file=sys.stderr)
+        return 2
+    if args.case in CASE_NAMES:
+        return 0
+    print(f"unknown case {args.case!r}; have: all, {', '.join(CASE_NAMES)}", file=sys.stderr)
+    return 2
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
     from miniworld_engine.autotune import builder
+
+    repo = Path(__file__).resolve().parents[2]
+    # Reject a name we already know is not a target BEFORE anything imports. Everything below --
+    # apply_config_dir, cases(), op_units() -- imports every kernel module, which is minutes of
+    # triton compilation, and `build <typo>` used to spend all of it before printing "unknown
+    # case". Both name spaces are declared and readable without importing anything: CASE_NAMES is
+    # a literal, and the per-op sweep's names are the first column of registry.csv.
+    rc = _reject_unknown_build_target(args, repo)
+    if rc:
+        return rc
 
     # Select the config directory BEFORE cases(), which imports the kernel modules. An op that
     # calls configs_for() with no directory chosen gets triton's substitute Config({}) and can
@@ -598,7 +653,6 @@ def cmd_build(args: argparse.Namespace) -> int:
     # directory was selected" and the whole command dies -- `build` was unusable without
     # MINIWORLD_CONFIG_DIR already exported. `_bench_build_first` has always had these two in the
     # right order; this was a plain ordering slip.
-    repo = Path(__file__).resolve().parents[2]
     directory = resolve_config_dir(args.config_type, repo)
     if isinstance(directory, int):
         return directory
@@ -663,20 +717,25 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
-               per_target_mode: bool) -> tuple[list[str], dict | None]:
-    """The argv and env for one target's bench.py run."""
+               level: str) -> tuple[list[str], dict | None]:
+    """The argv and env for one target's bench.py run.
+
+    `level` is bench.py's namespace selector, not decoration: a kernel and the module built out of
+    it share a name (`triangle_attention` is both), so a target is only identified by the pair.
+    """
     # bench.py requires a mode. For a kernel target it is not the caller's to choose: the name
     # says it (`*_bwd` = training, else inference), which is why bench_kernel has no --mode.
-    mode = ("training" if target.endswith("_bwd") else "inference") if per_target_mode \
+    mode = ("training" if target.endswith("_bwd") else "inference") if level == "kernel" \
         else args.mode
-    cmd = [sys.executable, "-u", "benchmarks/runners/bench.py", f"kernel={target}",
+    cmd = [sys.executable, "-u", "benchmarks/runners/bench.py",
+           f"target={target}", f"level={level}",
            f"implementations=[{args.impl}]", f"mode={mode}", "metric=time",
            f"sweep_axis={getattr(args, 'sweep_axis', 'seq_len')}",
            f"cudagraph={getattr(args, 'cudagraph', 'manual')}",
            f"compile={getattr(args, 'compile', 'true')}"]
-    extra = TARGETS.get(target, "")
-    if extra:
-        cmd.extend(extra.split())
+    module_target = MODULE_TARGETS.get(target) if level == "module" else None
+    if module_target is not None and module_target.bench_args:
+        cmd.extend(module_target.bench_args.split())
     env = None
     wrap = getattr(args, "compile_wrap", "")
     if wrap:
@@ -691,7 +750,7 @@ def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
 
 
 def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
-               config_dir: Path | None = None, *, per_target_mode: bool = False) -> int:
+               config_dir: Path | None = None, *, level: str) -> int:
     """Bench every target, one process each, spread across the visible GPUs.
 
     Targets are independent processes, so on an N-GPU node N of them run at once -- pinned with
@@ -704,7 +763,7 @@ def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
     """
     started = time.time()   # coverage must count THIS run's .ops, not history
     gpus = _resolve_gpus(args.gpus) or [0]
-    jobs = [(t, *_bench_cmd(args, t, config_dir, per_target_mode)) for t in targets]
+    jobs = [(t, *_bench_cmd(args, t, config_dir, level)) for t in targets]
     rc = 0
 
     def run(job: tuple, gpu: int) -> tuple[str, int, str]:
@@ -733,11 +792,12 @@ def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
                 print(out, flush=True)
                 rc |= code
     if len(targets) > 1:
-        rc |= _report_coverage(targets, repo, since=started)
+        rc |= _report_coverage(targets, repo, level, since=started)
     return rc
 
 
-def _report_coverage(targets: tuple[str, ...], repo: Path, *, since: float = 0.0) -> int:
+def _report_coverage(targets: tuple[str, ...], repo: Path, level: str, *,
+                     since: float = 0.0) -> int:
     """Compare the kernels that actually launched against everything the repo declares.
 
     The denominator is ``kernels/registry.csv`` -- declared data, not something derived from this
@@ -753,8 +813,11 @@ def _report_coverage(targets: tuple[str, ...], repo: Path, *, since: float = 0.0
     launched: set[str] = set()
     for target in targets:
         # bench.py owns the layout: benchmarks/{kernels,modules}/<target>/artifacts/<gpu>/<run>.ops
-        family = "kernels" if target in KERNEL_BUILD_CASES else "modules"
-        base = repo / "benchmarks" / family / target
+        # -- one directory per (level, target), with no exceptions, so the path is derived and not
+        # guessed. It used to be guessed from `target in KERNEL_TARGETS`, which was wrong for
+        # augmented_attention_token/_atom: they shared one directory named after neither of them,
+        # so `base` did not exist and both targets' kernels were dropped from coverage in silence.
+        base = repo / "benchmarks" / f"{level}s" / target
         if not base.is_dir():
             continue
         for f in base.glob("artifacts/*/*.ops"):
@@ -786,11 +849,11 @@ def cmd_bench_kernel(args: argparse.Namespace) -> int:
     repo = Path(__file__).resolve().parents[2]
     # 'all' is the honest default unit of work: a sweep that names one target measures one
     # target, and calling that "the kernels" is how a broken implementation stays hidden.
-    targets = tuple(KERNEL_BUILD_CASES) if args.what == "all" else (args.what,)
-    unknown = [t for t in targets if t not in KERNEL_BUILD_CASES]
+    targets = tuple(KERNEL_TARGETS) if args.what == "all" else (args.what,)
+    unknown = [t for t in targets if t not in KERNEL_TARGETS]
     if unknown:
         print(f"unknown kernel target(s): {', '.join(unknown)}; have: all, "
-              f"{', '.join(sorted(KERNEL_BUILD_CASES))}", file=sys.stderr)
+              f"{', '.join(sorted(KERNEL_TARGETS))}", file=sys.stderr)
         return 2
     # A config set means "measure AT these configs". There is then nothing to tune, so there is
     # nothing to build: a build exists to SEARCH for the best config and write a cache, and its
@@ -809,11 +872,11 @@ def cmd_bench_kernel(args: argparse.Namespace) -> int:
     else:
         # No config set: the autotuner would search its full grid mid-measurement, which times a
         # search rather than a kernel. Build first so the search happens once, up front.
-        rc = _bench_build_first(args, targets, repo, KERNEL_BUILD_CASES, "KERNEL_BUILD_CASES")
+        rc = _bench_build_first(args, targets, repo, KERNEL_TARGETS, "KERNEL_TARGETS")
         if rc:
             return rc
         directory = None
-    return _run_bench(args, targets, repo, directory, per_target_mode=True)
+    return _run_bench(args, targets, repo, directory, level="kernel")
 
 
 def cmd_bench_module(args: argparse.Namespace) -> int:
@@ -825,14 +888,15 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     """
     repo = Path(__file__).resolve().parents[2]
     targets = GROUPS.get(args.what, (args.what,))
-    unknown = [t for t in targets if t not in MODULE_BUILD_CASES]
+    unknown = [t for t in targets if t not in MODULE_TARGETS]
     if unknown:
         print(f"unknown module target(s): {', '.join(unknown)}; have: "
-              f"{', '.join(sorted(MODULE_BUILD_CASES))}; groups: {', '.join(GROUPS)}",
+              f"{', '.join(sorted(MODULE_TARGETS))}; groups: {', '.join(GROUPS)}",
               file=sys.stderr)
         return 2
     # A module bench takes no config set, so the build uses the default one -- see the docstring.
-    rc = _bench_build_first(args, targets, repo, MODULE_BUILD_CASES, "MODULE_BUILD_CASES")
+    cases = {name: MODULE_TARGETS[name].cases for name in MODULE_TARGETS}
+    rc = _bench_build_first(args, targets, repo, cases, "MODULE_TARGETS")
     if rc:
         return rc
     directory = resolve_config_dir(DEFAULT_CONFIG_SET, repo)
@@ -841,7 +905,7 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     rc = apply_config_dir(directory)
     if rc:
         return rc
-    return _run_bench(args, targets, repo, directory)
+    return _run_bench(args, targets, repo, directory, level="module")
 
 
 def _resolve_gpus(spec: str) -> list[int]:
@@ -989,7 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
     bk = sub.add_parser("bench_kernel",
                         help="build the cache, then bench ONE kernel-level target")
     bk.add_argument("what", help=f"kernel target, or 'all' "
-                                 f"({', '.join(sorted(KERNEL_BUILD_CASES))})")
+                                 f"({', '.join(sorted(KERNEL_TARGETS))})")
     bk.add_argument("config_type", nargs="?", default=None,
                     help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     _bench_common(bk)
@@ -998,7 +1062,7 @@ def build_parser() -> argparse.ArgumentParser:
     bm = sub.add_parser("bench_module",
                         help="build the cache, then bench a module-level target (no config arg)")
     bm.add_argument("what", help=f"module target or group "
-                                f"({', '.join(sorted(MODULE_BUILD_CASES))}; "
+                                f"({', '.join(sorted(MODULE_TARGETS))}; "
                                 f"groups: {', '.join(GROUPS)})")
     _bench_common(bm)
     # Only the module bench takes a mode: a module genuinely runs in both regimes. A kernel target's

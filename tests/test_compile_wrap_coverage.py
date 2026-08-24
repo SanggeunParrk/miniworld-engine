@@ -108,11 +108,15 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
     entered from inside an opaque region, so Dynamo never sees it, and wrapping it would just add
     a second dispatch on a hot inner call. Everything else needs its own fake.
 
-    ``checks_*`` / ``drivers_*`` are excluded: that is the autotune-capture harness, which calls
-    kernels directly and is never inside a compiled model.
+    ``kernels/checks/`` and ``kernels/drivers/`` are excluded: that is the autotune-capture
+    harness, which calls kernels directly and is never inside a compiled model. The exclusion is
+    by DIRECTORY, not by filename: the harness is one module per registry family now
+    (``drivers/transition.py``, ``checks/transition.py``, ...), so a name-prefix test would let
+    every one of them back in.
     """
+    harness = {SRC / "kernels" / "checks", SRC / "kernels" / "drivers"}
     paths = [p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
-             if not p.name.startswith(("checks_", "drivers_"))]
+             if p.parent not in harness]
     launchers, ops, calls = _launchers_and_ops(paths)
 
     # "Covered" is TRANSITIVE: `_ln_bwd_atomic`'s only caller is `ln_bwd_mmajor`, which is not an

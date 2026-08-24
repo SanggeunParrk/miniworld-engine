@@ -10,7 +10,7 @@ and the second wrote its result under a dtype the kernel never saw:
 as holes -- against a cache that was complete. Nothing was wrong with the build; the declaration
 was. The evidence was in the shards the whole time: what a unit RECORDS is what the kernel ran.
 
-drivers_adaln.py's docstring already said so for one family ("The conditioned_transition family
+drivers/conditioned_transition.py's docstring already said so for one family ("The conditioned_transition family
 runs fp32: every file in it states 'fp32 io with TF32 tensor cores'"), and
 gated_projection/triton/main.py casts its operands with `.to(torch.bfloat16)` before the launch
 for the other. Neither fact had reached the registry.
@@ -89,7 +89,7 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
     declared = _declared()
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
-            assert want == {"float32"}, f"{op}: conditioned_transition is fp32 io (drivers_adaln)"
+            assert want == {"float32"}, f"{op}: conditioned_transition is fp32 io (drivers/conditioned_transition)"
         if op.startswith("gated_projection_gate") or op.startswith("gated_projection_bwd_gate"):
             if op.endswith("lowp_triton"):
                 continue

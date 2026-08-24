@@ -260,6 +260,36 @@ def _swa_params(length: int, dims: dict, dtype: torch.dtype) -> tuple:
     return (cos, sin, seqused, cu_seqlens, length, valid)
 
 
+#: Every case name, declared. `cases()` cannot answer "is this a real case name?" cheaply: it
+#: constructs the module classes, which imports every kernel, which is 2+ minutes -- so
+#: `miniworld-engine build <typo>` spent all of it before saying "unknown case". Validating
+#: against this list happens before the first import. `test_case_names_are_declared` asserts the
+#: two agree, so it cannot drift into a second source of truth.
+CASE_NAMES: tuple[str, ...] = (
+    "transition",
+    "triangle_multiplication",
+    "triangle_multiplication_bidirectional",
+    "triangle_attention_bidirectional",
+    "triangle_attention_heads",
+    "attention_pair_bias",
+    "augmented_attention",
+    "adaptive_layernorm",
+    "conditioned_transition",
+    "msa_pair_weighted_averaging",
+    "outer_product_mean",
+    "pairformer_block",
+    "triangle_pair_attention",
+    "tm1",
+    "tm2",
+    "gated_projection",
+    "layernorm_linear_pair_bias",
+    "swa_atom_attention",
+    "layernorm_lowreg",
+    "layernorm_transpose",
+    "layernorm_linear_stats",
+)
+
+
 def cases() -> list[Case]:
     """Every production module worth driving, deferred so importing this module needs no GPU.
 
@@ -327,12 +357,12 @@ def cases() -> list[Case]:
              dims=PAIR_HID, dtypes=BOTH,
              switches=("p_drop", "trimul_impl", "ln_out_bwd_path", "ln_partial_reduction"),
              impls=("miniworld", "triton", "cute")),
-        Case("triangle_multiplication_bidir",
+        Case("triangle_multiplication_bidirectional",
              lambda dims, p, i, dt: BidirectionalTriangleMultiplication(
                  **dims, implementation=IT(i), p_drop=p).cuda().to(dt),
              lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
              dims=PAIR_HID, switches=("p_drop", "trimul_impl", "ln_out_bwd_path")),
-        Case("triangle_attention_bidir",
+        Case("triangle_attention_bidirectional",
              lambda dims, p, i, dt: BidirectionalTriangleAttention(
                  **dims, implementation=IT(i)).cuda().to(dt),
              lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
@@ -419,12 +449,12 @@ def cases() -> list[Case]:
         # ---- kernels with no module that dispatches to them ------------------------------- #
         # Registered ops are built because they are registered, not because the current model
         # reaches them. Each entry below drives the op through its own public entry point.
-        Case("tm1_triton",
+        Case("tm1",
              _kernel_case(("miniworld_engine.kernels.tm1.triton.main", "triton_tm1"),
                           _w(("d", "d"), ("d", "d"), ("d", "d"), ("d", "d"))),
              lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt),),
              dims=({"d": 128}, {"d": 256}), lengths=(256, 384, 512)),
-        Case("tm2_triton",
+        Case("tm2",
              _kernel_case(("miniworld_engine.kernels.tm2.triton.main", "triton_tm2"),
                           _w(("d", "d"), ("d", "d"))),
              lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt), _pair(b, l, dims["d"], dt)),

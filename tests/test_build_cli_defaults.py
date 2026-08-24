@@ -147,7 +147,7 @@ def test_no_build_skips_the_case_decomposition(monkeypatch, capsys):
     args = argparse.Namespace(no_build=True, shards="/tmp/x", gpus="1", compile_jobs=1,
                               resume=False)
     rc = cli._bench_build_first(args, ("transition",), repo, {"transition": ("transition",)},
-                                "MODULE_BUILD_CASES")
+                                "MODULE_TARGETS")
     assert rc == 0
     assert "--no-build" in capsys.readouterr().out
 
@@ -167,7 +167,7 @@ def test_without_no_build_the_pre_bench_build_still_runs(monkeypatch):
     args = argparse.Namespace(no_build=False, shards="/tmp/x", gpus="1", compile_jobs=1,
                               resume=False)
     cli._bench_build_first(args, ("transition",), repo, {"transition": ("transition",)},
-                           "MODULE_BUILD_CASES")
+                           "MODULE_TARGETS")
     assert called, "build_all did not run without --no-build"
 
 
@@ -182,7 +182,7 @@ def test_the_sweep_axis_reaches_bench_py():
 
     for axis in ("seq_len", "d_pair"):
         args = argparse.Namespace(impl="all", mode="inference", sweep_axis=axis)
-        cmd, _ = cli._bench_cmd(args, "transition", None, per_target_mode=False)
+        cmd, _ = cli._bench_cmd(args, "transition", None, level="module")
         assert f"sweep_axis={axis}" in cmd, cmd
 
 
@@ -191,6 +191,77 @@ def test_a_kernel_targets_mode_is_not_the_callers_to_choose():
     import argparse
 
     args = argparse.Namespace(impl="all", mode="inference", sweep_axis="seq_len")
-    bwd, _ = cli._bench_cmd(args, "layernorm_bwd", None, per_target_mode=True)
-    fwd, _ = cli._bench_cmd(args, "layernorm", None, per_target_mode=True)
+    bwd, _ = cli._bench_cmd(args, "layernorm_bwd", None, level="kernel")
+    fwd, _ = cli._bench_cmd(args, "layernorm", None, level="kernel")
     assert "mode=training" in bwd and "mode=inference" in fwd
+
+
+def test_case_names_are_declared() -> None:
+    """`CASE_NAMES` must be exactly what `cases()` builds, in order.
+
+    It exists so `miniworld-engine build <typo>` can be rejected without importing anything:
+    `cases()` constructs the production modules, which imports every kernel, so the old code spent
+    minutes of triton compilation before printing "unknown case". A declared list is only safe if
+    it cannot drift from the thing it stands in for, which is what this asserts.
+    """
+    from miniworld_engine.autotune.builder import CASE_NAMES, cases
+
+    assert tuple(c.name for c in cases()) == CASE_NAMES
+
+
+def test_build_rejects_an_unknown_case_without_importing_kernels(capsys) -> None:
+    """The rejection has to come BEFORE the imports, or it is not a fast failure.
+
+    `sys.modules` is the check: if resolving the name pulled in a kernel module, the guard ran too
+    late and the user waited for it.
+    """
+    import argparse
+    import sys
+
+    repo = Path(cli.__file__).resolve().parents[2]
+    before = set(sys.modules)
+    rc = cli._reject_unknown_build_target(
+        argparse.Namespace(case="triangle_multiplicaton", per_op=False), repo)
+    assert rc == 2
+    out = capsys.readouterr().err
+    assert "unknown case" in out
+    assert "triangle_multiplication" in out, "the message must list what IS valid"
+    new_kernel_imports = [m for m in set(sys.modules) - before
+                          if m.startswith("miniworld_engine.kernels")]
+    assert not new_kernel_imports, new_kernel_imports
+
+
+def test_build_accepts_every_declared_case_and_every_registered_op() -> None:
+    """Both name spaces `build` takes, checked against their declarations."""
+    import argparse
+    import csv
+
+    from miniworld_engine.autotune.builder import CASE_NAMES
+
+    repo = Path(cli.__file__).resolve().parents[2]
+    for name in CASE_NAMES:
+        assert cli._reject_unknown_build_target(
+            argparse.Namespace(case=name, per_op=False), repo) == 0, name
+    registry = repo / "src" / "miniworld_engine" / "kernels" / "registry.csv"
+    with registry.open() as fh:
+        ops = [row["kernel"] for row in csv.DictReader(fh)]
+    assert ops, "registry.csv is empty"
+    for op in ops:
+        assert cli._reject_unknown_build_target(
+            argparse.Namespace(case=op, per_op=True), repo) == 0, op
+
+
+def test_capture_argv_names_the_target_and_its_level() -> None:
+    """`dev capture` builds bench.py's argv by hand, and bench.py needs BOTH halves of a target's
+    identity: `target=` alone would be ambiguous the moment a kernel and a module share a name."""
+    from pathlib import Path as _Path
+
+    jobs = cli.build_jobs(("augmented_attention_atom", "conditioned_transition"),
+                          _Path("/tmp/shards"), sweep_dispatch=True)
+    atom = next(j for j in jobs if j.target == "augmented_attention_atom").bench_args("miniworld")
+    assert "target=augmented_attention_atom" in atom
+    assert "level=module" in atom
+    # the atom ladder comes from SHAPES, not the token default
+    assert "max_seq_len=384" in atom, atom
+    cond = next(j for j in jobs if j.target == "conditioned_transition").bench_args("miniworld")
+    assert {"precision=32", "d_single_token=384"} <= set(cond), cond

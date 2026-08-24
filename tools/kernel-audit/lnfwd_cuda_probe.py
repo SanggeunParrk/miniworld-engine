@@ -26,7 +26,7 @@ def run_once(dirty: bool, seed: int = 1234):
         del scratch
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    from miniworld_engine.kernels.checks_ln import layernorm_fwd_cuda as chk
+    from miniworld_engine.kernels.checks.layernorm import layernorm_fwd_cuda as chk
     got = chk()
     pairs = got if isinstance(got, dict) else {"out": got}
     rels, h = {}, hashlib.sha256()
@@ -40,7 +40,7 @@ def run_once(dirty: bool, seed: int = 1234):
 
 def main() -> int:
     from miniworld_engine.kernels.drivers import SHAPE_MODE
-    from miniworld_engine.kernels.drivers_ln import _D, _M
+    from miniworld_engine.kernels.drivers.layernorm_linear import _D, _M
     print(f"device={torch.cuda.get_device_name()}  mode={SHAPE_MODE}  _M={_M} _D={_D}")
     shas, allrels = [], []
     for i in range(5):

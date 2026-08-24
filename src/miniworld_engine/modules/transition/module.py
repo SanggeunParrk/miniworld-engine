@@ -16,7 +16,7 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
-from ..ops import swish_gate
+from miniworld_engine.modules.functional import swish_gate
 
 
 

@@ -21,7 +21,8 @@ import torch.nn.functional as F
 
 def main() -> int:
     from miniworld_engine.kernels.drivers import SHAPE_MODE
-    from miniworld_engine.kernels.drivers_adaln import _D, _DC, _EPS, _adaln_args
+    from miniworld_engine.kernels.drivers.adaln import _EPS, _adaln_args
+    from miniworld_engine.kernels.drivers.conditioned_transition import _D, _DC
     from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
 
     print(f"device={torch.cuda.get_device_name()}  mode={SHAPE_MODE}  NX={_D} NC={_DC}")

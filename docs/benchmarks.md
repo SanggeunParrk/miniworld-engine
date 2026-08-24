@@ -14,7 +14,17 @@
 Every `kernels/<k>/` and `modules/<m>/` target uses exactly these subdirs, each
 with one job. Nothing else belongs at the target root.
 
-- `configs/` — Hydra bench config (`bench.yaml`).
+- `configs/` — Hydra bench config (`bench.yaml`), whose `target:`/`level:` name this
+  very directory: `level` is `kernel` or `module` (the parent dir) and `target` is the
+  folder name. One target owns exactly one directory; no folder is shared. This file is
+  the run's **complete** config, selected by the `target=`/`level=` you pass on the
+  command line — `bench.py` reads that pair off argv and points hydra at this directory,
+  then applies the rest of the command line on top. There is no shared base file and no
+  `defaults:` list, so a key missing here does not exist for this target's runs.
+  (`config_path` used to be the constant `../modules/triangle_multiplication/configs`, so
+  every target loaded that one file and the other 25 configs were read by nothing —
+  `augmented_attention_atom` declared a 128–384 ladder and was swept at 384–1024.
+  `tests/test_bench_config_per_target.py` is what keeps it honest.)
 - `artifacts/` — **generated benchmark outputs only**: `*.csv`, `*.svg`,
   `*_autotune_summary.txt`. No Python, no profiler captures, no repro trees.
   (`.gitignore` already drops everything under `artifacts/` except the data
@@ -104,11 +114,11 @@ SVGs, slide exports, and profiler outputs go under
 `benchmarks/modules/<module>/artifacts/` by default. Durable interpretation
 belongs in `docs/`, not in a benchmark archive tree.
 
-## Workflow (example: `layernorm_linear`)
+## Workflow (example: `gemm_epilogue`)
 
 Prefer this exact flow over ad hoc measurement.
 
-Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
+Let `A=benchmarks/kernels/gemm_epilogue/artifacts`.
 
 1. **Run** the bench on a GPU compute node. Uses the
    repo's unified pixi env (`.pixi/`); `--frozen` keeps the cu12 TE core fix in
@@ -116,7 +126,7 @@ Let `A=benchmarks/kernels/layernorm_linear/artifacts`.
    ```bash
    srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 \
      --mem=64G --cpus-per-task=8 --time=00:30:00 \
-     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python benchmarks/runners/bench.py kernel=<kernel>"'
+     bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; python benchmarks/runners/bench.py target=gemm_epilogue level=kernel"'
    ```
    This writes a long-form CSV under the target-local artifact directory.
 2. **Render** plots from the CSV into the same artifact directory. **Never run this on the
@@ -224,11 +234,11 @@ Before treating a benchmark artifact as final, check every item below.
 
 `triangle_multiplication_bidirectional` already has its own final artifact set;
 the matrix below is the remaining repo-developed module kernels, one
-`bench.py kernel=<target>` run each:
+`bench.py target=<target> level=module` run each:
 
 | target | implementations | sweeps | modes | notes |
 | --- | --- | --- | --- | --- |
-| `bias_only_attention` | `pytorch`, `cuequivariance`, `old_triton`, `miniworld` | `seq_len`, `d_pair` | inference, training | This is the bias-only TriangleAttention case (`use_self_attention=False`). `old_triton` is the Team-GM vendored bias-only Triton attention kernel. MiniWorld covers the developed LN/projection/gate dispatch path. See `docs/kernels/bias-only-attention.md`. |
+| `attention_pair_bias` | `pytorch`, `cuequivariance`, `old_triton`, `miniworld` | `seq_len`, `d_pair` | inference, training | This benches the production `AttentionPairBias` module -- the bias-only TriangleAttention case (`use_self_attention=False`). (The `bias_only_attention` NAME belongs to the kernel-level target, which benches the `bias_only_attention` kernel family.) `old_triton` is the Team-GM vendored bias-only Triton attention kernel. MiniWorld covers the developed LN/projection/gate dispatch path. See `docs/kernels/bias-only-attention.md`. |
 | `triangle_attention` | `pytorch`, `cuequivariance`, `miniworld` | `seq_len`, `d_pair` | inference, training | Full triangular self-attention (`use_self_attention=True`). MiniWorld maps to the canonical Triton pair-bias attention kernel plus the module LayerNorm/projection/gate path; `old_triton` is not a separate public full-attention implementation. See `docs/kernels/triangle-attention.md`. |
 | `transition` | `pytorch`, `old_triton`, `miniworld` | `seq_len`, `d_pair` | inference, training | `old_triton` is the Team-GM Triton transition path (`LayerNorm(TRITON)` + `kernels.transition.triton.main`). MiniWorld means the production d-aware fused route: Triton for small `d_pair`, CuTe for large `d_pair`. Component-only `cute` runs are diagnostics, not final plots. |
 | `conditioned_transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmarks the post-AdaLN tail only; inference dispatch is fused at `d_pair<=128` and composed above that, training uses the custom autograd path. |

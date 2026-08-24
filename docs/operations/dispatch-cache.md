@@ -230,7 +230,7 @@ bench harness:
 
 then run the bench harness in the same process:
 
-    python benchmarks/runners/bench.py kernel=<module> implementations='[miniworld]' \
+    python benchmarks/runners/bench.py target=<module> level=module implementations='[miniworld]' \
       compile=false cudagraph=manual mode=training sweep_axis=seq_len ...
 
 `run_autotune=True` unlocks the full grid (no cached narrowing) so every config is benched;

@@ -75,7 +75,7 @@ Every kernel family has the same shape, and `tests/test_kernel_layout.py` enforc
 
 | file | what it is | required |
 |---|---|---|
-| `reference.py` | the torch definition. `kernels/checks_*.py` compares against it, so it is what "correct" means for that family. | yes |
+| `reference.py` | the torch definition. `kernels/checks/<family>.py` compares against it, so it is what "correct" means for that family. | yes |
 | `interface.py` | the family's ONE public door — the names the rest of the repo may import, and nothing about which backend serves them. `kernels/__init__.py` reaches only here. | yes |
 | `dispatch.py` | a CHOICE among implementations, at whatever level the choice lives: per-GPU calibration (`layernorm`), a d-aware pick between triton variants (`conditioned_transition/triton`), cuBLAS-vs-quack (`trimul_inproj/cute`). | no |
 | `whole_op.py` | a whole model-layer op with weights as arguments (LN → … → gate in one call). A property of the layer, not of the folder. | no |
@@ -111,12 +111,16 @@ configs:
 # Unified repo env (.pixi/). --frozen keeps the cu12 TE core fix.
 srun --account=cssb --qos=cssb_h100 --partition=h100 --gres=gpu:h100:1 --mem=64G --cpus-per-task=8 \
   bash -c 'pixi run --frozen bash -c "export LD_LIBRARY_PATH=\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH; \
-    PYTHONPATH=src python benchmarks/runners/bench.py kernel=triangle_multiplication \
+    PYTHONPATH=src python benchmarks/runners/bench.py target=triangle_multiplication level=module \
       implementations=[pytorch,dtv1,cuequivariance,miniworld] mode=inference"'
 ```
 
-`kernel=` selects the op (`triangle_multiplication`, `triangle_attention`,
-`transition`, `adaptive_layernorm`, `augmented_attention_token/atom`).
+`target=` names what to bench and `level=` says which of the two namespaces it is
+in -- `level=module` for a production module (`triangle_multiplication`,
+`triangle_attention`, `transition`, `adaptive_layernorm`,
+`augmented_attention_token/atom`), `level=kernel` for a kernel family
+(`triangle_attention`, `layernorm`, `adaln`, ...). A kernel and the module built
+out of it may share a name, which is why the level is not optional.
 All final benchmarks run the `torch.compile`d path; non-compiled debug probes
 are not valid final benchmark results.
 Generated results land in the selected target's `artifacts/` directory, for
@@ -150,7 +154,7 @@ both cards (pick the card with `--gres`; the script auto-detects it and asserts 
 ```bash
 # one module bench
 srun -p gpu --gres=gpu:A6000:1 -c 8 --mem=64G \
-  .pixi/envs/default/bin/python benchmarks/runners/bench.py kernel=transition mode=inference
+  .pixi/envs/default/bin/python benchmarks/runners/bench.py target=transition level=module mode=inference
 
 # the tuned cache for this card: one unit per (op, dtype, shape bucket), across every GPU given
 srun -p gpu --gres=gpu:A6000:8 --exclusive \

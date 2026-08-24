@@ -74,7 +74,7 @@ def _xn_recompute(x2, rstd, c1, gamma, beta, *, shape_key: int | None = None):
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(), xn,
         M, K, x2.stride(0), x2.stride(1),
         # both_key(rows_of(<pre-flatten shape>)) from the caller (the backward below).
-        # None = drivers_trans / checks_trans, which the coordinator threads; that path
+        # None = drivers/checks transition, which the coordinator threads; that path
         # buckets the flattened ROW count, the ambiguity autotune.shape_key removes.
         shape_key=both_key(M) if shape_key is None else shape_key,
     )

@@ -15,7 +15,7 @@ from miniworld_engine._typecheck import typecheck
 
 # NOT called from this file any more -- every launch below keys on `atom_key(L)` (see
 # autotune/shape_key.py: the key is L, the atom count, and this family is level=atom in
-# kernels/registry.csv). Kept only because ``checks_attn.py`` still imports it.
+# kernels/registry.csv). Kept only because ``checks/augmented_attention.py`` still imports it.
 def get_seq_group(length) -> int:
     """Delegates to canonical size-bucketing (autotune.buckets)."""
     from miniworld_engine.autotune.buckets import bucket_linear
@@ -529,7 +529,7 @@ def _attn_bwd(
 # against, and the element count is a function of it (times fixed A/H/D), so nothing is lost by
 # keying the cause instead of the product -- and the family stops holding two bucket spaces at once.
 #
-# NOT called from this file any more. Kept only because ``checks_attn.py`` still imports it.
+# NOT called from this file any more. Kept only because ``checks/augmented_attention.py`` still imports it.
 def get_elem_group(n_elem) -> int:
     """Bucket a flat ELEMENT count (canonical autotune.buckets). Superseded by `atom_key(L)`."""
     from miniworld_engine.autotune.buckets import bucket_mixed

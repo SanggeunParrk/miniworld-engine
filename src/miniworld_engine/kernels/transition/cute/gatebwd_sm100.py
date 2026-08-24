@@ -780,7 +780,7 @@ def _grad_mul_inplace(dA: torch.Tensor, dB: torch.Tensor, ge: torch.Tensor,
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_E"]),)  # noqa: E731
     # N here is a FLAT ELEMENT COUNT (dA.numel()), not even a row count -- there is nothing
     # in it to recover L from, so the key comes from the caller: both_key(rows_of(<pre-
-    # flatten shape>)). None = drivers_trans / checks_trans (coordinator-owned).
+    # flatten shape>)). None = drivers/checks transition (coordinator-owned).
     _grad_mul_kernel[grid](dA, dB, ge, N,
                            shape_key=both_key(N) if shape_key is None else shape_key)
 

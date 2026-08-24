@@ -20,7 +20,8 @@ d_pair_values:
 sweep_axis: seq_len
 sweep_seq_len: 384
 
-kernel: adaptive_layernorm
+target: adaptive_layernorm
+level: module
 implementations:
   - pytorch
   - miniworld

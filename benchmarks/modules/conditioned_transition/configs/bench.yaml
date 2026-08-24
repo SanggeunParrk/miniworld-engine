@@ -20,7 +20,8 @@ d_pair_values:
 sweep_axis: seq_len
 sweep_seq_len: 384
 
-kernel: conditioned_transition
+target: conditioned_transition
+level: module
 implementations:
   - pytorch
   - miniworld

@@ -1,7 +1,7 @@
 """Every kernel the registry declares a checker for must match its torch reference.
 
 This is the suite `pixi run test-gpu` and the CI comment have named all along -- it did not
-exist. The machinery did: `checks_*.py` holds a reference implementation per kernel, 99 of 103
+exist. The machinery did: `kernels/checks/<family>.py` holds a reference implementation per kernel, 99 of 103
 registry rows name one, and `autotune/run_all.py` can run them. Nothing called it from pytest,
 so a wrong number was only ever caught by someone running a module by hand.
 

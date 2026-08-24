@@ -1,0 +1,44 @@
+# Single-bench config (hydra), loaded because `level=kernel target=gemm_gate` names this
+# directory. Generated as a copy of the module base at the time the per-target lookup was
+# introduced -- that base is exactly what this target's runs already loaded, so writing it down
+# changed nothing about what it measures; it only stopped the value from being implicit. Edit the
+# ladders here when this kernel wants its own.
+d_single: 384
+d_pair: 128
+d_single_token: 768
+d_single_atom: 128
+d_pair_atom: 16
+
+n_layers: 1
+n_augment: 32
+mask_prob: 0.0
+min_seq_len: 384
+max_seq_len: 1024
+seq_len_step: 128
+min_d_pair: 128
+max_d_pair: 512
+d_pair_step: 128
+d_pair_values:
+  - 128
+  - 256
+  - 512
+sweep_axis: seq_len   # seq_len | d_pair
+sweep_seq_len: 384    # fixed L for d_pair sweeps
+
+# Which op to bench, and in which namespace. The pair names THIS directory,
+# benchmarks/<level>s/<target>/, and that is how this file was found. `triangle_attention` is
+# both a kernel target and a module target, so neither half identifies a target on its own.
+target: gemm_gate
+level: kernel
+# implementations: filled by `implementations=[all]`, which reads this target's own
+# `implementation == "..."` chain (see target_impls). Pin a list here only to
+# restrict it.
+implementations:
+  - all
+mode: inference        # inference | training
+metric: time           # time | memory
+compile: true
+cudagraph: disabled    # disabled | manual (bucketed capture) | graphed (make_graphed_callables, pad-to-max)
+allow_tf32: true
+precision: "bf16-mixed"
+name_suffix: ""

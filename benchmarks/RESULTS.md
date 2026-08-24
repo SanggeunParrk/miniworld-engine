@@ -22,8 +22,11 @@ benchmarks/kernels/<target>/
 - Each `<gpu>` folder holds `tables/` (CSV) and, for modules, `plots/` (SVG) side by side.
 - `<gpu>`: `h100` (sm90), `b200` (sm100), `a100` (sm80), …
 - `<mode>`: `inference` | `training`; `<axis>`: `seq_len` | `d_pair`
-- `augmented_attention` holds two targets in one folder, so its files are prefixed
-  `atom_` / `token_` (e.g. `results/h100/tables/atom_inference_seq_len.csv`).
+- One target owns exactly one `<target>/` folder, at the level (`kernels/` or `modules/`)
+  named by its `bench.yaml`'s `level:`, so every table is `<mode>_<axis>.csv` with no
+  prefix. (`augmented_attention_token` and `augmented_attention_atom` used to share one
+  `augmented_attention/` folder and disambiguate by an `atom_`/`token_` filename prefix;
+  they are now separate targets with separate folders and unprefixed filenames.)
 
 ## Rules
 

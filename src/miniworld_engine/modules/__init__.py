@@ -1,8 +1,23 @@
 """Model-level ops (parts cut from the full model) that connect fused kernels.
 
-Each op is its own folder (``modules/<op>/``) holding the connecting nn.Module +
-reference + its benchmark results. No triton/cute/cuda backends live here — those
-belong to the fusion units under ``miniworld_engine.kernels``.
+Every op is its own folder (``modules/<op>/``) holding the connecting nn.Module + reference + its
+benchmark results, and every folder holds a ``module.py``. Three ops used to be flat files instead
+(``attention_pair_bias.py``, ``msa_pair_weighted_averaging.py``, ``swa_atom_attention.py``), which
+made the rule above a description of eight of eleven ops.
+
+The flat modules that remain are NOT ops -- they are the shared infrastructure the ops are built
+from, and they are exactly these four:
+
+    dispatch.py    backend selection (public ImplementationType -> internal KernelBackend)
+    exceptions.py  the public implementation enum and its error
+    primitives.py  layer classes the ops compose (Linear, LayerNorm, Dropout, MPLinear)
+    functional.py  free functions the ops compose (sigmoid_gate, swish_gate)
+
+``functional.py`` is named for torch's own split between layer classes and the free functions
+beside them. It was ``ops.py``, one level below :mod:`miniworld_engine.ops` -- which is the public
+WHOLE-OP contract, the opposite kind of thing.
+
+``tests/test_module_layout.py`` holds both halves of this rule.
 
 NOTE: this namespace is an INTERNAL reference / benchmark harness that
 composes the kernels. It is NOT the consumed public contract (that is
@@ -10,30 +25,38 @@ composes the kernels. It is NOT the consumed public contract (that is
 stack and may change without a semver bump.
 """
 
-from .adaptive_layernorm import AdaptiveLayerNorm
-from .augmented_attention import AugmentedAttentionPairBias
-from .conditioned_transition import ConditionedTransition
-from .dispatch import KernelBackend
-from .exceptions import ImplementationType, InvalidImplementationError
-from .attention_pair_bias import AttentionPairBias
-from .msa_pair_weighted_averaging import MSAPairWeightedAveraging
-from .outer_product import OuterProduct, OuterProductMean
-from .pairformer import Pairformer, PairformerBlock, PairformerConfig
-from .primitives import Dropout, LayerNorm, Linear, MPLinear
-from .swa_atom_attention import SWA3DRoPEAttention
-from .transition import Transition
-from .triangle_attention import (
+from miniworld_engine.modules.adaptive_layernorm import AdaptiveLayerNorm
+from miniworld_engine.modules.attention_pair_bias import AttentionPairBias
+from miniworld_engine.modules.augmented_attention import AugmentedAttentionPairBias
+from miniworld_engine.modules.conditioned_transition import ConditionedTransition
+from miniworld_engine.modules.dispatch import KernelBackend
+from miniworld_engine.modules.exceptions import (
+    ImplementationType,
+    InvalidImplementationError,
+)
+from miniworld_engine.modules.msa_pair_weighted_averaging import MSAPairWeightedAveraging
+from miniworld_engine.modules.outer_product import OuterProduct, OuterProductMean
+from miniworld_engine.modules.pairformer import (
+    Pairformer,
+    PairformerBlock,
+    PairformerConfig,
+)
+from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear, MPLinear
+from miniworld_engine.modules.swa_atom_attention import SWA3DRoPEAttention
+from miniworld_engine.modules.transition import Transition
+from miniworld_engine.modules.triangle_attention import (
     BidirectionalTriangleAttention,
     TriangleAttention,
     TrianglePairAttention,
 )
-from .triangle_multiplication import (
+from miniworld_engine.modules.triangle_multiplication import (
     BidirectionalTriangleMultiplication,
     TriangleMultiplication,
 )
 
 __all__ = [
     "AdaptiveLayerNorm",
+    "AttentionPairBias",
     "AugmentedAttentionPairBias",
     "BidirectionalTriangleAttention",
     "BidirectionalTriangleMultiplication",
@@ -44,7 +67,7 @@ __all__ = [
     "KernelBackend",
     "LayerNorm",
     "Linear",
-    "AttentionPairBias",
+    "MPLinear",
     "MSAPairWeightedAveraging",
     "OuterProduct",
     "OuterProductMean",
@@ -52,7 +75,6 @@ __all__ = [
     "PairformerBlock",
     "PairformerConfig",
     "SWA3DRoPEAttention",
-    "MPLinear",
     "Transition",
     "TriangleAttention",
     "TriangleMultiplication",

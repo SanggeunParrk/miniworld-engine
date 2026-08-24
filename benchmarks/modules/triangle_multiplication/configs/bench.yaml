@@ -1,6 +1,6 @@
 # Single-bench config (hydra). Override on the CLI, e.g.
-#   python benchmarks/runners/bench.py kernel=transition implementations=[pytorch,triton]
-#   python benchmarks/runners/bench.py kernel=triangle_multiplication mode=inference
+#   python benchmarks/runners/bench.py target=transition level=module implementations=[pytorch,triton]
+#   python benchmarks/runners/bench.py target=triangle_multiplication level=module mode=inference
 d_single: 384
 d_pair: 128
 d_single_token: 768
@@ -23,10 +23,15 @@ d_pair_values:
 sweep_axis: seq_len   # seq_len | d_pair
 sweep_seq_len: 384    # fixed L for d_pair sweeps
 
-# Which op to bench. One of:
-#   triangle_multiplication | triangle_attention | transition |
-#   adaptive_layernorm | augmented_attention_token | augmented_attention_atom
-kernel: triangle_multiplication
+# Which op to bench, and in which namespace. `level: module` targets (this file's set) are
+# the folders under benchmarks/modules/:
+#   triangle_multiplication | triangle_multiplication_bidirectional | attention_pair_bias |
+#   triangle_attention | transition | conditioned_transition | adaptive_layernorm |
+#   augmented_attention_token | augmented_attention_atom
+# `level: kernel` targets are the folders under benchmarks/kernels/ (same key, other
+# namespace: `triangle_attention` exists at both levels).
+target: triangle_multiplication
+level: module
 implementations:
   - pytorch
   - dtv1

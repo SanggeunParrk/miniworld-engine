@@ -164,6 +164,41 @@ def test_drivers_and_checkers_resolve() -> None:
     assert not bad, f"unresolvable driver/checker references: {bad}"
 
 
+def test_the_harness_is_one_module_per_family() -> None:
+    """The driver/check harness is laid out BY the `family` column, one module per family.
+
+    It used to be eleven flat modules grouped by nothing the repo declares -- `drivers_attn.py`
+    served three families, `drivers_trans.py` two, and the suffixes (`attn`, `ln`, `trans`,
+    `trimul`) abbreviated no name in `registry.csv`. So "which module does this kernel's driver
+    go in" had no answer a machine could give, and every new kernel guessed.
+
+    The `family` column already answers it, so the harness follows it: row -> module, with no
+    grouping left to drift. A helper several families share lives in `drivers/__init__.py` or
+    `checks/__init__.py`; a kernel's own driver and checker live in its family's module.
+    """
+    bad = []
+    for r in _rows():
+        for col, pkg in (("driver", "drivers"), ("check", "checks")):
+            spec = (r.get(col) or "").strip()
+            if not spec:
+                continue
+            mod = spec.partition(":")[0]
+            want = f"miniworld_engine.kernels.{pkg}.{r['family']}"
+            if mod != want:
+                bad.append((r["kernel"], col, mod, f"family is {r['family']}, so expected {want}"))
+    assert not bad, ("driver/check modules that do not match their row's family:\n  "
+                     + "\n  ".join(f"{k} [{c}]: {m} -- {why}" for k, c, m, why in bad))
+
+
+def test_every_family_has_a_harness_module() -> None:
+    """The other direction: a family named in the registry must have both modules on disk, so a
+    new family cannot be declared with nowhere for its drivers to go."""
+    families = sorted({r["family"] for r in _rows()})
+    missing = [f"{pkg}/{f}.py" for f in families for pkg in ("drivers", "checks")
+               if not (KERNELS / pkg / f"{f}.py").is_file()]
+    assert not missing, f"registry families with no harness module: {missing}"
+
+
 def test_kind_matches_the_source() -> None:
     """The hand-entered `kind` against what the source does, via tools/kernel-audit/classify.py.
 

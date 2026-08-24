@@ -8,7 +8,7 @@ import csv
 from collections.abc import Callable
 from pathlib import Path
 import functools
-from typing import Literal, NamedTuple, Protocol, TypedDict, cast
+from typing import Any, Literal, NamedTuple, Protocol, TypedDict, cast
 
 # When run as `python benchmarks/runners/bench.py`, sys.path[0] is
 # `.../benchmarks/runners`, which can
@@ -106,7 +106,16 @@ class BenchConfig(BaseModel):
     #: Pin transition's hand-CUDA fused b2b forward on/off; None = let the engine decide.
     pin_transition_cuda_b2b: bool | None = None
 
-    kernel: str
+    #: What to bench, and in which of the two namespaces. `level` is not a label on `target`: the
+    #: two levels are SEPARATE namespaces, and the same name legitimately exists in both -- a
+    #: kernel and the module built out of it (`triangle_attention` is a kernel target AND a module
+    #: target today; `transition`, `layernorm`, ... are one bench away from being both). A single
+    #: flat namespace is what forced the kernel side to abbreviate its names, purely to dodge
+    #: those collisions.
+    #: `level` is exactly the directory the target lives under: "kernel" -> `benchmarks/kernels/`,
+    #: "module" -> `benchmarks/modules/` (see `target_dir`), with no exceptions.
+    target: str
+    level: Literal["kernel", "module"]
     implementations: list[str] = [
         ImplementationType.PYTORCH.value,
         ImplementationType.TRITON.value,
@@ -337,22 +346,23 @@ def actual_compiled_flag(conf: BenchConfig) -> bool:
     `compile=true cudagraph=manual` runs eager for those and compiled for the other four. The
     column recorded the REQUEST, and the request is not what ran: 330 of the 350 committed result
     tables say `compiled=True, cudagraph=manual`, and for triangle_multiplication,
-    triangle_attention and bias_only_attention that is a measurement of eager code.
+    triangle_attention and attention_pair_bias that is a measurement of eager code.
 
     Read from the bench function's own source, like `target_impls`, rather than the hand-kept
-    `kernel == "transition"` list this used to be -- which is how three of the four went unnoticed.
+    `target == "transition"` list this used to be -- which is how three of the four went unnoticed.
     """
-    if conf.compile and conf.cudagraph != "disabled" and _skips_compile_under_cudagraph(conf.kernel):
+    if (conf.compile and conf.cudagraph != "disabled"
+            and _skips_compile_under_cudagraph(conf.level, conf.target)):
         return False
     return conf.compile
 
 
 @functools.lru_cache(maxsize=None)
-def _skips_compile_under_cudagraph(target: str) -> bool:
+def _skips_compile_under_cudagraph(level: str, target: str) -> bool:
     """Does ``target``'s bench guard its compile on ``cudagraph == "disabled"``?"""
     import inspect as _inspect  # noqa: PLC0415
 
-    fn = KERNEL_MAP.get(target)
+    fn = targets_for(level).get(target)
     if fn is None:
         return False
     src = _inspect.getsource(fn)
@@ -603,7 +613,7 @@ def triangle_multiplication_path(implementation: str, mode: str, d_pair: int) ->
     return implementation
 
 
-def bench_triangle_multiplication(
+def bench_module_triangle_multiplication(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -830,7 +840,7 @@ def bench_triangle_multiplication(
     )
 
 
-def bench_bias_only_attention(
+def bench_module_attention_pair_bias(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -916,7 +926,7 @@ def bench_bias_only_attention(
     )
 
 
-def bench_triangle_attention(
+def bench_module_triangle_attention(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -994,7 +1004,7 @@ def bench_triangle_attention(
     )
 
 
-def bench_transition(
+def bench_module_transition(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -1159,7 +1169,7 @@ def bench_transition(
     )._replace(**accuracy)
 
 
-def bench_conditioned_transition(
+def bench_module_conditioned_transition(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -1249,7 +1259,7 @@ def bench_conditioned_transition(
     )
 
 
-def bench_adaptive_layernorm(
+def bench_module_adaptive_layernorm(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -1338,7 +1348,7 @@ def bench_adaptive_layernorm(
         return as_bench_result(float("nan"))
 
 
-def bench_augmented_attention_token(
+def bench_module_augmented_attention_token(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -1397,7 +1407,7 @@ def bench_augmented_attention_token(
     )
 
 
-def bench_augmented_attention_atom(
+def bench_module_augmented_attention_atom(
     conf: BenchConfig,
     seq_len: int,
     implementation: str,
@@ -1460,8 +1470,8 @@ def bench_augmented_attention_atom(
         return as_bench_result(float("nan"))
 
 
-def bench_bidirectional_triangle_multiplication(conf, seq_len, implementation, fabric):
-    return bench_triangle_multiplication(conf, seq_len, implementation, fabric, bidirectional=True)
+def bench_module_triangle_multiplication_bidirectional(conf, seq_len, implementation, fabric):
+    return bench_module_triangle_multiplication(conf, seq_len, implementation, fabric, bidirectional=True)
 
 
 # =============================================================================================
@@ -1514,7 +1524,7 @@ def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
 
 
 # ---- FORWARD operations -----------------------------------------------------------------------
-def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
+def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
     """Gated dual-GEMM in-projection (trimul front): left=(x@WL)*sigma(x@WLg), right=..., gate=sigma(x@Wg).
     Rows: pytorch, trimul_front_triton, trimul_inproj_cute, tm1_cute, triton_tm1,
     trimul_front_sm100(dep). Variants without a gate compare left|right only."""
@@ -1573,7 +1583,7 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
         def run(x):
             # The pair activation, NOT its (M, D) flattening: TritonTM1Function reads
             # `token_key(length_of(x.shape))` before its own rearrange, so a pre-flattened
-            # (M, D) is refused outright by the shape_key guard. drivers_trimul says the same.
+            # (M, D) is refused outright by the shape_key guard. drivers/trimul_inproj says the same.
             left, right = triton_tm1(x, wl, wlg, wr, wrg)
             return left.reshape(L * L, D), right.reshape(L * L, D)
         path = "kernels.tm1.triton.main"
@@ -1597,7 +1607,7 @@ def bench_kernel_dual_gemm_epil(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, run, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
 
 
-def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
+def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
     """Fused LayerNorm+Linear (GEMM w/ LN epilogue): Y = LN(x) @ W^T. N=K=d. Rows: pytorch,
     layernorm_linear_triton, layernorm_linear_cute(M1), layernorm_linear_cute_fused(M2), layernorm_linear_te."""
     import torch.nn.functional as F
@@ -1614,7 +1624,7 @@ def bench_kernel_gemm_epil(conf, seq_len, implementation, fabric):
         # reads the shape key off what it was handed, so a (M, D) input is refused by the
         # shape_key guard -- every `layernorm_linear_triton` row came back `failed`. Each backend
         # below that genuinely wants a matrix flattens it explicitly, so all rows still measure
-        # the same numbers on the same data. drivers_ln's `layernorm_linear_fwd_triton` carries
+        # the same numbers on the same data. drivers/layernorm_linear's `layernorm_linear_fwd_triton` carries
         # the same note.
         torch.manual_seed(1)
         return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16).contiguous()
@@ -1802,9 +1812,9 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype=tname)
 
 
-def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
+def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
     """Triangle self-attention: softmax(QK^T*d^-0.5 + pair_bias)*V. q,k,v:(1,H,L,L,dh) bias:(1,H,L,L).
-    Rows: pytorch(SDPA), triton_tri_attn, triton_tri_attn_miniworld(dep), triton_tri_attn_perf(dep)."""
+    Rows: pytorch(SDPA), triton_triangle_attention, triton_triangle_attention_miniworld(dep), triton_triangle_attention_perf(dep)."""
     import torch.nn.functional as F
 
     L, dh = seq_len, 32
@@ -1825,11 +1835,11 @@ def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
 
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.sdpa"
-    elif implementation == "triton_tri_attn":
+    elif implementation == "triton_triangle_attention":
         from miniworld_engine.kernels import triton_triangle_attention_pair_bias as fn
         kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
         path = "kernels.triangle_attention.triton.main"
-    elif implementation == "triton_tri_attn_atomic":
+    elif implementation == "triton_triangle_attention_atomic":
         from miniworld_engine.kernels.triangle_attention.triton.atomic import (
             triton_triangle_attention_pair_bias as fn,
         )
@@ -1847,9 +1857,9 @@ def bench_kernel_tri_attn(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.sdpa", dtype="bfloat16")
 
 
-def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
+def bench_kernel_bias_only_attention(conf, seq_len, implementation, fabric):
     """Bias-only attention: out[i,j,d]=sum_k softmax_k(bias[j,k])*v[i,k,d]. v:(1,H,L,L,dh) bias:(1,H,L,L).
-    Rows: pytorch, triton_bias_attn."""
+    Rows: pytorch, triton_bias_only_attention."""
     import torch.nn.functional as F
 
     L, dh = seq_len, 32
@@ -1867,7 +1877,7 @@ def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
 
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.einsum"
-    elif implementation == "triton_bias_attn":
+    elif implementation == "triton_bias_only_attention":
         from miniworld_engine.kernels import triton_bias_only_attention
         kfn = lambda v, b: triton_bias_only_attention(v, b)  # noqa: E731
         path = "kernels.bias_only_attention.triton.main"
@@ -1878,9 +1888,9 @@ def bench_kernel_bias_attn(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16")
 
 
-def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
+def bench_kernel_augmented_attention(conf, seq_len, implementation, fabric):
     """Augmented pair-bias attention: softmax(q.k*d^-0.5 + bias)*v. q,k,v:(A,1,L,H,dh) bias:(1,L,L,H).
-    Rows: pytorch, triton_aug_attn, aug_attn_memory_efficient."""
+    Rows: pytorch, triton_augmented_attention, augmented_attention_memory_efficient."""
     import torch.nn.functional as F
 
     L, A, H, dh = seq_len, 8, 4, 32
@@ -1901,13 +1911,13 @@ def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
 
     if implementation == "pytorch":
         kfn, path = ref, "pytorch.einsum"
-    elif implementation == "triton_aug_attn":
+    elif implementation == "triton_augmented_attention":
         from miniworld_engine.kernels import triton_augmented_attention_pair_bias
         # The dispatch wrapper's default: the compute-efficient backend in triton/main.py. The
-        # memory-efficient one is the aug_attn_memory_efficient row below.
+        # memory-efficient one is the augmented_attention_memory_efficient row below.
         kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b)  # noqa: E731
         path = "kernels.augmented_attention.triton.main"
-    elif implementation == "aug_attn_memory_efficient":
+    elif implementation == "augmented_attention_memory_efficient":
         from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import (
             triton_augmented_attention_pair_bias as fn,
         )
@@ -1920,7 +1930,7 @@ def bench_kernel_aug_attn(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16")
 
 
-def bench_kernel_ln_mask(conf, seq_len, implementation, fabric):
+def bench_kernel_fused_ln_mask(conf, seq_len, implementation, fabric):
     """Fused LayerNorm+mask: out = LN(x)*mask (per-row scale). Rows: pytorch, fused_ln_mask."""
     import torch.nn.functional as F
 
@@ -1988,7 +1998,7 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
 
 
-def bench_kernel_cond_transition_tail(conf, seq_len, implementation, fabric):
+def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabric):
     """Post-adaLN conditioned-transition tail: out=squeeze(silu(x@Wa)*(x@Wb)); y=sigma(cond@Wsc+b)*out.
     fp32. Rows: pytorch, triton_cond_transition."""
     from miniworld_engine import kernels
@@ -2043,7 +2053,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     # The pair activation (1, L, L, D), NOT its (M, D) flattening. `_bwd_*_impl` reshapes
     # internally and reads `both_key(length_of(x.shape))` off the 4-D shape, so a pre-flattened
     # (M, D) is refused by the shape_key guard -- 18 of this file's bench rows came back
-    # `failed: shape (..., D) is already flattened`. drivers_ln fixed this; the bench did not.
+    # `failed: shape (..., D) is already flattened`. drivers/layernorm fixed this; the bench did not.
     x = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
     dy = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
     eps = 1e-5
@@ -2089,7 +2099,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     )._replace(**acc)
 
 
-def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
+def bench_kernel_gemm_gate_bwd(conf, seq_len, implementation, fabric):
     """Gate-elementwise backward: bwd of y=sigma(x_n@Wg)*proj -> (d_proj, dx_n, dWg). Rows: pytorch(pure),
     gate_elem_bwd. Cosine on concatenated grads."""
     D, L = conf.d_pair, seq_len
@@ -2125,7 +2135,7 @@ def bench_kernel_gate_bwd(conf, seq_len, implementation, fabric):
     )._replace(**acc)
 
 
-def bench_kernel_dual_gemm_epil_bwd(conf, seq_len, implementation, fabric):
+def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     """Gated dual-GEMM front backward: (d_left,d_right)->dx_n + 4 weight grads. Rows: pytorch(pure),
     front_bwd_fused. Cosine on concatenated (dx_n|dWL|dWLg|dWR|dWRg)."""
     D, L, H = conf.d_pair, seq_len, conf.d_pair
@@ -2265,7 +2275,7 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
                                 ref="module.reference.torch", dtype="bfloat16")
 
 
-def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
+def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     """LayerNorm+Linear backward (autograd, backward-only). Rows: pytorch, layernorm_linear_te,
     layernorm_linear_cute. Cosine on dx vs pytorch autograd."""
     import torch.nn.functional as F
@@ -2300,40 +2310,81 @@ def bench_kernel_gemm_epil_bwd(conf, seq_len, implementation, fabric):
                                 ref="pytorch.autograd", dtype="bfloat16")
 
 
-KERNEL_MAP = {
+# A kernel target is named after the kernel FAMILY in `src/miniworld_engine/kernels/registry.csv`
+# that it benches -- `triangle_attention`, `bias_only_attention`, `augmented_attention`,
+# `fused_ln_mask`, `layernorm`, `adaln`, `conditioned_transition` (whose target benches the
+# post-AdaLN `_tail` of the family). The four exceptions bench a fused OP SHAPE that several
+# families implement rather than one family -- `dual_gemm_epilogue`, `gemm_epilogue`, `gemm_gate`,
+# `transition_b2b` -- and are named after the shape. No abbreviations: the name is spelled the way
+# the engine spells it. A `_bwd` suffix marks the backward-only bench of the same op. The key is
+# also the directory: `benchmarks/kernels/<target>/` (see `target_dir`), and the bench function is
+# `bench_kernel_<target>` (asserted below).
+KERNEL_TARGETS = {
     # kernel function-operations (benchmarks/kernels/<op>/): forward
-    "dual_gemm_epil": bench_kernel_dual_gemm_epil,
-    "gemm_epil": bench_kernel_gemm_epil,
+    "dual_gemm_epilogue": bench_kernel_dual_gemm_epilogue,
+    "gemm_epilogue": bench_kernel_gemm_epilogue,
     "transition_b2b": bench_kernel_transition_b2b,
     "layernorm": bench_kernel_layernorm,
     "adaln": bench_kernel_adaln,
-    "tri_attn": bench_kernel_tri_attn,
-    "bias_attn": bench_kernel_bias_attn,
-    "aug_attn": bench_kernel_aug_attn,
-    "ln_mask": bench_kernel_ln_mask,
+    "triangle_attention": bench_kernel_triangle_attention,
+    "bias_only_attention": bench_kernel_bias_only_attention,
+    "augmented_attention": bench_kernel_augmented_attention,
+    "fused_ln_mask": bench_kernel_fused_ln_mask,
     "gemm_gate": bench_kernel_gemm_gate,
-    "cond_transition_tail": bench_kernel_cond_transition_tail,
+    "conditioned_transition_tail": bench_kernel_conditioned_transition_tail,
     # kernel function-operations: backward
     "layernorm_bwd": bench_kernel_layernorm_bwd,
-    "gate_bwd": bench_kernel_gate_bwd,
-    "dual_gemm_epil_bwd": bench_kernel_dual_gemm_epil_bwd,
+    "gemm_gate_bwd": bench_kernel_gemm_gate_bwd,
+    "dual_gemm_epilogue_bwd": bench_kernel_dual_gemm_epilogue_bwd,
     "adaln_bwd": bench_kernel_adaln_bwd,
     "transition_b2b_bwd": bench_kernel_transition_b2b_bwd,
-    "gemm_epil_bwd": bench_kernel_gemm_epil_bwd,
-    # module-level benches (benchmarks/modules/<mod>/)
-    "triangle_multiplication": bench_triangle_multiplication,
-    "triangle_multiplication_bidirectional": bench_bidirectional_triangle_multiplication,
-    "bias_only_attention": bench_bias_only_attention,
-    "triangle_attention": bench_triangle_attention,
-    "transition": bench_transition,
-    "conditioned_transition": bench_conditioned_transition,
-    "adaptive_layernorm": bench_adaptive_layernorm,
-    "augmented_attention_token": bench_augmented_attention_token,
-    "augmented_attention_atom": bench_augmented_attention_atom,
+    "gemm_epilogue_bwd": bench_kernel_gemm_epilogue_bwd,
 }
 
-def target_impls(target: str) -> tuple[str, ...]:
-    """Every implementation ``target`` knows how to bench.
+# A module target is named after the production module it benches, spelled as the engine spells
+# it. The key is the directory `benchmarks/modules/<target>/` and the function is
+# `bench_module_<target>` (asserted below). Names may repeat KERNEL_TARGETS keys on purpose: the
+# module and the kernel it is built out of are two different benches of the same op, told apart
+# by `level`, not by mangling one of the two names.
+MODULE_TARGETS = {
+    "triangle_multiplication": bench_module_triangle_multiplication,
+    "triangle_multiplication_bidirectional": bench_module_triangle_multiplication_bidirectional,
+    "attention_pair_bias": bench_module_attention_pair_bias,
+    "triangle_attention": bench_module_triangle_attention,
+    "transition": bench_module_transition,
+    "conditioned_transition": bench_module_conditioned_transition,
+    "adaptive_layernorm": bench_module_adaptive_layernorm,
+    "augmented_attention_token": bench_module_augmented_attention_token,
+    "augmented_attention_atom": bench_module_augmented_attention_atom,
+}
+
+# The naming rules above are checked here, not just written down: a target whose function is named
+# off-convention (or a kernel target parked in MODULE_TARGETS) fails at import, which is the only
+# way a convention survives the next addition. NOT asserted: that the two key sets are disjoint --
+# a shared name is the point of having a level. `triangle_attention` is already both a kernel
+# target and a module target, and `transition`/`layernorm`/... become both the day someone adds
+# the missing side.
+for _name, _fn in KERNEL_TARGETS.items():
+    assert _fn.__name__ == f"bench_kernel_{_name}", (
+        f"kernel target {_name!r} must map to bench_kernel_{_name}, got {_fn.__name__}"
+    )
+for _name, _fn in MODULE_TARGETS.items():
+    assert _fn.__name__ == f"bench_module_{_name}", (
+        f"module target {_name!r} must map to bench_module_{_name}, got {_fn.__name__}"
+    )
+del _name, _fn
+
+
+def targets_for(level: str) -> dict[str, Callable[..., Any]]:
+    """The target->bench-function table of one level. The two levels are separate namespaces."""
+    # cast, not an annotation on the tables themselves: the import-time convention check below
+    # reads each entry's `__name__`, which a `Callable` does not have.
+    return cast("dict[str, Callable[..., Any]]",
+                KERNEL_TARGETS if level == "kernel" else MODULE_TARGETS)
+
+
+def target_impls(level: str, target: str) -> tuple[str, ...]:
+    """Every implementation ``target`` (of ``level``) knows how to bench.
 
     Read out of this module's own source rather than kept as a second list: the names live in each
     bench function's ``implementation == "..."`` chain, and any hand-maintained copy drifts the
@@ -2346,7 +2397,7 @@ def target_impls(target: str) -> tuple[str, ...]:
     import ast as _ast  # noqa: PLC0415
     import inspect as _inspect  # noqa: PLC0415
 
-    fn = KERNEL_MAP.get(target)
+    fn = targets_for(level).get(target)
     if fn is None:
         return ()
     tree = _ast.parse(_inspect.getsource(fn))
@@ -2379,39 +2430,38 @@ def target_impls(target: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def expand_implementations(target: str, requested: list[str]) -> list[str]:
+def expand_implementations(level: str, target: str, requested: list[str]) -> list[str]:
     """Resolve the sentinel ``all`` to every implementation of ``target``."""
     if [r.strip().lower() for r in requested] != ["all"]:
         return requested
-    impls = target_impls(target)
+    impls = target_impls(level, target)
     if not impls:
-        msg = f"implementations=all: no implementations found for target {target!r}"
+        msg = f"implementations=all: no implementations found for {level} target {target!r}"
         raise ValueError(msg)
     return list(impls)
 
 
 _KERNELS_ROOT = _REPO_ROOT / "benchmarks" / "kernels"
 _MODULES_ROOT = _REPO_ROOT / "benchmarks" / "modules"
-_KERNEL_TARGETS = [
-    "dual_gemm_epil", "gemm_epil", "transition_b2b", "layernorm", "adaln", "tri_attn",
-    "bias_attn", "aug_attn", "ln_mask", "gemm_gate", "cond_transition_tail",
-    "layernorm_bwd", "gate_bwd", "dual_gemm_epil_bwd", "adaln_bwd", "transition_b2b_bwd",
-    "gemm_epil_bwd",
-]
-TARGET_DIRS = {name: _KERNELS_ROOT / name for name in _KERNEL_TARGETS}
-TARGET_DIRS.update({
-    "triangle_multiplication": _MODULES_ROOT / "triangle_multiplication",
-    "triangle_multiplication_bidirectional": _MODULES_ROOT / "triangle_multiplication_bidirectional",
-    "bias_only_attention": _MODULES_ROOT / "bias_only_attention",
-    "triangle_attention": _MODULES_ROOT / "triangle_attention",
-    "transition": _MODULES_ROOT / "transition",
-    "conditioned_transition": _MODULES_ROOT / "conditioned_transition",
-    "adaptive_layernorm": _MODULES_ROOT / "adaptive_layernorm",
-    "augmented_attention_token": _MODULES_ROOT / "augmented_attention",
-    "augmented_attention_atom": _MODULES_ROOT / "augmented_attention",
-})
 
-# Triton autotuner objects live in the per-op `triton/main.py` of each kernel.
+
+def target_dir(level: str, target: str) -> Path:
+    """Where ``target``'s configs/artifacts/results live.
+
+    The mapping is the identity, not a lookup table: `level` IS the directory
+    (`benchmarks/kernels/` or `benchmarks/modules/`) and `target` IS the folder name under it,
+    for every target with no exceptions. The hand-written dict this replaced is what let two
+    targets (`augmented_attention_token`/`_atom`) quietly share one folder and disambiguate their
+    tables by filename prefix instead.
+    """
+    root = _KERNELS_ROOT if level == "kernel" else _MODULES_ROOT
+    return root / target
+
+
+# Triton autotuner objects live in the per-op `triton/main.py` of each kernel. Keyed by MODULE
+# target: a module composes several kernel families, so its summary has to gather all of them. A
+# kernel target benches one op directly and needs no such list -- and must not borrow a module's,
+# now that the two namespaces share names (`triangle_attention` is both).
 AUTOTUNE_MODULES = {
     "triangle_multiplication": [
         "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
@@ -2426,7 +2476,7 @@ AUTOTUNE_MODULES = {
         "miniworld_engine.kernels.tm2.triton.main",
         "miniworld_engine.kernels.trimul_inproj.triton.back_fused",
     ],
-    "bias_only_attention": [
+    "attention_pair_bias": [
         "miniworld_engine.kernels.layernorm.triton.main",
         "miniworld_engine.kernels.layernorm_linear.triton.main",
         "miniworld_engine.kernels.bias_only_attention.triton.gate_out",
@@ -2461,9 +2511,11 @@ AUTOTUNE_MODULES = {
 }
 
 
-def get_autotuners(kernel: str) -> dict[str, Autotuner]:
+def get_autotuners(level: str, target: str) -> dict[str, Autotuner]:
+    if level != "module":
+        return {}
     autotuners = {}
-    for module_name in AUTOTUNE_MODULES.get(kernel, []):
+    for module_name in AUTOTUNE_MODULES.get(target, []):
         try:
             module = importlib.import_module(module_name)
         except Exception:
@@ -2491,12 +2543,13 @@ def format_autotune_config(config: triton.Config) -> str:
 
 
 def capture_autotune_state(
-    kernel: str,
+    level: str,
+    target: str,
     cache_records: dict[str, dict[tuple, triton.Config]],
     single_config_records: dict[str, triton.Config],
     seen_autotuners: set[str],
 ) -> None:
-    for autotuner_name, autotuner in sorted(get_autotuners(kernel).items()):
+    for autotuner_name, autotuner in sorted(get_autotuners(level, target).items()):
         seen_autotuners.add(autotuner_name)
         cache = getattr(autotuner, "cache", None) or {}
         if cache:
@@ -2510,17 +2563,18 @@ def capture_autotune_state(
 
 
 def build_autotune_summary(
-    kernel: str,
+    level: str,
+    target: str,
     cache_records: dict[str, dict[tuple, triton.Config]] | None = None,
     single_config_records: dict[str, triton.Config] | None = None,
     seen_autotuners: set[str] | None = None,
 ) -> str | None:
     cache_records = cache_records or {}
     single_config_records = single_config_records or {}
-    seen_autotuners = seen_autotuners or set(get_autotuners(kernel))
+    seen_autotuners = seen_autotuners or set(get_autotuners(level, target))
 
     sections = []
-    current_autotuners = get_autotuners(kernel)
+    current_autotuners = get_autotuners(level, target)
     for autotuner_name in sorted(seen_autotuners):
         lines = [autotuner_name]
         configs = getattr(current_autotuners.get(autotuner_name), "configs", [])
@@ -2631,11 +2685,6 @@ def fabric_precision(precision: int | str) -> str:
     return "32-true" if precision == FP32_PRECISION else str(precision)
 
 
-def target_kind(kernel: str) -> str:
-    target_dir = TARGET_DIRS[kernel]
-    return target_dir.parent.name.rstrip("s")
-
-
 def csv_row(
     *,
     conf: BenchConfig,
@@ -2663,8 +2712,8 @@ def csv_row(
         implementation_type = OLD_TRITON_IMPL
     return {
         "run_name": run_name,
-        "target_kind": target_kind(conf.kernel),
-        "target": conf.kernel,
+        "target_kind": conf.level,
+        "target": conf.target,
         "device": device_name,
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
@@ -2707,8 +2756,55 @@ def csv_row(
     }
 
 
+#: The config directory used when the command line names no target -- `--help`, or a bare
+#: `python bench.py`, both of which must still load something for hydra to start. It is the module
+#: base every target's config was copied from.
+_FALLBACK_CONFIG_DIR = "../modules/triangle_multiplication/configs"
+
+
+def _target_config_path() -> str:
+    """Hydra's config directory for the target named on the command line.
+
+    ``@hydra.main``'s ``config_path`` is a decorator argument, so it used to be one module's
+    directory for every run: `benchmarks/modules/triangle_multiplication/configs/bench.yaml` was
+    the base of a kernel bench, of an atom bench, of everything. The other 25 targets' configs
+    were files nothing loaded, and they did not agree with what ran --
+    `augmented_attention_atom/configs/bench.yaml` declares a 128-384 ladder and the target was
+    swept at 384-1024, which is token-scale lengths on an atom-scale op.
+
+    The path is a pure function of `level` and `target`, and both are plain overrides, so it can
+    be read off argv before hydra starts. Returned relative to THIS file, which is what hydra
+    requires. A named target whose directory has no `bench.yaml` is an error, not a fall back to
+    somebody else's config -- silently loading another target's ladders is the failure being
+    removed here.
+    """
+    picked: dict[str, str] = {}
+    for arg in sys.argv[1:]:
+        key, sep, value = arg.partition("=")
+        if sep and key in ("level", "target"):
+            picked[key] = value
+    level, target = picked.get("level"), picked.get("target")
+    if level is None and target is None:
+        return _FALLBACK_CONFIG_DIR
+    if level is None or target is None:
+        # One without the other picks a config by accident: `target=layernorm` alone would load
+        # the module base and then look `layernorm` up in MODULE_TARGETS, which is a KeyError
+        # several hundred lines later.
+        msg = (f"target and level go together: got level={level!r} target={target!r}. `level` is "
+               f"`kernel` or `module`, and the pair names benchmarks/<level>s/<target>/.")
+        raise ValueError(msg)
+    here = Path(__file__).resolve().parent
+    config_dir = here.parent / f"{level}s" / target / "configs"
+    if not (config_dir / "bench.yaml").is_file():
+        msg = (f"no bench config for level={level} target={target}: expected "
+               f"{config_dir / 'bench.yaml'}. Every target owns one -- see "
+               f"tests/test_bench_config_per_target.py.")
+        raise FileNotFoundError(msg)
+    return os.path.relpath(config_dir, here)
+
+
 @hydra.main(
-    config_path="../modules/triangle_multiplication/configs",
+    config_path=_target_config_path(),
     config_name="bench",
     version_base=None,
 )
@@ -2730,8 +2826,8 @@ def main(cfg: DictConfig) -> None:
         raise ValueError(msg)
     from miniworld_engine.autotune.capture import install_launch_recorder
     install_launch_recorder()   # coverage accounting; no effect on what or how anything is benched
-    conf.implementations = expand_implementations(conf.kernel, conf.implementations)
-    bench_func = KERNEL_MAP[conf.kernel]
+    conf.implementations = expand_implementations(conf.level, conf.target, conf.implementations)
+    bench_func = targets_for(conf.level)[conf.target]
 
     torch.backends.cuda.matmul.allow_tf32 = conf.allow_tf32
     # Benchmark harness must measure the RAW module/kernel, NOT a training-framework wrapper.
@@ -2794,7 +2890,7 @@ def main(cfg: DictConfig) -> None:
         _capture.install()
 
     bench_args = [
-        conf.kernel,
+        conf.target,
         f"n_layers={conf.n_layers}",
         mode_label(conf.mode),
         conf.metric,
@@ -2815,7 +2911,7 @@ def main(cfg: DictConfig) -> None:
     run_name = "_".join(bench_args)
 
     gpu_name = torch.cuda.get_device_name(0)
-    results_dir = TARGET_DIRS[conf.kernel] / "artifacts" / gpu_name
+    results_dir = target_dir(conf.level, conf.target) / "artifacts" / gpu_name
     results_dir.mkdir(parents=True, exist_ok=True)
     csv_path = results_dir / f"{run_name}.csv"
     tmp_csv_path = csv_path.with_suffix(f"{csv_path.suffix}.tmp")
@@ -2846,7 +2942,8 @@ def main(cfg: DictConfig) -> None:
                 try:
                     result = bench_func(conf, seq_len, implementation, fabric)
                     capture_autotune_state(
-                        conf.kernel,
+                        conf.level,
+                        conf.target,
                         autotune_cache_records,
                         autotune_single_config_records,
                         seen_autotuners,
@@ -2868,13 +2965,13 @@ def main(cfg: DictConfig) -> None:
                 writer.writerow(row)
                 if result is None:
                     print(
-                        f"{conf.kernel} seq_len={seq_len} d_pair={d_pair} "
+                        f"{conf.target} seq_len={seq_len} d_pair={d_pair} "
                         f"implementation={implementation} failed: {error}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"{conf.kernel} seq_len={seq_len} d_pair={d_pair} "
+                        f"{conf.target} seq_len={seq_len} d_pair={d_pair} "
                         f"implementation={implementation} {conf.metric}={result.value:.6g} "
                         f"{result_unit(conf.metric)}",
                         flush=True,
@@ -2900,7 +2997,8 @@ def main(cfg: DictConfig) -> None:
         _capture.reset()
 
     autotune_summary = build_autotune_summary(
-        conf.kernel,
+        conf.level,
+        conf.target,
         cache_records=autotune_cache_records,
         single_config_records=autotune_single_config_records,
         seen_autotuners=seen_autotuners,

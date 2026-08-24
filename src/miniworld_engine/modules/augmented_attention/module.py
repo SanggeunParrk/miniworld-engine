@@ -18,7 +18,7 @@ from miniworld_engine.modules.exceptions import (
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 from ..adaptive_layernorm.module import AdaptiveLayerNorm
-from ..ops import sigmoid_gate
+from miniworld_engine.modules.functional import sigmoid_gate
 
 
 class AugmentedAttentionPairBias(nn.Module):

@@ -110,7 +110,7 @@ def _cdup_interleave(ge: Tensor, shape_key: int | None = None) -> Tensor:
     _cdup_interleave_kernel[grid](
         ge, o, M, N, 2 * N, ge.stride(0), ge.stride(1), o.stride(0),
         # both_key(rows_of(<pre-flatten shape>)) from transition/cute/fused.py's backward.
-        # None = drivers_trans / checks_trans (coordinator-owned): buckets the flattened ROW
+        # None = drivers/checks transition (coordinator-owned): buckets the flattened ROW
         # count, the L-vs-L*L ambiguity autotune.shape_key removes.
         shape_key=both_key(M) if shape_key is None else shape_key,
     )

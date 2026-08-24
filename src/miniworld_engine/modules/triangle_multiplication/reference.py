@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.modules.ops import sigmoid_gate
+from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 

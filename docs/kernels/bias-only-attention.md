@@ -9,11 +9,14 @@ kernel structure. Full triangular self-attention is tracked separately under the
 
 ## Scope
 
-- Module target: `bias_only_attention`
-- Benchmark config: `benchmarks/modules/bias_only_attention/configs/bench.yaml`
+- Module target: `attention_pair_bias` (the production module this path benches).
+  It was called `bias_only_attention` until the bench targets were renamed after
+  what they actually construct; `bias_only_attention` is now the KERNEL-level
+  target for the family under `kernels/bias_only_attention/`.
+- Benchmark config: `benchmarks/modules/attention_pair_bias/configs/bench.yaml`
 - Runner: `benchmarks/runners/bench.py`
-- Run: `python benchmarks/runners/bench.py kernel=bias_only_attention`
-- Artifacts: `benchmarks/modules/bias_only_attention/artifacts/`
+- Run: `python benchmarks/runners/bench.py target=attention_pair_bias level=module`
+- Artifacts: `benchmarks/modules/attention_pair_bias/artifacts/`
 
 Implementations in the final benchmark:
 
@@ -63,8 +66,8 @@ Validated targeted repros:
 Run:
 
 ```bash
-sbatch --export=ALL,BENCH_TARGET=bias_only_attention,MINIWORLD_BIASONLY_AUTOTUNE=off \
-  --output=benchmarks/modules/bias_only_attention/artifacts/bias_only_%j.out \
+sbatch --export=ALL,BENCH_TARGET=attention_pair_bias,MINIWORLD_BIASONLY_AUTOTUNE=off \
+  --output=benchmarks/modules/attention_pair_bias/artifacts/bias_only_%j.out \
   submits/run_bench.sbatch
 ```
 

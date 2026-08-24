@@ -19,7 +19,7 @@ reported 36 findings where there are 3, because `_attn_bwd_preprocess` names fou
 kernels. That mistake has now been made three times in this repo; see launch_bind.py.
 
 KNOWN LIMIT: imports are collected per FILE, not per scope. A file with several function-local
-imports of one name from different modules (checks_attn.py does this four times) attributes them
+imports of one name from different modules (checks/triangle_attention.py does this four times) attributes them
 all to whichever import comes last, which produces a false positive. Such a finding is reported
 with a marker rather than silently dropped.
 """

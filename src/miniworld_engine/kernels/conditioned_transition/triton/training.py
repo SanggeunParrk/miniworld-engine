@@ -244,7 +244,7 @@ def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
 # `D` is a tl.constexpr and is NOT in the key -- deliberately, because `K` already covers it.
 # D = ws.shape[0] and K = x.shape[1] are both the module's d_hidden (ConditionedTransition:
 # "K = D = d_hidden"; expand d_hidden -> n*d_hidden, squeeze n*d_hidden -> d_hidden), and every
-# launcher in the repo -- module.py, drivers_adaln._ct_args, checks_adaln -- builds ws as (D, ND)
+# launcher in the repo -- module.py, drivers.conditioned_transition._ct_args, checks.conditioned_transition -- builds ws as (D, ND)
 # with D == K. Keying on both would only duplicate the same partition. ND stays keyed: n differs
 # per module (2 here, 4 in transition/) and the driver harness moves ND independently of D.
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_saveact_triton"),
