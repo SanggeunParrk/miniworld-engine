@@ -41,6 +41,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -153,18 +155,33 @@ def trimul_front_triton(x, WL, WLg, WR, WRg, Wg):
     # caller if you need it. See docs/kernel-optimization/trimul_batch_generalization.
     B, L, L2, D = x.shape
     assert B == 1 and L == L2
-    M, LL = L * L, L * L
+    M = L * L
     x_flat = x.reshape(M, D)
     # Interleave each half's (gate-logit, proj) columns: col 2c = Wxg[:,c], 2c+1 =
     # Wx[:,c], so the kernel's reshape((...,2)).split() recovers (g, p) per half.
     left = torch.stack([WLg, WL], dim=2).reshape(D, 2 * D)   # (D,2D) = [g0 p0 ...]
     right = torch.stack([WRg, WR], dim=2).reshape(D, 2 * D)
     Wlr = torch.cat([left, right], dim=1).contiguous()       # (D,4D)
-    lr = torch.empty(B, 2 * D, L, L, device=x.device, dtype=x.dtype)  # bdll storage
-    gate = torch.empty(M, D, device=x.device, dtype=x.dtype)          # blld
-    lr_grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(2 * D, meta["BLOCK_N"]))  # noqa: E731
-    g_grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))       # noqa: E731
-    key = token_key(L)
-    _lr_kernel[lr_grid](x_flat, Wlr, lr, M, LL, K=D, D=D, shape_key=key)
-    _gate_kernel[g_grid](x_flat, Wg.contiguous(), gate, M, K=D, D=D, shape_key=key)
+    lr, gate = _front_launch(x_flat, Wlr, Wg.contiguous(), L, D, token_key(L))
+    # The left/right split is done HERE, not in the op: both halves are views of the same `lr`
+    # buffer, and an op's outputs may not alias each other. Slicing outside is free and traceable.
     return lr[:, :D], lr[:, D:], gate.view(B, L, L, D)
+
+
+def _front_launch_fake(x_flat, Wlr, Wg, L, D, shape_key):
+    return x_flat.new_empty((1, 2 * D, L, L)), x_flat.new_empty((L * L, D))
+
+
+@opaque(fake=_front_launch_fake, name="trimul_front_lr_gate")
+def _front_launch(x_flat: torch.Tensor, Wlr: torch.Tensor, Wg: torch.Tensor, L: int, D: int,
+                  shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The two in-projection launches -> ``(lr, gate)``; ``lr`` is the UNSPLIT (1, 2D, L, L) bdll
+    buffer. The weight interleave that builds ``Wlr`` stays in the caller, in the graph."""
+    m = L * L
+    lr = torch.empty(1, 2 * D, L, L, device=x_flat.device, dtype=x_flat.dtype)  # bdll storage
+    gate = torch.empty(m, D, device=x_flat.device, dtype=x_flat.dtype)          # blld
+    lr_grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]), triton.cdiv(2 * D, meta["BLOCK_N"]))  # noqa: E731
+    g_grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))       # noqa: E731
+    _lr_kernel[lr_grid](x_flat, Wlr, lr, m, m, K=D, D=D, shape_key=shape_key)
+    _gate_kernel[g_grid](x_flat, Wg, gate, m, K=D, D=D, shape_key=shape_key)
+    return lr, gate

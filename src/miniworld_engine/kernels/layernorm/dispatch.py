@@ -33,6 +33,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._compile import device_constant
+
 from miniworld_engine._atomic import write_json
 
 _SUBDIR = "ln_bwd_dispatch"
@@ -50,6 +52,7 @@ def _cache_dir() -> Path:
     return _CACHE_ROOT / _SUBDIR
 
 
+@device_constant
 @functools.lru_cache(maxsize=8)
 def gpu_key(device_index: int) -> str:
     """Stable per-GPU key: name + compute capability + triton version."""
@@ -70,6 +73,7 @@ def _file(device_index: int) -> Path:
     return _cache_dir() / f"{gpu_key(device_index)}.json"
 
 
+@device_constant
 @functools.lru_cache(maxsize=8)
 def _load(device_index: int) -> dict:
     """Load (and memoize) the on-disk cache for a device. Corrupt file -> empty."""
@@ -80,6 +84,7 @@ def _load(device_index: int) -> dict:
         return {}
 
 
+@device_constant
 def lookup(device: torch.device, n: int, mb: int) -> str | None:
     idx = device.index if device.index is not None else torch.cuda.current_device()
     entry = _load(idx).get(f"{n}|{mb}")

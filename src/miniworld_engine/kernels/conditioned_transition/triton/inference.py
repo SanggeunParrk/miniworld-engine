@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from miniworld_engine.autotune.configs import configs_for
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -143,6 +145,9 @@ def _cond_transition_inference_kernel(
 # fmt: on
 
 
+@opaque(fake=lambda x, cond, wa, wb, ws, wsc, bsc, length=None: x.new_empty(
+            (x.shape[0], ws.shape[0])),
+        name="cond_transition_inference")
 def cond_transition_inference(
     x: torch.Tensor,     # (M, K)  AdaLN output, K = d_hidden
     cond: torch.Tensor,  # (M, DC) conditioning, DC = d_cond

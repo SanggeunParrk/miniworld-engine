@@ -16,6 +16,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -178,7 +180,13 @@ def _back_kernel(
             tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask & nmask)
 
 
-def trimul_back_triton(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None):
+@opaque(fake=lambda tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None:
+            x_n.new_empty(x_n.shape),
+        name="trimul_back_fused")
+def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tensor,
+                       Wg: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor,
+                       eps: float = 1e-5,
+                       residual: torch.Tensor | None = None) -> torch.Tensor:
     """tri_bdll:(B,D,L,L), x_n:(B,L,L,D), Wp/Wg:(D,D)=weight.T -> y:(B,L,L,D). B=1.
 
     ``residual`` (optional, [B,L,L,D] == the module input pair): fuses the pairformer

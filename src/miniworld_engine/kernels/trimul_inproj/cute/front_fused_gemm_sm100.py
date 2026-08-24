@@ -34,6 +34,8 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from cutlass import BFloat16, Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import from_dlpack
@@ -600,7 +602,10 @@ class FusedPreactGemmKernel(GatedPersistentGemmKernel):
 _CACHE = {}
 
 
-def fused_front_gemm(A, Bp, Bg, lr, preact):
+@opaque(fake=lambda A, Bp, Bg, lr, preact: None, name="trimul_fused_front_gemm_sm100",
+        mutates_args=("lr", "preact"))
+def fused_front_gemm(A: torch.Tensor, Bp: torch.Tensor, Bg: torch.Tensor, lr: torch.Tensor,
+                     preact: torch.Tensor) -> None:
     """lr[2H,M] = sigmoid(A@Bg.T)*(A@Bp.T); preact[4H,M] interleaved: even=A@Bg.T, odd=A@Bp.T.
     A:(M,K) bf16; Bp/Bg:(N=2H,K) bf16; lr:(2H,M) contiguous; preact:(4H,M) contiguous — all
     written M-major (M contiguous). No return; writes in place (caller owns the buffers)."""
@@ -649,7 +654,10 @@ class FusedSigGemmKernel(FusedPreactGemmKernel):
 _CACHE_SIG = {}
 
 
-def fused_front_gemm_sig(A, Bp, Bg, lr, sg):
+@opaque(fake=lambda A, Bp, Bg, lr, sg: None, name="trimul_fused_front_gemm_sig_sm100",
+        mutates_args=("lr", "sg"))
+def fused_front_gemm_sig(A: torch.Tensor, Bp: torch.Tensor, Bg: torch.Tensor,
+                         lr: torch.Tensor, sg: torch.Tensor) -> None:
     """lr[2H,M] = σ(A@Bg.T)·(A@Bp.T);  sg[2H,M] = σ(A@Bg.T). Both (2H,M) contiguous (M-major).
     A:(M,K) bf16; Bp/Bg:(2H,K) bf16. Writes in place. Replaces preact[4H] with sg[2H]."""
     M, K = A.shape

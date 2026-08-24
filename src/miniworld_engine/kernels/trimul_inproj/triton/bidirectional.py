@@ -31,6 +31,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -166,16 +168,48 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     left_w = torch.stack([WLg, WL], dim=2).reshape(K, 2 * H2)
     right_w = torch.stack([WRg, WR], dim=2).reshape(K, 2 * H2)
     Wlr = torch.cat([left_w, right_w], dim=1).contiguous()      # (K, 4*H2)
-    left = torch.empty(B, H2, L, L, device=x_n.device, dtype=x_n.dtype)
-    right = torch.empty(B, H2, L, L, device=x_n.device, dtype=x_n.dtype)
-    preact = (torch.empty(4 * H2, M, device=x_n.device, dtype=x_n.dtype)
-              if save_preact else left)   # dummy ptr when not saving (stores guarded)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)          # noqa: E731
-    _bidir_front_kernel[grid](
-        x_flat, Wlr, left, right, preact, M, M,
-        K=K, H2=H2, shape_key=token_key(L), SAVE_PREACT=save_preact,
-    )
+    left, right, preact = _bidir_front_launch(x_flat, Wlr, H2, L, save_preact, token_key(L))
     return left, right, (preact if save_preact else None)
+
+
+def _bidir_front_launch_fake(x_flat, Wlr, H2, L, save_preact, shape_key):
+    m = L * L
+    return (
+        x_flat.new_empty((1, H2, L, L)),
+        x_flat.new_empty((1, H2, L, L)),
+        x_flat.new_empty((4 * H2, m)) if save_preact else x_flat.new_empty((0, 0)),
+    )
+
+
+@opaque(fake=_bidir_front_launch_fake, name="trimul_bidir_front")
+def _bidir_front_launch(
+    x_flat: torch.Tensor,
+    Wlr: torch.Tensor,
+    H2: int,
+    L: int,
+    save_preact: bool,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The gated in-projection launch -> ``(left, right, preact)``, left/right in bdll.
+
+    ``preact`` is a 0-element placeholder when ``save_preact`` is False. The eager code passed
+    ``left`` as the dummy pointer there, which an op may not do -- returning the same tensor twice
+    makes two outputs alias. ``bidir_front_triton`` above turns the placeholder back into ``None``.
+    The weight interleave (``stack``/``cat``) stays outside, in the graph.
+    """
+    m = L * L
+    left = torch.empty(1, H2, L, L, device=x_flat.device, dtype=x_flat.dtype)
+    right = torch.empty(1, H2, L, L, device=x_flat.device, dtype=x_flat.dtype)
+    preact = (torch.empty(4 * H2, m, device=x_flat.device, dtype=x_flat.dtype)
+              if save_preact else left)   # dummy ptr when not saving (stores guarded)
+    grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)          # noqa: E731
+    _bidir_front_kernel[grid](
+        x_flat, Wlr, left, right, preact, m, m,
+        K=x_flat.shape[1], H2=H2, shape_key=shape_key, SAVE_PREACT=save_preact,
+    )
+    if not save_preact:
+        preact = x_flat.new_empty((0, 0))
+    return left, right, preact
 
 
 # ── merged back-half (mirror of cute BidirBackHalf), fwd + manual bwd ─────────

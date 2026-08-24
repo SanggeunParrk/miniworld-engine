@@ -25,6 +25,8 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from cutlass import BFloat16, Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, tcgen05
 from cutlass.cute.runtime import from_dlpack
@@ -583,7 +585,17 @@ class GatedPersistentGemmKernel(PersistentDenseGemmKernel):
 _CACHE = {}
 
 
-def gate_gemm(A, Bp, Bg, mmajor=False):
+def _gate_gemm_fake(A, Bp, Bg, mmajor=False):
+    M = A.shape[0]
+    N = Bp.shape[0]
+    # mmajor returns the (N, M) STORAGE (an M-major (M, N) view for the caller), so the fake
+    # has to hand back that same shape -- not a transposed view of an (M, N) buffer.
+    return A.new_empty((N, M) if mmajor else (M, N), dtype=torch.bfloat16)
+
+
+@opaque(fake=_gate_gemm_fake, name="tm1_gate_gemm_sm100")
+def gate_gemm(A: torch.Tensor, Bp: torch.Tensor, Bg: torch.Tensor,
+              mmajor: bool = False) -> torch.Tensor:
     """out = sigmoid(A@Bg.T) * (A@Bp.T). A:(M,K), Bp/Bg:(N,K), all bf16.
 
     mmajor=True: returns storage (N, M) contiguous (== M-major (M,N) view), zero-copy [B,D,L,L].

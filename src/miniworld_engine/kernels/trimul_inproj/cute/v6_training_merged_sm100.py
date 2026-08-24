@@ -13,7 +13,6 @@ bdll-direct store fails on sm100 but the non-gated store is bit-correct.
 """
 from __future__ import annotations
 
-from miniworld_engine.kernels._compile import opaque
 
 import torch
 import torch.nn as nn
@@ -95,7 +94,9 @@ class _SingleBackHalfSm100(torch.autograd.Function):
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None)
 
 
-@opaque()
+# No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
+# so Dynamo traces straight through this. It could never have BEEN an op itself -- see
+# ``kernels._compile`` -- but it does not need to be.
 def v6_forward_merged_sm100(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
                             ln_out_w, ln_out_b, eps, b_lr, direction="out", row_scale=None):
     # AF pair-mask folded into LN_in as a row_scale (FREE), rs=None -> plain LN. (== v6)

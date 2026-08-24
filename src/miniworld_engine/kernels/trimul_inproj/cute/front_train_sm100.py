@@ -33,6 +33,8 @@ from miniworld_engine.autotune.configs import configs_for
 import os
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 from miniworld_engine.kernels._quack_compat import gemm_act, gemm_act_tuned
@@ -157,6 +159,19 @@ def trimul_front_sm100_train_sig(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     return lr[:, :H], lr[:, H:], sg
 
 
+@opaque(fake=lambda preact_2d, lr_2d, H, M, shape_key: None, name="trimul_glu_bdll",
+        mutates_args=("lr_2d",))
+def _glu_bdll(preact_2d: torch.Tensor, lr_2d: torch.Tensor, H: int, M: int,
+              shape_key: int) -> None:
+    """The GLU pass of the v13 fallback front: writes lr from the raw preact planes, in place.
+
+    Only the launch is wrapped -- ``trimul_front_sm100_train`` itself stays a plain function so
+    its left/right split stays a free view (an op's outputs may not alias each other).
+    """
+    grid = lambda meta: (triton.cdiv(H * M, meta["BLOCK_E"]),)  # noqa: E731
+    _glu_bdll_kernel[grid](preact_2d, lr_2d, H=H, M=M, shape_key=shape_key)
+
+
 def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     """SM100 v6-faithful front. Returns (left_bdll, right_bdll, preact_bdll):
       left/right : (B, H, L, L) contiguous  (== left.reshape(H,L,L) is a free view)
@@ -195,7 +210,5 @@ def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
         gemm_act_tuned.fn(x_flat, b_lr, None, preact_view, None, None, None,
                           None, None, False, config=_cfg)
     lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
-    grid = lambda meta: (triton.cdiv(H * M, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_bdll_kernel[grid](preact.view(4 * H, M), lr.view(2 * H, M), H=H, M=M,
-                           shape_key=token_key(L))
+    _glu_bdll(preact.view(4 * H, M), lr.view(2 * H, M), H, M, token_key(L))
     return lr[:, :H], lr[:, H:], preact

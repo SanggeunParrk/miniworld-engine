@@ -162,7 +162,12 @@ def _dgrad_epi(
     tl.store(a_ptr + off, (s * r).to(a_ptr.dtype.element_ty), mask=em)
 
 
-def _dgrad_epilogue(do2, wo, g2, r2, *, shape_key: int | None = None):
+@opaque(fake=lambda do2, wo, g2, r2, shape_key=None: (
+            torch.empty_like(g2), torch.empty_like(g2), torch.empty_like(g2)),
+        name="gate_out_dgrad_epilogue")
+def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: torch.Tensor,
+                    shape_key: int | None = None,
+                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """One kernel: d_a=do2@wo (GEMM) + gate-bwd epilogue -> (d_out_r, d_gate, gated).
 
     ``shape_key`` is ``token_key(L)``, computed by the caller: everything here is already the
@@ -185,7 +190,11 @@ def _dgrad_epilogue(do2, wo, g2, r2, *, shape_key: int | None = None):
     return dr, dg, a
 
 
-def _fwd(gate2d, outr2d, wo, *, shape_key: int | None = None):
+@opaque(fake=lambda gate2d, outr2d, wo, shape_key=None: gate2d.new_empty(
+            (gate2d.shape[0], wo.shape[0])),
+        name="gate_out_fwd")
+def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor,
+         shape_key: int | None = None) -> torch.Tensor:
     """``shape_key`` is ``token_key(L)`` from the caller (see ``_dgrad_epilogue``)."""
     M, DH = gate2d.shape
     N = wo.shape[0]
@@ -204,8 +213,11 @@ def _fwd(gate2d, outr2d, wo, *, shape_key: int | None = None):
 
 
 class _FusedGateOut(torch.autograd.Function):
+    """``_fwd`` and ``_dgrad_epilogue`` are each wrapped by ``opaque`` at their definition, so
+    these methods need no wrapper -- the reshapes and the wgrad GEMM stay in the graph. See
+    ``kernels._compile``."""
+
     @staticmethod
-    @opaque()
     def forward(ctx, gate, outr, wo):
         # gate, outr: [..., DH]; wo: [N, DH]
         shape = gate.shape
@@ -219,7 +231,6 @@ class _FusedGateOut(torch.autograd.Function):
         return out2.reshape(*shape[:-1], wo.shape[0])
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_out):
         g2, r2, wo = ctx.saved_tensors
         N = ctx.N
@@ -250,36 +261,46 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
 
 
+@opaque(fake=lambda gate, out, shape_key: torch.empty_like(gate), name="sigmul_fwd")
+def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tensor:
+    """``sigmoid(gate) * out`` in one pass."""
+    a = torch.empty_like(gate)
+    n = gate.numel()
+    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+    _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, shape_key=shape_key)
+    return a
+
+
+@opaque(fake=lambda da, gate, out, shape_key: (torch.empty_like(gate), torch.empty_like(out)),
+        name="sigmul_bwd")
+def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
+                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""
+    dg = torch.empty_like(gate)
+    do = torch.empty_like(out)
+    n = gate.numel()
+    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+    _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, shape_key=shape_key)
+    return dg, do
+
+
 class _SigmoidGate(torch.autograd.Function):
+    # both_key, NOT _key_of. `_sigmul_fwd` belongs to gated_projection and is declared
+    # level=both, while `_key_of` is token_key -- whose top bucket is 512. Keying a
+    # level=both kernel through it makes every L >= 512 record 512, so its 1024..8192
+    # buckets are unreachable AND the same kernel ends up in two bucket spaces, since
+    # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
+    # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
     @staticmethod
-    @opaque()
     def forward(ctx, gate, out):
-        a = torch.empty_like(gate)
-        n = gate.numel()
-        grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-        # both_key, NOT _key_of. `_sigmul_fwd` belongs to gated_projection and is declared
-        # level=both, while `_key_of` is token_key -- whose top bucket is 512. Keying a
-        # level=both kernel through it makes every L >= 512 record 512, so its 1024..8192
-        # buckets are unreachable AND the same kernel ends up in two bucket spaces, since
-        # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
-        # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
-        _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n,
-                          shape_key=both_key(rows_of(gate.shape)))
+        a = _sigmul(gate, out, both_key(rows_of(gate.shape)))
         ctx.save_for_backward(gate, out)
         return a
 
     @staticmethod
-    @opaque()
     def backward(ctx, da):
         gate, out = ctx.saved_tensors
-        dg = torch.empty_like(gate)
-        do = torch.empty_like(out)
-        n = gate.numel()
-        grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-        # both_key, NOT _key_of -- see the note on _sigmul_fwd above.
-        _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n,
-                          shape_key=both_key(rows_of(gate.shape)))
-        return dg, do
+        return _sigmul_grad(da, gate, out, both_key(rows_of(gate.shape)))
 
 
 def sigmoid_gate_fused(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:

@@ -72,18 +72,21 @@ def _stats_kernel(
     tl.store(c1_ptr + rows, mean * rstd, mask=row_mask)
 
 
-@opaque()
-def stats_triton(x: torch.Tensor, eps: float, *, shape_key: int | None = None,
+def _stats_fake(x, eps, shape_key=None):
+    m = x.shape[0]
+    return (x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32))
+
+
+@opaque(fake=_stats_fake, name="layernorm_stats")
+def stats_triton(x: torch.Tensor, eps: float, shape_key: int | None = None,
                  ) -> tuple[torch.Tensor, torch.Tensor]:
     """rstd[m], c1[m]=mean*rstd over the last dim of X (M, K). Both fp32 [M].
 
-    ``@opaque()``: this is the only autotuned Triton kernel
-    (``@triton.autotune`` + ``early_config_prune``) reached on a compile-traced
-    path — the transition/attention autotuned kernels are already disabled at
-    their autograd.Function level. Without this guard, torch.compile/dynamo tries
-    to hopify the autotuner's ``early_config_prune`` closure and fails with
-    "Can't construct an AttrSource without a valid base source". Graph-breaking
-    here (eager launch) is captured normally by the manual full-model CUDA graph.
+    ``@opaque()`` because Dynamo cannot trace the autotuner: it tries to hopify
+    ``early_config_prune`` and fails with "Can't construct an AttrSource without a
+    valid base source". Under ``compile_wrap="disable"`` that is a graph break the
+    manual full-model CUDA graph captures anyway; under ``"custom_op"`` this is an
+    opaque node and the callers' surrounding ops keep fusing across it.
     """
     assert x.dim() == 2 and x.is_cuda
     M, K = x.shape

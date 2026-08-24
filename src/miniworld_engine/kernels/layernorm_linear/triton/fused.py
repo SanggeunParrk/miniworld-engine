@@ -19,6 +19,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -161,6 +163,9 @@ def _lnl_fwd_kernel(
             )
 
 
+@opaque(fake=lambda x, ln_weight, ln_bias, weight, bias, eps=1e-5: x.new_empty(
+            (*x.shape[:-1], weight.shape[0])),
+        name="layernorm_linear_fwd")
 def layernorm_linear_triton_fwd(
     x: torch.Tensor,          # (..., K) = (..., d_in)
     ln_weight: torch.Tensor,  # (K,)

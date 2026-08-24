@@ -31,6 +31,8 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from quack.cute_dsl_utils import get_max_active_clusters
 from cutlass import Float32, const_expr
 from cutlass.cute.nvgpu import cpasync
@@ -149,7 +151,10 @@ class SwiGLUExpandKernel(GatedPersistentGemmKernel):
 _CACHE = {}
 
 
-def swiglu_expand_gemm(xn, wb, wa):
+@opaque(fake=lambda xn, wb, wa: xn.new_empty((xn.shape[0], wb.shape[0]),
+                                             dtype=torch.bfloat16),
+        name="transition_swiglu_expand_gemm_sm100")
+def swiglu_expand_gemm(xn: torch.Tensor, wb: torch.Tensor, wa: torch.Tensor) -> torch.Tensor:
     """h = silu(xn @ wa^T) * (xn @ wb^T).  xn:(M,K), wa/wb:(ND,K) bf16 -> h:(M,ND) row-major.
     (wa is the gate/silu weight, wb the up weight — matching swish_gate(a,b)=silu(a)*b.)"""
     M, K = xn.shape

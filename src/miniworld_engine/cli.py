@@ -668,12 +668,15 @@ def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
     if extra:
         cmd.extend(extra.split())
     env = None
+    wrap = getattr(args, "compile_wrap", "")
+    if wrap:
+        env = {**os.environ, "MINIWORLD_COMPILE_WRAP": wrap}
     if config_dir is not None:
         # The child must have the set in its ENVIRONMENT, not on its argv: bench.py's own header
         # imports kernel modules, so anything read inside main() lands after the autotuners have
         # already been handed empty lists. +config_dir is kept so the child can assert they agree.
         cmd.append(f"+config_dir={config_dir}")
-        env = {**os.environ, "MINIWORLD_CONFIG_DIR": str(config_dir)}
+        env = {**(env or os.environ), "MINIWORLD_CONFIG_DIR": str(config_dir)}
     return cmd, env
 
 
@@ -938,6 +941,13 @@ def build_parser() -> argparse.ArgumentParser:
                                   "result table)")
         parser_.add_argument("--compile", default="true", choices=("true", "false"),
                              help="torch.compile the module under test (default: true)")
+        # Passed to the child through the ENVIRONMENT, not argv: settings.compile_wrap is read
+        # when the kernel modules import, which happens in bench.py's header, before anything
+        # reads its Hydra config. See settings._compile_wrap_from_env.
+        parser_.add_argument("--compile-wrap", default="",
+                             choices=("", "disable", "custom_op"),
+                             help="how kernel entry points are exposed to torch.compile "
+                                  "(default: leave settings alone)")
 
     aud = sub.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

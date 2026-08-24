@@ -17,6 +17,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -104,7 +106,11 @@ def _ln_transpose_dbn_kernel(
             tl.store(y_ptr + rm[:, None] * D + rk[None, :], y, mask=mask)
 
 
-def _ln_transpose_dbn_bnd(x, weight, bias, eps):
+@opaque(fake=lambda x, weight, bias, eps: x.new_empty(
+            (x.shape[1], x.shape[2], x.shape[0])),
+        name="layernorm_transpose_dbn_bnd")
+def _ln_transpose_dbn_bnd(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor,
+                          eps: float) -> torch.Tensor:
     """x: (D, B, N) -> LN over D -> (B, N, D), fused (no materialised transpose)."""
     d, b, n = x.shape
     M = b * n

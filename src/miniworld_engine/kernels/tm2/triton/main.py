@@ -174,10 +174,74 @@ def get_seq_group(length) -> int:
     return bucket_squared(length)
 
 
+@opaque(fake=lambda x, y, gate_weight, out_weight, shape_key: torch.empty_like(x),
+        name="tm2_fwd")
+def _tm2_fwd(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    gate_weight: torch.Tensor,
+    out_weight: torch.Tensor,
+    shape_key: int,
+) -> torch.Tensor:
+    """The fused gate+out projection -> ``out``, flat.
+
+    Split out of ``TritonTM2Function.forward`` so the rearranges, the autocast casts and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    M, N = y.shape
+    out = torch.empty_like(x)
+    grid = lambda META: [
+        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
+    ]
+    fused_sigmoid_gate2_fwd_kernel[grid](
+        x,
+        y,
+        gate_weight,
+        out_weight,
+        out,
+        M,
+        N,
+        shape_key=shape_key,
+    )
+    return out
+
+
+@opaque(fake=lambda x, y, gate_weight, out_weight, grad_out, shape_key: (
+            torch.empty_like(x), torch.empty_like(x)),
+        name="tm2_bwd")
+def _tm2_bwd(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    gate_weight: torch.Tensor,
+    out_weight: torch.Tensor,
+    grad_out: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The gate backward -> ``(dA, dB)``; the four GEMMs that consume them stay in the caller."""
+    M, N = x.shape
+    dA = torch.empty_like(x)
+    dB = torch.empty_like(x)
+    grid = lambda META: [
+        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
+    ]
+    fused_sigmoid_gate2_bwd_kernel[grid](
+        x,
+        y,
+        gate_weight,
+        out_weight,
+        grad_out,
+        dA,
+        dB,
+        M,
+        N,
+        shape_key=shape_key,
+    )
+    return dA, dB
+
+
 class TritonTM2Function(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         x: Float[torch.Tensor, "* d"],
@@ -188,7 +252,6 @@ class TritonTM2Function(torch.autograd.Function):
         original_shape = x.shape
         x = rearrange(x, "... d -> (...) d").contiguous()
         y = rearrange(x_out_normalized, "... d -> (...) d").contiguous()
-        M, N = y.shape
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -199,21 +262,8 @@ class TritonTM2Function(torch.autograd.Function):
 
         gate_weight = gate_weight.contiguous()
         out_weight = out_weight.contiguous()
-        out = torch.empty_like(x)
 
-        grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
-        ]
-        fused_sigmoid_gate2_fwd_kernel[grid](
-            x,
-            y,
-            gate_weight,
-            out_weight,
-            out,
-            M,
-            N,
-            shape_key=token_key(length_of(original_shape)),
-        )
+        out = _tm2_fwd(x, y, gate_weight, out_weight, token_key(length_of(original_shape)))
 
         ctx.save_for_backward(x, y, gate_weight, out_weight)
         ctx.original_shape = original_shape
@@ -221,34 +271,17 @@ class TritonTM2Function(torch.autograd.Function):
         return out.reshape(original_shape)
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_out: torch.Tensor):
         x, y, gate_weight, out_weight = ctx.saved_tensors
         original_shape = ctx.original_shape
-        M, N = x.shape
 
         if grad_out.dtype != x.dtype:
             grad_out = grad_out.to(x.dtype)
 
         grad_out = rearrange(grad_out, "... d -> (...) d").contiguous()
-        dA = torch.empty_like(x)
-        dB = torch.empty_like(x)
+        dA, dB = _tm2_bwd(x, y, gate_weight, out_weight, grad_out,
+                          token_key(length_of(original_shape)))
 
-        grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
-        ]
-        fused_sigmoid_gate2_bwd_kernel[grid](
-            x,
-            y,
-            gate_weight,
-            out_weight,
-            grad_out,
-            dA,
-            dB,
-            M,
-            N,
-            shape_key=token_key(length_of(original_shape)),
-        )
         dx = dA @ gate_weight.T
         dy = dB @ out_weight.T
         dW_gate = torch.matmul(x.T, dA)

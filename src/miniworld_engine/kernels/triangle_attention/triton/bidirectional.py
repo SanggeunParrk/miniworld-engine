@@ -85,63 +85,119 @@ def _split_dirs(t, H):
     return g[:, :H], g[:, H:].transpose(2, 3)
 
 
+def _bidir_fwd_fake(q, k, v, bs, be, n_head):
+    B, L, _, D2 = q.shape
+    f32 = torch.float32
+    return (
+        q.new_empty((B, L, L, D2)),
+        q.new_empty((B, n_head, L, L), dtype=f32),
+        q.new_empty((B, n_head, L, L), dtype=f32),
+    )
+
+
+@opaque(fake=_bidir_fwd_fake, name="bidir_triangle_attention_fwd")
+def _bidir_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tensor,
+               be: torch.Tensor, n_head: int,
+               ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Both directions' forward launches -> ``(out, m_s, m_e)``.
+
+    ``bs``/``be`` arrive already sliced out of the packed bias AND contiguous: they are saved for
+    the backward, and an op may not return a view of its own input, so the caller has to be the
+    one that makes them. See ``kernels._compile``.
+    """
+    B, L, _, D2 = q.shape
+    H = n_head
+    dh = D2 // 2
+    D = dh // H
+    sm_scale = D**-0.5
+
+    qs, qe = _split_dirs(q, H)
+    ks, ke = _split_dirs(k, H)
+    vs, ve = _split_dirs(v, H)
+
+    out = torch.empty(B, L, L, D2, device=q.device, dtype=q.dtype)
+    out_s = rearrange(out[..., :dh], "B L L2 (H D) -> B H L L2 D", H=H)
+    out_e = rearrange(out[..., dh:], "B L L2 (H D) -> B H L L2 D", H=H).transpose(2, 3)
+    m_s = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
+    m_e = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
+
+    _fwd_dir(qs, ks, vs, bs, out_s, m_s, sm_scale)
+    _fwd_dir(qe, ke, ve, be, out_e, m_e, sm_scale)
+    return out, m_s, m_e
+
+
+def _bidir_bwd_fake(q, k, v, bs, be, m_s, m_e, out, dout, n_head):
+    B, L, _, D2 = q.shape
+    return (
+        v.new_empty((B, L, L, D2)),
+        v.new_empty((B, L, L, D2)),
+        v.new_empty((B, L, L, D2)),
+        bs.new_empty((B, n_head, L, L)),
+        bs.new_empty((B, n_head, L, L)),
+    )
+
+
+@opaque(fake=_bidir_bwd_fake, name="bidir_triangle_attention_bwd")
+def _bidir_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bs: torch.Tensor,
+               be: torch.Tensor, m_s: torch.Tensor, m_e: torch.Tensor, out: torch.Tensor,
+               dout: torch.Tensor, n_head: int) -> tuple[
+                   torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Both directions' backward launches -> ``(dq, dk, dv, dbias_s, dbias_e)``.
+
+    ``dbias_e`` is still in the ending (row=j) frame; the transpose back, the concat and the
+    rearrange to the packed layout are plain torch and stay in the caller.
+    """
+    B, L, _, D2 = q.shape
+    H = n_head
+    dh = D2 // 2
+    D = dh // H
+    sm_scale = D**-0.5
+
+    qs, qe = _split_dirs(q, H)
+    ks, ke = _split_dirs(k, H)
+    vs, ve = _split_dirs(v, H)
+    dq = torch.empty(B, L, L, D2, device=q.device, dtype=v.dtype)
+    dk = torch.empty(B, L, L, D2, device=q.device, dtype=v.dtype)
+    dv = torch.empty(B, L, L, D2, device=q.device, dtype=v.dtype)
+    dqs, dqe = _split_dirs(dq, H)
+    dks, dke = _split_dirs(dk, H)
+    dvs, dve = _split_dirs(dv, H)
+    out_s = rearrange(out[..., :dh], "B L L2 (H D) -> B H L L2 D", H=H)
+    out_e = rearrange(out[..., dh:], "B L L2 (H D) -> B H L L2 D", H=H).transpose(2, 3)
+    dout_s = rearrange(dout[..., :dh], "B L L2 (H D) -> B H L L2 D", H=H)
+    dout_e = rearrange(dout[..., dh:], "B L L2 (H D) -> B H L L2 D", H=H).transpose(2, 3)
+
+    dbias_s = _bwd_dir(qs, ks, vs, bs, m_s, out_s, dout_s, dqs, dks, dvs, sm_scale)
+    dbias_e = _bwd_dir(qe, ke, ve, be, m_e, out_e, dout_e, dqe, dke, dve, sm_scale)
+    return dq, dk, dv, dbias_s, dbias_e
+
+
 class BidirTriangleAttentionFn(torch.autograd.Function):
     @staticmethod
-    @opaque()
     def forward(ctx, q, k, v, bias, n_head):
-        B, L, _, D2 = q.shape
         H = n_head
-        dh = D2 // 2
-        D = dh // H
-        sm_scale = D**-0.5
-
-        qs, qe = _split_dirs(q, H)
-        ks, ke = _split_dirs(k, H)
-        vs, ve = _split_dirs(v, H)
         bv = rearrange(bias, "B L L2 G -> B G L L2", G=2 * H)
-        bs_in, be_in = bv[:, :H], bv[:, H:].transpose(2, 3)
+        # Sliced and made contiguous HERE, not inside the op: these are what the backward saves,
+        # and an op cannot return a view of its own input.
+        bs = bv[:, :H].contiguous()
+        be = bv[:, H:].transpose(2, 3).contiguous()
 
-        out = torch.empty(B, L, L, D2, device=q.device, dtype=q.dtype)
-        out_s = rearrange(out[..., :dh], "B L L2 (H D) -> B H L L2 D", H=H)
-        out_e = rearrange(out[..., dh:], "B L L2 (H D) -> B H L L2 D", H=H).transpose(2, 3)
-        m_s = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
-        m_e = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
-
-        bs = _fwd_dir(qs, ks, vs, bs_in, out_s, m_s, sm_scale)
-        be = _fwd_dir(qe, ke, ve, be_in, out_e, m_e, sm_scale)
+        out, m_s, m_e = _bidir_fwd(q, k, v, bs, be, H)
 
         ctx.save_for_backward(q, k, v, bs, be, m_s, m_e, out)
         ctx.H = H
-        ctx.dh = dh
+        ctx.dh = q.shape[-1] // 2
         return out
 
     @staticmethod
-    @opaque()
     def backward(ctx, dout):
         q, k, v, bs, be, m_s, m_e, out = ctx.saved_tensors
-        H, dh = ctx.H, ctx.dh
-        B, L, _, D2 = q.shape
-        D = dh // H
-        sm_scale = D**-0.5
         if dout.dtype != q.dtype:
             dout = dout.to(q.dtype)
 
-        qs, qe = _split_dirs(q, H)
-        ks, ke = _split_dirs(k, H)
-        vs, ve = _split_dirs(v, H)
-        dq = torch.empty(B, L, L, D2, device=q.device, dtype=v.dtype)
-        dk = torch.empty(B, L, L, D2, device=q.device, dtype=v.dtype)
-        dv = torch.empty(B, L, L, D2, device=q.device, dtype=v.dtype)
-        dqs, dqe = _split_dirs(dq, H)
-        dks, dke = _split_dirs(dk, H)
-        dvs, dve = _split_dirs(dv, H)
-        out_s = rearrange(out[..., :dh], "B L L2 (H D) -> B H L L2 D", H=H)
-        out_e = rearrange(out[..., dh:], "B L L2 (H D) -> B H L L2 D", H=H).transpose(2, 3)
-        dout_s = rearrange(dout[..., :dh], "B L L2 (H D) -> B H L L2 D", H=H)
-        dout_e = rearrange(dout[..., dh:], "B L L2 (H D) -> B H L L2 D", H=H).transpose(2, 3)
-
-        dbias_s = _bwd_dir(qs, ks, vs, bs, m_s, out_s, dout_s, dqs, dks, dvs, sm_scale)
-        dbias_e = _bwd_dir(qe, ke, ve, be, m_e, out_e, dout_e, dqe, dke, dve, sm_scale)
+        dq, dk, dv, dbias_s, dbias_e = _bidir_bwd(
+            q, k, v, bs, be, m_s, m_e, out, dout, ctx.H,
+        )
         # dbias_e is in the ending (row=j) frame -> transpose back to native [B,H,i,j]
         dbias = torch.cat([dbias_s, dbias_e.transpose(2, 3)], dim=1)  # [B,2H,i,j]
         dbias = rearrange(dbias, "B G L L2 -> B L L2 G")

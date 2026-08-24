@@ -14,6 +14,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -98,7 +100,16 @@ def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.conste
     tl.store(out + 4 * DMi + idx, dglog.to(et), mask=mask)                      # d_glogit
 
 
-def front_bwd_dW_glogit(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit, Wg):
+@opaque(fake=lambda d_left, d_right, preact, x_n, WL, WLg, WR, WRg, d_glogit, Wg: (
+            torch.empty_like(x_n), torch.empty_like(WL), torch.empty_like(WLg),
+            torch.empty_like(WR), torch.empty_like(WRg), torch.empty_like(Wg)),
+        name="trimul_front_bwd_dW_glogit")
+def front_bwd_dW_glogit(d_left: torch.Tensor, d_right: torch.Tensor, preact: torch.Tensor,
+                        x_n: torch.Tensor, WL: torch.Tensor, WLg: torch.Tensor,
+                        WR: torch.Tensor, WRg: torch.Tensor, d_glogit: torch.Tensor,
+                        Wg: torch.Tensor) -> tuple[
+                            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+                            torch.Tensor, torch.Tensor]:
     """NEGATIVE RESULT — tried & not adopted (kept as reference). Collapses the single-dir back
     half to TWO cuBLAS GEMMs by folding d_glogit in as the 5th d_concat block:
       dWs5 = dconc5 @ x_n   (5D,D) -> dWLg/dWL/dWRg/dWR + dWg          (all weight grads, 1 GEMM)
@@ -155,6 +166,22 @@ def front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     return dxn, dWL, dWLg, dWR, dWRg
 
 
+@opaque(fake=lambda dL2, dR2, preact2, M, D, shape_key: dL2.new_empty((4 * D, M)),
+        name="trimul_front_bwd_dconcat")
+def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int, D: int,
+             shape_key: int) -> torch.Tensor:
+    """The elementwise GLU backward -> dconc (4D, M) = [d_gLlog; d_pL; d_gRlog; d_pR].
+
+    Only the launch: the four wgrad GEMMs and the W_stack ``cat`` around it are cuBLAS/torch and
+    stay in the graph.
+    """
+    dm = D * M
+    dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
+    _dconcat_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
+        dL2, dR2, preact2, dconc, M, dm, D=D, shape_key=shape_key)
+    return dconc
+
+
 def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     """The front bwd EXCEPT the final dxn GEMM: builds d_concat (elementwise), the 4 weight
     grads (cuBLAS huge-K, STAYS cuBLAS), and the stacked W operand. Returns
@@ -163,16 +190,12 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     B, H, L, _ = d_left.shape   # per-side hidden width
     Din = WL.shape[0]           # input width (= d_pair); may differ from H (bidirectional)
     M = B * L * L
-    dt = x_n.dtype
     dL2 = d_left.reshape(H * M)
     dR2 = d_right.reshape(H * M)
     preact2 = preact.reshape(4 * H, M)
     xf = x_n.reshape(M, Din)
 
-    dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)   # [d_gLlog;d_pL;d_gRlog;d_pR]
-    DM = H * M
-    _dconcat_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dconc, M, DM, D=H, shape_key=token_key(L))
+    dconc = _dconcat(dL2, dR2, preact2, M, H, token_key(L))
 
     # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
     # slower there — measured. dispatch confirms + self-documents).
@@ -214,6 +237,19 @@ def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
     tl.store(out + 3 * DMi + idx, (dR * sgR).to(et), mask=mask)                # d_pR
 
 
+@opaque(fake=lambda dL2, dR2, lrL, lrR, sg2, M, D, shape_key: dL2.new_empty((4 * D, M)),
+        name="trimul_front_bwd_dconcat_sig")
+def _dconcat_sig(dL2: torch.Tensor, dR2: torch.Tensor, lrL: torch.Tensor, lrR: torch.Tensor,
+                 sg2: torch.Tensor, M: int, D: int, shape_key: int) -> torch.Tensor:
+    """The sigma(gate) variant of :func:`_dconcat` -- same output, rebuilt from the forward's
+    ``left``/``right``/``sigma(gate)`` instead of the raw preact logits."""
+    dm = D * M
+    dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
+    _dconcat_sig_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
+        dL2, dR2, lrL, lrR, sg2, dconc, M, dm, D=D, shape_key=shape_key)
+    return dconc
+
+
 def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
     """σ(gate) variant of front_bwd_dW: reconstructs d_concat from the forward outputs
     (left, right, sg=σ(gate)) instead of preact. Same returns/layout as front_bwd_dW
@@ -221,7 +257,6 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
     B, H, L, _ = d_left.shape
     Din = WL.shape[0]
     M = B * L * L
-    dt = x_n.dtype
     dL2 = d_left.reshape(H * M)
     dR2 = d_right.reshape(H * M)
     lrL = left.reshape(H * M)
@@ -229,10 +264,7 @@ def front_bwd_dW_sig(d_left, d_right, left, right, sg, x_n, WL, WLg, WR, WRg):
     sg2 = sg.reshape(2 * H, M)
     xf = x_n.reshape(M, Din)
 
-    dconc = torch.empty(4 * H, M, device=x_n.device, dtype=dt)
-    DM = H * M
-    _dconcat_sig_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, lrL, lrR, sg2, dconc, M, DM, D=H, shape_key=token_key(L))
+    dconc = _dconcat_sig(dL2, dR2, lrL, lrR, sg2, M, H, token_key(L))
 
     from miniworld_engine.kernels.trimul_inproj.cute import dispatch
     dWs = dispatch.mm("dWs", dconc, xf)

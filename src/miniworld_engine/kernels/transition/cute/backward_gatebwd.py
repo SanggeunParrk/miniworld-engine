@@ -29,6 +29,8 @@ from miniworld_engine.autotune.configs import configs_for
 from typing import NamedTuple, Optional
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 from torch import Tensor
@@ -89,7 +91,9 @@ def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BLOCK_M1: tl.
 # fmt: on
 
 
-def _cdup_interleave(ge: Tensor, *, shape_key: int | None = None) -> Tensor:
+@opaque(fake=lambda ge, shape_key=None: ge.new_empty((ge.shape[0], 2 * ge.shape[1])),
+        name="transition_cdup_interleave")
+def _cdup_interleave(ge: Tensor, shape_key: int | None = None) -> Tensor:
     # ge may be a strided/transposed VIEW (col stride != 1); the kernel reads it with an
     # explicit col stride, fusing an upstream transpose into this (already-present) copy.
     M, N = ge.shape

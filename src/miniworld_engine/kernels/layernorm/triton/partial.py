@@ -39,9 +39,109 @@ def _bwd_num_warps(n: int) -> int:
 
 
 
+def _partial_fwd_fake(x_2d, weight, bias, eps, shape_key):
+    m = x_2d.shape[0]
+    return (
+        torch.empty_like(x_2d),
+        x_2d.new_empty((m,), dtype=torch.float32),   # mean
+        x_2d.new_empty((m,), dtype=torch.float32),   # rstd
+    )
+
+
+@opaque(fake=_partial_fwd_fake, name="layernorm_partial_fwd")
+def _partial_fwd(
+    x_2d: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The launch -> ``(y, mean, rstd)``; ``x_2d`` arrives flat and contiguous.
+
+    Split out of ``TritonLayerNormPartialReductionFunction.forward`` so the reshape and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    m, n = x_2d.shape
+    y_2d = torch.empty_like(x_2d)
+    mean = torch.empty(m, dtype=torch.float32, device=x_2d.device)
+    rstd = torch.empty(m, dtype=torch.float32, device=x_2d.device)
+
+    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
+    layer_norm_fwd_fused[grid](
+        x_2d,
+        y_2d,
+        weight,
+        bias,
+        mean,
+        rstd,
+        rstd,  # placeholder when HAS_ROWSCALE=False; keep the call shape identical to main.py
+        x_2d.stride(0),
+        x_2d.stride(1),
+        m,
+        n,
+        eps,
+        shape_key=shape_key,
+        HAS_ROWSCALE=False,
+    )
+    return y_2d, mean, rstd
+
+
+def _partial_bwd_fake(dy_2d, x, weight, mean, rstd, input_shape, shape_key):
+    n = x.shape[-1]
+    return (
+        dy_2d.new_empty(tuple(input_shape)),
+        weight.new_empty((n,)),
+        weight.new_empty((n,)),
+    )
+
+
+@opaque(fake=_partial_bwd_fake, name="layernorm_partial_bwd")
+def _partial_bwd(
+    dy_2d: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    input_shape: list[int],
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward launch + its partial reduction -> ``(dx, dweight, dbias)``."""
+    m, n = x.shape
+
+    # num_partials fixes how finely dw/db are split (unchanged); the compute tile BLOCK_M1 and
+    # the feature tile BLOCK_N now come from the autotune sweep. Programs that get no row tile
+    # write their zero-initialised accumulator, so the final sum is unaffected.
+    num_partials = triton.cdiv(m, _bwd_block_m(n))
+
+    dx_2d = torch.empty_like(dy_2d)
+    partial_dw = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
+    partial_db = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
+
+    grid = lambda meta: (num_partials, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
+    _ln_bwd_persistent[grid](
+        dx_2d,
+        partial_dw,
+        partial_db,
+        dy_2d,
+        x,
+        weight,
+        mean,
+        rstd,
+        partial_dw.stride(0),
+        x.stride(0),
+        x.stride(1),
+        m,
+        N=n,
+        shape_key=shape_key,
+    )
+
+    dw = partial_dw.sum(dim=0).to(weight.dtype)
+    db = partial_db.sum(dim=0).to(weight.dtype)
+    return dx_2d.view(tuple(input_shape)), dw, db
+
+
 class TritonLayerNormPartialReductionFunction(torch.autograd.Function):
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         x: torch.Tensor,
@@ -50,73 +150,24 @@ class TritonLayerNormPartialReductionFunction(torch.autograd.Function):
         eps: float,
     ) -> torch.Tensor:
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        y_2d = torch.empty_like(x_2d)
-        m, n = x_2d.shape
-
-        mean = torch.empty(m, dtype=torch.float32, device=x.device)
-        rstd = torch.empty(m, dtype=torch.float32, device=x.device)
-
-        grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
-        layer_norm_fwd_fused[grid](
-            x_2d,
-            y_2d,
-            weight,
-            bias,
-            mean,
-            rstd,
-            rstd,  # placeholder when HAS_ROWSCALE=False; keep the call shape identical to main.py
-            x_2d.stride(0),
-            x_2d.stride(1),
-            m,
-            n,
-            eps,
+        y_2d, mean, rstd = _partial_fwd(
+            x_2d, weight, bias, eps,
             # L = x.shape[-2] BEFORE the reshape, not m. (The kernel parameter is named
             # shape_key now -- GROUP_M here was a stale name from before the rename.)
-            shape_key=both_key(rows_of(x.shape)),
-            HAS_ROWSCALE=False,
+            both_key(rows_of(x.shape)),
         )
-
         ctx.save_for_backward(x_2d, weight, mean, rstd)
         ctx.input_shape = x.shape
         return y_2d.view_as(x)
 
     @staticmethod
-    @opaque()
     def backward(ctx, dy: torch.Tensor):
         x, weight, mean, rstd = ctx.saved_tensors
-        dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
-        m, n = x.shape
-
-        # num_partials fixes how finely dw/db are split (unchanged); the compute tile BLOCK_M1 and
-        # the feature tile BLOCK_N now come from the autotune sweep. Programs that get no row tile
-        # write their zero-initialised accumulator, so the final sum is unaffected.
-        num_partials = triton.cdiv(m, _bwd_block_m(n))
-
-        dx_2d = torch.empty_like(dy_2d)
-        partial_dw = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
-        partial_db = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
-
-        grid = lambda meta: (num_partials, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
-        _ln_bwd_persistent[grid](
-            dx_2d,
-            partial_dw,
-            partial_db,
-            dy_2d,
-            x,
-            weight,
-            mean,
-            rstd,
-            partial_dw.stride(0),
-            x.stride(0),
-            x.stride(1),
-            m,
-            N=n,
-            shape_key=both_key(rows_of(ctx.input_shape)),
+        dx, dw, db = _partial_bwd(
+            dy.reshape(-1, dy.shape[-1]).contiguous(), x, weight, mean, rstd,
+            list(ctx.input_shape), both_key(rows_of(ctx.input_shape)),
         )
-
-        dw = partial_dw.sum(dim=0).to(weight.dtype)
-        db = partial_db.sum(dim=0).to(weight.dtype)
-        return dx_2d.view(ctx.input_shape), dw, db, None
+        return dx, dw, db, None   # eps takes no gradient
 
 
 triton_layernorm_partial = TritonLayerNormPartialReductionFunction.apply

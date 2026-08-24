@@ -37,6 +37,8 @@ import cutlass.cute.math as cmath
 import cutlass.pipeline as pipeline
 import cutlass.utils as utils
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from quack.cute_dsl_utils import get_max_active_clusters
 from cutlass import BFloat16, Float32, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, tcgen05
@@ -764,7 +766,10 @@ def _grad_mul_kernel(dA_ptr, dB_ptr, ge_ptr, N, BLOCK_E: tl.constexpr, shape_key
     tl.store(dB_ptr + offs, tl.load(dB_ptr + offs, mask=m) * ge, mask=m)
 
 
-def _grad_mul_inplace(dA, dB, ge, *, shape_key: int | None = None):
+@opaque(fake=lambda dA, dB, ge, shape_key=None: None,
+        name="transition_grad_mul_inplace", mutates_args=("dA", "dB"))
+def _grad_mul_inplace(dA: torch.Tensor, dB: torch.Tensor, ge: torch.Tensor,
+                      shape_key: int | None = None) -> None:
     """dA *= ge; dB *= ge  in one pass (grad read once). All (M,ND) bf16 contiguous."""
     N = dA.numel()
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_E"]),)  # noqa: E731

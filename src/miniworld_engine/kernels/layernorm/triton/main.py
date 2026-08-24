@@ -247,9 +247,50 @@ def layer_norm_bwd_dx_fused(
 # fmt: on
 
 
+def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key):
+    m = x_2d.shape[0]
+    return (
+        torch.empty_like(x_2d),
+        x_2d.new_empty((m,), dtype=torch.float32),   # mean
+        x_2d.new_empty((m,), dtype=torch.float32),   # rstd
+    )
+
+
+@opaque(fake=_ln_fwd_fake, name="layernorm_fwd")
+def _ln_fwd(
+    x_2d: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    rs: torch.Tensor | None,
+    eps: float,
+    has_rs: bool,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The launch: ``y = LN(x) * rs`` -> ``(y, mean, rstd)``. ``x_2d`` arrives flat and contiguous.
+
+    Split out of ``TritonLayerNormFunction.forward`` so the reshape, the ``row_scale`` flattening
+    and ``save_for_backward`` stay traceable -- see ``kernels._compile``. ``rs`` is None on the
+    dense path; the kernel wants a real pointer there, so ``rstd`` stands in as the placeholder it
+    never reads (``HAS_ROWSCALE=False``).
+    """
+    M, N = x_2d.shape
+    y_2d = torch.empty_like(x_2d)
+    mean = torch.empty(M, dtype=torch.float32, device=x_2d.device)
+    rstd = torch.empty(M, dtype=torch.float32, device=x_2d.device)
+    # fmt: off
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    layer_norm_fwd_fused[grid](
+        x_2d, y_2d, weight, bias, mean, rstd, rs if has_rs else rstd,
+        x_2d.stride(0), x_2d.stride(1),
+        M, N, eps,
+        shape_key=shape_key, HAS_ROWSCALE=has_rs,
+    )
+    # fmt: on
+    return y_2d, mean, rstd
+
+
 class TritonLayerNormFunction(torch.autograd.Function):
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         x: torch.Tensor,
@@ -259,27 +300,17 @@ class TritonLayerNormFunction(torch.autograd.Function):
         row_scale: torch.Tensor | None = None,
     ):
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-        y_2d = torch.empty_like(x_2d)
-        M, N = x_2d.shape
-
-        mean = torch.empty(M, dtype=torch.float32, device=x.device)
-        rstd = torch.empty(M, dtype=torch.float32, device=x.device)
 
         has_rs = row_scale is not None
         # per-row scale (e.g. AF pair-mask) folded into the LN epilogue — y = LN(x)*rs, FREE
         # (no extra (M,N) multiply / HBM round-trip). rs reshaped to [M], broadcast over N.
-        rs = row_scale.reshape(-1).to(x_2d.dtype).contiguous() if has_rs else rstd
-        # fmt: off
-        grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
-        layer_norm_fwd_fused[grid](
-            x_2d, y_2d, weight, bias, mean, rstd, rs,  # rs (or rstd placeholder when no rowscale)
-            x_2d.stride(0), x_2d.stride(1),
-            M, N, eps,
+        rs = row_scale.reshape(-1).to(x_2d.dtype).contiguous() if has_rs else None
+        y_2d, mean, rstd = _ln_fwd(
+            x_2d, weight, bias, rs, eps, has_rs,
             # L = x.shape[-2], read BEFORE the reshape above -- one rule for pair
             # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
-            shape_key=both_key(rows_of(x.shape)), HAS_ROWSCALE=has_rs,
+            both_key(rows_of(x.shape)),
         )
-        # fmt: on
 
         ctx.save_for_backward(
             x_2d.to(torch.bfloat16),
@@ -293,60 +324,88 @@ class TritonLayerNormFunction(torch.autograd.Function):
         return y_2d.view_as(x)
 
     @staticmethod
-    @opaque()
     def backward(ctx, dy: torch.Tensor):
         x, weight, mean, rstd, rs = ctx.saved_tensors
-        x = x.to(dy.dtype)
-        M, N = x.shape
-        dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
-
-        has_rs = ctx.has_rowscale
-
-        # Hand-CUDA warp-per-row backward (register column-partials, no atomics/shared/spill).
-        # It now supports the row_scale (AF pair-mask) fold: the CUDA kernel scales the incoming
-        # grad by rs per row (dx/dw/db follow, cos=1.0 vs triton). Measured B200 (M=L², N=128,
-        # fwd+bwd of triton_layernorm):
-        #   MASKED (has_rs): CUDA beats triton 1.17x @L512, 1.28x @L1024 — triton pays a real
-        #                    rowscale penalty (+26% bwd) that the CUDA path (one FMA) avoids.
-        #   DENSE  (no rs):  ~neutral (1.00x @L512, 1.07x @L1024) and slightly SLOWER at L384.
-        # So auto-take CUDA for the masked path (always wins), but keep dense behind the opt-in
-        # env flag. Lazy import so the nvcc JIT build only triggers when this path is taken; any
-        # build/run failure falls through to triton.
-        if (x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _ln_cuda_bwd_enabled())):
-            try:
-                from ..cuda import layer_norm_bwd_cuda
-                dx_c, dw_c, db_c = layer_norm_bwd_cuda(
-                    dy_2d, x.contiguous(), weight, mean, rstd,
-                    row_scale=rs if has_rs else None,
-                )
-                return (dx_c.view(ctx.input_shape), dw_c.float(), db_c.float(), None, None)
-            except Exception:  # noqa: BLE001 - portable triton fallback on any CUDA-path failure
-                pass
-
-        # allocate output
-        dx_2d = torch.empty_like(dy_2d)
-        dw = torch.zeros(N, dtype=torch.float32, device=x.device)
-        db = torch.zeros(N, dtype=torch.float32, device=x.device)
-
-        # fmt: off
-        grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
-        layer_norm_bwd_dx_fused[grid](
-            dx_2d, dy_2d, dw, db,
-            x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)
-            dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
-            M, N,
+        dx, dw, db = _ln_bwd(
+            dy.reshape(-1, dy.shape[-1]).contiguous(), x, weight, mean, rstd, rs,
+            ctx.has_rowscale, list(ctx.input_shape),
             # ctx.input_shape is the forward's PRE-flatten shape; L = its [-2].
-            shape_key=both_key(rows_of(ctx.input_shape)), HAS_ROWSCALE=has_rs,
+            both_key(rows_of(ctx.input_shape)),
         )
-        # fmt: on
+        return dx, dw, db, None, None   # eps, row_scale take no gradient
 
-        return (
-            dx_2d.view(ctx.input_shape),
-            dw,
-            db,
-            None,
-            None,
-        )
+
+def _ln_bwd_fake(dy_2d, x, weight, mean, rstd, rs, has_rs, input_shape, shape_key):
+    n = x.shape[-1]
+    return (
+        dy_2d.new_empty(tuple(input_shape)),
+        x.new_empty((n,), dtype=torch.float32),
+        x.new_empty((n,), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_ln_bwd_fake, name="layernorm_bwd")
+def _ln_bwd(
+    dy_2d: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    rs: torch.Tensor | None,
+    has_rs: bool,
+    input_shape: list[int],
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward launches -> ``(dx, dweight, dbias)``.
+
+    Split out of ``TritonLayerNormFunction.backward`` (see ``kernels._compile``). It returns only
+    the three real gradients -- a ``torch.library`` schema cannot return ``None``, so the caller
+    re-adds the two ``None`` slots that ``eps`` and ``row_scale`` need. Both the hand-CUDA and the
+    Triton path live in here, so which one a card takes is invisible to the compiled graph -- as it
+    must be, since the fake cannot know.
+    """
+    x = x.to(dy_2d.dtype)
+    M, N = x.shape
+
+    # Hand-CUDA warp-per-row backward (register column-partials, no atomics/shared/spill).
+    # It now supports the row_scale (AF pair-mask) fold: the CUDA kernel scales the incoming
+    # grad by rs per row (dx/dw/db follow, cos=1.0 vs triton). Measured B200 (M=L², N=128,
+    # fwd+bwd of triton_layernorm):
+    #   MASKED (has_rs): CUDA beats triton 1.17x @L512, 1.28x @L1024 — triton pays a real
+    #                    rowscale penalty (+26% bwd) that the CUDA path (one FMA) avoids.
+    #   DENSE  (no rs):  ~neutral (1.00x @L512, 1.07x @L1024) and slightly SLOWER at L384.
+    # So auto-take CUDA for the masked path (always wins), but keep dense behind the opt-in
+    # env flag. Lazy import so the nvcc JIT build only triggers when this path is taken; any
+    # build/run failure falls through to triton.
+    if (x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _ln_cuda_bwd_enabled())):
+        try:
+            from ..cuda import layer_norm_bwd_cuda
+            dx_c, dw_c, db_c = layer_norm_bwd_cuda(
+                dy_2d, x.contiguous(), weight, mean, rstd,
+                row_scale=rs if has_rs else None,
+            )
+            return (dx_c.view(tuple(input_shape)), dw_c.float(), db_c.float(),
+                    None, None)
+        except Exception:  # noqa: BLE001 - portable triton fallback on any CUDA-path failure
+            pass
+
+    # allocate output
+    dx_2d = torch.empty_like(dy_2d)
+    dw = torch.zeros(N, dtype=torch.float32, device=x.device)
+    db = torch.zeros(N, dtype=torch.float32, device=x.device)
+
+    # fmt: off
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    layer_norm_bwd_dx_fused[grid](
+        dx_2d, dy_2d, dw, db,
+        x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)
+        dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
+        M, N,
+        shape_key=shape_key, HAS_ROWSCALE=has_rs,
+    )
+    # fmt: on
+
+    return dx_2d.view(tuple(input_shape)), dw, db
 
 
 def triton_layernorm(x, weight, bias, eps, row_scale=None):
@@ -356,8 +415,15 @@ def triton_layernorm(x, weight, bias, eps, row_scale=None):
     return TritonLayerNormFunction.apply(x, weight, bias, eps, row_scale)
 
 
-@opaque()
-def triton_layernorm_masked(x, weight, bias, eps, row_scale):
+@opaque(fake=lambda x, weight, bias, eps, row_scale: torch.empty_like(x),
+        name="layernorm_masked_fwd")
+def triton_layernorm_masked(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    eps: float,
+    row_scale: torch.Tensor,
+) -> torch.Tensor:
     """Forward-only LN with a per-row scale folded into the epilogue (free) — for the
     AF triangle pair-mask: y = LN(x) * row_scale[row]. row_scale is [M] (or anything
     reshapeable to [M]); broadcast over the feature dim. No autograd (bench/inference)."""

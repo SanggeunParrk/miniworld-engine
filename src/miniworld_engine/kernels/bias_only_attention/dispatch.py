@@ -30,6 +30,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._compile import device_constant
+
 # Reuse the shared per-GPU key (name + compute capability + triton version) and
 # M-bucketing from the layernorm dispatch cache so all kernels key GPUs identically.
 from miniworld_engine._atomic import write_json
@@ -63,6 +65,7 @@ def _file(idx: int) -> Path:
     return _cache_dir() / f"{gpu_key(idx)}.json"
 
 
+@device_constant
 @functools.lru_cache(maxsize=8)
 def _load(idx: int) -> dict:
     try:
@@ -84,6 +87,7 @@ def _store(idx: int, key: str, choice: str, times_ms: dict[str, float]) -> None:
     _load(idx).update(data)
 
 
+@device_constant
 def _is_sm90(device: torch.device) -> bool:
     idx = device.index if device.index is not None else torch.cuda.current_device()
     return torch.cuda.get_device_capability(idx)[0] == 9
@@ -94,6 +98,7 @@ def use_kernels(L: int) -> bool:
     return L >= KERNEL_MIN_L
 
 
+@device_constant
 def use_infer_concat(d_hidden: int) -> bool:
     """Use the inference LN+proj concat fusion (layernorm_linear).
 
@@ -137,6 +142,7 @@ def _calibrate_gate(d_hidden: int, n_out: int, M: int, device: torch.device,
     return ("fused" if tf <= ts else "split"), {"fused": tf, "split": ts}
 
 
+@device_constant
 def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
                    dtype: torch.dtype) -> bool:
     """True -> fused_gate_out; False -> split. Static H100 by DH; calibrated+cached

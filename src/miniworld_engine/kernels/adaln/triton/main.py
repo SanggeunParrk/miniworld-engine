@@ -689,9 +689,253 @@ def adaln_bwd_lnw_kernel(
     tl.store(DLnW + c_cols, acc_lnw, mask=c_mask)
 
 
+def _adaln_fwd_fake(x_2d, cond_2d, cond_ln_weight, scale_weight, scale_bias, bias_weight,
+                    eps_x, eps_cond, use_bf16, use_fp16, shape_key):
+    m, nx = x_2d.shape
+    nc = cond_2d.shape[1]
+    gate_dtype = (torch.bfloat16 if use_bf16 else
+                  torch.float16 if use_fp16 else torch.float32)
+    return (
+        torch.empty_like(x_2d),                              # y
+        x_2d.new_empty((m, nx), dtype=torch.float32),         # x_hat
+        x_2d.new_empty((m, nc), dtype=torch.float32),         # cond_norm
+        x_2d.new_empty((m, nx), dtype=gate_dtype),            # gate
+        x_2d.new_empty((m,), dtype=torch.float32),            # rstd_x
+        x_2d.new_empty((m,), dtype=torch.float32),            # rstd_cond
+    )
+
+
+@opaque(fake=_adaln_fwd_fake, name="adaln_fwd")
+def _adaln_fwd(
+    x_2d: torch.Tensor,
+    cond_2d: torch.Tensor,
+    cond_ln_weight: torch.Tensor,
+    scale_weight: torch.Tensor,
+    scale_bias: torch.Tensor,
+    bias_weight: torch.Tensor,
+    eps_x: float,
+    eps_cond: float,
+    use_bf16: bool,
+    use_fp16: bool,
+    shape_key: int,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+]:
+    """The launch -> ``(y, x_hat, cond_norm, gate, rstd_x, rstd_cond)``, all five tail outputs
+    being intermediates the backward reuses.
+
+    Split out of ``TritonAdaptiveLayerNormFunction.forward`` so the reshapes and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``. The autocast decision is
+    resolved by the CALLER and arrives as ``use_bf16``/``use_fp16``: ``gate``'s dtype depends on
+    it, so a fake that could not see it would get the graph's dtypes wrong.
+    """
+    if not x_2d.is_cuda or not cond_2d.is_cuda:
+        msg = "Triton AdaptiveLayerNorm requires CUDA tensors."
+        raise RuntimeError(msg)
+    if (
+        not cond_ln_weight.is_cuda
+        or not scale_weight.is_cuda
+        or not scale_bias.is_cuda
+        or not bias_weight.is_cuda
+    ):
+        msg = "Triton AdaptiveLayerNorm requires CUDA parameters."
+        raise RuntimeError(msg)
+    devices = {
+        x_2d.device,
+        cond_2d.device,
+        cond_ln_weight.device,
+        scale_weight.device,
+        scale_bias.device,
+        bias_weight.device,
+    }
+    if len(devices) != 1:
+        msg = "Triton AdaptiveLayerNorm requires all inputs on the same device."
+        raise RuntimeError(msg)
+    if x_2d.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
+        msg = f"Unsupported dtype for Triton AdaptiveLayerNorm: {x_2d.dtype}."
+        raise TypeError(msg)
+    if cond_2d.dtype != x_2d.dtype:
+        msg = "x and cond must have the same dtype for Triton AdaptiveLayerNorm."
+        raise TypeError(msg)
+
+    m, nx = x_2d.shape
+    _, nc = cond_2d.shape
+    y = torch.empty_like(x_2d)
+    x_hat = torch.empty((m, nx), dtype=torch.float32, device=x_2d.device)
+    cond_norm = torch.empty((m, nc), dtype=torch.float32, device=x_2d.device)
+    gate_dtype = (torch.bfloat16 if use_bf16 else
+                  torch.float16 if use_fp16 else torch.float32)
+    gate = torch.empty((m, nx), dtype=gate_dtype, device=x_2d.device)
+    rstd_x = torch.empty(m, dtype=torch.float32, device=x_2d.device)
+    rstd_cond = torch.empty(m, dtype=torch.float32, device=x_2d.device)
+
+    grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
+    adaln_fwd_kernel[grid](
+        x_2d,
+        cond_2d,
+        cond_ln_weight,
+        scale_weight,
+        scale_bias,
+        bias_weight,
+        y,
+        x_hat,
+        cond_norm,
+        gate,
+        rstd_x,
+        rstd_cond,
+        x_2d.stride(0),
+        x_2d.stride(1),
+        cond_2d.stride(0),
+        cond_2d.stride(1),
+        scale_weight.stride(0),
+        scale_weight.stride(1),
+        bias_weight.stride(0),
+        bias_weight.stride(1),
+        m,
+        NX=nx,
+        NC=nc,
+        eps_x=eps_x,
+        eps_cond=eps_cond,
+        USE_BF16=use_bf16,
+        USE_FP16=use_fp16,
+        shape_key=shape_key,
+    )
+    return y, x_hat, cond_norm, gate, rstd_x, rstd_cond
+
+
+def _adaln_bwd_fake(grad_output_2d, x_hat, cond_norm, gate, cond_ln_weight, scale_weight,
+                    bias_weight, rstd_x, rstd_cond, use_bf16, use_fp16, shape_key):
+    m, nx = grad_output_2d.shape
+    nc = cond_norm.shape[1]
+    f32 = torch.float32
+    return (
+        torch.empty_like(grad_output_2d),                        # dx
+        grad_output_2d.new_empty((m, nc), dtype=f32),             # dcond
+        torch.empty_like(cond_ln_weight, dtype=f32),              # dlnw
+        torch.empty_like(scale_weight, dtype=f32),                # dscale_w
+        grad_output_2d.new_empty((nx,), dtype=f32),               # dscale_b
+        torch.empty_like(bias_weight, dtype=f32),                 # dbias_w
+    )
+
+
+@opaque(fake=_adaln_bwd_fake, name="adaln_bwd")
+def _adaln_bwd(
+    grad_output_2d: torch.Tensor,
+    x_hat: torch.Tensor,
+    cond_norm: torch.Tensor,
+    gate: torch.Tensor,
+    cond_ln_weight: torch.Tensor,
+    scale_weight: torch.Tensor,
+    bias_weight: torch.Tensor,
+    rstd_x: torch.Tensor,
+    rstd_cond: torch.Tensor,
+    use_bf16: bool,
+    use_fp16: bool,
+    shape_key: int,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+]:
+    """The three backward launches, every gradient still FLAT and in its accumulation dtype.
+
+    The reshapes back to the caller's shapes and the casts back to the parameters' dtypes are
+    plain torch, so they stay outside where the compiler can fuse them.
+    """
+    m, nx = grad_output_2d.shape
+    _, nc = cond_norm.shape
+
+    dx = torch.empty_like(grad_output_2d)
+    dcond = torch.empty((m, nc), dtype=torch.float32, device=grad_output_2d.device)
+    dlnw = torch.empty_like(cond_ln_weight, dtype=torch.float32)
+    dscale_w = torch.empty_like(scale_weight, dtype=torch.float32)
+    dscale_b = torch.zeros((nx,), dtype=torch.float32, device=grad_output_2d.device)
+    dbias_w = torch.empty_like(bias_weight, dtype=torch.float32)
+
+    input_grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
+    adaln_bwd_input_kernel[input_grid](
+        grad_output_2d,
+        dx,
+        dcond,
+        dscale_b,
+        x_hat,
+        cond_norm,
+        gate,
+        cond_ln_weight,
+        scale_weight,
+        bias_weight,
+        rstd_x,
+        rstd_cond,
+        grad_output_2d.stride(0),
+        grad_output_2d.stride(1),
+        cond_norm.stride(0),
+        cond_norm.stride(1),
+        scale_weight.stride(0),
+        scale_weight.stride(1),
+        bias_weight.stride(0),
+        bias_weight.stride(1),
+        m,
+        NX=nx,
+        NC=nc,
+        USE_BF16=use_bf16,
+        USE_FP16=use_fp16,
+        shape_key=shape_key,
+    )
+    weight_grid = lambda meta: (
+        triton.cdiv(nx, meta["BLOCK_N_NX"]),
+        triton.cdiv(nc, meta["BLOCK_N_NC"]),
+    )
+    adaln_bwd_weight_kernel[weight_grid](
+        grad_output_2d,
+        dscale_w,
+        dbias_w,
+        x_hat,
+        cond_norm,
+        gate,
+        cond_ln_weight,
+        grad_output_2d.stride(0),
+        grad_output_2d.stride(1),
+        cond_norm.stride(0),
+        cond_norm.stride(1),
+        scale_weight.stride(0),
+        scale_weight.stride(1),
+        bias_weight.stride(0),
+        bias_weight.stride(1),
+        m,
+        NX=nx,
+        NC=nc,
+        USE_BF16=use_bf16,
+        USE_FP16=use_fp16,
+        shape_key=shape_key,
+    )
+    lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_N"])]
+    adaln_bwd_lnw_kernel[lnw_grid](
+        grad_output_2d,
+        dlnw,
+        x_hat,
+        cond_norm,
+        gate,
+        scale_weight,
+        bias_weight,
+        grad_output_2d.stride(0),
+        grad_output_2d.stride(1),
+        cond_norm.stride(0),
+        cond_norm.stride(1),
+        scale_weight.stride(0),
+        scale_weight.stride(1),
+        bias_weight.stride(0),
+        bias_weight.stride(1),
+        m,
+        NX=nx,
+        NC=nc,
+        USE_BF16=use_bf16,
+        USE_FP16=use_fp16,
+        shape_key=shape_key,
+    )
+
+    return dx, dcond, dlnw, dscale_w, dscale_b, dbias_w
+
+
 class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         x: torch.Tensor,
@@ -703,35 +947,6 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
         eps_x: float,
         eps_cond: float,
     ) -> torch.Tensor:
-        if not x.is_cuda or not cond.is_cuda:
-            msg = "Triton AdaptiveLayerNorm requires CUDA tensors."
-            raise RuntimeError(msg)
-        if (
-            not cond_ln_weight.is_cuda
-            or not scale_weight.is_cuda
-            or not scale_bias.is_cuda
-            or not bias_weight.is_cuda
-        ):
-            msg = "Triton AdaptiveLayerNorm requires CUDA parameters."
-            raise RuntimeError(msg)
-        devices = {
-            x.device,
-            cond.device,
-            cond_ln_weight.device,
-            scale_weight.device,
-            scale_bias.device,
-            bias_weight.device,
-        }
-        if len(devices) != 1:
-            msg = "Triton AdaptiveLayerNorm requires all inputs on the same device."
-            raise RuntimeError(msg)
-        if x.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
-            msg = f"Unsupported dtype for Triton AdaptiveLayerNorm: {x.dtype}."
-            raise TypeError(msg)
-        if cond.dtype != x.dtype:
-            msg = "x and cond must have the same dtype for Triton AdaptiveLayerNorm."
-            raise TypeError(msg)
-
         compute_dtype = x.dtype
         if torch.is_autocast_enabled():
             compute_dtype = torch.get_autocast_dtype("cuda")
@@ -745,53 +960,13 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             msg = "AdaptiveLayerNorm expects x and cond to share leading dimensions."
             raise ValueError(msg)
 
-        m, nx = x_2d.shape
-        _, nc = cond_2d.shape
-        # L for the autotune key: x's pre-flatten shape[-2] (the atom count), not m = B*A.
-        shape_key = atom_key(length_of(orig_x_shape))
-
-        y = torch.empty_like(x_2d)
-        x_hat = torch.empty((m, nx), dtype=torch.float32, device=x.device)
-        cond_norm = torch.empty((m, nc), dtype=torch.float32, device=x.device)
-        gate_dtype = (
-            compute_dtype
-            if compute_dtype in {torch.bfloat16, torch.float16}
-            else torch.float32
-        )
-        gate = torch.empty((m, nx), dtype=gate_dtype, device=x.device)
-        rstd_x = torch.empty(m, dtype=torch.float32, device=x.device)
-        rstd_cond = torch.empty(m, dtype=torch.float32, device=x.device)
-
-        grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
-        adaln_fwd_kernel[grid](
-            x_2d,
-            cond_2d,
-            cond_ln_weight,
-            scale_weight,
-            scale_bias,
-            bias_weight,
-            y,
-            x_hat,
-            cond_norm,
-            gate,
-            rstd_x,
-            rstd_cond,
-            x_2d.stride(0),
-            x_2d.stride(1),
-            cond_2d.stride(0),
-            cond_2d.stride(1),
-            scale_weight.stride(0),
-            scale_weight.stride(1),
-            bias_weight.stride(0),
-            bias_weight.stride(1),
-            m,
-            NX=nx,
-            NC=nc,
-            eps_x=eps_x,
-            eps_cond=eps_cond,
-            USE_BF16=compute_dtype == torch.bfloat16,
-            USE_FP16=compute_dtype == torch.float16,
-            shape_key=shape_key,
+        use_bf16 = compute_dtype == torch.bfloat16
+        use_fp16 = compute_dtype == torch.float16
+        y, x_hat, cond_norm, gate, rstd_x, rstd_cond = _adaln_fwd(
+            x_2d, cond_2d, cond_ln_weight, scale_weight, scale_bias, bias_weight,
+            eps_x, eps_cond, use_bf16, use_fp16,
+            # L for the autotune key: x's pre-flatten shape[-2] (the atom count), not m = B*A.
+            atom_key(length_of(orig_x_shape)),
         )
 
         ctx.save_for_backward(
@@ -812,12 +987,11 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
         ctx.scale_weight_dtype = scale_weight.dtype
         ctx.scale_bias_dtype = scale_bias.dtype
         ctx.bias_weight_dtype = bias_weight.dtype
-        ctx.use_bfloat16 = compute_dtype == torch.bfloat16
-        ctx.use_float16 = compute_dtype == torch.float16
+        ctx.use_bfloat16 = use_bf16
+        ctx.use_float16 = use_fp16
         return y.reshape(orig_x_shape)
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         (
             x_hat,
@@ -830,100 +1004,13 @@ class TritonAdaptiveLayerNormFunction(torch.autograd.Function):
             rstd_cond,
         ) = ctx.saved_tensors
 
-        grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1]).contiguous()
-        m, nx = grad_output_2d.shape
-        _, nc = cond_norm.shape
-        # Same L as the forward: the pre-flatten atom count, kept on ctx for exactly this.
-        shape_key = atom_key(length_of(ctx.orig_x_shape))
-
-        dx = torch.empty_like(grad_output_2d)
-        dcond = torch.empty((m, nc), dtype=torch.float32, device=grad_output.device)
-        dlnw = torch.empty_like(cond_ln_weight, dtype=torch.float32)
-        dscale_w = torch.empty_like(scale_weight, dtype=torch.float32)
-        dscale_b = torch.zeros((nx,), dtype=torch.float32, device=grad_output.device)
-        dbias_w = torch.empty_like(bias_weight, dtype=torch.float32)
-
-        input_grid = lambda meta: [triton.cdiv(m, meta["BLOCK_M1"])]
-        adaln_bwd_input_kernel[input_grid](
-            grad_output_2d,
-            dx,
-            dcond,
-            dscale_b,
-            x_hat,
-            cond_norm,
-            gate,
-            cond_ln_weight,
-            scale_weight,
-            bias_weight,
-            rstd_x,
-            rstd_cond,
-            grad_output_2d.stride(0),
-            grad_output_2d.stride(1),
-            cond_norm.stride(0),
-            cond_norm.stride(1),
-            scale_weight.stride(0),
-            scale_weight.stride(1),
-            bias_weight.stride(0),
-            bias_weight.stride(1),
-            m,
-            NX=nx,
-            NC=nc,
-            USE_BF16=ctx.use_bfloat16,
-            USE_FP16=ctx.use_float16,
-            shape_key=shape_key,
+        dx, dcond, dlnw, dscale_w, dscale_b, dbias_w = _adaln_bwd(
+            grad_output.reshape(-1, grad_output.shape[-1]).contiguous(),
+            x_hat, cond_norm, gate, cond_ln_weight, scale_weight, bias_weight,
+            rstd_x, rstd_cond, ctx.use_bfloat16, ctx.use_float16,
+            # Same L as the forward: the pre-flatten atom count, kept on ctx for exactly this.
+            atom_key(length_of(ctx.orig_x_shape)),
         )
-        weight_grid = lambda meta: (
-            triton.cdiv(nx, meta["BLOCK_N_NX"]),
-            triton.cdiv(nc, meta["BLOCK_N_NC"]),
-        )
-        adaln_bwd_weight_kernel[weight_grid](
-            grad_output_2d,
-            dscale_w,
-            dbias_w,
-            x_hat,
-            cond_norm,
-            gate,
-            cond_ln_weight,
-            grad_output_2d.stride(0),
-            grad_output_2d.stride(1),
-            cond_norm.stride(0),
-            cond_norm.stride(1),
-            scale_weight.stride(0),
-            scale_weight.stride(1),
-            bias_weight.stride(0),
-            bias_weight.stride(1),
-            m,
-            NX=nx,
-            NC=nc,
-            USE_BF16=ctx.use_bfloat16,
-            USE_FP16=ctx.use_float16,
-            shape_key=shape_key,
-        )
-        lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_N"])]
-        adaln_bwd_lnw_kernel[lnw_grid](
-            grad_output_2d,
-            dlnw,
-            x_hat,
-            cond_norm,
-            gate,
-            scale_weight,
-            bias_weight,
-            grad_output_2d.stride(0),
-            grad_output_2d.stride(1),
-            cond_norm.stride(0),
-            cond_norm.stride(1),
-            scale_weight.stride(0),
-            scale_weight.stride(1),
-            bias_weight.stride(0),
-            bias_weight.stride(1),
-            m,
-            NX=nx,
-            NC=nc,
-            USE_BF16=ctx.use_bfloat16,
-            USE_FP16=ctx.use_float16,
-            shape_key=shape_key,
-        )
-
         return (
             dx.reshape(ctx.orig_x_shape).to(ctx.x_dtype),
             dcond.reshape(ctx.orig_cond_shape).to(ctx.cond_dtype),

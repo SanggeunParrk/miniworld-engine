@@ -29,6 +29,8 @@ from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -88,7 +90,9 @@ def _swiglu_fwd_kernel(
 
 
 
-def _swiglu(a, b, *, shape_key=None):
+@opaque(fake=lambda a, b, shape_key=None: a.new_empty(a.shape), name="cond_swiglu_fwd")
+def _swiglu(a: torch.Tensor, b: torch.Tensor,
+            shape_key: int | None = None) -> torch.Tensor:
     M, ND = a.shape
     if shape_key is None:
         shape_key = atom_key(length_of(a.shape))
@@ -99,7 +103,9 @@ def _swiglu(a, b, *, shape_key=None):
     return h
 
 
-def _gate(out, scale, *, shape_key=None):
+@opaque(fake=lambda out, scale, shape_key=None: torch.empty_like(out), name="cond_gate_fwd")
+def _gate(out: torch.Tensor, scale: torch.Tensor,
+          shape_key: int | None = None) -> torch.Tensor:
     y = torch.empty_like(out)
     n = out.numel()
     if shape_key is None:
@@ -146,7 +152,11 @@ def _swiglu_bwd_kernel(
     tl.store(dab_ptr + base + (col + ND) * stride_pn, db.to(dab_ptr.dtype.element_ty), mask=mask)
 
 
-def _gate_bwd(out, scale, dy, *, shape_key=None):
+@opaque(fake=lambda out, scale, dy, shape_key=None: (
+            torch.empty_like(out), torch.empty_like(out)),
+        name="cond_gate_bwd")
+def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
+              shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
@@ -162,7 +172,10 @@ def _gate_bwd(out, scale, dy, *, shape_key=None):
 # is a fast cuBLAS-adjacent reduction; keep it separate.
 
 
-def _swiglu_bwd_packed(a, b, dh, *, shape_key=None):
+@opaque(fake=lambda a, b, dh, shape_key=None: a.new_empty((a.shape[0], 2 * a.shape[1])),
+        name="cond_swiglu_bwd_packed")
+def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
+                       shape_key: int | None = None) -> torch.Tensor:
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""
     M, ND = a.shape
     if shape_key is None:
@@ -289,7 +302,19 @@ def _b2b_fwd_train_kernel(
 # fmt: on
 
 
-def _b2b_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
+def _b2b_fwd_train_fake(x, cond, wa, wb, ws, wsc, bsc, shape_key=None):
+    m = x.shape[0]
+    nd = wa.shape[0]
+    d = ws.shape[0]
+    return (x.new_empty((m, d)), x.new_empty((m, 2 * nd)), x.new_empty((m, nd)),
+            x.new_empty((m, d)), x.new_empty((m, d)))
+
+
+@opaque(fake=_b2b_fwd_train_fake, name="cond_b2b_fwd_train")
+def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
+                   ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
+                   shape_key: int | None = None) -> tuple[
+                       torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """atom fused b2b training forward -> (y, ab=[a|b], h, out, scale)."""
     M, K = x.shape
     if shape_key is None:

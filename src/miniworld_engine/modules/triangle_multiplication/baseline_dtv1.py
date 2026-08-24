@@ -544,7 +544,11 @@ def _gated_gemm_bwd_elemwise_kernel(
     tl.store(d_proj_ptr + offs, d_proj.to(out_dtype), mask=mask)
 
 
-def _elemwise_bwd_combined(grad, ab, sig_m, *, seq_len=None):
+@opaque(fake=lambda grad, ab, sig_m, seq_len=None: grad.new_empty(
+            (2 * grad.shape[0], grad.shape[1])),
+        name="dtv1_gated_gemm_bwd_combined")
+def _elemwise_bwd_combined(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Tensor,
+                           seq_len: int | None = None) -> torch.Tensor:
     """Backward for input gated GEMM — writes (d_gate, d_proj) into a single (2N, M) buffer.
 
     Returns d_combined[shape=(2N, M)] where:
@@ -568,7 +572,12 @@ def _elemwise_bwd_combined(grad, ab, sig_m, *, seq_len=None):
     return d_combined  # (2N, M) fully contiguous
 
 
-def _elemwise_bwd_separate(grad, ab, sig_m, *, seq_len=None):
+@opaque(fake=lambda grad, ab, sig_m, seq_len=None: (
+            torch.empty_like(grad), torch.empty_like(grad)),
+        name="dtv1_gated_gemm_bwd_separate")
+def _elemwise_bwd_separate(grad: torch.Tensor, ab: torch.Tensor, sig_m: torch.Tensor,
+                           seq_len: int | None = None,
+                           ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward for output gated GEMM — returns (d_gate, d_proj) as separate tensors."""
     n_total = grad.numel()
     d_gate = torch.empty_like(grad)
@@ -617,7 +626,17 @@ def _layernorm_backward_fused(grad_x_normed, x, mean, rstd, norm_w):
     return grad_x_op.view(m, k), grad_w, grad_b
 
 
-def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out, *, seq_len=None):
+def _input_gemm_fwd_fake(x_normed, w_gate, w_proj, mask, transpose_out, seq_len=None):
+    m, _k = x_normed.shape
+    n = w_gate.shape[0]
+    shape = (n, m) if transpose_out else (m, n)
+    return x_normed.new_empty(shape), x_normed.new_empty(shape, dtype=torch.float32)
+
+
+@opaque(fake=_input_gemm_fwd_fake, name="dtv1_input_gated_gemm")
+def _input_gemm_fwd(x_normed: torch.Tensor, w_gate: torch.Tensor, w_proj: torch.Tensor,
+                    mask: torch.Tensor | None, transpose_out: bool,
+                    seq_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Run _input_gated_gemm_kernel; return (ab, sig_m).
 
     ab (= sigmoid(xn@wg.T) * (xn@wp.T) * mask) is stored in the input dtype
@@ -660,7 +679,13 @@ def _input_gemm_fwd(x_normed, w_gate, w_proj, mask, transpose_out, *, seq_len=No
     return ab, sig_m
 
 
-def _output_gemm_fwd(x_normed, x_out, w_gate, w_proj, *, seq_len=None):
+@opaque(fake=lambda x_normed, x_out, w_gate, w_proj, seq_len=None: (
+            x_normed.new_empty((x_normed.shape[0], w_gate.shape[0])),
+            x_normed.new_empty((x_normed.shape[0], w_gate.shape[0]), dtype=torch.float32)),
+        name="dtv1_output_gated_gemm")
+def _output_gemm_fwd(x_normed: torch.Tensor, x_out: torch.Tensor, w_gate: torch.Tensor,
+                     w_proj: torch.Tensor, seq_len: int | None = None,
+                     ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run _output_gated_gemm_kernel; return (ab, sig).
 
     ab (the gated output) is in the input dtype — it becomes the final function
@@ -707,7 +732,6 @@ class _InputLNAndGEMM(torch.autograd.Function):
     """
 
     @staticmethod
-    @opaque()
     def forward(ctx, x, norm_w, norm_b, w_gate, w_proj, mask, eps, transpose_out, seq_len):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -742,7 +766,6 @@ class _InputLNAndGEMM(torch.autograd.Function):
         return ab, mean, rstd, x_normed
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_ab, _grad_mean, _grad_rstd, grad_xn_ext):
         (
             x, x_normed, norm_w, w_gate, w_proj, mask,
@@ -780,7 +803,6 @@ class _OutputGEMM(torch.autograd.Function):
     """
 
     @staticmethod
-    @opaque()
     def forward(ctx, x_normed, x_out, w_gate, w_proj, seq_len):
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -794,7 +816,6 @@ class _OutputGEMM(torch.autograd.Function):
         return ab
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_out):
         x_normed, x_out, w_gate, w_proj, ab, sig = ctx.saved_tensors
 

@@ -17,7 +17,6 @@ the front's dxn GEMM:  dx_n = (d_concatᵀ @ W_stack) + (d_glogit @ Wgᵀ)  done
 
 from __future__ import annotations
 
-from miniworld_engine.kernels._compile import opaque
 
 import torch
 import torch.nn as nn
@@ -127,7 +126,9 @@ class BidirBackHalf(torch.autograd.Function):
                 d_residual, None)
 
 
-@opaque()
+# No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
+# so Dynamo traces straight through this. It could never have BEEN an op itself -- see
+# ``kernels._compile`` -- but it does not need to be.
 def bidir_forward(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
                   ln_out_w, ln_out_b, eps, b_lr, h, row_scale=None,
                   add_residual=False, dropscale=None):

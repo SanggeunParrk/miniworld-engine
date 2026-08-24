@@ -157,7 +157,20 @@ def _epilogue_train_kernel(
                      gate.to(Gate.dtype.element_ty), mask=mask)
 
 
-def _epilogue_train(x, sb, eps, scale_bias=None, *, shape_key=None):
+def _epilogue_train_fake(x, sb, eps, scale_bias=None, shape_key=None):
+    m, n = x.shape
+    return (
+        x.new_empty((m, n)),                          # y
+        x.new_empty((m,), dtype=torch.float32),        # mean
+        x.new_empty((m,), dtype=torch.float32),        # rstd
+        x.new_empty((m, n)),                           # gate
+    )
+
+
+@opaque(fake=_epilogue_train_fake, name="adaln_epilogue_train")
+def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
+                    scale_bias: torch.Tensor | None = None, shape_key: int | None = None,
+                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     M, N = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))
@@ -262,7 +275,19 @@ def _bwd_x_kernel(
                      dx.to(DX.dtype.element_ty), mask=mask)
 
 
-def _bwd_x(dy, x, mean_x, rstd_x, gate, *, shape_key=None):
+def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None):
+    m, n = dy.shape
+    return (
+        dy.new_empty((2 * n, m)),
+        # dx is written in x's layout, so the fake carries x's strides.
+        torch.empty_strided((m, n), x.stride(), device=dy.device, dtype=dy.dtype),
+    )
+
+
+@opaque(fake=_bwd_x_fake, name="adaln_bwd_x")
+def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torch.Tensor,
+           gate: torch.Tensor, shape_key: int | None = None,
+           ) -> tuple[torch.Tensor, torch.Tensor]:
     """Returns D=(2N,M) [dscale;dy stacked on the 2N axis] and dx=(M,N) (x's layout), one kernel.
     D's (2N,M) layout is chosen so the wgrad D@cond_aff is a contiguous-K GEMM (see kernel note)."""
     M, N = dy.shape
@@ -411,7 +436,19 @@ def _dgrad_condln_kernel(
                      dcond.to(DCond.dtype.element_ty), mask=nmask2)
 
 
-def _dgrad_condln(D, w_cat, cond, mean_c, rstd_c, lnw, *, shape_key=None):
+def _dgrad_condln_fake(D, w_cat, cond, mean_c, rstd_c, lnw, shape_key=None):
+    m = D.shape[1]
+    nc = w_cat.shape[1]
+    return (
+        torch.empty_strided((m, nc), cond.stride(), device=cond.device, dtype=cond.dtype),
+        lnw.new_empty((nc,)),
+    )
+
+
+@opaque(fake=_dgrad_condln_fake, name="adaln_dgrad_condln")
+def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
+                  mean_c: torch.Tensor, rstd_c: torch.Tensor, lnw: torch.Tensor,
+                  shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused dgrad+cond-LN-bwd: dcond_aff = Dᵀ@w_cat (in-kernel GEMM) → cond LN-backward → (dcond,
     dlnw). No dcond_aff HBM round-trip, no cuBLAS dgrad. D=(2NX,M), w_cat=(2NX,NC)."""
     K2, M = D.shape
@@ -448,9 +485,13 @@ def set_dgrad_triton(flag) -> None:
 
 
 class AdaLNTrainFn(torch.autograd.Function):
+    """Every launch these two methods reach is wrapped by ``opaque`` at its own definition, so the
+    methods need no wrapper: the cuBLAS matmuls, the ``cat``, the reductions and the dtype casts
+    between the launches stay in the graph. See ``kernels._compile``."""
+
     @staticmethod
-    @opaque()
-    def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight, eps_x, eps_cond):
+    def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
+                eps_x, eps_cond):
         orig_x_shape = x.shape
         orig_cond_shape = cond.shape
         nx = orig_x_shape[-1]
@@ -483,7 +524,6 @@ class AdaLNTrainFn(torch.autograd.Function):
         return y.reshape(orig_x_shape)
 
     @staticmethod
-    @opaque()
     def backward(ctx, dy):
         (x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
          lnw, scale_weight, bias_weight) = ctx.saved_tensors
@@ -509,7 +549,8 @@ class AdaLNTrainFn(torch.autograd.Function):
                                         shape_key=shape_key)
         else:
             dcond_aff = _mm(D.t(), w_cat)                             # cuBLAS dgrad → (M,NC)
-            dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c, cond2d.stride(),
+            dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c,
+                                     list(cond2d.stride()),
                                      shape_key=both_key(rows_of(ctx.orig_cond_shape)))
 
         dW_scale = dW_cat[:nx].contiguous()

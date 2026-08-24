@@ -232,10 +232,93 @@ def fused_sigmoid_gate_bwd_kernel(
     )
 
 
+@opaque(fake=lambda x, left_gate_weight, left_weight, right_gate_weight, right_weight,
+               shape_key: (torch.empty_like(x), torch.empty_like(x)),
+        name="tm1_fwd")
+def _tm1_fwd(
+    x: torch.Tensor,
+    left_gate_weight: torch.Tensor,
+    left_weight: torch.Tensor,
+    right_gate_weight: torch.Tensor,
+    right_weight: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The fused dual sigmoid-gated projection -> ``(left, right)``, both flat.
+
+    Split out of ``TritonTM1Function.forward`` so the rearrange, the autocast casts and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    M, N = x.shape
+    left = torch.empty_like(x)
+    right = torch.empty_like(x)
+    grid = lambda META: [
+        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
+    ]
+    fused_sigmoid_gate_fwd_kernel[grid](
+        x,
+        left_gate_weight,
+        left_weight,
+        right_gate_weight,
+        right_weight,
+        left,
+        right,
+        M,
+        N,
+        shape_key=shape_key,
+    )
+    return left, right
+
+
+@opaque(fake=lambda x, left_gate_weight, left_weight, right_gate_weight, right_weight,
+               grad_out_left, grad_out_right, shape_key: (
+                   torch.empty_like(x), torch.empty_like(x),
+                   torch.empty_like(x), torch.empty_like(x)),
+        name="tm1_bwd")
+def _tm1_bwd(
+    x: torch.Tensor,
+    left_gate_weight: torch.Tensor,
+    left_weight: torch.Tensor,
+    right_gate_weight: torch.Tensor,
+    right_weight: torch.Tensor,
+    grad_out_left: torch.Tensor,
+    grad_out_right: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The gate backward -> the four partial grads ``(dLA, dLB, dRA, dRB)``.
+
+    The dgrad and the four wgrad GEMMs that consume them are plain ``matmul``, so they stay in the
+    caller and keep fusing -- only this launch is opaque.
+    """
+    M, N = x.shape
+    dLA = torch.empty_like(x)
+    dLB = torch.empty_like(x)
+    dRA = torch.empty_like(x)
+    dRB = torch.empty_like(x)
+    grid = lambda META: [
+        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
+    ]
+    fused_sigmoid_gate_bwd_kernel[grid](
+        x,
+        left_gate_weight,
+        left_weight,
+        right_gate_weight,
+        right_weight,
+        grad_out_left,
+        grad_out_right,
+        dLA,
+        dLB,
+        dRA,
+        dRB,
+        M,
+        N,
+        shape_key=shape_key,
+    )
+    return dLA, dLB, dRA, dRB
+
+
 class TritonTM1Function(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         x: Float[torch.Tensor, "* d"],
@@ -249,7 +332,6 @@ class TritonTM1Function(torch.autograd.Function):
     ]:
         original_shape = x.shape
         x = rearrange(x, "... d -> (...) d").contiguous()
-        M, N = x.shape
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -263,23 +345,10 @@ class TritonTM1Function(torch.autograd.Function):
         left_gate_weight = left_gate_weight.contiguous()
         right_weight = right_weight.contiguous()
         right_gate_weight = right_gate_weight.contiguous()
-        left = torch.empty_like(x)
-        right = torch.empty_like(x)
 
-        grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
-        ]
-        fused_sigmoid_gate_fwd_kernel[grid](
-            x,
-            left_gate_weight,
-            left_weight,
-            right_gate_weight,
-            right_weight,
-            left,
-            right,
-            M,
-            N,
-            shape_key=token_key(length_of(original_shape)),
+        left, right = _tm1_fwd(
+            x, left_gate_weight, left_weight, right_gate_weight, right_weight,
+            token_key(length_of(original_shape)),
         )
 
         ctx.save_for_backward(
@@ -291,12 +360,9 @@ class TritonTM1Function(torch.autograd.Function):
         )
         ctx.original_shape = original_shape
 
-        left = left.reshape(original_shape)
-        right = right.reshape(original_shape)
-        return left, right
+        return left.reshape(original_shape), right.reshape(original_shape)
 
     @staticmethod
-    @opaque()
     def backward(
         ctx,
         grad_out_left: torch.Tensor,
@@ -306,7 +372,6 @@ class TritonTM1Function(torch.autograd.Function):
             ctx.saved_tensors
         )
         original_shape = ctx.original_shape
-        M, N = x.shape
 
         if grad_out_left.dtype != x.dtype:
             grad_out_left = grad_out_left.to(x.dtype)
@@ -316,29 +381,9 @@ class TritonTM1Function(torch.autograd.Function):
         grad_out_left = rearrange(grad_out_left, "... d -> (...) d").contiguous()
         grad_out_right = rearrange(grad_out_right, "... d -> (...) d").contiguous()
 
-        dLA = torch.empty_like(x)
-        dLB = torch.empty_like(x)
-        dRA = torch.empty_like(x)
-        dRB = torch.empty_like(x)
-
-        grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
-        ]
-        fused_sigmoid_gate_bwd_kernel[grid](
-            x,
-            left_gate_weight,
-            left_weight,
-            right_gate_weight,
-            right_weight,
-            grad_out_left,
-            grad_out_right,
-            dLA,
-            dLB,
-            dRA,
-            dRB,
-            M,
-            N,
-            shape_key=token_key(length_of(original_shape)),
+        dLA, dLB, dRA, dRB = _tm1_bwd(
+            x, left_gate_weight, left_weight, right_gate_weight, right_weight,
+            grad_out_left, grad_out_right, token_key(length_of(original_shape)),
         )
 
         dx = dLA @ left_gate_weight.T + dLB @ left_weight.T

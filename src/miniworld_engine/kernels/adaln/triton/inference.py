@@ -30,6 +30,8 @@ from .fused3 import _ln_kernel
 import contextlib
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import torch.nn.functional as F
 import triton
 import triton.language as tl
@@ -92,8 +94,11 @@ def _fp32_matmul_ctx(dtype):
 from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
+@opaque(fake=lambda cond, lnw, eps, out_dtype=None, shape_key=None: cond.new_empty(
+            cond.shape, dtype=out_dtype or cond.dtype),
+        name="adaln_cond_affine")
 def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
-                 out_dtype: torch.dtype | None = None, *,
+                 out_dtype: torch.dtype | None = None,
                  shape_key: int | None = None) -> torch.Tensor:
     M, N = cond.shape
     if shape_key is None:
@@ -171,7 +176,9 @@ def _adaln_epilogue_kernel(
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, y.to(Y.dtype.element_ty), mask=mask)
 
 
-def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float, *,
+@opaque(fake=lambda x, sb, eps, shape_key=None: torch.empty_like(x),
+        name="adaln_inference_epilogue")
+def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
                     shape_key: int | None = None) -> torch.Tensor:
     M, N = x.shape
     if shape_key is None:
@@ -396,6 +403,9 @@ def _adaln_fused_kernel(  # noqa: PLR0915
         tl.store(Y + yo, y.to(Y.dtype.element_ty), mask=xm)
 
 
+@opaque(fake=lambda x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
+               eps_x, eps_cond, length=None: torch.empty_like(x),
+        name="adaln_inference_fused")
 def adaln_inference_fused(
     x: torch.Tensor,
     cond: torch.Tensor,

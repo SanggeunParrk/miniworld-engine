@@ -242,10 +242,164 @@ def _attn_bwd(
     )
 
 
+def _memeff_fwd_fake(q, k, v, bias, mask, shape_key):
+    A, B, L, H, D = q.shape
+    return torch.empty_like(q), q.new_empty((A, B, H, L), dtype=torch.float32)
+
+
+@opaque(fake=_memeff_fwd_fake, name="augmented_attention_memeff_fwd")
+def _memeff_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The attention launch -> ``(out, m)``. ``bias`` arrives already permuted to (B, L, H, L).
+
+    Split out of ``TritonAugmentedAttentionFunction.forward`` (the memory-efficient variant) so
+    the autocast casts, the permute, the default mask and ``save_for_backward`` stay traceable --
+    see ``kernels._compile``.
+    """
+    A, B, L, H, D = q.shape
+    sm_scale = D**-0.5
+    out = torch.empty_like(q)
+    m = torch.empty(A, B, H, L, device=q.device, dtype=torch.float32)
+    # The kernel wants (A*B) as one batch axis; the caller keeps (A, B) split.
+    qf, kf, vf, outf = (x.view(A * B, L, H, D) for x in (q, k, v, out))
+
+    grid = lambda META: (
+        triton.cdiv(L, META["BLOCK_M1"]),
+        A * B * H,
+        triton.cdiv(D, META["HEAD_DIM_PAD"]),
+    )
+    # bias is (B, L, H, L) here but main.py's kernel reads stride_bz/bh/bm/bn in that order
+    _sbz, _sbm, _sbh, _sbn = bias.stride()
+    _attn_fwd[grid](
+        qf,
+        kf,
+        vf,
+        bias,
+        mask,
+        sm_scale,
+        m,
+        outf,
+        *qf.stride(),
+        *kf.stride(),
+        *vf.stride(),
+        *outf.stride(),
+        _sbz, _sbh, _sbm, _sbn,
+        *mask.stride()[:2],
+        A,
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=shape_key,
+    )
+    return out, m
+
+
+def _memeff_bwd_fake(grad_output, q, k, v, bias, mask, o, m, shape_key):
+    A, B, L, H, D = q.shape
+    return (
+        q.new_empty((A, B, L, H, D), dtype=torch.float32),
+        torch.empty_like(k),
+        torch.empty_like(v),
+        q.new_empty((B, L, H, L), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_memeff_bwd_fake, name="augmented_attention_memeff_bwd")
+def _memeff_bwd(
+    grad_output: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    o: torch.Tensor,
+    m: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The two backward launches -> ``(dq, dk, dv, dbias)``, ``dbias`` still in (B, L, H, L).
+
+    The permute back to the caller's (B, L, L, H) layout is plain torch and stays outside, where
+    the compiler can fuse it.
+    """
+    A, B, L, H, D = q.shape
+    sm_scale = D**-0.5
+    delta = torch.empty_like(m)  # (A, B, H, L)
+
+    grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)
+    _attn_bwd_preprocess[grid](
+        o,
+        grad_output,
+        delta,
+        A,
+        B,
+        L,
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        q.stride(4),
+        H,
+        D,
+        shape_key=atom_key(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+    )
+
+    dq = torch.zeros_like(q, dtype=torch.float32)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    dbias = torch.zeros(B, L, H, L, device=q.device, dtype=torch.float32)
+
+    grid = lambda META: (
+        triton.cdiv(L, META["BLOCK_M2"]),
+        A,
+        B * H,
+    )  # Suppose that D <= HEAD_DIM_PAD
+    _attn_bwd[grid](
+        q,
+        k,
+        v,
+        bias,
+        mask,
+        sm_scale,
+        grad_output,
+        dq,
+        dk,
+        dv,
+        dbias,
+        m,
+        delta,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        q.stride(4),
+        bias.stride(0),
+        bias.stride(1),
+        bias.stride(2),
+        bias.stride(3),
+        *mask.stride()[:2],
+        A,
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=atom_key(L),
+    )
+
+    return dq, dk, dv, dbias
+
+
 class TritonAugmentedAttentionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         q: Float[torch.Tensor, "A B L H D"],
@@ -271,126 +425,23 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
         if mask is None:
             mask = torch.ones(A, B, L, dtype=torch.bool, device=q.device)
         mask = mask.contiguous()
-        q, k, v = [x.view(A * B, L, H, D) for x in (q, k, v)]
 
-        sm_scale = D**-0.5
-        out = torch.empty_like(q)
-        m = torch.empty(A, B, H, L, device=q.device, dtype=torch.float32)
-
-        grid = lambda META: (
-            triton.cdiv(L, META["BLOCK_M1"]),
-            A * B * H,
-            triton.cdiv(D, META["HEAD_DIM_PAD"]),
-        )
-        # bias is (B, L, H, L) here but main.py's kernel reads stride_bz/bh/bm/bn in that order
-        _sbz, _sbm, _sbh, _sbn = bias.stride()
-        _attn_fwd[grid](
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            sm_scale,
-            m,
-            out,
-            *q.stride(),
-            *k.stride(),
-            *v.stride(),
-            *out.stride(),
-            _sbz, _sbh, _sbm, _sbn,
-            *mask.stride()[:2],
-            A,
-            B,
-            H,
-            L,
-            D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=atom_key(L),
-        )
-
-        q, k, v, out = [x.view(A, B, L, H, D) for x in (q, k, v, out)]
+        out, m = _memeff_fwd(q, k, v, bias, mask, atom_key(L))
 
         ctx.save_for_backward(q, k, v, bias, mask, out, m)
         return out
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         q, k, v, bias, mask, o, m = ctx.saved_tensors
-
         if grad_output.dtype != q.dtype:
             grad_output = grad_output.to(q.dtype)
 
-        grad_output = grad_output.contiguous()
-
-        A, B, L, H, D = q.shape
-        sm_scale = D**-0.5
-        delta = torch.empty_like(m)  # (A, B, H, L)
-
-        grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)
-        _attn_bwd_preprocess[grid](
-            o,
-            grad_output,
-            delta,
-            A,
-            B,
-            L,
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),
-            q.stride(4),
-            H,
-            D,
-            shape_key=atom_key(L),
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
+        dq, dk, dv, dbias = _memeff_bwd(
+            grad_output.contiguous(), q, k, v, bias, mask, o, m, atom_key(q.shape[2]),
         )
-
-        dq = torch.zeros_like(q, dtype=torch.float32)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        dbias = torch.zeros(B, L, H, L, device=q.device, dtype=torch.float32)
-
-        grid = lambda META: (
-            triton.cdiv(L, META["BLOCK_M2"]),
-            A,
-            B * H,
-        )  # Suppose that D <= HEAD_DIM_PAD
-        _attn_bwd[grid](
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            sm_scale,
-            grad_output,
-            dq,
-            dk,
-            dv,
-            dbias,
-            m,
-            delta,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),
-            q.stride(4),
-            bias.stride(0),
-            bias.stride(1),
-            bias.stride(2),
-            bias.stride(3),
-            *mask.stride()[:2],
-            A,
-            B,
-            H,
-            L,
-            D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=atom_key(L),
-        )
-
         dbias = dbias.permute(0, 1, 3, 2).contiguous()  # (B, L, H, L) -> (B, L, L, H)
-
-        return dq, dk, dv, dbias, None
+        return dq, dk, dv, dbias, None   # mask takes no gradient
 
 
 triton_augmented_attention_pair_bias = TritonAugmentedAttentionFunction.apply

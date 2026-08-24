@@ -26,6 +26,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -145,19 +147,31 @@ def _shape_key(seq_len, x_n=None) -> int:
     return token_key(0)
 
 
-def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
-                     residual=None, dropscale=None, seq_len=None):
-    """gate = sigmoid(x_n @ Wg); y = proj ⊙ gate. Returns y, or (y, gate) if return_gate.
-    x_n:(M,K) or (B,L,L,K); proj:(M,N); Wg:(K,N)=to_gate.weight.T. B=1.
+def _gate_elem_fake(x_n, proj, Wg, return_gate, residual, dropscale, seq_len):
+    m = x_n.numel() // x_n.shape[-1]
+    n = proj.shape[-1]
+    return (
+        x_n.new_empty((m, n)),
+        x_n.new_empty((m, n)) if return_gate else x_n.new_empty((0, 0)),
+    )
 
-    ``residual`` [M,N] (== module input pair) and ``dropscale`` [L,N] (== drop_row mask/(1-p),
-    broadcast over the i-index) optionally fuse the pairformer residual+dropout into the store:
-    y = residual + dropscale ⊙ (proj⊙gate). ``seq_len`` (L) is required with dropscale, and is
-    also what the autotune shape key is bucketed from (see ``_shape_key``) -- pass it whenever
-    ``x_n`` arrives already flattened to (M, K).
 
-    gate GEMM via cuBLAS (D-general), then a 2-D (row x col) elementwise pass
-    (sigmoid + mul + residual/dropout)."""
+@opaque(fake=_gate_elem_fake, name="trimul_gate_elem_fwd")
+def _gate_elem_launch(
+    x_n: torch.Tensor,
+    proj: torch.Tensor,
+    Wg: torch.Tensor,
+    return_gate: bool,
+    residual: torch.Tensor | None,
+    dropscale: torch.Tensor | None,
+    seq_len: int | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The gate GEMM + fused store. ALWAYS returns ``(y, gate)``.
+
+    ``gate`` is a 0-element placeholder when ``return_gate`` is False: a schema has one fixed
+    return arity, and the eager code's "dummy" gate pointer was ``proj`` itself -- an op may not
+    return one of its own inputs. ``gate_elem_triton`` below restores the caller-facing shape.
+    """
     xn_flat = x_n.reshape(-1, x_n.shape[-1])
     M = xn_flat.shape[0]
     N = proj.shape[-1]
@@ -175,6 +189,26 @@ def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
     _gate_mul_kernel[grid](glogit, proj_flat, y, gate, res_flat, ds_flat, M, L, N=N,
                            SAVE_GATE=return_gate, shape_key=_shape_key(seq_len, x_n),
                            ADD_RESIDUAL=add_residual, USE_DROPOUT=use_dropout)
+    return (y, gate) if return_gate else (y, y.new_empty((0, 0)))
+
+
+def gate_elem_triton(x_n, proj, Wg, *, return_gate: bool = False,
+                     residual=None, dropscale=None, seq_len=None):
+    """gate = sigmoid(x_n @ Wg); y = proj ⊙ gate. Returns y, or (y, gate) if return_gate.
+
+    x_n:(M,K) or (B,L,L,K); proj:(M,N); Wg:(K,N)=to_gate.weight.T. B=1.
+
+    ``residual`` [M,N] (== module input pair) and ``dropscale`` [L,N] (== drop_row mask/(1-p),
+    broadcast over the i-index) optionally fuse the pairformer residual+dropout into the store:
+    y = residual + dropscale ⊙ (proj⊙gate). ``seq_len`` (L) is required with dropscale, and is
+    also what the autotune shape key is bucketed from (see ``_shape_key``) -- pass it whenever
+    ``x_n`` arrives already flattened to (M, K).
+
+    A thin wrapper, not the op: the op has to have ONE return arity (see ``_gate_elem_launch``),
+    and this is where the caller-facing ``y`` / ``(y, gate)`` choice lives. Traceable -- it is a
+    call and a tuple unpack.
+    """
+    y, gate = _gate_elem_launch(x_n, proj, Wg, return_gate, residual, dropscale, seq_len)
     return (y, gate) if return_gate else y
 
 
@@ -212,8 +246,14 @@ def gate_elem_quack_fused(x_n, proj, Wg, *, return_preact: bool = False):
     return (y.reshape(M, N), preact) if return_preact else y.reshape(M, N)
 
 
-def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False,
-                     dropscale=None, seq_len=None):
+@opaque(fake=lambda dy, proj, gate, from_preact=False, dropscale=None, seq_len=None: (
+            torch.empty_like(dy.reshape(-1, dy.shape[-1])),
+            torch.empty_like(dy.reshape(-1, dy.shape[-1]))),
+        name="trimul_gate_elem_bwd_ew")
+def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
+                     from_preact: bool = False,
+                     dropscale: torch.Tensor | None = None,
+                     seq_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Just the GateElem bwd ELEMENTWISE (no GEMMs): returns (d_proj, d_glogit), both (M,N).
     For the merged BidirBackHalf, which fuses dx_gate (=d_glogit@Wgᵀ) into the dxn GEMM and
     does dWg itself — so it wants d_glogit raw, not gate_elem_bwd's dx_gate/dWg.
@@ -238,7 +278,13 @@ def gate_elem_bwd_ew(dy, proj, gate, *, from_preact: bool = False,
     return d_proj, d_glogit
 
 
-def gate_elem_bwd(dy, x_n, proj, gate, Wg):
+@opaque(fake=lambda dy, x_n, proj, gate, Wg: (
+            torch.empty_like(dy.reshape(-1, dy.shape[-1])),
+            x_n.new_empty((dy.numel() // dy.shape[-1], x_n.shape[-1])),
+            Wg.new_empty(Wg.shape)),
+        name="trimul_gate_elem_bwd")
+def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
+                  Wg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward of GateElem. Returns (d_proj, dx_gate, dWg).
     dy/proj/gate:(M,N); x_n:(M,K); Wg:(K,N). d_proj feeds ①; dx_gate is the gate-path
     grad into x_n (sum it with the front/LN contributions upstream); dWg:(K,N)."""

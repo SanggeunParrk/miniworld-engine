@@ -488,6 +488,97 @@ def _attn_bwd(
 # fmt: on
 
 
+def _atomic_fwd_fake(q, k, v, bias, shape_key):
+    B, H, L, _L2, _D = q.shape
+    return torch.empty_like(q), q.new_empty((B, H, L, L), dtype=torch.float32)
+
+
+@opaque(fake=_atomic_fwd_fake, name="triangle_attention_atomic_fwd")
+def _atomic_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
+                shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The attention launch -> ``(o, M)``. Every tensor arrives contiguous and shape-checked.
+
+    Split out of the Function so the validation, the contiguous() calls and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    B, H, L, _L2, D = q.shape
+    sm_scale = D**-0.5
+    o = torch.empty_like(q)
+    M = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
+
+    # fmt: off
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
+    _attn_fwd[grid](
+        q, k, v, bias, sm_scale,
+        M, o,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3), q.stride(4),
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3), k.stride(4),
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3), v.stride(4),
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3), o.stride(4),
+        bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
+        M.stride(0), M.stride(1), M.stride(2), M.stride(3),
+        B, H, L, D,
+        shape_key=shape_key,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+    )
+    # fmt: on
+
+    return o, M
+
+
+def _atomic_bwd_fake(q, k, v, bias, o, M, grad_output, shape_key):
+    # q here is the MERGED-head (B, H*L, L2, D) view the caller rearranged to, not the
+    # forward's 5-D layout. dq accumulates in fp32 (atomic adds).
+    return (q.new_empty(q.shape, dtype=torch.float32), torch.empty_like(k),
+            torch.empty_like(v), torch.empty_like(bias))
+
+
+@opaque(fake=_atomic_bwd_fake, name="triangle_attention_atomic_bwd")
+def _atomic_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
+                o: torch.Tensor, M: torch.Tensor, grad_output: torch.Tensor,
+                shape_key: int) -> tuple[
+                    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The two backward launches -> ``(dq, dk, dv, dbias)``; ``dq`` comes back fp32."""
+    B, HL, L, D = q.shape
+    sm_scale = D**-0.5
+    delta = torch.empty_like(M)
+
+    # fmt: off
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    _attn_bwd_preprocess[grid](
+        o, grad_output, delta,
+        B, L, D,
+        shape_key=shape_key,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+    )
+    # fmt: on
+
+    dq = torch.zeros_like(q).to(torch.float32)
+    dv = torch.empty_like(v)
+    dk = torch.empty_like(k)
+    dbias = torch.empty_like(bias)
+
+    # fmt: off
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    _attn_bwd[grid](
+        q, k, v, bias, sm_scale,
+        grad_output, dq, dk, dv, dbias,
+        M, delta,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
+        HL, L, D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=shape_key,
+    )
+    # fmt: on
+
+    dq = rearrange(dq, "B (H L) L2 D -> B H L L2 D", L=L).to(op_dtype)
+    dk = rearrange(dk, "B (H L) L2 D -> B H L L2 D", L=L)
+    dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)
+    dbias = reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
+    return dq, dk, dv, dbias
+
+
 class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -520,26 +611,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         if bias.shape != (B, H, L, L):
             raise ValueError(f"bias must have shape {B, H, L, L}, but got {bias.shape=}")
 
-        sm_scale = D**-0.5
-        o = torch.empty_like(q)
-        M = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
-
-        # fmt: off
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
-        _attn_fwd[grid](
-            q, k, v, bias, sm_scale,
-            M, o,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3), q.stride(4),
-            k.stride(0), k.stride(1), k.stride(2), k.stride(3), k.stride(4),
-            v.stride(0), v.stride(1), v.stride(2), v.stride(3), v.stride(4),
-            o.stride(0), o.stride(1), o.stride(2), o.stride(3), o.stride(4),
-            bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
-            M.stride(0), M.stride(1), M.stride(2), M.stride(3),
-            B, H, L, D,
-            shape_key=token_key(L),
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-        )
-        # fmt: on
+        o, M = _atomic_fwd(q, k, v, bias, token_key(L))
 
         # M is a log2-space logsumexp, not an activation: backward recomputes
         # p = exp2(qk*scale - M) from it, so bf16's ~3 significant digits land in an
@@ -573,43 +645,7 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         bias = repeat(bias, "B H L L2 -> B (H L3) L L2", L3=bias.shape[2])
         M = rearrange(M, "B H L L2 -> B (H L) L2")
 
-        B, HL, L, D = q.shape
-        sm_scale = D**-0.5
-        delta = torch.empty_like(M)
-
-        # fmt: off
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
-        _attn_bwd_preprocess[grid](
-            o, grad_output, delta,
-            B, L, D,
-            shape_key=token_key(L),
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-        )
-        # fmt: on
-
-        dq = torch.zeros_like(q).to(torch.float32)
-        dv = torch.empty_like(v)
-        dk = torch.empty_like(k)
-        dbias = torch.empty_like(bias)
-
-        # fmt: off
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
-        _attn_bwd[grid](
-            q, k, v, bias, sm_scale,
-            grad_output, dq, dk, dv, dbias,
-            M, delta,
-            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-            bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
-            HL, L, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=token_key(L),
-        )
-        # fmt: on
-
-        dq = rearrange(dq, "B (H L) L2 D -> B H L L2 D", L=L).to(op_dtype)
-        dk = rearrange(dk, "B (H L) L2 D -> B H L L2 D", L=L)
-        dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)
-        dbias = reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
+        dq, dk, dv, dbias = _atomic_bwd(q, k, v, bias, o, M, grad_output, token_key(L))
         return dq, dk, dv, dbias
 
 

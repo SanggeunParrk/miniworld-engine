@@ -17,6 +17,8 @@ fp32 io with TF32 tensor cores (``input_precision="tf32"``).
 
 from miniworld_engine.autotune.configs import configs_for
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -156,7 +158,10 @@ def _squeeze_gate_kernel(
 # fmt: on
 
 
-def _expand_swiglu(x, wa, wb, *, shape_key=None):
+@opaque(fake=lambda x, wa, wb, shape_key=None: x.new_empty((x.shape[0], wa.shape[0])),
+        name="cond_composed_expand_swiglu")
+def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
+                   shape_key: int | None = None) -> torch.Tensor:
     """h = silu(x @ Wa^T) * (x @ Wb^T) -> (M, ND)."""
     M, K = x.shape
     if shape_key is None:
@@ -175,7 +180,11 @@ def _expand_swiglu(x, wa, wb, *, shape_key=None):
     return h
 
 
-def _squeeze_gate(h, cond, ws, wsc, bsc, *, shape_key=None):
+@opaque(fake=lambda h, cond, ws, wsc, bsc, shape_key=None: h.new_empty(
+            (h.shape[0], ws.shape[0])),
+        name="cond_composed_squeeze_gate")
+def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor,
+                  bsc: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D)."""
     M, ND = h.shape
     if shape_key is None:

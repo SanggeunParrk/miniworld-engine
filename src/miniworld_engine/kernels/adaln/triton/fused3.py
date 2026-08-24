@@ -101,7 +101,10 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
 
 
-def _layernorm(x, eps, weight=None, *, shape_key=None):
+@opaque(fake=lambda x, eps, weight=None, shape_key=None: torch.empty_like(x),
+        name="adaln_fused3_layernorm")
+def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
+               shape_key: int | None = None) -> torch.Tensor:
     M, N = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))
@@ -178,7 +181,12 @@ def _gemm_gate_kernel(
                  gate.to(Gate.dtype.element_ty), mask=om)
 
 
-def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b, *, shape_key=None):
+@opaque(fake=lambda x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None:
+            torch.empty_like(x_norm),
+        name="adaln_fused3_gemm_gate")
+def _gemm_gate(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
+               Wb: torch.Tensor, scale_b: torch.Tensor,
+               shape_key: int | None = None) -> torch.Tensor:
     # Ws, Wb are the (N, K) nn.Linear weights (k-contiguous tile = MMA-friendly B layout).
     M, N = x_norm.shape
     if shape_key is None:
@@ -199,7 +207,12 @@ def _gemm_gate(x_norm, cond_norm, Ws, Wb, scale_b, *, shape_key=None):
 # ── training: K3 variant that also stores gate=sigmoid(scale); + backward elementwise ──────────
 
 
-def _gemm_gate_train(x_norm, cond_norm, Ws, Wb, scale_b, *, shape_key=None):
+@opaque(fake=lambda x_norm, cond_norm, Ws, Wb, scale_b, shape_key=None: (
+            torch.empty_like(x_norm), torch.empty_like(x_norm)),
+        name="adaln_gemm_gate_train")
+def _gemm_gate_train(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
+                     Wb: torch.Tensor, scale_b: torch.Tensor, shape_key: int | None = None,
+                     ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x_norm.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x_norm.shape))
@@ -244,7 +257,11 @@ def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                  dxn.to(Dxn.dtype.element_ty), mask=mask)
 
 
-def _bwd_elem(dy, x_norm, gate, *, shape_key=None):
+@opaque(fake=lambda dy, x_norm, gate, shape_key=None: (
+            torch.empty_like(dy), torch.empty_like(dy)),
+        name="adaln_fused3_bwd_elem")
+def _bwd_elem(dy: torch.Tensor, x_norm: torch.Tensor, gate: torch.Tensor,
+              shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = dy.shape
     if shape_key is None:
         shape_key = atom_key(length_of(dy.shape))
@@ -259,8 +276,12 @@ def _bwd_elem(dy, x_norm, gate, *, shape_key=None):
 
 
 class _Fused3TrainFn(torch.autograd.Function):
+    """Every launch this reaches (``_ln_materialize``, ``_gemm_gate_train``, ``_bwd_elem``,
+    ``_ln_bwd``) is wrapped by ``opaque`` at its own definition, so these two methods need no
+    wrapper of their own -- the GEMMs, the reductions and the dtype casts between the launches
+    stay in the graph. See ``kernels._compile``."""
+
     @staticmethod
-    @opaque()
     def forward(ctx, x, cond, lnw, Ws, sb, Wb, eps_x, eps_cond):
         from ...layernorm_linear.triton.te_style import _ln_materialize
         orig = x.shape
@@ -284,7 +305,6 @@ class _Fused3TrainFn(torch.autograd.Function):
         return y.reshape(orig)
 
     @staticmethod
-    @opaque()
     def backward(ctx, dy):
         from ...layernorm_linear.triton.te_style import _ln_bwd, _fp32_matmul_ctx
         (x2d, cond2d, x_norm, cond_norm, gate, mean_x, rstd_x, mean_c, rstd_c, lnw, Ws, Wb) = ctx.saved_tensors
@@ -299,9 +319,10 @@ class _Fused3TrainFn(torch.autograd.Function):
             dsb = dscale.sum(0)                     # (N,)
             dcond_norm = torch.addmm(dscale @ Ws, dy2d, Wb)  # dscale@Ws + dy@Wb → (M,K)
         ones = lnw.new_ones(nx)
-        dx, _, _ = _ln_bwd(dxn, x2d, ones, mean_x, rstd_x, x2d.stride(),
+        dx, _, _ = _ln_bwd(dxn, x2d, ones, mean_x, rstd_x, list(x2d.stride()),
                            shape_key=both_key(rows_of(ctx.orig)))
-        dcond, dlnw, _ = _ln_bwd(dcond_norm, cond2d, lnw, mean_c, rstd_c, cond2d.stride(),
+        dcond, dlnw, _ = _ln_bwd(dcond_norm, cond2d, lnw, mean_c, rstd_c,
+                             list(cond2d.stride()),
                                  shape_key=both_key(rows_of(ctx.ocond)))
         xd, cd, lnwd, wsd, sbd, wbd = ctx.dt
         return (dx.reshape(ctx.orig).to(xd), dcond.reshape(ctx.ocond).to(cd), dlnw.to(lnwd),

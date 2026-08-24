@@ -32,6 +32,7 @@ x_normed materialization (see kernels/.../cute/dgrad_lnbwd.py for the same ident
 
 from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._compile import opaque
 
 import contextlib
 
@@ -156,8 +157,19 @@ def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N: tl.constexpr, eps,
                      xn.to(Xn.dtype.element_ty), mask=mask)
 
 
+def _ln_materialize_fake(x, gamma, beta, eps, shape_key=None):
+    m, k = x.shape
+    return (
+        x.new_empty((m, k)),
+        x.new_empty((m,), dtype=torch.float32),
+        x.new_empty((m,), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_ln_materialize_fake, name="ln_materialize")
 def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, eps: float,
-                    *, shape_key: int | None = None):
+                    shape_key: int | None = None,
+                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """x_normed = LN(x)=(x-μ)·rstd·γ+β. Reads x at its OWN strides (m-major/strided OK, no
     pre-copy), writes a CONTIGUOUS (M,K) x_normed; returns (x_normed, mean, rstd).
 
@@ -220,7 +232,21 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
     tl.atomic_add(DB + cols, pdb, mask=cmask)
 
 
-def _ln_bwd(dx_normed, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
+def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None):
+    m, k = x.shape
+    # dx is written AT dx_strides (m-major in -> m-major out), so the fake has to carry those
+    # strides too: the compiled graph reads its layout decisions off this tensor.
+    return (
+        torch.empty_strided((m, k), tuple(dx_strides), device=x.device, dtype=dx_normed.dtype),
+        x.new_empty((k,), dtype=torch.float32),
+        x.new_empty((k,), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_ln_bwd_fake, name="ln_bwd_mmajor")
+def _ln_bwd(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor, mean: torch.Tensor,
+            rstd: torch.Tensor, dx_strides: list[int], shape_key: int | None = None,
+            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """ONE pass: dx = rstd·(γ·dxn − meanₖ(γ·dxn) − x̂·meanₖ(γ·dxn·x̂)) written at `dx_strides`
     (m-major in→out), plus dγ=Σ_m dxn·x̂ and dβ=Σ_m dxn. x̂ recomputed inside from x (read at its
     strides) + saved μ,rstd — no separate recompute kernel.
@@ -272,7 +298,7 @@ def _te_backward(dY, x_normed, x, mean, rstd, gamma, W, has_bias, *,
         dx_normed = torch.matmul(W.t(), dY.t()).t()      # (dY@W) m-major → uniform LN-bwd layout
         dW = torch.matmul(dY.t(), x_normed)              # dYᵀ@x_normed → (N,K) wgrad (cuBLAS)
         db = _bias_grad(dY).to(W.dtype) if has_bias else None  # linear bias grad (cuBLAS GEMV)
-    dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, x.stride(),
+    dx, dgamma, dbeta = _ln_bwd(dx_normed, x, gamma, mean, rstd, list(x.stride()),
                                 shape_key=shape_key)                 # dx(m-major)+dγ+dβ
     return dx, dgamma.to(gamma.dtype), dbeta.to(gamma.dtype), dW, db
 

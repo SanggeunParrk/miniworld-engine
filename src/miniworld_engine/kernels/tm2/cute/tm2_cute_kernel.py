@@ -38,6 +38,8 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils.hopper_helpers as sm90h
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from cutlass import BFloat16, Float32, Int32
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.cute.runtime import from_dlpack
@@ -372,6 +374,9 @@ class TM2DualKernel:
 _COMPILE_CACHE: dict = {}
 
 
+@opaque(fake=lambda x1, x2, Wg_nk, Wp_nk, tile_m=None: x1.new_empty(
+            (*x1.shape[:-1], Wg_nk.shape[0])),
+        name="tm2_dual_from_scratch")
 def tm2_dual_from_scratch(
     x1: torch.Tensor,
     x2: torch.Tensor,

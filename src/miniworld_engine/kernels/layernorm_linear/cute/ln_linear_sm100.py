@@ -31,6 +31,8 @@ from __future__ import annotations
 from miniworld_engine.kernels.layernorm.triton.transpose import _ln_transpose_dbn_kernel
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -72,6 +74,9 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
+@opaque(fake=lambda tri_bkll, w, b, eps: tri_bkll.new_empty(
+            (tri_bkll.shape[2] * tri_bkll.shape[3], tri_bkll.shape[1])),
+        name="ln_out_mmajor_sm100")
 def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
                   eps: float) -> torch.Tensor:
     """LayerNorm over K of ``tri`` [B,K,L,L] (B=1), read M-major. Returns (M, K)

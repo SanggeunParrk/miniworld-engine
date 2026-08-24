@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -37,9 +39,11 @@ def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, s
         tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1,
                  y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
 
+@opaque(fake=lambda x, gamma, beta, mean, rstd, shape_key=None: x.new_empty(x.shape),
+        name="lnl_recompute_xnormed")
 def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
-                       mean: torch.Tensor, rstd: torch.Tensor, *,
-                       shape_key: int | None = None):
+                       mean: torch.Tensor, rstd: torch.Tensor,
+                       shape_key: int | None = None) -> torch.Tensor:
     """x_normed = (x-mean)*rstd*γ + β, one fused bf16 pass using the SAVED mean/rstd (no stats
     recompute). Reads x at its own strides (strided/transposed view OK — no pre-copy) and writes
     a CONTIGUOUS (M,K) output.
@@ -73,8 +77,10 @@ def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
         tl.store(y_ptr + rows[:, None] * sy0 + cols[None, :] * sy1,
                  y.to(y_ptr.dtype.element_ty), mask=rm[:, None] & cm[None, :])
 
-def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor, *,
-                    shape_key: int | None = None):
+@opaque(fake=lambda x, mean, rstd, shape_key=None: x.new_empty(x.shape),
+        name="lnl_recompute_xhat")
+def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
+                    shape_key: int | None = None) -> torch.Tensor:
     """x̂ = (x-mean)·rstd (no affine), one fused bf16 pass using the SAVED mean/rstd.
     Reads x at its own strides (so a transposed/strided view is fine — NO pre-copy) and
     writes a CONTIGUOUS (M,K) x̂. This lets the caller feed a strided x (e.g. a bmm

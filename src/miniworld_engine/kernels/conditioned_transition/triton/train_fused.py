@@ -46,6 +46,8 @@ from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -176,7 +178,12 @@ def _fwd_squeeze_gate_kernel(
 # fmt: on
 
 
-def _fwd_expand_swiglu(x, wa, wb, *, shape_key=None):
+@opaque(fake=lambda x, wa, wb, shape_key=None: (
+            x.new_empty((x.shape[0], wa.shape[0])),
+            x.new_empty((x.shape[0], 2 * wa.shape[0]))),
+        name="cond_tf_fwd_expand_swiglu")
+def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
+                       shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     M, K = x.shape
     if shape_key is None:
         shape_key = atom_key(length_of(x.shape))
@@ -193,7 +200,13 @@ def _fwd_expand_swiglu(x, wa, wb, *, shape_key=None):
     return h, ab
 
 
-def _fwd_squeeze_gate(h, cond, ws, wsc, bsc, *, shape_key=None):
+@opaque(fake=lambda h, cond, ws, wsc, bsc, shape_key=None: (
+            h.new_empty((h.shape[0], ws.shape[0])),
+            h.new_empty((h.shape[0], ws.shape[0])),
+            h.new_empty((h.shape[0], ws.shape[0]))),
+        name="cond_tf_fwd_squeeze_gate")
+def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
+                      shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     M, ND = h.shape
     if shape_key is None:
         shape_key = atom_key(length_of(h.shape))
@@ -221,7 +234,11 @@ def _fwd_squeeze_gate(h, cond, ws, wsc, bsc, *, shape_key=None):
 # --- gate-bwd: dout = sg*dy ; dscale = out*sg*(1-sg)*dy  (one HBM pass over (M,D)) ---
 
 
-def _gate_bwd(out, scale, dy, *, shape_key=None):
+@opaque(fake=lambda out, scale, dy, shape_key=None: (
+            torch.empty_like(out), torch.empty_like(out)),
+        name="cond_tf_gate_bwd")
+def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
+              shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     dout = torch.empty_like(out)
     dscale = torch.empty_like(out)
     n = out.numel()
@@ -287,7 +304,10 @@ def _dgemm_kernel(
 # fmt: on
 
 
-def _dgemm(a, w, M, N, K, swk, swn, *, shape_key=None):
+@opaque(fake=lambda a, w, M, N, K, swk, swn, shape_key=None: a.new_empty((M, N)),
+        name="cond_tf_dgemm")
+def _dgemm(a: torch.Tensor, w: torch.Tensor, M: int, N: int, K: int, swk: int, swn: int,
+           shape_key: int | None = None) -> torch.Tensor:
     """C = a(M,K) @ W(K,N) via TF32 triton. swk,swn = W strides for the (K,N) logical view."""
     if shape_key is None:
         shape_key = atom_key(length_of(a.shape))
@@ -352,7 +372,11 @@ def _dx_fused_kernel(
 # fmt: on
 
 
-def _dx_fused(dh, ab, wa, wb, *, shape_key=None):
+@opaque(fake=lambda dh, ab, wa, wb, shape_key=None: dh.new_empty(
+            (dh.shape[0], wa.shape[1])),
+        name="cond_tf_dx_fused")
+def _dx_fused(dh: torch.Tensor, ab: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
+              shape_key: int | None = None) -> torch.Tensor:
     M, ND = dh.shape
     if shape_key is None:
         shape_key = atom_key(length_of(dh.shape))
@@ -423,7 +447,12 @@ def _dh_gatebwd_kernel(
 # fmt: on
 
 
-def _dh_gatebwd(out, scale, dy, ws, ND, *, shape_key=None):
+@opaque(fake=lambda out, scale, dy, ws, ND, shape_key=None: (
+            out.new_empty((out.shape[0], ND)),
+            torch.empty_like(out), torch.empty_like(out)),
+        name="cond_tf_dh_gatebwd")
+def _dh_gatebwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor, ws: torch.Tensor, ND: int,
+                shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """dh = (sigmoid(scale)*dy) @ Ws ; also returns materialized dout, dscale for wgrad."""
     M, D = out.shape
     if shape_key is None:
@@ -494,7 +523,12 @@ def _dx_swiglubwd_kernel(
 # fmt: on
 
 
-def _dx_swiglubwd(dh, ab, wcat, *, shape_key=None):
+@opaque(fake=lambda dh, ab, wcat, shape_key=None: (
+            dh.new_empty((dh.shape[0], wcat.shape[1])),
+            dh.new_empty((dh.shape[0], 2 * dh.shape[1]))),
+        name="cond_tf_dx_swiglubwd")
+def _dx_swiglubwd(dh: torch.Tensor, ab: torch.Tensor, wcat: torch.Tensor,
+                  shape_key: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """dx = dab @ Wcat (one GEMM), dab formed in-register from (dh, ab); emits dab for wgrad."""
     M, ND = dh.shape
     if shape_key is None:
@@ -549,7 +583,10 @@ def _swiglu_bwd_pack_kernel(
     tl.store(dab_ptr + row * stride_pm + (col + ND) * stride_pn, dh * silu, mask=mask)
 
 
-def _swiglu_bwd_pack(dh, ab, *, shape_key=None):
+@opaque(fake=lambda dh, ab, shape_key=None: dh.new_empty(
+            (dh.shape[0], 2 * dh.shape[1])),
+        name="cond_tf_swiglu_bwd_pack")
+def _swiglu_bwd_pack(dh: torch.Tensor, ab: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
     M, ND = dh.shape
     if shape_key is None:
         shape_key = atom_key(length_of(dh.shape))
@@ -602,7 +639,9 @@ def _wgrad_kernel(
 # fmt: on
 
 
-def _wgrad(g, x, N, K, *, shape_key=None):
+@opaque(fake=lambda g, x, N, K, shape_key=None: g.new_empty((N, K)),
+        name="cond_tf_wgrad")
+def _wgrad(g: torch.Tensor, x: torch.Tensor, N: int, K: int, shape_key: int | None = None) -> torch.Tensor:
     """dW(N,K) = g(M,N)^T @ x(M,K) via TF32 triton (reduce over M)."""
     M = g.shape[0]
     if shape_key is None:

@@ -19,6 +19,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -80,12 +82,16 @@ def _fold_kernel(
     tl.store(b2_ptr + 2 * j + 1, b2b, mask=j_mask)
 
 
+@opaque(fake=lambda Wa, Wb, ln_weight, ln_bias, w2_dtype=torch.bfloat16: (
+            Wa.new_empty((2 * Wa.shape[0], Wa.shape[1]), dtype=w2_dtype),
+            Wa.new_empty((2 * Wa.shape[0],), dtype=torch.float32),
+            Wa.new_empty((2 * Wa.shape[0],), dtype=torch.float32)),
+        name="transition_fold_swiglu")
 def fold_swiglu_triton(
     Wa: torch.Tensor,        # (N, K)
     Wb: torch.Tensor,        # (N, K)
     ln_weight: torch.Tensor, # (K,) gamma
     ln_bias: torch.Tensor,   # (K,) beta
-    *,
     w2_dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single-kernel fused fold. Returns (B (2N,K) w2_dtype, S (2N,) f32, B2 (2N,) f32)."""

@@ -24,6 +24,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -54,7 +56,9 @@ def _transpose_kernel(src_ptr, dst_ptr, M, N, BLOCK_M1: tl.constexpr, BLOCK_N: t
     )
 
 
-def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor, *,
+@opaque(fake=lambda blld, out_2d_m, seq_len=None: None,
+        name="trimul_transpose_blld_to_bdll", mutates_args=("out_2d_m",))
+def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor,
                             seq_len: int | None = None) -> None:
     """blld (M, 2D) row-major -> out (2D, M) row-major, in place into out_2d_m.
 

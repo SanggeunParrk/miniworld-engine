@@ -25,6 +25,8 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -129,6 +131,8 @@ def _fused_ln_mask_kernel(
             )
 
 
+@opaque(fake=lambda x, weight, bias, mask, eps=1e-5: torch.empty_like(x),
+        name="fused_ln_mask")
 def fused_ln_mask(
     x: torch.Tensor,  # (B, L, L, D), bf16/fp16
     weight: torch.Tensor,  # (D,)

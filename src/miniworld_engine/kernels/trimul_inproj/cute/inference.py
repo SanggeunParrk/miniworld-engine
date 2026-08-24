@@ -28,7 +28,9 @@ from miniworld_engine.kernels.trimul_inproj.cute.launch import trimul_inproj_cut
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 
 
-@opaque()
+@opaque(fake=lambda pair, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b,
+               eps, b_lr, rmask=None: torch.empty_like(pair),
+        name="trimul_inproj_inference")
 @torch.no_grad()
 def trimul_inproj_inference(pair, WL, WLg, WR, WRg, Wg, Wp,
                             ln_in_w, ln_in_b, ln_out_w, ln_out_b, eps, b_lr, rmask=None):

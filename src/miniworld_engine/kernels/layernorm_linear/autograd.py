@@ -22,6 +22,8 @@ from __future__ import annotations
 from .triton.recompute import _recompute_xhat, _recompute_xnormed
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 
 # torch/triton-only (no quack) — safe to import eagerly; this IS the LN-part backward.
@@ -73,8 +75,14 @@ def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
     return dx.to(x.dtype), dgamma, dbeta, dW, db_out
 
 
+@opaque(fake=lambda dx_normed, x, gamma, mean, rstd, shape_key=None: (
+            torch.empty_like(dx_normed),
+            x.new_empty((x.shape[-1],), dtype=torch.float32),
+            x.new_empty((x.shape[-1],), dtype=torch.float32)),
+        name="lnl_ln_backward")
 def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
-                 mean: torch.Tensor, rstd: torch.Tensor, *, shape_key: int | None = None):
+                 mean: torch.Tensor, rstd: torch.Tensor, shape_key: int | None = None,
+                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """dx, dgamma, dbeta for the LayerNorm part, reusing the repo's fused Triton kernel.
 
     Feeds ``dy = dx_normed`` (grad w.r.t. the LN output) so the kernel's dx/dw/db become the

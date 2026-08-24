@@ -362,44 +362,112 @@ def _attn_bwd(
     )
 
 
+def _bias_only_fwd_fake(v, bias, shape_key):
+    B, H, L, _, D = v.shape
+    return torch.empty_like(v), v.new_empty((B, H, L, L), dtype=torch.float32)
+
+
+@opaque(fake=_bias_only_fwd_fake, name="bias_only_attention_fwd")
+def _bias_only_fwd(v: torch.Tensor, bias: torch.Tensor,
+                   shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The attention launch -> ``(out, m)``; both tensors arrive contiguous.
+
+    Split out of ``TritonBiasOnlyAttentionFunction.forward`` so the contiguous() calls and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    B, H, L, _, D = v.shape
+    out = torch.empty_like(v)
+    m = torch.empty(B, H, L, L, device=v.device, dtype=torch.float32)
+
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
+    _attn_fwd[grid](
+        v,
+        bias,
+        m,
+        out,
+        *v.stride(),
+        *out.stride(),
+        *bias.stride(),
+        *m.stride(),
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=shape_key,
+    )
+    return out, m
+
+
+def _bias_only_bwd_fake(v, bias, grad_output, out, m, shape_key):
+    return v.new_empty(v.shape), bias.new_empty(bias.shape)
+
+
+@opaque(fake=_bias_only_bwd_fake, name="bias_only_attention_bwd")
+def _bias_only_bwd(v: torch.Tensor, bias: torch.Tensor, grad_output: torch.Tensor,
+                   out: torch.Tensor, m: torch.Tensor,
+                   shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The two backward launches -> ``(dv, dbias)``, both still in the kernels' merged-head layout.
+
+    Every argument arrives ALREADY rearranged: the einops reshape in and the reduce back out are
+    plain tensor ops, so they stay in the caller where the compiler can fuse them.
+    """
+    B, HL, L, D = v.shape
+    delta = torch.empty_like(m)
+
+    B, HL, L, D = v.shape
+    delta = torch.empty_like(m)
+
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    _attn_bwd_preprocess[grid](
+        out,
+        grad_output,
+        delta,
+        B,
+        L,
+        D,
+        shape_key=shape_key,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+    )
+
+    dv = torch.empty_like(v)
+    dbias = torch.empty_like(bias)
+
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    _attn_bwd[grid](
+        v,
+        bias,
+        grad_output,
+        dv,
+        dbias,
+        m,
+        delta,
+        *v.stride(),
+        *bias.stride(),
+        HL,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=shape_key,
+    )
+
+    return dv, dbias
+
+
 class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         v: Float[torch.Tensor, "B H L L D"],
         bias: Float[torch.Tensor, "B H L L"],
     ) -> Float[torch.Tensor, "B H L L D"]:
         v, bias = [x.contiguous() for x in (v, bias)]
-        B, H, L, _, D = v.shape
-
-        out = torch.empty_like(v)
-        m = torch.empty(B, H, L, L, device=v.device, dtype=torch.float32)
-
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
-        _attn_fwd[grid](
-            v,
-            bias,
-            m,
-            out,
-            *v.stride(),
-            *out.stride(),
-            *bias.stride(),
-            *m.stride(),
-            B,
-            H,
-            L,
-            D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=token_key(L),
-        )
-
+        out, m = _bias_only_fwd(v, bias, token_key(v.shape[2]))
         ctx.save_for_backward(v, bias, m, out)
         return out
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         v, bias, m, out = ctx.saved_tensors
 
@@ -412,48 +480,15 @@ class TritonBiasOnlyAttentionFunction(torch.autograd.Function):
         # invalid global reads there before the same one-line fix.
         grad_output = grad_output.contiguous()
 
-        v, out, grad_output = [
+        v_r, out_r, go_r = (
             rearrange(x, "B H L L2 D -> B (H L) L2 D")
             for x in (v, out, grad_output)
-        ]
-        bias = repeat(bias, "B H L L2 -> B (H L3) L L2", L3=bias.shape[2])
-        m = rearrange(m, "B H L L2 -> B (H L) L2")
-
-        B, HL, L, D = v.shape
-        delta = torch.empty_like(m)
-
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
-        _attn_bwd_preprocess[grid](
-            out,
-            grad_output,
-            delta,
-            B,
-            L,
-            D,
-            shape_key=token_key(L),
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
         )
+        bias_r = repeat(bias, "B H L L2 -> B (H L3) L L2", L3=bias.shape[2])
+        m_r = rearrange(m, "B H L L2 -> B (H L) L2")
+        L = v_r.shape[2]
 
-        dv = torch.empty_like(v)
-        dbias = torch.empty_like(bias)
-
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
-        _attn_bwd[grid](
-            v,
-            bias,
-            grad_output,
-            dv,
-            dbias,
-            m,
-            delta,
-            *v.stride(),
-            *bias.stride(),
-            HL,
-            L,
-            D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=token_key(L),
-        )
+        dv, dbias = _bias_only_bwd(v_r, bias_r, go_r, out_r, m_r, token_key(L))
 
         dv = rearrange(dv, "B (H L) L2 D -> B H L L2 D", L=L)
         dbias = reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)

@@ -3,6 +3,8 @@ from miniworld_engine.autotune.configs import configs_for
 import os
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine import settings
 import triton
 import triton.language as tl
@@ -115,6 +117,39 @@ def get_seq_group(length) -> int:
     return bucket_mixed(length)
 
 
+@opaque(fake=lambda gate, x, shape_key: torch.empty_like(x), name="sigmoid_gate_fwd")
+def _sigmoid_gate(gate: torch.Tensor, x: torch.Tensor, shape_key: int) -> torch.Tensor:
+    """``sigmoid(gate) * x``. Both operands arrive already flattened to (M, N) and contiguous.
+
+    Split out of ``TritonGatedProjectionFunction`` so the rearranges, the dtype casts, the
+    projection GEMM and ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    M, N = x.shape
+    out = torch.empty_like(x)
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    sigmoid_gate_fwd_kernel[grid](
+        gate, x, gate.stride(0), x.stride(0), out, M, N, shape_key=shape_key,
+    )
+    return out
+
+
+@opaque(fake=lambda gate, x, grad_out, shape_key: (
+            torch.empty_like(gate), torch.empty_like(x)),
+        name="sigmoid_gate_bwd")
+def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tensor,
+                      shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gradients of ``sigmoid(gate) * x`` -> ``(dgate, dx)``, both flat. The two GEMMs that
+    produce ``grad_out`` and ``dW_out`` stay in the caller."""
+    M, N = x.shape
+    dgate = torch.empty_like(gate)
+    dx = torch.empty_like(x)
+    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    sigmoid_gate_bwd_kernel[grid](
+        gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0), M, N, shape_key=shape_key,
+    )
+    return dgate, dx
+
+
 class TritonGatedProjectionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
@@ -129,23 +164,9 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
         x = rearrange(x, "... d -> (...) d").contiguous()
         op_dtype = x.dtype
         gate = gate.to(op_dtype)
-        M, N = x.shape
-
-        out = torch.empty_like(x)
-
-        grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
-        sigmoid_gate_fwd_kernel[grid](
-            gate,
-            x,
-            gate.stride(0),
-            x.stride(0),
-            out,
-            M,
-            N,
-            # L = original_shape[-2], captured BEFORE the rearrange to (M, hd) -- one rule
-            # for pair (B, L, L, D) and token/atom (B, L, D). Never the row count M.
-            shape_key=both_key(rows_of(original_shape)),
-        )
+        # L = original_shape[-2], captured BEFORE the rearrange to (M, hd) -- one rule
+        # for pair (B, L, L, D) and token/atom (B, L, D). Never the row count M.
+        out = _sigmoid_gate(gate, x, both_key(rows_of(original_shape)))
 
         ctx.save_for_backward(
             gate.to(torch.bfloat16),
@@ -170,41 +191,16 @@ class TritonGatedProjectionFunction(torch.autograd.Function):
         grad_out = grad_out.to(op_dtype)
         out_weight = out_weight.to(op_dtype)
         original_shape = ctx.original_shape
-        M, N = x.shape
-
-        out = torch.empty_like(x)
-
-        grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
-        sigmoid_gate_fwd_kernel[grid](
-            gate,
-            x,
-            gate.stride(0),
-            x.stride(0),
-            out,
-            M,
-            N,
-            shape_key=both_key(rows_of(original_shape)),
-        )
+        shape_key = both_key(rows_of(original_shape))
+        # Recompute the gated activation (forward saved gate/x, not the product) -- the same
+        # launch the forward used, so it is the same op.
+        out = _sigmoid_gate(gate, x, shape_key)
 
         grad_out = rearrange(grad_out, "... W -> (...) W").contiguous()
         dW_out = torch.matmul(out.T, grad_out)
         grad_out = torch.matmul(grad_out, out_weight.T)
 
-        dgate = torch.empty_like(gate)
-        dx = torch.empty_like(x)
-
-        sigmoid_gate_bwd_kernel[grid](
-            gate,
-            x,
-            grad_out,
-            dgate,
-            dx,
-            gate.stride(0),
-            x.stride(0),
-            M,
-            N,
-            shape_key=both_key(rows_of(original_shape)),
-        )
+        dgate, dx = _sigmoid_gate_bwd(gate, x, grad_out, shape_key)
 
         dgate = dgate.reshape(original_shape)
         dx = dx.reshape(original_shape)

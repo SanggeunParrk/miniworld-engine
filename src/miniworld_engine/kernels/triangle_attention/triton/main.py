@@ -334,10 +334,125 @@ def _attn_bwd_dq(
     tl.store(DQ_bp, dq.to(dq_ptr.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _tri_attn_fwd_fake(q, k, v, bias, shape_key):
+    B, H, L, _, D = q.shape
+    # Mirror the real allocation EXACTLY, strides included: `out` is a strided view over a
+    # [B, L, L2, H*D] projection-layout buffer, and the module's rearrange back to that layout is
+    # only free if the graph knows those strides. A contiguous fake here would silently reinstate
+    # the ~0.2 ms output copy this layout exists to remove.
+    out = rearrange(q.new_empty((B, L, L, H * D)), "B L L2 (H D) -> B H L L2 D", H=H)
+    return out, q.new_empty((B, H, L, L), dtype=torch.float32)
+
+
+@opaque(fake=_tri_attn_fwd_fake, name="triangle_attention_fwd")
+def _tri_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
+                  shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The attention launch -> ``(out, m)``, ``out`` in projection layout.
+
+    Split out of ``TritonTriangleAttentionPairBiasFunction.forward`` so ``bias.contiguous()`` and
+    ``save_for_backward`` stay traceable -- see ``kernels._compile``.
+    """
+    B, H, L, _, D = q.shape
+    sm_scale = D**-0.5
+    # B: write `out` into PROJECTION layout [B,L,L2,H*D] via a strided (B,H,L,L2,D) view
+    # (head_dim stride-1 -> coalesced write, free like q/k/v). The module's rearrange-back
+    # "B H L L2 D -> B L L2 (H D)" is then a FREE view -> kills the ~0.2 ms fwd out copy.
+    out_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=q.dtype)
+    out = rearrange(out_proj, "B L L2 (H D) -> B H L L2 D", H=H)
+    m = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
+
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
+    _attn_fwd[grid](
+        q, k, v, bias, sm_scale, m, out,
+        *q.stride(),      # q strided 5D (B,H,Lrow,tok,D)  [k,v share pattern]
+        *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
+        *bias.stride(),   # bias contiguous (B,H,m,n)
+        *m.stride(),
+        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=shape_key,
+    )
+    return out, m
+
+
+def _tri_attn_bwd_fake(q, k, v, bias, m, out, grad_output, shape_key):
+    B, H, L, _, D = q.shape
+    def _proj():   # same projection-layout strided view the real backward allocates
+        return rearrange(v.new_empty((B, L, L, H * D)), "B L L2 (H D) -> B H L L2 D", H=H)
+    return _proj(), _proj(), _proj(), bias.new_empty((B, H * L, L, L))
+
+
+@opaque(fake=_tri_attn_bwd_fake, name="triangle_attention_bwd")
+def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor,
+                  m: torch.Tensor, out: torch.Tensor, grad_output: torch.Tensor,
+                  shape_key: int,
+                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The three backward launches -> ``(dq, dk, dv, dbias_raw)``.
+
+    ``dbias_raw`` is the per-row ``(B, H*L, L, L)`` accumulator; the reduce over the row axis is
+    plain torch and stays in the caller.
+    """
+    B, H, L, _, D = q.shape
+    HL = H * L
+    sm_scale = D**-0.5
+    # B+C: consume both out and grad_output STRIDED 5D (no .contiguous); preprocess reads
+    # each via its own explicit strides.
+    m_m = rearrange(m, "B H L L2 -> B (H L) L2")
+    delta = torch.empty_like(m_m)
+
+    grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
+    _attn_bwd_preprocess[grid](
+        out, grad_output, delta,
+        *out.stride(),           # out STRIDED 5D (projection layout)
+        *grad_output.stride(), HL, B, L, D,
+        shape_key=shape_key,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+    )
+
+    # A: allocate dq/dk/dv in the PROJECTION layout [B,L,L2,H*D] and hand the kernels
+    # strided (B,H,L,L2,D) views of them. The kernels write strided (q-group), so the
+    # module's rearrange-backward becomes a FREE view -> no grad-transpose copy.
+    # dq stored bf16 (was fp32 — a vestige of the original atomic-add dq, which needed an
+    # fp32 accumulator buffer; FA2 split removed the atomics). The kernel accumulates dq in
+    # fp32 registers and stores once, exactly like dk/dv, so bf16 out is precision-neutral
+    # (matches the cuBLAS/pytorch ref which also stores bf16 grads). Kills the fp32->bf16
+    # cast copy of the returned query grad.
+    dq_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
+    dk_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
+    dv_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
+    dq = rearrange(dq_proj, "B L L2 (H D) -> B H L L2 D", H=H)
+    dk = rearrange(dk_proj, "B L L2 (H D) -> B H L L2 D", H=H)
+    dv = rearrange(dv_proj, "B L L2 (H D) -> B H L L2 D", H=H)
+    dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)  # per-row, reduced below
+
+    grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
+    _attn_bwd_dkdv[grid_kv](
+        q, k, v, bias, sm_scale, grad_output, dk, dv, dbias, m_m, delta,
+        *q.stride(),        # q strided 5D  [k,v share] — READ layout
+        *dk.stride(),       # grad-group WRITE layout (may differ from q, e.g. concat split-view)
+        *grad_output.stride(),  # do STRIDED 5D (B,H,Lrow,tok,D)
+        *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
+        L * L,              # dbias HL-dim stride
+        L, HL, D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=shape_key,
+    )
+    grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
+    _attn_bwd_dq[grid_q](
+        q, k, v, bias, sm_scale, grad_output, dq, m_m, delta,
+        *q.stride(),
+        *dq.stride(),       # grad-group WRITE layout
+        *grad_output.stride(),
+        *bias.stride(),
+        L, HL, D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=shape_key,
+    )
+
+    # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;
+    # the module's rearrange-backward is a free view (data already in projection layout).
+    return dq, dk, dv, dbias
+
+
 class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         q: Float[torch.Tensor, "B H L L D"],
@@ -349,91 +464,20 @@ class TritonTriangleAttentionPairBiasFunction(torch.autograd.Function):
         # bias IS contiguous (its strided key-dim stride=H is a fully-gappy load = the whole
         # 2.3x penalty; the copy is tiny, ~1MB). out/m are freshly-allocated contiguous.
         bias = bias.contiguous()
-        B, H, L, _, D = q.shape
-        sm_scale = D**-0.5
-        # B: write `out` into PROJECTION layout [B,L,L2,H*D] via a strided (B,H,L,L2,D) view
-        # (head_dim stride-1 -> coalesced write, free like q/k/v). The module's rearrange-back
-        # "B H L L2 D -> B L L2 (H D)" is then a FREE view -> kills the ~0.2 ms fwd out copy.
-        out_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=q.dtype)
-        out = rearrange(out_proj, "B L L2 (H D) -> B H L L2 D", H=H)
-        m = torch.empty(B, H, L, L, device=q.device, dtype=torch.float32)
-
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * H, L]
-        _attn_fwd[grid](
-            q, k, v, bias, sm_scale, m, out,
-            *q.stride(),      # q strided 5D (B,H,Lrow,tok,D)  [k,v share pattern]
-            *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
-            *bias.stride(),   # bias contiguous (B,H,m,n)
-            *m.stride(),
-            B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
-        )
+        out, m = _tri_attn_fwd(q, k, v, bias, token_key(q.shape[2]))
         ctx.save_for_backward(q, k, v, bias, m, out)
         return out
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         q, k, v, bias, m, out = ctx.saved_tensors   # q/k/v strided; bias/m/out contiguous
         if grad_output.dtype != q.dtype:
             grad_output = grad_output.to(q.dtype)
 
-        B, H, L, _, D = q.shape
-        HL = H * L
-        sm_scale = D**-0.5
-        # B+C: consume both out and grad_output STRIDED 5D (no .contiguous); preprocess reads
-        # each via its own explicit strides.
-        m_m = rearrange(m, "B H L L2 -> B (H L) L2")
-        delta = torch.empty_like(m_m)
-
-        grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
-        _attn_bwd_preprocess[grid](
-            out, grad_output, delta,
-            *out.stride(),           # out STRIDED 5D (projection layout)
-            *grad_output.stride(), HL, B, L, D,
-            shape_key=token_key(L),
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-        )
-
-        # A: allocate dq/dk/dv in the PROJECTION layout [B,L,L2,H*D] and hand the kernels
-        # strided (B,H,L,L2,D) views of them. The kernels write strided (q-group), so the
-        # module's rearrange-backward becomes a FREE view -> no grad-transpose copy.
-        # dq stored bf16 (was fp32 — a vestige of the original atomic-add dq, which needed an
-        # fp32 accumulator buffer; FA2 split removed the atomics). The kernel accumulates dq in
-        # fp32 registers and stores once, exactly like dk/dv, so bf16 out is precision-neutral
-        # (matches the cuBLAS/pytorch ref which also stores bf16 grads). Kills the fp32->bf16
-        # cast copy of the returned query grad.
-        dq_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
-        dk_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
-        dv_proj = torch.empty(B, L, L, H * D, device=q.device, dtype=v.dtype)
-        dq = rearrange(dq_proj, "B L L2 (H D) -> B H L L2 D", H=H)
-        dk = rearrange(dk_proj, "B L L2 (H D) -> B H L L2 D", H=H)
-        dv = rearrange(dv_proj, "B L L2 (H D) -> B H L L2 D", H=H)
-        dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)  # per-row, reduced below
-
-        grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
-        _attn_bwd_dkdv[grid_kv](
-            q, k, v, bias, sm_scale, grad_output, dk, dv, dbias, m_m, delta,
-            *q.stride(),        # q strided 5D  [k,v share] — READ layout
-            *dk.stride(),       # grad-group WRITE layout (may differ from q, e.g. concat split-view)
-            *grad_output.stride(),  # do STRIDED 5D (B,H,Lrow,tok,D)
-            *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
-            L * L,              # dbias HL-dim stride
-            L, HL, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
-        )
-        grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
-        _attn_bwd_dq[grid_q](
-            q, k, v, bias, sm_scale, grad_output, dq, m_m, delta,
-            *q.stride(),
-            *dq.stride(),       # grad-group WRITE layout
-            *grad_output.stride(),
-            *bias.stride(),
-            L, HL, D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
-        )
-
-        # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;
+        L = q.shape[2]
+        # dq/dk/dv come back as (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;
         # the module's rearrange-backward is a free view (data already in projection layout).
+        dq, dk, dv, dbias = _tri_attn_bwd(q, k, v, bias, m, out, grad_output, token_key(L))
         dbias = reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
         return dq, dk, dv, dbias
 

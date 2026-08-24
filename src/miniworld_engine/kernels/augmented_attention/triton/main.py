@@ -567,10 +567,188 @@ def _dq_reduce(
     tl.store(out_ptr, acc, mask=mask)
 
 
+def _aa_fwd_fake(q, k, v, bias, mask, shape_key):
+    A, B, L, H, D = q.shape
+    return torch.empty_like(q), q.new_empty((A, B, H, L), dtype=torch.float32)
+
+
+@opaque(fake=_aa_fwd_fake, name="augmented_attention_fwd")
+def _aa_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The attention launch -> ``(out, m)``; ``m`` is the per-row logsumexp the backward reuses.
+
+    Split out of ``TritonAugmentedAttentionFunction.forward`` so the bias permute, the default
+    mask, the contiguous() calls and ``save_for_backward`` stay traceable -- see
+    ``kernels._compile``. Every tensor arrives already permuted and contiguous, so this only
+    flattens (A, B) into the kernel's batch axis and launches.
+    """
+    A, B, L, H, D = q.shape
+    sm_scale = D**-0.5
+    out = torch.empty_like(q)
+    m = torch.empty(A, B, H, L, device=q.device, dtype=torch.float32)
+    # The kernel wants (A*B) as one batch axis; the caller keeps (A, B) split.
+    qf, kf, vf, outf = (x.view(A * B, L, H, D) for x in (q, k, v, out))
+
+    grid = lambda META: (
+        triton.cdiv(L, META["BLOCK_M1"]),
+        A * B * H,
+        triton.cdiv(D, META["HEAD_DIM_PAD"]),
+    )
+    _attn_fwd[grid](
+        qf,
+        kf,
+        vf,
+        bias,
+        mask,
+        sm_scale,
+        m,
+        outf,
+        *qf.stride(),
+        *kf.stride(),
+        *vf.stride(),
+        *outf.stride(),
+        *bias.stride(),
+        *mask.stride()[:2],
+        A,
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=shape_key,
+    )
+    return out, m
+
+
+def _aa_bwd_fake(dy, q, k, v, bias, mask, o, m, shape_key):
+    A, B, L, H, D = q.shape
+    return (
+        q.new_empty((A, B, L, H, D), dtype=torch.float32),
+        torch.empty_like(k),
+        torch.empty_like(v),
+        q.new_empty((A, B, H, L, L), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_aa_bwd_fake, name="augmented_attention_bwd")
+def _aa_bwd(
+    dy: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    o: torch.Tensor,
+    m: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The three backward launches -> ``(dq, dk, dv, dbias_raw)``.
+
+    ``dbias_raw`` is the UNREDUCED ``(A, B, H, L, L)`` accumulator: the sum over A and the permute
+    back to the caller's ``(B, L, L, H)`` layout are plain torch, so they are left to the caller
+    where the compiler can fuse them instead of being buried in an opaque node.
+    """
+    A, B, L, H, D = q.shape
+    sm_scale = D**-0.5
+    delta = torch.empty_like(m)
+
+    grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)
+    _attn_bwd_preprocess[grid](
+        o,
+        dy,
+        delta,
+        A,
+        B,
+        L,
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        q.stride(4),
+        H,
+        D,
+        shape_key=atom_key(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+    )
+
+    # dq_expand is (num_splits, A, B, L, H, D): one slot per BLOCK_M2 block.
+    num_splits = triton.cdiv(L, _bwd_min_block_n())
+    dq_expand = torch.zeros(
+        int(num_splits), A, B, L, H, D, device=q.device, dtype=torch.float32
+    )
+
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    dbias = torch.zeros(A, B, H, L, L, device=q.device, dtype=torch.float32)
+
+    grid = lambda META: (
+        triton.cdiv(L, META["BLOCK_M2"]),
+        A,
+        B * H,
+    )
+    _attn_bwd[grid](
+        q,
+        k,
+        v,
+        bias,
+        mask,
+        sm_scale,
+        dy,
+        dq_expand,  # DQ slot buffer
+        dk,
+        dv,
+        dbias,
+        m,
+        delta,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        q.stride(4),
+        dq_expand.stride(0),  # stride_dq_split
+        dbias.stride(0),
+        dbias.stride(1),
+        dbias.stride(2),
+        dbias.stride(3),
+        dbias.stride(4),
+        *mask.stride()[:2],
+        A,
+        B,
+        H,
+        L,
+        D,
+        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=atom_key(L),
+    )
+
+    # sum the splits into the final dq
+    dq = torch.empty(A, B, L, H, D, device=q.device, dtype=torch.float32)
+    n_elem = A * B * L * H * D
+    # META-lambda grid: BLOCK_SIZE is a tuned constexpr, so the launch geometry MUST be
+    # derived from the config the kernel is compiled with. A grid pinned to a different
+    # block size leaves part of the (torch.empty) dq unwritten -- see the note on _dq_reduce.
+    grid_reduce = lambda META: (triton.cdiv(n_elem, META["BLOCK_E"]),)  # noqa: E731
+    _dq_reduce[grid_reduce](
+        dq_expand,
+        dq,
+        int(num_splits),
+        dq_expand.stride(0),
+        1,  # element stride (contiguous)
+        n_elem,
+        shape_key=atom_key(L),
+    )
+
+    return dq, dk, dv, dbias
+
+
 class TritonAugmentedAttentionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         q: Float[torch.Tensor, "A B L H D"],
@@ -590,150 +768,26 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
         if mask is None:
             mask = torch.ones(A, B, L, dtype=torch.bool, device=q.device)
         mask = mask.contiguous()
-        q, k, v = [x.view(A * B, L, H, D) for x in (q, k, v)]
 
-        sm_scale = D**-0.5
-        out = torch.empty_like(q)
-        m = torch.empty(A, B, H, L, device=q.device, dtype=torch.float32)
-
-        grid = lambda META: (
-            triton.cdiv(L, META["BLOCK_M1"]),
-            A * B * H,
-            triton.cdiv(D, META["HEAD_DIM_PAD"]),
-        )
-        _attn_fwd[grid](
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            sm_scale,
-            m,
-            out,
-            *q.stride(),
-            *k.stride(),
-            *v.stride(),
-            *out.stride(),
-            *bias.stride(),
-            *mask.stride()[:2],
-            A,
-            B,
-            H,
-            L,
-            D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=atom_key(L),
-        )
-
-        q, k, v, out = [x.view(A, B, L, H, D) for x in (q, k, v, out)]
+        out, m = _aa_fwd(q, k, v, bias, mask, atom_key(L))
 
         ctx.save_for_backward(q, k, v, bias, mask, out, m)
         return out
 
     @staticmethod
-    @opaque()
     def backward(ctx, *grad_output: torch.Tensor):
         (dy,) = grad_output
         q, k, v, bias, mask, o, m = ctx.saved_tensors
-
         if dy.dtype != q.dtype:
             dy = dy.to(q.dtype)
 
-        dy = dy.contiguous()
-
-        A, B, L, H, D = q.shape
-        sm_scale = D**-0.5
-        delta = torch.empty_like(m)
-
-        grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)
-        _attn_bwd_preprocess[grid](
-            o,
-            dy,
-            delta,
-            A,
-            B,
-            L,
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),
-            q.stride(4),
-            H,
-            D,
-            shape_key=atom_key(L),
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
+        dq, dk, dv, dbias = _aa_bwd(
+            dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(q.shape[2]),
         )
-
-        # dq_expand is (num_splits, A, B, L, H, D): one slot per BLOCK_M2 block.
-        num_splits = triton.cdiv(L, _bwd_min_block_n())
-        dq_expand = torch.zeros(
-            int(num_splits), A, B, L, H, D, device=q.device, dtype=torch.float32
-        )
-
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
-        dbias = torch.zeros(A, B, H, L, L, device=q.device, dtype=torch.float32)
-
-        grid = lambda META: (
-            triton.cdiv(L, META["BLOCK_M2"]),
-            A,
-            B * H,
-        )
-        _attn_bwd[grid](
-            q,
-            k,
-            v,
-            bias,
-            mask,
-            sm_scale,
-            dy,
-            dq_expand,  # DQ slot buffer
-            dk,
-            dv,
-            dbias,
-            m,
-            delta,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            q.stride(3),
-            q.stride(4),
-            dq_expand.stride(0),  # stride_dq_split
-            dbias.stride(0),
-            dbias.stride(1),
-            dbias.stride(2),
-            dbias.stride(3),
-            dbias.stride(4),
-            *mask.stride()[:2],
-            A,
-            B,
-            H,
-            L,
-            D,
-            HEAD_DIM_PAD=triton.next_power_of_2(D),
-            shape_key=atom_key(L),
-        )
-
-        # sum the splits into the final dq
-        dq = torch.empty(A, B, L, H, D, device=q.device, dtype=torch.float32)
-        n_elem = A * B * L * H * D
-        # META-lambda grid: BLOCK_SIZE is a tuned constexpr, so the launch geometry MUST be
-        # derived from the config the kernel is compiled with. A grid pinned to a different
-        # block size leaves part of the (torch.empty) dq unwritten -- see the note on _dq_reduce.
-        grid_reduce = lambda META: (triton.cdiv(n_elem, META["BLOCK_E"]),)  # noqa: E731
-        _dq_reduce[grid_reduce](
-            dq_expand,
-            dq,
-            int(num_splits),
-            dq_expand.stride(0),
-            1,  # element stride (contiguous)
-            n_elem,
-            shape_key=atom_key(L),
-        )
-
-        dbias = dbias.sum(dim=0)
-        dbias = dbias.permute(0, 2, 3, 1).contiguous()
-
-        return dq, dk, dv, dbias, None
+        # Reduce over A and restore the caller's (B, L, L, H) bias layout OUTSIDE the op, so these
+        # stay in the graph and fuse with whatever consumes dbias.
+        dbias = dbias.sum(dim=0).permute(0, 2, 3, 1).contiguous()
+        return dq, dk, dv, dbias, None   # mask takes no gradient
 
 
 triton_augmented_attention_pair_bias = TritonAugmentedAttentionFunction.apply

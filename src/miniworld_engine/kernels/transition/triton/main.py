@@ -88,10 +88,46 @@ def transition_fwd_kernel(
     )
 
 
+def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, n, shape_key):
+    return x.new_empty((x.shape[0], n * x.shape[1]))
+
+
+@opaque(fake=_expand_swiglu_fake, name="transition_expand_swiglu")
+def _expand_swiglu(
+    x: torch.Tensor,
+    expand_a_weight: torch.Tensor,
+    expand_b_weight: torch.Tensor,
+    n: int,
+    shape_key: int,
+) -> torch.Tensor:
+    """The launch, and only the launch: ``SwiGLU(x @ Wa^T, x @ Wb^T)`` -> ``(M, n*N)``.
+
+    Split out of ``TritonTransitionFunction.forward`` so the flatten, the autocast casts, the
+    squeeze GEMM and ``save_for_backward`` stay traceable and only this stays opaque -- see
+    ``kernels._compile``. ``x`` arrives already 2-D and contiguous; ``shape_key`` is computed from
+    the PRE-flatten shape by the caller, which is the only place that still knows it.
+    """
+    M, N = x.shape
+    expand = torch.empty(M, n * N, dtype=x.dtype, device=x.device)
+    grid = lambda META: [
+        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(n * N, META["BLOCK_N"]),
+    ]
+    transition_fwd_kernel[grid](
+        x,
+        expand_a_weight,
+        expand_b_weight,
+        expand,
+        M,
+        n,
+        N,
+        shape_key=shape_key,
+    )
+    return expand
+
+
 class TritonTransitionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
-    @opaque()
     def forward(
         ctx,
         x: Float[torch.Tensor, "... d"],
@@ -102,7 +138,6 @@ class TritonTransitionFunction(torch.autograd.Function):
     ) -> Float[torch.Tensor, "... d"]:
         orig_shape = x.shape
         x = x.view(-1, orig_shape[-1]).contiguous()
-        M, N = x.shape
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -111,22 +146,14 @@ class TritonTransitionFunction(torch.autograd.Function):
             expand_b_weight = expand_b_weight.to(dtype)
             squeeze_weight = squeeze_weight.to(dtype)
 
-        expand = torch.empty(M, n * N, dtype=x.dtype, device=x.device)
-
-        grid = lambda META: [
-            triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(n * N, META["BLOCK_N"]),
-        ]
-        transition_fwd_kernel[grid](
+        expand = _expand_swiglu(
             x,
             expand_a_weight,
             expand_b_weight,
-            expand,
-            M,
             n,
-            N,
             # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
             # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
-            shape_key=both_key(rows_of(orig_shape)),
+            both_key(rows_of(orig_shape)),
         )
 
         ctx.save_for_backward(
@@ -141,7 +168,6 @@ class TritonTransitionFunction(torch.autograd.Function):
         return output.reshape(orig_shape)
 
     @staticmethod
-    @opaque()
     def backward(ctx, grad_output: torch.Tensor):
         (
             x,
