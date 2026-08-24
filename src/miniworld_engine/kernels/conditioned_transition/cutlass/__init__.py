@@ -8,7 +8,7 @@ module is import-safe even when the extension is absent (returns None loader).
 """
 from __future__ import annotations
 
-__all__ = ["load_ext", "cond_transition_train_cutlass"]
+__all__ = ["cond_transition_train_cutlass", "load_ext"]
 
 
 def load_ext():

@@ -7,6 +7,8 @@ its own backward. This module is the family's public door: importers name it rat
 
 from __future__ import annotations
 
-from .triton.main import triton_triangle_attention_pair_bias
+from miniworld_engine.kernels.triangle_attention.triton.main import (
+    triton_triangle_attention_pair_bias,
+)
 
 __all__ = ["triton_triangle_attention_pair_bias"]

@@ -21,6 +21,8 @@ def layernorm_linear_triton(
     bias: torch.Tensor | None,  # (d_out,)
     eps: float = 1e-5,
 ) -> torch.Tensor:
-    from .triton.fused import layernorm_linear_triton_fwd
+    from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+        layernorm_linear_triton_fwd,
+    )
 
     return layernorm_linear_triton_fwd(x, ln_weight, ln_bias, weight, bias, eps)

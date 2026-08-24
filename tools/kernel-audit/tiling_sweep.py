@@ -9,7 +9,9 @@ or CUTE kernel's tiling is fixed in its source and re-running it per set measure
 paying a multi-minute nvcc build each time.
 """
 from __future__ import annotations
+
 import argparse
+import contextlib
 import csv
 import os
 import sys
@@ -56,7 +58,7 @@ def check_and_hash(check: str, *, seed: int = 0, dirty: bool = False) -> tuple[b
         torch.cuda.manual_seed_all(seed)
     try:
         got = fn()
-    except Exception as exc:                                     # noqa: BLE001
+    except Exception as exc:
         return False, f"checker raised {type(exc).__name__}: {str(exc).strip().splitlines()[0][:150]}", ""
     pairs = got if isinstance(got, dict) else {"out": got}
     worst, detail, h = 0.0, [], hashlib.sha256()
@@ -92,7 +94,7 @@ def run_isolated(args, rows) -> int:
     out.mkdir(parents=True, exist_ok=True)
     merged, fields = [], ["kernel", "family", "phase", "ok", "worst", "sha", "detail"]
     with tempfile.TemporaryDirectory() as tmp:
-        for i, r in enumerate(rows, 1):
+        for r in rows:
             k = r["kernel"]
             cmd = [sys.executable, __file__, "--label", "one", "--out", tmp,
                    "--ops", k, "--backends", args.backends, "--seed", str(args.seed),
@@ -111,14 +113,14 @@ def run_isolated(args, rows) -> int:
                 rec = got[0]
                 # a no-driver row carries ok="" and is not counted as a failure in the summary;
                 # printing it as FAIL made the two disagree
-                mark = 'ok  ' if rec['ok'] == '1' else ('----' if rec['ok'] == '' else 'FAIL')
+                mark = "ok  " if rec["ok"] == "1" else ("----" if rec["ok"] == "" else "FAIL")
                 print(f"  [{mark}] {rec['phase']:11s} "
                       f"{k:46s} {rec['detail'][:80]}", flush=True)
             else:
                 tail = (proc.stderr or proc.stdout).strip().splitlines()
                 why = tail[-1][:150] if tail else f"no output, rc={proc.returncode}"
-                merged.append(dict(kernel=k, family=r["family"], phase="crashed", ok="0",
-                                   worst="", sha="", detail=f"subprocess produced no row: {why}"))
+                merged.append({"kernel": k, "family": r["family"], "phase": "crashed", "ok": "0",
+                                   "worst": "", "sha": "", "detail": f"subprocess produced no row: {why}"})
                 print(f"  [FAIL] crashed     {k:46s} {why[:80]}", flush=True)
     dest = out / f"{args.label}.csv"
     with dest.open("w", newline="") as fh:
@@ -200,8 +202,8 @@ def main() -> int:
     for r in rows:
         drv, chk = (r.get("driver") or "").strip(), (r.get("check") or "").strip()
         if not drv:
-            recs.append(dict(kernel=r["kernel"], family=r["family"], phase="no-driver",
-                             ok="", worst="", sha="", detail=""))
+            recs.append({"kernel": r["kernel"], "family": r["family"], "phase": "no-driver",
+                             "ok": "", "worst": "", "sha": "", "detail": ""})
             continue
         ok, detail = run_one(drv)
         phase, sha = "launch", ""
@@ -231,14 +233,12 @@ def main() -> int:
             vals = []
             for tok in detail[4:].split():
                 _, _, v = tok.partition("=")
-                try:
+                with contextlib.suppress(ValueError):
                     vals.append(float(v))
-                except ValueError:
-                    pass
             if vals:
                 worst = f"{max(vals):.3e}"
-        recs.append(dict(kernel=r["kernel"], family=r["family"], phase=phase,
-                         ok="1" if ok else "0", worst=worst, sha=sha, detail=detail[:300]))
+        recs.append({"kernel": r["kernel"], "family": r["family"], "phase": phase,
+                         "ok": "1" if ok else "0", "worst": worst, "sha": sha, "detail": detail[:300]})
         print(f"  [{'ok  ' if ok else 'FAIL'}] {phase:11s} {r['kernel']:46s} {detail[:80]}",
               flush=True)
 

@@ -67,7 +67,10 @@ def adaln_gemm_gate():
     """fused3._gemm_gate_kernel, both settings of the SAVE_GATE constexpr (it is in the autotune
     key, so the two launchers are two distinct compiles): _gemm_gate is False, _gemm_gate_train
     True."""
-    from miniworld_engine.kernels.adaln.triton.fused3 import _gemm_gate, _gemm_gate_train
+    from miniworld_engine.kernels.adaln.triton.fused3 import (
+        _gemm_gate,
+        _gemm_gate_train,
+    )
 
     x_norm, cond_norm, _, ws, sb, wb = _adaln_args()
     _gemm_gate(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)

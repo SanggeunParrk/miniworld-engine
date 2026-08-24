@@ -217,7 +217,7 @@ class BidirectionalTriangleAttention(nn.Module):
         projection (pln never materializes), then the two einsums and gate+to_out."""
         from miniworld_engine.kernels.layernorm_linear import layernorm_linear_triton
 
-        B, L, _, d = pair.shape
+        B, L, _, _d = pair.shape
         dv = self.to_value.weight.shape[0]
         db = self.to_bias.weight.shape[0]
         dg = self.to_gate.weight.shape[0]

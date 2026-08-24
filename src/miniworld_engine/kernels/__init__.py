@@ -69,7 +69,7 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
 
 
-def cuda_transition(*args, **kwargs):  # noqa: ARG001 -- signature kept for the frozen surface
+def cuda_transition(*args, **kwargs):  # signature kept for the frozen surface
     """NOT IMPLEMENTED. Kept as a name because the public surface is frozen.
 
     This wrapper deferred to ``transition.cuda.cuda_transition``, which has never existed in this
@@ -90,14 +90,18 @@ def cuda_transition(*args, **kwargs):  # noqa: ARG001 -- signature kept for the 
 
 def cuda_transition_b2b(*args, **kwargs):
     """Hand-CUDA fused b2b Transition forward. See ``transition.interface``, where it lives."""
-    from .transition.interface import cuda_transition_b2b as _impl
+    from miniworld_engine.kernels.transition.interface import (
+        cuda_transition_b2b as _impl,
+    )
 
     return _impl(*args, **kwargs)
 
 
 def cute_transition_fused(*args, **kwargs):
     """Cute (quack SM90 WGMMA) Transition fwd+bwd. See ``transition.interface``."""
-    from .transition.interface import cute_transition_fused as _impl
+    from miniworld_engine.kernels.transition.interface import (
+        cute_transition_fused as _impl,
+    )
 
     return _impl(*args, **kwargs)
 
@@ -111,8 +115,8 @@ __all__ = [
     "cuda_transition_b2b",
     "cute_transition_fused",
     "fused_gate_out",
-    "sigmoid_gate_fused",
     "layernorm_kernel",
+    "sigmoid_gate_fused",
     "triton_adaptive_layer_norm",
     "triton_augmented_attention_pair_bias",
     "triton_bias_only_attention",

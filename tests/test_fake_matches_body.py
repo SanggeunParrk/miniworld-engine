@@ -163,8 +163,8 @@ def test_every_opaque_site_names_its_op() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
-            for dec in node.decorator_list:
-                if (isinstance(dec, ast.Call) and getattr(dec.func, "id", "") == "opaque"
-                        and not any(k.arg == "name" for k in dec.keywords)):
-                    missing.append(f"{node.name}  ({path.relative_to(SRC)})")
+            missing.extend(
+                f"{node.name}  ({path.relative_to(SRC)})" for dec in node.decorator_list
+                if isinstance(dec, ast.Call) and getattr(dec.func, "id", "") == "opaque"
+                and not any(k.arg == "name" for k in dec.keywords))
     assert not missing, "opaque() without an explicit name=:\n  " + "\n  ".join(missing)

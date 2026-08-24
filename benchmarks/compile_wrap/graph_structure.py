@@ -22,14 +22,25 @@ ap.add_argument("--only", default="", help="comma list of targets (default: all)
 args = ap.parse_args()
 
 from miniworld_engine import settings
+
 settings.configure(compile_wrap=args.wrap)            # BEFORE any kernel import
 
 import torch
 import torch._dynamo as dynamo
+
 from miniworld_engine.modules import (
-    AdaptiveLayerNorm, AttentionPairBias, AugmentedAttentionPairBias, ConditionedTransition,
-    ImplementationType, MSAPairWeightedAveraging, OuterProductMean, PairformerBlock,
-    PairformerConfig, TriangleAttention, TriangleMultiplication, Transition,
+    AdaptiveLayerNorm,
+    AttentionPairBias,
+    AugmentedAttentionPairBias,
+    ConditionedTransition,
+    ImplementationType,
+    MSAPairWeightedAveraging,
+    OuterProductMean,
+    PairformerBlock,
+    PairformerConfig,
+    Transition,
+    TriangleAttention,
+    TriangleMultiplication,
 )
 from miniworld_engine.modules.triangle_multiplication import (
     BidirectionalTriangleMultiplication,
@@ -128,7 +139,7 @@ for name, build in TARGETS.items():
     print(f"\n########## {args.wrap} :: {name}", flush=True)
     try:
         mod, inputs = build()
-    except Exception as e:                                     # noqa: BLE001
+    except Exception as e:
         print(f"  BUILD FAILED {type(e).__name__}: {e}", flush=True)
         continue
 
@@ -157,7 +168,7 @@ for name, build in TARGETS.items():
             for fs in (getattr(r, "user_stack", None) or [])[-3:]:
                 print(f"          at {fs.filename.split('miniworld_engine/')[-1]}:{fs.lineno}"
                       f" {fs.name}", flush=True)
-    except Exception as e:                                     # noqa: BLE001
+    except Exception as e:
         out[f"{name}/breaks"] = -1
         print(f"  EXPLAIN FAILED {type(e).__name__}: {str(e)[:300]}", flush=True)
 
@@ -171,7 +182,7 @@ for name, build in TARGETS.items():
         for i, t in enumerate(inputs):
             if t.grad is not None:
                 out[f"{name}/grad{i}"] = t.grad.detach().float().cpu()
-    except Exception as e:                                     # noqa: BLE001
+    except Exception as e:
         print(f"  EAGER FAILED {type(e).__name__}: {str(e)[:300]}", flush=True)
         traceback.print_exc()
         continue

@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import torch
 
-from .triton.main import (
+from miniworld_engine.kernels.augmented_attention.triton.main import (
     triton_augmented_attention_pair_bias as _pair_bias_compute_efficient,
 )
-from .triton.memory_efficient import (
+from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import (
     triton_augmented_attention_pair_bias as _pair_bias_memory_efficient,
 )
 

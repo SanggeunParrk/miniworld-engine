@@ -37,9 +37,8 @@ rather than counting it as ragged coverage it never had.
 
 from __future__ import annotations
 
-from typing import TypedDict
-
 import os
+from typing import TypedDict
 
 import torch
 
@@ -107,7 +106,7 @@ def both_level_is_pair(length: int) -> bool:
     the int32 offset range. Promoting that kernel's offsets to int64 would have been the wrong fix:
     it spends registers to reach a shape the model never asks for.
     """
-    from miniworld_engine.autotune.shape_key import TOKEN_SHAPES  # noqa: PLC0415
+    from miniworld_engine.autotune.shape_key import TOKEN_SHAPES
 
     # An explicit side beats inferring one from the length. A `level=both` kernel keys on ROWS
     # (shape_key.BOTH_ROWS), so its two sides are separate buckets at the SAME length: an atom

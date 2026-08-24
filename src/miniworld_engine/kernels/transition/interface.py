@@ -21,8 +21,8 @@ implementation in this family to point at.
 
 from __future__ import annotations
 
-from .triton.fused import triton_transition_fused
-from .triton.main import triton_transition
+from miniworld_engine.kernels.transition.triton.fused import triton_transition_fused
+from miniworld_engine.kernels.transition.triton.main import triton_transition
 
 
 def cuda_transition_b2b(*args, **kwargs):
@@ -30,14 +30,18 @@ def cuda_transition_b2b(*args, **kwargs):
 
     Fixed AF3 shapes only (d_hidden=128, n=4 -> K=128, ND=512, D=128). Beats the Triton
     b2b forward ~1.29x at this config. Inference-only (no backward saved)."""
-    from .cuda import cuda_transition_b2b as _impl
+    from miniworld_engine.kernels.transition.cuda import (
+        cuda_transition_b2b as _impl,
+    )
 
     return _impl(*args, **kwargs)
 
 
 def cute_transition_fused(*args, **kwargs):
     """Lazy cute (quack SM90 WGMMA) Transition fwd+bwd entry (imports cutlass on first call)."""
-    from .cute.fused import cute_transition_fused as _impl
+    from miniworld_engine.kernels.transition.cute.fused import (
+        cute_transition_fused as _impl,
+    )
 
     return _impl(*args, **kwargs)
 

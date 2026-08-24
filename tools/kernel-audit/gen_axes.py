@@ -17,6 +17,7 @@ would be guessing, every column here is read off the code or the config CSVs:
 The prose is not lost: the previous file is kept verbatim as docs/kernels/axes-legacy.csv.
 """
 from __future__ import annotations
+
 import ast
 import csv
 from pathlib import Path
@@ -52,20 +53,21 @@ for path in sorted(ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text())
     except SyntaxError:
         continue
-    kern_op = {}
+    kern_op: dict[str, str] = {}
     for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef):
             continue
         for dec in fn.decorator_list:
             for n in ast.walk(dec):
                 if (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "configs_for"
-                        and n.args and isinstance(n.args[0], ast.Constant)):
+                        and n.args and isinstance(n.args[0], ast.Constant)
+                        and isinstance(n.args[0].value, str)):
                     kern_op[fn.name] = n.args[0].value
         if fn.name in kern_op:
             op = kern_op[fn.name]
-            rec = info.setdefault(op, dict(kernel=fn.name,
-                                           file=str(path.relative_to(ROOT.parent)),
-                                           line=fn.lineno, loops={}))
+            rec = info.setdefault(op, {"kernel": fn.name,
+                                           "file": str(path.relative_to(ROOT.parent)),
+                                           "line": fn.lineno, "loops": {}})
             for loop in [n for n in ast.walk(fn) if isinstance(n, ast.For)]:
                 it = loop.iter
                 # same matcher as .bench/mask_audit.py: tl.static_range counts, and the step is
@@ -74,7 +76,7 @@ for path in sorted(ROOT.rglob("*.py")):
                         and len(it.args) == 3):
                     continue
                 step = ast.unparse(it.args[2])
-                if step.isupper() and step in {"G", "NP"} or not step[:1].isalpha():
+                if (step.isupper() and step in {"G", "NP"}) or not step[:1].isalpha():
                     continue
                 extent = ast.unparse(it.args[1])
                 ext_names = names(it.args[1]) or {extent}

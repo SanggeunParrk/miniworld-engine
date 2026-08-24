@@ -28,6 +28,7 @@ from jaxtyping import Float
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune.shape_key import length_of
+from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     resolve_conditioned_transition,
@@ -37,7 +38,6 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.primitives import Linear
-from ..adaptive_layernorm.module import AdaptiveLayerNorm
 
 
 class ConditionedTransition(nn.Module):

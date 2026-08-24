@@ -6,9 +6,8 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules.exceptions import ImplementationType
-from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
-
 from miniworld_engine.modules.functional import sigmoid_gate
+from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear
 
 
 class MSAPairWeightedAveraging(nn.Module):

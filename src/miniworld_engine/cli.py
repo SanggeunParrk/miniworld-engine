@@ -56,6 +56,7 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
+
 @dataclasses.dataclass(frozen=True)
 class ModuleTarget:
     """One module-level bench target: what fills its cache, and what its bench needs on argv.
@@ -251,7 +252,7 @@ def run_worker(device: int, queue: Queue, impl: str, repo: Path, log_dir: Path,
             cmd.append(f"+compile_jobs={compile_jobs}")
         started = time.monotonic()
         with log.open("w") as handle:
-            proc = subprocess.run(  # noqa: S603
+            proc = subprocess.run(
                 cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT, check=False,
                 env=_worker_env(device),
             )
@@ -287,7 +288,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
     import concurrent.futures as cf
 
     repo = Path(__file__).resolve().parents[2]
-    targets = GROUPS.get(args.what, (args.what,))
+    targets = GROUPS.get(args.target, (args.target,))
     unknown = [t for t in targets if t not in MODULE_TARGETS]
     if unknown:
         print(f"unknown target(s): {', '.join(unknown)}\n"
@@ -367,7 +368,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # cache under a GPU nothing will ever look up.
     gpu = args.gpu or gpu_key()
     if gpu == "cpu":
-        print("no CUDA device visible; pass --gpu \"<gpu key>\" to merge from a login node",
+        print('no CUDA device visible; pass --gpu "<gpu key>" to merge from a login node',
               file=sys.stderr)
         return 2
 
@@ -427,7 +428,11 @@ def apply_config_dir(directory: Path) -> int:
     at all (``dynamic_func() missing ... 'BLOCK_M1'``). So the directory has to be set BEFORE the
     kernel modules import and their decorators run.
     """
-    from miniworld_engine.autotune.configs import missing_ops, registered_ops, use_config_dir
+    from miniworld_engine.autotune.configs import (
+        missing_ops,
+        registered_ops,
+        use_config_dir,
+    )
     from miniworld_engine.build.audit import import_all_kernels
 
     os.environ["MINIWORLD_CONFIG_DIR"] = str(directory)  # inherited by every child process
@@ -508,7 +513,7 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     Split out of the build command so the partial-merge policy is testable without a GPU:
     which units count as bad, whether a bad one blocks the merge, and what the exit code is.
     """
-    from miniworld_engine.autotune import capture  # noqa: PLC0415 -- heavy; import at use
+    from miniworld_engine.autotune import capture  # heavy; import at use
 
     bad = [r for r in results if is_bad_unit(r)]
     skipped = [r for r in results if r.get("skipped")]
@@ -615,7 +620,7 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     never by importing: :data:`~miniworld_engine.autotune.builder.CASE_NAMES` is a literal tuple
     and the ops are the first column of ``kernels/registry.csv``.
     """
-    from miniworld_engine.autotune.builder import CASE_NAMES  # noqa: PLC0415 -- literal, no imports
+    from miniworld_engine.autotune.builder import CASE_NAMES  # literal, no imports
 
     if args.case == "all":
         return 0
@@ -706,7 +711,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     """Verify the build system AND that every declared (op, bucket) is in the shipped cache."""
-    from miniworld_engine.build import audit as _audit  # noqa: PLC0415 -- imports every kernel
+    from miniworld_engine.build import audit as _audit  # imports every kernel
 
     argv = ["--gpu", args.gpu] if args.gpu else []
     if args.shards:
@@ -769,7 +774,7 @@ def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
     def run(job: tuple, gpu: int) -> tuple[str, int, str]:
         target, cmd, env = job
         env = {**(env or os.environ), "CUDA_VISIBLE_DEVICES": str(gpu)}
-        done = subprocess.run(cmd, cwd=repo, check=False, env=env,  # noqa: S603
+        done = subprocess.run(cmd, cwd=repo, check=False, env=env,
                               capture_output=True, text=True)
         return target, done.returncode, (done.stdout or "") + (done.stderr or "")
 
@@ -829,7 +834,7 @@ def _report_coverage(targets: tuple[str, ...], repo: Path, level: str, *,
 
     declared = devices.registered_kernels()
     hit = declared & launched
-    devices.record(key, {k: (True, "launched by bench") for k in hit})
+    devices.record(key, dict.fromkeys(hit, (True, "launched by bench")))
     missed = sorted(declared - launched)
     print(f"\n=== coverage on {key}")
     print(f"    declared: {len(declared)}   launched: {len(hit)}   never launched: {len(missed)}")
@@ -849,7 +854,7 @@ def cmd_bench_kernel(args: argparse.Namespace) -> int:
     repo = Path(__file__).resolve().parents[2]
     # 'all' is the honest default unit of work: a sweep that names one target measures one
     # target, and calling that "the kernels" is how a broken implementation stays hidden.
-    targets = tuple(KERNEL_TARGETS) if args.what == "all" else (args.what,)
+    targets = tuple(KERNEL_TARGETS) if args.target == "all" else (args.target,)
     unknown = [t for t in targets if t not in KERNEL_TARGETS]
     if unknown:
         print(f"unknown kernel target(s): {', '.join(unknown)}; have: all, "
@@ -887,7 +892,7 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     ``default``, passed here as a constant rather than an argument so the two cannot disagree.
     """
     repo = Path(__file__).resolve().parents[2]
-    targets = GROUPS.get(args.what, (args.what,))
+    targets = GROUPS.get(args.target, (args.target,))
     unknown = [t for t in targets if t not in MODULE_TARGETS]
     if unknown:
         print(f"unknown module target(s): {', '.join(unknown)}; have: "
@@ -952,7 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
     dev = dev_parser.add_subparsers(dest="dev_command", required=True)
 
     cap = dev.add_parser("capture", help="write shards without merging (see `build`)")
-    cap.add_argument("what", help=f"target or group ({', '.join(GROUPS)})")
+    cap.add_argument("target", help=f"module target or group ({', '.join(GROUPS)})")
     cap.add_argument("--gpus", default="all", help="count, comma list, or 'all' (default: all)")
     cap.add_argument("--shards", default="~/.cache/miniworld-shards", help="where shards go")
     cap.add_argument("--impl", default="miniworld",
@@ -972,7 +977,11 @@ def build_parser() -> argparse.ArgumentParser:
     mrg.set_defaults(func=cmd_merge)
 
     bld = sub.add_parser("build", help="build the cache by driving the production modules")
-    bld.add_argument("case", nargs="?", default="all", help="kernel case, or 'all'")
+    bld.add_argument("case", nargs="?", default="all",
+                     help="build case, or 'all' (the default). With --per-op it is a kernel name "
+                          "from registry.csv instead -- two name spaces, because a case drives a "
+                          "module and an op is one kernel. Neither is a BENCH target; see "
+                          "`bench_kernel` / `bench_module`.")
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
@@ -1052,8 +1061,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     bk = sub.add_parser("bench_kernel",
                         help="build the cache, then bench ONE kernel-level target")
-    bk.add_argument("what", help=f"kernel target, or 'all' "
-                                 f"({', '.join(sorted(KERNEL_TARGETS))})")
+    bk.add_argument("target", help=f"kernel target, or 'all' "
+                                   f"({', '.join(sorted(KERNEL_TARGETS))})")
     bk.add_argument("config_type", nargs="?", default=None,
                     help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     _bench_common(bk)
@@ -1061,9 +1070,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     bm = sub.add_parser("bench_module",
                         help="build the cache, then bench a module-level target (no config arg)")
-    bm.add_argument("what", help=f"module target or group "
-                                f"({', '.join(sorted(MODULE_TARGETS))}; "
-                                f"groups: {', '.join(GROUPS)})")
+    bm.add_argument("target", help=f"module target or group "
+                                   f"({', '.join(sorted(MODULE_TARGETS))}; "
+                                   f"groups: {', '.join(GROUPS)})")
     _bench_common(bm)
     # Only the module bench takes a mode: a module genuinely runs in both regimes. A kernel target's
     # name already says which one it is (`*_bwd` or not), so offering the choice there can only

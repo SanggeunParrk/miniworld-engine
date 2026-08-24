@@ -31,17 +31,16 @@ Biology", Algorithm 8 / Algorithm 9; RoPE: Su et al. (arXiv:2104.09864).
 
 from __future__ import annotations
 
-from miniworld_engine.kernels._compile import opaque
-
 import importlib.util
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
-from miniworld_engine import settings
 
+from miniworld_engine import settings
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.primitives import Linear, MPLinear
 
 # FlashAttention-4 (CuTeDSL) is the Hopper/Blackwell windowed-attention backend
@@ -441,7 +440,7 @@ class SWA3DRoPEAttention(nn.Module):
         valid: torch.Tensor,
     ) -> torch.Tensor:
         """Dense fallback: band mask over valid atoms. O(S^2) — test/CPU only."""
-        n, s = q.shape[:2]
+        _n, s = q.shape[:2]
         rank = torch.cumsum(valid.to(torch.long), dim=1) - 1  # [N, S]
         within = (rank.unsqueeze(2) - rank.unsqueeze(1)).abs() <= self.half_window
         allowed = within & valid.unsqueeze(1) & valid.unsqueeze(2)

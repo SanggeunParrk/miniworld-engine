@@ -25,7 +25,9 @@ def trimul_gemm_gate_saveact_triton():
     ``sig_m = sigmoid(xn@wg^T)`` (fp32, reused by the backward). The driver passes
     mask=None -> APPLY_MASK=False, so no row scale enters either output, and
     TRANSPOSE_OUT=True -> both outputs are written (N, M), hence the transposed reference."""
-    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import _input_gemm_fwd
+    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
+        _input_gemm_fwd,
+    )
 
     xn = rows2d(TRIMUL_ROWS, TRIMUL_D)
     wg, wp = rows2d(2 * TRIMUL_D, TRIMUL_D), rows2d(2 * TRIMUL_D, TRIMUL_D)
@@ -40,7 +42,9 @@ def trimul_outproj_gemm_gate_saveact_triton():
     """Output gated GEMM: the gate reads x_normed and the projection reads x_out -- two
     DIFFERENT activations through two weights (baseline_dtv1.py:405-406), unlike the input
     path where both dots share one operand. Outputs stay (M, N); sig is fp32."""
-    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import _output_gemm_fwd
+    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
+        _output_gemm_fwd,
+    )
 
     xn = rows2d(TRIMUL_ROWS, TRIMUL_D)
     x_out = rows2d(TRIMUL_ROWS, TRIMUL_D)

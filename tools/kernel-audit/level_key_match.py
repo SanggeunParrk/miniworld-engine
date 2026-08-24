@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from launch_bind import SRC, _module_of, _resolve_import          # noqa: E402
+from launch_bind import SRC, _module_of, _resolve_import
 
 FN_LEVEL = {"token_key": "token", "atom_key": "atom", "both_key": "both"}
 REG = SRC / "miniworld_engine/kernels/registry.csv"

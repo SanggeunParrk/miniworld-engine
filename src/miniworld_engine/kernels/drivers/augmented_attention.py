@@ -26,12 +26,16 @@ def _aug_qkvb() -> tuple[torch.Tensor, ...]:
 
 
 def augmented_attention_fwd_triton() -> None:
-    from miniworld_engine.kernels.augmented_attention.triton.main import TritonAugmentedAttentionFunction as Fn
+    from miniworld_engine.kernels.augmented_attention.triton.main import (
+        TritonAugmentedAttentionFunction as Fn,
+    )
     Fn.apply(*_aug_qkvb())
 
 
 def _aug_main_backward() -> None:
-    from miniworld_engine.kernels.augmented_attention.triton.main import TritonAugmentedAttentionFunction as Fn
+    from miniworld_engine.kernels.augmented_attention.triton.main import (
+        TritonAugmentedAttentionFunction as Fn,
+    )
     _grad(Fn.apply(*_aug_qkvb()))
 
 
@@ -53,5 +57,7 @@ def augmented_attention_bwd_reduce_triton() -> None:
 def augmented_attention_bwd_atomic_triton() -> None:
     # This file's forward and bwd_preprocess now come from main.py; the atomic dq/dk/dv/dbias
     # backward below is the only kernel it still defines.
-    from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import TritonAugmentedAttentionFunction as Fn
+    from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import (
+        TritonAugmentedAttentionFunction as Fn,
+    )
     _grad(Fn.apply(*_aug_qkvb()))

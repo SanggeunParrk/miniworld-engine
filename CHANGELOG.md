@@ -93,6 +93,25 @@ The public surface is enforced by `tests/test_public_api.py`.
   contract, and meaning the opposite thing — is `modules/functional.py`.
   `tests/test_module_layout.py` holds the rule and the four shared modules that are
   legitimately flat.
+- **The linter now checks what the code was already written against.** `select` was
+  `["E", "F", "W"]` while the source carried ~700 `# noqa:` comments naming PLC0415,
+  BLE001, ANN001, SLF001, S603, ARG005 and two dozen other rules that were not
+  enabled — so none of them suppressed anything, and nothing said so. The set is now
+  a deliberate one (import sorting, bugbear, pyupgrade, simplification, perf, pytest
+  and logging idioms, RUF including RUF100) with every excluded family named and
+  justified in `pyproject.toml`, and it runs clean. 264 dead directives were turned
+  back into plain comments, keeping their reasons — ruff's own RUF100 fix deletes the
+  whole comment, and the reason is the part worth having. Relative imports are banned
+  outright (`ban-relative-imports = "all"`): 137 of them became absolute, which is the
+  form that broke this session when a flat module became a package and `from .ops
+  import sigmoid_gate` silently pointed somewhere else. `[tool.ruff] src = ["src"]`
+  was missing, so ruff's own fix for those rewrote them to `src.miniworld_engine.*`.
+  Two real defects surfaced: an `assert sig is None or True` that could never fail,
+  and eleven late-bound loop variables captured by autotune lambdas in
+  `autotune/build.py` (harmless today because each lambda is called in its own
+  iteration, one refactor away from tuning every bucket against the last shape).
+- **`tools/` is in both gates.** It was tracked code that `ruff check` and `ty check`
+  never looked at, in the pixi tasks and in CI alike.
 - **`ty` is a gate, not a report.** CI ran `ty check src tests || true` against a
   job that installed the package with `--no-deps`, so torch and triton were
   absent, every `import torch` was an unresolved import, and every torch

@@ -6,14 +6,12 @@ Run: ``pixi run python -m pytest tests/test_dispatch.py -q``
 
 from __future__ import annotations
 
-
 import dataclasses
 
 import pytest
-
-from miniworld_engine import settings
 import torch
 
+from miniworld_engine import settings
 from miniworld_engine.modules import dispatch
 from miniworld_engine.modules.dispatch import KernelBackend
 from miniworld_engine.modules.exceptions import (

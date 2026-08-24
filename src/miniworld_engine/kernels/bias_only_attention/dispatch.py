@@ -30,11 +30,10 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels._compile import device_constant
-
 # Reuse the shared per-GPU key (name + compute capability + triton version) and
 # M-bucketing from the layernorm dispatch cache so all kernels key GPUs identically.
 from miniworld_engine._atomic import write_json
+from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.layernorm.dispatch import gpu_key, mbucket
 
 # ---- static H100 thresholds (defaults / fallback) --------------------------------
@@ -53,7 +52,7 @@ _CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 
 def autotune_mode() -> str:
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
     return settings.current().biasonly_dispatch
 
 
@@ -105,7 +104,7 @@ def use_infer_concat(d_hidden: int) -> bool:
     A cache build pins this so it can sweep both branches: the kernels on the side this shape does
     not take still run in production at other shapes, and would otherwise have no cached configs.
     """
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     pin = settings.current().pin_infer_concat
     if pin is not None:
@@ -118,7 +117,10 @@ def _calibrate_gate(d_hidden: int, n_out: int, M: int, device: torch.device,
     """Time fused vs split gate+to_out (forward) on dummy tensors; return the winner."""
     import triton
 
-    from .triton.gate_out import fused_gate_out, sigmoid_gate_fused
+    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+        fused_gate_out,
+        sigmoid_gate_fused,
+    )
 
     g = torch.randn(M, d_hidden, device=device, dtype=dtype)
     o = torch.randn(M, d_hidden, device=device, dtype=dtype)
@@ -147,7 +149,7 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
                    dtype: torch.dtype) -> bool:
     """True -> fused_gate_out; False -> split. Static H100 by DH; calibrated+cached
     per GPU on other arches (or when forced)."""
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     # A cache BUILD pins this so it can sweep both branches: whichever side the card does not pick
     # at the swept shapes still runs in production at other shapes, and would otherwise have no
@@ -174,7 +176,7 @@ def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
         return cached["choice"] == "fused"
     try:
         choice, times = _calibrate_gate(d_hidden, n_out, M, device, dtype)
-    except Exception:  # noqa: BLE001 -- calibration failed -> fall back to the static
+    except Exception:  # calibration failed -> fall back to the static
         # choice, but still CACHE it so we don't re-run (and re-fail) the calibration
         # do_bench on every forward.
         choice, times = ("fused" if static else "split"), {}

@@ -17,7 +17,7 @@ import torch
 _CUTE_DIR = Path(__file__).resolve().parent / "cute"
 
 
-from .triton.main import triton_tm2
+from miniworld_engine.kernels.tm2.triton.main import triton_tm2
 
 __all__ = ["tm2_cute", "triton_tm2"]
 
@@ -55,7 +55,8 @@ def tm2_cute(
     """
     assert x_gate.shape == x_out.shape
     assert W_gate.shape == W_out.shape
-    assert x_gate.is_contiguous() and x_out.is_contiguous()
+    assert x_gate.is_contiguous()
+    assert x_out.is_contiguous()
     # Kernel wants weights in (N, K) nn.Linear form (last-dim contiguous = K).
     # The reference uses ``x @ W`` with W as (K, N), so transpose here.
     Wg_nk = W_gate.t().contiguous()
@@ -100,9 +101,10 @@ def _resolve_tm2_tile_m(M: int, N: int, K: int, dtype: str, device) -> int:
     resolved pick and fall back to a guaranteed-valid default, never sacrificing correctness."""
     default = _largest_valid_tile_m(M, N, K)
     try:
+        from quack.gemm_config import GemmConfig
+
         from miniworld_engine.autotune.buckets import bucket_mixed
         from miniworld_engine.autotune.cute_config import resolve_config, tm2_candidates
-        from quack.gemm_config import GemmConfig
 
         dev_index = device.index if getattr(device, "index", None) is not None else 0
         cfg = resolve_config(
@@ -114,7 +116,7 @@ def _resolve_tm2_tile_m(M: int, N: int, K: int, dtype: str, device) -> int:
             device_index=dev_index,
         )
         tm = int(cfg.tile_m)
-    except Exception:  # noqa: BLE001 -- any resolve failure -> safe default
+    except Exception:  # any resolve failure -> safe default
         return default
     # Validate the cached pick against THIS shape (divisibility + SMEM); else safe default.
     if M % tm == 0 and _tm2_smem_bytes(tm, N, K) <= _SM90_SMEM_MAX:

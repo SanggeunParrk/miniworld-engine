@@ -21,12 +21,21 @@ ap.add_argument("--iters", type=int, default=30)
 args = ap.parse_args()
 
 from miniworld_engine import settings
+
 settings.configure(compile_wrap=args.wrap)
 
 import torch
+
 from miniworld_engine.modules import (
-    AdaptiveLayerNorm, AugmentedAttentionPairBias, ConditionedTransition, ImplementationType,
-    PairformerBlock, PairformerConfig, TriangleAttention, TriangleMultiplication, Transition,
+    AdaptiveLayerNorm,
+    AugmentedAttentionPairBias,
+    ConditionedTransition,
+    ImplementationType,
+    PairformerBlock,
+    PairformerConfig,
+    Transition,
+    TriangleAttention,
+    TriangleMultiplication,
 )
 
 DEV, DT = "cuda", torch.bfloat16
@@ -99,7 +108,7 @@ def timed(model, inputs, train: bool) -> float:
                 p.grad = None
 
     if not train:
-        def step(_f=fn):                                   # noqa: F811
+        def step(_f=fn):
             with torch.no_grad():
                 _f(*inputs)
 
@@ -124,7 +133,7 @@ for name, build in TARGETS.items():
             ms = timed(model, inputs, train)
             print(f"wrap={args.wrap} target={name} mode={mode} seq_len={L} time={ms:.4f} ms",
                   flush=True)
-        except Exception as e:                                     # noqa: BLE001
+        except Exception as e:  # noqa: PERF203 -- one target's OOM must not end the sweep
             print(f"wrap={args.wrap} target={name} mode={mode} FAILED "
                   f"{type(e).__name__}: {str(e)[:160]}", flush=True)
         finally:

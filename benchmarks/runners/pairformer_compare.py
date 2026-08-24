@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pairformer (pair-track) timing comparison: pytorch vs cuequivariance vs ours.
 
 Measures **inference** and **training** as two separate cases (never a single
@@ -37,8 +36,8 @@ import torch
 import torch.nn as nn
 import triton
 
-from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
 from miniworld_engine import settings
+from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
 
 DEVICE = torch.device("cuda")
 IMPLS = {
@@ -74,7 +73,7 @@ def apply_stability_workarounds() -> list[str]:
     # Deliberate monkeypatch of a module-level function; rebinding one is never
     # assignment-compatible to a checker, because the declared type of the name IS that
     # one function.
-    _bod.gate_use_fused = lambda *a, **k: False  # noqa: ARG005
+    _bod.gate_use_fused = lambda *a, **k: False
     notes.append("triangle-attention gate forced non-fused (cudagraph-capturable, faster here)")
     return notes
 
@@ -84,8 +83,7 @@ def build(impl: ImplementationType, cfg: PairformerConfig) -> Pairformer:
     # bf16 params: our cute/triton kernels require the weight dtype to match the
     # bf16 activations; also the deployment regime. All three impls use bf16 for
     # a fair comparison.
-    model = Pairformer(cfg, implementation=impl).to(DEVICE, dtype=torch.bfloat16)
-    return model
+    return Pairformer(cfg, implementation=impl).to(DEVICE, dtype=torch.bfloat16)
 
 
 def make_inputs(B: int, L: int, d_pair: int):
@@ -214,7 +212,7 @@ def run_table(mode: str, args, cfg: PairformerConfig) -> None:
                     print(f"    [check] L={L} {label} cos_vs_pytorch={cos:.6f}")
             try:
                 times[label] = timer(model, pair, mask, args.cudagraph)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 times[label] = float("nan")
                 print(f"    [warn] L={L} {mode} {label} failed: {type(e).__name__}: {str(e)[:100]}")
             del model

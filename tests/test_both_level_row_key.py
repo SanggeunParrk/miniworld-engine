@@ -86,7 +86,9 @@ def test_the_two_sides_get_different_shards():
     units = {u.stem for u in op_units() if u.side and u.length == 256 and u.dtype == "bfloat16"}
     pair = {s for s in units if "-pair-" in s}
     atom = {s for s in units if "-atom-" in s}
-    assert pair and atom and not (pair & atom)
+    assert pair
+    assert atom
+    assert not (pair & atom)
 
 
 def test_an_entry_from_the_old_scheme_is_not_served_to_a_both_level_kernel():

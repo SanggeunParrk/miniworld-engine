@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 
-
 from miniworld_engine.autotune import cache, capture
 
 

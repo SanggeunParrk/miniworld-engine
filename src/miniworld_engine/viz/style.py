@@ -286,7 +286,7 @@ def label_for(name: str) -> str:
     return DISPLAY.get(ident, name)
 
 
-def style_for(name: str):  # noqa: ANN201 - returns matplotlib (color, linestyle)
+def style_for(name: str):  # returns matplotlib (color, linestyle)
     """``(colour, linestyle)`` tuple for line plots (Triton ``perf_report``)."""
     ident = canonical(name)
     return color_for(name), LINESTYLE.get(ident, "-")

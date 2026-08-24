@@ -49,15 +49,25 @@ src/miniworld_engine/
 │   ├── triangle_attention/ augmented_attention/
 │   ├── bias_only_attention/ gated_projection/
 │   ├── fused_ln_mask/            #   LN+mask fusion (used by the trimul cute path)
+│   ├── drivers/<family>.py       #   autotune-capture harness: one launcher per registry
+│   ├── checks/<family>.py        #     kernel, and its numerical check. One module per
+│   │                             #     `family` in registry.csv -- nothing else groups them.
+│   ├── registry.csv              #   the declared kernel list: family, level, dtypes, driver
 │   └── __init__.py               #   flat re-export bridge: kernels.triton_tm1, ...
 └── modules/                      # model ops: connect kernels (NO backend folders)
     ├── triangle_multiplication/  #   module.py (connects tm1/tm2/LN; pytorch/triton/
     │   ├── module.py             #     cute/cuequivariance via ImplementationType)
     │   ├── reference.py interface.py baseline_dtv1.py
     ├── triangle_attention/ transition/ adaptive_layernorm/ augmented_attention/
+    ├── attention_pair_bias/ conditioned_transition/ outer_product/ pairformer/
+    ├── msa_pair_weighted_averaging/ swa_atom_attention/
+    │                             #   every op is a folder holding module.py --
+    │                             #     tests/test_module_layout.py enforces it
+    ├── dispatch.py               #   ImplementationType -> internal KernelBackend
     ├── exceptions.py             #   ImplementationType (pytorch/triton/cuda/cute/cuequivariance)
-    ├── primitives.py ops.py      #   shared connecting utilities (LayerNorm, Linear, gates)
-    └── __init__.py
+    ├── primitives.py             #   layer classes the ops compose (LayerNorm, Linear, Dropout)
+    ├── functional.py             #   free functions the ops compose (sigmoid_gate, swish_gate)
+    └── __init__.py               #   the four flat modules above are the ONLY non-op files
 benchmarks/
 ├── kernels/<kernel>/             # isolated kernel benchmarks + configs/artifacts
 ├── modules/<module>/             # composed module benchmarks + configs/artifacts

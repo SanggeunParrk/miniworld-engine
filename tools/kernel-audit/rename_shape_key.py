@@ -14,6 +14,7 @@ in the function body?) rather than by which spelling it uses. It rewrites, in ea
 and then re-parses every file and asserts the three stay in agreement.
 """
 from __future__ import annotations
+
 import ast
 import re
 import subprocess

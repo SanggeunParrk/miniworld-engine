@@ -115,7 +115,9 @@ def trimul_gemm_gate_mmajor_triton() -> None:
 
     Per-side hidden H2 = 2*d_hidden = 2*D (module docstring: "H = 2*d_hidden, Din = d_pair").
     """
-    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import bidir_front_triton
+    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
+        bidir_front_triton,
+    )
 
     h2 = 2 * D
     bidir_front_triton(_x(), _w(h2), _w(h2), _w(h2), _w(h2))
@@ -151,7 +153,9 @@ def trimul_bwd_gate_packed_triton() -> None:
 
 def trimul_bwd_gate_packed_recompute_triton() -> None:
     """back_fused.py _dconcat_sig_kernel, via front_bwd_dW_sig (sg = sigma(gate), (1,2D,L,L))."""
-    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW_sig
+    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
+        front_bwd_dW_sig,
+    )
 
     front_bwd_dW_sig(_bdll(), _bdll(), _bdll(), _bdll(), _bdll(2 * D), _x(),
                      _w(), _w(), _w(), _w())
@@ -159,7 +163,9 @@ def trimul_bwd_gate_packed_recompute_triton() -> None:
 
 def trimul_bwd_gate_transpose_packed_triton() -> None:
     """back_fused.py _dconcat5_kernel, via front_bwd_dW_glogit (the NEGATIVE-RESULT launcher)."""
-    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW_glogit
+    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
+        front_bwd_dW_glogit,
+    )
 
     front_bwd_dW_glogit(_bdll(), _bdll(), _bdll(4 * D), _x(),
                         _w(), _w(), _w(), _w(), _rows(), _w())
@@ -169,7 +175,9 @@ def trimul_bwd_gate_transpose_packed_triton() -> None:
 
 def trimul_transpose_triton() -> None:
     """front_sm100.py _transpose_kernel, via _transpose_blld_to_bdll ((M,2D) -> (2D,M))."""
-    from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import _transpose_blld_to_bdll
+    from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import (
+        _transpose_blld_to_bdll,
+    )
 
     # seq_len=L as trimul_front_sm100 passes it: both arguments are already flattened (M rows),
     # so ``seq_len`` is the only place L can come from; without it the launcher keys on
@@ -191,7 +199,7 @@ def gated_projection_gate_packed_mmajor_triton() -> None:
     h = D
     preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
     lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
-    grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)  # noqa: E731
+    grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)
     _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L))
 
 

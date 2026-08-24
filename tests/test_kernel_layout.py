@@ -182,7 +182,9 @@ def test_no_check_module_reaches_sideways() -> None:
     for path in sorted((KERNELS / "checks").glob("*.py")):
         if path.name == "__init__.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith(prefix):
-                offenders.append(f"{path.stem} imports from {node.module} (line {node.lineno})")
+        offenders.extend(
+            f"{path.stem} imports from {node.module} (line {node.lineno})"
+            for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.ImportFrom) and node.module
+            and node.module.startswith(prefix))
     assert not offenders, offenders

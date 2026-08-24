@@ -1,6 +1,6 @@
 """ConditionedTransition tail kernels (post-AdaLN: SwiGLU expand/squeeze + sigmoid gate)."""
 
-from .triton import (
+from miniworld_engine.kernels.conditioned_transition.triton import (
     ConditionedTransitionTail12345Function,
     ConditionedTransitionTailFunction,
     ConditionedTransitionTailFusedFunction,

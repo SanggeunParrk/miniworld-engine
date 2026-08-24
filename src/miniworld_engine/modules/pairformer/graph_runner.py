@@ -26,7 +26,6 @@ triangle-attention gate) — apply_workarounds() sets them.
 
 from __future__ import annotations
 
-
 import torch
 import torch.nn as nn
 
@@ -45,10 +44,10 @@ def apply_workarounds() -> None:
     active = settings.current()
     defaults = {f.name: f.default for f in dataclasses.fields(settings.Settings)}
     changes = {}
-    if torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10:
-        # setdefault semantics: an explicit choice by the caller still wins.
-        if active.transition_cuda_b2b == defaults["transition_cuda_b2b"]:
-            changes["transition_cuda_b2b"] = False
+    # setdefault semantics: an explicit choice by the caller still wins.
+    if (torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
+            and active.transition_cuda_b2b == defaults["transition_cuda_b2b"]):
+        changes["transition_cuda_b2b"] = False
     if active.pin_gate_backend is None:
         changes["pin_gate_backend"] = "split"
     if changes:

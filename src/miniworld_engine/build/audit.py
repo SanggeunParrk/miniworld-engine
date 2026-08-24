@@ -67,7 +67,7 @@ def import_all_kernels() -> list[tuple[str, str]]:
     for m in pkgutil.walk_packages(pkg.__path__, prefix=pkg.__name__ + "."):
         try:
             importlib.import_module(m.name)
-        except BaseException as exc:  # noqa: BLE001 -- a broken module is a finding, not a crash
+        except BaseException as exc:  # noqa: PERF203 -- a broken module is a finding, not a crash
             failed.append((m.name, f"{type(exc).__name__}: {str(exc).splitlines()[0][:80]}"))
     return failed
 
@@ -83,7 +83,7 @@ def autotuners() -> list[tuple[str, object]]:
         for attr in dir(mod):
             try:
                 obj = getattr(mod, attr)
-            except Exception:  # noqa: BLE001, S112
+            except Exception:
                 continue
             if isinstance(obj, Autotuner) and id(obj) not in seen:
                 seen.add(id(obj))
@@ -95,7 +95,7 @@ def _op_of(tuner) -> str | None:
     # By identity of the config list the op was handed. The prune objects that used to carry
     # ``_miniworld_op`` were removed in fcd3c7a, after which this returned None for every op and
     # the whole audit fell back to reporting module-level variable names instead of op names.
-    from miniworld_engine.autotune.configs import op_of  # noqa: PLC0415 -- avoid an import cycle
+    from miniworld_engine.autotune.configs import op_of  # avoid an import cycle
 
     return op_of(getattr(tuner, "configs", None) or [])
 
@@ -134,7 +134,7 @@ def check_brute(rep: Report, tuners) -> None:
     # command that crashed on startup.
     def _declared(op: str) -> tuple[set, set]:
         """(num_warps, num_stages) the op's config CSV declares, or empty if it has no spec."""
-        from miniworld_engine.autotune.configs import _DIR  # noqa: PLC0415
+        from miniworld_engine.autotune.configs import _DIR
 
         d = _DIR
         if not d:
@@ -180,7 +180,7 @@ def check_brute(rep: Report, tuners) -> None:
         if keep is not None:
             full = 0
             for combo in itertools.product(*[sorted(dims[k]) for k in dims]):
-                cand = triton.Config(dict(zip(dims, combo)), num_warps=4, num_stages=3)
+                cand = triton.Config(dict(zip(dims, combo, strict=False)), num_warps=4, num_stages=3)
                 if keep(cand):
                     full += 1
             expect = full * len(warps) * len(stages)
@@ -220,10 +220,10 @@ def check_prune_executes(rep: Report, tuners) -> None:
         if prune is None or not cfgs:
             continue
         try:
-            prune(cfgs, {}, **{})
+            prune(cfgs, {})
         except NameError as exc:
             rep.add("prune", FAIL, op, f"unbound name at launch: {exc}")
-        except Exception:  # noqa: BLE001 -- missing constexprs are expected here
+        except Exception:  # missing constexprs are expected here
             rep.add("prune", OK, op, "ran (raised on synthetic args, which is fine)")
         else:
             rep.add("prune", OK, op, "ran")
@@ -329,9 +329,9 @@ def _keys_on_shape_key(op: str) -> bool:
     ``_keys_on_shape``, so the audit and the build agree on which ops have a per-shape cache.
     An op the registry does not name is assumed to key on shape -- the strict reading.
     """
-    import csv  # noqa: PLC0415
+    import csv
 
-    from miniworld_engine.autotune.builder import _keys_on_shape  # noqa: PLC0415
+    from miniworld_engine.autotune.builder import _keys_on_shape
 
     root = Path(__file__).resolve().parents[2]
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
@@ -345,7 +345,7 @@ def _keys_on_shape_key(op: str) -> bool:
 
 def _declared_dtypes() -> dict:
     """kernel -> the torch dtype names registry.csv says it must be tuned for."""
-    import csv  # noqa: PLC0415
+    import csv
 
     alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
     out = {}
@@ -393,7 +393,7 @@ def check_reachability(rep: Report, shard_dirs: list[Path]) -> None:
 def check_parallelism(rep: Report) -> None:
     from miniworld_engine.autotune import capture
 
-    jobs = capture._compile_jobs()  # noqa: SLF001
+    jobs = capture._compile_jobs()
     rep.add("parallel", OK if jobs > 1 else FAIL, "cpu-compile",
             f"precompile workers = {jobs}")
     from miniworld_engine.autotune import builder
@@ -424,7 +424,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
     for f in sorted(_CACHE_ROOT.rglob("*.json")):
         try:
             d = json.loads(f.read_text())
-        except Exception:  # noqa: BLE001
+        except Exception:
             rep.add("coverage", FAIL, f.parent.name, f"unreadable cache file: {f.name}")
             continue
         if not (isinstance(d, dict) and "entries" in d and d.get("gpu") == gk):
@@ -447,7 +447,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
 
     try:
         units = op_units()
-    except Exception as exc:  # noqa: BLE001 -- a config dir may not be set
+    except Exception as exc:  # a config dir may not be set
         rep.add("coverage", WARN, "op_units", f"cannot enumerate declared work: {exc}")
         return
 

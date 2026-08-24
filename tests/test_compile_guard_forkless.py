@@ -77,7 +77,8 @@ def test_a_legacy_bare_line_does_not_claim_an_outcome(tmp_path):
     (tmp_path / "u.compiled").write_text("BLOCK_M1=32,num_warps=4,num_stages=2\n")
     capture.load_probe_state(shard)
     assert capture._COMPILED, "legacy line still suppresses recompiling in the round"
-    assert not capture._COMPILE_OK and not capture._COMPILE_BAD
+    assert not capture._COMPILE_OK
+    assert not capture._COMPILE_BAD
 
 
 def test_load_is_idempotent_across_repeated_appends(tmp_path):

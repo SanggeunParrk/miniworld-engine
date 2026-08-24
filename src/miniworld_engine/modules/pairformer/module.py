@@ -165,8 +165,8 @@ class PairformerBlock(nn.Module):
             assert self.tri_atten_ending is not None, "tri_atten starting is set but ending is not"
             pair = self.tri_atten_starting(pair, mask)  # y = pair + drop_row(attn_start(pair))
             pair = self.tri_atten_ending(pair, mask)    # y = pair + drop_col(attn_end(pair))
-        pair = self.transition_pair(pair)  # y = pair + transition(pair) (residual fused, no dropout)
-        return pair
+        # y = pair + transition(pair) (residual fused, no dropout)
+        return self.transition_pair(pair)
 
 
 class Pairformer(nn.Module):

@@ -33,6 +33,8 @@ def fused_ln_mask(
     the backend module builds its autotuned kernel at import. (Despite the ``cute/`` folder
     name, that backend is Triton today, not CuTeDSL -- the deferral holds either way.)
     """
-    from .cute.fused_ln_mask import fused_ln_mask as _impl
+    from miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask import (
+        fused_ln_mask as _impl,
+    )
 
     return _impl(x, weight, bias, mask, eps)

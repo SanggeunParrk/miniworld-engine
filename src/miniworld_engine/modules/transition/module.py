@@ -6,18 +6,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 
-from miniworld_engine._typecheck import typecheck
 from miniworld_engine import kernels
+from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_transition
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.primitives import LayerNorm, Linear
-
 from miniworld_engine.modules.functional import swish_gate
-
+from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 
 def _force_split_enabled() -> bool:
@@ -26,7 +24,7 @@ def _force_split_enabled() -> bool:
     but the split is the proven, shape-general fallback: set MINIWORLD_TRANSITION_FORCE_SPLIT=1
     to A/B against it or as an escape hatch on a GPU where the fused path misbehaves. Static
     (env, compile-safe) rather than a runtime try/except, which is fragile under torch.compile."""
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     return settings.current().transition_force_split
 
@@ -35,19 +33,19 @@ def _cuda_b2b_inference_enabled() -> bool:
     """Whether to route d=128/n=4 inference through the hand-CUDA fused b2b kernel
     (beats the Triton b2b ~1.29x). Default on; set MINIWORLD_TRANSITION_CUDA_B2B=0 to
     A/B against the Triton path."""
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     return settings.current().transition_cuda_b2b
 
 
 def _large_d_training_backend_from_env() -> str | None:
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     return settings.current().transition_large_d_training
 
 
 def _explicit_cute_backward_backend() -> str:
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     return settings.current().transition_cute_backward
 

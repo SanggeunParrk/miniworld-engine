@@ -40,7 +40,7 @@ import sys
 sys.path.insert(0, "src")
 os.environ.setdefault("MINIWORLD_CONFIG_DIR", os.path.abspath("configs/accuracy"))
 
-import torch  # noqa: E402
+import torch
 
 
 def make_inputs(D: int, L: int):
@@ -69,12 +69,14 @@ def dirty_the_allocator() -> None:
 
 
 def one(D: int, L: int, dirty: bool):
-    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import bidir_front_triton
+    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
+        bidir_front_triton,
+    )
 
     x, WL, WLg, WR, WRg = make_inputs(D, L)
     if dirty:
         dirty_the_allocator()
-    left, right, preact = bidir_front_triton(x, WL, WLg, WR, WRg)
+    left, _right, _preact = bidir_front_triton(x, WL, WLg, WR, WRg)
 
     M, h2 = L * L, 2 * D
     xf = x.float().reshape(M, D)

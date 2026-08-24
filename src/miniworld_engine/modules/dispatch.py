@@ -95,12 +95,12 @@ def capability(device: torch.device | None = None) -> tuple[int, int]:
 
 def is_sm100(device: torch.device | None = None) -> bool:
     """True on Blackwell / B200 (sm_100, major == 10)."""
-    return capability(device)[0] >= 10  # noqa: PLR2004
+    return capability(device)[0] >= 10
 
 
 def is_sm90plus(device: torch.device | None = None) -> bool:
     """True on Hopper (sm_90) and newer — i.e. archs with a supported cute GEMM."""
-    return capability(device)[0] >= 9  # noqa: PLR2004
+    return capability(device)[0] >= 9
 
 
 def is_sm90(device: torch.device | None = None) -> bool:
@@ -113,7 +113,7 @@ def is_sm90(device: torch.device | None = None) -> bool:
     pre-Hopper GPUs (which are also "not sm100") get routed into a Hopper-only
     kernel and crash. A100 falls through to the portable Triton path instead.
     """
-    return capability(device)[0] == 9  # noqa: PLR2004
+    return capability(device)[0] == 9
 
 
 def is_sm86(device: torch.device | None = None) -> bool:
@@ -125,7 +125,7 @@ def is_sm86(device: torch.device | None = None) -> bool:
     small ``d`` on A100 loses to the shape-general split on sm_86, so a few routes gate on
     this specifically to keep A100's tuned choice untouched while fixing sm_86.
     """
-    return capability(device) == (8, 6)  # noqa: PLR2004
+    return capability(device) == (8, 6)
 
 
 # --------------------------------------------------------------------------- #
@@ -183,7 +183,7 @@ _CUEQ_OPS = frozenset({"triangle_multiplication"})
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     """trimul: cute on Hopper+ (the measured winner; out_layout via ``trimul_out_layout``),
     Triton pre-Hopper. ``settings.trimul_impl`` pins a backend for debug/A-B."""
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     override = settings.current().trimul_impl
     if override:
@@ -232,31 +232,31 @@ def resolve(
 
 
 # Thin per-op wrappers (stable API for the modules + benchmark harness + tests).
-def resolve_transition(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_transition(impl, device=None):
     return resolve("transition", impl, device)
 
 
-def resolve_triangle_attention(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_triangle_attention(impl, device=None):
     return resolve("triangle_attention", impl, device)
 
 
-def resolve_adaptive_layernorm(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_adaptive_layernorm(impl, device=None):
     return resolve("adaptive_layernorm", impl, device)
 
 
-def resolve_conditioned_transition(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_conditioned_transition(impl, device=None):
     return resolve("conditioned_transition", impl, device)
 
 
-def resolve_augmented_attention(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_augmented_attention(impl, device=None):
     return resolve("augmented_attention", impl, device)
 
 
-def resolve_layernorm(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_layernorm(impl, device=None):
     return resolve("layernorm", impl, device)
 
 
-def resolve_triangle_multiplication(impl, device=None):  # noqa: ANN001, ANN201
+def resolve_triangle_multiplication(impl, device=None):
     return resolve("triangle_multiplication", impl, device)
 
 
@@ -319,7 +319,7 @@ def trimul_out_layout(device: torch.device | None = None) -> str:
     ``bdll_direct_wide`` 0.184 ms, ``bdll_direct`` 0.194 ms, triton 0.284 ms, pytorch 1.14 ms.
     d-major [B,D,L,L] feeds the efficient d-major einsum (the d-last ``blld`` einsum is ~9x
     slower). Overridable via ``settings.trimul_out_layout`` for debug/A-B."""
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     override = settings.current().trimul_out_layout
     if override:

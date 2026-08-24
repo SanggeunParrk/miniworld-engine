@@ -21,12 +21,13 @@ A family absent from the map is an error rather than a default, so adding a fami
 decision instead of silently inheriting one.
 """
 from __future__ import annotations
+
 import csv
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from classify import SRC, classify  # noqa: E402
+from classify import SRC, classify
 
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 
@@ -52,7 +53,7 @@ def main() -> int:
     import collections
     kinds, levels, unresolved = collections.Counter(), collections.Counter(), []
     for r in rows:
-        kind, sig, how = classify(SRC / r["file"], r["symbol"])
+        kind, _sig, how = classify(SRC / r["file"], r["symbol"])
         if how != "closure":
             unresolved.append((r["kernel"], how))
         r["kind"] = kind

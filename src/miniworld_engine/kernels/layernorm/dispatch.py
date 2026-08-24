@@ -33,9 +33,8 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels._compile import device_constant
-
 from miniworld_engine._atomic import write_json
+from miniworld_engine.kernels._compile import device_constant
 
 _SUBDIR = "ln_bwd_dispatch"
 # In-repo, committed cache root (sibling of the autotune-config data tree). Single
@@ -44,7 +43,7 @@ _CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 
 def autotune_mode() -> str:
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
     return settings.current().layernorm_dispatch
 
 

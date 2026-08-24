@@ -32,9 +32,17 @@ from torch._library.custom_ops import CustomOpDef
 
 from miniworld_engine import settings
 from miniworld_engine.modules import (
-    AdaptiveLayerNorm, AugmentedAttentionPairBias, ConditionedTransition, ImplementationType,
-    MSAPairWeightedAveraging, OuterProductMean, PairformerBlock, PairformerConfig,
-    Transition, TriangleAttention, TriangleMultiplication,
+    AdaptiveLayerNorm,
+    AugmentedAttentionPairBias,
+    ConditionedTransition,
+    ImplementationType,
+    MSAPairWeightedAveraging,
+    OuterProductMean,
+    PairformerBlock,
+    PairformerConfig,
+    Transition,
+    TriangleAttention,
+    TriangleMultiplication,
 )
 
 DEV, DT = "cuda", torch.bfloat16
@@ -108,7 +116,7 @@ def test_every_exercised_op_satisfies_its_contract(captured):
     for name, (op, args, kwargs) in sorted(captured.items()):
         try:
             torch.library.opcheck(op, args, kwargs)
-        except Exception as e:                                      # noqa: BLE001
+        except Exception as e:  # noqa: PERF203 -- every op is checked; one failure is not the end
             failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
     assert not failures, "op contract violations:\n  " + "\n  ".join(failures)
 

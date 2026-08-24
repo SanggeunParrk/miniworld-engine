@@ -1,13 +1,13 @@
 # vendored + trimmed from team-gm psk/benchmark : benchmarks/runners/bench.py
 # Single bench entry for miniworld-engine. Drops the model-level
 # Pairformer / DiffusionTransformer benches; keeps the kernel-wrapping layers.
+import csv
+import functools
 import importlib
 import os
 import sys
-import csv
 from collections.abc import Callable
 from pathlib import Path
-import functools
 from typing import Any, Literal, NamedTuple, Protocol, TypedDict, cast
 
 # When run as `python benchmarks/runners/bench.py`, sys.path[0] is
@@ -357,10 +357,10 @@ def actual_compiled_flag(conf: BenchConfig) -> bool:
     return conf.compile
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _skips_compile_under_cudagraph(level: str, target: str) -> bool:
     """Does ``target``'s bench guard its compile on ``cudagraph == "disabled"``?"""
-    import inspect as _inspect  # noqa: PLC0415
+    import inspect as _inspect
 
     fn = targets_for(level).get(target)
     if fn is None:
@@ -388,9 +388,9 @@ def capture_cudagraph(step: Callable, params: list, is_train: bool,
     # — and are silently skipped. A couple of eager fwd(+bwd) iters here fixes that; it's a no-op
     # for normal timing runs (guarded on the capture patch being installed).
     try:
-        from miniworld_engine.autotune import capture as _cap  # noqa: PLC0415
-        _capturing = _cap._orig_bench is not None  # noqa: SLF001
-    except Exception:  # noqa: BLE001
+        from miniworld_engine.autotune import capture as _cap
+        _capturing = _cap._orig_bench is not None
+    except Exception:
         _capturing = False
     if _capturing:
         for _ in range(2):
@@ -789,7 +789,8 @@ def bench_module_triangle_multiplication(
         fabric.backward(actual, dy)
         fabric.backward(expected, dy_ref)
         out_max, out_rel, out_cos = tensor_metrics(actual, expected)
-        assert pair_impl.grad is not None and pair_ref.grad is not None
+        assert pair_impl.grad is not None
+        assert pair_ref.grad is not None
         grad_max, grad_rel, grad_cos = tensor_metrics(pair_impl.grad, pair_ref.grad)
         return {
             "output_max_abs": out_max,
@@ -1109,7 +1110,8 @@ def bench_module_transition(
         fabric.backward(actual, dy)
         fabric.backward(expected, dy_ref)
         out_max, out_rel, out_cos = tensor_metrics(actual, expected)
-        assert x_impl.grad is not None and x_ref.grad is not None
+        assert x_impl.grad is not None
+        assert x_ref.grad is not None
         grad_max, grad_rel, grad_cos = tensor_metrics(x_impl.grad, x_ref.grad)
         return {
             "output_max_abs": out_max,
@@ -1131,7 +1133,7 @@ def bench_module_transition(
         # (>=256) to the shape-general split (_old_triton_forward -> kernels.transition.triton.main),
         # NOT the cute fused path (cute is sm_90+ only and never runs here). d=128 stays fused.
         _cap0 = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
-        if _cap0 < 9 and conf.d_pair >= 256:  # noqa: PLR2004 -- pre-Hopper large-d -> split
+        if _cap0 < 9 and conf.d_pair >= 256:  # pre-Hopper large-d -> split
             execution_path = "kernels.transition.triton.main"
         elif not is_inference_mode(conf.mode) and conf.d_pair >= 512:
             execution_path = "kernels.transition.cute.forward+triton.backward"
@@ -1556,14 +1558,18 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
             return left, right, ref_gate(x)
         path = "pytorch"
     elif implementation == "trimul_front_triton":
-        from miniworld_engine.kernels.trimul_inproj.triton.front import trimul_front_triton
+        from miniworld_engine.kernels.trimul_inproj.triton.front import (
+            trimul_front_triton,
+        )
 
         def run(x):
             left, right, gate = trimul_front_triton(x, wl, wlg, wr, wrg, wg)
             return bdll_to_md(left), bdll_to_md(right), gate.reshape(L * L, D)
         path = "kernels.trimul_inproj.triton.front"
     elif implementation == "trimul_inproj_cute":
-        from miniworld_engine.kernels.trimul_inproj.cute.launch import trimul_inproj_cute_forward
+        from miniworld_engine.kernels.trimul_inproj.cute.launch import (
+            trimul_inproj_cute_forward,
+        )
 
         def run(x):
             left, right, gate = trimul_inproj_cute_forward(x, wl, wlg, wr, wrg, wg, compute_gate=True)
@@ -1588,7 +1594,9 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
             return left.reshape(L * L, D), right.reshape(L * L, D)
         path = "kernels.tm1.triton.main"
     elif implementation == "trimul_front_sm100":
-        from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import trimul_front_sm100
+        from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import (
+            trimul_front_sm100,
+        )
 
         def run(x):
             left, right = trimul_front_sm100(x, wl, wlg, wr, wrg)
@@ -1635,28 +1643,32 @@ def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "layernorm_linear_triton":
-        from miniworld_engine.kernels.layernorm_linear.interface import layernorm_linear_triton
-        kfn = lambda x: layernorm_linear_triton(x, lw, lb, w, None, eps)  # noqa: E731
+        from miniworld_engine.kernels.layernorm_linear.interface import (
+            layernorm_linear_triton,
+        )
+        kfn = lambda x: layernorm_linear_triton(x, lw, lb, w, None, eps)
         path = "kernels.layernorm_linear.triton.fused"
     elif implementation == "layernorm_linear_cute":
         from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
             layernorm_linear_cute,
         )
-        kfn = lambda x: layernorm_linear_cute(  # noqa: E731
+        kfn = lambda x: layernorm_linear_cute(
             x.reshape(-1, D), lw, lb, w, None, eps).reshape(x.shape)
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear"
     elif implementation == "layernorm_linear_cute_fused":
         from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
             layernorm_linear_cute_fused,
         )
-        kfn = lambda x: layernorm_linear_cute_fused(  # noqa: E731
+        kfn = lambda x: layernorm_linear_cute_fused(
             x.reshape(-1, D), lw, lb, w, None, eps).reshape(x.shape)
         path = "kernels.layernorm_linear.cute.gemm_layernorm_linear_fused"
     elif implementation == "layernorm_linear_te":
-        from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
+        from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
+            layernorm_linear_te_fn,
+        )
         # Flattened here, with length=L passed explicitly: TE wants a matrix, and once it is one
         # the pair length is no longer readable from the shape.
-        kfn = lambda x: layernorm_linear_te_fn(  # noqa: E731
+        kfn = lambda x: layernorm_linear_te_fn(
             x.reshape(-1, D), lw, lb, w, None, eps, length=L).reshape(x.shape)
         path = "kernels.layernorm_linear.triton.te_style"
     else:
@@ -1693,15 +1705,17 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_engine.kernels import triton_transition_fused
-        kfn = lambda x: triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)  # noqa: E731
+        kfn = lambda x: triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
     elif implementation == "cute_transition_fused":
         from miniworld_engine.kernels import cute_transition_fused
-        kfn = lambda x: cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)  # noqa: E731
+        kfn = lambda x: cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.cute.fused"
     elif implementation == "transition_b2b_ktiled":
-        from miniworld_engine.kernels.transition.triton.fused import transition_b2b_ktiled
-        kfn = lambda x: transition_b2b_ktiled(  # noqa: E731
+        from miniworld_engine.kernels.transition.triton.fused import (
+            transition_b2b_ktiled,
+        )
+        kfn = lambda x: transition_b2b_ktiled(
             x.reshape(L * L, D), lw, lb, wa, wb, wsq, eps).reshape(1, L, L, D)
         path = "kernels.transition.triton.fused.b2b_ktiled"
     else:
@@ -1735,19 +1749,23 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
         kfn, path = ref, "torch.nn.functional.layer_norm"
     elif implementation == "triton_layernorm":
         from miniworld_engine.kernels import triton_layernorm
-        kfn = lambda x: triton_layernorm(x, w, b, eps)  # noqa: E731
+        kfn = lambda x: triton_layernorm(x, w, b, eps)
         path = "kernels.layernorm.triton.main"
     elif implementation == "layernorm_dispatch":
         from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
-        kfn = lambda x: layernorm_kernel(x, w, b, eps)  # noqa: E731
+        kfn = lambda x: layernorm_kernel(x, w, b, eps)
         path = "kernels.layernorm.interface"
     elif implementation == "quack_cute":
-        from miniworld_engine.kernels.layernorm.cute.quack_adapter import quack_layernorm_fwd
-        kfn = lambda x: quack_layernorm_fwd(x, w, b, eps)  # noqa: E731
+        from miniworld_engine.kernels.layernorm.cute.quack_adapter import (
+            quack_layernorm_fwd,
+        )
+        kfn = lambda x: quack_layernorm_fwd(x, w, b, eps)
         path = "kernels.layernorm.cute.quack"
     elif implementation == "triton_layernorm_lowreg":
-        from miniworld_engine.kernels.layernorm.triton.lowreg import triton_layernorm_lowreg
-        kfn = lambda x: triton_layernorm_lowreg(x, w, b, eps)  # noqa: E731
+        from miniworld_engine.kernels.layernorm.triton.lowreg import (
+            triton_layernorm_lowreg,
+        )
+        kfn = lambda x: triton_layernorm_lowreg(x, w, b, eps)
         path = "kernels.layernorm.triton.lowreg"
     else:
         return as_bench_result(float("nan"))
@@ -1785,24 +1803,26 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
         kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
     elif implementation == "adaln_inference":
         from miniworld_engine.kernels.adaln.triton.inference import adaln_inference
-        kfn = lambda x, c: adaln_inference(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
+        kfn = lambda x, c: adaln_inference(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.inference"
     elif implementation == "adaln_lnfold":
-        from miniworld_engine.kernels.adaln.triton.inference import adaln_inference_lnfold
+        from miniworld_engine.kernels.adaln.triton.inference import (
+            adaln_inference_lnfold,
+        )
         from miniworld_engine.kernels.layernorm_linear.cute import fold_for_gemm
         _wcat = torch.cat([sw, bw], dim=0).contiguous()
         _bcat = torch.cat([sb, sb.new_zeros(D)], dim=0).contiguous()
         _pf = fold_for_gemm(_wcat, clw, clw.new_zeros(clw.shape), _bcat, w2_dtype=dtype)
-        kfn = lambda x, c: adaln_inference_lnfold(  # noqa: E731
+        kfn = lambda x, c: adaln_inference_lnfold(
             x, c, clw, sw, sb, bw, ex, ec, weight_cat=_wcat, bias_cat=_bcat, prefolded=_pf)
         path = "kernels.adaln.triton.inference.lnfold"
     elif implementation == "triton_adaln":
         from miniworld_engine.kernels import triton_adaptive_layer_norm
-        kfn = lambda x, c: triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
+        kfn = lambda x, c: triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.main"
     elif implementation == "adaln_fused3":
         from miniworld_engine.kernels.adaln.triton.fused3 import adaln_fused3
-        kfn = lambda x, c: adaln_fused3(x, c, clw, sw, sb, bw, ex, ec)  # noqa: E731
+        kfn = lambda x, c: adaln_fused3(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.fused3"
     else:
         return as_bench_result(float("nan"))
@@ -1837,13 +1857,13 @@ def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch.sdpa"
     elif implementation == "triton_triangle_attention":
         from miniworld_engine.kernels import triton_triangle_attention_pair_bias as fn
-        kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
+        kfn = lambda q, k, v, b: fn(q, k, v, b)
         path = "kernels.triangle_attention.triton.main"
     elif implementation == "triton_triangle_attention_atomic":
         from miniworld_engine.kernels.triangle_attention.triton.atomic import (
             triton_triangle_attention_pair_bias as fn,
         )
-        kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
+        kfn = lambda q, k, v, b: fn(q, k, v, b)
         path = "kernels.triangle_attention.triton.atomic"
     else:
         return as_bench_result(float("nan"))
@@ -1879,7 +1899,7 @@ def bench_kernel_bias_only_attention(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch.einsum"
     elif implementation == "triton_bias_only_attention":
         from miniworld_engine.kernels import triton_bias_only_attention
-        kfn = lambda v, b: triton_bias_only_attention(v, b)  # noqa: E731
+        kfn = lambda v, b: triton_bias_only_attention(v, b)
         path = "kernels.bias_only_attention.triton.main"
     else:
         return as_bench_result(float("nan"))
@@ -1915,13 +1935,13 @@ def bench_kernel_augmented_attention(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels import triton_augmented_attention_pair_bias
         # The dispatch wrapper's default: the compute-efficient backend in triton/main.py. The
         # memory-efficient one is the augmented_attention_memory_efficient row below.
-        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b)  # noqa: E731
+        kfn = lambda q, k, v, b: triton_augmented_attention_pair_bias(q, k, v, b)
         path = "kernels.augmented_attention.triton.main"
     elif implementation == "augmented_attention_memory_efficient":
         from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import (
             triton_augmented_attention_pair_bias as fn,
         )
-        kfn = lambda q, k, v, b: fn(q, k, v, b)  # noqa: E731
+        kfn = lambda q, k, v, b: fn(q, k, v, b)
         path = "kernels.augmented_attention.triton.memory_efficient"
     else:
         return as_bench_result(float("nan"))
@@ -1952,8 +1972,10 @@ def bench_kernel_fused_ln_mask(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = ref, "pytorch"
     elif implementation == "fused_ln_mask":
-        from miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
-        kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)  # noqa: E731
+        from miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask import (
+            fused_ln_mask,
+        )
+        kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)
         path = "kernels.fused_ln_mask.cute"
     else:
         return as_bench_result(float("nan"))
@@ -1982,14 +2004,16 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
         kfn, path = ref, "pytorch"
     elif implementation == "tm2_cute":
         # cuequiv wrapper deleted 2026-08-04 — this now benches OUR from-scratch tm2 kernel.
-        from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import tm2_dual_from_scratch
-        kfn = lambda xg, xo: tm2_dual_from_scratch(xg, xo, wg, wp)  # noqa: E731  (wg/wp are (N,K))
+        from miniworld_engine.kernels.tm2.cute.tm2_cute_kernel import (
+            tm2_dual_from_scratch,
+        )
+        kfn = lambda xg, xo: tm2_dual_from_scratch(xg, xo, wg, wp)  # (wg/wp are (N,K))
         path = "kernels.tm2.cute"
     elif implementation == "triton_tm2":
         from miniworld_engine.kernels.tm2.triton.main import triton_tm2
         wgt, wpt = wg.t().contiguous(), wp.t().contiguous()  # kernel computes x@W (K,N form)
         # Pre-flatten, and TritonTM2Function's `length_of(x.shape)` sees M = L*L and refuses.
-        kfn = lambda xg, xo: triton_tm2(xg, xo, wgt, wpt).reshape(1, L, L, D)  # noqa: E731
+        kfn = lambda xg, xo: triton_tm2(xg, xo, wgt, wpt).reshape(1, L, L, D)
         path = "kernels.tm2.triton.main"
     else:
         return as_bench_result(float("nan"))
@@ -2002,7 +2026,9 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
     """Post-adaLN conditioned-transition tail: out=squeeze(silu(x@Wa)*(x@Wb)); y=sigma(cond@Wsc+b)*out.
     fp32. Rows: pytorch, triton_cond_transition."""
     from miniworld_engine import kernels
-    from miniworld_engine.modules.conditioned_transition.module import ConditionedTransition
+    from miniworld_engine.modules.conditioned_transition.module import (
+        ConditionedTransition,
+    )
     from miniworld_engine.modules.exceptions import ImplementationType
 
     D, L, n = conf.d_pair, seq_len, 4
@@ -2020,7 +2046,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
 
     # The kernel is the POST-AdaLN tail: ConditionedTransition.forward runs `ada_ln_in` first and
     # only then calls it. Normalize once here so both sides see the same input.
-    ref_fn = lambda x, c: ref_mod._reference(ref_mod.ada_ln_in(x, c), c)  # noqa: E731
+    ref_fn = lambda x, c: ref_mod._reference(ref_mod.ada_ln_in(x, c), c)
     if implementation == "pytorch":
         kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_cond_transition":
@@ -2028,7 +2054,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
         # `length=L`: the dispatch takes the pre-flatten L explicitly precisely because its
         # caller has already flattened to (M, K). Omitting it left the inner path calling
         # `length_of` on a 2-D shape, which the guard refuses.
-        kfn = lambda x, c: raw(  # noqa: E731
+        kfn = lambda x, c: raw(
             ref_mod.ada_ln_in(x, c).reshape(-1, D), c.reshape(-1, D),
             wa, wb, ws, wsc, bsc, length=L).reshape(1, L, L, D)
         path = "kernels.conditioned_transition.triton"
@@ -2075,11 +2101,13 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         kfn, path = torch_bwd, "pytorch"
     elif implementation in {"triton_atomic", "triton_partial", "triton_persistent"}:
         from miniworld_engine.kernels.layernorm.compile_native import (
-            _bwd_atomic_impl, _bwd_partial_impl, _bwd_persistent_impl,
+            _bwd_atomic_impl,
+            _bwd_partial_impl,
+            _bwd_persistent_impl,
         )
         impl_fn = {"triton_atomic": _bwd_atomic_impl, "triton_partial": _bwd_partial_impl,
                    "triton_persistent": _bwd_persistent_impl}[implementation]
-        kfn = lambda: impl_fn(dy, x, w, mean, rstd)  # noqa: E731
+        kfn = lambda: impl_fn(dy, x, w, mean, rstd)
         path = f"kernels.layernorm.compile_native.{implementation}"
     elif implementation == "cuda":
         # Hand-CUDA vectorized backward; the shipped dispatch routes bf16 128<=N<=512 here.
@@ -2087,7 +2115,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         if dtype is not BF16 or not (128 <= D <= 512):
             return as_bench_result(float("nan"))
         from miniworld_engine.kernels.layernorm.cuda import layer_norm_bwd_cuda
-        kfn = lambda: layer_norm_bwd_cuda(dy, x, w, mean, rstd)  # noqa: E731
+        kfn = lambda: layer_norm_bwd_cuda(dy, x, w, mean, rstd)
         path = "kernels.layernorm.cuda.layer_norm_bwd_cuda"
     else:
         return as_bench_result(float("nan"))
@@ -2122,8 +2150,10 @@ def bench_kernel_gemm_gate_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
     elif implementation == "gate_elem_bwd":
-        from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_bwd
-        kfn = lambda: gate_elem_bwd(dy, x_n, proj, gate, wg)  # noqa: E731
+        from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
+            gate_elem_bwd,
+        )
+        kfn = lambda: gate_elem_bwd(dy, x_n, proj, gate, wg)
         path = "kernels.trimul_inproj.triton.gate_elem"
     else:
         return as_bench_result(float("nan"))
@@ -2165,7 +2195,9 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
     elif implementation == "front_bwd_fused":
-        from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_fused
+        from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
+            front_bwd_fused,
+        )
         xf = x_n.reshape(L * L, D)
         gLlog, pL = xf @ WLg, xf @ WL
         gRlog, pR = xf @ WRg, xf @ WR
@@ -2175,7 +2207,7 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
             1, L, L, 4 * H).permute(0, 3, 1, 2).contiguous()
         dlb = d_left.permute(0, 3, 1, 2).contiguous()
         drb = d_right.permute(0, 3, 1, 2).contiguous()
-        kfn = lambda: front_bwd_fused(dlb, drb, preact, x_n, WL, WLg, WR, WRg)  # noqa: E731
+        kfn = lambda: front_bwd_fused(dlb, drb, preact, x_n, WL, WLg, WR, WRg)
         path = "kernels.trimul_inproj.triton.back_fused"
     else:
         return as_bench_result(float("nan"))
@@ -2297,11 +2329,15 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     if implementation == "pytorch":
         out, path = F.linear(F.layer_norm(x, (D,), lw, lb, eps), w), "pytorch.autograd"
     elif implementation == "layernorm_linear_te":
-        from miniworld_engine.kernels.layernorm_linear.triton.te_style import layernorm_linear_te_fn
+        from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
+            layernorm_linear_te_fn,
+        )
         out = layernorm_linear_te_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
         path = "kernels.layernorm_linear.triton.te_style"
     elif implementation == "layernorm_linear_cute":
-        from miniworld_engine.kernels.layernorm_linear.autograd import layernorm_linear_fn
+        from miniworld_engine.kernels.layernorm_linear.autograd import (
+            layernorm_linear_fn,
+        )
         out = layernorm_linear_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
         path = "kernels.layernorm_linear.autograd.cute"
     else:
@@ -2394,8 +2430,8 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
     Module-level targets do not use that chain; they parse the name into an ``ImplementationType``,
     so their set is the enum plus the two aliases ``module_miniworld_spec`` understands.
     """
-    import ast as _ast  # noqa: PLC0415
-    import inspect as _inspect  # noqa: PLC0415
+    import ast as _ast
+    import inspect as _inspect
 
     fn = targets_for(level).get(target)
     if fn is None:
@@ -2617,7 +2653,7 @@ def _compile_wrap_now() -> str:
     (see kernels._compile), so by the time a row is written it is a fact about this process, not
     a request that might not have been honoured.
     """
-    from miniworld_engine import settings as _s  # noqa: PLC0415
+    from miniworld_engine import settings as _s
 
     return _s.current().compile_wrap
 
@@ -2844,11 +2880,11 @@ def main(cfg: DictConfig) -> None:
             pass
 
         @staticmethod
-        def setup_module(module):  # noqa: ANN001, ANN205
+        def setup_module(module):
             return module
 
         @staticmethod
-        def backward(tensor, gradient):  # noqa: ANN001, ANN205
+        def backward(tensor, gradient):
             tensor.backward(gradient)
 
     fabric = _NoFabric()
@@ -2935,7 +2971,7 @@ def main(cfg: DictConfig) -> None:
         for seq_len, d_pair in sweep_points:
             conf.d_pair = d_pair
             for implementation in conf.implementations:
-                torch._dynamo.reset()  # noqa: SLF001
+                torch._dynamo.reset()
                 torch.cuda.empty_cache()
                 status = "ok"
                 error = ""
@@ -2948,7 +2984,7 @@ def main(cfg: DictConfig) -> None:
                         autotune_single_config_records,
                         seen_autotuners,
                     )
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     result = None
                     status = "failed"
                     error = ascii_safe(f"{type(exc).__name__}: {exc}")

@@ -10,7 +10,9 @@ Two hypotheses, and one sweep separates them:
   (b) a tail-handling defect: then every non-multiple M is elevated and every multiple is not.
 """
 from __future__ import annotations
+
 import sys
+
 sys.path.insert(0, "src")
 
 import torch
@@ -19,7 +21,10 @@ import torch
 def one(m: int, k: int, seed: int = 1234):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    from miniworld_engine.kernels.drivers.transition import _CUDA_N, _transition_cuda_ext
+    from miniworld_engine.kernels.drivers.transition import (
+        _CUDA_N,
+        _transition_cuda_ext,
+    )
     ext = _transition_cuda_ext()
     nk = _CUDA_N * k
     dev = torch.device("cuda")
@@ -47,6 +52,9 @@ def one(m: int, k: int, seed: int = 1234):
     out = {}
     for name, a, e in (("dx", got[0], xf.grad), ("dwa", got[1], af.grad),
                        ("dwb", got[2], bf.grad), ("dws", got[3], sf.grad)):
+        # .grad is Optional; None here would mean the reference expression never reached this
+        # leaf, i.e. the reference formula itself is wrong -- not something to paper over.
+        assert e is not None, f"{name}: reference backward() left .grad unset"
         num = (a.float() - e).abs().max().item()
         den = e.abs().max().item()
         out[name] = (num / (den or 1.0), num, den)

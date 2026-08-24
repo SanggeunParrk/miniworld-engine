@@ -23,21 +23,21 @@ validates the capture path. Config choice is performance-only, so this never aff
 
 from __future__ import annotations
 
-
+import contextlib
 from pathlib import Path
 
-from .cache import (
+from miniworld_engine.autotune.cache import _scheme_stale as _scheme_stale
+from miniworld_engine.autotune.cache import _sig_from_dict as _sig_from_dict
+from miniworld_engine.autotune.cache import (
     as_cfg_dict,
     config_space_hash,
-    op_identity,
     config_to_dict,
-    bucket_of_autotuner as _bucket_of,
-    dtype_of_args as _dtype_of,
     gpu_key,
+    op_identity,
     store_ranked_configs,
 )
-from .cache import _scheme_stale as _scheme_stale
-from .cache import _sig_from_dict as _sig_from_dict
+from miniworld_engine.autotune.cache import bucket_of_autotuner as _bucket_of
+from miniworld_engine.autotune.cache import dtype_of_args as _dtype_of
 
 # op -> {"grid": [configs] | None, "entries": {(dtype, bucket): {sig: (config, ms)}}}
 _CAPTURE: dict = {}
@@ -165,9 +165,9 @@ def load_probe_state(shard_path) -> int:
     restart. A unit that dies to an OOM, a node failure, or a job time limit resumes without
     re-benching or re-compiling what it had already decided.
     """
-    from pathlib import Path as _P  # noqa: PLC0415
+    from pathlib import Path as _P
 
-    stem = str(shard_path)[: -len(".json")] if str(shard_path).endswith(".json") else str(shard_path)
+    stem = str(shard_path).removesuffix(".json")
     cf = _P(stem + ".compiled")
     _COMPILED_FILE.append(cf)
     if cf.exists():
@@ -274,7 +274,7 @@ def _remember(sig: str, ms: float) -> None:
 
 def probe_log_summary(top: int = 0) -> str:
     """Per-axis mean device time over every probed config -- which axis value costs the time."""
-    import collections  # noqa: PLC0415
+    import collections
 
     if not _PROBE_LOG:
         return ""
@@ -301,11 +301,11 @@ _PROBES_INSTALLED = False
 
 def _install_launch_probes() -> None:
     """Time the per-config first-launch path. Idempotent; build-only."""
-    import time  # noqa: PLC0415
+    import time
 
-    from triton.compiler.compiler import CompiledKernel  # noqa: PLC0415
-    from triton.runtime.autotuner import Autotuner  # noqa: PLC0415
-    from triton.runtime.jit import JITFunction  # noqa: PLC0415
+    from triton.compiler.compiler import CompiledKernel
+    from triton.runtime.autotuner import Autotuner
+    from triton.runtime.jit import JITFunction
 
     global _PROBES_INSTALLED
     if _PROBES_INSTALLED:
@@ -314,7 +314,7 @@ def _install_launch_probes() -> None:
 
     orig_init = CompiledKernel._init_handles
 
-    def init_handles(self):  # noqa: ANN001, ANN202
+    def init_handles(self):
         if self.module is not None:
             return orig_init(self)
         t = time.monotonic()
@@ -328,7 +328,7 @@ def _install_launch_probes() -> None:
 
     orig_run = JITFunction.run
 
-    def run(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+    def run(self, *a, **k):
         t = time.monotonic()
         try:
             return orig_run(self, *a, **k)
@@ -344,7 +344,7 @@ def _install_launch_probes() -> None:
     # the metadata json + every IR level (.ttir/.ttgir/.llir/.ptx/.cubin) off the cache dir.
     orig_ckinit = CompiledKernel.__init__
 
-    def ckinit(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+    def ckinit(self, *a, **k):
         t = time.monotonic()
         try:
             return orig_ckinit(self, *a, **k)
@@ -363,12 +363,12 @@ def _install_launch_probes() -> None:
     _pre_wrapped: set[int] = set()
     orig_at_run = Autotuner.run
 
-    def at_run(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, ANN202
+    def at_run(self, *a, **k):
         if id(self) not in _pre_wrapped:
             _pre_wrapped.add(id(self))
             inner = self.pre_hook
 
-            def pre_hook(*ha, **hk):  # noqa: ANN002, ANN003, ANN202
+            def pre_hook(*ha, **hk):
                 t = time.monotonic()
                 try:
                     return inner(*ha, **hk)
@@ -384,7 +384,7 @@ def _install_launch_probes() -> None:
 
 def _budget_ms(autotuner) -> float | None:
     """Bench budget for the next config, or None when the feature is off."""
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     cur = settings.current()
     factor = cur.bench_budget_factor
@@ -403,15 +403,15 @@ def _budgeted_do_bench(orig, budget: float):
     for the wrong reason). Then one timed launch -- enough to separate a config that is 10x the
     best from one that might win, which is the only distinction the budget needs to make.
     """
-    import time  # noqa: PLC0415
+    import time
 
-    import torch  # noqa: PLC0415
+    import torch
 
-    from miniworld_engine import settings as _settings  # noqa: PLC0415
+    from miniworld_engine import settings as _settings
 
     skip_warm = _settings.current().bench_budget_skip_warm
 
-    def f(kernel_call, quantiles=None, **kw):  # noqa: ANN001, ANN003, ANN202
+    def f(kernel_call, quantiles=None, **kw):
         sig = _sig_line(_CURRENT_CFG)
         if sig in _PROBE_DONE:          # decided on an earlier attempt: replay, do not relaunch
             m = _PROBE_DONE[sig]
@@ -492,9 +492,9 @@ def precompile_summary() -> str:
 
 def _compile_jobs() -> int:
     """Workers for pre-compilation: ``settings.compile_jobs``, else one per usable core (cap 32)."""
-    import os  # noqa: PLC0415
+    import os
 
-    from miniworld_engine import settings  # noqa: PLC0415
+    from miniworld_engine import settings
 
     want = settings.current().compile_jobs
     if want is not None:
@@ -510,7 +510,7 @@ def _compile_jobs() -> int:
 _JIT_CACHE: dict = {}
 
 
-def _resolve_jit(module_path: str, fn_name: str):  # noqa: ANN201
+def _resolve_jit(module_path: str, fn_name: str):
     """The JITFunction behind ``module_path.fn_name``, imported at most once per process.
 
     The module attribute is whatever the decorators left there -- for an autotuned kernel that is
@@ -520,9 +520,9 @@ def _resolve_jit(module_path: str, fn_name: str):  # noqa: ANN201
     hit = _JIT_CACHE.get((module_path, fn_name))
     if hit is not None:
         return hit
-    import importlib  # noqa: PLC0415
+    import importlib
 
-    from triton.runtime.jit import JITFunction  # noqa: PLC0415
+    from triton.runtime.jit import JITFunction
 
     fn = getattr(importlib.import_module(module_path), fn_name)
     while not isinstance(fn, JITFunction):
@@ -534,7 +534,7 @@ def _resolve_jit(module_path: str, fn_name: str):  # noqa: ANN201
 def _compile_payload(payload, prefetched=None) -> None:
     """The compile itself, with no process management. Raises on failure."""
     module_path, fn_name, signature, constants, attrs, target, options = payload
-    from triton.compiler.compiler import ASTSource, compile  # noqa: PLC0415, A004
+    from triton.compiler.compiler import ASTSource, compile
 
     fn = prefetched if prefetched is not None else _resolve_jit(module_path, fn_name)
     src = ASTSource(fn=fn, signature=signature, attrs=attrs)
@@ -549,7 +549,7 @@ def _worker_compile(chunk: list) -> list:
     recurse without the accounting tuple being wrapped a second time. Must stay importable at
     module level (spawn).
     """
-    import time  # noqa: PLC0415
+    import time
 
     t0 = time.monotonic()
     oks = _compile_chunk(chunk)
@@ -582,9 +582,9 @@ def _compile_chunk(chunk: list) -> list:
     given its own budget would be kept by a pre-compiled build and dropped by a serial one, and
     the two would produce different caches from the same inputs.
     """
-    import os  # noqa: PLC0415
-    import signal  # noqa: PLC0415
-    import time  # noqa: PLC0415
+    import os
+    import signal
+    import time
 
     if not chunk:
         return []
@@ -598,7 +598,7 @@ def _compile_chunk(chunk: list) -> list:
     for payload in chunk:
         try:
             prefetched.append(_resolve_jit(payload[0], payload[1]))
-        except BaseException:  # noqa: BLE001 -- fall back to resolving in the child
+        except BaseException:  # noqa: PERF203 -- fall back to resolving in the child
             prefetched.append(None)
 
     rfd, wfd = os.pipe()
@@ -606,13 +606,13 @@ def _compile_chunk(chunk: list) -> list:
     if pid == 0:
         os.close(rfd)
         try:
-            for payload, pre in zip(chunk, prefetched):
+            for payload, pre in zip(chunk, prefetched, strict=False):
                 try:
                     _compile_payload(payload, pre)
                     os.write(wfd, b"\x01")
-                except BaseException as exc:  # noqa: BLE001, PERF203 -- one bad config, not a bad chunk
+                except BaseException as exc:  # noqa: PERF203 -- one bad config, not a bad chunk
                     if os.environ.get("_MW_PRECOMPILE_FIRST") == "1":
-                        import sys  # noqa: PLC0415
+                        import sys
                         print(f"  [precompile] child failed: {type(exc).__name__}: {exc}",
                               file=sys.stderr, flush=True)
                     os.write(wfd, b"\x00")
@@ -658,10 +658,8 @@ def _compile_chunk(chunk: list) -> list:
         time.sleep(0.001 if waited < 0.05 else 0.01 if waited < 0.5 else 0.05)
     os.close(rfd)
     if killed_at is None:
-        try:
+        with contextlib.suppress(OSError):
             os.waitpid(pid, 0)
-        except OSError:
-            pass
     else:
         results.append(False)                       # the config that stalled
         rest = chunk[len(results):]
@@ -682,7 +680,7 @@ def _precompile_round(src, target, options, configs) -> None:
     # no output and nothing can interrupt it.
     if jobs < 1 or not configs:
         return
-    import time  # noqa: PLC0415
+    import time
 
     started = time.monotonic()
     todo = [c for c in configs if _cfg_sig(c) not in _COMPILED]
@@ -693,7 +691,7 @@ def _precompile_round(src, target, options, configs) -> None:
         return
     configs = todo
     try:
-        import multiprocessing as mp  # noqa: PLC0415
+        import multiprocessing as mp
 
         arg_names = list(src.fn.arg_names)
         base_constants = dict(src.constants)
@@ -710,7 +708,7 @@ def _precompile_round(src, target, options, configs) -> None:
                     opts[knob] = value
             payloads.append((src.fn.module, src.fn.__name__, src.signature, constants,
                              src.attrs, target, opts))
-        import os as _os  # noqa: PLC0415
+        import os as _os
         _os.environ["_MW_PRECOMPILE_FIRST"] = "1" if _PRECOMPILE["rounds"] == 0 else "0"
 
         if _PRECOMPILE_POOL is None:
@@ -727,7 +725,7 @@ def _precompile_round(src, target, options, configs) -> None:
         results = _PRECOMPILE_POOL.map_async(_worker_compile, chunks, chunksize=1)
         try:
             done = [r for chunk_res in results.get(timeout=budget) for r in chunk_res]
-        except Exception:  # noqa: BLE001 -- timeout: proceed, the serial pass still works
+        except Exception:  # timeout: proceed, the serial pass still works
             done = []
         ok = sum(1 for d in done if d and d[0])
         bad = sum(1 for d in done if not (d and d[0]))
@@ -737,9 +735,9 @@ def _precompile_round(src, target, options, configs) -> None:
         # settled = attempted and answered, pass or fail. `done` is shorter than `configs` only
         # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
         # unsettled and is retried, which is the intent.
-        _mark_compiled(_cfg_sig(c) for c, _ in zip(configs, done))
+        _mark_compiled(_cfg_sig(c) for c, _ in zip(configs, done, strict=False))
         _mark_outcome(src.fn.__name__,
-                      ((_cfg_sig(c), bool(d and d[0])) for c, d in zip(configs, done)))
+                      ((_cfg_sig(c), bool(d and d[0])) for c, d in zip(configs, done, strict=False)))
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
         _PRECOMPILE["rounds"] += 1
@@ -750,7 +748,7 @@ def _precompile_round(src, target, options, configs) -> None:
               f"({skipped} already compiled) on {jobs} "
               f"workers -> {ok} compiled, {bad} failed, "
               f"{time.monotonic() - started:.0f}s", flush=True)
-    except Exception:  # noqa: BLE001 -- an optimisation; a build must never fail because of it
+    except Exception:  # an optimisation; a build must never fail because of it
         pass
     _PRECOMPILE["seconds"] += time.monotonic() - started
 
@@ -758,10 +756,8 @@ def _precompile_round(src, target, options, configs) -> None:
 def shutdown_precompile() -> None:
     global _PRECOMPILE_POOL
     if _PRECOMPILE_POOL is not None:
-        try:
+        with contextlib.suppress(Exception):
             _PRECOMPILE_POOL.terminate()
-        except Exception:  # noqa: BLE001
-            pass
         _PRECOMPILE_POOL = None
 
 
@@ -805,11 +801,11 @@ def install_launch_recorder() -> None:
     if _REC_INSTALLED:
         return
     _REC_INSTALLED = True
-    from triton.runtime.autotuner import Autotuner  # noqa: PLC0415
+    from triton.runtime.autotuner import Autotuner
 
     prev = Autotuner.run
 
-    def run(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+    def run(self, *args, **kwargs):
         key = id(self)
         if key not in _NOTED:
             _NOTED.add(key)
@@ -823,7 +819,7 @@ def install_launch_recorder() -> None:
 
 def _op_name(autotuner) -> str | None:
     """The op behind a live autotuner, by identity of the config list it was handed."""
-    from miniworld_engine.autotune.configs import op_of  # noqa: PLC0415
+    from miniworld_engine.autotune.configs import op_of
     return op_of(getattr(autotuner, "configs", None))
 
 
@@ -836,7 +832,7 @@ def _record_failed(exc: BaseException) -> None:
     first = key not in _RECORD_ERRORS
     _RECORD_ERRORS[key] = _RECORD_ERRORS.get(key, 0) + 1
     if first:
-        import warnings  # noqa: PLC0415
+        import warnings
 
         warnings.warn(f"[miniworld.autotune] capture could not record a timing -- {key}. "
                       f"This shard will be missing measurements.", stacklevel=3)
@@ -915,16 +911,17 @@ def install() -> None:
     global _orig_bench, _orig_compile
     if _orig_bench is not None:
         return
-    import os  # noqa: PLC0415
-    import signal  # noqa: PLC0415
-    import time  # noqa: PLC0415
-    import triton.compiler as _tc  # noqa: PLC0415
-    import triton.compiler.compiler as _tcc  # noqa: PLC0415
+    import os
+    import signal
+    import time
+
+    import triton.compiler as _tc
+    import triton.compiler.compiler as _tcc
     from triton.runtime.autotuner import Autotuner
 
     _orig_compile = _tcc.compile
 
-    def _fork_compile(*args, **kwargs):  # noqa: ANN002, ANN003
+    def _fork_compile(*args, **kwargs):
         # This is the only place fully-resolved compile arguments exist, so it is where a round's
         # fan-out has to start -- but only for the round currently being timed, and only once.
         src = args[0] if args else kwargs.get("src")
@@ -962,7 +959,7 @@ def install() -> None:
             try:
                 _orig_compile(*args, **kwargs)
                 os._exit(0)
-            except BaseException:  # noqa: BLE001 -- any failure -> parent treats config as unusable
+            except BaseException:  # any failure -> parent treats config as unusable
                 os._exit(3)
         _COMPILE_T["fork_s"] += time.monotonic() - _t_fork
         _t_wait = time.monotonic()
@@ -986,7 +983,7 @@ def install() -> None:
             # 50ms once it is clear this is a real compile, where the tick is irrelevant next to
             # the seconds it will take.
             waited = time.monotonic() - _t_wait
-            time.sleep(0.001 if waited < 0.05 else 0.01 if waited < 0.5 else 0.05)  # noqa: ASYNC251
+            time.sleep(0.001 if waited < 0.05 else 0.01 if waited < 0.5 else 0.05)
             _COMPILE_T["polls"] += 1
         _COMPILE_T["wait_s"] += time.monotonic() - _t_wait
         if os.waitstatus_to_exitcode(st) != 0:
@@ -1028,7 +1025,7 @@ def install() -> None:
     global _orig_prune
     _orig_prune = Autotuner.prune_configs
 
-    def prune_configs(self, kwargs):  # noqa: ANN001, ANN202
+    def prune_configs(self, kwargs):
         pruned = _orig_prune(self, kwargs)
         _ROUND[id(self)] = list(pruned)     # per autotuner: rounds interleave across kernels
         # A round is exactly one prune_configs + one sweep of the pruned list for ONE autotune key,
@@ -1057,7 +1054,7 @@ def install() -> None:
             self.do_bench = _budgeted_do_bench(saved_do_bench, budget)
         try:
             res = _orig_bench(self, *args, config=config, **meta)
-        except Exception:  # noqa: BLE001 -- a config that fails to compile/run simply loses
+        except Exception:  # a config that fails to compile/run simply loses
             # Match triton's own sentinel SHAPE, not just its value: do_bench(quantiles=...) hands
             # back [median, q20, q80], and triton returns [inf, inf, inf] for a config it could not
             # build. Returning a bare float mixes scalars and lists in the timings dict, and the
@@ -1077,7 +1074,7 @@ def install() -> None:
                 _BEST[id(self)] = med
         try:
             _record_one(self, config, meta, med)
-        except Exception as exc:  # noqa: BLE001 -- capture must never perturb a real bench
+        except Exception as exc:  # capture must never perturb a real bench
             # ...but it must not fail SILENTLY either. Swallowing without a word is how a
             # recorder that raised on every single call produced an empty shard from a build
             # that otherwise looked healthy.
@@ -1103,7 +1100,7 @@ def install() -> None:
         # Snapshot the positional binding NOW: triton builds exactly this
         # (`self.nargs = dict(zip(self.arg_names, args))`) at the top of run() and clears it at
         # the bottom, so by the time the single-config record below fires it is gone.
-        nargs0 = dict(zip(getattr(self, "arg_names", ()) or (), args))
+        nargs0 = dict(zip(getattr(self, "arg_names", ()) or (), args, strict=False))
         previous = _CURRENT.get("id")
         if len(cfgs0) == 1 and id(self) not in _ROUND:
             _ROUND[id(self)] = list(cfgs0)
@@ -1122,7 +1119,7 @@ def install() -> None:
                 try:
                     _record_one(self, cfgs[0], kwargs, float("nan"), unmeasured=True,
                                 nargs=nargs0)
-                except Exception as exc:  # noqa: BLE001 -- must not perturb a real run
+                except Exception as exc:  # must not perturb a real run
                     _record_failed(exc)
         return out
 
@@ -1145,8 +1142,8 @@ def uninstall() -> None:
             Autotuner.prune_configs = _orig_prune
             _orig_prune = None
     if _orig_compile is not None:
-        import triton.compiler as _tc  # noqa: PLC0415
-        import triton.compiler.compiler as _tcc  # noqa: PLC0415
+        import triton.compiler as _tc
+        import triton.compiler.compiler as _tcc
         _tcc.compile = _orig_compile
         _tc.compile = _orig_compile
         _orig_compile = None
@@ -1189,8 +1186,8 @@ def dump_shard(path: str) -> int:
     in-repo cache). Parallel capture jobs each ``dump_shard`` to their OWN file; a single
     ``merge_shards`` writer folds them into the committed cache — so no env var and no
     concurrent writers ever touch the in-repo tree. Returns the number of ops dumped."""
-    from miniworld_engine._atomic import write_json  # noqa: PLC0415
-    from miniworld_engine.autotune.cache import KEY_SCHEME  # noqa: PLC0415
+    from miniworld_engine._atomic import write_json
+    from miniworld_engine.autotune.cache import KEY_SCHEME
 
     # `_key_scheme`, leading underscore: every other top-level key in a shard is an OP NAME, and
     # `merge_shards` iterates them as such. Without this a shard carries no record of what its
@@ -1227,14 +1224,14 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
     Unions buckets across shards, keeping the fastest reading per config. ``only_ops`` (a set)
     restricts the write to those op names — so a targeted build never rewrites an op that already
     has a good cache. Returns ``(op, dtype|bucket, n_configs, path)`` rows for logging."""
-    import json  # noqa: PLC0415
+    import json
     gk = gpu or gpu_key()
     _MERGE_SKIPPED.clear()
     agg: dict = {}
     for sp in shard_paths:
         try:
             d = json.loads(Path(sp).read_text())
-        except Exception as exc:  # noqa: BLE001 -- unreadable/partial shard
+        except Exception as exc:  # unreadable/partial shard
             # Never silent: a dropped shard is a whole unit's measurement missing from the cache,
             # and it used to look identical to a unit that was never run.
             _MERGE_SKIPPED.append((str(sp), f"{type(exc).__name__}: {exc}"))

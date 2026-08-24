@@ -39,7 +39,7 @@ def build_shards(tmp: Path, n_each: int = 6) -> list[Path]:
     so the module can still run; only OP's two slices matter to the merge under test.
     """
     sys.path.insert(0, str(REPO / "tools/kernel-audit"))
-    from gen_shards import full_grid                                     # noqa: PLC0415
+    from gen_shards import full_grid
 
     grid = full_grid()[OP]
     assert len(grid) >= 2 * n_each, f"{OP} grid has only {len(grid)} configs"
@@ -67,13 +67,13 @@ def build_shards(tmp: Path, n_each: int = 6) -> list[Path]:
 
 
 def _run(shard: Path, cfg: Path | None) -> tuple[int, str]:
-    import os                                                            # noqa: PLC0415
+    import os
     cmd = [".pixi/envs/default/bin/python", "-m", "miniworld_engine.autotune.builder",
            "--case", CASE, "--dims", DIMS, "--length", LENGTH, "--mode", MODE,
            "--shard", str(shard)]
     if cfg is not None:
         cmd += ["--config-dir", str(cfg)]
-    r = subprocess.run(cmd, cwd=REPO, env={**os.environ, "PYTHONPATH": "src"},   # noqa: S603
+    r = subprocess.run(cmd, cwd=REPO, env={**os.environ, "PYTHONPATH": "src"},
                        capture_output=True, text=True, timeout=3600)
     return r.returncode, r.stdout + r.stderr
 
@@ -91,7 +91,7 @@ def discover_op(tmp: Path) -> str:
         raise SystemExit(f"discovery run failed:\n{out[-2500:]}")
     fired = sorted(json.loads(sh.read_text()))
     sys.path.insert(0, str(REPO / "tools/kernel-audit"))
-    from gen_shards import full_grid                                     # noqa: PLC0415
+    from gen_shards import full_grid
 
     grid = full_grid()
     cand = [(len(grid.get(o, [])), o) for o in fired if len(grid.get(o, [])) >= 12]
@@ -104,7 +104,7 @@ def discover_op(tmp: Path) -> str:
 
 
 def main() -> int:
-    global OP                                                            # noqa: PLW0603
+    global OP
     tmp = REPO / ".bench/_e2e"
     tmp.mkdir(parents=True, exist_ok=True)
     OP = discover_op(tmp)
@@ -147,7 +147,7 @@ def main() -> int:
             s.kwargs, s.num_warps, s.num_stages, s.maxnreg = (
                 d["kwargs"], d["num_warps"], d["num_stages"], None)
 
-    union = {cache._sig_from_dict(c): c for d in per for c in d["grid"]}   # noqa: SLF001
+    union = {cache._sig_from_dict(c): c for d in per for c in d["grid"]}
     want = cache.config_space_hash([_C(c) for c in union.values()])
     print(f"  union of shard grids : {len(union)} configs -> hash {want}")
     print(f"  cache config_space_hash: {data['config_space_hash']}")

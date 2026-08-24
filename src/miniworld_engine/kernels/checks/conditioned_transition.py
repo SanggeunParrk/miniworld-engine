@@ -126,7 +126,9 @@ def cond_transition_fwd_b2b():
     h (M, ND) never reaches HBM here -- the launcher returns just y -- so the reference is the
     full five-stage expression and nothing intermediate is observable to compare.
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.inference import cond_transition_inference
+    from miniworld_engine.kernels.conditioned_transition.triton.inference import (
+        cond_transition_inference,
+    )
 
     _fixed()
     x, cond, wa, wb, ws, wsc, bsc = _ct_args()
@@ -138,7 +140,9 @@ def cond_transition_fwd_b2b():
 
 def cond_transition_expand_swiglu():
     """composed._expand_swiglu_kernel: h = silu(x@Waᵀ) * (x@Wbᵀ)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.composed import _expand_swiglu
+    from miniworld_engine.kernels.conditioned_transition.triton.composed import (
+        _expand_swiglu,
+    )
 
     _fixed()
     x, _, wa, wb, *_ = _ct_args()
@@ -148,7 +152,9 @@ def cond_transition_expand_swiglu():
 
 def cond_transition_expand_swiglu_saveact():
     """train_fused._fwd_expand_swiglu_kernel: same h, plus the packed pre-activations ab=[a|b]."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _fwd_expand_swiglu
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _fwd_expand_swiglu,
+    )
 
     _fixed()
     x, _, wa, wb, *_ = _ct_args()
@@ -168,7 +174,9 @@ def cond_transition_swiglu():
 
 def cond_transition_squeeze_gate():
     """composed._squeeze_gate_kernel: y = sigmoid(cond@Wscᵀ + bsc) * (h@Wsᵀ)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.composed import _squeeze_gate
+    from miniworld_engine.kernels.conditioned_transition.triton.composed import (
+        _squeeze_gate,
+    )
 
     _fixed()
     _, cond, _, _, ws, wsc, bsc = _ct_args()
@@ -179,7 +187,9 @@ def cond_transition_squeeze_gate():
 
 def cond_transition_squeeze_gate_saveact():
     """train_fused._fwd_squeeze_gate_kernel: same y, plus the saved out and scale."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _fwd_squeeze_gate
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _fwd_squeeze_gate,
+    )
 
     _fixed()
     _, cond, _, _, ws, wsc, bsc = _ct_args()
@@ -196,7 +206,9 @@ def cond_transition_fwd_b2b_saveact():
     y-only check would not see the saved-for-backward stores (which the ``pid_d == 0`` store mask
     makes a separate correctness question from y).
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.training import _b2b_fwd_train
+    from miniworld_engine.kernels.conditioned_transition.triton.training import (
+        _b2b_fwd_train,
+    )
 
     _fixed()
     x, cond, wa, wb, ws, wsc, bsc = _ct_args()
@@ -213,7 +225,9 @@ def cond_transition_fwd_b2b_saveact():
 
 def cond_transition_bwd_swiglu_flat():
     """training._swiglu_bwd_kernel via _swiglu_bwd_packed(a, b, dh) -> dab = [da|db] (M, 2ND)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.training import _swiglu_bwd_packed
+    from miniworld_engine.kernels.conditioned_transition.triton.training import (
+        _swiglu_bwd_packed,
+    )
 
     _fixed()
     a = _rand(_M, _ND, dtype=FP32)
@@ -230,7 +244,9 @@ def cond_transition_bwd_swiglu_packed():
     Same math as the flat kernel above, different contract (2-D tiling, a/b arrive packed), so it
     gets its own reference against the same autograd grads.
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _swiglu_bwd_pack
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _swiglu_bwd_pack,
+    )
 
     _fixed()
     dh = _rand(_M, _ND, dtype=FP32)
@@ -246,7 +262,9 @@ def cond_transition_bwd_swiglu_dx():
     Two dots per ND tile (Wa and Wb separately), where the packed kernel below does one over the
     concatenated 2ND axis -- so the same dx is reachable two ways and both are checked.
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _dx_fused
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _dx_fused,
+    )
 
     _fixed()
     _, _, wa, wb, *_ = _ct_args()
@@ -265,7 +283,9 @@ def cond_transition_bwd_swiglu_dx_packed():
     dab is a real output here, not a scratch partial (the backward hands it to the dWa/dWb wgrad),
     so it is compared alongside dx.
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _dx_swiglubwd
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _dx_swiglubwd,
+    )
 
     _fixed()
     _, _, wa, wb, *_ = _ct_args()
@@ -286,7 +306,9 @@ def cond_transition_bwd_gate_squeeze_dx():
     The gate backward is fused into the dh-GEMM prologue and the two elementwise grads are emitted
     from the pid_n == 0 column of programs, so all three buffers are final values and compared.
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _dh_gatebwd
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _dh_gatebwd,
+    )
 
     _fixed()
     _, _, _, _, ws, *_ = _ct_args()
@@ -306,7 +328,9 @@ def cond_transition_bwd_gemm():
     N=_DC and K=_D are passed separately (the launcher takes M/N/K as ints), so the GEMM's N and
     K axes are two different non-aligned widths under ragged mode.
     """
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _dgemm
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _dgemm,
+    )
 
     _fixed()
     _, _, _, _, _, wsc, _ = _ct_args()
@@ -320,7 +344,9 @@ def cond_transition_bwd_gemm():
 
 def cond_transition_bwd_dw():
     """train_fused._wgrad_kernel: dW(N,K) = g(M,N)ᵀ @ x(M,K), the dWs shape (D, ND)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import _wgrad
+    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+        _wgrad,
+    )
 
     _fixed()
     g = _rand(_M, _D, dtype=FP32)

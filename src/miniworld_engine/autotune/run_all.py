@@ -21,8 +21,8 @@ import importlib
 import sys
 import traceback
 
-from . import devices
-from .cache import gpu_key
+from miniworld_engine.autotune import devices
+from miniworld_engine.autotune.cache import gpu_key
 
 
 def _resolve(path: str):
@@ -42,7 +42,7 @@ def check_one(check: str) -> tuple[bool, str]:
     """
     try:
         got = _resolve(check)()
-    except Exception as exc:                                     # noqa: BLE001
+    except Exception as exc:
         return False, f"checker raised {type(exc).__name__}: {str(exc).strip().splitlines()[0][:150]}"
     pairs = got if isinstance(got, dict) else {"out": got}
     worst, detail = 0.0, []
@@ -66,7 +66,7 @@ def run_one(driver: str) -> tuple[bool, str]:
     try:
         _resolve(driver)()
         torch.cuda.synchronize()
-    except Exception as exc:                                     # noqa: BLE001
+    except Exception as exc:
         # Keep the line that names the cause, not just the first line. A build error's first line
         # is the nvcc command line -- truncating there hid "unsupported gpu architecture" and
         # "__is_array is undefined" behind a wall of -isystem flags and cost three round trips.

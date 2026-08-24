@@ -57,7 +57,7 @@ _SCHEME_AFFECTS = {2: frozenset({"both"})}
 @functools.lru_cache(maxsize=1)
 def _levels() -> dict[str, str]:
     """kernel -> its `level` column, from registry.csv. Read once."""
-    import csv  # noqa: PLC0415
+    import csv
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
     if not reg.is_file():
@@ -122,7 +122,7 @@ def as_cfg_dict(config) -> dict:
                 "num_warps": int(config.get("num_warps", 0)),
                 "num_stages": int(config.get("num_stages", 0))}
     if isinstance(config, dict):
-        return {"kwargs": {k: v for k, v in config.items()}, "num_warps": 0, "num_stages": 0}
+        return {"kwargs": dict(config), "num_warps": 0, "num_stages": 0}
     raise TypeError(f"unsupported config type: {type(config)!r}")
 
 
@@ -184,9 +184,9 @@ def env_identity() -> str:
         return _env_identity_cache
     parts = []
     try:
-        import triton  # noqa: PLC0415
+        import triton
         parts.append(f"triton={getattr(triton, '__version__', '?')}")
-    except Exception:  # noqa: BLE001 -- identity degrades to "unknown", never raises
+    except Exception:  # identity degrades to "unknown", never raises
         parts.append("triton=?")
     parts.append(f"torch={torch.__version__}")
     parts.append(f"cuda={getattr(torch.version, 'cuda', None)}")
@@ -204,13 +204,13 @@ def env_identity() -> str:
 
 def _ptxas_version() -> str:
     """The ptxas release string, or ``"?"`` if it genuinely cannot be found."""
-    import subprocess  # noqa: PLC0415
+    import subprocess
 
     def _release(path) -> str | None:
         try:
-            out = subprocess.run([str(path), "--version"], capture_output=True,  # noqa: S603
+            out = subprocess.run([str(path), "--version"], capture_output=True,
                                  text=True, timeout=10, check=False).stdout
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
         return _pick(out)
 
@@ -220,11 +220,11 @@ def _ptxas_version() -> str:
         return next((ln.strip() for ln in str(text).splitlines() if "release" in ln), None)
 
     try:  # triton >= 3.3: the backend exposes the version directly
-        from triton.backends.nvidia.compiler import get_ptxas_version  # noqa: PLC0415
+        from triton.backends.nvidia.compiler import get_ptxas_version
         rel = _pick(get_ptxas_version())
         if rel:
             return rel
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     for getter in (
         lambda: __import__("triton.knobs", fromlist=["nvidia"]).nvidia.ptxas.path,
@@ -233,7 +233,7 @@ def _ptxas_version() -> str:
     ):
         try:
             rel = _release(getter())
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
         if rel:
             return rel
@@ -285,7 +285,7 @@ def _load(op: str, gk: str) -> dict | None:
     if fp.exists():
         try:
             result = json.loads(fp.read_text())
-        except Exception:  # noqa: BLE001 -- corrupt cache -> treat as miss
+        except Exception:  # corrupt cache -> treat as miss
             result = None
     _load_cache[key] = result
     return result
@@ -306,18 +306,18 @@ def store_ranked_configs(
     if fp.exists():
         try:
             data = json.loads(fp.read_text())
-        except Exception:  # noqa: BLE001
+        except Exception:
             data = None
     env_id = env_id or env_identity()
     if (data is None or data.get("config_space_hash") != config_space_h
             or _scheme_stale(op, data.get("key_scheme"))
             or data.get("env_identity") != env_id
             or (op_id and data.get("op_identity") not in (None, op_id))):
-        import datetime as _dt  # noqa: PLC0415 -- stamp only when writing
+        import datetime as _dt  # stamp only when writing
         try:
-            import triton as _triton  # noqa: PLC0415
+            import triton as _triton
             triton_ver = getattr(_triton, "__version__", "?")
-        except Exception:  # noqa: BLE001
+        except Exception:
             triton_ver = "?"
         # Annotated because the literal's value types join to `int | str | dict`, which makes
         # `data["entries"][key] = ...` below a subscript-assign on an int as far as a checker
@@ -413,7 +413,7 @@ def operand_bytes(named_args, kwargs, arg_name: str, default: int = 2) -> int:
     size = getattr(t, "element_size", None)
     try:
         return int(size()) if callable(size) else default
-    except Exception:  # noqa: BLE001 -- never let an estimate break a launch
+    except Exception:  # never let an estimate break a launch
         return default
 
 
@@ -558,7 +558,7 @@ def _miss(op, gk, what, why, configs):
 
     Returning None here meant "keep the full grid", and the full grid is 205,266 configs. That is
     correct for a build and ruinous for a forward, which is the same call site."""
-    from miniworld_engine import settings  # noqa: PLC0415 -- avoid an import cycle
+    from miniworld_engine import settings  # avoid an import cycle
 
     cur = settings.current()
     cap = 0 if getattr(cur, "run_autotune", False) else getattr(cur, "autotune_miss_cap", 0)
@@ -575,7 +575,7 @@ def _miss(op, gk, what, why, configs):
 
 def _cached_subset(autotuner, configs, nargs, meta):
     """The cached top-K for this (op, gpu, dtype, bucket), or a bounded fallback on a miss."""
-    from .configs import op_of                       # noqa: PLC0415 -- avoid an import cycle
+    from miniworld_engine.autotune.configs import op_of  # avoid an import cycle
 
     op = op_of(getattr(autotuner, "configs", None) or [])
     if op is None:
@@ -636,22 +636,22 @@ def install_cache_reader() -> None:
     global _reader_installed
     if _reader_installed:
         return
-    from triton.runtime.autotuner import Autotuner   # noqa: PLC0415
+    from triton.runtime.autotuner import Autotuner
 
     orig_init = Autotuner.__init__
 
-    def __init__(self, *a, **kw):                    # noqa: ANN001, ANN002, ANN003, N807
+    def __init__(self, *a, **kw):
         orig_init(self, *a, **kw)
         base = self.early_config_prune
 
-        def prune(configs, nargs, **meta):           # noqa: ANN001, ANN003
+        def prune(configs, nargs, **meta):
             cfgs = list(base(configs, nargs, **meta)) if base else list(configs)
-            from .. import settings                  # noqa: PLC0415
+            from miniworld_engine import settings
             if settings.current().run_autotune or not cfgs:
                 return cfgs                          # a BUILD re-benches the whole grid on purpose
             try:
                 hit = _cached_subset(self, cfgs, nargs, meta)
-            except Exception:                        # noqa: BLE001 -- never break a launch
+            except Exception:  # never break a launch
                 return cfgs
             return hit or cfgs
 
@@ -682,7 +682,7 @@ def select_config(
     """
     try:
         gk = gpu_key(device_index)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     data = _load(op, gk)
     # NOT _miss(): this path returns ONE config dict, and None means "use the kernel's own

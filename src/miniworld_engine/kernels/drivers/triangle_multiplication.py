@@ -37,7 +37,9 @@ TRIMUL_SHAPE_KEY = token_key(TRIMUL_L)  # what ``seq_len=TRIMUL_L`` below makes 
 def trimul_gemm_gate_saveact_triton() -> None:
     """_input_gated_gemm_kernel via _input_gemm_fwd. w_gate/w_proj have 2*D rows and the
     public entry passes TRANSPOSE_OUT=True; mask=None (APPLY_MASK=False)."""
-    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import _input_gemm_fwd
+    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
+        _input_gemm_fwd,
+    )
 
     xn = rows2d(TRIMUL_ROWS, TRIMUL_D)
     _input_gemm_fwd(xn, rows2d(2 * TRIMUL_D, TRIMUL_D), rows2d(2 * TRIMUL_D, TRIMUL_D), None, True,
@@ -46,7 +48,9 @@ def trimul_gemm_gate_saveact_triton() -> None:
 
 def trimul_outproj_gemm_gate_saveact_triton() -> None:
     """_output_gated_gemm_kernel via _output_gemm_fwd: x_normed/x_out (M, D), weights (D, D)."""
-    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import _output_gemm_fwd
+    from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
+        _output_gemm_fwd,
+    )
 
     xn = rows2d(TRIMUL_ROWS, TRIMUL_D)
     _output_gemm_fwd(xn, rows2d(TRIMUL_ROWS, TRIMUL_D),

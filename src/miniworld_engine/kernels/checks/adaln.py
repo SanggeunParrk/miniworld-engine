@@ -21,6 +21,7 @@ from miniworld_engine.kernels.drivers.conditioned_transition import (
     _SHAPE_KEY,
 )
 
+
 def _ln(x: torch.Tensor, eps: float = _EPS) -> torch.Tensor:
     """LayerNorm, no affine, biased variance -- computed in fp32 as the kernels do in-register."""
     return F.layer_norm(x.float(), (x.shape[-1],), eps=eps)
@@ -230,7 +231,8 @@ def adaln_bwd_pre_dx():
     xr = x.float().detach().requires_grad_(True)
     s = torch.logit(gate.float()).detach().requires_grad_(True)
     (torch.sigmoid(s) * F.layer_norm(xr, (_D,), eps=_EPS)).backward(dy.float())
-    assert s.grad is not None and xr.grad is not None
+    assert s.grad is not None
+    assert xr.grad is not None
     return {"D": (d_stack, torch.cat([s.grad, dy.float()], dim=1).t()), "DX": (dx, xr.grad)}
 
 
@@ -299,7 +301,10 @@ def adaln_gemm_gate():
     The kernel's inputs are the already-normalized x_norm/cond_norm (the two LN kernels are
     upstream), which is what the driver feeds it.
     """
-    from miniworld_engine.kernels.adaln.triton.fused3 import _gemm_gate, _gemm_gate_train
+    from miniworld_engine.kernels.adaln.triton.fused3 import (
+        _gemm_gate,
+        _gemm_gate_train,
+    )
 
     _fixed()
     x_norm, cond_norm, _, ws, sb, wb = _adaln_args()

@@ -232,7 +232,7 @@ class TriangleAttention(nn.Module):
         from miniworld_engine.kernels.layernorm_linear import layernorm_linear_triton
 
         H = self.n_head
-        B, L, _, d = pair.shape
+        B, L, _, _d = pair.shape
         dv = self.to_value.weight.shape[0]
         db = self.to_bias.weight.shape[0]
         w_cat = self._inproj_weight()

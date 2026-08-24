@@ -1,5 +1,7 @@
 """ConditionedTransition (model-level op; post-AdaLN tail)."""
 
-from .module import ConditionedTransition
+from miniworld_engine.modules.conditioned_transition.module import (
+    ConditionedTransition,
+)
 
 __all__ = ["ConditionedTransition"]

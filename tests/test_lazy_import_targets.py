@@ -24,17 +24,32 @@ PKG = Path(__file__).resolve().parents[1] / "src/miniworld_engine"
 KERNELS_INIT = PKG / "kernels/__init__.py"
 
 
+PKG_PREFIX = "miniworld_engine.kernels."
+
+
 def _deferred_imports(path: Path):
-    """(function, module, name) for every `from .x import y` written INSIDE a function."""
+    """(function, module, name) for every kernels-package import written INSIDE a function.
+
+    Both spellings are matched. They used to be relative (`from .transition.interface import x`);
+    the repo now bans relative imports (ruff TID252, `ban-relative-imports = "all"`), so the same
+    statements are absolute. Matching only the relative form is how this file quietly found zero
+    wrappers and checked nothing -- which is what `test_there_are_lazy_wrappers_to_check` is for.
+    """
     tree = ast.parse(path.read_text())
     out = []
     for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef):
             continue
         for node in ast.walk(fn):
-            if isinstance(node, ast.ImportFrom) and node.module and node.level:
-                for a in node.names:
-                    out.append((fn.name, "." * node.level + node.module, a.name))
+            if not (isinstance(node, ast.ImportFrom) and node.module):
+                continue
+            if node.level:
+                mod = "." * node.level + node.module
+            elif node.module.startswith(PKG_PREFIX):
+                mod = node.module[len(PKG_PREFIX):]
+            else:
+                continue
+            out.extend((fn.name, mod, a.name) for a in node.names)
     return out
 
 
@@ -52,7 +67,7 @@ def _module_file(mod: str) -> Path | None:
     Importing is not an option: `.transition.cuda` builds a CUDA extension on import, so an
     import-based check skips on CPU -- skipping the exact case this test exists for.
     """
-    rel = mod.lstrip(".").replace(".", "/")
+    rel = mod.lstrip(".").replace(".", "/")   # both spellings land on the same path
     for cand in (PKG / "kernels" / f"{rel}.py", PKG / "kernels" / rel / "__init__.py"):
         if cand.is_file():
             return cand

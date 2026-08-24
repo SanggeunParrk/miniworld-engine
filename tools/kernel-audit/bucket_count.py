@@ -23,8 +23,18 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import TypedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
+
+class Row(TypedDict):
+    """One captured op: how many distinct buckets and dtypes its launches landed in."""
+
+    op: str
+    n_buckets: int
+    n_dtypes: int
+    buckets: list[str]
 
 
 def main() -> int:
@@ -32,7 +42,12 @@ def main() -> int:
 
     from miniworld_engine import settings
     from miniworld_engine.autotune import capture
-    from miniworld_engine.autotune.builder import SWITCH_SETTINGS, cases, run_case, units
+    from miniworld_engine.autotune.builder import (
+        SWITCH_SETTINGS,
+        cases,
+        run_case,
+        units,
+    )
 
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     cs = list(cases())
@@ -65,7 +80,7 @@ def main() -> int:
             # module ARGUMENT; everything else is a settings pin.
             p_drop, restore = 0.0, None
             if u.switch == "p_drop":
-                p_drop = float(u.value)
+                p_drop = float(str(u.value))
             elif u.switch:
                 field, parse = SWITCH_SETTINGS[u.switch]
                 # configure() returns the PREVIOUS settings. builder.py gets away without
@@ -86,7 +101,7 @@ def main() -> int:
             else:
                 err += 1
                 fails[f"{u.case}: skipped"] += 1
-        except Exception as exc:                                  # noqa: BLE001
+        except Exception as exc:
             err += 1
             fails[f"{u.case}: {type(exc).__name__}"] += 1
             if err <= 3:
@@ -99,8 +114,8 @@ def main() -> int:
     for k, v in fails.most_common(10):
         print(f"  {v:4d}  {k}")
 
-    rows = []
-    for op, slot in sorted(capture._CAPTURE.items()):             # noqa: SLF001
+    rows: list[Row] = []
+    for op, slot in sorted(capture._CAPTURE.items()):
         buckets = sorted({b for _, b in slot["entries"]})
         dtypes = sorted({d for d, _ in slot["entries"]})
         rows.append({"op": op, "n_buckets": len(buckets), "n_dtypes": len(dtypes),

@@ -39,12 +39,13 @@ from miniworld_engine.kernels.drivers.transition import (
     EPS,
     K_LARGE,
     K_SMALL,
-    ND_SMALL,
     N_EXPAND,
+    ND_SMALL,
     ROWS,
     _pair_x,
     _transition_operands,
 )
+
 
 def _stats(x2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """(rstd, c1=mean*rstd) from the same kernel the launchers use (stats.py:stats_triton)."""
@@ -223,7 +224,9 @@ def transition_bwd_transpose_packed_triton():
     ``repeat_interleave(2, dim=1)`` -- exact, not approximate. The second pair feeds a
     transposed VIEW (column stride != 1), which the launcher explicitly supports
     (backward_gatebwd.py:94) and which the contiguous case cannot exercise."""
-    from miniworld_engine.kernels.transition.cute.backward_gatebwd import _cdup_interleave
+    from miniworld_engine.kernels.transition.cute.backward_gatebwd import (
+        _cdup_interleave,
+    )
 
     ge = rows2d(ROWS, ND_SMALL)
     view = rows2d(ND_SMALL, ROWS).T                 # (ROWS, ND_SMALL), stride (1, ROWS)
@@ -307,7 +310,11 @@ def _transition_ref(x, wa, wb, ws):
 
 
 def _transition_cuda_fwd_pair(dtype):
-    from miniworld_engine.kernels.drivers.transition import _CUDA_N, _transition_cuda_ext, _transition_cuda_operands
+    from miniworld_engine.kernels.drivers.transition import (
+        _CUDA_N,
+        _transition_cuda_ext,
+        _transition_cuda_operands,
+    )
 
     ext = _transition_cuda_ext()
     x, wa, wb, ws = _transition_cuda_operands(dtype)
@@ -332,7 +339,11 @@ def transition_bwd_cuda():
     is asserted by shape rather than assumed from position: dx matches x, dwa/dwb match the expand
     weights, dws matches the squeeze weight, and the four shapes are mutually distinct at these
     extents, so the mapping is unambiguous."""
-    from miniworld_engine.kernels.drivers.transition import _CUDA_N, _transition_cuda_ext, _transition_cuda_operands
+    from miniworld_engine.kernels.drivers.transition import (
+        _CUDA_N,
+        _transition_cuda_ext,
+        _transition_cuda_operands,
+    )
 
     ext = _transition_cuda_ext()
     x, wa, wb, ws = _transition_cuda_operands(ACT_DTYPE)
@@ -361,7 +372,7 @@ def transition_bwd_cuda():
     if len(got) != 4:
         raise AssertionError(f"backward returned {len(got)} tensors, expected 4")
     out = {}
-    for name, actual, expected in zip(names, got, refs):
+    for name, actual, expected in zip(names, got, refs, strict=False):
         if tuple(actual.shape) != tuple(expected.shape):
             raise AssertionError(
                 f"{name}: kernel returned {tuple(actual.shape)}, reference {tuple(expected.shape)} "

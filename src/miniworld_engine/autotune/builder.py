@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-from itertools import zip_longest
 import json
 import os
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from itertools import zip_longest
 from pathlib import Path
 from queue import Empty, Queue
 
@@ -210,7 +210,7 @@ class _KernelModule(torch.nn.Module):
         for name, w in weights.items():
             self.register_parameter(name, torch.nn.Parameter(w))
 
-    def forward(self, *args):  # noqa: ANN002, ANN201
+    def forward(self, *args):
         out = self._fn(*args, *[p for _, p in self.named_parameters()], *self._tail)
         return out[0] if isinstance(out, tuple) else out
 
@@ -218,7 +218,7 @@ class _KernelModule(torch.nn.Module):
 def _kernel_case(fn_path: tuple[str, str], weights: Callable[[dict, torch.dtype], dict],
                  tail: tuple = ()):
     """Case factory for a kernel driven through its public API. Imports lazily, like the modules."""
-    def make(dims, p, impl, dt):  # noqa: ANN001, ANN202, ARG001
+    def make(dims, p, impl, dt):
         import importlib
 
         mod, attr = fn_path
@@ -321,7 +321,7 @@ def cases() -> list[Case]:
         TriangleMultiplication,
     )
 
-    def IT(i):  # noqa: N802
+    def IT(i):
         return ImplementationType(i)
 
     PAIR_D = ({"d_pair": 128}, {"d_pair": 256}, {"d_pair": 384}, {"d_pair": 512})
@@ -508,7 +508,7 @@ def run_case(case: Case, length: int, dim_index: int, *, train: bool, p_drop: fl
     try:
         dims = case.dims[dim_index]
         module = case.factory(dims, p_drop, impl, dtype)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"    skip {case.name} dims#{dim_index}: build failed ({type(exc).__name__}: {exc})",
               flush=True)
         return 0
@@ -528,7 +528,7 @@ def run_case(case: Case, length: int, dim_index: int, *, train: bool, p_drop: fl
             with torch.no_grad():
                 module(*args, **fwd_kwargs)
         torch.cuda.synchronize()
-    except Exception as exc:  # noqa: BLE001 -- an unsupported shape must not stop the build
+    except Exception as exc:  # an unsupported shape must not stop the build
         print(f"    skip {case.name} dims#{dim_index} L={length} "
               f"{'train' if train else 'eval'}: "
               f"{type(exc).__name__}: {exc}", flush=True)
@@ -622,7 +622,7 @@ class OpUnit:
         ``both_key(L*L)`` -- and a coverage check that compares declared lengths against cached
         buckets would report every both-level op as a total miss.
         """
-        from miniworld_engine.autotune.shape_key import both_key  # noqa: PLC0415
+        from miniworld_engine.autotune.shape_key import both_key
 
         if self.side == "pair":
             return both_key(self.length * self.length)
@@ -684,7 +684,7 @@ def _one_config_per_op():
     object itself, so shortening it in place reaches autotuners that already exist, and restoring
     it afterwards leaves the build's own config space untouched.
     """
-    from miniworld_engine.autotune.configs import _LISTS  # noqa: PLC0415
+    from miniworld_engine.autotune.configs import _LISTS
 
     saved = {op: list(live) for op, live in _LISTS.items()}
     for live in _LISTS.values():
@@ -711,7 +711,7 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
             with torch.no_grad():
                 module(*case.inputs(1, length, dims, dt))
             torch.cuda.synchronize()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # OutOfResources is the autotuner working, not a broken case: a config that wants more
             # shared memory than the card has is exactly what the tuner is there to reject, and it
             # surfaces on any run wide enough to reach one. Treating it as a case defect stopped a
@@ -746,9 +746,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
     was never driven -- and the coverage check counted (op, bucket) without dtype, so it reported
     527/527 and missing_pairs=0 over a cache that held one of the two declared precisions.
     """
-    import csv  # noqa: PLC0415
+    import csv
 
-    from miniworld_engine.autotune.shape_key import (  # noqa: PLC0415
+    from miniworld_engine.autotune.shape_key import (
         ATOM_SHAPES,
         BOTH_PAIR_LENGTHS,
         SHAPES_BY_LEVEL,
@@ -800,7 +800,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
 
 def _keys_on_shape(path: Path, symbol: str) -> bool:
     """Does this kernel's ``@triton.autotune(key=[...])`` include ``shape_key``?"""
-    import ast  # noqa: PLC0415
+    import ast
 
     try:
         tree = ast.parse(path.read_text())
@@ -944,7 +944,7 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     env.update(unit.env())
     started = time.monotonic()
     with log.open("w") as handle:
-        proc = subprocess.run(cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT,  # noqa: S603
+        proc = subprocess.run(cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT,
                               check=False, env=env)
     ops = 0
     if shard.exists():
@@ -1091,8 +1091,8 @@ def audit(selected: list[Case]) -> list[tuple]:
 def _run_one_driver(op: str) -> int:
     """Launch one kernel through the driver registry.csv names for it. 1 on success, 0 if the
     shape is one this kernel cannot run (data, not failure -- same contract as run_case)."""
-    import csv  # noqa: PLC0415
-    import importlib  # noqa: PLC0415
+    import csv
+    import importlib
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
     row = next((r for r in csv.DictReader(reg.open()) if r["kernel"] == op), None)
@@ -1102,13 +1102,13 @@ def _run_one_driver(op: str) -> int:
     mod_name, _, fn_name = row["driver"].partition(":")
     try:
         fn = getattr(importlib.import_module(mod_name), fn_name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"    skip {op}: driver import failed ({type(exc).__name__}: {exc})", flush=True)
         return 0
     try:
         fn()
         torch.cuda.synchronize()
-    except Exception as exc:  # noqa: BLE001 -- an unsupported shape must not stop the sweep
+    except Exception as exc:  # an unsupported shape must not stop the sweep
         # OOM and OutOfResources are PERMANENT facts about this card at this shape, not failures
         # to retry: the tensors do not fit, or the tiles want more smem than the SM has. Saying so
         # in a line the parent can read is what stops a resumed run from re-claiming them forever

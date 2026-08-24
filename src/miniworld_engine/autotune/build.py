@@ -36,7 +36,7 @@ def _bench(fn, grid, pos, meta) -> float:
         return triton.testing.do_bench(
             lambda: fn[grid](*pos, **meta), warmup=25, rep=100, return_mode="median"
         )
-    except Exception as e:  # noqa: BLE001 -- a config that won't launch here is just skipped
+    except Exception as e:  # a config that won't launch here is just skipped
         print(f"    skip {meta}: {type(e).__name__}")
         return float("inf")
 
@@ -65,7 +65,8 @@ def build_transition_split_fwd(d_hiddens=(256, 512), seq_lens=(384, 512, 768, 10
     """Split transition forward GEMM (main.py transition_fwd_kernel) — A100's default large-d
     (>=256) route. Bucket = (GROUP_M, n, N) to match key_bucket_of in main.py."""
     from miniworld_engine.kernels.transition.triton.main import (
-        get_seq_group, transition_fwd_kernel,
+        get_seq_group,
+        transition_fwd_kernel,
     )
 
     kernel = transition_fwd_kernel
@@ -83,11 +84,14 @@ def build_transition_split_fwd(d_hiddens=(256, 512), seq_lens=(384, 512, 768, 10
             out = torch.empty(M, n * N, device=dev, dtype=dtype)
             gm = get_seq_group(M)
             pos = (x, wa, wb, out, M, n, N)
-            grid = lambda meta: (  # noqa: E731
+            # Loop variables bound as defaults, not captured: both lambdas outlive the line
+            # that builds them only by a call away, but a late-bound `M` here would silently
+            # tune every bucket against the LAST shape of the sweep.
+            grid = lambda meta, M=M, n=n, N=N: (
                 triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(n * N, meta["BLOCK_N"]),
             )
             bucket = shape_bucket(GROUP_M=gm, n=n, N=N)
-            run_ms = lambda cfg: _bench(  # noqa: E731
+            run_ms = lambda cfg, grid=grid, pos=pos, gm=gm: _bench(
                 kernel.fn, grid, pos,
                 dict(cfg.kwargs, GROUP_M=gm, num_warps=cfg.num_warps, num_stages=cfg.num_stages))
             tune_bucket(op, gk, dtype_str, bucket, full_grid, run_ms, csh, top_k=top_k)
@@ -96,9 +100,12 @@ def build_transition_split_fwd(d_hiddens=(256, 512), seq_lens=(384, 512, 768, 10
 def build_trimul_bidir_front(d_pairs=(128, 256, 512), seq_lens=(384, 512, 768, 1024), top_k=5,
                              dtype=torch.bfloat16) -> None:
     from miniworld_engine.kernels.trimul_inproj.triton import bidirectional as B
+
     # get_seq_group lives in the package's _autotune module, not on `bidirectional`. `B.get_seq_group`
     # is an AttributeError, so this builder has never run past its first bucket. Found by `ty`.
-    from miniworld_engine.kernels.trimul_inproj.triton._autotune import get_seq_group as _seq_group
+    from miniworld_engine.kernels.trimul_inproj.triton._autotune import (
+        get_seq_group as _seq_group,
+    )
 
     kernel = B._bidir_front_kernel
     full_grid = list(kernel.configs)
@@ -124,9 +131,10 @@ def build_trimul_bidir_front(d_pairs=(128, 256, 512), seq_lens=(384, 512, 768, 1
             preact = torch.empty(4 * h2, M, device=dev, dtype=dtype)
             gm = _seq_group(M)
             pos = (x_flat, Wlr, left, right, preact, M, M)
-            grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+            # See the note in build_transition_split_fwd: bound as defaults, not captured.
+            grid = lambda meta, M=M: (triton.cdiv(M, meta["BLOCK_M1"]),)
             bucket = shape_bucket(GM=gm, H2=h2, K=d)
-            run_ms = lambda cfg: _bench(  # noqa: E731
+            run_ms = lambda cfg, grid=grid, pos=pos, d=d, h2=h2, gm=gm: _bench(
                 kernel.fn, grid, pos,
                 dict(cfg.kwargs, K=d, H2=h2, GROUP_M=gm, SAVE_PREACT=True,
                      num_warps=cfg.num_warps, num_stages=cfg.num_stages))

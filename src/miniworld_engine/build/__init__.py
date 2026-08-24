@@ -5,6 +5,14 @@ that consults the cache. This package is consulted only while BUILDING the cache
 belongs on the hot import path.
 """
 
-from .matrix import RULES_DIR, Rule, allows, decide, known_gpus, rules, sm_tag
+from miniworld_engine.build.matrix import (
+    RULES_DIR,
+    Rule,
+    allows,
+    decide,
+    known_gpus,
+    rules,
+    sm_tag,
+)
 
 __all__ = ["RULES_DIR", "Rule", "allows", "decide", "known_gpus", "rules", "sm_tag"]

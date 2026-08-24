@@ -246,7 +246,7 @@ def current() -> Settings:
     return _ACTIVE
 
 
-def configure(**kwargs) -> Settings:  # noqa: ANN003
+def configure(**kwargs) -> Settings:
     """Replace the active settings; returns the previous value so a caller can restore it."""
     global _ACTIVE
     previous = _ACTIVE

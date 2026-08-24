@@ -12,15 +12,24 @@ from __future__ import annotations
 
 import torch
 
-from .autograd import (
+from miniworld_engine.kernels.layernorm_linear.autograd import (
     LayerNormLinearFn,
     LayerNormLinearTritonFn,
     layernorm_linear_fn,
     layernorm_linear_triton_fn,
 )
-from .interface import layernorm_linear_triton
-from .reference import LayerNormLinearRef, layernorm_linear_pytorch
-from .triton.te_style import LayerNormLinearTEFn, layernorm_linear_te_fn, set_fp32_matmul_precision
+from miniworld_engine.kernels.layernorm_linear.interface import (
+    layernorm_linear_triton,
+)
+from miniworld_engine.kernels.layernorm_linear.reference import (
+    LayerNormLinearRef,
+    layernorm_linear_pytorch,
+)
+from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
+    LayerNormLinearTEFn,
+    layernorm_linear_te_fn,
+    set_fp32_matmul_precision,
+)
 
 __all__ = [
     "LayerNormLinearFn",
@@ -51,7 +60,9 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     returns ``(Y, mean, rstd)`` with stats computed alongside.
     """
     if torch.cuda.is_available() and torch.cuda.get_device_capability(x.device)[0] == 9:
-        from .cute import layernorm_linear as _cute_dispatch
+        from miniworld_engine.kernels.layernorm_linear.cute import (
+            layernorm_linear as _cute_dispatch,
+        )
 
         return _cute_dispatch(
             x, ln_weight, ln_bias, weight, bias, eps, save_stats=save_stats, prefolded=prefolded

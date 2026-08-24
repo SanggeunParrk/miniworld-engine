@@ -26,12 +26,16 @@ def _bias_only_vb() -> tuple[torch.Tensor, ...]:
 
 
 def bias_only_attention_fwd_triton() -> None:
-    from miniworld_engine.kernels.bias_only_attention.triton.main import TritonBiasOnlyAttentionFunction as Fn
+    from miniworld_engine.kernels.bias_only_attention.triton.main import (
+        TritonBiasOnlyAttentionFunction as Fn,
+    )
     Fn.apply(*_bias_only_vb())
 
 
 def _bias_only_backward() -> None:
-    from miniworld_engine.kernels.bias_only_attention.triton.main import TritonBiasOnlyAttentionFunction as Fn
+    from miniworld_engine.kernels.bias_only_attention.triton.main import (
+        TritonBiasOnlyAttentionFunction as Fn,
+    )
     _grad(Fn.apply(*_bias_only_vb()))
 
 
@@ -73,7 +77,9 @@ def gated_projection_gate_gemm_triton() -> None:
 
 
 def gated_projection_bwd_dx_triton() -> None:
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import _dgrad_epilogue
+    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+        _dgrad_epilogue,
+    )
     kw: TensorKw = {"device": dev(), "dtype": BF16}
     do2 = torch.randn(L * L, DP, **kw)      # grad wrt [M, N], N == d_pair
     wo = torch.randn(DP, DH, **kw)

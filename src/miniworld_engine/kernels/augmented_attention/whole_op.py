@@ -35,11 +35,13 @@ def augmented_attention_pair_bias(
     caller's dtype on output, so it stays bf16 even when the surrounding forward is fp32.
     """
     if kernel_type == "compute_efficient":
-        from .triton.main import (
+        from miniworld_engine.kernels.augmented_attention.triton.main import (
             triton_augmented_attention_pair_bias as _fn,
         )
     elif kernel_type == "memory_efficient":
-        from . import triton_augmented_attention_pair_bias as _fn
+        from miniworld_engine.kernels.augmented_attention import (
+            triton_augmented_attention_pair_bias as _fn,
+        )
     else:
         msg = f"unknown kernel_type {kernel_type!r}"
         raise ValueError(msg)

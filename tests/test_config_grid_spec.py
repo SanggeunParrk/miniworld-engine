@@ -70,7 +70,7 @@ def test_slices_of_one_spec_reconstruct_it_exactly(tmp_path):
     assert [_sig(c) for c in parts] == [_sig(c) for c in full]
 
 
-@pytest.mark.parametrize("bad,why", [
+@pytest.mark.parametrize(("bad", "why"), [
     ("axis,values\nBLOCK_M1,32 64\nnum_warps,4\n", "no num_stages row"),
     ("axis,values\nnum_warps,4\nnum_stages,2\n", "no tile-axis row"),
     ("axis,values\nBLOCK_M1,\nnum_warps,4\nnum_stages,2\n", "axis with no values"),
@@ -81,7 +81,7 @@ def test_a_malformed_spec_is_rejected_at_read(tmp_path, bad, why):
     """These must fail where the file is read, naming it. A spec that silently loses an axis
     produces configs missing a constexpr, and Triton reports that far away as
     ``dynamic_func() missing 1 required positional argument``."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"\S"):
         _read(_write(tmp_path, bad, f"bad_{abs(hash(why))}.csv"))
 
 

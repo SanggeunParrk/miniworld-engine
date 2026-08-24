@@ -15,6 +15,8 @@ from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     resolve_triangle_multiplication,
+)
+from miniworld_engine.modules.dispatch import (
     trimul_out_layout as _resolve_trimul_out_layout,
 )
 from miniworld_engine.modules.exceptions import (
@@ -23,7 +25,6 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
-
 
 _CUTE_FNS = None
 
@@ -52,9 +53,13 @@ def _load_cute_fns():
     ):
         if str(d) not in sys.path:
             sys.path.insert(0, str(d))
+    # These two resolve only through the sys.path entries added just above, so the `ty: ignore`
+    # has to sit on the `from` line -- an import sorter that wraps the statement in parentheses
+    # moves the comment onto the name and the suppression stops applying.
+    from fused_ln_mask import fused_ln_mask  # ty: ignore[unresolved-import]
+    from launch import tm1_cute_forward  # ty: ignore[unresolved-import]
+
     from miniworld_engine.kernels.layernorm.triton.transpose import layer_norm_transpose
-    from fused_ln_mask import fused_ln_mask  # ty: ignore[unresolved-import]  # sys.path above
-    from launch import tm1_cute_forward  # ty: ignore[unresolved-import]  # sys.path above
 
     # NOTE: tm2 (cuequiv-backed gated GEMM) is NOT imported here — the default cute path is
     # cuequiv-free. The legacy cuequiv tm2 path lazy-imports it itself (see _forward_cute).
@@ -359,11 +364,11 @@ class TriangleMultiplication(nn.Module):
                 # v6_merged sm100 — the faster single-direction training kernel
                 # (cuBLAS-centric merged backward; beats train_b200 v14 by 1.3x+ at
                 # L<=1024). Baseline for further optimization.
-                from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged_sm100 import (  # noqa: E501
+                from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged_sm100 import (
                     V6TriMulMergedSm100 as _Impl,
                 )
             else:
-                from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (  # noqa: E501
+                from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (
                     V6TriMulMerged as _Impl,
                 )
             # Built from this module's params (copied into the kernel's packed
@@ -456,7 +461,9 @@ class TriangleMultiplication(nn.Module):
                 self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
             )
             return out + pair if add_residual else out  # sm100 back: explicit residual (no fuse yet)
-        from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
+        from miniworld_engine.kernels.trimul_inproj.triton.back import (
+            trimul_back_triton,
+        )
         return trimul_back_triton(
             tri, x_normed, self.to_out.weight.T, self.to_gate.weight.T,
             self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,

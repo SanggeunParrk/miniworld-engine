@@ -92,6 +92,10 @@ addopts = "--strict-markers"
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+# src layout: without this, ruff resolves first-party imports against the repo root, so its
+# relative-import fix rewrote `from .module import X` to `from src.miniworld_engine...` -- a
+# package path that only exists when the repo root is on sys.path, which it never is.
+src = ["src"]
 exclude = [
   "_ct_cutlass",
   "_ct_tmp",
@@ -108,23 +112,86 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W"]
+# The rule set is a decision, and it is written down here because the source already argued with
+# the old one: `select = ["E", "F", "W"]` while the code carried ~700 `# noqa:` comments naming
+# PLC0415, BLE001, ANN001, SLF001, S603, ARG005 and two dozen more. None of those rules were on,
+# so none of those comments suppressed anything, and nothing could tell you that. Either the rules
+# are on or the comments go: 264 of them were converted back to plain comments (their REASONS are
+# the part worth keeping -- ruff's own RUF100 fix deletes the whole comment), and the rest now
+# name a rule this set selects. What remains under `= ["ALL"]` below is upstream's, left alone.
+#
+# What is ON: correctness and modernity (F, E, W, B, UP, FURB, PIE, RET, SIM, C4, PERF), one
+# import style (I, TID, ICN, FA), one string style (Q, ISC), the pytest and logging idioms
+# (PT, LOG, G), and RUF -- including RUF100, so a `# noqa` for a rule this set does not select is
+# itself an error rather than decoration.
+select = [
+  "E", "F", "W",        # pycodestyle + pyflakes
+  "I",                  # import sorting
+  "UP",                 # pyupgrade
+  "B",                  # bugbear
+  "C4", "PIE", "RET", "SIM", "PERF", "FURB",   # comprehensions / simplification / speed
+  "TID", "ICN", "FA",   # absolute imports, conventional aliases, `from __future__`
+  "Q", "ISC",           # quote + implicit-concat style
+  "PT",                 # pytest idioms
+  "LOG", "G",           # logging
+  "SLOT", "INT", "FLY", "NPY", "DTZ", "EXE", "YTT", "ASYNC",
+  "RUF",
+]
+# What is OFF, and why -- each of these was measured against this codebase, not assumed:
+#   ANN   1,500+ findings. The kernel and bench code is deliberately unannotated at the boundary
+#         where triton hands back `Unknown`; `ty` is this repo's type gate and it gates.
+#   D     docstrings here are prose that explains a decision, not numpydoc sections. D205/D401
+#         would rewrite 200 of them into worse English.
+#   N     709 findings, nearly all math notation: `WL`, `Wp`, `D`, `L`, `Q`, `K`, `V`, `M`. The
+#         papers and the kernels use these names; renaming them makes the code harder to check
+#         against the algorithm.
+#   S     347 of them are `assert` in tests, which is what pytest is. The subprocess rules
+#         (S603/S607) fire on the build's own GPU-worker fan-out, which is the point of it.
+#   PL    512 PLC0415 alone: lazy imports here are load-bearing (importing a kernel module has
+#         side effects on autotuner registration and costs minutes of triton compilation), so the
+#         rule is wrong for this codebase rather than unmet by it. PLR's arity and magic-value
+#         thresholds are taste.
+#   SLF   the autotune harness reaches into triton's private autotuner state on purpose; that is
+#         what capturing a config grid is.
+#   ARG   unused arguments are the bench harness's uniform signature
+#         `(conf, seq_len, implementation, fabric)`, which every target must accept.
+#   T20   367 `print`s: this is a CLI and a benchmark runner. Printing is the output.
+#   INP   `tests/`, `tools/` and `benchmarks/` are script trees, deliberately not packages.
+#   TC    moving imports into `if TYPE_CHECKING` breaks jaxtyping, which resolves its annotations
+#         at runtime through `@typecheck`.
 ignore = [
-  "E501",
+  "E501",    # line length: the formatter's 88 is a target, not a hard wrap for tables and prose
   "E701",
   "E702",
-  "E402",
-  "E731",
-  "E741",
+  "E402",    # module-level import position: the bench/tool scripts bootstrap sys.path first
+  "E731",    # lambda assignment: the kernel benches are full of one-line kernel adapters
+  "E741",    # `l`, `L`, `I` are dimensions here
   "F722",    # Incompatible with jaxtyping
   "COM812",  # Conflicts with ruff formatter
+  # Korean is a first-class language in docs/ and in the comments that cite them; every one of
+  # these is a full-width character in prose, not a homoglyph smuggled into an identifier.
+  "RUF002",
+  "RUF003",
 ]
 
+[tool.ruff.lint.flake8-tidy-imports]
+# One import style, absolute, everywhere. The default ("parents") would leave `from .sibling
+# import x` alone, and that is the form that broke today: `modules/attention_pair_bias.py` read
+# `from .ops import sigmoid_gate`, and the moment the flat module became `attention_pair_bias/
+# module.py` the same line resolved somewhere else. An absolute import means the same thing from
+# any file, which is what makes a move mechanical.
+ban-relative-imports = "all"
+
 [tool.ruff.lint.per-file-ignores]
-# team-gm's tests/benchmarks relaxations (+ E402/I001 for our sys.path bootstrap).
+# `PT` is flake8-pytest-style: it is about how tests are written, and it has no business in
+# library code. Selected globally it fires PT018 on ordinary `assert a and b` in `src/` and
+# `benchmarks/`, which is a pytest-report-readability rule applied where there is no report.
+"src/**/*.py" = ["PT"]
 "benchmarks/**/*.py" = [
-  "E402",
+  "E402",   # the bench/tool scripts bootstrap sys.path before importing the package
+  "PT",
 ]
+"tools/**/*.py" = ["PT"]
 # team-gm's kernel relaxation (math-notation names, no annotations) for the
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
 "src/miniworld_engine/kernels/**/*.py" = []
@@ -181,7 +248,7 @@ pythonVersion = "3.10"
 typeCheckingMode = "off"
 
 [tool.ty.src]
-include = ["src", "tests", "benchmarks"]
+include = ["src", "tests", "benchmarks", "tools"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -288,12 +355,12 @@ fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
-ruff-check = "ruff check src tests benchmarks"
-ruff-format = "ruff format src tests benchmarks"
+ruff-check = "ruff check src tests benchmarks tools"
+ruff-format = "ruff format src tests benchmarks tools"
 # benchmarks too: `[tool.ty.src].include` has always listed it, but the command checked
 # src+tests only, so 53 findings in the bench harness were invisible -- among them a
 # `BenchResult(status=...)` that raised TypeError on the path it was guarding.
-types = "ty check src tests benchmarks"
+types = "ty check src tests benchmarks tools"
 
 # The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
 # 16 test files run nowhere automatic.
@@ -305,7 +372,7 @@ types = "ty check src tests benchmarks"
 test = "python -m pytest tests/ -m 'not gpu' -q"
 test-gpu = "python -m pytest tests/ -m gpu -q"
 # Mirrors the CI job, in its order: lint, then the type gate, then the suite.
-ci = "ruff check src tests benchmarks && ty check src tests benchmarks && python -m pytest tests/ -m 'not gpu' -q"
+ci = "ruff check src tests benchmarks tools && ty check src tests benchmarks tools && python -m pytest tests/ -m 'not gpu' -q"
 
 [project.scripts]
 miniworld-engine = "miniworld_engine.cli:main"

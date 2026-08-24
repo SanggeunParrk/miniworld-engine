@@ -19,33 +19,21 @@ the GEMMs/fused kernel require SM90 (the fully-portable training path is LayerNo
 
 from __future__ import annotations
 
-from .triton.recompute import _recompute_xhat, _recompute_xnormed
-
 import torch
-
-from miniworld_engine.kernels._compile import opaque
 import triton
-
-# torch/triton-only (no quack) — safe to import eagerly; this IS the LN-part backward.
-
-from ..layernorm.triton.main import layer_norm_bwd_dx_fused
 
 # `layer_norm_bwd_dx_fused` is level=both in kernels/registry.csv -> both_key. The key is L (the
 # token/atom count), never the row count M: the saved x here is already the flattened (M, K)
 # matrix, so L has to arrive from the caller (see `LayerNormLinearFn.forward`'s `length` input).
 from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._compile import opaque
 
-
-
-
-
-
-
-
-
-
-
-
+# torch/triton-only (no quack) — safe to import eagerly; this IS the LN-part backward.
+from miniworld_engine.kernels.layernorm.triton.main import layer_norm_bwd_dx_fused
+from miniworld_engine.kernels.layernorm_linear.triton.recompute import (
+    _recompute_xhat,
+    _recompute_xnormed,
+)
 
 
 def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
@@ -60,7 +48,9 @@ def _compose_backward_fused(dY, x, mean, rstd, gamma, beta, W, has_bias, *,
 
     ``shape_key`` is ``both_key(L)`` from the Function's `length` input; it labels the one Triton
     launch here (`_recompute_xhat`)."""
-    from .cute.dgrad_lnbwd import dgrad_lnbwd_cute  # lazy (SM90)
+    from miniworld_engine.kernels.layernorm_linear.cute.dgrad_lnbwd import (
+        dgrad_lnbwd_cute,  # lazy (SM90)
+    )
     dY = dY.contiguous()
     xc = x.to(dY.dtype)
     xhat = _recompute_xhat(xc, mean, rstd, shape_key=shape_key)   # (M,K) bf16 = (x-μ)·rstd
@@ -100,7 +90,7 @@ def _ln_backward(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor,
     dgamma = torch.zeros(K, dtype=torch.float32, device=x.device)
     dbeta = torch.zeros(K, dtype=torch.float32, device=x.device)
     xc = x.to(dx_normed.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)
     layer_norm_bwd_dx_fused[grid](
         dx, dx_normed, dgamma, dbeta,
         xc, gamma, mean, rstd, rstd,
@@ -147,7 +137,9 @@ class LayerNormLinearFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps, length):
-        from .cute import layernorm_linear as _fwd  # lazy (pulls quack)
+        from miniworld_engine.kernels.layernorm_linear.cute import (
+            layernorm_linear as _fwd,  # lazy (pulls quack)
+        )
 
         Y, mean, rstd = _fwd(x, ln_weight, ln_bias, weight, bias, eps, save_stats=True)
         ctx.save_for_backward(x, mean, rstd, ln_weight, ln_bias, weight)
@@ -196,7 +188,9 @@ class LayerNormLinearTritonFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, ln_weight, ln_bias, weight, bias, eps, length):
-        from .interface import layernorm_linear_triton  # triton fused forward (portable)
+        from miniworld_engine.kernels.layernorm_linear.interface import (
+            layernorm_linear_triton,
+        )
 
         Y = layernorm_linear_triton(x, ln_weight, ln_bias, weight, bias, eps)
         xf = x.reshape(-1, x.shape[-1]).float()

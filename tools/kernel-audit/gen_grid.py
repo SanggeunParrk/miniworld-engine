@@ -34,13 +34,14 @@ is exactly linear at one operand tile per stage (measured: 8192 / 32768 / 49152 
 and 3 respectively on an A6000. That is why no single stage ceiling is written here.
 """
 from __future__ import annotations
+
 import csv
 import itertools
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from classify import SRC, classify  # noqa: E402
+from classify import SRC, classify
 
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 META = ("num_warps", "num_stages", "maxnreg")
@@ -85,7 +86,7 @@ def grid_for(op: str, axes: list[str], kind: str):
     for combo in itertools.product(*vals):
         for w in WARPS[kind]:
             for s in STAGES[kind]:
-                yield dict(zip(axes, combo)) | {"num_warps": w, "num_stages": s}
+                yield dict(zip(axes, combo, strict=False)) | {"num_warps": w, "num_stages": s}
 
 
 def main() -> int:
@@ -103,11 +104,11 @@ def main() -> int:
     worst.sort(reverse=True)
     print(f"ops {len(axes)}   grid entries {total:,}")
     print("by kind: " + "  ".join(f"{k}={v:,}" for k, v in sorted(bykind.items())))
-    print("")
+    print()
     print("largest grids:")
     for n, op, kind, na in worst[:8]:
         print(f"  {n:>9,}  {op:<48} {kind:<7} {na} axes")
-    print("")
+    print()
     print("smallest:")
     for n, op, kind, na in worst[-4:]:
         print(f"  {n:>9,}  {op:<48} {kind:<7} {na} axes")

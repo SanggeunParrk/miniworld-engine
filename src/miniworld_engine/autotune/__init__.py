@@ -25,12 +25,11 @@ so a missing / stale / wrong cache can only ever be slower, never incorrect.
 
 from __future__ import annotations
 
-from .configs import configs_for, missing_ops, registered_ops, use_config_dir
-from .cache import (
+from miniworld_engine.autotune.cache import (
     as_cfg_dict,
-    install_cache_reader,
     config_space_hash,
     gpu_key,
+    install_cache_reader,
     key_bucket_of,
     operand_bytes,
     select_config,
@@ -38,22 +37,28 @@ from .cache import (
     store_ranked_configs,
     tensor_dtype_of,
 )
+from miniworld_engine.autotune.configs import (
+    configs_for,
+    missing_ops,
+    registered_ops,
+    use_config_dir,
+)
 
 __all__ = [
     "as_cfg_dict",
-    "install_cache_reader",
-    "configs_for",
-    "missing_ops",
-    "registered_ops",
-    "use_config_dir",
     "config_space_hash",
+    "configs_for",
     "gpu_key",
+    "install_cache_reader",
     "key_bucket_of",
+    "missing_ops",
     "operand_bytes",
+    "registered_ops",
     "select_config",
     "shape_bucket",
     "store_ranked_configs",
     "tensor_dtype_of",
+    "use_config_dir",
 ]
 
 

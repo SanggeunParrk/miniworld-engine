@@ -58,7 +58,8 @@ def _key_list(fn: ast.FunctionDef) -> list[str] | None:
             continue
         for kw in dec.keywords:
             if kw.arg == "key" and isinstance(kw.value, (ast.List, ast.Tuple)):
-                return [e.value for e in kw.value.elts if isinstance(e, ast.Constant)]
+                return [e.value for e in kw.value.elts
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str)]
     return None
 
 

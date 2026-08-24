@@ -1,5 +1,5 @@
 """Transition (model-level op connecting the transition kernel)."""
 
-from .module import Transition
+from miniworld_engine.modules.transition.module import Transition
 
 __all__ = ["Transition"]

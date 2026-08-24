@@ -49,7 +49,7 @@ def _cute_eligible(x: torch.Tensor) -> bool:
             resolve_triangle_multiplication(ImplementationType.MINIWORLD, x.device)
             == KernelBackend.CUTE
         )
-    except Exception:  # noqa: BLE001 - dispatch/import hiccup -> just use triton
+    except Exception:  # dispatch/import hiccup -> just use triton
         return False
 
 
@@ -93,15 +93,19 @@ def _trimul_cute(
         # (sm90 / H100) uses the quack bdll front. Previously this path hardcoded the
         # sm100 variant, so on H100 it hit `sig front requires the fused sm100 kernel`.
         if torch.cuda.get_device_capability(x.device)[0] >= 10:
-            from .cute.v6_training_merged_sm100 import (
+            from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged_sm100 import (
                 prepack_lr_operand_sm100 as _prepack_lr,
+            )
+            from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged_sm100 import (
                 v6_forward_merged_sm100 as _v6_forward_merged,
             )
         else:
-            from .cute.v6_training_merged import (
+            from miniworld_engine.kernels.trimul_inproj.cute.launch import (
+                prepack_lr_operand as _prepack_lr,
+            )
+            from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (
                 v6_forward_merged as _v6_forward_merged,
             )
-            from .cute.launch import prepack_lr_operand as _prepack_lr
 
         b_lr = _prepack_lr(WL, WLg, WR, WRg)
         row_scale = _mask_2d(mask, x).reshape(-1).to(x.dtype) if mask is not None else None
@@ -117,7 +121,9 @@ def _trimul_cute(
     from miniworld_engine.kernels.trimul_inproj.cute.back_split_sm100 import (
         trimul_back_split_sm100,
     )
-    from miniworld_engine.modules.triangle_multiplication.dispatch import resolve_out_layout
+    from miniworld_engine.modules.triangle_multiplication.dispatch import (
+        resolve_out_layout,
+    )
 
     b, l1, l2, d = x.shape
     if mask is not None:
@@ -157,7 +163,10 @@ def _bidir_cute(
     WRg = to_right_gate_w.t().contiguous()
     Wg = to_gate_w.t().contiguous()   # to_gate.weight.T (d, d)
     Wp = to_out_w                     # to_out.weight (d, 2h) nn.Linear form
-    from .cute.bidir_training_sm100 import bidir_forward_sm100, prepack_lr_operand_sm100
+    from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
+        bidir_forward_sm100,
+        prepack_lr_operand_sm100,
+    )
 
     b_lr = prepack_lr_operand_sm100(WL, WLg, WR, WRg)
     row_scale = _mask_2d(mask, x).reshape(-1).to(x.dtype) if mask is not None else None
@@ -188,7 +197,9 @@ def triangle_multiplicative_update(
     hold them as ``nn.Parameter`` and train normally — exactly like the cuequiv
     baseline it replaces.
     """
-    from .triton.unidirectional import trimul_triton
+    from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import (
+        trimul_triton,
+    )
 
     if direction not in ("outgoing", "incoming"):
         msg = f"direction must be 'outgoing' or 'incoming', got {direction!r}"
@@ -281,7 +292,9 @@ def bidirectional_triangle_multiplicative_update(
     required. Unlike single-direction trimul there is no cuequiv equivalent, so this
     takes the four (2·d_hidden, d_pair) projections directly.
     """
-    from .triton.bidirectional import bidirectional_trimul_triton
+    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
+        bidirectional_trimul_triton,
+    )
 
     # Backend dispatch: cute (tcgen05) on Hopper+ bf16 B=1 — the fused-bidir kernel the
     # module resolves (~1.8x faster than triton on B200) — else triton. Grads flow to

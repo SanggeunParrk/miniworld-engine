@@ -5,8 +5,9 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from jaxtyping import Bool, Float
 
-from miniworld_engine._typecheck import typecheck
 from miniworld_engine import kernels
+from miniworld_engine._typecheck import typecheck
+from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     resolve_augmented_attention,
@@ -15,10 +16,8 @@ from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.primitives import LayerNorm, Linear
-
-from ..adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.functional import sigmoid_gate
+from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 
 class AugmentedAttentionPairBias(nn.Module):
@@ -84,7 +83,7 @@ class AugmentedAttentionPairBias(nn.Module):
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
 
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:  # noqa: ANN001
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs) -> None:
         """Drop `ln_pair.bias` from checkpoints written before it was removed.
 
         The parameter had an identically zero gradient, so a trained checkpoint carries it at its
@@ -180,7 +179,7 @@ class AugmentedAttentionPairBias(nn.Module):
             for x in (query, key, value)
         ]
 
-        if mask is not None and mask.ndim == 2:  # noqa: PLR2004
+        if mask is not None and mask.ndim == 2:
             mask = repeat(mask, "B L -> A B L", A=single.shape[0])
 
         if self.use_qk_norm:

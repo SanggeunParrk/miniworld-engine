@@ -15,7 +15,6 @@ back (cute LayerNormLinear over ``2*d_hidden`` + triton GateElem). See
 
 from __future__ import annotations
 
-
 import torch
 import torch.nn as nn
 from jaxtyping import Bool, Float
@@ -23,10 +22,9 @@ from jaxtyping import Bool, Float
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
-    resolve_triangle_multiplication as _resolve_trimul_backend,
 )
-from miniworld_engine.modules.triangle_multiplication.dispatch import (
-    resolve_out_layout as _resolve_trimul_out_layout,
+from miniworld_engine.modules.dispatch import (
+    resolve_triangle_multiplication as _resolve_trimul_backend,
 )
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -34,6 +32,9 @@ from miniworld_engine.modules.exceptions import (
 )
 from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.triangle_multiplication.dispatch import (
+    resolve_out_layout as _resolve_trimul_out_layout,
+)
 
 
 class BidirectionalTriangleMultiplication(nn.Module):
@@ -255,13 +256,17 @@ class BidirectionalTriangleMultiplication(nn.Module):
             else 0
         )
         if major >= 10:
-            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (  # noqa: E501
+            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
                 bidir_forward_sm100 as _fwd,
+            )
+            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
                 prepack_lr_operand_sm100 as _prepack,
             )
         else:
-            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (  # noqa: E501
+            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (
                 bidir_forward as _fwd,
+            )
+            from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (
                 prepack_lr_operand as _prepack,
             )
         # By-reference (differentiable) transposes of the module's own projection weights.
@@ -329,8 +334,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # masked/padded inputs too — no longer gated on `mask is None`.
             return self._forward_cute_free(pair, mask, add_residual)
 
-        from miniworld_engine.modules.triangle_multiplication.module import _load_cute_fns
-        from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
+        from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
+            gate_elem_triton,
+        )
+        from miniworld_engine.modules.triangle_multiplication.module import (
+            _load_cute_fns,
+        )
 
         tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
         b, l1, l2, d = pair.shape

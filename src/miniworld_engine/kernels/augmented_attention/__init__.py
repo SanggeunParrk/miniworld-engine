@@ -7,6 +7,8 @@ See ``interface.py`` -- the family's public entry point -- for the choice betwee
 
 from __future__ import annotations
 
-from .interface import triton_augmented_attention_pair_bias
+from miniworld_engine.kernels.augmented_attention.interface import (
+    triton_augmented_attention_pair_bias,
+)
 
 __all__ = ["triton_augmented_attention_pair_bias"]

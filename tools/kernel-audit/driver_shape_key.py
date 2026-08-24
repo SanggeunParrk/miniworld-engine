@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-CHILD = r'''
+CHILD = r"""
 import json, sys
 sys.path.insert(0, "src")
 import torch
@@ -35,7 +35,7 @@ capture.install()
 ran = _run_one_driver(op)
 buckets = sorted({b for slot in capture._CAPTURE.values() for _d, b in slot["entries"]})
 json.dump({"ran": ran, "buckets": buckets}, open(out, "w"))
-'''
+"""
 
 
 def probe(op: str, length: int, tmp: Path) -> dict:
@@ -43,7 +43,7 @@ def probe(op: str, length: int, tmp: Path) -> dict:
     env = {**os.environ, "PYTHONPATH": "src",
            "MINIWORLD_CONFIG_DIR": str(REPO / ".bench/onecfg"),
            "MINIWORLD_DRIVER_LENGTH": str(length)}
-    r = subprocess.run([".pixi/envs/default/bin/python", "-c", CHILD, op, str(out)],  # noqa: S603
+    r = subprocess.run([".pixi/envs/default/bin/python", "-c", CHILD, op, str(out)],
                        cwd=REPO, env=env, capture_output=True, text=True, timeout=900)
     if r.returncode != 0 or not out.is_file():
         return {"ran": 0, "buckets": [], "err": (r.stderr or r.stdout)[-160:]}

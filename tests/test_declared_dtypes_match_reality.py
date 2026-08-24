@@ -90,7 +90,7 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
             assert want == {"float32"}, f"{op}: conditioned_transition is fp32 io (drivers/conditioned_transition)"
-        if op.startswith("gated_projection_gate") or op.startswith("gated_projection_bwd_gate"):
+        if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
             if op.endswith("lowp_triton"):
                 continue
             assert want == {"bfloat16"}, (

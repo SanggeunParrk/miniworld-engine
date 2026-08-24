@@ -52,7 +52,7 @@ class TriMulManualBwd(torch.autograd.Function):
     def forward(ctx, x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b,
                 ln_out_w, ln_out_b, eps):
         B, L, _, D = x.shape
-        x_n, mean_in, rstd_in, xhat_in = _ln_fwd(x, ln_in_w, ln_in_b, eps)
+        x_n, _mean_in, rstd_in, xhat_in = _ln_fwd(x, ln_in_w, ln_in_b, eps)
 
         pL = x_n @ WL
         gL = torch.sigmoid(x_n @ WLg)
@@ -66,7 +66,7 @@ class TriMulManualBwd(torch.autograd.Function):
         tri = torch.einsum("bdik,bdjk->bdij", left_b, right_b)   # (B,D,L,L)
         tri_lld = tri.permute(0, 2, 3, 1).contiguous()           # (B,L,L,D)
 
-        out_n, mean_out, rstd_out, xhat_out = _ln_fwd(tri_lld, ln_out_w, ln_out_b, eps)
+        out_n, _mean_out, rstd_out, xhat_out = _ln_fwd(tri_lld, ln_out_w, ln_out_b, eps)
         g_logit = x_n @ Wg
         gate = torch.sigmoid(g_logit)
         proj = out_n @ Wp
@@ -81,7 +81,7 @@ class TriMulManualBwd(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        (x, x_n, xhat_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
+        (_x, x_n, xhat_in, rstd_in, WL, WLg, WR, WRg, Wg, Wp,
          pL, gL, pR, gR, left_b, right_b,
          xhat_out, rstd_out, ln_out_w, out_n, gate, proj) = ctx.saved_tensors
         ln_in_w = ctx.ln_in_w

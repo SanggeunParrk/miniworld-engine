@@ -35,8 +35,8 @@ N_CFG = 8
 def _spec_dir(tmp: Path) -> Path:
     """A config dir with a real multi-config grid for every op (slice keeps it cheap)."""
     sys.path.insert(0, str(REPO / "tools/kernel-audit"))
-    from gen_shards import full_grid                                     # noqa: PLC0415
-    from gen_grid import op_axes                                         # noqa: PLC0415
+    from gen_grid import op_axes
+    from gen_shards import full_grid
 
     grid, axes = full_grid(), op_axes()
     d = tmp / "cfg"
@@ -51,7 +51,7 @@ def _spec_dir(tmp: Path) -> Path:
     return d
 
 
-CHILD = r'''
+CHILD = r"""
 import json, os, sys
 sys.path.insert(0, "src")
 import torch
@@ -89,13 +89,13 @@ if mode == "build":
     capture.dump_shard(out)
 else:
     json.dump(seen, open(out, "w"))
-'''
+"""
 
 
 def _run(mode: str, out: Path, cfg: Path) -> str:
     env = {**os.environ, "PYTHONPATH": "src", "MINIWORLD_CONFIG_DIR": str(cfg)}
     r = subprocess.run([".pixi/envs/default/bin/python", "-c", CHILD, mode, str(out), CASE],
-                       cwd=REPO, env=env, capture_output=True, text=True, timeout=3600)  # noqa: S603
+                       cwd=REPO, env=env, capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
         print(r.stdout[-2000:]); print(r.stderr[-2000:])
         raise SystemExit(f"{mode} pass failed")

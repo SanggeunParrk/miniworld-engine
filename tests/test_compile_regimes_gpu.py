@@ -39,7 +39,10 @@ import torch._dynamo as dynamo
 
 from miniworld_engine import settings
 from miniworld_engine.modules import (
-    ImplementationType, Pairformer, PairformerBlock, PairformerConfig,
+    ImplementationType,
+    Pairformer,
+    PairformerBlock,
+    PairformerConfig,
 )
 
 DEV, DT = "cuda", torch.bfloat16

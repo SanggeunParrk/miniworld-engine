@@ -98,12 +98,16 @@ def _tri_qkvb(d: int = D) -> tuple[torch.Tensor, ...]:
 
 
 def triangle_attention_fwd_triton() -> None:
-    from miniworld_engine.kernels.triangle_attention.triton.main import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     Fn.apply(*_tri_qkvb())
 
 
 def _tri_main_backward() -> None:
-    from miniworld_engine.kernels.triangle_attention.triton.main import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     _grad(Fn.apply(*_tri_qkvb()))
 
 
@@ -123,12 +127,16 @@ def triangle_attention_bwd_dq_triton() -> None:
 
 
 def triangle_attention_fwd_contig_triton() -> None:
-    from miniworld_engine.kernels.triangle_attention.triton.atomic import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.atomic import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     Fn.apply(*_tri_qkvb(D32))   # this file's forward raises on any head dim but 32
 
 
 def _tri_atomic_backward() -> None:
-    from miniworld_engine.kernels.triangle_attention.triton.atomic import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.atomic import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     _grad(Fn.apply(*_tri_qkvb(D32)))
 
 

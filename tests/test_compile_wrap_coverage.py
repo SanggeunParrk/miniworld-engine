@@ -53,9 +53,9 @@ def test_no_bare_opaque_site_remains() -> None:
     bare: list[str] = []
     for path in _python_files():
         tree = ast.parse(path.read_text())
-        for dec in _decorator_sites(tree, "opaque"):
-            if isinstance(dec, ast.Call) and not dec.args and not dec.keywords:
-                bare.append(f"{path.relative_to(SRC)}:{dec.lineno}")
+        bare.extend(f"{path.relative_to(SRC)}:{dec.lineno}"
+                    for dec in _decorator_sites(tree, "opaque")
+                    if isinstance(dec, ast.Call) and not dec.args and not dec.keywords)
     assert not bare, (
         "these @opaque() sites have no fake, so compile_wrap='custom_op' cannot register them:\n  "
         + "\n  ".join(bare))

@@ -90,7 +90,7 @@ def _parse(path: Path) -> tuple[Rule, ...]:
     return tuple(out)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def rules(sm: str) -> tuple[Rule, ...]:
     """``_common.csv`` then ``<sm>.csv``, in that order -- so a card can reopen a common deny.
 

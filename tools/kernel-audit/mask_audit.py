@@ -19,12 +19,13 @@ body never mentions its extent at all cannot be masking the axis it walks.
 with ``boundary_check=(0, 1)`` is fully bounded and is not reported.
 """
 from __future__ import annotations
+
 import ast
 import csv
+import os
 import re
 from pathlib import Path
 
-import os
 ROOT = Path(os.environ.get("MASK_AUDIT_ROOT", "src/miniworld_engine"))
 META = {"num_warps", "num_stages", "maxnreg"}
 
@@ -51,6 +52,11 @@ for path in sorted(ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text())
     except SyntaxError:
         continue
+    # `if EVEN_K:` names enclosing each tl.load, keyed by id() of the ast.Call node.
+    # This used to be stamped onto the node as an undeclared `_guard` attribute; the dict
+    # keeps the same lifetime (one parsed tree, so ids stay valid and stamps still
+    # accumulate across the nested walks below) without inventing an ast field.
+    guards: dict[int, set[str]] = {}
     for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef):
             continue
@@ -58,7 +64,8 @@ for path in sorted(ROOT.rglob("*.py")):
         for dec in fn.decorator_list:
             for n in ast.walk(dec):
                 if (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "configs_for"
-                        and n.args and isinstance(n.args[0], ast.Constant)):
+                        and n.args and isinstance(n.args[0], ast.Constant)
+                        and isinstance(n.args[0].value, str)):
                     op = n.args[0].value
         if op is None:
             continue
@@ -74,7 +81,7 @@ for path in sorted(ROOT.rglob("*.py")):
             step = ast.unparse(it.args[2])
             # a stride-by-program-count persistent loop (range(pid, num_tiles, NUM_PROGRAMS))
             # walks tile INDICES, not an extent, and the range itself bounds it
-            if step.isupper() and step in {"G", "NP"} or not step[:1].isalpha():
+            if (step.isupper() and step in {"G", "NP"}) or not step[:1].isalpha():
                 continue
             extent = ast.unparse(it.args[1])
             ext_names = names(it.args[1]) or {extent}
@@ -104,7 +111,7 @@ for path in sorted(ROOT.rglob("*.py")):
                 for sub in node.body + node.orelse:
                     for n in ast.walk(sub):
                         if isinstance(n, ast.Call) and fname(n) == "load":
-                            n._guard = getattr(n, "_guard", set()) | names(node.test)
+                            guards[id(n)] = guards.get(id(n), set()) | names(node.test)
 
             loads, bc_axes, unmasked, all_ok = 0, set(), 0, True
             for n in ast.walk(body):
@@ -117,16 +124,16 @@ for path in sorted(ROOT.rglob("*.py")):
                         bc_axes |= {ast.unparse(kw["boundary_check"])}
                     elif "mask" not in kw:
                         unmasked += 1
-                    if not (full_bc or (getattr(n, "_guard", set()) & even)):
+                    if not (full_bc or (guards.get(id(n), set()) & even)):
                         all_ok = False
             # a block pointer listing every axis it advances is bounded by triton itself
             bounded_by_bc = (bool(bc_axes) and all(
                 len(re.findall(r"\d", a)) >= 2 for a in bc_axes)) or (loads > 0 and all_ok)
-            results.append(dict(
-                op=op, kernel=fn.name, file=str(path.relative_to(ROOT.parent)),
-                line=loop.lineno, extent=extent, step=step, loads=loads,
-                unmasked=unmasked, bc=sorted(bc_axes),
-                verdict=("bounded" if (bounded_by_cmp or bounded_by_bc) else "UNBOUNDED")))
+            results.append({
+                "op": op, "kernel": fn.name, "file": str(path.relative_to(ROOT.parent)),
+                "line": loop.lineno, "extent": extent, "step": step, "loads": loads,
+                "unmasked": unmasked, "bc": sorted(bc_axes),
+                "verdict": ("bounded" if (bounded_by_cmp or bounded_by_bc) else "UNBOUNDED")})
 
 bad = [r for r in results if r["verdict"] == "UNBOUNDED"]
 ops_bad = sorted({r["op"] for r in bad})
@@ -156,6 +163,11 @@ for path in sorted(ROOT.rglob("*.py")):
         tree = ast.parse(path.read_text())
     except SyntaxError:
         continue
+    # `if EVEN_K:` names enclosing each tl.store, keyed by id() of the ast.Call node.
+    # This used to be stamped onto the node as an undeclared `_guard` attribute; the dict
+    # keeps the same lifetime (one parsed tree, so ids stay valid and stamps still
+    # accumulate across the nested walks below) without inventing an ast field.
+    guards: dict[int, set[str]] = {}
     for fn in ast.walk(tree):
         if not isinstance(fn, ast.FunctionDef):
             continue
@@ -163,7 +175,8 @@ for path in sorted(ROOT.rglob("*.py")):
         for dec in fn.decorator_list:
             for n in ast.walk(dec):
                 if (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "configs_for"
-                        and n.args and isinstance(n.args[0], ast.Constant)):
+                        and n.args and isinstance(n.args[0], ast.Constant)
+                        and isinstance(n.args[0].value, str)):
                     op = n.args[0].value
         if op is None:
             continue
@@ -188,7 +201,7 @@ for path in sorted(ROOT.rglob("*.py")):
             for sub in node.body + node.orelse:
                 for n in ast.walk(sub):
                     if isinstance(n, ast.Call) and fname(n) == "store":
-                        n._guard = getattr(n, "_guard", set()) | names(node.test)
+                        guards[id(n)] = guards.get(id(n), set()) | names(node.test)
         for n in ast.walk(fn):
             if not (isinstance(n, ast.Call) and fname(n) == "store"):
                 continue
@@ -197,7 +210,7 @@ for path in sorted(ROOT.rglob("*.py")):
             kw = {k.arg: k.value for k in n.keywords if k.arg}
             if "mask" in kw:
                 continue
-            if getattr(n, "_guard", set()) & even:
+            if guards.get(id(n), set()) & even:
                 store_guarded += 1
                 continue
             if "boundary_check" in kw:

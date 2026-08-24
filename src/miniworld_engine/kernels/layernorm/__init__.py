@@ -1,11 +1,14 @@
 """Standalone LayerNorm kernel package."""
 
-from .compile_native import (
+from miniworld_engine.kernels.layernorm.compile_native import (
     layernorm_dispatch_compile,
 )
-from .interface import layernorm_kernel
-from .reference import LayerNormRef, layernorm_pytorch
-from .triton.main import triton_layernorm
+from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
+from miniworld_engine.kernels.layernorm.reference import (
+    LayerNormRef,
+    layernorm_pytorch,
+)
+from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 
 __all__ = [
     "LayerNormRef",

@@ -2,7 +2,7 @@
 import math
 from enum import Enum
 from functools import partial
-from typing import Literal, Union
+from typing import Literal
 
 import numpy as np
 import torch
@@ -42,7 +42,7 @@ def _trunc_normal_init(
     # core, and this is the only thing in `miniworld_engine.modules` that wants it. At
     # module scope it made `import miniworld_engine.modules.primitives` -- and so every
     # module built on it -- fail outright on a core-only install.
-    from scipy.stats import truncnorm  # noqa: PLC0415
+    from scipy.stats import truncnorm
 
     scale = scale / max(1, f)
     std = math.sqrt(scale) / truncnorm.std(a=a, b=b, loc=0, scale=1)
@@ -60,7 +60,8 @@ class InitType(Enum):
     NORMAL = partial(nn.init.kaiming_normal_, nonlinearity="linear")
     GLOROT = partial(nn.init.xavier_uniform_)
     GATING = partial(nn.init.zeros_)
-    ZERO = partial(nn.init.zeros_)  # noqa: PIE796
+    ZERO = partial(nn.init.zeros_)  # noqa: PIE796 -- a distinct NAME for the same
+    # initialiser: GATING says why a tensor is zeroed, ZERO says only that it is.
     ONE = partial(nn.init.ones_)
 
     def apply(self, data: torch.Tensor) -> None:
@@ -68,7 +69,7 @@ class InitType(Enum):
         self.value(data)
 
 
-_shape_t = Union[int, list[int], Size]
+_shape_t = int | list[int] | Size
 
 
 class _Fp32ParamsMixin(nn.Module):
@@ -87,8 +88,8 @@ class _Fp32ParamsMixin(nn.Module):
     nn.LayerNorm)``), and stating that is what makes the delegation checkable. The MRO is
     unchanged -- ``nn.Module`` still resolves after the concrete norm class."""
 
-    def _apply(self, fn, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        def fp32_fn(t):  # noqa: ANN001, ANN202
+    def _apply(self, fn, *args, **kwargs):
+        def fp32_fn(t):
             out = fn(t)
             if isinstance(out, torch.Tensor) and out.is_floating_point():
                 out = out.to(torch.float32)
@@ -158,7 +159,7 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
             if self.bias is not None and self.bias.is_floating_point():
                 self.bias.data = self.bias.data.float()
 
-    def forward(self, input: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:  # noqa: A002
+    def forward(self, input: Float[torch.Tensor, "*"]) -> Float[torch.Tensor, "*"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
         backend = self._backend
         if backend == KernelBackend.PYTORCH:

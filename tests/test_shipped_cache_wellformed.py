@@ -59,10 +59,13 @@ def test_the_identities_are_real(path: Path):
     data = json.loads(path.read_text())
     for key in ("config_space_hash", "env_identity", "op_identity"):
         value = data[key]
-        assert isinstance(value, str) and value, f"{key} is empty"
+        assert isinstance(value, str), f"{key} is {type(value).__name__}, not a string"
+        assert value, f"{key} is empty"
         assert "?" not in value, f"{key}={value!r} -- a probe failed and was swallowed"
     prov = data["provenance"]
-    assert prov.get("torch") and prov.get("triton") and prov.get("built_utc")
+    assert prov.get("torch")
+    assert prov.get("triton")
+    assert prov.get("built_utc")
 
 
 @pytest.mark.parametrize("path", FILES, ids=_id)
@@ -76,8 +79,10 @@ def test_entries_are_ranked_fastest_first(path: Path):
         assert times == sorted(times), f"{bucket}: not fastest-first: {times}"
         for c in ranked:
             assert isinstance(c.get("kwargs"), dict), f"{bucket}: entry has no kwargs"
-            assert isinstance(c.get("num_warps"), int) and c["num_warps"] > 0
-            assert isinstance(c.get("num_stages"), int) and c["num_stages"] > 0
+            assert isinstance(c.get("num_warps"), int)
+            assert c["num_warps"] > 0
+            assert isinstance(c.get("num_stages"), int)
+            assert c["num_stages"] > 0
 
 
 @pytest.mark.parametrize("path", FILES, ids=_id)
@@ -87,7 +92,8 @@ def test_a_bucket_key_names_a_dtype(path: Path):
     for key in data["entries"]:
         assert "|" in key, f"{key!r} has no dtype prefix"
         dtype, bucket = key.split("|", 1)
-        assert dtype and bucket
+        assert dtype
+        assert bucket
         for one in dtype.split("+"):
             assert one in {"bfloat16", "float32", "float16", "int32", "int64", "int8",
                            "uint8", "float64", "bool"}, f"{key!r}: unknown dtype {one!r}"
@@ -115,7 +121,8 @@ def test_a_dispatch_cache_is_wellformed(path: Path):
     assert data, "empty calibration cache"
     for key, entry in data.items():
         fields = key.split("|")
-        assert len(fields) >= 2 and all(fields), f"{key!r}: expected '|'-joined non-empty fields"
+        assert len(fields) >= 2, f"{key!r}: expected '|'-joined fields, got {fields}"
+        assert all(fields), f"{key!r}: an empty field in {fields}"
         assert fields[-1].isdigit(), f"{key!r}: the last field must be the shape it was tuned at"
         times = entry["ms"]
         # The two writers spell the winner differently -- layernorm calls it `path`, bias-only

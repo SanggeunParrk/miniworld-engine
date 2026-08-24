@@ -208,7 +208,9 @@ def trimul_gemm_gate_mmajor_triton():
     The reference builds the interleave with the same ``stack(dim=2).reshape`` the launcher uses
     for the weights, so the two cannot disagree about the packing convention.
     """
-    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import bidir_front_triton
+    from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
+        bidir_front_triton,
+    )
 
     h2 = 2 * D                                  # per-side hidden = 2*d_hidden
     x_n = _x()
@@ -310,7 +312,9 @@ def trimul_bwd_gate_packed_recompute_triton():
     ``sg`` is a real sigmoid, not raw noise -- the kernel's ``(1 - sg)`` factor is only meaningful
     for sg in (0, 1). ``sg`` is (2D, M): left rows [0:D), right rows [D:2D).
     """
-    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW_sig
+    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
+        front_bwd_dW_sig,
+    )
 
     d_left, d_right = _bdll(), _bdll()
     left, right = _bdll(), _bdll()
@@ -342,7 +346,9 @@ def trimul_bwd_gate_transpose_packed_triton():
     driver) rather than through it: that launcher returns only its cuBLAS products (dxn and five
     dW), which would check each block through a GEMM instead of elementwise.
     """
-    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import _dconcat5_kernel
+    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
+        _dconcat5_kernel,
+    )
 
     d_left, d_right, preact, x_n = _bdll(), _bdll(), _bdll(4 * D), _x()
     d_glogit = _rows()
@@ -369,7 +375,9 @@ def trimul_bwd_gate_transpose_packed_triton():
 
 def trimul_transpose_triton():
     """front_sm100.py _transpose_kernel: a pure transpose, (M, 2D) row-major -> (2D, M)."""
-    from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import _transpose_blld_to_bdll
+    from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import (
+        _transpose_blld_to_bdll,
+    )
 
     src = _rows(2 * D)
     out = torch.empty(2 * D, M, device=dev(), dtype=BF16)

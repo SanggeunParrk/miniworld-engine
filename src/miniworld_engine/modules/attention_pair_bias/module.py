@@ -5,9 +5,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.modules.primitives import Linear
-
 from miniworld_engine.modules.functional import sigmoid_gate
+from miniworld_engine.modules.primitives import Linear
 
 
 class AttentionPairBias(nn.Module):

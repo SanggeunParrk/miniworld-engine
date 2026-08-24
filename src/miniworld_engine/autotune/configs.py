@@ -124,7 +124,7 @@ def _read_spec(path: Path, rows: list[dict]) -> list:
 
     out = []
     for combo in itertools.product(*(spec[a] for a in order)):
-        v = dict(zip(order, combo))
+        v = dict(zip(order, combo, strict=False))
         out.append(triton.Config({a: v[a] for a in axes}, num_warps=v["num_warps"],
                                  num_stages=v["num_stages"], maxnreg=v.get("maxnreg")))
     if rng is not None:

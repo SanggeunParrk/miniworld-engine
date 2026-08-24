@@ -222,7 +222,9 @@ def transition_bwd_epilogue_triton() -> None:
 
 def transition_bwd_transpose_packed_triton() -> None:
     """_cdup_interleave_kernel via _cdup_interleave: grad_expand (M, ND) -> (M, 2*ND)."""
-    from miniworld_engine.kernels.transition.cute.backward_gatebwd import _cdup_interleave
+    from miniworld_engine.kernels.transition.cute.backward_gatebwd import (
+        _cdup_interleave,
+    )
 
     _cdup_interleave(rows2d(ROWS, ND_SMALL), shape_key=SHAPE_KEY)
 

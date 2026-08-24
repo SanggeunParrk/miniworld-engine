@@ -28,11 +28,13 @@ ap.add_argument("--iters", type=int, default=30)
 args = ap.parse_args()
 
 from miniworld_engine import settings
+
 settings.configure(compile_wrap=args.wrap)
 
 import torch
 import torch._dynamo as dynamo
 from torch._dynamo.utils import counters
+
 from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
 
 DEV, DT = "cuda", torch.bfloat16
@@ -60,7 +62,7 @@ def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> None:
         ms = _measure(mode, manual_graph, train)
         print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
               f"time={ms:.4f} ms  [{skip_report()}]", flush=True)
-    except Exception as e:                                            # noqa: BLE001
+    except Exception as e:
         print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
               f"FAILED {type(e).__name__}: {str(e)[:220]}  [{skip_report()}]", flush=True)
     finally:

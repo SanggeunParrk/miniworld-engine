@@ -49,7 +49,7 @@ def _signature(fn: ast.FunctionDef) -> tuple[list[str], set[str]]:
     ordered = [p.arg for p in a.posonlyargs + a.args]
     ndef = len(a.defaults)
     required = set(ordered[:-ndef] if ndef else ordered)
-    required |= {k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults) if d is None}
+    required |= {k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=False) if d is None}
     return ordered, {r for r in required if not r.startswith(INJECTED)}
 
 
@@ -90,7 +90,7 @@ def collect() -> tuple[dict, list]:
     return kernels, trees
 
 
-def audit() -> tuple[list, collections.Counter, int]:
+def audit() -> tuple[list, collections.Counter, int, list[tuple[str, int, str, str]]]:
     kernels, trees = collect()
     by_name = collections.defaultdict(list)
     for (mod, name) in kernels:

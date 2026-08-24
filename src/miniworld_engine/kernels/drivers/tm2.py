@@ -44,16 +44,16 @@ def tm2_dual_kernel() -> None:
     d = aligned_only(
         "tm2.trimul_outproj_gemm_gate_sm90_cute.K",
         128,
-        "tm2/cute/tm2_cute_kernel.py:66 `assert K % _TILE_K == 0, f\"K={K} must be divisible by "
-        "TILE_K={_TILE_K}\"`, with `_TILE_K = 64` at tm2_cute_kernel.py:49 and "
+        'tm2/cute/tm2_cute_kernel.py:66 `assert K % _TILE_K == 0, f"K={K} must be divisible by '
+        'TILE_K={_TILE_K}"`, with `_TILE_K = 64` at tm2_cute_kernel.py:49 and '
         "`self.k_loop = K // _TILE_K` at :72 -- the K-stage count is an exact division, so the "
         "channel width K = d_pair must be a multiple of 64",
     )
     lseq = aligned_only(
         "tm2.trimul_outproj_gemm_gate_sm90_cute.M",
         64,
-        "tm2/cute/tm2_cute_kernel.py:406 `assert M % tile_m == 0, f\"M={M} must be divisible by "
-        "tile_m={tile_m}\"`; tile_m is chosen at :404 as the largest of (256,192,128,64) dividing "
+        'tm2/cute/tm2_cute_kernel.py:406 `assert M % tile_m == 0, f"M={M} must be divisible by '
+        'tile_m={tile_m}"`; tile_m is chosen at :404 as the largest of (256,192,128,64) dividing '
         "M and falls back to 64, so M = L*L must be a multiple of 64. Perturbing L to 61 makes "
         "that assert the launcher's first statement to fail (AssertionError: M=3721 must be "
         "divisible by tile_m=64), which is the assert speaking, not a masked tail",

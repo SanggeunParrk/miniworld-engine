@@ -30,7 +30,9 @@ def trimul_inproj_cute(
     (BDLL, ``hidden_dim=1``); the BDLL input is read via an M-major GEMM operand with no
     pre-permute. Output layout is unchanged.
     """
-    from .cute.launch import trimul_inproj_cute_forward
+    from miniworld_engine.kernels.trimul_inproj.cute.launch import (
+        trimul_inproj_cute_forward,
+    )
 
     left, right, gate = trimul_inproj_cute_forward(
         x, WL, WLg, WR, WRg, Wg, hidden_dim=hidden_dim

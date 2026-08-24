@@ -102,7 +102,7 @@ def test_a_build_ignores_the_cache(tmp_path, monkeypatch):
     try:
         @triton.autotune(configs=list(GRID), key=["shape_key"])
         @triton.jit
-        def _k(x, shape_key, BLOCK_M1: triton.language.constexpr):  # noqa: ANN001, N803
+        def _k(x, shape_key, BLOCK_M1: triton.language.constexpr):
             pass
 
         pruned = _k.early_config_prune(list(GRID), at.nargs)
@@ -117,7 +117,7 @@ def test_the_reader_is_installed_on_every_autotuner():
     exactly how the per-kernel version was lost."""
     @triton.autotune(configs=[_Cfg(64)], key=["shape_key"])
     @triton.jit
-    def _k2(x, shape_key, BLOCK_M1: triton.language.constexpr):  # noqa: ANN001, N803
+    def _k2(x, shape_key, BLOCK_M1: triton.language.constexpr):
         pass
 
     assert _k2.early_config_prune is not None
@@ -140,7 +140,7 @@ def test_installing_the_reader_does_not_stop_capture_recording(monkeypatch):
 
     @triton.autotune(configs=[_Cfg(64), _Cfg(128)], key=["shape_key"])
     @triton.jit
-    def _k3(x, shape_key, BLOCK_M1: triton.language.constexpr):  # noqa: ANN001, N803
+    def _k3(x, shape_key, BLOCK_M1: triton.language.constexpr):
         pass
 
     at = _k3

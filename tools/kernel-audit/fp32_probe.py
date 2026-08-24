@@ -25,13 +25,14 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 PY = str(REPO / ".pixi/envs/default/bin/python")
 REGISTRY = REPO / "src/miniworld_engine/kernels/registry.csv"
 
-CHILD = r'''
+CHILD = r"""
 import json, sys, traceback
 sys.path.insert(0, "src")
 import torch
@@ -70,7 +71,7 @@ for line in json.loads(sys.argv[1]):
         rec["ok"] = False
         rec["error"] = f"checker {type(exc).__name__}: {str(exc).strip().splitlines()[0][:400] if str(exc).strip() else ''}"
     print("RESULT " + json.dumps(rec), flush=True)
-'''
+"""
 
 
 #: ``--observed``: drive with the capture hook installed and report the dtype the AUTOTUNER saw.
@@ -78,7 +79,7 @@ for line in json.loads(sys.argv[1]):
 #: ``torch.bfloat16`` so the env override never reached it" -- both look like a clean pass.
 #: ``cache.dtype_of_args`` reads the dtype off the kernel's own first tensor operand and is what
 #: keys the cache entry, so the captured bucket IS the answer, for every triton op at once.
-OBSERVE = r'''
+OBSERVE = r"""
 import json, sys
 sys.path.insert(0, "src")
 import torch
@@ -94,7 +95,7 @@ for kern, drv, chk in json.loads(sys.argv[1]):
     except Exception as exc:
         print(f"SKIP {kern} {type(exc).__name__}", flush=True)
 capture.dump_shard(sys.argv[2])
-'''
+"""
 
 
 def rows() -> list[dict]:
@@ -103,10 +104,10 @@ def rows() -> list[dict]:
 
 
 def _child(work: list[tuple[str, str, str]], dtype: str, cfg: str,
-           code: str = CHILD, extra: list[str] = ()) -> tuple[dict, int, str]:
+           code: str = CHILD, extra: Sequence[str] = ()) -> tuple[dict, int, str]:
     env = {**os.environ, "PYTHONPATH": "src", "MINIWORLD_CONFIG_DIR": cfg,
            "MINIWORLD_DRIVER_DTYPE": dtype}
-    proc = subprocess.run([PY, "-c", code, json.dumps(work), *extra],  # noqa: S603
+    proc = subprocess.run([PY, "-c", code, json.dumps(work), *extra],
                           cwd=REPO, env=env, capture_output=True, text=True, timeout=5400)
     out = {}
     for ln in proc.stdout.splitlines():

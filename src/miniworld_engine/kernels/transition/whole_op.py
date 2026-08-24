@@ -47,8 +47,10 @@ def transition(
     # Pre-Hopper (sm_80 / A100) wide d: the shape-general split GEMM wins, but keep the
     # input LayerNorm on our fused Triton LN (never native fp32 F.layer_norm).
     if d_hidden >= 256 and not _dispatch.is_sm90plus(x.device):
-        from ..layernorm.triton.main import triton_layernorm
-        from .triton.main import triton_transition
+        from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+        from miniworld_engine.kernels.transition.triton.main import (
+            triton_transition,
+        )
 
         x_n = triton_layernorm(
             x.reshape(-1, d_hidden), ln_in_weight, ln_in_bias, eps,

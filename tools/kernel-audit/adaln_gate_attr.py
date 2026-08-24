@@ -12,7 +12,9 @@ Reported side by side, same inputs, same run:
   bf16-operand ref    -- fp32 reference with cond_aff cast to bf16 before the GEMMs
 """
 from __future__ import annotations
+
 import sys
+
 sys.path.insert(0, "src")
 
 import torch
@@ -20,10 +22,10 @@ import torch.nn.functional as F
 
 
 def main() -> int:
+    from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
     from miniworld_engine.kernels.drivers import SHAPE_MODE
     from miniworld_engine.kernels.drivers.adaln import _EPS, _adaln_args
     from miniworld_engine.kernels.drivers.conditioned_transition import _D, _DC
-    from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
 
     print(f"device={torch.cuda.get_device_name()}  mode={SHAPE_MODE}  NX={_D} NC={_DC}")
     prev = torch.backends.cuda.matmul.allow_tf32

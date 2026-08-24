@@ -21,17 +21,20 @@ def test_the_default_config_set_exists():
     got = cli.resolve_config_dir(cli.DEFAULT_CONFIG_SET, repo)
     assert not isinstance(got, int), (
         f"the default config set {cli.DEFAULT_CONFIG_SET!r} does not resolve to a directory")
-    assert got.is_dir() and any(got.glob("*.csv")), f"{got} holds no <op>.csv"
+    assert got.is_dir(), f"{got} is not a directory"
+    assert any(got.glob("*.csv")), f"{got} holds no <op>.csv"
 
 
 def test_build_all_needs_no_second_word():
-    """`build all` -- exactly as the goal states it -- must not require naming a config set."""
-    import inspect
-    sig = inspect.signature(cli.cmd_build_all) if hasattr(cli, "cmd_build_all") else None
+    """`build all` -- exactly as the goal states it -- must not require naming a config set.
+
+    The parser supplies DEFAULT_CONFIG_SET for the optional second positional, so the check is
+    that the name it supplies resolves to a real directory.
+    """
     repo = Path(cli.__file__).resolve().parents[2]
-    # the positional's default is what a bare `build all` gets
     assert not isinstance(cli.resolve_config_dir(cli.DEFAULT_CONFIG_SET, repo), int)
-    assert sig is None or True
+    parsed = cli.build_parser().parse_args(["build", "all"])
+    assert parsed.config_type == cli.DEFAULT_CONFIG_SET
 
 
 def test_an_unknown_config_set_names_the_default():
@@ -68,7 +71,8 @@ def test_one_bad_unit_does_not_discard_the_whole_run(monkeypatch, tmp_path):
 
 def test_strict_restores_all_or_nothing(monkeypatch, tmp_path):
     merged, rc = _merge(monkeypatch, tmp_path, [GOOD, OOM], strict=True)
-    assert not merged and rc == 1
+    assert not merged
+    assert rc == 1
 
 
 def test_a_failing_run_does_not_unmake_earlier_shards(monkeypatch, tmp_path):
@@ -81,7 +85,8 @@ def test_a_failing_run_does_not_unmake_earlier_shards(monkeypatch, tmp_path):
 
 def test_a_clean_run_merges_and_succeeds(monkeypatch, tmp_path):
     merged, rc = _merge(monkeypatch, tmp_path, [GOOD, GOOD])
-    assert merged and rc == 0
+    assert merged
+    assert rc == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -99,7 +104,9 @@ SKIP = {"rc": 1, "ops": 0, "label": "big-shape", "log": "-", "skipped": True}
 
 def test_an_oom_skip_is_not_a_bad_unit(monkeypatch, tmp_path):
     merged, rc = _merge(monkeypatch, tmp_path, [GOOD, SKIP])
-    assert merged and rc == 0, "a shape that cannot fit is a permanent answer, not a failure"
+    reason = "a shape that cannot fit is a permanent answer, not a failure"
+    assert merged, reason
+    assert rc == 0, reason
 
 
 def test_a_run_of_only_skips_still_merges_the_shards_on_disk(monkeypatch, tmp_path):
@@ -111,7 +118,7 @@ def test_a_run_of_only_skips_still_merges_the_shards_on_disk(monkeypatch, tmp_pa
 
 def test_a_run_of_only_real_failures_still_merges_earlier_shards(monkeypatch, tmp_path):
     """Even genuine failures must not strand shards a previous run already produced."""
-    merged, rc = _merge(monkeypatch, tmp_path, [OOM, OOM])
+    merged, _rc = _merge(monkeypatch, tmp_path, [OOM, OOM])
     assert merged, "shards on disk are finished work; a later run's failures do not unmake them"
 
 
@@ -138,11 +145,11 @@ def test_no_build_skips_the_case_decomposition(monkeypatch, capsys):
 
     from miniworld_engine.autotune import builder
 
-    def explode(*a, **k):  # noqa: ANN002, ANN003, ARG001
+    def explode(*a, **k):
         raise AssertionError("build_all ran despite --no-build")
 
     monkeypatch.setattr(builder, "build_all", explode)
-    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)  # noqa: ARG005
+    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)
     repo = Path(cli.__file__).resolve().parents[2]
     args = argparse.Namespace(no_build=True, shards="/tmp/x", gpus="1", compile_jobs=1,
                               resume=False)
@@ -160,9 +167,9 @@ def test_without_no_build_the_pre_bench_build_still_runs(monkeypatch):
 
     called = []
     monkeypatch.setattr(builder, "build_all", lambda *a, **k: called.append(1) or [])
-    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)  # noqa: ARG005
-    monkeypatch.setattr(cli, "_merge_built_shards", lambda a, r: 0)  # noqa: ARG005
-    monkeypatch.setattr(builder, "cases", lambda: [])
+    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)
+    monkeypatch.setattr(cli, "_merge_built_shards", lambda a, r: 0)
+    monkeypatch.setattr(builder, "cases", list)
     repo = Path(cli.__file__).resolve().parents[2]
     args = argparse.Namespace(no_build=False, shards="/tmp/x", gpus="1", compile_jobs=1,
                               resume=False)
@@ -193,7 +200,8 @@ def test_a_kernel_targets_mode_is_not_the_callers_to_choose():
     args = argparse.Namespace(impl="all", mode="inference", sweep_axis="seq_len")
     bwd, _ = cli._bench_cmd(args, "layernorm_bwd", None, level="kernel")
     fwd, _ = cli._bench_cmd(args, "layernorm", None, level="kernel")
-    assert "mode=training" in bwd and "mode=inference" in fwd
+    assert "mode=training" in bwd
+    assert "mode=inference" in fwd
 
 
 def test_case_names_are_declared() -> None:

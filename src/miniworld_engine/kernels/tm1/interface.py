@@ -12,7 +12,7 @@ of this door; import is therefore side-effect free with a plain module-level imp
 
 from __future__ import annotations
 
-from .triton.main import triton_tm1
+from miniworld_engine.kernels.tm1.triton.main import triton_tm1
 
 __all__ = [
     "triton_tm1",

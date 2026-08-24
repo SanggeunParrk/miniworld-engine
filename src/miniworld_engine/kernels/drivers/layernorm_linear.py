@@ -96,7 +96,9 @@ def layernorm_stats_triton() -> None:
 
 
 def layernorm_fwd_recompute_triton() -> None:
-    from miniworld_engine.kernels.layernorm_linear.triton.recompute import _recompute_xnormed
+    from miniworld_engine.kernels.layernorm_linear.triton.recompute import (
+        _recompute_xnormed,
+    )
 
     x = rows2d(_M, _D)
     mean, rstd = _ln_stats(x)
@@ -104,7 +106,9 @@ def layernorm_fwd_recompute_triton() -> None:
 
 
 def layernorm_fwd_recompute_noaffine_triton() -> None:
-    from miniworld_engine.kernels.layernorm_linear.triton.recompute import _recompute_xhat
+    from miniworld_engine.kernels.layernorm_linear.triton.recompute import (
+        _recompute_xhat,
+    )
 
     x = rows2d(_M, _D)
     mean, rstd = _ln_stats(x)
@@ -112,13 +116,17 @@ def layernorm_fwd_recompute_noaffine_triton() -> None:
 
 
 def layernorm_fwd_saveact_strided_triton() -> None:
-    from miniworld_engine.kernels.layernorm_linear.triton.te_style import _ln_materialize
+    from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
+        _ln_materialize,
+    )
 
     _ln_materialize(_mmajor(), vec(_D), vec(_D), 1e-5, shape_key=_SHAPE_KEY)
 
 
 def layernorm_bwd_atomic_strided_triton() -> None:
-    from miniworld_engine.kernels.layernorm_linear.triton.mmajor_bwd import _ln_bwd_atomic
+    from miniworld_engine.kernels.layernorm_linear.triton.mmajor_bwd import (
+        _ln_bwd_atomic,
+    )
 
     x = _mmajor()
     mean, rstd = _ln_stats(x)
@@ -128,7 +136,9 @@ def layernorm_bwd_atomic_strided_triton() -> None:
 def layernorm_bwd_split_mmajor_triton() -> None:
     # _ln_bwd_persistent_new allocates PDG/PDB as [SM*waves, K] fp32, passes pdg.stride(0)
     # as stride_part and x.stride(1) as the feature stride; grid (NP, cdiv(K, BLOCK_K)).
-    from miniworld_engine.kernels.layernorm_linear.triton.mmajor_bwd import _ln_bwd_persistent_new
+    from miniworld_engine.kernels.layernorm_linear.triton.mmajor_bwd import (
+        _ln_bwd_persistent_new,
+    )
 
     x = _mmajor()
     mean, rstd = _ln_stats(x)
@@ -138,7 +148,9 @@ def layernorm_bwd_split_mmajor_triton() -> None:
 
 
 def layernorm_linear_fwd_triton() -> None:
-    from miniworld_engine.kernels.layernorm_linear.triton.fused import layernorm_linear_triton_fwd
+    from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+        layernorm_linear_triton_fwd,
+    )
 
     w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
     # `layernorm_linear_triton_fwd` flattens to (M, K) itself and reshapes the result back, so
@@ -155,7 +167,10 @@ def layernorm_linear_fwd_fp32_triton() -> None:
 
 
 def layernorm_linear_bwd_fp32_triton() -> None:
-    from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import _bwd_op, _fwd_op
+    from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import (
+        _bwd_op,
+        _fwd_op,
+    )
 
     # Both ops run here, so both have to record the same bucket: `_fwd_op` gets the pre-flatten
     # pair activation and reads L off it, `_bwd_op` only ever takes the (M, N) matrix and so takes
@@ -168,7 +183,9 @@ def layernorm_linear_bwd_fp32_triton() -> None:
 
 
 def gemm_lnl_fused_sm90_kernel() -> None:
-    from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import layernorm_linear_cute_fused
+    from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear_fused import (
+        layernorm_linear_cute_fused,
+    )
 
     w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
     layernorm_linear_cute_fused(rows2d(_M, _D), vec(_D), vec(_D), w, None, 1e-5)

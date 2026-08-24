@@ -18,9 +18,9 @@ entry points, so nothing here needs a deferred import.
 
 from __future__ import annotations
 
-from .triton.inference import adaln_inference
-from .triton.main import triton_adaptive_layer_norm
-from .triton.training import adaln_train
+from miniworld_engine.kernels.adaln.triton.inference import adaln_inference
+from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
+from miniworld_engine.kernels.adaln.triton.training import adaln_train
 
 __all__ = [
     "adaln_inference",

@@ -12,8 +12,12 @@ is the door callers name.
 
 from __future__ import annotations
 
-from .triton.dispatch import cond_transition_inference_dispatch
-from .triton.training import cond_transition_train
+from miniworld_engine.kernels.conditioned_transition.triton.dispatch import (
+    cond_transition_inference_dispatch,
+)
+from miniworld_engine.kernels.conditioned_transition.triton.training import (
+    cond_transition_train,
+)
 
 __all__ = [
     "cond_transition_inference_dispatch",

@@ -17,14 +17,26 @@ import csv
 import json
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 
+def _rebind(mod: Any, fn: Callable[..., Any]) -> None:
+    """Install `fn` as `mod.length_of`.
+
+    A deliberate monkeypatch, and the reason it needs a helper: a module attribute has a
+    fixed declared type, so `mod.length_of = spy` is something a type checker is right to
+    reject. Replacing it is the whole point of this probe, so the dynamic write lives here
+    and nowhere else.
+    """
+    mod.length_of = fn
+
+
 def main() -> int:
-    import torch  # noqa: F401
 
     from miniworld_engine import settings
     from miniworld_engine.autotune import shape_key
@@ -46,18 +58,18 @@ def main() -> int:
         rec["shapes"].add(dims[:4])
         return out
 
-    shape_key.length_of = spy
+    _rebind(shape_key, spy)
     # the kernels imported `length_of` by value, so rebind it in every module that holds one
     for name, mod in list(sys.modules.items()):
         if name.startswith("miniworld_engine") and getattr(mod, "length_of", None) is orig:
-            mod.length_of = spy
+            _rebind(mod, spy)
     settings.configure(run_autotune=True, capture=True)
 
-    def _rebind():
+    def _rebind_all():
         # a first call imports the kernel module, which binds length_of by value then
         for name, mod in list(sys.modules.items()):
             if name.startswith("miniworld_engine") and getattr(mod, "length_of", None) is orig:
-                mod.length_of = spy
+                _rebind(mod, spy)
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "driver"
     ran = 0
@@ -65,17 +77,17 @@ def main() -> int:
         # The PRODUCTION path: modules, not drivers. Which one violates the contract is the whole
         # question -- a driver that hands over a flattened (M, D) says nothing about what the
         # module does, and the fix is in a completely different place depending on the answer.
-        import torch as _t  # noqa: PLC0415
+        import torch as _t
 
-        from miniworld_engine.autotune.builder import cases, run_case  # noqa: PLC0415
+        from miniworld_engine.autotune.builder import cases, run_case
         cs = list(cases())
         for i, c in enumerate(cs, 1):
-            _rebind()
+            _rebind_all()
             for li, length in enumerate(c.lengths[:2]):
                 try:
                     ran += run_case(c, length, 0, train=(li == 0 and c.train),
                                     dtype=_t.bfloat16)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: PERF203 -- a case that cannot run is reported, not fatal
                     print(f"    {c.name} L={length}: {type(exc).__name__}", flush=True)
             if i % 5 == 0:
                 print(f"  {i}/{len(cs)} cases, {len(seen)} call sites", flush=True)
@@ -85,7 +97,7 @@ def main() -> int:
             (REPO / "src/miniworld_engine/kernels/registry.csv").open())
             if r["backend"] == "triton" and (r["driver"] or "").strip()]
         for i, r in enumerate(reg, 1):
-            _rebind()
+            _rebind_all()
             ran += _run_one_driver(r["kernel"])
             if i % 20 == 0:
                 print(f"  {i}/{len(reg)} drivers, {len(seen)} call sites", flush=True)

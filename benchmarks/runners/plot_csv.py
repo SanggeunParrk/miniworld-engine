@@ -13,9 +13,9 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib
+import matplotlib as mpl
 
-matplotlib.use("Agg")
+mpl.use("Agg")
 import matplotlib.pyplot as plt
 
 from miniworld_engine.viz import (

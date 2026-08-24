@@ -43,21 +43,21 @@ try:
         # `.value`, not `int(self)`: every Enum has it, and it is what the py3.11+ IntEnum
         # `__str__` already returns -- which is the behaviour being back-ported here.
         def _rounding_str(self: object) -> str:  # `object`: it replaces `__str__`
-            return str(getattr(self, "value"))
+            return str(getattr(self, "value"))  # noqa: B009 -- `self` is typed `object`; see above
 
         _RoundingMode.__str__ = _rounding_str
-except Exception:  # noqa: BLE001 - older quack without quack.rounding / no schema issue
+except Exception:  # older quack without quack.rounding / no schema issue
     pass
 
 # --- fix 2: jit_cache / compile-only flag location (moved between 0.3.11 and 0.5.0).
 try:
     # quack >= 0.5.0
-    from quack.cache import is_compile_only, jit_cache  # noqa: E402
+    from quack.cache import is_compile_only, jit_cache
 except ImportError:
     # quack 0.3.11: jit_cache + module-level COMPILE_ONLY flag in quack.cache_utils.
-    from quack.cache_utils import jit_cache  # noqa: E402,F401  # ty: ignore[unresolved-import]
+    from quack.cache_utils import jit_cache  # # ty: ignore[unresolved-import]
 
-    def is_compile_only() -> bool:  # noqa: D401 - read the flag live, not snapshot at import
+    def is_compile_only() -> bool:  # read the flag live, not snapshot at import
         import quack.cache_utils as _cu  # ty: ignore[unresolved-import]
 
         return bool(getattr(_cu, "COMPILE_ONLY", False))
@@ -73,7 +73,7 @@ except ImportError:
 try:
     from pathlib import Path as _Path
 
-    import quack.cache as _qcache  # noqa: E402
+    import quack.cache as _qcache
 
     # `EXTRA_SOURCE_DIRS` is `list[Path]`, and quack resolves each entry before hashing it.
     # This used to append an unresolved `str`, so the membership guard never matched and every
@@ -81,7 +81,7 @@ try:
     _pkg_dir = _Path(__file__).resolve().parent.parent  # miniworld_engine/
     if hasattr(_qcache, "EXTRA_SOURCE_DIRS") and _pkg_dir not in _qcache.EXTRA_SOURCE_DIRS:
         _qcache.EXTRA_SOURCE_DIRS.append(_pkg_dir)
-except Exception:  # noqa: BLE001 - never let cache-key hardening break import
+except Exception:  # never let cache-key hardening break import
     pass
 
 # gemm_interface is imported lazily (below) so merely needing jit_cache / is_compile_only
@@ -105,7 +105,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):  # noqa: ANN202  (PEP 562: consulted by `from ... import name` too)
+def __getattr__(name: str):  # (PEP 562: consulted by `from ... import name` too)
     if name in _GEMM_INTERFACE_SYMBOLS:
         import quack.gemm_interface as _gi  # RoundingMode fix already applied above
 

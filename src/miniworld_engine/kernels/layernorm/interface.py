@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import torch
 
-from .compile_native import layernorm_dispatch_compile
-from .reference import layernorm_pytorch
-from .triton.main import triton_layernorm
+from miniworld_engine.kernels.layernorm.compile_native import (
+    layernorm_dispatch_compile,
+)
+from miniworld_engine.kernels.layernorm.reference import layernorm_pytorch
+from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 
 __all__ = ["layernorm_kernel", "triton_layernorm"]
 

@@ -69,7 +69,7 @@ def ensure_cuda_home() -> str | None:
         # torch.utils.cpp_extension caches CUDA_HOME at ITS import time, so setting the env
         # var above is not enough once it is already in sys.modules. setattr, not attribute
         # syntax: the name is not declared on ModuleType.
-        setattr(mod, "CUDA_HOME", home)  # noqa: B010
+        setattr(mod, "CUDA_HOME", home)  # noqa: B010 -- see above: attribute syntax is wrong here
     return home
 
 
@@ -95,13 +95,10 @@ def gencodes(*arches: str, ptx: tuple[str, ...] = ()) -> list[str]:
     """
     ensure_cuda_home()
     have = supported_arches()
-    out = []
-    for a in arches:
-        if not have or f"compute_{a}" in have:
-            out.append(f"-gencode=arch=compute_{a},code=sm_{a}")
-    for a in ptx:
-        if not have or f"compute_{a}" in have:
-            out.append(f"-gencode=arch=compute_{a},code=compute_{a}")
+    out = [f"-gencode=arch=compute_{a},code=sm_{a}"
+           for a in arches if not have or f"compute_{a}" in have]
+    out += [f"-gencode=arch=compute_{a},code=compute_{a}"
+            for a in ptx if not have or f"compute_{a}" in have]
     return out
 
 

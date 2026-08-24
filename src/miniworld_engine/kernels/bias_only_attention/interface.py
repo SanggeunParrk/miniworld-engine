@@ -11,8 +11,13 @@ This module is the family's public door: importers name it rather than the ``tri
 
 from __future__ import annotations
 
-from .triton.gate_out import fused_gate_out, sigmoid_gate_fused
-from .triton.main import triton_bias_only_attention
+from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+    fused_gate_out,
+    sigmoid_gate_fused,
+)
+from miniworld_engine.kernels.bias_only_attention.triton.main import (
+    triton_bias_only_attention,
+)
 
 __all__ = [
     "fused_gate_out",

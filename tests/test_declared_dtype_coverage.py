@@ -58,8 +58,9 @@ def test_a_token_kernel_is_not_driven_in_fp32(units):
 def test_coverage_counts_the_dtype_axis(tmp_path, monkeypatch):
     """A cache holding only bf16 must NOT audit clean when fp32 is declared."""
     import json
-    from miniworld_engine.build import audit
+
     from miniworld_engine.autotune import cache
+    from miniworld_engine.build import audit
 
     root = tmp_path / "data"
     (root / "op_x").mkdir(parents=True)

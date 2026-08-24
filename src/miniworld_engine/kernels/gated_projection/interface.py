@@ -10,6 +10,8 @@ but every family gets an ``interface.py`` so the layout rule holds without excep
 
 from __future__ import annotations
 
-from .triton.main import triton_gated_projection
+from miniworld_engine.kernels.gated_projection.triton.main import (
+    triton_gated_projection,
+)
 
 __all__ = ["triton_gated_projection"]

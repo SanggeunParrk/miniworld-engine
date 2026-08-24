@@ -10,10 +10,12 @@ one family uses stays in that family's module.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable, Sequence
+
 import torch
 
-from collections.abc import Callable, Sequence
 from miniworld_engine.kernels.drivers import _ln_stats
+
 
 def _fixed() -> None:
     """Fixed RNG stream per checker: a "WRONG NUMBERS" line reproduces on the next run."""
@@ -55,7 +57,7 @@ def _grads(
     refs = [t.detach().float().requires_grad_(True) for t in inputs]
     ref(*refs).backward(dy.float())
     out_grads: dict[str, Pair] = {}
-    for n, lf, rf in zip(names, leaves, refs):
+    for n, lf, rf in zip(names, leaves, refs, strict=False):
         # A missing grad is a kernel bug, not a comparison to skip: `None` here means the
         # backward never touched that leaf. Name the side that dropped it.
         if lf.grad is None or rf.grad is None:
@@ -158,7 +160,9 @@ def _ln_bwd_ref(
     gf = w.float().detach().requires_grad_(True)
     bf = torch.zeros_like(gf).requires_grad_(True)
     layernorm_pytorch(xf, gf, bf, eps).backward(dy.float())
-    assert xf.grad is not None and gf.grad is not None and bf.grad is not None
+    assert xf.grad is not None
+    assert gf.grad is not None
+    assert bf.grad is not None
     return xf.grad, gf.grad, bf.grad
 
 

@@ -38,7 +38,7 @@ _KNOWN_INT32_HOT = [
 ]
 
 
-@pytest.mark.parametrize("rel,pattern", _HARDENED)
+@pytest.mark.parametrize(("rel", "pattern"), _HARDENED)
 def test_m_index_is_int64(rel: str, pattern: str):
     text = (_SRC / rel).read_text()
     assert re.search(pattern, text), (

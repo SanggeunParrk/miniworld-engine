@@ -30,7 +30,7 @@ OP = "layernorm_fwd_saveact_triton"      # level=both, declared bf16|fp32, cheap
 DTYPES = ("bf16", "fp32")
 LENGTH = 512
 
-BUILD = r'''
+BUILD = r"""
 import sys; sys.path.insert(0, "src")
 import torch
 from miniworld_engine import settings
@@ -41,9 +41,9 @@ capture.install()
 ran = _run_one_driver(sys.argv[1])
 n = capture.dump_shard(sys.argv[2])
 print(f"ran={ran} ops={n} errors={capture.record_errors()}")
-'''
+"""
 
-READ = r'''
+READ = r"""
 import json, sys; sys.path.insert(0, "src")
 import torch
 from miniworld_engine import settings
@@ -64,13 +64,13 @@ def prune_configs(self, kwargs):
 Autotuner.prune_configs = prune_configs
 _run_one_driver(sys.argv[1])
 json.dump(seen, open(sys.argv[2], "w"))
-'''
+"""
 
 
 def _run(code: str, args: list[str], dtype: str, cfg: Path) -> str:
     env = {**os.environ, "PYTHONPATH": "src", "MINIWORLD_CONFIG_DIR": str(cfg),
            "MINIWORLD_DRIVER_LENGTH": str(LENGTH), "MINIWORLD_DRIVER_DTYPE": dtype}
-    r = subprocess.run([".pixi/envs/default/bin/python", "-c", code, *args],  # noqa: S603
+    r = subprocess.run([".pixi/envs/default/bin/python", "-c", code, *args],
                        cwd=REPO, env=env, capture_output=True, text=True, timeout=5400)
     if r.returncode != 0:
         print(r.stdout[-3000:]); print(r.stderr[-3000:])

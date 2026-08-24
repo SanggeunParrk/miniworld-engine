@@ -69,7 +69,8 @@ from miniworld_engine.kernels.checks import (
     _rowsum,
 )
 from miniworld_engine.kernels.drivers import BF16, dev
-from miniworld_engine.kernels.drivers.triangle_attention import D, D32, H, L, _tri_qkvb
+from miniworld_engine.kernels.drivers.triangle_attention import D32, D, H, L, _tri_qkvb
+
 
 def _tri_logits(q, k, bias) -> torch.Tensor:
     """``[B,H,L,L,L]`` pre-softmax logits; bias ``[B,H,L,L]`` shared across the row axis (dim 2)."""
@@ -101,16 +102,20 @@ def _tri_fwd_pairs(Fn, d: int, m_at: int) -> dict[str, Pair]:
 
 
 def triangle_attention_fwd_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.triangle_attention.triton.main import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     # save order: (q, k, v, bias, m, out) -> m at 4.
     return _tri_fwd_pairs(Fn, D, 4)
 
 
 def triangle_attention_bwd_pre_triton() -> Pair:
-    from miniworld_engine.autotune.shape_key import token_key
-
-    from miniworld_engine.kernels.triangle_attention.triton.main import _attn_bwd_preprocess
     from einops import rearrange
+
+    from miniworld_engine.autotune.shape_key import token_key
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        _attn_bwd_preprocess,
+    )
     B, HL = 1, H * L
     # main.py's preprocess takes BOTH stride sets, and at runtime the two differ: `out` is the
     # strided (B,H,L,L2,D) view over projection layout [B,L,L2,H*D] that the forward allocates,
@@ -133,14 +138,18 @@ def triangle_attention_bwd_pre_triton() -> Pair:
 
 
 def triangle_attention_bwd_dkdv_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.triangle_attention.triton.main import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     # _attn_bwd_dkdv produces dk/dv/dbias; dq comes from the separate _attn_bwd_dq below.
     g = _grads(Fn.apply, _tri_qkvb(), _tri_ref, ("dq", "dk", "dv", "dbias"))
     return {n: g[n] for n in ("dk", "dv", "dbias")}
 
 
 def triangle_attention_bwd_dq_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.triangle_attention.triton.main import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     g = _grads(Fn.apply, _tri_qkvb(), _tri_ref, ("dq", "dk", "dv", "dbias"))
     return {"dq": g["dq"]}
 
@@ -149,7 +158,9 @@ def triangle_attention_bwd_dq_triton() -> dict[str, Pair]:
 
 
 def triangle_attention_fwd_contig_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.triangle_attention.triton.atomic import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.atomic import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     # D32, not D: this forward raises ValueError on any other head dim, so it is the only shape
     # the driver can reach it with. L is still ragged, and IS the axis that tiles here -- this
     # file's masking is a bias load with other=-inf plus EVEN_N/EVEN_D branches on q/k/v/store,
@@ -160,8 +171,9 @@ def triangle_attention_fwd_contig_triton() -> dict[str, Pair]:
 
 def triangle_attention_bwd_pre_contig_triton() -> Pair:
     from miniworld_engine.autotune.shape_key import token_key
-
-    from miniworld_engine.kernels.triangle_attention.triton.atomic import _attn_bwd_preprocess
+    from miniworld_engine.kernels.triangle_attention.triton.atomic import (
+        _attn_bwd_preprocess,
+    )
     B, HL = 1, H * L
     # This preprocess takes no strides at all -- it addresses o/do as off_hz*D*L + m*D + d, a
     # contiguous [B, H*L, L, D], which is what its backward rearranges to before launching.
@@ -179,7 +191,9 @@ def triangle_attention_bwd_pre_contig_triton() -> Pair:
 
 
 def triangle_attention_bwd_atomic_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.triangle_attention.triton.atomic import TritonTriangleAttentionPairBiasFunction as Fn
+    from miniworld_engine.kernels.triangle_attention.triton.atomic import (
+        TritonTriangleAttentionPairBiasFunction as Fn,
+    )
     # One kernel emits all four grads here: dq lands via atomic accumulation into an fp32 buffer,
     # dk/dv/dbias are stored once. The atomics change the summation ORDER, not the value.
     return _grads(Fn.apply, _tri_qkvb(D32), _tri_ref, ("dq", "dk", "dv", "dbias"))

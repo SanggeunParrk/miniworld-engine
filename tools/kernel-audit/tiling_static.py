@@ -6,6 +6,7 @@ The autotuner injects EXACTLY the config CSV header columns, so:
   * axes.csv names must match the code, or the doc points at a knob that does not exist
 """
 from __future__ import annotations
+
 import ast
 import csv
 from collections import defaultdict
@@ -44,7 +45,8 @@ for path in sorted(ROOT.rglob("*.py")):
         for dec in fn.decorator_list:
             for node in ast.walk(dec):
                 if (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "configs_for"
-                        and node.args and isinstance(node.args[0], ast.Constant)):
+                        and node.args and isinstance(node.args[0], ast.Constant)
+                        and isinstance(node.args[0].value, str)):
                     op = node.args[0].value
         if op is None:
             continue

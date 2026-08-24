@@ -22,11 +22,11 @@ miss / stale / bad pick only costs speed, never correctness. Config is performan
 
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 from quack.gemm_config import GemmConfig, _get_sm90_configs
 
-from .cache import (
+from miniworld_engine.autotune.cache import (
     config_space_hash,
     gpu_key,
     select_config,
@@ -122,7 +122,7 @@ def resolve_config(
         return default
     try:
         return kwargs_to_config(best["kwargs"])
-    except Exception:  # noqa: BLE001 -- malformed cache entry -> safe default
+    except Exception:  # malformed cache entry -> safe default
         return default
 
 
@@ -148,7 +148,7 @@ def sweep_and_cache(
     A config that fails to compile/run for a shape is dropped (timed as +inf) — the sweep is
     a superset of what each kernel supports, and unsupported configs simply lose.
     """
-    from triton.testing import do_bench  # noqa: PLC0415
+    from triton.testing import do_bench
 
     gk = gpu_key(device_index)
     csh = config_space_hash(_as_cache_dicts(candidates))
@@ -158,7 +158,7 @@ def sweep_and_cache(
             try:
                 run = make_run(c)
                 ms = float(do_bench(run, warmup=warmup, rep=rep, quantiles=(0.5, 0.2, 0.8))[0])
-            except Exception:  # noqa: BLE001 -- unsupported/failed config -> skip
+            except Exception:  # unsupported/failed config -> skip
                 continue
             ranked.append((c, ms))
             if on_result is not None:

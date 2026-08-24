@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import TypeVar, overload
+
 from miniworld_engine import settings
 
 _SHOULD_TYPECHECK = settings.current().typecheck

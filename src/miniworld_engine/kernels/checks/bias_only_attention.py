@@ -23,6 +23,7 @@ from miniworld_engine.kernels.drivers import BF16, TensorKw, dev
 from miniworld_engine.kernels.drivers.bias_only_attention import DH, DP, _bias_only_vb
 from miniworld_engine.kernels.drivers.triangle_attention import D, H, L
 
+
 def _bias_only_ref(v, bias) -> torch.Tensor:
     """No q/k: p = softmax(bias) is one ``[B,H,L,L]`` matrix, reused by every row of v."""
     return torch.einsum("bhmn,bhind->bhimd", bias.softmax(-1), v)
@@ -32,7 +33,9 @@ def _bias_only_ref(v, bias) -> torch.Tensor:
 
 
 def bias_only_attention_fwd_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.bias_only_attention.triton.main import TritonBiasOnlyAttentionFunction as Fn
+    from miniworld_engine.kernels.bias_only_attention.triton.main import (
+        TritonBiasOnlyAttentionFunction as Fn,
+    )
     _fp32_matmul()
     v, bias = _bias_only_vb()
     # save order: (v, bias, m, out) -> m at 2.
@@ -49,8 +52,9 @@ def bias_only_attention_fwd_triton() -> dict[str, Pair]:
 
 def bias_only_attention_bwd_pre_triton() -> Pair:
     from miniworld_engine.autotune.shape_key import token_key
-
-    from miniworld_engine.kernels.bias_only_attention.triton.main import _attn_bwd_preprocess
+    from miniworld_engine.kernels.bias_only_attention.triton.main import (
+        _attn_bwd_preprocess,
+    )
     B, HL = 1, H * L
     # Contiguous addressing, no strides -- same contract as atomic.py's, and the reason its
     # backward calls grad_output.contiguous() before this launch.
@@ -66,7 +70,9 @@ def bias_only_attention_bwd_pre_triton() -> Pair:
 
 
 def bias_only_attention_bwd_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.bias_only_attention.triton.main import TritonBiasOnlyAttentionFunction as Fn
+    from miniworld_engine.kernels.bias_only_attention.triton.main import (
+        TritonBiasOnlyAttentionFunction as Fn,
+    )
     # Only two grads exist on this path: there is no q/k to differentiate.
     return _grads(Fn.apply, _bias_only_vb(), _bias_only_ref, ("dv", "dbias"))
 
@@ -87,7 +93,9 @@ def gated_projection_gate_gemm_triton() -> Pair:
 
 
 def gated_projection_bwd_dx_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import _dgrad_epilogue
+    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+        _dgrad_epilogue,
+    )
     kw: TensorKw = {"device": dev(), "dtype": BF16}
     do2 = torch.randn(L * L, DP, **kw)      # grad wrt [M, N], N == d_pair
     wo = torch.randn(DP, DH, **kw)

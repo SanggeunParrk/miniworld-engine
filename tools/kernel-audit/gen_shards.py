@@ -33,8 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from classify import SRC, classify                              # noqa: E402
-from gen_grid import GROUP_M, STAGES, VALUES, WARPS, grid_for, op_axes, role                    # noqa: E402
+from classify import SRC, classify
+from gen_grid import GROUP_M, STAGES, VALUES, WARPS, grid_for, op_axes, role
 
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 

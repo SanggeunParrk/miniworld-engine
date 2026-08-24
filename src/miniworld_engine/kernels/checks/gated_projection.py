@@ -59,7 +59,9 @@ def gated_projection_bwd_gate_triton():
 
 def gated_projection_gate_flat_triton():
     """_sigmul_fwd: the flat (1-D, all-contiguous) form of the same y = sigmoid(g) * o."""
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import sigmoid_gate_fused
+    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+        sigmoid_gate_fused,
+    )
 
     gate, out = _x(), _x()
     return sigmoid_gate_fused(gate, out), torch.sigmoid(_f(gate)) * _f(out)
@@ -71,7 +73,9 @@ def gated_projection_bwd_gate_flat_triton():
     ``da`` is random rather than the driver's ``.sum()`` (all-ones): a uniform upstream grad
     cannot distinguish ``da*o*s*(1-s)`` from an expression that drops the ``da`` factor.
     """
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import sigmoid_gate_fused
+    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+        sigmoid_gate_fused,
+    )
 
     gate, out = _x().requires_grad_(), _x().requires_grad_()
     da = _x()

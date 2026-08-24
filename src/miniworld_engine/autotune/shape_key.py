@@ -148,7 +148,7 @@ def pair_length(rows: int) -> int:
     import math
 
     L = math.isqrt(int(rows))
-    if L * L != int(rows):
+    if int(rows) != L * L:
         raise ValueError(
             f"row count {rows} is not a perfect square, so it did not come from an L*L pair; pass "
             f"L directly instead of asking this helper to recover it."

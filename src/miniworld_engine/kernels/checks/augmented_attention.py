@@ -23,6 +23,7 @@ from miniworld_engine.kernels.drivers import BF16, dev
 from miniworld_engine.kernels.drivers.augmented_attention import A, _aug_qkvb
 from miniworld_engine.kernels.drivers.triangle_attention import D, H, L
 
+
 def _aug_logits(q, k, bias) -> torch.Tensor:
     """``[A,B,H,L,L]`` logits; bias ``[B,L,L,H]`` -> ``[B,H,L,L]``, shared across the A axis."""
     logits = torch.einsum("abmhd,abnhd->abhmn", q, k) * q.shape[-1] ** -0.5
@@ -38,7 +39,9 @@ def _aug_ref(q, k, v, bias) -> torch.Tensor:
 
 
 def augmented_attention_fwd_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.augmented_attention.triton.main import TritonAugmentedAttentionFunction as Fn
+    from miniworld_engine.kernels.augmented_attention.triton.main import (
+        TritonAugmentedAttentionFunction as Fn,
+    )
     _fp32_matmul()
     # The driver passes no mask, so the forward substitutes all-ones and the where() over the key
     # axis is a no-op -- the reference carries no mask term (see the module docstring).
@@ -53,8 +56,9 @@ def augmented_attention_fwd_triton() -> dict[str, Pair]:
 
 def augmented_attention_bwd_pre_triton() -> Pair:
     from miniworld_engine.autotune.shape_key import atom_key
-
-    from miniworld_engine.kernels.augmented_attention.triton.main import _attn_bwd_preprocess
+    from miniworld_engine.kernels.augmented_attention.triton.main import (
+        _attn_bwd_preprocess,
+    )
     B = 1
     o = torch.randn(A, B, L, H, D, device=dev(), dtype=BF16)
     do = torch.randn_like(o)
@@ -71,7 +75,9 @@ def augmented_attention_bwd_pre_triton() -> Pair:
 
 
 def augmented_attention_bwd_split_triton() -> dict[str, Pair]:
-    from miniworld_engine.kernels.augmented_attention.triton.main import TritonAugmentedAttentionFunction as Fn
+    from miniworld_engine.kernels.augmented_attention.triton.main import (
+        TritonAugmentedAttentionFunction as Fn,
+    )
     # _attn_bwd writes dq into one slot of dq_expand per BLOCK_M2 block, so its dq is a PARTIAL;
     # the grad autograd returns is the post-_dq_reduce sum of those slots, which is the value the
     # split is supposed to add up to. dk/dv/dbias come out of this same kernel whole.
@@ -80,7 +86,9 @@ def augmented_attention_bwd_split_triton() -> dict[str, Pair]:
 
 def augmented_attention_bwd_reduce_triton() -> Pair:
     from miniworld_engine.kernels.augmented_attention.triton.main import (
-        _bwd_min_block_n, _dq_reduce, get_elem_group,
+        _bwd_min_block_n,
+        _dq_reduce,
+        get_elem_group,
     )
     B = 1
     # The split count has to match the backward's: cdiv(L, min BLOCK_M2 over the split kernel's

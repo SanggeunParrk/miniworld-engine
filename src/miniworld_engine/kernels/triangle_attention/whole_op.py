@@ -43,7 +43,9 @@ def triangle_attention(
     Matches the AF3 reference (query is scaled by ``d_head**-0.5`` inside the attention
     kernel; masked keys get ``finfo.min`` bias).
     """
-    from .triton.main import triton_triangle_attention_pair_bias
+    from miniworld_engine.kernels.triangle_attention.triton.main import (
+        triton_triangle_attention_pair_bias,
+    )
 
     # Both weights, not just the query: the branch below uses to_key_weight too, so deriving the
     # flag from to_query_weight alone let `to_query_weight=W, to_key_weight=None` reach

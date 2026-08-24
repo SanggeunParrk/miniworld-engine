@@ -54,7 +54,8 @@ def test_the_flag_is_not_a_hand_kept_list_of_target_names():
     code = [st for st in fn.body if not (isinstance(st, ast.Expr)
                                          and isinstance(st.value, ast.Constant))]
     body = "\n".join(ast.unparse(st) for st in code)
-    assert 'kernel == \'transition\'' not in body and 'kernel == "transition"' not in body, (
+    assert not any(spelling in body
+                   for spelling in ("kernel == 'transition'", 'kernel == "transition"')), (
         "actual_compiled_flag names one target; the rule has to be read from the benches, or it "
         f"drifts again -- {len(GATED)} of them gate their compile today")
 
@@ -63,8 +64,9 @@ def test_the_deriver_agrees_with_every_bench():
     """`_skips_compile_under_cudagraph` must classify each bench the way its source behaves."""
     start = SRC.index("def _skips_compile_under_cudagraph")
     body = SRC[start:start + 900]
-    assert 'conf.cudagraph == "disabled"' in body and '".compile()"' in body, (
-        "the deriver no longer looks for the gate it is meant to detect")
+    for probe in ('conf.cudagraph == "disabled"', '".compile()"'):
+        assert probe in body, (
+            f"the deriver no longer looks for {probe}, the gate it is meant to detect")
 
 
 @pytest.mark.parametrize("name", sorted(GATED))

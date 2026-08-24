@@ -1,7 +1,12 @@
 """Triangle attention (model-level op connecting the triangle-attention kernel)."""
 
-from .bidirectional import BidirectionalTriangleAttention
-from .module import TriangleAttention, TrianglePairAttention
+from miniworld_engine.modules.triangle_attention.bidirectional import (
+    BidirectionalTriangleAttention,
+)
+from miniworld_engine.modules.triangle_attention.module import (
+    TriangleAttention,
+    TrianglePairAttention,
+)
 
 __all__ = [
     "BidirectionalTriangleAttention",

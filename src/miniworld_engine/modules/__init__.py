@@ -34,7 +34,9 @@ from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
-from miniworld_engine.modules.msa_pair_weighted_averaging import MSAPairWeightedAveraging
+from miniworld_engine.modules.msa_pair_weighted_averaging import (
+    MSAPairWeightedAveraging,
+)
 from miniworld_engine.modules.outer_product import OuterProduct, OuterProductMean
 from miniworld_engine.modules.pairformer import (
     Pairformer,

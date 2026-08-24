@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from miniworld_engine.kernels._compile import opaque
-
-
 import torch
 import triton
 from torch import Tensor
 
+from miniworld_engine import settings
 from miniworld_engine.autotune.shape_key import both_key, rows_of
-
-from .triton.main import (
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels.layernorm import dispatch as dispatch_cache
+from miniworld_engine.kernels.layernorm.triton.main import (
     layer_norm_bwd_dx_fused,
     layer_norm_fwd_fused,
 )
-from .triton.partial import _bwd_block_m
-from .triton.persistent import _ln_bwd_persistent, _persistent_grid
-from . import dispatch as dispatch_cache
-from miniworld_engine import settings
+from miniworld_engine.kernels.layernorm.triton.partial import _bwd_block_m
+from miniworld_engine.kernels.layernorm.triton.persistent import (
+    _ln_bwd_persistent,
+    _persistent_grid,
+)
 
 
 def _use_partial_reduction(m: int, n: int) -> bool:
@@ -60,7 +60,7 @@ def _static_bwd_path(m: int, n: int, is_bf16: bool = False) -> str:
 def _time_bwd_path(impl, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> float:
     try:
         return triton.testing.do_bench(lambda: impl(dy, x, weight, mean, rstd), warmup=10, rep=30)
-    except Exception:  # noqa: BLE001 - a path that won't compile/run on this shape is just skipped
+    except Exception:  # a path that won't compile/run on this shape is just skipped
         return float("inf")
 
 
@@ -177,7 +177,7 @@ def _bwd_partial_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd:
     dx_2d = torch.empty_like(dy_2d)
     partial_dw = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
     partial_db = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
-    grid = lambda meta: (num_partials, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
+    grid = lambda meta: (num_partials, triton.cdiv(n, meta["BLOCK_K"]))
     _ln_bwd_persistent[grid](
         dx_2d,
         partial_dw,
@@ -211,7 +211,7 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
     partial_dw = torch.empty((g, n), dtype=torch.float32, device=x.device)
     partial_db = torch.empty((g, n), dtype=torch.float32, device=x.device)
     # grid axis 1 = feature tiles; BLOCK_N is tuned now (see triton/persistent.py).
-    grid = lambda meta: (g, triton.cdiv(n, meta["BLOCK_K"]))  # noqa: E731
+    grid = lambda meta: (g, triton.cdiv(n, meta["BLOCK_K"]))
     _ln_bwd_persistent[grid](
         dx_2d,
         partial_dw,
@@ -237,7 +237,7 @@ def _bwd_cuda_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Te
     """Hand-CUDA warp-per-row backward (register column-partials, no atomics/no spill). Beats triton
     1.2-1.46x for bf16 128<=N<=512 on H100. Lazy import so `compile_native` never triggers the nvcc
     build unless this path is actually selected."""
-    from .cuda import layer_norm_bwd_cuda
+    from miniworld_engine.kernels.layernorm.cuda import layer_norm_bwd_cuda
 
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()
     dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()

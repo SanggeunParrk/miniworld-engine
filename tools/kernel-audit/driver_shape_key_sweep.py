@@ -42,7 +42,7 @@ CONFIG_DIR = str(REPO / ".bench/onecfg")
 # The child runs ONE driver at ONE length and dumps the cache buckets every autotuner recorded.
 # MINIWORLD_CONFIG_DIR is already in the environment before this text is executed, which is what
 # `autotune.configs` needs -- it reads the directory at import time.
-CHILD = r'''
+CHILD = r"""
 import contextlib, io, json, sys
 sys.path.insert(0, "src")
 import torch
@@ -65,7 +65,7 @@ slots = {name: sorted({b for _d, b in slot["entries"]})
 json.dump({"ran": ran, "slots": slots, "log": buf.getvalue()[-600:], "err": err[-600:],
            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"},
           open(out, "w"))
-'''
+"""
 
 SHAPE_KEY = re.compile(r"\bshape_key=(\d+)")
 
@@ -86,7 +86,7 @@ def probe(op: str, length: int, tmp: Path) -> dict:
     env = {**os.environ, "PYTHONPATH": "src", "MINIWORLD_CONFIG_DIR": CONFIG_DIR,
            "MINIWORLD_DRIVER_LENGTH": str(length)}
     try:
-        r = subprocess.run([PY, "-c", CHILD, op, str(out)],  # noqa: S603
+        r = subprocess.run([PY, "-c", CHILD, op, str(out)],
                            cwd=REPO, env=env, capture_output=True, text=True, timeout=1800)
     except subprocess.TimeoutExpired:
         return {"op": op, "length": length, "ran": 0, "slots": {}, "err": "TIMEOUT 1800s"}

@@ -27,10 +27,12 @@ ap.add_argument("--blocks", type=int, default=4)
 args = ap.parse_args()
 
 from miniworld_engine import settings
+
 settings.configure(compile_wrap=args.wrap)          # BEFORE any kernel import
 
 import torch
-from miniworld_engine.modules import ImplementationType, PairformerConfig, Pairformer
+
+from miniworld_engine.modules import ImplementationType, Pairformer, PairformerConfig
 
 DEV, DT = "cuda", torch.bfloat16
 L, D = args.seq_len, args.d_pair
@@ -106,7 +108,7 @@ for impl_name, impl in (("pytorch", ImplementationType.PYTORCH),
                 model = build(impl)
                 ms = timed(model, train, compile_it, cudagraph)
                 print(f"{label} blocks={args.blocks} seq_len={L} time={ms:.4f} ms", flush=True)
-            except Exception as e:                                  # noqa: BLE001
+            except Exception as e:
                 print(f"{label} FAILED {type(e).__name__}: {str(e)[:160]}", flush=True)
             finally:
                 torch.cuda.empty_cache()

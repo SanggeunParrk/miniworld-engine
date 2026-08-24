@@ -40,7 +40,7 @@ def _target_table(name: str) -> dict[str, str]:
             continue
         if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             continue
-        return {str(k.value): v.id for k, v in zip(node.value.keys, node.value.values)
+        return {str(k.value): v.id for k, v in zip(node.value.keys, node.value.values, strict=False)
                 if isinstance(k, ast.Constant) and isinstance(v, ast.Name)}
     raise AssertionError(f"{name} not found in {BENCH}")
 
