@@ -61,6 +61,7 @@ src/miniworld_engine/
 benchmarks/
 ├── kernels/<kernel>/             # isolated kernel benchmarks + configs/artifacts
 ├── modules/<module>/             # composed module benchmarks + configs/artifacts
+├── compile_wrap/                 # graph structure + regime A/B behind the compile_wrap default
 └── runners/                      # shared benchmark/render CLI entry points
 docs/                             # repo docs, cache policy, kernel notes
 third_party/                      # external checkouts/submodules
@@ -150,6 +151,25 @@ list instead — see the CLI section below and `docs/operations/dispatch-cache.m
 
 The A5000's 24 GB may OOM at the top of the sweep (L=1024, d=512); `bench.py` records those
 points as `status=failed` rows rather than aborting, so the CSV still shows the memory cliff.
+
+## torch.compile
+
+Every kernel entry point is registered as an opaque `torch.library` op, so a compiled model is
+ONE graph rather than one per kernel — a pairformer block traces to 1 graph / 0 breaks instead of
+27 / 26. That is `settings.compile_wrap="custom_op"`, the default.
+
+```bash
+MINIWORLD_COMPILE_WRAP=disable   # the other mode: a graph break at every kernel entry
+```
+
+`disable` is kept for A/B and as the escape hatch: it is the mode that needs no `fake`, so it
+still works if one is ever wrong. It has to come from the environment because the value is read
+when the kernel modules IMPORT — `settings.configure()` from a parent process is too late.
+
+The default matters beyond fusion. Under `disable`, inductor's cudagraph-trees
+(`mode="reduce-overhead"`) bail on the breaks and end up SLOWER than eager, and a manual
+`torch.cuda.graph` capture over a compiled module dies with `cudaErrorStreamCaptureInvalidated`.
+Numbers, and the scripts that produced them: `benchmarks/compile_wrap/`.
 
 ## Status
 

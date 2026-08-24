@@ -81,6 +81,25 @@ breaks to 0.
 So there is no escape hatch here, deliberately: if something still breaks, the answer is to find
 the launch underneath it and give THAT a fake.
 
+HOW MUCH GOES IN ONE OP
+-----------------------
+The unit is "the launch", but two shapes of kernel read that differently and both are here:
+
+* **launch-only** (most of them). One op per kernel launch, with the GEMMs, reductions, reshapes
+  and dtype casts around it left in the graph. ``tm1``, ``tm2``, ``gated_projection``,
+  ``trimul``'s front/back all look like this, and it is the default choice: it gives the compiler
+  the most to work with.
+* **whole-body** (``transition/triton/fused.py``, ``transition/cute/fused.py``,
+  ``adaln/triton/main.py``). One op for the entire forward and one for the entire backward,
+  because the body is an arch dispatch -- ``torch.cuda.get_device_capability`` branches,
+  ``try``/``except`` build fallbacks, several launches picked at runtime -- and a fake must return
+  the same STRUCTURE regardless of which branch runs. Splitting these into per-launch ops would
+  mean one op per branch and a caller that has to re-derive the branch outside the op, which is
+  the dispatch logic duplicated in a place that cannot see the device.
+
+Prefer launch-only. Reach for whole-body when the launches are chosen by a runtime property the
+caller must not have to know about.
+
 ``register_autograd`` is deliberately NOT used. It only lets ``setup_context`` save the op's inputs
 and outputs, so every intermediate the backward needs (LN stats, the normalized activation) would
 have to become a forward RETURN. Keeping ``autograd.Function`` keeps ``save_for_backward`` free to
