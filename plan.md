@@ -11,7 +11,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | id | criterion | title | status |
 |---|---|---|---|
 | P0a | D1 | plot-style entries orphaned by the label rename | **done** |
-| P0b | E1 | prove `build all` end to end | **doing** — found 2 regressions |
+| P0b | E1 | prove `build all` end to end | **done** — found 2 regressions + P15-P18 |
 | P1 | A3 | ship `py.typed` | **done** |
 | P2 | B2 | per-kernel numerical tolerance | **P2a done**, P2b needs a GPU |
 | P3 | B4 | ragged/fp32 shape modes become a gate | **measured** — 3 candidate bugs found |
@@ -87,6 +87,45 @@ so the moved `checks/<family>.py` are exercised by the GPU suite.
 
 **Done when.** `run_all` reports 0 `failed`; the bounded build reports `N ok, 0 empty, 0 failed`
 and its merge writes the entries; `dev audit` exits 0 against those shards. Numbers recorded here.
+
+**Done. The chain works, and the run found more than it was looking for.**
+
+`run_all`, all 103 declared drivers, 77 s: `driven 103, ok 92, failed 11, no driver 0`. The 11 were
+3 x the `.cpp` path bug, 2 x the undefined `L` (one bug, two kernels -- `pre_contig`'s DRIVER runs
+the whole Function including backward), and 6 arch-gated cute kernels that are not failures at all,
+which became P17.
+
+The build chain, four ops chosen one per shape-block group so every cross-family import the harness
+refactor introduced was exercised:
+
+    adaln_fwd_triton                        6 ok, 0 empty, 0 failed   103 s
+    bias_only_attention_fwd_triton          4 ok, 0 empty, 0 failed    74 s
+    layernorm_fwd_rowscale_triton           4 ok, 0 empty, 0 failed    73 s
+    gated_projection_gate_inplace_flat...   4 ok, 0 empty, 0 failed    93 s
+    18 shards written; data/ changed for all four ops   <- the merge wrote
+    dev audit: reach 4 OK  <- exactly the four built, read from the shard evidence
+    data/ restored; `git status -- data` empty
+
+So: decompose -> run -> **merge** -> audit, with the shipped cache untouched.
+
+**Sizing, not the chain, was what failed first.** `build <op> --per-op` with the default `grid` set
+blew a 600 s cap twice. `grid` is a grid SPEC (5 axes, cartesian) and per-op tuning benches every
+config in it -- cli.py's own comment says a single 15,552-config op costs 244 GPU-h. `blk16` is
+materialised with exactly one config per op, so each unit measures once and the plumbing is what
+gets exercised. Tuning was never what needed proving.
+
+**Two unlooked-for confirmations:**
+
+* the STALE guard works. The audit read entries the merge had just written from a `blk16` build,
+  against the default `grid` config space, and the reader correctly reported
+  "STALE (kernel config grid changed) ... falling back to the full grid" for each. That is exactly
+  the failure mode `default_config_dir`'s docstring warns about, caught by the guard rather than by
+  a silent wrong answer.
+* `dev audit`'s own `import` check is **permanently red on any non-Hopper card**:
+  `import: 0 OK, 2 not OK`, `transition.cuda -> RuntimeError: Error building extension
+  'transition_b2b_cuda'`. That is the eager import-time build P15 deferred, and it is now not a
+  theoretical concern -- it makes `dev audit` exit 1 on an A6000 for a reason that has nothing to do
+  with the cache. -> raises the priority of P15's lazy half.
 
 ---
 
@@ -619,6 +658,12 @@ body, so nothing needs the eager build) — but it changes import semantics for 
 that only a GPU run can verify, and I have no green GPU run to verify against yet. Landing the hang
 fix alone is the smaller, checkable change; the lazy conversion goes with the run that can confirm
 it.
+
+**Evidence from P0b, raising this from cleanup to a defect:** `dev audit` reports
+`import: 0 OK, 2 not OK` on an A6000 -- `transition.cuda` fails with "Error building extension
+'transition_b2b_cuda'" because that extension is sm_90a-only and the module builds it at import.
+So the audit command exits 1 on every non-Hopper card, for a reason unrelated to what it audits.
+The lazy conversion is what fixes it.
 
 **Incidental find, not fixed:** `transition/cuda/__init__.py` passes
 `-I/home/psk6950/mathdx_dl/extracted/...` — a personal absolute path baked into a build. It works
