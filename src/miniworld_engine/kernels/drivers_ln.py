@@ -138,10 +138,13 @@ def layernorm_bwd_split_triton() -> None:
 def layernorm_fwd_mmajor_triton() -> None:
     from .layernorm.triton.transpose import layer_norm_transpose
 
-    # (D, B, N) with B = N = L, so M = B*N = L*L rows exactly as before. `_ln_transpose_dbn_bnd`
-    # keys on `both_key(n)` -- the token axis of the (B, N, D) result -- so the old (D, 1, L*L)
-    # packing handed it n = M and clamped to 8192 at every L.
-    x = torch.randn(_D, _PAIR_N, _PAIR_N, device=dev(), dtype=BF16)
+    # Channel-major (D, B, N), and M = B*N is what `_ln_transpose_dbn_bnd` keys on now (a
+    # `level=both` kernel buckets on rows). So the two sides differ in the SHAPE OF B*N, not just
+    # in a constant: the pair side is B=N=L (M = L*L) and the atom side is B=1, N=A (M = A).
+    # Building the pair packing on both sides left this op's six atom buckets empty -- it was the
+    # only hole in either card's cache after the row-key rebuild.
+    x = (torch.randn(_D, _PAIR_N, _PAIR_N, device=dev(), dtype=BF16) if _IS_PAIR
+         else torch.randn(_D, 1, _M, device=dev(), dtype=BF16))
     layer_norm_transpose(x, vec(_D), vec(_D), layout="dbn->bnd")
 
 
