@@ -228,7 +228,12 @@ the author having run something by hand on one of two Ampere cards.
 *Enforced by:* nothing. `run_all` (`ok 94, failed 0, skipped 9`), the numerical suite
 (`98 passed, 2 skipped`), and opcheck (`5 passed`) are all real results and all manual.
 
-*Status:* **not met.** Everything else in section J is downstream of this.
+*Status:* **partially met.** CI still executes nothing on a GPU. What changed is that the
+evidence is no longer a memory: `run_all` writes a per-card manifest with a `#provenance` row
+naming the version, commit, tree state and date, `docs/supported.md` cites those manifests, and
+`tests/registry/test_a_release_has_been_run_on_a_card.py` fails a release whose version appears in
+no manifest, or only in one produced from a dirty tree. Scoped to the release on purpose -- a
+freshness gate red on every commit is a gate that gets switched off.
 
 ### J2. The shipped autotune cache is validated, not trusted
 

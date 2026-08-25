@@ -115,7 +115,7 @@ machine with mathdx installed anywhere else.
 
 ## B. Prove it somewhere that is not this machine
 
-### B1 — PARTIAL — no GPU runs in CI  (J1)
+### B1 — DONE (scoped) — no GPU runs in CI  (J1)
 
 *Gap, measured:* both CI jobs are `runs-on: ubuntu-latest`. The "gpu" step runs
 `pytest --collect-only -m gpu` — it proves GPU tests can be *collected*. **103 kernels, 0
@@ -136,9 +136,18 @@ apparatus than the problem justified. The smaller answer reuses the artifact tha
 the version, commit, tree state and date. `docs/supported.md` cites those manifests, so a support
 claim now points at a dated artifact naming the code it was produced against.
 
-What is still missing is the gate: nothing fails when the newest manifest is older than the
-release. That is deliberate for now -- a freshness gate goes red on every commit until someone
-finds a GPU, which is what got the first attempt cut. 103 kernels still run in CI zero times.
+*Closed, scoped to the release.* `tests/registry/test_a_release_has_been_run_on_a_card.py` is one
+file: the version in `pyproject.toml` must appear in some manifest's `#provenance`, and that
+manifest must have been produced from a clean tree. Both directions verified -- bump the version
+and it fails naming the version; flip the provenance to `dirty` and it fails saying so.
+
+Deliberately NOT a freshness gate. "The newest manifest must match HEAD" goes red on every
+ordinary commit until someone finds a card, and a gate that is red by default is one that gets
+switched off -- that is what cut the first attempt. The version only moves at a release, which is
+the one moment where "nobody has run this" should stop the line.
+
+What remains true: CI itself still executes 0 of 103 kernels. The gate does not change that; it
+makes the absence of evidence fail loudly at the moment it matters instead of quietly forever.
 
 ### B2 — DONE — no end-to-end test proves the kernels are substitutable  (K2)
 
