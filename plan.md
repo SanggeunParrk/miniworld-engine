@@ -100,7 +100,7 @@ machine with mathdx installed anywhere else.
 
 ## B. Prove it somewhere that is not this machine
 
-### B1 — REVERTED — no GPU runs in CI  (J1)
+### B1 — PARTIAL — no GPU runs in CI  (J1)
 
 *Gap, measured:* both CI jobs are `runs-on: ubuntu-latest`. The "gpu" step runs
 `pytest --collect-only -m gpu` — it proves GPU tests can be *collected*. **103 kernels, 0
@@ -115,9 +115,15 @@ fails when the newest verdict does not match `HEAD` or is older than N days. Tha
 
 *Done when:* something dated and checkable stands behind the GPU claims.
 
-*Where it stands:* built, then removed. `tools/release/gpu_verdict.py` plus a five-test gate was
-more apparatus than the problem justified, so it was cut. J1 is exactly where it was this morning:
-103 kernels, 0 executed by CI. Whatever answers it must be smaller than what it guards.
+*Where it stands:* the verdict system was built and cut -- a script plus a five-test gate was more
+apparatus than the problem justified. The smaller answer reuses the artifact that already exists:
+`run_all` writes a per-card manifest, it is committed, and it now carries a `#provenance` row with
+the version, commit, tree state and date. `docs/supported.md` cites those manifests, so a support
+claim now points at a dated artifact naming the code it was produced against.
+
+What is still missing is the gate: nothing fails when the newest manifest is older than the
+release. That is deliberate for now -- a freshness gate goes red on every commit until someone
+finds a GPU, which is what got the first attempt cut. 103 kernels still run in CI zero times.
 
 ### B2 — DONE — no end-to-end test proves the kernels are substitutable  (K2)
 

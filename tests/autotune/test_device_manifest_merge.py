@@ -12,6 +12,7 @@ Measured: one `bench_kernel all` took the committed manifest from 94 ok / 6 fail
 from __future__ import annotations
 
 import csv
+import re
 
 import pytest
 
@@ -25,8 +26,13 @@ def manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(devices, "_DEVICES", tmp_path)
 
     def read():
+        # Skip the `#provenance` row -- version, commit, tree state and date, written so a
+        # manifest says WHEN and against WHICH code it was produced. It is not a kernel, and
+        # `devices.load_manifest` filters it out for the same reason; this fixture reads the CSV
+        # directly and has to do the same.
         with (tmp_path / f"{GPU}.csv").open(newline="") as fh:
-            return {r["kernel"]: (r["status"], r["detail"]) for r in csv.DictReader(fh)}
+            return {r["kernel"]: (r["status"], r["detail"]) for r in csv.DictReader(fh)
+                    if r["kernel"] != devices._PROVENANCE}
 
     return read
 
@@ -68,3 +74,24 @@ def test_the_whole_registry_is_still_written(manifest):
     a = _some_kernels(1)[0]
     devices.record(GPU, {a: (True, "x")})
     assert len(manifest()) == len(devices.registry())
+
+
+def test_a_manifest_says_when_and_against_what_it_was_produced(manifest) -> None:
+    """A manifest is the only evidence that any kernel has ever run on a given card. Without
+    provenance a file from six months and two rewrites ago is indistinguishable from one produced
+    this morning, and `docs/supported.md` cites these as its evidence."""
+    devices.record(GPU, {})
+    prov = devices.provenance(GPU)
+    assert prov is not None, "record() wrote no #provenance row"
+    for field in ("version", "commit", "tree", "date"):
+        assert prov[field], f"provenance has no {field}: {prov}"
+    assert prov["tree"] in ("clean", "dirty"), prov["tree"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", prov["date"]), prov["date"]
+
+
+def test_provenance_is_not_mistaken_for_a_kernel(manifest) -> None:
+    """It shares the file with the kernel rows, so every reader has to skip it. `load_manifest`
+    does; a reader that does not would report a 104th kernel that does not exist."""
+    devices.record(GPU, {})
+    assert all(r["kernel"] != devices._PROVENANCE for r in devices.load_manifest(GPU))
+    assert len(devices.load_manifest(GPU)) == len(devices.registry())

@@ -52,5 +52,9 @@ guessed floor reads like evidence. What is true is the row above.
 
 Run `python -m miniworld_engine.autotune.run_all` on the card. It writes
 `autotune/manifests/<device>.csv` with one line per kernel — what ran, what it measured, and
-against which band. Commit that file and add the row here; the manifest is the evidence and this
-table is its index.
+against which band — plus a `#provenance` first row carrying the version, the commit, whether the
+tree was clean and the date. Commit that file and add the row here; the manifest is the evidence,
+its provenance row says what the evidence is *of*, and this table is the index.
+
+A manifest whose `#provenance` says `dirty` describes a working tree, not a commit. It is still
+useful to you and it is not evidence for anyone else.
