@@ -33,7 +33,12 @@ benchmarks/**/profiles/*
 #   artifacts/  raw bench output (CSVs, autotune summaries)  -> SCRATCH, ignored
 #   plots/      raw plot_csv.py SVG output                    -> SCRATCH, ignored
 #   results/    CURATED results kept in git                   -> TRACKED
-#               results/<gpu>/tables/*.csv  +  results/<gpu>/plots/*.svg (modules)
+#               results/<gpu>/tables/*.csv  -- the data, TRACKED
+#               results/<gpu>/plots/*.svg  -- renders of it, ignored: `plot_csv.py` makes
+#               them from the csv beside them, all 45 plot directories have their tables/,
+#               and no doc, README or source cited one of the 360 (5.9 MB of the 9.1 MB
+#               tracked here). Same rule as the profiler dumps under kernels/*/notes/: a
+#               render nothing names is output, the data it came from is the record.
 # Scratch is scoped to the target level (benchmarks/*/*/{artifacts,plots}); the deeper
 # results/<gpu>/plots/ is NOT matched by that (it is 2 levels below), so curated results
 # track by default. Raw dumps (*.out/*.ncu-rep/*.so) stay ignored everywhere via the global
@@ -86,3 +91,4 @@ benchmarks/**/logs/
 
 # staging output of tools/release/gpu_verdict.py; the verdict JSON itself IS committed
 verdicts/.stage/
+benchmarks/*/*/results/*/plots/
