@@ -6,13 +6,13 @@
 #SBATCH --gres=gpu:3
 #SBATCH -c 48
 #SBATCH -t 04:00:00
-#SBATCH -o tools/kernel-audit/prof/tail-%j.log
+#SBATCH -o src/miniworld_engine/tools/prof/tail-%j.log
 set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
 export PYTHONPATH=src
 export TRITON_CACHE_DIR=${MINIWORLD_TRITON_CACHE:-$HOME/.cache/miniworld-triton}
-OUT=$R/tools/kernel-audit/prof
+OUT=$R/src/miniworld_engine/tools/prof
 PY=.pixi/envs/default/bin/python
 
 # The three slowest COMPLETED sweep units, all measured under the old fork-per-config guard:

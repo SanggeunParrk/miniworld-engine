@@ -23,5 +23,5 @@ stored entry against the live config list, so a narrower default would resolve e
 to nothing and silently re-tune on every call. `tests/test_default_config_set.py` asserts exactly
 that against the committed caches, and also that there is only one copy of `grid`.
 
-The generator writes here too: `tools/kernel-audit/gen_shards.py --out
+The generator writes here too: `src/miniworld_engine/tools/gen_shards.py --out
 src/miniworld_engine/autotune/configs/grid`.

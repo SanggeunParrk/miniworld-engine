@@ -1,14 +1,15 @@
 #!/bin/bash
-#SBATCH -J numerical
+#SBATCH -J audit
 #SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH --gres=gpu:1
 #SBATCH -c 16
-#SBATCH -t 01:00:00
-#SBATCH -o tools/kernel-audit/prof/numerical-%j.log
+#SBATCH -t 00:40:00
+#SBATCH -o src/miniworld_engine/tools/prof/audit-%j.log
 set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
 export PYTHONPATH=src
 export TRITON_CACHE_DIR=${MINIWORLD_TRITON_CACHE:-$HOME/.cache/miniworld-triton}
-.pixi/envs/default/bin/python -m pytest tests/test_numerical.py -m gpu -q -p no:cacheprovider
+.pixi/envs/default/bin/python -u -m miniworld_engine.cli audit \
+  --shards ${MINIWORLD_SHARDS:-$HOME/.cache/miniworld-build}

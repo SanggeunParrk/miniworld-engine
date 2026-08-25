@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 16
 #SBATCH -t 01:00:00
-#SBATCH -o tools/kernel-audit/prof/atomflat-%j.log
+#SBATCH -o src/miniworld_engine/tools/prof/atomflat-%j.log
 set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"

@@ -15,8 +15,8 @@ pixi run ci        # ruff check → ty check → pytest -m 'not gpu'
 Individually:
 
 ```bash
-pixi run ruff-check     # ruff check src tests benchmarks tools
-pixi run types          # ty check src tests benchmarks tools
+pixi run ruff-check     # ruff check src tests benchmarks
+pixi run types          # ty check src tests benchmarks
 pixi run test           # the whole CPU suite, ~60 s, no GPU
 pixi run test-gpu       # the GPU suite (numerical + compile-regime); needs an allocated card
 ```

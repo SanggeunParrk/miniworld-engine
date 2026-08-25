@@ -25,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 OP = ""
 CASE = "gated_projection"
 DIMS, LENGTH, MODE = "0", "256", "eval"
@@ -38,8 +38,7 @@ def build_shards(tmp: Path, n_each: int = 6) -> list[Path]:
     slicing it cannot produce two disjoint shards at all. Every other op keeps its accuracy config
     so the module can still run; only OP's two slices matter to the merge under test.
     """
-    sys.path.insert(0, str(REPO / "tools/kernel-audit"))
-    from gen_shards import full_grid
+    from miniworld_engine.tools.gen_shards import full_grid
 
     grid = full_grid()[OP]
     assert len(grid) >= 2 * n_each, f"{OP} grid has only {len(grid)} configs"
@@ -90,8 +89,7 @@ def discover_op(tmp: Path) -> str:
     if rc != 0:
         raise SystemExit(f"discovery run failed:\n{out[-2500:]}")
     fired = sorted(json.loads(sh.read_text()))
-    sys.path.insert(0, str(REPO / "tools/kernel-audit"))
-    from gen_shards import full_grid
+    from miniworld_engine.tools.gen_shards import full_grid
 
     grid = full_grid()
     cand = [(len(grid.get(o, [])), o) for o in fired if len(grid.get(o, [])) >= 12]

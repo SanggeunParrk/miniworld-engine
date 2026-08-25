@@ -29,7 +29,7 @@ sm90·sm100 232,448 B). 그래서 stage는 넓게 두고 컴파일 실패로 걸
 
 `builder.py`는 이미 **shape**(`--case/--dims/--length/--mode`)로 샤딩하지만, 그 샤드들은 전부
 **동일한 full grid**를 들고 있었다. 20만 개는 그렇게 못 나누므로 **config set 자체**를 쪼갠다
-(`tools/kernel-audit/gen_shards.py` → `--config-dir`로 그대로 투입).
+(`src/miniworld_engine/tools/gen_shards.py` → `--config-dir`로 그대로 투입).
 
 샤드 디렉터리가 반드시 만족해야 하는 두 가지 (생성 결과 + **실제 GPU 실행**으로 검증함):
 
@@ -49,7 +49,7 @@ sm90·sm100 232,448 B). 그래서 stage는 넓게 두고 컴파일 실패로 걸
 
 ### 하드웨어 end-to-end 검증
 
-`tools/kernel-audit/shard_e2e.py` — 실제 모듈 실행으로 세 가지를 한 번에 확인한다.
+`src/miniworld_engine/tools/shard_e2e.py` — 실제 모듈 실행으로 세 가지를 한 번에 확인한다.
 disjoint한 두 config 샤드를 각각 별도 프로세스로 돌리고(config dir 선택이 import 시점이므로
 같은 프로세스에서는 불가능) 병합한다. A6000 결과:
 
@@ -108,7 +108,7 @@ autotuner는 `key=[...]`의 **값 조합마다** config 리스트 전체를 다�
   (ND = 4D, DC는 모델당 고정), boolean key 상당수는 매트릭스에서 한 값만 쓴다.
 - 커밋된 캐시를 세면 → op당 **1개**. 이건 측정이 아니라 위 버그의 잔해였다 (전부 `any|any`).
 
-그래서 직접 쟀다 (`tools/kernel-audit/bucket_count.py`, A6000, 빌드 매트릭스 **2085 unit 전수**,
+그래서 직접 쟀다 (`src/miniworld_engine/tools/bucket_count.py`, A6000, 빌드 매트릭스 **2085 unit 전수**,
 op당 config 1개 — 어느 bucket에 떨어지는지는 어떤 config를 벤치하든 같으므로):
 
 ```

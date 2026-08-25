@@ -27,16 +27,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 CASE = "gated_projection"
 N_CFG = 8
 
 
 def _spec_dir(tmp: Path) -> Path:
     """A config dir with a real multi-config grid for every op (slice keeps it cheap)."""
-    sys.path.insert(0, str(REPO / "tools/kernel-audit"))
-    from gen_grid import op_axes
-    from gen_shards import full_grid
+    from miniworld_engine.tools.gen_grid import op_axes
+    from miniworld_engine.tools.gen_shards import full_grid
 
     grid, axes = full_grid(), op_axes()
     d = tmp / "cfg"

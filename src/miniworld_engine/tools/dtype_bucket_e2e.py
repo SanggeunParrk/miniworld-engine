@@ -25,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 OP = "layernorm_fwd_saveact_triton"      # level=both, declared bf16|fp32, cheap to drive
 DTYPES = ("bf16", "fp32")
 LENGTH = 512

@@ -25,7 +25,7 @@ import traceback
 from pathlib import Path
 from typing import TypedDict
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 class Row(TypedDict):
@@ -128,7 +128,7 @@ def main() -> int:
         print(f"\n{'op':46s} {'bkt':>4s} {'dt':>3s}  buckets")
         for r in sorted(rows, key=lambda r: -r["n_buckets"])[:20]:
             print(f"{r['op']:46s} {r['n_buckets']:4d} {r['n_dtypes']:3d}  {r['buckets'][:4]}")
-    with (Path(__file__).resolve().parents[2] / ".bench/bucketcount.json").open("w") as fh:
+    with (Path(__file__).resolve().parents[3] / ".bench/bucketcount.json").open("w") as fh:
         json.dump(rows, fh, indent=1)
     return 0
 

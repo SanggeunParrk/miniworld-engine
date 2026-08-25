@@ -24,10 +24,8 @@ from __future__ import annotations
 
 import csv
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from classify import SRC, classify
+from miniworld_engine.tools.classify import SRC, classify
 
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 

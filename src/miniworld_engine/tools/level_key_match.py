@@ -28,11 +28,9 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from launch_bind import SRC, _module_of, _resolve_import
+from miniworld_engine.tools.launch_bind import SRC, _module_of, _resolve_import
 
 FN_LEVEL = {"token_key": "token", "atom_key": "atom", "both_key": "both"}
 REG = SRC / "miniworld_engine/kernels/registry.csv"

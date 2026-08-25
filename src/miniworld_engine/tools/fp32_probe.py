@@ -28,7 +28,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 PY = str(REPO / ".pixi/envs/default/bin/python")
 REGISTRY = REPO / "src/miniworld_engine/kernels/registry.csv"
 

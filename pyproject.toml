@@ -176,7 +176,7 @@ select = [
 #   ARG   unused arguments are the bench harness's uniform signature
 #         `(conf, seq_len, implementation, fabric)`, which every target must accept.
 #   T20   367 `print`s: this is a CLI and a benchmark runner. Printing is the output.
-#   INP   `tests/`, `tools/` and `benchmarks/` are script trees, deliberately not packages.
+#   INP   `tests/` and `benchmarks/` are script trees, deliberately not packages.
 #   TC    moving imports into `if TYPE_CHECKING` breaks jaxtyping, which resolves its annotations
 #         at runtime through `@typecheck`.
 ignore = [
@@ -211,7 +211,7 @@ ban-relative-imports = "all"
   "E402",   # the bench/tool scripts bootstrap sys.path before importing the package
   "PT",
 ]
-"tools/**/*.py" = ["PT"]
+"src/miniworld_engine/tools/**/*.py" = ["PT"]
 # team-gm's kernel relaxation (math-notation names, no annotations) for the
 # connecting/reference code that lives under kernels/ (interface.py, reference.py).
 "src/miniworld_engine/kernels/**/*.py" = []
@@ -272,7 +272,7 @@ pythonVersion = "3.10"
 typeCheckingMode = "off"
 
 [tool.ty.src]
-include = ["src", "tests", "benchmarks", "tools"]
+include = ["src", "tests", "benchmarks"]
 exclude = [
   ".pixi",
   "**/.pixi",
@@ -315,11 +315,6 @@ invalid-method-override = "ignore"
 [tool.ty.environment]
 python-version = "3.10"
 # tests/test_registry_complete.py imports classify/launch_bind/key_gaps from
-# tools/kernel-audit via sys.path at call time (tools/ is not shipped in a wheel, so it
-# cannot be a package). Naming the directory here lets ty resolve those imports for real
-# instead of suppressing them; the directory itself stays out of `[tool.ty.src].include`,
-# so its own contents are not checked.
-extra-paths = ["tools/kernel-audit"]
 
 # ----------------------------------------------------------------------------
 # pixi — single unified environment for the whole repo (triton + Transformer
@@ -383,12 +378,12 @@ fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"
-ruff-check = "ruff check src tests benchmarks tools"
-ruff-format = "ruff format src tests benchmarks tools"
+ruff-check = "ruff check src tests benchmarks"
+ruff-format = "ruff format src tests benchmarks"
 # benchmarks too: `[tool.ty.src].include` has always listed it, but the command checked
 # src+tests only, so 53 findings in the bench harness were invisible -- among them a
 # `BenchResult(status=...)` that raised TypeError on the path it was guarding.
-types = "ty check src tests benchmarks tools"
+types = "ty check src tests benchmarks"
 
 # The whole suite is CPU-only and runs in ~76 s; naming a subset here is what let 13 of
 # 16 test files run nowhere automatic.
@@ -400,7 +395,7 @@ types = "ty check src tests benchmarks tools"
 test = "python -m pytest tests/ -m 'not gpu' -q"
 test-gpu = "python -m pytest tests/ -m gpu -q"
 # Mirrors the CI job, in its order: lint, then the type gate, then the suite.
-ci = "ruff check src tests benchmarks tools && ty check src tests benchmarks tools && python -m pytest tests/ -m 'not gpu' -q"
+ci = "ruff check src tests benchmarks && ty check src tests benchmarks && python -m pytest tests/ -m 'not gpu' -q"
 
 [project.scripts]
 miniworld-engine = "miniworld_engine.cli:main"

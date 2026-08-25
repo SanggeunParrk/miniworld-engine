@@ -38,7 +38,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint (ruff)
-        run: ruff check src tests benchmarks tools
+        run: ruff check src tests benchmarks
 
       - name: Types (ty)
         # `ty`, not pyright. pyright cannot parse this codebase: jaxtyping shape strings
@@ -62,7 +62,7 @@ jobs:
         #
         # The count is zero and this step GATES. No `|| true`: a finding must be fixed or
         # suppressed at its line with a reason, never hidden behind a green step.
-        run: ty check src tests benchmarks tools
+        run: ty check src tests benchmarks
 
       - name: Tests (whole suite -- every test here is CPU-only)
         # Runs ALL of tests/, not a hand-listed subset. It used to name three files, so

@@ -25,7 +25,7 @@ import ast
 import csv
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[2] / "src"
+SRC = Path(__file__).resolve().parents[2]
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 ALLOWED = Path(__file__).parent / "key_gaps_allowed.csv"
 #: padding helpers derived from a keyed dim, never independent

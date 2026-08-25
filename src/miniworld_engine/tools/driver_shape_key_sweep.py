@@ -19,9 +19,9 @@ One child process per (kernel, length): the drivers read ``MINIWORLD_DRIVER_LENG
 time, so the length cannot be changed inside a live process.
 
     # one shard of a job array
-    python tools/kernel-audit/driver_shape_key_sweep.py --shard 3 --nshards 24
+    python src/miniworld_engine/tools/driver_shape_key_sweep.py --shard 3 --nshards 24
     # collate
-    python tools/kernel-audit/driver_shape_key_sweep.py --report
+    python src/miniworld_engine/tools/driver_shape_key_sweep.py --report
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 OUT = REPO / ".bench/_shapekey_sweep"
 PY = str(REPO / ".pixi/envs/default/bin/python")
 CONFIG_DIR = str(REPO / ".bench/onecfg")

@@ -6,13 +6,13 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 16
 #SBATCH -t 01:00:00
-#SBATCH -o tools/kernel-audit/prof/prof-%j.log
+#SBATCH -o src/miniworld_engine/tools/prof/prof-%j.log
 set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
 export PYTHONPATH=src
 export TRITON_CACHE_DIR=${MINIWORLD_TRITON_CACHE:-$HOME/.cache/miniworld-triton}
-OUT=$R/tools/kernel-audit/prof
+OUT=$R/src/miniworld_engine/tools/prof
 PY=.pixi/envs/default/bin/python
 
 echo "### host $(hostname)"

@@ -34,7 +34,7 @@ import ast
 import collections
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[2] / "src"
+SRC = Path(__file__).resolve().parents[2]
 PKG = "miniworld_engine"
 #: The autotuner injects these; a caller never passes them.
 INJECTED = ("BLOCK", "GROUP")

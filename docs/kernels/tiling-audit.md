@@ -10,7 +10,7 @@ Every kernel the repo declares, measured against the tile configuration rather t
 right. Nothing here is inferred from reading a kernel and deciding it looks correct — each row is
 either a run on an A6000 (sm86) or an AST fact, and the two are labelled differently.
 
-Harness, all under `tools/kernel-audit/` and run from the repo root:
+Harness, all under `src/miniworld_engine/tools/` and run from the repo root:
 `tiling_sweep.py` (runs every registry driver, then its checker, under whatever
 `MINIWORLD_CONFIG_DIR` names; `--isolate --dirty --repeat` are the three flags this audit learned
 it needs), `tiling_static.py`, `grid_audit.py`, `mask_audit.py`, `gen_axes.py`, and the four
@@ -180,7 +180,7 @@ the config reaches the kernels.
   `trimul_gemm_gate_saveact_triton`, `trimul_outproj_gemm_gate_saveact_triton`, all in
   `modules/triangle_multiplication/baseline_dtv1.py`).
 
-  **Regenerated** by `tools/kernel-audit/gen_axes.py` from the code and the config CSVs: 210 axis rows over 91
+  **Regenerated** by `src/miniworld_engine/tools/gen_axes.py` from the code and the config CSVs: 210 axis rows over 91
   ops, every column a checkable fact — the op's kernel symbol and file:line, the axis name as
   triton injects it, its value in each of the 9 config sets, and `grid_axis` / `loop_step` /
   `loop_extent` / `extent_bounded`. The prose columns (`meaning`, `extent`, `notes`) were not
@@ -302,7 +302,7 @@ All five families ran. Two findings need their own explanation before the per-fa
   but it zeroes fresh memory and therefore *masks* allocator-dependent out-of-bounds reads — here it
   produced a false negative. Neither mode alone is sufficient.
 
-  **Settled by a controlled experiment** (`tools/kernel-audit/trimul_bidir_oob.py`), which holds shape,
+  **Settled by a controlled experiment** (`src/miniworld_engine/tools/trimul_bidir_oob.py`), which holds shape,
   config and seed fixed in one process and varies only whether the caching allocator has served
   non-zero bytes:
 
@@ -373,7 +373,7 @@ All five families ran. Two findings need their own explanation before the per-fa
 * **A CUDA error poisons the context.** After the first illegal or misaligned access, every later
   launch in the same process re-raises that same error. The first ragged run reported 16 failures
   with byte-identical error text, of which one was real and 15 were never measured. Use
-  `tools/kernel-audit/tiling_sweep.py --isolate`, which runs each kernel in its own subprocess. Any sweep that
+  `src/miniworld_engine/tools/tiling_sweep.py --isolate`, which runs each kernel in its own subprocess. Any sweep that
   can hit a memory fault and does not isolate is reporting the first failure N times.
 
 ## Ragged results by family
