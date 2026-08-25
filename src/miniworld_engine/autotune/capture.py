@@ -150,55 +150,39 @@ def load_compile_state(shard_path) -> int:
             ln = raw.strip()
             if not ln:
                 continue
-            if ln[0] in "+-":
-                # "<+|-><kernel>\t<cfg sig>": outcome-tagged, written since the fork guard learned
-                # to trust the pool. The sig alone still goes in _COMPILED so the ROUND skip works
-                # exactly as before.
+            if ln[0] in "+-":  # "<+|-><kernel>\t<cfg sig>"
                 (_COMPILE_OK if ln[0] == "+" else _COMPILE_BAD).add(ln[1:])
-                _COMPILED.add(ln[1:].partition("\t")[2] or ln[1:])
-            else:  # legacy bare sig: settled, outcome unknown -> still fork to find out
-                _COMPILED.add(ln)
-    return len(_COMPILED)
+            # A legacy bare sig names no kernel, so it cannot answer either question and is
+            # dropped. It costs one round of recompiling on the first restart of a unit whose
+            # `.compiled` predates the outcome tags; every later restart reads tagged rows.
+    return len(_COMPILE_OK) + len(_COMPILE_BAD)
 
 
-#: sigs whose compile is already in the on-disk triton cache from an earlier attempt at this unit.
-#: The probe replay made a restart skip re-BENCHING; without the same trick for compiling, every
-#: restart still re-submitted the whole round to a fresh spawn pool -- 446 s a time, which is what
-#: turned 87 legitimate kills into 7799 s. The triton cache is already warm for these; the cost
-#: being avoided is the pool spawn and the job round-trip, not the compile itself.
-_COMPILED: set = set()
 _COMPILED_FILE: list = []
 
-#: "<kernel>\t<cfg sig>" for compiles the precompile POOL already settled, split by outcome.
-#: _COMPILED answers "should the round recompile this?"; these answer the different and much more
-#: expensive question "must the serial pass still fork a child to find out?". A config the pool
-#: compiled cannot be a compile monster -- that is exactly what the pool just proved, under the
-#: same SIGKILL budget -- so re-proving it costs a fork + a pipe + a poll loop (179 ms measured)
-#: to protect a triton.compile that is a warm on-disk cache hit (3.5 ms measured). A config the
-#: pool FAILED needs no child either: the answer is already known and the bench scores it +inf.
+#: "<kernel>\t<cfg sig>" for compiles the precompile POOL already settled, split by outcome. Two
+#: questions are answered off this one record, and they must be answered with the SAME key:
+#:
+#:   * should the ROUND recompile this? -- avoids re-submitting a warm round to a fresh spawn
+#:     pool on every restart, 446 s a time, which is what turned 87 legitimate kills into 7799 s.
+#:   * must the SERIAL pass fork a child to find out? -- a config the pool compiled cannot be a
+#:     compile monster, that is exactly what the pool just proved under the same SIGKILL budget,
+#:     so re-proving it costs a fork + a pipe + a poll loop (179 ms measured) to protect a
+#:     triton.compile that is a warm on-disk cache hit (3.5 ms). A config the pool FAILED needs no
+#:     child either: the answer is known and the bench scores it +inf.
+#:
+#: They were once keyed differently -- the round by bare sig, the fork by "<kernel>\t<sig>" -- and
+#: rounds interleave across the kernels of one unit (see `prune_configs`). A second kernel reusing
+#: the first one's tile axes therefore produced identical sigs, its round was skipped as "already
+#: compiled", the pool never ran for it, and every one of its configs fell through to the fork it
+#: was the pool's job to avoid: 864 forks, 4166 s, on a unit that should have spent ~400 s.
 _COMPILE_OK: set = set()
 _COMPILE_BAD: set = set()
 
 
-def _mark_compiled(sigs) -> None:
-    """Record configs whose compile is SETTLED -- succeeded or permanently failed.
-
-    Failures have to be recorded too. A config that fails to compile fails deterministically (it
-    spills registers, or wants more smem than the card has), so retrying it on every restart is
-    pure loss: 38 such configs cost 206 s per attempt and, across ~90 attempts, dominated the
-    restart budget the compiled-list was added to remove. A settled failure is as reusable a fact
-    as a settled success -- the bench scores it +inf either way.
-    """
-    new_sigs = [x for x in sigs if x not in _COMPILED]
-    if not new_sigs:
-        return
-    _COMPILED.update(new_sigs)
-    if _COMPILED_FILE:
-        try:
-            with _COMPILED_FILE[0].open("a") as fh:
-                fh.write("".join(x + "\n" for x in new_sigs))
-        except OSError:
-            pass
+def _settled(kernel: str, sig: str) -> bool:
+    key = f"{kernel}\t{sig}"
+    return key in _COMPILE_OK or key in _COMPILE_BAD
 
 
 def _mark_outcome(kernel: str, sigs_ok) -> None:
@@ -535,11 +519,12 @@ def _precompile_round(src, target, options, configs) -> None:
     import time
 
     started = time.monotonic()
-    todo = [c for c in configs if _cfg_sig(c) not in _COMPILED]
+    kname = getattr(getattr(src, "fn", None), "__name__", "?")
+    todo = [c for c in configs if not _settled(kname, _cfg_sig(c))]
     skipped = len(configs) - len(todo)
     if not todo:
-        print(f"  [precompile] round skipped: all {len(configs)} configs already compiled "
-              f"on an earlier attempt", flush=True)
+        print(f"  [precompile] {kname}: round skipped, all {len(configs)} configs already "
+              f"compiled for THIS kernel on an earlier attempt", flush=True)
         return
     configs = todo
     try:
@@ -587,8 +572,7 @@ def _precompile_round(src, target, options, configs) -> None:
         # settled = attempted and answered, pass or fail. `done` is shorter than `configs` only
         # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
         # unsettled and is retried, which is the intent.
-        _mark_compiled(_cfg_sig(c) for c, _ in zip(configs, done, strict=False))
-        _mark_outcome(src.fn.__name__,
+        _mark_outcome(kname,
                       ((_cfg_sig(c), bool(d and d[0])) for c, d in zip(configs, done, strict=False)))
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
