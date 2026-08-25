@@ -28,6 +28,18 @@ the `ty` step once ran against an install with no torch, so every attribute was 
 The CPU suite must stay CPU-only and fast. A test that needs a device goes behind
 `@pytest.mark.gpu`.
 
+**A green CI does not mean the kernels are correct.** It cannot: CI has no GPU, so the 116
+gpu-marked tests run zero times there — 1230 CPU tests run, and every claim about what a kernel
+computes comes from someone running `pixi run test-gpu` and `python -m
+miniworld_engine.autotune.run_all` on an allocated card. A self-hosted runner is deliberately out
+of scope (`docs/product-standards.md`, last section).
+
+So: if your change touches a kernel, a tolerance, an arch gate or a dispatch decision, run it on a
+card and say what you saw in the commit message. Two changes on the day this was written — 95
+tolerance bands narrowed 5x, and three kernels ungated from sm100 — were green in CI before and
+after, and would have been green if either had been wrong. `run_all` writes
+`autotune/manifests/<card>.csv`; commit it, and the release gate will hold you to having one.
+
 ## What a change includes
 
 **A test that fails without it.** Not a test that exercises the new code — a test that reproduces

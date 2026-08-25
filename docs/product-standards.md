@@ -225,24 +225,30 @@ version is 1.0.0 rather than 0.2.0.
 
 ## J. Verification at a distance — CI proves what the README claims
 
-### J1. The claims that need a GPU are checked by something that has one
+### J1. The GPU claims are backed by dated evidence, not by memory
 
-Two CI jobs, `checks` and `floor`, both `runs-on: ubuntu-latest`. The GPU step in `checks`
-runs `pytest --collect-only -m gpu` — it verifies that GPU tests can be *collected*, not that
-any of them pass. **103 kernels, 0 executed in CI.**
+Three CI jobs, all `runs-on: ubuntu-latest`. 1230 CPU tests run on every push; the **116
+gpu-marked tests run zero times**, and the one step that mentions the GPU is `--collect-only`,
+which proves they can be collected. Every claim about kernel correctness comes from a person
+running `run_all` on this cluster.
 
-*Prevents:* the state this repo is in, where every correctness and performance claim rests on
-the author having run something by hand on one of two Ampere cards.
+A self-hosted GPU runner would close that and is **deliberately excluded** — see the section at
+the end. So the criterion is not "CI executes them", which is unreachable here; it is that the
+evidence exists, says when and against what it was produced, and that its absence is loud at the
+moment it matters.
 
-*Enforced by:* nothing. `run_all` (`ok 94, failed 0, skipped 9`), the numerical suite
-(`98 passed, 2 skipped`), and opcheck (`5 passed`) are all real results and all manual.
+*Prevents:* a release going out that nothing has ever run on a card, and — the subtler one — a
+manifest from six months and two rewrites ago being read as current.
 
-*Status:* **partially met.** CI still executes nothing on a GPU. What changed is that the
-evidence is no longer a memory: `run_all` writes a per-card manifest with a `#provenance` row
-naming the version, commit, tree state and date, `docs/supported.md` cites those manifests, and
+*Enforced by:* `run_all` writes `autotune/manifests/<card>.csv` with a `#provenance` row (version,
+commit, clean/dirty, date); `docs/supported.md` cites those manifests;
 `tests/registry/test_a_release_has_been_run_on_a_card.py` fails a release whose version appears in
-no manifest, or only in one produced from a dirty tree. Scoped to the release on purpose -- a
-freshness gate red on every commit is a gate that gets switched off.
+no manifest, or only in one produced from a dirty tree.
+
+*Status:* **met, scoped.** And the scope has a cost that must not be misread: **a green CI does
+not mean the kernels are verified.** It means nothing about them. Today's tolerance tightening
+(95 bands, 5x narrower) and arch relaxation (3 kernels ungated) were both checked by hand on an
+A6000; CI was green before and after either, and would have been green if either had been wrong.
 
 ### J2. The shipped autotune cache is validated, not trusted
 
@@ -440,6 +446,13 @@ is that a *named* consumer can install, upgrade, and verify — that consumer is
 **A full hardware matrix in CI.** sm100 CI is not a reasonable ask. The criterion (G2, J1) is
 that the claim matches the evidence: run what can be run, and mark the rest unverified rather
 than implying it was tested.
+
+**A self-hosted GPU runner.** It would let CI execute the 116 gpu-marked tests, and it is out of
+scope by decision: it needs a registered runner token, a daemon resident on a cluster GPU node,
+and that node's capacity held for CI rather than for work. The consequence is accepted and stated
+rather than worked around -- J1 is met by dated evidence, and a green CI says nothing about the
+kernels. Anything that reintroduces "CI is the gate for kernel correctness" is reintroducing a
+claim this repository cannot support.
 
 **Backwards compatibility with the pre-rename package.** The rename was correct. What is
 required (I4) is that the break be versioned and announced, not that it be undone.

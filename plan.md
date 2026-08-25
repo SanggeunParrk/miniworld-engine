@@ -115,7 +115,7 @@ machine with mathdx installed anywhere else.
 
 ## B. Prove it somewhere that is not this machine
 
-### B1 — DONE (scoped) — no GPU runs in CI  (J1)
+### B1 — DONE (scoped by decision) — no GPU runs in CI  (J1)
 
 *Gap, measured:* both CI jobs are `runs-on: ubuntu-latest`. The "gpu" step runs
 `pytest --collect-only -m gpu` — it proves GPU tests can be *collected*. **103 kernels, 0
@@ -146,8 +146,14 @@ ordinary commit until someone finds a card, and a gate that is red by default is
 switched off -- that is what cut the first attempt. The version only moves at a release, which is
 the one moment where "nobody has run this" should stop the line.
 
-What remains true: CI itself still executes 0 of 103 kernels. The gate does not change that; it
-makes the absence of evidence fail loudly at the moment it matters instead of quietly forever.
+What remains true: CI executes 0 of the 116 gpu-marked tests. A self-hosted runner would change
+that and is **excluded by decision** -- it needs a runner token, a resident daemon on a cluster GPU
+node, and that node's capacity held for CI. So J1 is met in the only sense available here: the
+evidence exists, it is dated, and its absence fails a release.
+
+The cost is written where it can mislead. `CONTRIBUTING.md` now says a green CI means nothing about
+the kernels, with the day's own example: 95 tolerance bands narrowed 5x and three kernels ungated
+from sm100, both green before and after, both would have been green if wrong.
 
 ### B2 — DONE — no end-to-end test proves the kernels are substitutable  (K2)
 
