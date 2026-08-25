@@ -20,7 +20,7 @@ import csv
 import re
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 REGISTRY = REPO / "src/miniworld_engine/kernels/registry.csv"
 README = REPO / "README.md"
 BEGIN = "<!-- BEGIN GENERATED: hardware-support -->"

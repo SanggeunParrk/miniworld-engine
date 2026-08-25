@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 BENCH = REPO / "benchmarks" / "runners" / "bench.py"
 SOURCE = BENCH.read_text()
 TREE = ast.parse(SOURCE)

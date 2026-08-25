@@ -178,7 +178,7 @@ def test_the_packaged_config_dir_is_not_a_package() -> None:
 
     Nothing about that is visible in a diff that adds one empty file, so it is asserted here.
     """
-    configs_dir = Path(__file__).resolve().parents[1] / "src/miniworld_engine/autotune/configs"
+    configs_dir = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/autotune/configs"
     assert configs_dir.is_dir(), configs_dir
     init = configs_dir / "__init__.py"
     assert not init.exists(), (

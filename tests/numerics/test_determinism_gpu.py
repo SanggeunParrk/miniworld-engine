@@ -32,7 +32,7 @@ import pytest
 
 pytestmark = pytest.mark.gpu
 
-REGISTRY = Path(__file__).resolve().parents[1] / "src/miniworld_engine/kernels/registry.csv"
+REGISTRY = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
 
 #: One kernel per family that has a checker, chosen for launch-path variety rather than coverage:
 #: an atomic accumulation, a split reduction, a persistent grid, a fused epilogue. Declared rather

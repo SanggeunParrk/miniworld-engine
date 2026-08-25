@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-REG = Path(__file__).resolve().parents[1] / "src/miniworld_engine/kernels/registry.csv"
+REG = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 
 

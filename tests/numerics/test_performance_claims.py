@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 
 #: Docs a reader takes as CURRENT. Anything here that quotes a latency or a speedup has to say on
 #: what. Declared rather than globbed: the distinction between a reference and a record is a

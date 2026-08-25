@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "kernels"
+_SRC = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine" / "kernels"
 
 # Files whose M-index must stay promoted. The check is a REGEX over the tile-axis name, not a
 # literal: pinning ``tl.arange(0, BLOCK_M)`` made this test fail the moment fcd3c7a renamed the

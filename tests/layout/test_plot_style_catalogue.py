@@ -29,7 +29,7 @@ import pytest
 
 from miniworld_engine.viz import style
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 BENCH = REPO / "benchmarks" / "runners" / "bench.py"
 
 

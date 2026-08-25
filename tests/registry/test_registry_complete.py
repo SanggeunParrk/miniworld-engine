@@ -22,7 +22,7 @@ import csv
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 SRC = ROOT / "src"
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 KERNELS = SRC / "miniworld_engine/kernels"

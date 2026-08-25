@@ -19,7 +19,7 @@ import pytest
 
 from miniworld_engine.cli import build_parser
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 DOCS = [ROOT / "README.md", ROOT / "docs" / "operations" / "dispatch-cache.md",
         ROOT / "src" / "miniworld_engine" / "cli.py"]
 

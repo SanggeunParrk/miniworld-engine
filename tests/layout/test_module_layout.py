@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-MODULES = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "modules"
+MODULES = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine" / "modules"
 
 #: The flat modules that are infrastructure, not ops. Anything else flat under `modules/` is an op
 #: that skipped the folder rule.

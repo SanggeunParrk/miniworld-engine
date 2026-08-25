@@ -20,7 +20,7 @@ import pytest
 
 from miniworld_engine.autotune.run_all import DEFAULT_RTOL, check_one, declared_rtol
 
-REGISTRY = Path(__file__).resolve().parents[1] / "src/miniworld_engine/kernels/registry.csv"
+REGISTRY = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
 
 
 def _rows() -> list[dict]:

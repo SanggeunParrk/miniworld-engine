@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 
-KERNELS = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "kernels"
+KERNELS = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine" / "kernels"
 BACKENDS = {"triton", "cute", "cuda", "cutlass"}
 
 #: The only imports one ``drivers/<family>.py`` may take from another, and the shape group each

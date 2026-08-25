@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-PKG = Path(__file__).resolve().parents[1] / "src/miniworld_engine"
+PKG = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine"
 KERNELS_INIT = PKG / "kernels/__init__.py"
 
 

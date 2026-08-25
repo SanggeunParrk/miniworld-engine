@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-KERNELS = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine" / "kernels"
+KERNELS = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine" / "kernels"
 
 #: The call that compiles. `load_extension` is this repo's wrapper (kernels/_nvcc.py); torch's
 #: `load` is the thing it wraps. Either at module scope means a build at import.

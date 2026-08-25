@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 PKG = REPO / "src" / "miniworld_engine"
 
 #: A jaxtyping annotation. Its shape names live in a string ruff parses as a forward reference, so

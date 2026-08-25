@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 
 # Read as text, not with `tomllib`: `requires-python = ">=3.10"` and tomllib is 3.11+, so
 # importing it here would make the suite need a newer Python than the library does.

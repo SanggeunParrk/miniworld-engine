@@ -100,7 +100,7 @@ def test_every_jit_load_goes_through_the_guard() -> None:
     """The guard is worth nothing on a call site that still uses `load` directly."""
     import ast
 
-    root = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine"
+    root = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine"
     offenders = []
     for path in sorted(root.rglob("*.py")):
         if path.name == "_nvcc.py":

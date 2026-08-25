@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-BENCH = Path(__file__).resolve().parents[1] / "benchmarks" / "runners" / "bench.py"
+BENCH = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "benchmarks" / "runners" / "bench.py"
 SRC = BENCH.read_text()
 TREE = ast.parse(SRC)
 LINES = SRC.splitlines()

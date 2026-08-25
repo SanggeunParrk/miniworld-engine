@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-REG = Path(__file__).resolve().parents[1] / "src/miniworld_engine/kernels/registry.csv"
+REG = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
 
 pytestmark = pytest.mark.gpu
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "miniworld_engine"
+SRC = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine"
 
 
 def _own_return_arities(node: ast.FunctionDef | ast.Lambda) -> set[int] | None:

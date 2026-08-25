@@ -28,7 +28,7 @@ import pytest
 from miniworld_engine import cli
 from miniworld_engine.autotune.builder import CASE_NAMES
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 BENCH = REPO / "benchmarks" / "runners" / "bench.py"
 TREE = ast.parse(BENCH.read_text())
 
