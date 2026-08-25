@@ -117,3 +117,55 @@ def test_an_exact_kernel_can_declare_zero(monkeypatch) -> None:
     off = _register(monkeypatch, _checker(1.0 + 1e-7, 1.0))
     ok, detail = check_one(off, 0.0)
     assert not ok, detail
+
+
+def test_a_declared_band_is_above_what_that_kernel_measured() -> None:
+    """A band below the kernel's own measured error fails on a correct run; far above it catches
+    nothing. Both are checked against `autotune/manifests/`, which run_all writes.
+
+    The manifests are the only record of what each kernel actually costs, so a band that drifts
+    away from them -- in either direction -- means the declaration and the measurement have stopped
+    describing the same kernel.
+    """
+    import collections
+    import math
+    import re
+
+    from miniworld_engine.autotune.run_all import DEFAULT_RTOL, RTOL_MARGIN
+
+    manifests = REGISTRY.parent.parent / "autotune" / "manifests"
+    measured: dict[str, list[float]] = collections.defaultdict(list)
+    for f in sorted(manifests.glob("*.csv")):
+        with f.open(newline="") as fh:
+            for row in csv.DictReader(fh):
+                if row["status"] != "ok":
+                    continue
+                vals = [float(v) for v in re.findall(r"=([0-9.e+-]+)", row["detail"] or "")
+                        if "e" in v or "." in v]
+                if vals:
+                    measured[row["kernel"]].append(max(vals))
+    assert measured, f"no measurements in {manifests}; the check below would pass vacuously"
+
+    too_tight, too_loose = [], []
+    with REGISTRY.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            band = (row.get("rtol") or "").strip()
+            worst = max(measured.get(row["kernel"], [0.0]) or [0.0])
+            if not band or not worst:
+                continue
+            b = float(band)
+            if b < worst:
+                too_tight.append(f"{row['kernel']}: band {b:.1e} < measured {worst:.1e}")
+            elif b >= DEFAULT_RTOL:
+                continue                      # capped at the default, deliberately
+            elif b > worst * RTOL_MARGIN * 1.5:
+                too_loose.append(f"{row['kernel']}: band {b:.1e} vs measured {worst:.1e} "
+                                 f"({b / worst:.0f}x, margin is {RTOL_MARGIN:.0f}x)")
+    assert not too_tight, (
+        "declared band below the kernel's own measured error -- a correct run would fail:\n  "
+        + "\n  ".join(too_tight))
+    assert not too_loose, (
+        "declared band far above what the kernel measures, so it catches nothing:\n  "
+        + "\n  ".join(too_loose)
+        + f"\n  Re-derive from {manifests.name}/ at {RTOL_MARGIN:.0f}x, or say why in the row.")
+    assert math.isfinite(DEFAULT_RTOL)

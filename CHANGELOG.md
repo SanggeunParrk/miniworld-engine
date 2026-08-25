@@ -37,6 +37,17 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   enabled. The A5000/A6000 caches need rebuilding.
 
 ### Changed
+- **Per-kernel numerical tolerance, derived from measurement.** `registry.csv` had an `rtol`
+  column and 0 of 103 rows filled it, so every kernel was held to one global `5e-2` — 18x the
+  median kernel's actual error, and 88 of 97 sat more than 10x inside it. Each row now declares
+  a band computed as `4x` its worst measured relative error, from the two device manifests
+  `run_all` writes. The margin is from the data, not chosen: the same kernel's error across the
+  two cards varies by median 1.07x, p90 1.47x, **max 1.95x**, so 4x leaves two more doublings
+  than anything observed. Calibration only tightens — the two kernels already measuring close to
+  the global band (`adaln_fwd_saveact_triton` 2.77e-2, `triangle_attention_bwd_atomic_triton`
+  1.44e-2) keep `5e-2` rather than being handed something looser. Median band is now `1.1e-2`,
+  a 5x tightening. `tests/registry/test_declared_tolerance.py` fails if a band drops below what
+  the kernel measured, or drifts far above it.
 - **`settings.AutotuneKernel` is three names, and an unknown one now raises.** It declared
   seven; four of them (`tri_multi`, `layernorm`, `layer_norm_linear`, `augmented_attention`)
   had no call site, so naming one unlocked nothing and reported nothing. `autotune_kernels`

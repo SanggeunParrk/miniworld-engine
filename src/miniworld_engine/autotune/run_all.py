@@ -65,6 +65,12 @@ def run_checker(check: str):
 #: invisible in the model. A kernel that needs this much slack should say so in `registry.csv`,
 #: where a reviewer sees it; `rtol` is that column.
 DEFAULT_RTOL = 5e-2
+#: How far above a kernel's MEASURED worst relative error its declared band sits. Chosen from the
+#: data rather than picked: the same kernel's rel across the two cards in `autotune/manifests/`
+#: varies by median 1.07x, p90 1.47x, max 1.95x, so 4x leaves two more doublings of headroom than
+#: anything observed. Calibration may only TIGHTEN -- a kernel whose measurement is already close
+#: to DEFAULT_RTOL keeps DEFAULT_RTOL rather than being given a looser band than it has today.
+RTOL_MARGIN = 4.0
 
 
 def check_one(check: str, rtol: float | None = None) -> tuple[bool, str]:
