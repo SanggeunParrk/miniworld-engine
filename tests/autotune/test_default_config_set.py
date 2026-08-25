@@ -185,3 +185,26 @@ def test_the_packaged_config_dir_is_not_a_package() -> None:
         f"{init} would shadow autotune/configs.py, the config-CSV reader. The directory is DATA "
         f"(the shipped default config set); it is reached by path, never imported. If it must "
         f"become a package, rename the module first.")
+
+
+@pytest.mark.parametrize("given", ["grid", "configs/grid", "blk16", "configs/blk16"])
+def test_the_old_repo_relative_form_still_resolves(given, tmp_path):
+    """Moving the sets into the package must not break a command line that already worked.
+
+    Every script and doc wrote `configs/<name>` while the sets lived at the repo root. That form
+    would otherwise become "unknown config set" -- a rename presenting as a missing file.
+    """
+    from miniworld_engine import cli
+
+    resolved = cli.resolve_config_dir(given, tmp_path)
+    assert not isinstance(resolved, int), f"{given} did not resolve"
+    assert resolved == configs.CONFIG_ROOT / given.rsplit("/", 1)[-1]
+
+
+def test_an_unknown_name_still_fails_in_both_forms(tmp_path, capsys):
+    """The compatibility path must not turn a typo into a silent default."""
+    from miniworld_engine import cli
+
+    for given in ("nope", "configs/nope"):
+        assert cli.resolve_config_dir(given, tmp_path) == 2, given
+    assert "unknown config set" in capsys.readouterr().err

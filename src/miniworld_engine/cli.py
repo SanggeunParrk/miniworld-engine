@@ -413,9 +413,15 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
 
     packaged_root = _configs.CONFIG_ROOT
     given = Path(config_type).expanduser()
-    candidates = [given] if given.is_absolute() or given.parts[:1] == (CONFIG_ROOT,) else [
-        packaged_root / config_type, given,
-    ]
+    if given.is_absolute():
+        candidates = [given]
+    else:
+        # `configs/<name>` is the form every script and doc used while the sets lived at the repo
+        # root. Moving them into the package would otherwise turn a working command line into
+        # "unknown config set", so the prefix is stripped and the name resolved where the sets
+        # actually are. A real relative directory still wins if it exists.
+        stripped = Path(*given.parts[1:]) if given.parts[:1] == (CONFIG_ROOT,) else given
+        candidates = [given, packaged_root / stripped, packaged_root / config_type]
     for c in candidates:
         if c.is_dir():
             return c

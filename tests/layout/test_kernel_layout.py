@@ -88,6 +88,45 @@ def test_every_backend_directory_is_a_package() -> None:
     assert not missing, f"backend dirs that are not packages: {', '.join(missing)}"
 
 
+#: Module names allowed at family level, with the role each one holds. The directory rule below
+#: makes a new backend a deliberate act; without this, a new FILE was not -- `test_every_family_has`
+#: only checks that the required ones exist, so any name could drift in beside them.
+#:
+#: `compile_native.py` is layernorm's alone. It holds the custom_op-wrapped impls and the backward
+#: resolution, which other families keep in `interface.py` or in the backend package. The name is
+#: load-bearing rather than merely historical: tracked benchmark rows record the implementation as
+#: `kernels.layernorm.compile_native.triton_persistent`, so renaming it would invalidate recorded
+#: provenance for a cosmetic gain. Admitted deliberately, not by omission.
+FAMILY_MODULES = {
+    "__init__.py":      "the family package",
+    "interface.py":     "the ONE public door -- the names the rest of the repo may import",
+    "reference.py":     "the torch definition; what `correct` means for this family",
+    "dispatch.py":      "a per-GPU or per-shape CHOICE among implementations",
+    "whole_op.py":      "the fused op-level entry point a module consumes",
+    "autograd.py":      "the family's autograd.Function",
+    "compile_native.py": "layernorm only -- see above",
+}
+
+
+def test_no_unexpected_module_at_family_level() -> None:
+    """A new backend is a deliberate act (below); a new module beside `reference.py` must be too."""
+    stray = [f"{d.name}/{f.name}" for d in _families() for f in sorted(d.glob("*.py"))
+             if f.name not in FAMILY_MODULES]
+    assert not stray, (
+        f"unrecognised module(s) at kernel-family level: {', '.join(stray)}. Either it belongs in "
+        f"the family's backend package, or add it to FAMILY_MODULES with the role it holds -- "
+        f"known: {', '.join(sorted(FAMILY_MODULES))}")
+
+
+def test_every_declared_family_module_is_actually_used() -> None:
+    """The other direction: a name nobody uses is a rule protecting nothing."""
+    unused = [name for name in FAMILY_MODULES
+              if not any((d / name).exists() for d in _families())]
+    assert not unused, (
+        f"FAMILY_MODULES declares {unused}, which no family has. Drop the entry -- an allowed-list "
+        f"that outlives its members stops describing the tree.")
+
+
 #: Not a backend, but allowed beside them: `notes/` is the family's optimization log -- the write-up
 #: per round and the captures a write-up cites. It lives with the kernel rather than in a top-level
 #: tree, because it is information about THAT kernel and nothing else reads it.
