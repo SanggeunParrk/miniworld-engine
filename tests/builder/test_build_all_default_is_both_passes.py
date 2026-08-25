@@ -83,3 +83,27 @@ def test_a_named_case_still_gets_its_single_module_pass(spy) -> None:
     assert len(spy) == 1, f"a named case ran {len(spy)} passes: {spy}"
     assert spy[0]["kind"] == "Case", spy
     assert spy[0]["fill_gaps"] is False, spy
+
+
+def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:
+    """The last untested link. `build_all(fill_gaps=True)` is checked above, and the child parses
+    `--fill-gaps`; nothing checked that the runner in between puts it on the command line, and the
+    two passes of `build all` differ by nothing else. A `blk64` smoke cannot catch it either: with
+    one config per op, filling a gap and re-ranking a hit are the same work."""
+    from miniworld_engine.autotune import builder
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        raise SystemExit(0)          # stop before anything launches
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    unit = builder.op_units({"gated_projection_gate_triton"})[0]
+    for want in (True, False):
+        seen.clear()
+        shard_dir = tmp_path / f"s{want}"
+        shard_dir.mkdir()                       # the runner claims the unit with O_EXCL in here
+        with pytest.raises(SystemExit):
+            builder._run_unit_subprocess(unit, 0, shard_dir, tmp_path, 1, fill_gaps=want)
+        assert ("--fill-gaps" in seen["cmd"]) is want, seen["cmd"]

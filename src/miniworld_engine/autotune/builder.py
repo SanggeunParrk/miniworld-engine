@@ -1190,7 +1190,9 @@ def _child_main(argv: list[str] | None = None) -> int:
         use_config_dir(args.config_dir, require_all=False)
         # Reported after run_case, when the kernels have imported and registered: counting here
         # would always print 0/0, since nothing has asked for configs yet.
-        print(f"  [config] set to {args.config_dir}", flush=True)
+        print(f"  [config] set to {args.config_dir}"
+              f"{'  [fill-gaps] keys the cache already holds are left alone' if args.fill_gaps else ''}",
+              flush=True)
     settings.configure(run_autotune=True, capture=True, fill_gaps=args.fill_gaps,
                        compile_jobs=(args.compile_jobs or None))
     p_drop = 0.0
