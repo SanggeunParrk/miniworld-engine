@@ -88,12 +88,27 @@ def test_every_backend_directory_is_a_package() -> None:
     assert not missing, f"backend dirs that are not packages: {', '.join(missing)}"
 
 
+#: Not a backend, but allowed beside them: `notes/` is the family's optimization log -- the write-up
+#: per round and the captures a write-up cites. It lives with the kernel rather than in a top-level
+#: tree, because it is information about THAT kernel and nothing else reads it.
+NON_BACKEND_DIRS = {"notes", "__pycache__"}
+
+
 def test_no_unexpected_directory_under_a_family() -> None:
     """A new backend is a deliberate act; a stray directory is not."""
     stray = [f"{d.name}/{s.name}" for d in _families() for s in sorted(d.iterdir())
-             if s.is_dir() and s.name not in BACKENDS and s.name != "__pycache__"]
+             if s.is_dir() and s.name not in BACKENDS and s.name not in NON_BACKEND_DIRS]
     assert not stray, (f"unrecognised directories under a kernel family: {', '.join(stray)} "
-                       f"(known backends: {', '.join(sorted(BACKENDS))})")
+                       f"(known backends: {', '.join(sorted(BACKENDS))}; "
+                       f"also allowed: {', '.join(sorted(NON_BACKEND_DIRS - {'__pycache__'}))})")
+
+
+def test_notes_are_not_a_package() -> None:
+    """`notes/` holds markdown and captures. An `__init__.py` there would ship a lab notebook in
+    the wheel and put it under the import graph the layout tests police."""
+    packaged = [str(d.relative_to(KERNELS)) for d in KERNELS.glob("*/notes")
+                if (d / "__init__.py").exists()]
+    assert not packaged, f"notes/ must not be a package: {packaged}"
 
 
 HARNESS_DIRS = {"drivers", "checks"}

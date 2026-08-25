@@ -44,8 +44,12 @@ def _decorator_sites(tree: ast.AST, name: str) -> list[ast.expr]:
     return out
 
 
+#: `kernels/<family>/notes/` is that family's optimization log -- write-ups and the scratch .py a
+#: version was measured with. It ships nothing (no __init__.py) and Dynamo never reaches it, so a
+#: kernel launched there is not a launcher this file is about. Every scan below goes through here.
 def _python_files() -> list[Path]:
-    return sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py"))
+    return sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
+                  if "notes" not in p.parts)
 
 
 def test_no_bare_opaque_site_remains() -> None:
@@ -115,8 +119,7 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
     every one of them back in.
     """
     harness = {SRC / "kernels" / "checks", SRC / "kernels" / "drivers"}
-    paths = [p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
-             if p.parent not in harness]
+    paths = [p for p in _python_files() if p.parent not in harness]
     launchers, ops, calls = _launchers_and_ops(paths)
 
     # "Covered" is TRANSITIVE: `_ln_bwd_atomic`'s only caller is `ln_bwd_mmajor`, which is not an
@@ -178,7 +181,7 @@ def _declared_op_names() -> dict[str, str]:
     a CPU box and covers the sm90/sm100 ops this machine can never import.
     """
     found: dict[str, str] = {}
-    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+    for path in _python_files():
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -227,7 +230,7 @@ def test_nothing_bypasses_the_compile_wrap_switch() -> None:
     ``autograd.Function`` over ``opaque`` launches now, like the other 105.
     """
     offenders = []
-    for path in sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")):
+    for path in _python_files():
         if path.name == "_compile.py":
             continue                      # the switch's own implementation
         if "torch.library.custom_op(" in path.read_text():
@@ -259,8 +262,7 @@ def test_custom_op_mode_registers_every_site(wrap: str) -> None:
     The narrow set is also the complete set for the question being asked: a site that does not
     exist in a file cannot fail to register from it.
     """
-    sites = sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
-                   if "@opaque" in p.read_text())
+    sites = [p for p in _python_files() if "@opaque" in p.read_text()]
     assert sites, "no @opaque sites found -- the test is looking in the wrong place"
     mods = [
         "miniworld_engine." + ".".join(

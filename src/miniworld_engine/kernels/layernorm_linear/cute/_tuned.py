@@ -23,7 +23,7 @@ tile_m∈{128,192}, {cluster_m=2, coop, cluster_m=2+coop}) all give cos=1.0, and
 The race was apparently fixed elsewhere and only this safe-subset restriction + warning
 remained. → a re-tune may now include ``cluster_m=2`` / coop in the config space. (Caveat:
 racecheck does not fully cover async TMA/mbarrier hazards, so re-tune under real load.)
-See ``notebook/cute-autotune-and-config-pinning.md`` ("Config fix").
+See ``docs/kernels/cute-autotune-and-config-pinning.md`` ("Config fix").
 
 Every M2 entry is bit-clean (cos=0.999997); the racy ``tile_n>=160`` configs only ever won
 at d>=384, where the dispatcher uses M1 anyway, so they never enter this table.

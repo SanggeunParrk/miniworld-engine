@@ -182,7 +182,7 @@ def trimul_triton(
 
     B==1 by design (inherited from the shared bidir front + bdll layout). B>1 was implemented
     + verified correct but is slower than looping this path per batch (L2 thrashing of large
-    bdll intermediates); see notebook/trimul_batch_generalization."""
+    bdll intermediates); see notes/trimul_batch_generalization."""
     d = pair.shape[-1]
     if d_hidden != d:
         raise ValueError(

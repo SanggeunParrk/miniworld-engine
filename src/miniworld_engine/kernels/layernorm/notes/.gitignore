@@ -1,0 +1,10 @@
+# Profiler output is machine-generated and regenerable, so it is not committed. The exception is
+# a capture a write-up NAMES -- that one is the evidence for a number it quotes, and is force-added
+# by name (see kernels/tm1/notes/.gitignore for the ones that earned it).
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+*.ncu.log
+ncu.status
+*.txt
+*.csv

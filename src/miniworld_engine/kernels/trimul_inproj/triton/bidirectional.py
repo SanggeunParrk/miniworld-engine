@@ -158,7 +158,7 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True):
     # (batched grid axis + einsum channel-last contraction) + verified correct, but is SLOWER
     # than looping this B==1 path per batch — the large bdll intermediates (~300 MB at B=8,L=384)
     # thrash L2 (40 MB) when chained, so a per-batch loop (working set ~L2-sized) wins. Loop over
-    # B at the caller if needed. See notebook/trimul_batch_generalization.
+    # B at the caller if needed. See notes/trimul_batch_generalization.
     B, L, L2, K = x_n.shape
     assert B == 1 and L == L2
     H2 = WL.shape[1]                       # per-side hidden = 2*d_hidden

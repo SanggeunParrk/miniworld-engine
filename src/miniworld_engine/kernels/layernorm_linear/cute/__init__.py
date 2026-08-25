@@ -41,7 +41,7 @@ def layernorm_linear(x, ln_weight, ln_bias, weight, bias, eps: float = 1e-5, *,
     # All paths use M1 (`layernorm_linear_cute`, config=None -> brute-force autotuned via
     # cute_config). The M2 fused kernel (`layernorm_linear_cute_fused`) is a deep quack-0.5.0 port
     # in progress (load_AB->load_tma, _epi_smem_map->dict, and its kernel-filled SmemColVec op is
-    # dropped by 0.5.0's None-arg active-op filter — see notebook/cute-autotune-and-config-pinning.md); until it lands, n<=256 INFERENCE
+    # dropped by 0.5.0's None-arg active-op filter — see docs/kernels/cute-autotune-and-config-pinning.md); until it lands, n<=256 INFERENCE
     # uses correct M1 instead of broken M2. M2's only edge was inference perf (~0.062 vs 0.094 ms).
     return layernorm_linear_cute(
         x, ln_weight, ln_bias, weight, bias, eps, prefolded=prefolded,

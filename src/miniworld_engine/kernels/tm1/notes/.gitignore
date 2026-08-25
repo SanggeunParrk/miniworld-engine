@@ -1,0 +1,16 @@
+# Profiler output is machine-generated and regenerable, so it is not committed. The exception is
+# a capture a write-up NAMES: deleting it turns the number it backs into an unverifiable claim.
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+*.ncu.log
+ncu.status
+*.txt
+*.csv
+
+# cited by the write-up beside them
+!triangle_multiplication_tm1_cute/v1/nsys_kern_L1024_cuda_gpu_kern_sum.csv
+!triangle_multiplication_tm1_cute/v2/nsys_kern_L1024_cuda_gpu_kern_sum.csv
+!triangle_multiplication_tm1_cute/v8/nsys_kern_L1024_cuda_gpu_kern_sum.csv
+!triangle_multiplication_tm1_cute/v9/ncu_gk_occupancy.txt
+!trimul_cuequiv_free_b200/v1/nsys_kern_sum.txt

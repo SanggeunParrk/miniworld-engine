@@ -49,6 +49,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# `notes` has no __init__.py, but the recursive `**/*` package-data globs below reach into any
+# directory of a package that IS found -- so a kernel family's optimization log shipped in the
+# wheel (20 files) until this excluded it. The log is a record of how a kernel got here; a
+# consumer installs the kernel, not its history.
+exclude = ["*.notes", "*.notes.*"]
 
 [tool.setuptools.package-data]
 # Ship the non-.py assets the RUNTIME needs in a non-editable (pip / wheel) install. Editable
@@ -70,7 +75,14 @@ where = ["src"]
 #                                 sees `Any` for every symbol in this package, so the `ty`
 #                                 gate protects only this repo. The file must be BOTH
 #                                 present and listed here; either alone ships nothing.
-miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h", "**/*.csv"]
+miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", "**/*.h",
+                    "**/*.csv"]
+# ...but not the optimization logs. `exclude` above drops `notes` as a package; these
+# `exclude-package-data` entries drop the assets the globs above would otherwise sweep in
+# from a parent package's tree. tests/test_notes_stay_out_of_the_wheel.py checks the result.
+
+[tool.setuptools.exclude-package-data]
+miniworld_engine = ["kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*"]
 
 # ----------------------------------------------------------------------------
 # ruff — practical repo policy.
@@ -109,6 +121,11 @@ exclude = [
   # only configs/, artifacts/, profiles/". Both are gitignored, so a clean checkout never has
   # them; excluding only artifacts meant a working tree with local profiler captures reported
   # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
+  # A kernel's optimization log: the write-up per round and the scratch .py a version was
+  # measured with. Records, not maintained code -- they are not imported, not run, and not
+  # shipped (no __init__.py, enforced by tests/test_kernel_layout.py). Excluded for what they
+  # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
+  "src/miniworld_engine/kernels/*/notes",
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
@@ -237,6 +254,11 @@ exclude = [
   # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
   # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
   # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
+  # A kernel's optimization log: the write-up per round and the scratch .py a version was
+  # measured with. Records, not maintained code -- they are not imported, not run, and not
+  # shipped (no __init__.py, enforced by tests/test_kernel_layout.py). Excluded for what they
+  # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
+  "src/miniworld_engine/kernels/*/notes",
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
@@ -264,6 +286,11 @@ exclude = [
   # Scratch under a bench target, per docs/benchmarks.md: "A target holds no Python at all --
   # only configs/, artifacts/, profiles/". All three are gitignored, so a clean checkout never
   # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
+  # A kernel's optimization log: the write-up per round and the scratch .py a version was
+  # measured with. Records, not maintained code -- they are not imported, not run, and not
+  # shipped (no __init__.py, enforced by tests/test_kernel_layout.py). Excluded for what they
+  # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
+  "src/miniworld_engine/kernels/*/notes",
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",

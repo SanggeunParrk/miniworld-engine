@@ -28,8 +28,10 @@ BANNED = re.compile("|".join(rf"/{root}/[A-Za-z0-9_.-]+" for root in (*_ACCOUNT,
 
 
 def scanned_files() -> list[Path]:
+    # kernels/<family>/notes/ is the family's optimization log: records of what was run on one
+    # machine at one time. A path in there is part of the record, not a build input.
     return sorted(p for root in SCANNED for p in (REPO / root).rglob("*")
-                  if p.is_file() and p.suffix in SUFFIXES)
+                  if p.is_file() and p.suffix in SUFFIXES and "notes" not in p.parts)
 
 
 def test_there_are_files_to_check() -> None:
