@@ -8,6 +8,14 @@ The public surface is enforced by `tests/test_public_api.py`.
 
 ## [Unreleased]
 
+### Changed
+- **`settings.AutotuneKernel` is three names, and an unknown one now raises.** It declared
+  seven; four of them (`tri_multi`, `layernorm`, `layer_norm_linear`, `augmented_attention`)
+  had no call site, so naming one unlocked nothing and reported nothing. `autotune_kernels`
+  is typed against the vocabulary and `configure` rejects a name outside it — previously
+  `autotune_kernels={"triangle_attention"}`, the family's *current* name rather than this
+  vocabulary's older `tri_attention`, was accepted and did nothing.
+
 ## [1.0.0] - 2026-08-25
 
 ### Breaking

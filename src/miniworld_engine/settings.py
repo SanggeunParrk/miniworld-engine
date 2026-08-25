@@ -24,15 +24,21 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Literal
+from typing import Literal, get_args
 
 #: Kernels whose triton autotuner unlocks its full config grid. Formerly TRITON_AUTOTUNE, which
-#: named ONE kernel group per run ("transition", "tri_attention", "tri_multi", "adaln", ...); a set
-#: expresses the same thing without forcing a run per group.
-AutotuneKernel = Literal[
-    "transition", "tri_attention", "tri_multi", "adaln", "layernorm", "layer_norm_linear",
-    "augmented_attention",
-]
+#: named ONE kernel group per run; a set expresses the same thing without forcing a run per group.
+#:
+#: Exactly the groups something asks about. It listed seven, and four of them --  "tri_multi",
+#: "layernorm", "layer_norm_linear", "augmented_attention" -- had no call site at all, so naming
+#: one unlocked nothing and said nothing. A vocabulary entry is a promise that a name does
+#: something.
+#:
+#: "tri_attention" covers two call sites: triangle_attention/triton/atomic.py and
+#: gated_projection/triton/main.py. The gate projection is the projection triangle attention
+#: gates with, and it inherited the key when it was vendored -- stated here because the coupling
+#: is invisible from either file.
+AutotuneKernel = Literal["transition", "tri_attention", "adaln"]
 
 #: How a device-calibrated dispatch switch is resolved. "auto" benchmarks once per GPU and caches
 #: the winner; "off" uses the static threshold; "force" re-runs the calibration ignoring the cache.
@@ -48,8 +54,11 @@ class Settings:
     #: Record every benched (config -> ms) for an autotune-cache build. Formerly
     #: MINIWORLD_AUTOTUNE_CAPTURE.
     capture: bool = False
-    #: Kernels with their full grid unlocked. Formerly TRITON_AUTOTUNE.
-    autotune_kernels: frozenset[str] = frozenset()
+    #: Kernels with their full grid unlocked. Formerly TRITON_AUTOTUNE. Typed against
+    #: :data:`AutotuneKernel`, and `configure` rejects a name outside it: an unknown name used to
+    #: be accepted and unlock nothing, so `autotune_kernels={"triangle_attention"}` -- the family's
+    #: CURRENT name, not this vocabulary's -- was a silent no-op.
+    autotune_kernels: frozenset[AutotuneKernel] = frozenset()
     #: Worker processes used to PRE-compile an autotune round before it is timed. None = one per
     #: usable core (capped). 1 disables it. Only a build ever sets this; see autotune.capture.
     compile_jobs: int | None = None
@@ -255,7 +264,14 @@ def configure(**kwargs) -> Settings:
     if unknown:
         raise TypeError(f"unknown setting(s): {', '.join(sorted(unknown))}")
     if "autotune_kernels" in kwargs and kwargs["autotune_kernels"] is not None:
-        kwargs["autotune_kernels"] = frozenset(kwargs["autotune_kernels"])
+        names = frozenset(kwargs["autotune_kernels"])
+        known = frozenset(get_args(AutotuneKernel))
+        unknown = sorted(names - known)
+        if unknown:
+            raise ValueError(
+                f"autotune_kernels={unknown} is not a group anything reads, so it would unlock "
+                f"nothing. Known groups: {sorted(known)}.")
+        kwargs["autotune_kernels"] = names
     _ACTIVE = dataclasses.replace(previous, **kwargs)
     return previous
 
