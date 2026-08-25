@@ -131,7 +131,7 @@ verdict.
 
 *Done when:* it fails if any single kernel is swapped for a deliberately wrong one.
 
-### B3 — the wheel is never built by anything automatic  (H1)
+### B3 — DONE — the wheel is never built by anything automatic  (H1)
 
 *Gap, measured:* verified by hand today and it passes — 563 files, `py.typed`, 186 autotune
 JSONs, `registry.csv`, 91 configs, imports clean from an isolated `--target` install. Nothing
@@ -144,7 +144,9 @@ number.
 
 *Done when:* deleting a `package-data` glob turns CI red.
 
-### B4 — the toolchain range is unpinned at the top and untested at the edges  (G3)
+*Closed.* The `wheel` job builds it, counts each asset against the tree rather than a written-down number, asserts the notebook and the A/B sets are absent, and imports from a `--target` install with `src/` off the path.
+
+### B4 — DONE (scoped) — the toolchain range is unpinned at the top and untested at the edges  (G3)
 
 *Gap, measured:* `torch>=2.8`, `triton` with no floor at all, `requires-python >=3.10`. CI
 varies Python (3.10, 3.12) and nothing else.
@@ -156,11 +158,13 @@ asks for; do not claim untested ones.
 *Done when:* `pyproject.toml` has no unbounded-below dependency and the supported-set page
 lists only combinations something ran.
 
+*Closed as far as evidence allows.* `triton>=3.3` from code evidence; einops/jaxtyping/numpy keep no floor deliberately, because nothing has run against an older release of any of them and a guessed floor reads like a measured one. `docs/supported.md` states what ran.
+
 ---
 
 ## C. Carried forward from the library standard
 
-### C1 — PARTIAL — the determinism test is wrong  (B5, P8)
+### C1 — DONE — the determinism test is wrong  (B5, P8)
 
 *Gap, measured:* 8 failures in the last GPU run with differences up to `1.6e+04` — output-
 scale, not reduction noise. The driver helpers use unseeded `torch.randn`, so the two calls
@@ -172,12 +176,9 @@ write the README determinism sentence P8 was blocked on.
 *Done when:* the test passes for the right reason — verified by making one kernel
 deliberately non-deterministic and watching it fail.
 
-*Where it stands:* fixed at the invocation point (`run_all.run_checker` seeds), which also fixed
-the deeper half — only 2 of 14 checker modules called `_fixed()`, so most `run_all` failures were
-never reproducible. The negative control has **not** been run: the GPU job carrying it was killed
-while diagnosing the build-lock leak.
+*Closed, and it moved the goalposts.* The seeding fix works -- the control proves inputs are identical (a checker's torch-computed reference matched across two calls while the kernel's did not). What it found is that the file's promise was false: `augmented_attention_bwd_atomic_triton` is not bitwise reproducible, and the sample had picked the one atomics kernel that is. `NOT_BITWISE` now names the exception with its cause, checked from both sides.
 
-### C2 — tolerance is one global number  (B2, P2b)
+### C2 — DONE — tolerance is one global number  (B2, P2b)
 
 *Gap, measured:* `DEFAULT_RTOL = 5e-2` for all 103 kernels. Stage C of the last GPU run
 recorded per-kernel `rel`, so the data to calibrate exists.
@@ -188,7 +189,7 @@ default only where there is no measurement, and say so in the row.
 *Done when:* no kernel's declared `rtol` is more than the stated margin above its measured
 `rel`, checked by `tests/registry/test_declared_tolerance.py`.
 
-### C3 — `arch` conflates an enforced gate with an intention  (G2, P7)
+### C3 — DONE — `arch` conflates an enforced gate with an intention  (G2, P7)
 
 *Gap, measured:* `arch` is `sm80`×94, `sm90`×2, `sm100`×7. For cute/cuda it gates execution;
 for triton it means "written for". The conflation currently skips **3 sm100 triton kernels
@@ -236,12 +237,14 @@ command that fixes it.
 *Done when:* each section quotes a message string that exists in the source, checked by a test
 so renamed messages cannot silently orphan a section.
 
-### D4 — the supported set is a paragraph  (L4)
+### D4 — DONE — the supported set is a paragraph  (L4)
 
 *Action:* a page listing tested (card, arch, torch, triton, CUDA, Python) combinations, each
 citing the B1 verdict that tested it. Untested rows are marked untested.
 
 *Done when:* it cites verdicts rather than asserting.
+
+*Closed.* `docs/supported.md`. Every row names its artifact, and a section lists what has NOT been run -- the 9 kernels declared sm90/sm100 that nothing here has executed.
 
 ---
 

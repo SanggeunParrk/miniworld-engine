@@ -207,9 +207,9 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 94 | triton 88, cuda 6 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 97 | triton 91, cuda 6 |
 | **sm90+** | H100 | 2 | cute 2 |
-| **sm100+** | B200 | 7 | cute 4, triton 3 |
+| **sm100+** | B200 | 4 | cute 4 |
 <!-- END GENERATED: hardware-support -->
 
 **The floor is sm80.** 94 of 103 kernels run there: all 88 unmarked Triton kernels (committed result

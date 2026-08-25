@@ -65,16 +65,45 @@ def test_every_kernel_declares_an_arch() -> None:
 
 
 def test_the_declared_arch_matches_the_evidence_in_the_name() -> None:
-    """A file called `..._sm100_...` cannot claim to run at sm80. This is the check that keeps the
-    column honest without making it derived: the name is evidence, not the source of truth."""
+    """A name saying `sm100` has to be accounted for by one of the two columns.
+
+    `arch` is the ENFORCED minimum -- below it the kernel is not launched. `tuned_for` is what it
+    was written against. The name is evidence for one of them, and the check is which.
+
+    They used to be one column, and the conflation cost coverage: three triton kernels live inside
+    sm100-named cute modules (`_grad_mul_inplace` in `transition/cute/gatebwd_sm100.py` and two
+    like it), and their drivers launch the triton kernel directly rather than building the cute
+    pipeline around it. Gating on the module's name skipped them on sm86, where they run fine --
+    measured, before this was relaxed: launch ok, check ok, `rel dA=1.99e-03` against a `1e-02`
+    band. `driven` went 94 -> 97 and `skipped` 9 -> 6.
+    """
     wrong = []
     for r in _rows():
         blob = f"{r['kernel']} {r['file']} {r['symbol']}"
-        for marker, arch in (("sm100", "sm100"), ("sm90", "sm90")):
-            if re.search(marker, blob) and r["arch"] != arch:
-                wrong.append(f"{r['kernel']}: name says {marker}, arch says {r['arch']}")
-                break
+        for marker in ("sm100", "sm90"):
+            if not re.search(marker, blob):
+                continue
+            if marker in (r["arch"], r.get("tuned_for") or ""):
+                break                      # accounted for by one column or the other
+            wrong.append(
+                f"{r['kernel']}: name says {marker}, arch={r['arch']} tuned_for="
+                f"{r.get('tuned_for') or '(empty)'}. Set `arch` if the hardware is REQUIRED, or "
+                f"`tuned_for` if it merely names what it was written against.")
+            break
     assert not wrong, wrong
+
+
+def test_tuned_for_is_only_used_to_relax_not_to_tighten() -> None:
+    """`tuned_for` is informational. A row using it must still be launchable at its `arch`, so it
+    may only sit ABOVE `arch` -- otherwise it is a second, quieter gate."""
+    from miniworld_engine.autotune.run_all import _sm
+
+    bad = [f"{r['kernel']}: arch={r['arch']} tuned_for={r['tuned_for']}"
+           for r in _rows() if (r.get("tuned_for") or "").strip()
+           and _sm(r["tuned_for"]) <= _sm(r["arch"])]
+    assert not bad, (
+        "`tuned_for` at or below `arch` says nothing the enforced column does not:\n  "
+        + "\n  ".join(bad))
 
 
 def test_no_cutedsl_kernel_claims_the_triton_floor() -> None:

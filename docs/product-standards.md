@@ -65,9 +65,11 @@ kernel was ever *run* on the arch it names. In practice everything has been veri
 (A5000 / A6000) by hand. sm90 and sm100 kernels have never been executed by any automated
 process.
 
-*Status:* **partially met.** Coherence enforced, execution unverified. Compounded by the
-`arch` column conflating an enforced gate (cute/cuda) with "written for" (triton) — that
-conflation currently skips 3 sm100 *triton* kernels that would have run on sm86.
+*Status:* **partially met.** Coherence enforced, execution still unverified for sm90/sm100 --
+`docs/supported.md` says which. The conflation is gone: `arch` is the enforced minimum and
+`tuned_for` is what a kernel was written against, so the three triton kernels that lived inside
+sm100-named cute modules are now launched and checked on sm86 (`driven` 94 -> 97, `skipped`
+9 -> 6).
 
 ### G3. The toolchain range is stated and its edges are tested
 

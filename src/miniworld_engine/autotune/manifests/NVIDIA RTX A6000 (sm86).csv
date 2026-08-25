@@ -48,7 +48,7 @@ layernorm_bwd_split_triton,triton,layernorm,miniworld_engine/kernels/layernorm/t
 layernorm_fwd_mmajor_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/transpose.py,ok,rel out=2.61e-03 (band 1e-02 declared)
 layernorm_fwd_saveact_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel out=2.70e-03 (band 1e-02 declared)
 layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,failed,AssertionError: SM90 (H100) only
-layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.70e-03 dgamma=1.49e-06 dbeta=1.71e-07 (band 1e-02 declared)
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.70e-03 dgamma=1.46e-06 dbeta=1.71e-07 (band 1e-02 declared)
 layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=2.70e-03 dgamma=3.55e-07 dbeta=1.71e-07 (band 1e-02 declared)
 layernorm_fwd_recompute_noaffine_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=3.26e-03 (band 1e-02 declared)
 layernorm_fwd_recompute_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=2.70e-03 (band 1e-02 declared)
@@ -72,7 +72,7 @@ transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/tra
 transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],"
 layernorm_bwd_privatized_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.07e-03 dgamma=2.75e-07 dbeta=9.90e-08 (band 9e-03 declared)
 layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,ok,rel xn=2.28e-03 vs_layer_norm=2.28e-03 (band 9e-03 declared)
-transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,ok,rel dA=2.32e-03 dB=2.19e-03
+transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,ok,rel dA=1.99e-03 dB=2.45e-03 (band 1e-02 declared)
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=3.58e-03 dAB=2.49e-03 xn=5.73e-04 (band 1e-02 declared)
 transition_bwd_transpose_packed_triton,triton,transition,miniworld_engine/kernels/transition/cute/backward_gatebwd.py,ok,rel contiguous=0.00e+00 strided_view=0.00e+00 (band 1e-04 declared)
 transition_expand_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/main.py,ok,rel out=2.85e-03 (band 1e-02 declared)
@@ -93,7 +93,7 @@ trimul_outproj_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld
 trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],"
 gated_projection_bwd_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel d_proj=2.04e-03 d_glogit=2.80e-03 d_proj_drop=2.44e-03 d_glogit_drop=1.81e-03 d_proj_preact=2.05e-03 d_glogit_preact=2.96e-03 (band 1e-02 declared)
 gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel y=2.67e-03 gate=2.73e-03 y_dropres=2.91e-03 (band 1e-02 declared)
-gated_projection_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_train_sm100.py,ok,rel lr_left=3.15e-03 lr_right=1.98e-03
+gated_projection_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_train_sm100.py,ok,rel lr_left=2.09e-03 lr_right=2.13e-03 (band 1e-02 declared)
 trimul_bwd_gate_packed_recompute_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=1.90e-03 d_pL=2.18e-03 d_gRlog=1.70e-03 d_pR=2.04e-03 (band 9e-03 declared)
 trimul_bwd_gate_packed_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=2.12e-03 d_pL=2.08e-03 d_gRlog=2.24e-03 d_pR=3.64e-03 (band 1e-02 declared)
 trimul_bwd_gate_transpose_packed_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=2.12e-03 d_pL=2.08e-03 d_gRlog=2.24e-03 d_pR=3.64e-03 d_glogit=0.00e+00 (band 1e-02 declared)
@@ -101,4 +101,4 @@ trimul_gemm_gate_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/tri
 trimul_gemm_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/front.py,ok,rel left=2.08e-03 right=2.09e-03 (band 9e-03 declared)
 trimul_outproj_gemm_sigmoid_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/front.py,ok,rel out=1.97e-03 (band 8e-03 declared)
 trimul_outproj_layernorm_gemm_gate_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back.py,ok,rel y=2.98e-03 y_residual=2.04e-03 (band 1e-02 declared)
-trimul_transpose_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_sm100.py,ok,rel out=0.00e+00
+trimul_transpose_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_sm100.py,ok,rel out=0.00e+00 (band 1e-04 declared)
