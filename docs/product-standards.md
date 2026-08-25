@@ -325,11 +325,11 @@ the failing environment could not be reproduced on this cluster.
 
 *Prevents:* a library whose entry cost is a conversation with its author.
 
-*Enforced by:* nothing. `README.md` has `Critical Safety`, `Layout`, `Benchmarking`,
-`torch.compile`, `Supported hardware`, `Status`, `CLI`, `Toolchain` — organised around the
-repository, not around a newcomer's first hour.
+*Enforced by:* `tests/layout/test_quickstart_runs.py` executes the quickstart's `# cpu` blocks
+as scripts and fails when one does not work, so the first page a newcomer runs cannot drift from
+what the code does.
 
-*Status:* **not met.**
+*Status:* **met.**
 
 ### L2. Working notes are separated from consumer documentation
 

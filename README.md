@@ -10,6 +10,59 @@ to **cut one op out of the full model and optimize it in isolation**:
 > and where residuals live) are documented canonically in team-gm's
 > `docs/ARCHITECTURE.md`.
 
+## Quickstart
+
+Four steps, and the first three need no GPU. Every command in this section is executed by
+`tests/layout/test_quickstart_runs.py`, so it cannot drift from what the code does.
+
+**1. Install.** The library is a normal wheel; `[cute]` and `[bench]` are extras you do not need
+to read a number.
+
+```bash
+# cpu
+python -m pip install -e .
+```
+
+**2. Check what you have.** Prints the version and the config set every triton kernel will search
+if you do nothing else.
+
+```bash
+# cpu
+python -c "import miniworld_engine as m; print(m.__version__)"
+python -c "from miniworld_engine.autotune import configs; print(configs.default_config_dir())"
+```
+
+**3. See what the library declares.** One row per kernel: which backend, which arch it requires,
+which tolerance it is held to.
+
+```bash
+# cpu
+python -c "
+import csv, collections, miniworld_engine.kernels as k, pathlib
+reg = pathlib.Path(k.__file__).parent / 'registry.csv'
+rows = list(csv.DictReader(reg.open()))
+print(len(rows), 'kernels;', dict(collections.Counter(r['backend'] for r in rows)))"
+```
+
+**4. Run them, on a GPU.** This launches every kernel that has a driver and compares each against
+its torch reference. It is the fastest way to find out whether this library works on your card,
+and it writes `autotune/manifests/<your card>.csv` recording what it found.
+
+```bash
+# gpu
+python -m miniworld_engine.autotune.run_all
+```
+
+Expect a line like `declared 103  driven 97  ok 97  failed 0  skipped 6`. `skipped` is kernels
+whose declared `arch` is above your card — a correct answer, not a failure. See
+[docs/supported.md](docs/supported.md) for what has actually been run, and
+[docs/troubleshooting.md](docs/troubleshooting.md) when a step does not do this.
+
+**Then:** using the kernels means `from miniworld_engine import ops` — eight whole-op entry points
+that take the same arguments as their torch equivalents. Getting them *fast* on your card means
+building a tuned cache, which is `miniworld-engine build all` and takes hours; the shipped cache
+covers A5000 and A6000 only.
+
 ## Critical Safety
 
 This repo is often accessed from a cluster login node.

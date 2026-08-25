@@ -204,7 +204,7 @@ Re-run `run_all` and confirm the 3 kernels move from skipped to checked.
 
 ## D. Make it usable by someone who is not the author
 
-### D1 — the README is organised around the repository, not a newcomer  (L1, H3)
+### D1 — DONE — the README is organised around the repository, not a newcomer  (L1, H3)
 
 *Gap, measured:* sections are `Critical Safety`, `Layout`, `Benchmarking`, `torch.compile`,
 `Supported hardware`, `Status`, `CLI`, `Toolchain`. There is no installation path for an empty
@@ -214,6 +214,12 @@ machine and no first-result walkthrough.
 commands are copied verbatim into a test that runs them.
 
 *Done when:* the quickstart commands are executed by CI, so they cannot rot.
+
+*Closed.* Four steps at the top of the README, three of them GPU-free, and every `# cpu` block is
+run by `tests/layout/test_quickstart_runs.py` as one script -- which is what a reader pastes.
+The first version ran them line by line, which broke every multi-line `python -c`, and then passed
+against a deliberately broken command because a shell script's exit code is its LAST line's. Both
+fixed; the probe fires now.
 
 ### D2 — DONE — the lab notebook was a third of the repo  (L2)
 
