@@ -1,4 +1,5 @@
 kernel,backend,family,file,status,detail
+#provenance,1.0.0,426a5b9b0700,dirty,2026-08-25,v1.0.0-26-g426a5b9
 adaln_bwd_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,rel out=2.54e-03 (band 1e-02 declared)
 adaln_bwd_dw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,rel DScaleW=3.09e-03 DBiasW=2.66e-03 (band 1e-02 declared)
 adaln_bwd_dx_dbias_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,rel DX=3.71e-03 DCond=1.47e-03 DScaleB=1.85e-03 (band 1e-02 declared)
@@ -48,7 +49,7 @@ layernorm_bwd_split_triton,triton,layernorm,miniworld_engine/kernels/layernorm/t
 layernorm_fwd_mmajor_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/transpose.py,ok,rel out=2.61e-03 (band 1e-02 declared)
 layernorm_fwd_saveact_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel out=2.70e-03 (band 1e-02 declared)
 layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,failed,AssertionError: SM90 (H100) only
-layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.70e-03 dgamma=1.46e-06 dbeta=1.71e-07 (band 1e-02 declared)
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.70e-03 dgamma=1.25e-06 dbeta=2.56e-07 (band 1e-02 declared)
 layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=2.70e-03 dgamma=3.55e-07 dbeta=1.71e-07 (band 1e-02 declared)
 layernorm_fwd_recompute_noaffine_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=3.26e-03 (band 1e-02 declared)
 layernorm_fwd_recompute_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=2.70e-03 (band 1e-02 declared)

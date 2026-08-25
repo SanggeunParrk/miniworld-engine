@@ -113,10 +113,15 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]]) -> Path:
         })
     _DEVICES.mkdir(parents=True, exist_ok=True)
     path = manifest_path(gpu_key)
+    # BEFORE opening the file. `_provenance_row` shells out to `git status`, and opening the
+    # manifest for writing truncates it -- so computing the row inside the `with` block reported
+    # `dirty` on every run, including one measured from a checkout with nothing modified. The
+    # act of recording made the record say the tree was unclean.
+    provenance = _provenance_row()
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=_FIELDS)
         writer.writeheader()
-        writer.writerow(_provenance_row())
+        writer.writerow(provenance)
         writer.writerows(rows)
     return path
 

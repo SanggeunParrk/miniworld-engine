@@ -77,10 +77,25 @@ as one commit on a branch off `exp/miniworld-integrated`, gated on `team-gm`'s o
 *Done when:* `team-gm` builds and its tests pass against `miniworld-engine v1.0.0`, and the
 submodule pin is a tag rather than a bare SHA.
 
-*Where it stands:* the submodule is moved, repointed and pinned to `v1.0.0`; pyproject, 13 source
-files, README and `uv.lock` are migrated; every symbol team-gm imports was verified present in
-v1.0.0. **Not committed** — 11 of the 13 files carry the user's uncommitted work, and that is not
-mine to fold into a commit. A `uv sync` is still needed to provision the environment.
+*Where it stands:* the migration is done and verified as far as it can be from here; what remains
+is not a code change.
+
+Done: submodule moved, repointed, pinned to the `v1.0.0` TAG rather than a SHA; pyproject, 13
+source files, README and `uv.lock` migrated; every symbol team-gm imports verified present in
+v1.0.0; the `MINIWORLD_KERNELS` enum VALUE deliberately left alone, because four config YAMLs
+carry that string and renaming it is a config break needing its own deprecation.
+
+Not done, and both are the user's call rather than mine:
+
+* **Not committed.** 11 of the 13 migrated files carry the user's uncommitted work. Folding
+  someone else's WIP into a commit is not mine to do.
+* **The environment predates the floor.** Running the migrated modules on a GPU, 8 of 14 import
+  and 6 fail with `infer_schema(func): Parameter input_shape has unsupported type list[int]` from
+  `layernorm/triton/main.py`. Not a migration bug: team-gm's env has **torch 2.6.0** and
+  miniworld-engine declares **torch>=2.8**. The consumer is below the declared floor, which is
+  what a floor is for. `uv sync` resolves it -- 106 packages, the whole CUDA 13 stack, several GB,
+  and a move from cu12 to cu13. That is a decision about someone's working environment, not a
+  step I take unasked.
 
 ### A3 — DONE — six hardcoded personal paths make one kernel unbuildable elsewhere  (G1)
 
