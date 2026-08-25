@@ -15,6 +15,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 HOOK = REPO / ".githooks" / "post-commit"
 
@@ -26,11 +28,21 @@ def test_the_hook_exists_and_is_executable() -> None:
 
 
 def test_the_hooks_directory_is_the_one_git_uses() -> None:
-    """A hook in a directory git does not read is a file, not a hook."""
+    """A hook in a directory git does not read is a file, not a hook.
+
+    `core.hooksPath` is per-clone local config -- git deliberately does not let a repository wire
+    its own hooks -- so a fresh clone has none and CONTRIBUTING says so ("once per clone"). This
+    asserted it unconditionally and therefore could not pass anywhere but on the author's machine;
+    the clean-clone job is what caught it. What is left is the failure that is actually a defect:
+    hooks wired at some OTHER directory, where the files in `.githooks/` silently never run.
+    """
     got = subprocess.run(["git", "config", "core.hooksPath"], cwd=REPO,
                          capture_output=True, text=True, check=False).stdout.strip()
+    if not got:
+        pytest.skip("hooks not wired in this checkout; CONTRIBUTING: git config core.hooksPath "
+                    ".githooks")
     assert got == ".githooks", (
-        f"core.hooksPath is {got!r}; the hooks in .githooks/ never run. "
+        f"core.hooksPath is {got!r}, so the hooks in .githooks/ never run. "
         f"`git config core.hooksPath .githooks`")
 
 
