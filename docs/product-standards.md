@@ -49,7 +49,9 @@ carries **six** occurrences of `-I/home/psk6950/mathdx_dl/extracted/nvidia/mathd
 three build functions. That kernel cannot compile on any machine but this one. A grep guard in
 the suite is one test and does not exist.
 
-*Status:* **not met**, with a named defect.
+*Status:* **met.** `tests/layout/test_no_machine_paths.py` scans `src/` and `tools/` -- the two
+trees whose contents are executed -- and `_nvcc.mathdx_includes` resolves at run time, naming the
+variable to set when it cannot. Verified to fail on the pre-fix file, all six lines.
 
 ### G2. Every architecture the registry claims is either exercised or declared unexercised
 
@@ -149,7 +151,9 @@ repo has been exercised against an older release and a guessed floor reads like 
 installation section written for someone starting from an empty machine, and no page telling
 them what to do when nvcc/mathdx/CUDA is missing.
 
-*Status:* **not met.**
+*Status:* **met.** `## Quickstart` is four steps at the top of the README, three of them
+GPU-free, executed by `tests/layout/test_quickstart_runs.py`; `docs/troubleshooting.md` covers
+what goes wrong, tied to the message literals in `src/`.
 
 ### H4. The name is one name, everywhere, including in the consumer
 
@@ -178,7 +182,9 @@ declared field.
 *Enforced by:* nothing. No release has ever been tagged (`git tag` holds two `archive/*` tags
 and no version).
 
-*Status:* **not met.** This is the most severe finding in the document.
+*Status:* **met.** 1.0.0, tagged, with a `### Breaking` entry naming the rename.
+`tests/registry/test_version_is_released.py` fails a bump with no changelog section, a changelog
+whose only section is `[Unreleased]`, and an x.0.0 with no Breaking entry.
 
 ### I2. Every release is a tag, and every tag is reachable
 
@@ -186,7 +192,8 @@ and no version).
 
 *Enforced by:* nothing.
 
-*Status:* **not met.**
+*Status:* **met.** `v1.0.0` is an annotated tag on the released commit, and
+`autotune/manifests/` records which commit the GPU evidence was produced at.
 
 ### I3. The changelog describes released things
 
@@ -197,7 +204,8 @@ and no version).
 *Prevents:* a consumer being unable to learn what changed between the version they have and
 the version they want.
 
-*Status:* **partially met** — the discipline exists, the release boundary does not.
+*Status:* **met.** `## [1.0.0] - 2026-08-25` with `[Unreleased]` above it, and the version and
+the changelog cannot disagree without failing a test.
 
 ### I4. A breaking change is announced before it lands, not discovered
 
@@ -210,7 +218,8 @@ alias.
 *Enforced by:* A4 documents a removal path for *API names*. It says nothing about the
 distribution or import name.
 
-*Status:* **not met.**
+*Status:* **met.** The rename is a `### Breaking` entry saying what to change and why the
+version is 1.0.0 rather than 0.2.0.
 
 ---
 
@@ -246,7 +255,9 @@ hand, not a test.
 *Enforced by:* `tests/autotune/test_shipped_cache_wellformed.py` checks shape; `dev audit` checks
 declared-vs-present reachability, but is a CLI command nobody runs automatically.
 
-*Status:* **partially met.**
+*Status:* **partially met.** `tests/autotune/test_shipped_cache_wellformed.py` checks shape and
+`dev audit` checks declared-vs-present reachability, but the audit is a command nobody runs
+automatically. The 349 entries the bench budget poisoned are still in the shipped cache.
 
 ### J3. A performance claim is re-measured, or it is dated
 
@@ -404,7 +415,8 @@ each unit of work.
 *Enforced by:* `CONTRIBUTING.md` exists and F6 is met for the mechanics — clone, gates, how to
 run the suite. Untested by any second person.
 
-*Status:* **partially met.**
+*Status:* **partially met.** `CONTRIBUTING.md` covers the mechanics and the quickstart is now
+executed rather than described. Still untested by any second person.
 
 ### M3. Nothing is retained that nobody can explain
 
