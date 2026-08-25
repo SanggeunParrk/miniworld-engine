@@ -717,7 +717,12 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     if args.per_op:
         passes = [(_op_pass, False, "per-op sweep")]
-    elif args.per_module:
+    elif args.per_module or args.case != "all":
+        # Two passes are what `build all` means. A NAMED target keeps its old single pass: the two
+        # name spaces are different -- `build <case>` names a module and `--per-op <kernel>` names
+        # a kernel -- so running the op pass for a case name filters `op_units` by a name no kernel
+        # has and returns "no triton op with a driver matched". Which is what this did for one
+        # commit, turning `build gated_projection grid` from a working command into exit 2.
         passes = [(_module_pass, False, "module matrix")]
     else:
         passes = [(_op_pass, False, "per-op sweep"),

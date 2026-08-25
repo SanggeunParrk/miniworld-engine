@@ -40,9 +40,9 @@ def spy(monkeypatch, tmp_path):
     return calls
 
 
-def _args(*extra):
+def _args(*extra, case="all"):
     """Parsed by the REAL parser, so the test cannot drift from the command it is about."""
-    return cli.build_parser().parse_args(["build", "all", *extra])
+    return cli.build_parser().parse_args(["build", case, *extra])
 
 
 def _run(args):
@@ -70,3 +70,16 @@ def test_an_explicit_flag_still_asks_for_one_pass(spy, flag, kind) -> None:
     assert len(spy) == 1, spy
     assert spy[0]["kind"] == kind, spy
     assert spy[0]["fill_gaps"] is False, "an explicit single pass is the unmodified old behaviour"
+
+
+def test_a_named_case_still_gets_its_single_module_pass(spy) -> None:
+    """Two passes are what `build all` means, not what `build` means.
+
+    `build <case>` names a module; `--per-op <kernel>` names a kernel. Running the op pass for a
+    case name filters `op_units` by a name no kernel has, so it finds nothing and the command exits
+    2 -- which is what `build gated_projection grid` did for one commit, having worked before it.
+    """
+    _run(_args(case="gated_projection"))
+    assert len(spy) == 1, f"a named case ran {len(spy)} passes: {spy}"
+    assert spy[0]["kind"] == "Case", spy
+    assert spy[0]["fill_gaps"] is False, spy
