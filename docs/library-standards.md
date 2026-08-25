@@ -1,5 +1,10 @@
 # What a tier-1 library owes its consumers
 
+> **This is the inner layer.** These criteria ask whether the code is a good library.
+> They stop at the edge of this machine. `docs/product-standards.md` covers the rest —
+> portability, distribution, releases, verification at a distance, and the consumer —
+> and is the document `plan.md` is derived from.
+
 This file is the standard `miniworld-engine` holds itself to. It is not a wish list: every
 criterion below states **the failure it prevents** and **how it is enforced mechanically**, because
 a standard nobody can check is a preference. Where this repo does not yet meet one, the status line
