@@ -368,6 +368,17 @@ def check_reachability(rep: Report, shard_dirs: list[Path]) -> None:
     from miniworld_engine.autotune.configs import registered_ops
 
     reg = sorted(registered_ops())
+    if not shard_dirs:
+        # Same shape as check_key_spread's no-shards branch, which this did not follow: with no
+        # evidence it FAILED every registered op with "NO build ever captured it" -- a statement
+        # about a missing ARGUMENT, printed as 88 defects in the artifact, and enough to make the
+        # audit exit 1 every time it is run the documented way. The module docstring already says
+        # reachability is answerable only from a real build's shards.
+        rep.add("reach", WARN, "(no shards)",
+                "pass --shards from a completed build to judge reachability")
+        rep.stats["registered"] = len(reg)
+        rep.stats["captured"] = 0
+        return
     built = set()
     for d in shard_dirs:
         for f in d.glob("*.json"):
@@ -420,6 +431,12 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
     from miniworld_engine.autotune.cache import _CACHE_ROOT, gpu_key
 
     gk = gpu or gpu_key()
+    if gk == "cpu":
+        # The default key on a machine with no CUDA. Every declared pair then "misses", so a login
+        # node reported 51 FAIL and missing_pairs=859 against a cache that is in fact complete.
+        rep.add("coverage", WARN, "(no gpu)",
+                "no CUDA device here; pass --gpu '<name> (sm<arch>)' to audit a shipped card")
+        return
     have: dict[str, set] = {}
     for f in sorted(_CACHE_ROOT.rglob("*.json")):
         try:
