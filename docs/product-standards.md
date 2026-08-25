@@ -20,8 +20,16 @@ Three rules govern it.
 still binds: every criterion below names the check that fails when it is violated, or admits
 there isn't one.
 
-**The check must fail for the right reason.** Also inherited. A green suite that stopped
-looking is worse than a red one.
+**The check must fail for the right reason.** Also inherited, and on **2026-08-25** it turned out
+to be the most-violated rule here. Running the things this repository says it does -- a clean
+clone, the GPU-marked suite, the build-system audit, the coverage replay -- produced nine defects
+(`plan.md` §H), and seven were checks that could not fail, could not pass, or answered a question
+nobody asked: a gate asserting per-clone git config that only the author's machine has; an audit
+printing 139 findings about its own missing arguments and exiting 1 every run; a marker documented
+as "needs a CUDA device" that failed instead of skipping without one; a `missing_pairs 0` that
+could not see 363 real holes; a miss set that only grew, so a filled cache could never be observed
+as filled. A green suite that stopped looking is worse than a red one, and a red one that is
+always red is the same thing.
 
 **The author is not the judge.** A criterion is met when a machine that is not this one, or a
 person who is not the author, demonstrates it. "It works for me" is the null hypothesis this
@@ -270,12 +278,26 @@ A6000; CI was green before and after either, and would have been green if either
 change altered bucket indices; the check that nothing was orphaned was a one-off script run by
 hand, not a test.
 
-*Enforced by:* `tests/autotune/test_shipped_cache_wellformed.py` checks shape; `dev audit` checks
-declared-vs-present reachability, but is a CLI command nobody runs automatically.
+*Enforced by:* `tests/autotune/test_shipped_cache_wellformed.py` checks shape. `dev audit` checks
+the build system and declared-vs-present coverage, and now RUNS in CI -- it could not before,
+because it exited 1 on every default invocation with 139 findings about its own missing arguments
+(88 reachability with no `--shards`, 51 coverage against the key `cpu`). `dev audit --replay`
+answers the different question -- what a run of the module matrix asks for and does not get -- and
+had no caller anywhere in the repo until now, while `cache.py` named it as "the only direct
+measure of whether the cache covers a workload".
 
-*Status:* **partially met.** `tests/autotune/test_shipped_cache_wellformed.py` checks shape and
-`dev audit` checks declared-vs-present reachability, but the audit is a command nobody runs
-automatically. The 349 entries the bench budget poisoned are still in the shipped cache.
+*Status:* **partially met, and the gap is now measured rather than assumed.** Two numbers, both
+true, on the same shipped cache on an A6000:
+
+- declared coverage: **91 OK, missing_pairs 0** -- every (op, dtype, shape bucket) `op_units`
+  enumerates is present.
+- the replay: **363 lookups the module matrix asks for and the cache does not serve, across 42 of
+  91 ops** (`docs/records/cache-coverage-replay-a6000.md`).
+
+The cache key carries each kernel's constexprs and no declared work list enumerates them, so the
+first number cannot see the second. `build all` with no flags now runs both work lists rather than
+one, which is what closes the 363 -- for a cache that is rebuilt. This one is not: the 349 entries
+the bench budget poisoned are still in it, and so are the 363 holes.
 
 ### J3. A performance claim is re-measured, or it is dated
 
@@ -291,9 +313,14 @@ It does not re-run them, and cannot without J1.
 
 *Prevents:* a lint or type rule that is configured and never executed.
 
-*Enforced by:* `.github/workflows/ci.yml` runs ruff, ty, and the CPU suite on push, and the
-`pixi run ci` task mirrors it in the same order. Verified green today: **1191 passed, 7
-skipped, 111 deselected**.
+*Enforced by:* `.github/workflows/ci.yml` runs ruff, ty, the CPU suite and `dev audit` on push,
+and the `pixi run ci` task mirrors it in the same order. Verified green today: **1241 passed, 11
+skipped, 116 deselected**, and **1241 passed, 127 skipped** with no marker flag -- the second
+number used to be eleven failures reading "Found no NVIDIA driver", because nothing ever ran the
+`gpu` marker's own meaning.
+
+The audit step is new and is what J2 records: 264 findings over 88 live autotuners that ran
+nowhere automatic, and could not, because the command exited 1 on every invocation.
 
 *Status:* **met**, for the CPU half.
 

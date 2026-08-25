@@ -405,6 +405,49 @@ which is a separate pass over the pair tensor each time.
 *Done when:* the "remaining" column of that document's table is empty, or the entries left in it
 say why they will stay.
 
+
+---
+
+## H. Closed by verifying what the repo claims
+
+Separate from F: F was found by tidying the tree, these were found by RUNNING the things this
+repo says it does -- a clean clone, the GPU-marked suite, the build-system audit, the coverage
+replay. Seven of the nine are checks that could not fail, could not pass, or answered a question
+nobody asked. One is a 3.2x defect in the build itself, and one was found by a verification of my
+own failing.
+
+| | what was wrong | how it is closed |
+|---|---|---|
+| H1 | `_precompile_round` decided whether to run the parallel pool by bare config sig while the fork guard decided by `<kernel>\t<sig>`. Rounds interleave across a unit's kernels, and `augmented_attention_fwd`/`_bwd_atomic` have byte-identical grids (4x4x6x9 = 864), so the second kernel's round was skipped as "already compiled", the pool never ran, and every config fell through to the fork the pool exists to avoid. The comment called it deliberate: *"The sig alone still goes in `_COMPILED` so the ROUND skip works exactly as before."* | one record, one key. `_COMPILED`/`_mark_compiled` deleted -- always written beside `_mark_outcome` from the same zip. Measured same node, cold caches per arm: **5759s -> 1818s, 864 forks -> 0** |
+| H2 | two tests PINNED H1 -- "the ROUND skip must still see it", "legacy line still suppresses recompiling in the round" | replaced by one that fails on the old code |
+| H3 | `test_the_hooks_directory_is_the_one_git_uses` asserted `core.hooksPath` unconditionally. It is per-clone local config and CONTRIBUTING says so ("once per clone"), so the test could only pass on the author's machine | unset skips; wired elsewhere -- the case that is a defect -- still fails |
+| H4 | `dev audit` printed 139 FAIL and exited 1 on every default run. 88 were reachability with no `--shards` to look in; 51 were coverage against the key `cpu`. Both are missing INPUTS reported as broken ARTIFACTS, and `check_key_spread` in the same file already had the right shape | one WARN naming the flag, then return. With real inputs: reach 88 OK, coverage 91 OK, exit 0 |
+| H5 | the `gpu` marker is documented as "needs a CUDA device" and CI only ever excludes it, so nothing exercised what it means: `pytest tests/` on a login node produced 11 failures reading "Found no NVIDIA driver" | `tests/conftest.py` skips them without a card. Collection untouched, so `--collect-only -m gpu` still reports its 100 |
+| H6 | the audit's brute/prune/keys checks -- 264 findings over 88 live autotuners -- ran nowhere automatic. They could not: H4 made the command exit 1 every time | a CI step, after H4 |
+| H7 | `cache.py` documents `_CACHE_MISSES` as "the only direct measure of whether the cache covers a workload" and pointed at `miniworld-engine audit`, which is the STATIC check and never reads it. The replay it meant, `builder.audit`, had **no caller in src, tests or benchmarks** | `dev audit --replay`, refusing without a card rather than reporting an empty miss set as a pass; a test pins the wiring |
+| H8 | `missing_pairs 0` read as "the cache covers the workload" when it means "every declared bucket is present". Declared work is (op, dtype, shape bucket); the cache key also carries each kernel's constexprs. Measured on an A6000: **363 lookups the module matrix asks for and the cache does not serve, across 42 of 91 ops** | the number carries its own limit next to it; the 363 recorded in `docs/records/cache-coverage-replay-a6000.md` as the rebuild's work list |
+| H9 | `_CACHE_MISSES` only ever grew, so a before/after over one process returned the before twice -- it could not observe a filled cache. Found by exactly that happening: a scoped fill covered four keys, merged, and the second replay named the same four in 0s | `clear_cache_misses()`, called by `builder.audit`; the docstring names what the clear cannot fix (triton memoises per autotuner instance, so the replay must be a fresh process) |
+
+And one that is not a defect but the thing H8 exposed:
+
+**`build all` with no flags now produces a complete cache.** Two work lists exist and neither
+covers the other -- `op_units` tunes every declared kernel but only through its own driver, so a
+module's real constexpr combinations never occur; `cases` reaches those and reaches 48 of 91
+kernels. The default was the first alone. It is now both, in order, with a merge between them, and
+the second runs with `settings.fill_gaps` so a key the first pass already tuned costs a 3-config
+re-rank rather than a full-grid sweep. Without that flag the module pass re-benches everything the
+op sweep did -- the 244 GPU-h that made these an either/or.
+
+*Not yet verified:* that pass 2 actually empties the 363. The first attempt measured before and
+after in one process and was invalid for H9's reason; the re-run is scoped to `gated_projection`
+(4 misses) with each measurement in its own process. A 4 -> 0 is evidence, not proof, for 363.
+
+*Also not settled:* the A/B's two arms chose different winners for all three keys of the unit --
+5.1 vs 6.1 us, 8.2 vs 9.2 us, one quantisation step apart at this shape. The claim "the same
+configs are benched, only the compile path differs" holds (527/525, 288/288, 593/593 benched;
+4 ops recorded either way), but "the result is unchanged" needs a same-arm control, which is
+running.
+
 ## Order
 
 **A1 → A3 → A2** first: version the package, make it buildable elsewhere, then move the
