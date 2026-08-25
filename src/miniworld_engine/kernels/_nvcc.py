@@ -14,6 +14,7 @@ Two failures this fixes, both observed rather than guessed:
 from __future__ import annotations
 
 import functools
+import importlib
 import os
 import subprocess
 import sys
@@ -200,6 +201,73 @@ def host_flags() -> list[str]:
 # So: reclaim a lock that is too old to be real, and turn an unbounded wait into an error that
 # names the file. A message beats a hang, and the remedy is one `rm`.
 # ---------------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------------
+# mathdx (cuBLASDx / CommonDx) headers.
+#
+# Three transition extensions -- transition_b2b_cuda, transition_expand_gate_cuda,
+# transition_gatebwd_cuda -- include cuBLASDx. Their include paths used to be written into the
+# build as `-I<a developer home>/mathdx_dl/extracted/nvidia/mathdx/...`, six occurrences across three
+# functions. That is unbuildable for any other user by construction; it also stopped being
+# buildable HERE, because the directory no longer exists and nothing noticed. Nothing noticed
+# because these extensions are absent from registry.csv and their build is lazy, so no test, no
+# audit, and no CI job ever asks for them.
+#
+# Resolve instead, and when resolution fails say which variable to set rather than emitting a
+# compiler error about a missing header.
+# ---------------------------------------------------------------------------------------------
+
+#: Checked in order. The project-prefixed name wins so a user can override a system install.
+MATHDX_ENV_VARS = ("MINIWORLD_MATHDX_HOME", "MATHDX_HOME", "NVIDIA_MATHDX_HOME")
+
+#: Present in every mathdx distribution; used to tell a real root from a plausible directory.
+_MATHDX_SENTINEL = Path("include") / "cublasdx.hpp"
+
+
+def _mathdx_candidates() -> list[Path]:
+    """Roots to try, most explicit first. Existence is checked by the caller, not here."""
+    roots = [Path(os.environ[v]) for v in MATHDX_ENV_VARS if os.environ.get(v)]
+    # A pip/conda install of `nvidia-mathdx` lands under the `nvidia` namespace package.
+    # Imported via importlib, not a static `import nvidia`: the package is optional and absent
+    # from the lean CPU install CI runs, where a static import is an unresolved-import error at
+    # type-check time even though the runtime path is guarded.
+    try:
+        nvidia = importlib.import_module("nvidia")
+    except ImportError:
+        pass
+    else:
+        roots += [Path(p) / "mathdx" for p in getattr(nvidia, "__path__", [])]
+    # A conda/pixi package installs the headers into the environment prefix directly.
+    roots.append(Path(sys.prefix))
+    return roots
+
+
+def mathdx_home() -> Path | None:
+    """First candidate root that actually holds the headers, or None."""
+    for root in _mathdx_candidates():
+        if (root / _MATHDX_SENTINEL).is_file():
+            return root
+    return None
+
+
+def mathdx_includes() -> list[str]:
+    """`-I` flags for cuBLASDx and the CUTLASS it vendors.
+
+    Raises rather than returning empty: an empty list would hand nvcc a missing-header error
+    naming a file the user has never heard of, which is how this was diagnosed the slow way.
+    """
+    root = mathdx_home()
+    if root is None:
+        tried = ", ".join(MATHDX_ENV_VARS)
+        raise RuntimeError(
+            "cuBLASDx headers not found, so the CUDA transition extensions cannot build. "
+            f"Set one of {tried} to a mathdx root -- the directory containing "
+            f"`{_MATHDX_SENTINEL.as_posix()}` -- or `pip install nvidia-mathdx`. "
+            f"Looked in: {', '.join(str(c) for c in _mathdx_candidates())}")
+    includes = [root / "include", root / "external" / "cutlass" / "include"]
+    return [f"-I{p}" for p in includes if p.is_dir()]
+
+
 
 #: A lock older than this cannot belong to a live build -- the longest real build here is a few
 #: minutes -- so it is a leftover and gets reclaimed. `build --reclaim` makes the same judgement

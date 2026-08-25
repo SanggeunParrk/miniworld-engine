@@ -3,7 +3,7 @@
 from pathlib import Path
 
 
-from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension, mathdx_includes
 
 _dir = Path(__file__).parent
 
@@ -19,8 +19,7 @@ def _build_transition_b2b_cuda():
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         *gencodes("90a"),
-        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
-        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
+        *mathdx_includes(),
         "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -45,8 +44,7 @@ def _build_transition_expand_gate_cuda():
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         *gencodes("90a"),
-        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
-        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
+        *mathdx_includes(),
         "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -71,8 +69,7 @@ def _build_transition_gatebwd_cuda():
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         *gencodes("90a"),
-        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include",
-        "-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/external/cutlass/include",
+        *mathdx_includes(),
         "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
