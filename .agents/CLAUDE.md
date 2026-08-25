@@ -12,7 +12,7 @@ Route everything through `srun`/`sbatch` onto a compute node:
 ```bash
 srun --partition=h100 --account=cssb --qos=cssb_h100 --gres=gpu:h100:1 \
      --cpus-per-task=8 --mem=64G --time=00:20:00 \
-     bash -c 'cd /home/psk6950/miniworld-engine && PYTHONPATH=src <cmd>'
+     bash -c 'cd <repo root> && PYTHONPATH=src <cmd>'
 # or write an sbatch script (see submits/run_bench.sbatch) and `sbatch` it.
 ```
 

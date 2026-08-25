@@ -6,10 +6,10 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 16
 #SBATCH -t 03:00:00
-#SBATCH -o /home/psk6950/practice/miniworld-engine/tools/kernel-audit/prof/ab-%j.log
+#SBATCH -o tools/kernel-audit/prof/ab-%j.log
 set -u
-R=/home/psk6950/practice/miniworld-engine
-cd $R
+R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
+cd "$R"
 export PYTHONPATH=src
 export MINIWORLD_CONFIG_DIR=$R/src/miniworld_engine/autotune/configs/grid
 OUT=$R/tools/kernel-audit/prof
@@ -37,7 +37,7 @@ run () {  # run <label> <cachedir>
 }
 
 # A: the current setup -- shared NFS cache, already holding 107k entries for this arch
-run nfs-warm /public_data02/psk6950/tritoncache
+run nfs-warm ${MINIWORLD_TRITON_CACHE:-$HOME/.cache/miniworld-triton}
 
 # B: node-local, cold. Pays the full compile, then reads back off local disk.
 LOCAL=/tmp/$USER/tritoncache-ab-$SLURM_JOB_ID

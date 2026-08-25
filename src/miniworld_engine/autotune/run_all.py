@@ -43,19 +43,11 @@ CHECKER_SEED = 0
 def run_checker(check: str):
     """Resolve a checker and run it on a fixed RNG stream.
 
-    `checks._fixed()` exists for exactly this and its docstring promises that "a WRONG NUMBERS
-    line reproduces on the next run". It is called in two of the fourteen checker modules --
-    adaln.py (10 of 18 functions) and conditioned_transition.py (14 of 18). The other twelve
-    files, ~100 checkers, build their inputs with unseeded `torch.randn`.
-
-    Two consequences, both real. A failing `run_all` line was not reproducible on the next run
-    for most kernels. And two calls to the same checker saw *different inputs*, which is why
-    tests/test_determinism_gpu.py reported differences up to 1.6e+04 -- output-scale, not
-    reduction-scale -- and was measuring nothing.
-
-    Seeding here, at the one place a checker is invoked, rather than in ~100 function bodies:
-    a checker added tomorrow cannot forget, and `_fixed()` inside a checker stays harmless
-    (it sets the same seed again).
+    Seeded here, not in the checkers: `checks._fixed()` promises a reproducible failure but only
+    two of the fourteen checker modules call it, so ~100 checkers built their inputs from unseeded
+    `torch.randn`. That made run_all failures irreproducible, and made two calls to one checker see
+    different inputs -- which is what `test_determinism_gpu` was really measuring. One seed at the
+    one invocation point; a checker written tomorrow cannot forget.
     """
     import torch
 

@@ -203,21 +203,13 @@ def host_flags() -> list[str]:
 # ---------------------------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------------------------
-# mathdx (cuBLASDx / CommonDx) headers.
-#
-# Three transition extensions -- transition_b2b_cuda, transition_expand_gate_cuda,
-# transition_gatebwd_cuda -- include cuBLASDx. Their include paths used to be written into the
-# build as `-I<a developer home>/mathdx_dl/extracted/nvidia/mathdx/...`, six occurrences across three
-# functions. That is unbuildable for any other user by construction; it also stopped being
-# buildable HERE, because the directory no longer exists and nothing noticed. Nothing noticed
-# because these extensions are absent from registry.csv and their build is lazy, so no test, no
-# audit, and no CI job ever asks for them.
-#
-# Resolve instead, and when resolution fails say which variable to set rather than emitting a
-# compiler error about a missing header.
+# mathdx (cuBLASDx) headers. Three transition extensions include them; their include paths were
+# written in as `-I/<a developer home>/mathdx_dl/...`, unbuildable for anyone else and, by the
+# time it was found, for the author too -- the directory was gone and nothing noticed, because
+# those extensions are absent from registry.csv and their build is lazy. Resolve instead, and on
+# failure name the variable to set rather than emitting a missing-header error.
 # ---------------------------------------------------------------------------------------------
 
-#: Checked in order. The project-prefixed name wins so a user can override a system install.
 MATHDX_ENV_VARS = ("MINIWORLD_MATHDX_HOME", "MATHDX_HOME", "NVIDIA_MATHDX_HOME")
 
 #: Present in every mathdx distribution; used to tell a real root from a plausible directory.
@@ -341,4 +333,14 @@ def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
     lock = _build_lock(name)
     if lock is not None and not clear_stale_lock(lock):
         wait_for_lock(lock)
-    return load(name=name, sources=sources, **kwargs)
+    try:
+        return load(name=name, sources=sources, **kwargs)
+    except BaseException:
+        # torch does not always release its baton when the build raises, and the leftover is
+        # indistinguishable from a live build -- so the NEXT call in this same process waits on a
+        # lock nobody holds. Seen for real: one nvcc failure in `transition_cuda_ext_v2` left the
+        # lock, and the following checker sat in `wait_for_lock` until its deadline. Guarding only
+        # the lock that exists on entry (above) covers another process; this covers our own.
+        if lock is not None:
+            lock.unlink(missing_ok=True)
+        raise

@@ -5,10 +5,10 @@
 #SBATCH --gres=gpu:1
 #SBATCH -c 8
 #SBATCH -t 00:40:00
-#SBATCH -o /home/psk6950/practice/miniworld-engine/tools/kernel-audit/prof/merge-%j.log
+#SBATCH -o tools/kernel-audit/prof/merge-%j.log
 set -u
-R=/home/psk6950/practice/miniworld-engine
-cd $R
+R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
+cd "$R"
 export PYTHONPATH=src
 export MINIWORLD_CONFIG_DIR=$R/configs/grid
 # merge_shards keys the output file on gpu_key() of the machine running it, so each cache must be

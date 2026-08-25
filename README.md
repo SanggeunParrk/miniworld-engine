@@ -14,7 +14,7 @@ to **cut one op out of the full model and optimize it in isolation**:
 
 This repo is often accessed from a cluster login node.
 
-- Do not run recursive scans outside this repo, especially commands like `find /home/psk6950 ...`.
+- Do not run recursive scans outside this repo, especially commands like `find $HOME ...`.
 - Do not run installs, builds, benchmarks, profiling, or GPU-dependent commands on the login node.
 - Keep login-node activity limited to lightweight repo-local inspection.
 - Use `srun` or an allocated compute node for GPU work or heavy filesystem activity.
