@@ -42,7 +42,7 @@ everything else moot, and the cheap fix that unblocks other machines.
 
 ## A. The two findings that make the rest moot
 
-### A1 — the version number does not distinguish two incompatible packages  (I1, I2, I4)
+### A1 — DONE — the version number does not distinguish two incompatible packages  (I1, I2, I4)
 
 *Gap, measured:* `version = "0.1.0"` has not moved across **191 commits including a package
 rename**. `git tag` holds `archive/gate-fuse-v1` and `archive/ln-bwd-cuda-v1` and no version
@@ -61,7 +61,7 @@ path change. Tag `v1.0.0`. Add `tests/test_version_is_released.py`: the version 
 *Done when:* the test fails on a version bump without a changelog entry, `git tag -l 'v*'`
 lists `v1.0.0`, and `pip download miniworld-engine==1.0.0` from the tag resolves.
 
-### A2 — the only consumer is 191 commits behind and cannot advance  (K1, H4)
+### A2 — PARTIAL — the only consumer is 191 commits behind and cannot advance  (K1, H4)
 
 *Gap, measured:* `team-gm` pins `libs/miniworld-kernels` at `403d382` (2026-07-27), **191
 commits / 29 days** behind. Its `.gitmodules` URL, its `pyproject.toml` dependency name, and
@@ -77,7 +77,12 @@ as one commit on a branch off `exp/miniworld-integrated`, gated on `team-gm`'s o
 *Done when:* `team-gm` builds and its tests pass against `miniworld-engine v1.0.0`, and the
 submodule pin is a tag rather than a bare SHA.
 
-### A3 — six hardcoded personal paths make one kernel unbuildable elsewhere  (G1)
+*Where it stands:* the submodule is moved, repointed and pinned to `v1.0.0`; pyproject, 13 source
+files, README and `uv.lock` are migrated; every symbol team-gm imports was verified present in
+v1.0.0. **Not committed** — 11 of the 13 files carry the user's uncommitted work, and that is not
+mine to fold into a commit. A `uv sync` is still needed to provision the environment.
+
+### A3 — DONE — six hardcoded personal paths make one kernel unbuildable elsewhere  (G1)
 
 *Gap, measured:* `src/miniworld_engine/kernels/transition/cuda/__init__.py` lines 22–23,
 48–49, 74–75 — `-I/home/psk6950/mathdx_dl/extracted/nvidia/mathdx/include` and
@@ -95,7 +100,7 @@ machine with mathdx installed anywhere else.
 
 ## B. Prove it somewhere that is not this machine
 
-### B1 — no GPU runs in CI  (J1)
+### B1 — REVERTED — no GPU runs in CI  (J1)
 
 *Gap, measured:* both CI jobs are `runs-on: ubuntu-latest`. The "gpu" step runs
 `pytest --collect-only -m gpu` — it proves GPU tests can be *collected*. **103 kernels, 0
@@ -108,8 +113,11 @@ verdict with the commit SHA and the device, and a `tests/test_gpu_verdict_is_cur
 fails when the newest verdict does not match `HEAD` or is older than N days. That converts
 "the author ran it" into a dated, checkable artifact.
 
-*Done when:* the verdict file is a required part of a release (A1) and the test fails on a
-stale one.
+*Done when:* something dated and checkable stands behind the GPU claims.
+
+*Where it stands:* built, then removed. `tools/release/gpu_verdict.py` plus a five-test gate was
+more apparatus than the problem justified, so it was cut. J1 is exactly where it was this morning:
+103 kernels, 0 executed by CI. Whatever answers it must be smaller than what it guards.
 
 ### B2 — no end-to-end test proves the kernels are substitutable  (K2)
 
@@ -152,7 +160,7 @@ lists only combinations something ran.
 
 ## C. Carried forward from the library standard
 
-### C1 — the determinism test is wrong  (B5, P8)
+### C1 — PARTIAL — the determinism test is wrong  (B5, P8)
 
 *Gap, measured:* 8 failures in the last GPU run with differences up to `1.6e+04` — output-
 scale, not reduction noise. The driver helpers use unseeded `torch.randn`, so the two calls
@@ -163,6 +171,11 @@ write the README determinism sentence P8 was blocked on.
 
 *Done when:* the test passes for the right reason — verified by making one kernel
 deliberately non-deterministic and watching it fail.
+
+*Where it stands:* fixed at the invocation point (`run_all.run_checker` seeds), which also fixed
+the deeper half — only 2 of 14 checker modules called `_fixed()`, so most `run_all` failures were
+never reproducible. The negative control has **not** been run: the GPU job carrying it was killed
+while diagnosing the build-lock leak.
 
 ### C2 — tolerance is one global number  (B2, P2b)
 
@@ -201,7 +214,7 @@ commands are copied verbatim into a test that runs them.
 
 *Done when:* the quickstart commands are executed by CI, so they cannot rot.
 
-### D2 — 110 of 130 doc files are a lab notebook  (L2)
+### D2 — DONE — the lab notebook was a third of the repo  (L2)
 
 *Gap, measured:* `docs/` has 124 tracked files; **101** are `notebook/**/vN.md`
 plus `.py`/`.txt`/ncu dumps.
@@ -269,6 +282,26 @@ state, which is what the criterion is about, and stops flagging local scratch.
 tracked results directory has no owning target.
 
 ---
+
+## F. Closed by the repo cleanup
+
+Not planned; found by tidying, and each one a defect the plan would not have reached.
+
+| | what was wrong | how it is closed |
+|---|---|---|
+| F1 | `third_party/` held no third-party code — 45 files of first-party scratch that the *name* exempted from ruff and ty (112 unseen findings), pointing at an `_ct_cutlass` that exists nowhere | deleted; the one paragraph worth keeping moved to CONTRIBUTING |
+| F2 | one kernel log split across `docs/` (prose) and `profiles/` (captures), with `docs/` already holding captures too | one tree, then placed under the kernel it is about: `kernels/<family>/notes/` |
+| F3 | `load()` did not release torch's build lock when a build raised, so the next call in the same process waited on a lock nobody held | `load_extension` takes the lock with it on failure |
+| F4 | `MINIWORLD_CONFIG_DIR` accepted a path that does not exist; four audit scripts had pointed at `configs/grid` since P10 moved it | rejected with the value and both ways out |
+| F5 | `devices.py` resolved its manifest dir as `parents[3]/configs/devices` — the repo only in an editable install, so a wheel wrote its per-card record nowhere | `autotune/manifests/`, package data |
+| F6 | `AutotuneKernel` declared seven groups; four had no call site, and the field was `frozenset[str]` so an unknown name silently unlocked nothing | three groups, typed, rejected by `configure` |
+| F7 | `--bench-budget` compared one drained-stream launch against do_bench's queued median — 10x different quantities — so the first config in grid order won. 349 of 1244 shipped cache entries carry that fingerprint | feature removed; **the A5000/A6000 caches still need rebuilding** |
+| F8 | 27 test files derived the repo root by fixed depth; `tests/build/` was invisible to pytest (`norecursedirs`), losing 65 tests silently | depth-independent derivation; a guard that fails on any test file in a skipped directory |
+| F9 | 360 rendered SVGs (5.9 of 9.1 MB) cited by nothing, and 29 `.gitkeep` holding directories both writers already `mkdir` | data kept, renders ignored |
+
+The one that is not closed is **F7's consequence**: the shipped caches were built with the
+budget on for 51 ops, so 349 entries are the grid's first config rather than the fastest. Rebuild
+is separate work and is not started.
 
 ## Order
 

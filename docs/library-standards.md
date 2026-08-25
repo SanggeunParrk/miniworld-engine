@@ -271,9 +271,11 @@ names will drift, and the drift will be silent.
 *Enforced by:* the merged `MODULE_TARGETS`; `builder.CASE_NAMES` pinned to `cases()`;
 `target_dir` derived from `level` rather than tabulated.
 
-*Status:* **met**, with one scheduled exception: `configs/grid` exists at the repo root *and*
-inside the package. It is deliberate, documented, and `tests/test_default_config_set.py` asserts
-the two are byte-identical — but the duplication is meant to end. -> `plan.md` P10.
+*Status:* **met.** The scheduled exception is closed: `configs/grid` was duplicated at the repo
+root and inside the package, and every other config set lived only at the root — so a short name
+resolved against a different root depending on the caller, and a wheel could reach only one of
+them. All eleven sets are packaged now, `configs.config_set(name)` is the single resolver, and
+`tests/test_default_config_set.py` asserts a repo-root directory cannot shadow the package.
 
 ### D5. A name collision that Python resolves by accident is a defect
 

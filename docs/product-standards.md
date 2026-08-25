@@ -328,14 +328,16 @@ repository, not around a newcomer's first hour.
 ### L2. Working notes are separated from consumer documentation
 
 `docs/` held 124 tracked files, **101** of them per-round optimization logs, with their
-profiler captures split into a third tree (`profiles/`). Now separated: `docs/` is 24 pages
-written for a consumer, `notebook/` is the logs and their captures together.
+profiler captures split into a third tree (`profiles/`). Now separated and then placed: `docs/`
+is 26 pages written for a consumer, and each family's log lives with the kernel it is about, at
+`src/miniworld_engine/kernels/<family>/notes/`.
 
 *Prevents:* a consumer unable to find the four pages that concern them among a hundred that do
 not.
 
-*Enforced by:* nothing yet -- the split is a fact of the layout, not a check. `notebook/README.md`
-states what the tree is and that it is not maintained.
+*Enforced by:* `tests/layout/test_kernel_layout.py` allows `notes/` beside a family's backends and
+forbids it being a package; `tests/layout/test_notes_stay_out_of_the_wheel.py` keeps it out of the
+artifact. `kernels/NOTES.md` states what the tree is and that it is not maintained.
 
 *Status:* **met, unenforced.**
 
