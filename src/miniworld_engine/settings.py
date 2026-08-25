@@ -59,6 +59,22 @@ class Settings:
     #: be accepted and unlock nothing, so `autotune_kernels={"triangle_attention"}` -- the family's
     #: CURRENT name, not this vocabulary's -- was a silent no-op.
     autotune_kernels: frozenset[AutotuneKernel] = frozenset()
+    #: During a build, leave a key the cache ALREADY holds alone instead of re-benching its grid.
+    #:
+    #: `build all` had to choose between two work lists, and neither is complete on its own. The
+    #: per-op sweep covers what registry.csv DECLARES -- every kernel, every shape bucket -- but
+    #: drives each kernel through its own driver, so it never produces the constexpr combinations a
+    #: module's real dispatch does (`SAVE_PREACT=1`, `ADD_RESIDUAL=0`, `H2=512,K=256`). Measured on
+    #: an A6000: a cache built that way answers `missing_pairs 0` to the declared question and
+    #: misses 363 lookups the module matrix actually makes, across 42 of 91 ops. Driving modules
+    #: reaches those keys, and reaches only the 48 of 91 kernels some module happens to dispatch.
+    #:
+    #: So the default now runs both, and this is what makes the second pass affordable: with it
+    #: set, a build behaves like a run for keys that are already tuned (cached top-K, ~3 configs)
+    #: and like a build for keys that are not (full grid). Only the gaps get searched. Without it
+    #: the module pass re-benches every key the op sweep already did -- the 244 GPU-h that made
+    #: the two work lists an either/or in the first place.
+    fill_gaps: bool = False
     #: Worker processes used to PRE-compile an autotune round before it is timed. None = one per
     #: usable core (capped). 1 disables it. Only a build ever sets this; see autotune.capture.
     compile_jobs: int | None = None

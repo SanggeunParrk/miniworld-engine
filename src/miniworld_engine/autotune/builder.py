@@ -913,7 +913,8 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 # same queue, so both kinds reach here. The annotation said `Unit` while every unit of the
 # 922-unit sweep that produced the shipped cache was an OpUnit.
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
-                         compile_jobs: int, config_dir: Path | None = None) -> dict:
+                         compile_jobs: int, config_dir: Path | None = None,
+                         fill_gaps: bool = False) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -938,6 +939,8 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     # argument and not inherited shell state).
     if config_dir is not None:
         cmd += ["--config-dir", str(config_dir)]
+    if fill_gaps:
+        cmd += ["--fill-gaps"]
     env.update(unit.env())
     started = time.monotonic()
     with log.open("w") as handle:
@@ -972,7 +975,7 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
 
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
-              config_dir: Path | None = None) -> list[dict]:
+              config_dir: Path | None = None, fill_gaps: bool = False) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit."""
     import concurrent.futures as cf
 
@@ -1044,7 +1047,8 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                 unit = queue.get_nowait()
             except Empty:
                 return got
-            res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs, config_dir)
+            res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs,
+                                       config_dir, fill_gaps)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
@@ -1169,6 +1173,9 @@ def _child_main(argv: list[str] | None = None) -> int:
                     help="dtype passed to forward() as compute_dtype; empty = do not pass one")
     ap.add_argument("--switch", default="")
     ap.add_argument("--value", default="")
+    ap.add_argument("--fill-gaps", action="store_true",
+                    help="leave keys the cache already holds alone; full-grid only the misses. "
+                         "See settings.Settings.fill_gaps")
     args = ap.parse_args(argv)
 
     if args.config_dir:
@@ -1177,7 +1184,7 @@ def _child_main(argv: list[str] | None = None) -> int:
         # Reported after run_case, when the kernels have imported and registered: counting here
         # would always print 0/0, since nothing has asked for configs yet.
         print(f"  [config] set to {args.config_dir}", flush=True)
-    settings.configure(run_autotune=True, capture=True,
+    settings.configure(run_autotune=True, capture=True, fill_gaps=args.fill_gaps,
                        compile_jobs=(args.compile_jobs or None))
     p_drop = 0.0
     if args.switch == "p_drop":

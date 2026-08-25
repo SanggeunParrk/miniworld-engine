@@ -651,7 +651,8 @@ def install_cache_reader() -> None:
         def prune(configs, nargs, **meta):
             cfgs = list(base(configs, nargs, **meta)) if base else list(configs)
             from miniworld_engine import settings
-            if settings.current().run_autotune or not cfgs:
+            cur = settings.current()
+            if not cfgs or (cur.run_autotune and not cur.fill_gaps):
                 return cfgs                          # a BUILD re-benches the whole grid on purpose
             try:
                 hit = _cached_subset(self, cfgs, nargs, meta)

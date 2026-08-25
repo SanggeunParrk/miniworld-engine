@@ -254,9 +254,23 @@ builder, narrowed:
 `--per-op` is the decomposition the shipped caches were built with: one unit per
 `(op, shape bucket)`, each tuned exactly once.
 
+**`build all` runs both, and needs no flag to.** Neither list is complete alone. `--per-op`
+coverage is DECLARED — registry.csv × level — so every kernel with a driver is tuned, but each
+through its own driver, which never produces the constexpr combinations a module's real dispatch
+does (`SAVE_PREACT=1`, `ADD_RESIDUAL=0`, `H2=512,K=256`). Measured on an A6000, a cache built that
+way answers `missing_pairs 0` to the declared question and misses 363 lookups the module matrix
+makes, across 42 of 91 ops (`docs/records/cache-coverage-replay-a6000.md`). The module matrix
+reaches those keys and reaches only 48 of the 91 kernels.
+
+So the default is the per-op sweep, a merge, then the module matrix with `fill_gaps` — a key the
+first pass already tuned costs a 3-config re-rank instead of a full-grid sweep, so only the gaps
+are searched. `--per-op` and `--per-module` still ask for one pass alone.
+
 Coverage: every live Triton kernel is wired — 91 ops in registry.csv, 922 declared
-`(op, dtype, bucket)` units. `miniworld-engine dev audit` is what reports how many of them the
-shipped cache actually holds on the card you are on; do not infer it from this paragraph.
+`(op, dtype, bucket)` units. Two commands report what a cache actually holds, and they answer
+different questions — `miniworld-engine dev audit` for the declared buckets, and
+`miniworld-engine dev audit --replay` (needs a card) for what a run of the module matrix asks for
+and does not get. Do not infer either from this paragraph.
 
 ## CuTe / CUDA autotune (sm90+)
 

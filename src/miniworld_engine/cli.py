@@ -680,36 +680,67 @@ def cmd_build(args: argparse.Namespace) -> int:
     if rc:
         return rc
 
-    # `build all` on a fresh card must produce a COMPLETE cache with no one curating a list, so
-    # the per-op sweep is the default for it: its coverage is declared (registry.csv x level),
-    # while driving modules only reaches the kernels some module happens to dispatch to -- 48 of
-    # 91 triton kernels, measured, leaving 43 with working drivers untuned and invisible.
-    # --per-module asks for the old decomposition, which is still what you want when the question
-    # is "does this module's real dispatch path work", not "is every kernel tuned".
-    per_op = args.per_op or (args.case == "all" and not args.per_module)
-    if per_op:
-        # One item per (op, shape bucket) instead of one per module unit. Same harness: the GPU
-        # pool, the O_EXCL claims, --resume, the shards and the merge are all unchanged -- only
-        # what a work item IS differs. Driving modules re-tunes an op once per unit that reaches
-        # it; 3,385 units, 1,950 of them one case, and a single 15,552-config op inside it costs
-        # 244 GPU-h of pure re-benching.
+    # `build all` on a fresh card must produce a COMPLETE cache with no one curating a list and no
+    # flags. Neither work list is complete on its own, and for a long time this had to pick one:
+    #
+    #   per-op    coverage is DECLARED (registry.csv x level), so every kernel with a driver is
+    #             tuned -- but each is driven through its own driver, which never produces the
+    #             constexpr combinations a module's real dispatch does. Measured on an A6000, a
+    #             cache built this way answers `missing_pairs 0` to the declared question and
+    #             misses 363 lookups the module matrix makes, across 42 of 91 ops.
+    #   per-module reaches those keys, and reaches only the 48 of 91 triton kernels some module
+    #             happens to dispatch to, leaving 43 with working drivers untuned and invisible.
+    #
+    # So the default is BOTH, in that order, with a merge between them. The second pass runs with
+    # `fill_gaps`, which is what makes it affordable: a key the first pass already tuned costs a
+    # 3-config re-rank instead of a full-grid sweep, so only the gaps are searched. Without that
+    # the module pass re-benches everything the op sweep did -- 244 GPU-h -- which is what made
+    # these an either/or in the first place.
+    #
+    # --per-op and --per-module still ask for one pass alone.
+    def _op_pass():
         only = None if args.case == "all" else {args.case}
-        selected = builder.op_units(only, config_dir=directory)
-        if not selected:
+        units = builder.op_units(only, config_dir=directory)
+        if not units:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
-            return 2
-        print(f"per-op sweep: {len(selected)} (op, shape) items", flush=True)
-    else:
-        selected = [c for c in builder.cases() if args.case in ("all", c.name)]
-        if not selected:
+            return None
+        print(f"per-op sweep: {len(units)} (op, shape) items", flush=True)
+        return units
+
+    def _module_pass():
+        units = [c for c in builder.cases() if args.case in ("all", c.name)]
+        if not units:
             names = ", ".join(c.name for c in builder.cases())
             print(f"unknown case {args.case!r}; have: all, {names}", file=sys.stderr)
-            return 2
+            return None
+        return units
 
-    results = builder.build_all(selected, Path(args.shards).expanduser(),
-                                _resolve_gpus(args.gpus), args.compile_jobs,
-                                resume=args.resume, reclaim=args.reclaim,
-                                config_dir=directory)
+    if args.per_op:
+        passes = [(_op_pass, False, "per-op sweep")]
+    elif args.per_module:
+        passes = [(_module_pass, False, "module matrix")]
+    else:
+        passes = [(_op_pass, False, "per-op sweep"),
+                  (_module_pass, True, "module matrix, gaps only")]
+
+    results: list = []
+    for i, (build_units, fill_gaps, label) in enumerate(passes):
+        selected = build_units()
+        if selected is None:
+            return 2
+        if len(passes) > 1:
+            print(f"\n=== pass {i + 1} of {len(passes)}: {label} ===", flush=True)
+        stage = builder.build_all(selected, Path(args.shards).expanduser(),
+                                  _resolve_gpus(args.gpus), args.compile_jobs,
+                                  resume=args.resume, reclaim=args.reclaim,
+                                  config_dir=directory, fill_gaps=fill_gaps)
+        results += stage
+        # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
+        # cache, and it can only see pass 1 once pass 1's shards are folded in.
+        if i + 1 < len(passes):
+            rc = _merge_built_shards(args, stage)
+            if rc:
+                return rc
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
