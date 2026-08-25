@@ -307,7 +307,7 @@ citing the B1 verdict that tested it. Untested rows are marked untested.
 
 ## E. Keep it from regressing
 
-### E1 — work sits unpushed  (M1)
+### E1 — DONE — work sits unpushed  (M1)
 
 *Gap, measured:* 70 commits sat local while a second cluster ran a month-old tree; ten hours
 lost on 2026-08-25. A further 16 were unpushed the same day.
@@ -317,6 +317,14 @@ lost on 2026-08-25. A further 16 were unpushed the same day.
 non-empty.
 
 *Done when:* something other than memory reports the backlog.
+
+*Closed.* `.githooks/post-commit` prints, after every commit, how many commits the remote does not
+have, the oldest one's age, and the first five subjects. It does not block and does not push --
+refusing a commit for being unpushed is nonsense, and refusing a push is the opposite of what is
+wanted. `git config miniworld.noahead true` silences it.
+`tests/layout/test_unpushed_work_is_reported.py` builds a bare remote and a clone and runs the
+hook against both states, rather than reading it: silent when everything is pushed, and naming the
+commit when one is not.
 
 ### E2 — DONE — the consumer's environment cannot be reproduced here  (K4)
 

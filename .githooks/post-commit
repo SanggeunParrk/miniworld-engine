@@ -1,0 +1,23 @@
+#!/bin/bash
+# Say out loud how much work is sitting only on this machine.
+#
+# Seventy commits accumulated locally while a second cluster ran a month-old tree, and the ten
+# hours that cost were spent diagnosing a bug that had been fixed for days. Nothing anywhere said
+# so: `git status` is clean when your work is committed, and committed-but-unpushed looks exactly
+# like done.
+#
+# This does not block and does not push. It prints, after every commit, what the remote does not
+# have -- so "I'll push later" is a decision you keep making rather than one you make once and
+# forget. `git config miniworld.noahead true` turns it off.
+set -u
+[ "$(git config --get miniworld.noahead || echo false)" = "true" ] && exit 0
+
+upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || exit 0
+ahead=$(git rev-list --count "$upstream"..HEAD 2>/dev/null) || exit 0
+[ "${ahead:-0}" -eq 0 ] && exit 0
+
+oldest=$(git log --format='%cr' "$upstream"..HEAD | tail -1)
+printf '\n  \033[33m%s commit(s) not on %s\033[0m — oldest %s\n' "$ahead" "$upstream" "$oldest"
+git log --oneline --format='    %h %s' "$upstream"..HEAD | head -5
+[ "$ahead" -gt 5 ] && printf '    ... and %s more\n' "$((ahead - 5))"
+printf '  A second machine sees none of it until you push.\n\n'

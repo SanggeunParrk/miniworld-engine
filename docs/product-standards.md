@@ -93,11 +93,16 @@ have. The other-cluster failure was a clean clone that could not do what this ch
 
 *Prevents:* a working repository that is only working here.
 
-*Enforced by:* nothing. No CI job clones fresh and builds a kernel, because no CI job has a GPU
-(J1). Today's fixes — lazy nvcc (`test_no_build_at_import.py`) and stale-lock recovery
-(`test_jit_build_lock.py`) — remove two known causes but do not prove the general case.
+*Enforced by:* `docs/reproducing-a-report.md` gives the recipe and it is run rather than described.
+Two known causes were also removed: import-time nvcc builds (`test_no_build_at_import.py`) and
+stale JIT locks (`test_jit_build_lock.py`).
 
-*Status:* **not met.**
+*Status:* **met, unenforced.** Measured: clone from the remote (not from this checkout), every
+cache pointed somewhere empty (`TORCH_EXTENSIONS_DIR`, `TRITON_CACHE_DIR`, `MINIWORLD_CONFIG_DIR`
+unset, `PYTHONPATH` unset), build a wheel, install it to an empty `--target`, import from there,
+run the suite. Wheel, install and import all clean; version 1.0.0, the packaged config set and the
+device manifests all present; **1225 passed, 7 skipped** from the clone. Unenforced because
+nothing repeats it: no CI job can clone and build a kernel without a GPU (J1).
 
 ### G5. The absence of a GPU is a supported state
 
@@ -157,15 +162,22 @@ what goes wrong, tied to the message literals in `src/`.
 
 ### H4. The name is one name, everywhere, including in the consumer
 
-*Prevents:* precisely the state measured today (K1): the package renamed from
-`miniworld-kernels` to `miniworld-engine`, `import miniworld_kernels` now raising
-`ModuleNotFoundError`, while the one real consumer's submodule URL, dependency entry, and
-directory are all still the old name.
+*Prevents:* the state this was written in — the package renamed from `miniworld-kernels` to
+`miniworld-engine`, `import miniworld_kernels` raising `ModuleNotFoundError`, while the one real
+consumer's submodule URL, dependency entry and directory were all still the old name.
 
-*Enforced by:* D1 covers names *inside* the repo. Nothing covers the name as the consumer
-spells it.
+*Enforced by:* D1 covers names *inside* the repo; nothing mechanical covers the name as a consumer
+spells it, and nothing here can — it is a different repository.
 
-*Status:* **not met.**
+*Status:* **met in the code, uncommitted in the consumer.** `team-gm` now has the submodule at
+`libs/miniworld-engine` pinned to the `v1.0.0` tag, `miniworld-engine` in `pyproject.toml` and
+`uv.lock`, and no `import miniworld_kernels` anywhere. One occurrence of the old string remains
+**on purpose**: `ImplementationType.MINIWORLD_KERNELS = "miniworld_kernels"` is a config value that
+four YAML files select by name, so renaming it is a config break needing its own deprecation — the
+lesson of I4, applied rather than repeated.
+
+The change is not committed there, and that is not mine to do: 11 of the 13 migrated files carry
+the user's uncommitted work.
 
 ---
 
@@ -291,19 +303,22 @@ skipped, 111 deselected**.
 
 ### K1. There is a consumer, it is current, and upgrading it is a routine act
 
-Measured today. `team-gm` consumes this library as the submodule `libs/miniworld-kernels`,
-pinned at `403d382`, dated **2026-07-27** — **191 commits and 29 days behind main**. Its
-`pyproject.toml` depends on `miniworld-kernels` by path. The pin predates the rename, so
-advancing it breaks every import in the consumer, which is presumably why it has never been
-advanced.
+*Prevents:* a library that improves in a direction nobody can follow. When this was written,
+`team-gm` pinned `403d382` of 2026-07-27 — **191 commits and 29 days behind** — by the pre-rename
+name, so advancing it broke every import. Every fix in those commits was invisible to the only
+thing that uses this library.
 
-*Prevents:* a library that improves in a direction nobody can follow. Every fix landed in
-those 191 commits — the fp32 dtype fix, the JIT lock recovery, the lazy nvcc build, the
-per-target bench configs — is invisible to the only thing that uses this library.
+*Enforced by:* nothing mechanical; a second repository cannot be gated from here. What replaced
+"nobody has tried" is that it has now been done and what it costs is known.
 
-*Enforced by:* nothing. Nothing anywhere checks that the consumer's pin is advanceable.
+*Status:* **done, uncommitted.** Pin advanced 191 commits to the `v1.0.0` TAG rather than a bare
+SHA. The upgrade also surfaced the thing that made it non-routine, which was not the rename:
+team-gm's environment held **torch 2.6.0** against this package's declared `torch>=2.8`, and six
+modules failed with `infer_schema(func): Parameter input_shape has unsupported type list[int]`.
+The floor caught a real incompatibility, which is what a floor is for. The environment is now on
+`torch 2.11.0+cu128`, the same CUDA and triton line this package is developed against.
 
-*Status:* **not met.** With I1, the pair of findings that matter most.
+What is left is a commit in a repository whose working tree is not mine to commit.
 
 ### K2. An end-to-end test proves the kernels are substitutable
 
@@ -409,10 +424,12 @@ untested, rather than implying a matrix that does not exist.
 *Prevents:* 70 commits accumulating locally while a second machine runs a month-old tree —
 directly, the ten hours lost today.
 
-*Enforced by:* nothing mechanical. The working rule adopted today is to push at the end of
-each unit of work.
+*Enforced by:* `.githooks/post-commit` reports what the remote does not have -- count, age of the
+oldest, first five subjects -- after every commit. Not a gate: blocking a commit for being
+unpushed is nonsense and blocking a push is backwards. It makes the invisible state visible at the
+moment you would otherwise stop looking, which is what `git status` does not do.
 
-*Status:* **not met**, cause understood.
+*Status:* **met.** Verified against a constructed remote rather than by reading the hook.
 
 ### M2. A second person can make a change
 
