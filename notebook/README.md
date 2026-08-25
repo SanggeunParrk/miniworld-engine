@@ -14,6 +14,12 @@ for a consumer were lost among them. Their profiler captures lived in a third tr
 split from the prose that explained them — plus twelve `.gitkeep` files holding open directories
 whose captures are gitignored, nine of them empty. One tree now.
 
+Profiler output is not committed. The binary captures (`.ncu-rep`, `.nsys-rep`, `.sqlite`) never
+were; the text dumps of the same runs were, which was one rule applied twice in opposite
+directions. Both are ignored now, with one exception: a capture that a write-up NAMES is the
+evidence for a number it quotes, so it is force-added in `.gitignore`. Sixteen dumps that nothing
+cited are gone; five that are cited stayed.
+
 Nothing here is maintained, linted, or expected to run. `tests/test_performance_claims.py` treats
 `notebook/**/v*.md` as dated records and deliberately exempts them from the traceability rule that
 governs prose in `README.md` and `docs/`.
