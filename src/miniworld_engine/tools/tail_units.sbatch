@@ -24,7 +24,7 @@ one () {  # one <gpu> <op> <len> <baseline>
     rm -f $OUT/tail-$2-$3-$SLURM_JOB_ID.*
     T0=$SECONDS
     $PY -u -m miniworld_engine.autotune.builder \
-      --shard $OUT/tail-$2-$3-$SLURM_JOB_ID.json --compile-jobs 16 --bench-budget 3.0 \
+      --shard $OUT/tail-$2-$3-$SLURM_JOB_ID.json --compile-jobs 16 \
       --op $2 --dtype bfloat16 --length $3 > $OUT/tail-$2-$3.txt 2>&1
     echo "### $2 L=$3 : WALL $((SECONDS-T0)) s   (was $4 s)" ) &
 }
@@ -36,5 +36,5 @@ wait
 echo "===== breakdowns ====="
 for t in bias_only_attention_bwd_triton-128 adaln_epilogue_triton-256 layernorm_linear_fwd_fp32_triton-128; do
   echo "--- $t"
-  grep -E 'precompile|bench-budget|compile-guard\]|first-launch' $OUT/tail-${t%-*}-${t##*-}.txt 2>/dev/null | sed 's/^ *//'
+  grep -E 'precompile|compile-guard\]|first-launch' $OUT/tail-${t%-*}-${t##*-}.txt 2>/dev/null | sed 's/^ *//'
 done

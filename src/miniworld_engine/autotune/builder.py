@@ -913,8 +913,7 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 # same queue, so both kinds reach here. The annotation said `Unit` while every unit of the
 # 922-unit sweep that produced the shipped cache was an OpUnit.
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
-                         compile_jobs: int, bench_budget: float = 0.0,
-                         config_dir: Path | None = None) -> dict:
+                         compile_jobs: int, config_dir: Path | None = None) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -939,8 +938,6 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     # argument and not inherited shell state).
     if config_dir is not None:
         cmd += ["--config-dir", str(config_dir)]
-    if bench_budget:
-        cmd += ["--bench-budget", str(bench_budget)]
     env.update(unit.env())
     started = time.monotonic()
     with log.open("w") as handle:
@@ -975,7 +972,6 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
 
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
-              bench_budget: float = 0.0,
               config_dir: Path | None = None) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit."""
     import concurrent.futures as cf
@@ -1048,8 +1044,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                 unit = queue.get_nowait()
             except Empty:
                 return got
-            res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs,
-                                       bench_budget, config_dir)
+            res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs, config_dir)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
@@ -1127,20 +1122,15 @@ def _run_one_driver(op: str) -> int:
 def _report_unit(shard: str) -> int:
     """Print everything a finished unit knows, then dump its shard. Returns ops dumped.
 
-    ONE reporter for both unit kinds. They had diverged: the ``--op`` path (which is what a sweep
-    actually runs, since build_all decomposes into OpUnits) never called ``probe_log_summary``, so
-    the per-axis timing breakdown was collected for 219k configs and printed for none of them; and
-    the ``--case`` path never called ``record_errors``, so a capture that failed silently stayed
-    silent there. Neither lost data -- the probes are on disk either way -- but each path was
-    missing a different half of the diagnostics, which is exactly the shape of bug that costs an
-    afternoon later.
+    ONE reporter for both unit kinds. They had diverged: each path was missing a different half of
+    the diagnostics -- the ``--op`` path (which is what a sweep actually runs, since build_all
+    decomposes into OpUnits) skipped one summary and the ``--case`` path never called
+    ``record_errors``, so a capture that failed silently stayed silent there. Exactly the shape of
+    bug that costs an afternoon later.
     """
     from miniworld_engine.autotune import capture
 
     print(capture.precompile_summary(), flush=True)
-    probe = capture.probe_log_summary(top=8)
-    if probe:
-        print(probe, flush=True)
     print(capture.summary(), flush=True)
     n = capture.dump_shard(shard)
     errs = capture.record_errors()
@@ -1172,11 +1162,6 @@ def _child_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", choices=("eval", "train"), default="eval")
     ap.add_argument("--shard", required=True)
     ap.add_argument("--compile-jobs", type=int, default=0)
-    ap.add_argument("--skip-warm", action="store_true",
-                    help="diagnostic: drop the untimed warm launch before the budget probe")
-    ap.add_argument("--bench-budget", type=float, default=0.0,
-                    help="abandon a config once one timed launch exceeds this factor x the best "
-                         "so far in the round (0 = off, measure every config to completion)")
     ap.add_argument("--impl", default="miniworld")
     ap.add_argument("--config-dir", default="",
                     help="directory of <op>.csv config files; every kernel's grid comes from here")
@@ -1193,9 +1178,7 @@ def _child_main(argv: list[str] | None = None) -> int:
         # would always print 0/0, since nothing has asked for configs yet.
         print(f"  [config] set to {args.config_dir}", flush=True)
     settings.configure(run_autotune=True, capture=True,
-                       compile_jobs=(args.compile_jobs or None),
-                       bench_budget_factor=(args.bench_budget or None),
-                       bench_budget_skip_warm=args.skip_warm)
+                       compile_jobs=(args.compile_jobs or None))
     p_drop = 0.0
     if args.switch == "p_drop":
         p_drop = float(args.value)          # a module argument, not a settings pin
@@ -1213,9 +1196,9 @@ def _child_main(argv: list[str] | None = None) -> int:
         # environment, before any of them imported. `--side` is on the command line so the unit is
         # reproducible from it; the env var is what the drivers actually read.
         capture.install()
-        n_done = capture.load_probe_state(args.shard)
+        n_done = capture.load_compile_state(args.shard)
         if n_done:
-            print(f"  [resume] {n_done} probe(s) replayable", flush=True)
+            print(f"  [resume] {n_done} compile(s) replayable", flush=True)
         ran = _run_one_driver(args.op)
         n = _report_unit(args.shard)
         print(f"unit ran={ran} ops={n}", flush=True)
@@ -1227,9 +1210,9 @@ def _child_main(argv: list[str] | None = None) -> int:
         return 2
 
     capture.install()
-    n_done = capture.load_probe_state(args.shard)
+    n_done = capture.load_compile_state(args.shard)
     if n_done:
-        print(f"  [resume] {n_done} probe(s) replayable from an earlier attempt", flush=True)
+        print(f"  [resume] {n_done} compile(s) replayable from an earlier attempt", flush=True)
     ran = run_case(case, args.length, args.dims, train=(args.mode == "train"), p_drop=p_drop,
                    impl=args.impl, dtype=getattr(torch, args.dtype),
                    compute_dtype=getattr(torch, args.compute_dtype) if args.compute_dtype else None)

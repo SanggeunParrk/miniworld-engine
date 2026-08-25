@@ -23,7 +23,7 @@ rm -f $OUT/fk-$SLURM_JOB_ID.*
 T0=$SECONDS
 $PY -u -m miniworld_engine.autotune.builder \
     --shard $OUT/fk-$SLURM_JOB_ID.json \
-    --compile-jobs 8 --bench-budget 3.0 \
+    --compile-jobs 8 \
     --op $OP --dtype bfloat16 --length 1024
 echo "### WALL(fresh) $((SECONDS-T0)) s"
 
@@ -32,6 +32,6 @@ echo "### RESUME (second attempt on the same shard -- must be forkless from the 
 T0=$SECONDS
 $PY -u -m miniworld_engine.autotune.builder \
     --shard $OUT/fk-$SLURM_JOB_ID.json \
-    --compile-jobs 8 --bench-budget 3.0 \
+    --compile-jobs 8 \
     --op $OP --dtype bfloat16 --length 1024
 echo "### WALL(resume) $((SECONDS-T0)) s"

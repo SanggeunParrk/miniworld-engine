@@ -31,7 +31,7 @@ losing side of a dispatch decision, both looked like successful runs.
 
 What a run leaves behind: one shard JSON per unit, holding each op's config grid, its ranked
 entries and its `op_id`; one log per unit under `<shards>/logs/`, opening with the config set the
-unit resolved and closing with its precompile / bench-budget / launch accounting; and, in each
+unit resolved and closing with its precompile / compile-guard / launch accounting; and, in each
 merged `data/<op>/<gpu>.json`, a `provenance` block naming the build time and the torch and triton
 it was built with. The invoking argv is NOT among them -- reconstruct a build from the config set
 named in its logs.
@@ -704,7 +704,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     results = builder.build_all(selected, Path(args.shards).expanduser(),
                                 _resolve_gpus(args.gpus), args.compile_jobs,
                                 resume=args.resume, reclaim=args.reclaim,
-                                bench_budget=args.bench_budget, config_dir=directory)
+                                config_dir=directory)
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
@@ -999,10 +999,6 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
     bld.add_argument("--resume", action="store_true",
                      help="skip units whose shard already has entries")
-    bld.add_argument("--bench-budget", type=float, default=0.0,
-                     help="abandon a config once one launch exceeds this factor x the round's "
-                          "best (0 = off). Post-hoc: it skips the full do_bench of a config that "
-                          "is already out of the running, it does not shorten the launch itself.")
     bld.add_argument("--per-op", action="store_true",
                      help="work item = (op, shape bucket) driven through its registry driver, "
                           "instead of (case, dims, length, mode) driving a whole module. No "

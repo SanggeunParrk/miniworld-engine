@@ -104,21 +104,6 @@ _ROUND: dict = {}
 #: armed round the compile it is servicing belongs to.
 _CURRENT: dict = {}
 
-#: autotuner id -> best median (ms) seen so far in the CURRENT round. Reset by prune_configs.
-_BEST: dict = {}
-
-#: configs abandoned by the bench budget, for the summary. Counted, never silent: a build that
-#: skipped nine tenths of its grid and one that measured all of it produce the same cache file.
-#:
-#: The seconds are split so the remaining bench time can be ATTRIBUTED rather than guessed. Three
-#: candidates look identical in a total: slow kernels running to completion before being judged,
-#: the fixed per-config cost of probing at all (two launches, two syncs, python round-trips), and
-#: the full do_bench of the configs that survive. They call for different fixes, so they are
-#: measured apart. ``kernel_ms`` is device time from cuda events; the ``*_s`` are host wall-clock,
-#: and the gap between them IS the fixed overhead.
-_ABANDONED: dict = {"skipped": 0, "measured": 0, "warm_s": 0.0, "probe_s": 0.0,
-                    "bench_s": 0.0, "kernel_ms": 0.0, "skipped_kernel_ms": 0.0}
-
 #: Where a compile() call actually spends its time. The guard forks a child, waits for it, and then
 #: recompiles in-process expecting a cache hit -- three costs that look like one. They have
 #: different fixes: fork is proportional to the parent's RSS, the wait is quantised by the poll
@@ -142,29 +127,18 @@ _LAUNCH_T: dict = {"init_handles": 0, "init_s": 0.0,
                    "ckinit_calls": 0, "ckinit_s": 0.0}
 
 #: (device_ms, config kwargs) for every probed config. The budget knows a config is slow; it does
-#: not know WHY, and "drop the slow ones" is only actionable once the slow ones share an attribute.
-#: Kept in memory and dumped next to the shard.
-_PROBE_LOG: list = []
 _CURRENT_CFG: dict = {}
 
 def _sig_line(cfg: dict) -> str:
     return ",".join(f"{k}={cfg[k]}" for k in sorted(cfg))
 
 
-#: sig -> median ms for every probe this unit has already decided, across attempts. A kill costs a
-#: restart, and a restart that re-benched everything up to the killed config would make the guard
-#: cost more than the hang it prevents -- quadratic in the number of bad configs. Replaying the
-#: decision instead makes a restart cost only the configs never reached.
-_PROBE_DONE: dict = {}
-_PROBE_FILE: list = []
+def load_compile_state(shard_path) -> int:
+    """Load the compiles this unit already settled. Returns how many replay.
 
-
-def load_probe_state(shard_path) -> int:
-    """Load the probes and compiles this unit already settled. Returns how many probes replay.
-
-    Kept after the bench watchdog was removed: it no longer serves kill-and-restart, it serves any
-    restart. A unit that dies to an OOM, a node failure, or a job time limit resumes without
-    re-benching or re-compiling what it had already decided.
+    Kept after the bench watchdog and then the bench budget were removed: it no longer serves
+    kill-and-restart or probe replay, it serves any restart. A unit that dies to an OOM, a node
+    failure, or a job time limit resumes without recompiling what it had already settled.
     """
     from pathlib import Path as _P
 
@@ -184,17 +158,7 @@ def load_probe_state(shard_path) -> int:
                 _COMPILED.add(ln[1:].partition("\t")[2] or ln[1:])
             else:  # legacy bare sig: settled, outcome unknown -> still fork to find out
                 _COMPILED.add(ln)
-    pf = _P(stem + ".probes")
-    _PROBE_FILE.append(pf)
-    if pf.exists():
-        for ln in pf.read_text().splitlines():
-            sig, _, ms = ln.rpartition("\t")
-            if sig:
-                try:
-                    _PROBE_DONE[sig] = float(ms)
-                except ValueError:
-                    continue
-    return len(_PROBE_DONE)
+    return len(_COMPILED)
 
 
 #: sigs whose compile is already in the on-disk triton cache from an earlier attempt at this unit.
@@ -261,37 +225,6 @@ def _cfg_sig(config) -> str:
     d["num_warps"] = config.num_warps
     d["num_stages"] = config.num_stages
     return _sig_line(d)
-
-
-def _remember(sig: str, ms: float) -> None:
-    _PROBE_DONE[sig] = ms
-    if _PROBE_FILE:
-        try:
-            with _PROBE_FILE[0].open("a") as fh:
-                fh.write(f"{sig}\t{ms}\n")
-        except OSError:
-            pass
-
-
-def probe_log_summary(top: int = 0) -> str:
-    """Per-axis mean device time over every probed config -- which axis value costs the time."""
-    import collections
-
-    if not _PROBE_LOG:
-        return ""
-    per = collections.defaultdict(list)
-    for ms, cfg in _PROBE_LOG:
-        for k, v in cfg.items():
-            per[(k, v)].append(ms)
-    lines = [f"  [probe-log] {len(_PROBE_LOG)} configs probed; mean device ms by axis value:"]
-    for (k, v), vals in sorted(per.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-        lines.append(f"      {k}={v!s:<6} n={len(vals):<5} mean={sum(vals) / len(vals):8.2f}ms"
-                     f"  min={min(vals):7.3f}ms")
-    if top:
-        worst = sorted(_PROBE_LOG, key=lambda r: -r[0])[:top]
-        lines.append("    slowest configs:")
-        lines += [f"      {ms:9.1f}ms  {cfg}" for ms, cfg in worst]
-    return "\n".join(lines)
 
 
 #: :func:`_install_launch_probes` ran. A module global, matching ``_REC_INSTALLED`` -- the flag
@@ -383,76 +316,6 @@ def _install_launch_probes() -> None:
     Autotuner.run = at_run
 
 
-def _budget_ms(autotuner) -> float | None:
-    """Bench budget for the next config, or None when the feature is off."""
-    from miniworld_engine import settings
-
-    cur = settings.current()
-    factor = cur.bench_budget_factor
-    if not factor:
-        return None
-    best = _BEST.get(id(autotuner))
-    cap = cur.bench_budget_cap_ms
-    return cap if best is None else min(cap, best * factor)
-
-
-def _budgeted_do_bench(orig, budget: float):
-    """``do_bench`` that probes once and gives up if the config is already out of the running.
-
-    One untimed call first: the timed one must not include a JIT compile (the precompile round
-    normally removes that, but a cache miss here would read as a slow kernel and abandon a config
-    for the wrong reason). Then one timed launch -- enough to separate a config that is 10x the
-    best from one that might win, which is the only distinction the budget needs to make.
-    """
-    import time
-
-    import torch
-
-    from miniworld_engine import settings as _settings
-
-    skip_warm = _settings.current().bench_budget_skip_warm
-
-    def f(kernel_call, quantiles=None, **kw):
-        sig = _sig_line(_CURRENT_CFG)
-        if sig in _PROBE_DONE:          # decided on an earlier attempt: replay, do not relaunch
-            m = _PROBE_DONE[sig]
-            _ABANDONED["skipped" if m == float("inf") else "measured"] += 1
-            return [m] * 3
-        if not skip_warm:
-            t0 = time.perf_counter()
-            kernel_call()                   # warm: compile / cache / allocator
-            torch.cuda.synchronize()
-            _ABANDONED["warm_s"] += time.perf_counter() - t0
-
-        t1 = time.perf_counter()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        kernel_call()
-        end.record()
-        torch.cuda.synchronize()
-        probe_wall = time.perf_counter() - t1
-        dev_ms = start.elapsed_time(end)
-        _ABANDONED["probe_s"] += probe_wall
-        _ABANDONED["kernel_ms"] += dev_ms
-
-        if dev_ms > budget:
-            _ABANDONED["skipped"] += 1
-            _ABANDONED["skipped_kernel_ms"] += dev_ms
-            _PROBE_LOG.append((dev_ms, dict(_CURRENT_CFG)))
-            _remember(sig, float("inf"))
-            return [float("inf")] * 3
-        _PROBE_LOG.append((dev_ms, dict(_CURRENT_CFG)))
-        _ABANDONED["measured"] += 1
-        t2 = time.perf_counter()
-        res = orig(kernel_call, quantiles=quantiles, **kw)
-        _ABANDONED["bench_s"] += time.perf_counter() - t2
-        _remember(sig, _median(res))
-        return res
-
-    return f
-
-
 def precompile_summary() -> str:
     """One line on what the pre-compile actually did.
 
@@ -461,18 +324,6 @@ def precompile_summary() -> str:
     """
     p = _PRECOMPILE
     budget = ""
-    a = _ABANDONED
-    if a["skipped"] or a["measured"]:
-        tot = a["skipped"] + a["measured"]
-        host = a["warm_s"] + a["probe_s"] + a["bench_s"]
-        dev = a["kernel_ms"] / 1000.0
-        budget = (
-            f"\n  [bench-budget] {a['skipped']}/{tot} abandoned"
-            f" | warm {a['warm_s']:.0f}s + probe {a['probe_s']:.0f}s"
-            f" + full-bench {a['bench_s']:.0f}s = {host:.0f}s host"
-            f" | device {dev:.1f}s (of which abandoned kernels"
-            f" {a['skipped_kernel_ms'] / 1000.0:.1f}s)"
-            f" | fixed overhead {host - dev:.0f}s")
     c = _COMPILE_T
     if c["calls"] or c["forkless"] or c["known_bad"]:
         budget += (f"\n  [compile-guard] forkless {c['forkless']} x -> {c['forkless_s']:.0f}s"
@@ -1033,7 +884,6 @@ def install() -> None:
         # so this is where the running best resets. Keeping it per autotuner rather than global:
         # rounds from different kernels interleave, and a fast elementwise kernel's best would
         # otherwise set an impossible budget for a GEMM.
-        _BEST.pop(id(self), None)
         return pruned
 
     Autotuner.prune_configs = prune_configs
@@ -1045,14 +895,10 @@ def install() -> None:
         # compiles triggers the fan-out for the whole round.
         previous = _CURRENT.get("id")
         _CURRENT["id"] = id(self)
-        budget = _budget_ms(self)
         _CURRENT_CFG.clear()
         _CURRENT_CFG.update(config.kwargs)
         _CURRENT_CFG["num_warps"] = config.num_warps
         _CURRENT_CFG["num_stages"] = config.num_stages
-        saved_do_bench = getattr(self, "do_bench", None)
-        if budget is not None and saved_do_bench is not None:
-            self.do_bench = _budgeted_do_bench(saved_do_bench, budget)
         try:
             res = _orig_bench(self, *args, config=config, **meta)
         except Exception:  # a config that fails to compile/run simply loses
@@ -1066,13 +912,7 @@ def install() -> None:
             res = [float("inf")] * 3
         finally:
             _CURRENT["id"] = previous
-            if budget is not None and saved_do_bench is not None:
-                self.do_bench = saved_do_bench
         med = _median(res)
-        if med != float("inf"):
-            prev = _BEST.get(id(self))
-            if prev is None or med < prev:
-                _BEST[id(self)] = med
         try:
             _record_one(self, config, meta, med)
         except Exception as exc:  # capture must never perturb a real bench

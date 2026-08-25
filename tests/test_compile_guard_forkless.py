@@ -59,13 +59,13 @@ def test_a_pool_settled_config_is_recorded_with_its_outcome(tmp_path):
 def test_the_outcome_survives_a_restart(tmp_path):
     """A unit that dies to a node failure must not go back to forking 1944 children."""
     shard = tmp_path / "u.json"
-    capture.load_probe_state(shard)
+    capture.load_compile_state(shard)
     cfg = _Cfg(32)
     capture._mark_outcome("k", [(capture._cfg_sig(cfg), True)])
     capture._COMPILE_OK.clear()
     capture._COMPILED.clear()
     capture._COMPILED_FILE.clear()
-    capture.load_probe_state(shard)                     # the restart
+    capture.load_compile_state(shard)                     # the restart
     assert f"k\t{capture._cfg_sig(cfg)}" in capture._COMPILE_OK
     assert capture._cfg_sig(cfg) in capture._COMPILED, "the ROUND skip must still see it"
 
@@ -75,7 +75,7 @@ def test_a_legacy_bare_line_does_not_claim_an_outcome(tmp_path):
     fine' would skip the fork for a config that in fact failed."""
     shard = tmp_path / "u.json"
     (tmp_path / "u.compiled").write_text("BLOCK_M1=32,num_warps=4,num_stages=2\n")
-    capture.load_probe_state(shard)
+    capture.load_compile_state(shard)
     assert capture._COMPILED, "legacy line still suppresses recompiling in the round"
     assert not capture._COMPILE_OK
     assert not capture._COMPILE_BAD
@@ -85,7 +85,7 @@ def test_load_is_idempotent_across_repeated_appends(tmp_path):
     """`_mark_outcome` appends; a resumed unit re-marking the same configs must not grow the file
     without bound -- 527 units x 1944 configs is where that turns into real I/O."""
     shard = tmp_path / "u.json"
-    capture.load_probe_state(shard)
+    capture.load_compile_state(shard)
     cfg = _Cfg(32)
     for _ in range(5):
         capture._mark_outcome("k", [(capture._cfg_sig(cfg), True)])

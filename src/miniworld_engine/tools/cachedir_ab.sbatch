@@ -31,7 +31,7 @@ run () {  # run <label> <cachedir>
   /usr/bin/time -f "### WALL %e s   maxrss %M KB" \
     $PY -u -m miniworld_engine.autotune.builder \
       --shard $OUT/ab-$label-$SLURM_JOB_ID \
-      --compile-jobs 8 --bench-budget 3.0 \
+      --compile-jobs 8 \
       --op $OP --dtype bfloat16 --length 1024 2>&1 | grep -E '^\s*\[|WALL|unit ran'
 }
 

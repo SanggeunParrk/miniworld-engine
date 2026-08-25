@@ -8,6 +8,34 @@ The public surface is enforced by `tests/test_public_api.py`.
 
 ## [Unreleased]
 
+### Removed
+- **`--bench-budget` and `settings.bench_budget_*`.** The feature abandoned an autotune config
+  once one timed launch exceeded `factor x` the best so far. Its safety argument — "a config
+  that could still win runs FASTER than the current best and is therefore always inside the
+  budget" — is true only if both numbers are the same quantity, and they were not.
+
+  `best` comes from triton's `do_bench`, whose timed loop never synchronises, so the queue
+  stays full and the event window measures device time alone. The probe drained the stream
+  (warm launch + `synchronize`) and timed ONE launch, so its number carried the host launch
+  latency as well. Measured here on an A6000, one kernel, BLOCK swept 256→16384 and warps
+  1→16:
+
+      probe (1 launch)   0.0256 – 0.0502 ms   (spread 0.025 — flat: it is not the kernel)
+      do_bench median    0.0051 – 0.0645 ms   (spread 0.059 — it tracks the config)
+      budget = best x 3  0.0154 ms            → 12 of 12 configs abandoned
+
+  So the first config in grid order sets `best` under the 300 ms first-round cap and every
+  other config is dropped. In the shipped cache this leaves a fingerprint: **349 of 1244
+  entries across 51 ops have the first config in grid order as their winner**, 346 of them
+  with a single ranked config, from grids of 750 to 15552. `adaln_gemm_gate_triton` records
+  `{BLOCK_K:16, BLOCK_M1:32, BLOCK_N:32, GROUP_M:1} warps=1 stages=1` — grid position 1 of
+  15552 — for three different shape keys.
+
+  It breaks whenever `kernel time < launch floor / 3`, which is nearly every kernel here
+  (0.005–0.03 ms). Removed rather than fixed: a corrected probe would have to bench a queued
+  batch, which is a different implementation, and this one silently corrupts caches when
+  enabled. The A5000/A6000 caches need rebuilding.
+
 ### Changed
 - **`settings.AutotuneKernel` is three names, and an unknown one now raises.** It declared
   seven; four of them (`tri_multi`, `layernorm`, `layer_norm_linear`, `augmented_attention`)

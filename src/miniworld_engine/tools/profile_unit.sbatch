@@ -44,7 +44,7 @@ echo "### profiling ONE unit ###"
 $PY -u -m cProfile -o $OUT/unit-$SLURM_JOB_ID.pstats \
   -m miniworld_engine.autotune.builder \
   --shard $OUT/shard-$SLURM_JOB_ID \
-  --compile-jobs 8 --bench-budget 3.0 \
+  --compile-jobs 8 \
   --op adaln_bwd_dx_dlnw_triton --dtype bfloat16 --length 1024
 
 echo "### TOP TOTTIME (self time -- where the wall clock actually goes) ###"
