@@ -419,11 +419,12 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
     for c in candidates:
         if c.is_dir():
             return c
-    have = sorted({d.name for d in (repo / CONFIG_ROOT).glob("*") if d.is_dir()}
-                  | {d.name for d in packaged_root.glob("*") if d.is_dir()})
+    have = sorted(d.name for d in packaged_root.glob("*") if d.is_dir())
     print(f"unknown config set {config_type!r}; have: {', '.join(have) or '(none)'}\n"
-          f"a config set is a directory of <op>.csv under {CONFIG_ROOT}/ "
-          f"(the default is {DEFAULT_CONFIG_SET!r})", file=sys.stderr)
+          f"a config set is a short name from that list, or a path to a directory of <op>.csv. "
+          f"They live in the package now ({packaged_root}), so the old repo-relative form "
+          f"`{CONFIG_ROOT}/<name>` no longer resolves. The default is "
+          f"{DEFAULT_CONFIG_SET!r}.", file=sys.stderr)
     return 2
 
 
