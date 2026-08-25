@@ -105,3 +105,34 @@ def test_skips_are_reported_with_reasons():
 # above 5 for small tiles). The guard that remains is capture.py's per-config compile TIMEOUT,
 # which judges each config by real compile time on the running card.
 # --------------------------------------------------------------------------- #
+
+
+def test_the_sweep_still_enumerates_every_declared_unit() -> None:
+    """The 527-unit report, turned into a check.
+
+    A consumer's clone predated `0854ac4` (*the sweep never drove fp32, and coverage could not see
+    it missing*) and `build all` enumerated 527 units instead of 859 — half of every fp32 kernel's
+    work, while coverage reported `missing 0` because it counted against what the build enumerated
+    rather than against the registry. Ten hours went to it on another cluster.
+
+    The count is derived from the registry here rather than written down, so adding a kernel does
+    not fail this for the wrong reason. What it catches is the shape of that bug: units going
+    missing while every other number still looks consistent.
+    """
+    import csv
+    from pathlib import Path
+
+    from miniworld_engine.autotune.builder import op_units
+    from miniworld_engine.kernels import __file__ as kernels_init
+
+    reg = Path(kernels_init).parent / "registry.csv"
+    with reg.open(newline="") as fh:
+        rows = [r for r in csv.DictReader(fh) if (r.get("driver") or "").strip()]
+    dtypes = sum(len([d for d in (r.get("dtypes") or "").split("|") if d]) for r in rows)
+    got = len(op_units())
+    assert got >= dtypes, (
+        f"{got} units for {len(rows)} driven kernels declaring {dtypes} (kernel, dtype) pairs. "
+        f"A unit is (op, dtype, shape bucket), so it cannot be fewer than the pairs -- this is the "
+        f"527-vs-859 shape: work vanishing while every other count still agrees. "
+        f"See docs/reproducing-a-report.md.")
+    assert got > 800, f"only {got} units; the sweep has lost work (859 at the time of writing)"

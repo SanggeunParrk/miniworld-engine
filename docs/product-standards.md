@@ -313,9 +313,12 @@ ties a module or step-level number to a released version.
 *Prevents:* today's ten-hour A100 loss, which took a session of analysis to attribute because
 the failing environment could not be reproduced on this cluster.
 
-*Enforced by:* nothing.
+*Enforced by:* `docs/reproducing-a-report.md` -- isolate the four caches that carry state between
+runs, ask the CPU-only question first, take a card last. Demonstrated on the report that motivated
+it: `0854ac4^` gives 527 units, main gives 859, no GPU involved. The count is now pinned by
+`tests/builder/test_build_matrix.py`.
 
-*Status:* **not met.**
+*Status:* **met.**
 
 ---
 

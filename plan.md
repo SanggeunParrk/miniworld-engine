@@ -273,7 +273,7 @@ non-empty.
 
 *Done when:* something other than memory reports the backlog.
 
-### E2 — the consumer's environment cannot be reproduced here  (K4)
+### E2 — DONE — the consumer's environment cannot be reproduced here  (K4)
 
 *Gap, measured:* the A100 failure took a session to attribute because the failing environment
 was a different cluster and a fresh clone.
@@ -282,6 +282,12 @@ was a different cluster and a fresh clone.
 runnable on this cluster, so a consumer report can be reproduced instead of reasoned about.
 
 *Done when:* the recipe reproduces the 527-unit symptom on a pre-fix commit.
+
+*Closed, and it needed no GPU.* A detached worktree at `0854ac4^` enumerates **527** units where
+main enumerates **859** -- the whole report, settled in seconds on CPU. That is the recipe's point:
+most of what makes a report irreproducible is accumulated state, not hardware, so the doc strips
+caches first and reaches for a card last. `tests/builder/test_build_matrix.py` now pins the count
+against the registry, so the regression fails in CI instead of in someone's ten-hour job.
 
 ### E3 — DONE — vocabulary tests read the working tree, not the repo  (D1, J4)
 
