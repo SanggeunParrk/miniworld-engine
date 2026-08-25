@@ -12,7 +12,12 @@ dependencies = [
   # entry points. Bench harness, comparison baselines, and the CuTeDSL backend
   # are optional extras below so the parent never drags them in.
   "torch>=2.8",
-  "triton",
+  # From code, not from a test: `autotune/cache.py` prefers
+  # `triton.backends.nvidia.compiler.get_ptxas_version`, which exists from 3.3, and falls
+  # back below it. Nothing has been RUN on anything older than the triton in docs/supported.md.
+  # einops / jaxtyping / numpy stay unbounded on purpose -- see that page: a guessed floor
+  # reads like evidence, and there is none for them.
+  "triton>=3.3",
   "einops",
   "jaxtyping",
   "numpy",

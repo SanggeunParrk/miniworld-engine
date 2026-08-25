@@ -85,6 +85,66 @@ jobs:
           CUDA_VISIBLE_DEVICES: ""
         run: pytest -q tests/numerics/test_numerical.py --collect-only -m gpu | tail -1
 
+  wheel:
+    name: the artifact a consumer installs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist/
+
+      - name: It carries the assets the RUNTIME needs, and nothing it does not
+        # An editable install reads straight from src/, so every check that passes here passes
+        # locally whatever `package-data` says. The failure this catches is a wheel that contains
+        # only .py: the shipped autotune caches, the default config set, the CUDA sources and the
+        # PEP 561 marker are declared by glob, and a glob is one edit away from dropping them.
+        # Counts are derived from the tree, not written down, so adding a kernel does not make
+        # this fail for the wrong reason.
+        run: |
+          python - <<'EOF'
+          import glob, pathlib, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          def n(sub): return sum(sub in x for x in names)
+          src = pathlib.Path("src/miniworld_engine")
+          want = {
+              "py.typed":              (n("py.typed"), 1),
+              "autotune/data/*.json":  (n("autotune/data"), len(list((src/"autotune/data").rglob("*.json")))),
+              "configs/grid/*.csv":    (n("autotune/configs/grid"), len(list((src/"autotune/configs/grid").glob("*.csv")))),
+              "manifests/*.csv":       (n("autotune/manifests"), len(list((src/"autotune/manifests").glob("*.csv")))),
+              "registry.csv":          (n("kernels/registry.csv"), 1),
+              "*.cu":                  (sum(x.endswith(".cu") for x in names), len(list(src.rglob("*.cu")))),
+          }
+          bad = {k: v for k, v in want.items() if v[0] != v[1]}
+          for k, (got, exp) in want.items():
+              print(f"  {k:24} {got:4} / {exp}")
+          # What must NOT ship: the lab notebook, and the A/B config sets a consumer never selects.
+          for label, sub in (("notes/", "/notes/"), ("A-B config sets", "autotune/configs/accuracy")):
+              if n(sub):
+                  bad[label] = (n(sub), 0)
+          assert not bad, f"wheel contents wrong: {bad}"
+          print(f"  OK: {len(names)} files")
+          EOF
+
+      - name: It imports with src/ off the path
+        # The other half. `pip install --target` into an empty directory and import from there, so
+        # a module that only resolves because the source tree is next to it fails here.
+        run: |
+          python -m pip install --quiet --no-deps --target /tmp/site dist/*.whl
+          cd /tmp && PYTHONPATH=/tmp/site python -c "
+          import miniworld_engine as m, miniworld_engine.kernels, miniworld_engine.ops
+          from miniworld_engine.autotune import cache, configs, devices
+          assert configs.default_config_dir().is_dir(), 'no packaged config set'
+          assert devices._DEVICES.is_dir(), 'no packaged device manifests'
+          print('imported', m.__version__, 'from', m.__file__)
+          "
+
   floor:
     name: declared Python floor (3.10, CPU suite only)
     runs-on: ubuntu-latest

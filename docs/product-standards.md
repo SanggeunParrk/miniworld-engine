@@ -121,8 +121,9 @@ fails everywhere else because the data files were never packaged.
 isolated `--target` and imported without `src/` on the path, `miniworld_engine`,
 `miniworld_engine.kernels` and `miniworld_engine.autotune.cache` all import.
 
-*Status:* **met in fact, unenforced.** No CI job builds the wheel, so the next `package-data`
-edit can silently drop the autotune cache.
+*Status:* **met.** A `wheel` CI job builds it, asserts each shipped asset count against the
+tree (so adding a kernel cannot fail it for the wrong reason), asserts the lab notebook and the
+A/B config sets are absent, and imports it from a `--target` install with `src/` off the path.
 
 ### H2. Dependencies are a contract, not a snapshot of what was installed
 
@@ -133,7 +134,10 @@ edit can silently drop the autotune cache.
 at all, and the pixi lock — the only fully-pinned artifact — is not what a `pip install`
 consumer gets.
 
-*Status:* **partially met.**
+*Status:* **met for the floor that exists.** `triton>=3.3` is declared with the code evidence
+behind it; `einops`/`jaxtyping`/`numpy` stay unbounded deliberately, because no version of this
+repo has been exercised against an older release and a guessed floor reads like evidence.
+`docs/supported.md` states what was actually run.
 
 ### H3. Installation is documented for the case where the author is not present
 
@@ -355,10 +359,12 @@ that. There is no troubleshooting document.
 
 *Prevents:* ambiguity about which card, driver, torch, and CUDA are inside the promise.
 
-*Enforced by:* README `## Supported hardware` plus the `arch` column. No page states the
-tested combinations, because (G3, J1) there is no matrix to state.
+*Enforced by:* `docs/supported.md`, where every row cites the artifact behind it -- a device
+manifest in `autotune/manifests/` or a CI job -- and the nine kernels declared for sm90/sm100 are
+listed under "GPU that has NOT been run".
 
-*Status:* **partially met.**
+*Status:* **met**, in the only sense available: the page states what ran and marks the rest
+untested, rather than implying a matrix that does not exist.
 
 ---
 
