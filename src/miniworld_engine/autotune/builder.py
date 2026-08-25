@@ -1072,10 +1072,17 @@ def audit(selected: list[Case]) -> list[tuple]:
     work. This runs the same modules against the finished cache and collects the misses the engine
     already reports, so "no missing shapes" becomes a measurement rather than a claim: an empty
     result means every (op, dtype, bucket) this matrix reaches was found.
+
+    Run it in a FRESH PROCESS, once. Two reasons, both of which made a before/after over one
+    process report the before twice: the miss set accumulated and was never cleared (fixed here by
+    clearing it), and triton's Autotuner memoises its choice per tuning key on the instance, so a
+    second replay never consults the cache again -- measured, the second call returned in 0 s and
+    named the same four misses a filled cache had just covered.
     """
     from miniworld_engine import settings
-    from miniworld_engine.autotune.cache import cache_misses
+    from miniworld_engine.autotune.cache import cache_misses, clear_cache_misses
 
+    clear_cache_misses()
     settings.configure(run_autotune=False, capture=False)   # use the cache, do not rebuild it
     for case in selected:
         for di in range(len(case.dims)):

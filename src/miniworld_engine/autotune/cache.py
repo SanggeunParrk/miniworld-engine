@@ -365,6 +365,16 @@ def cache_misses() -> frozenset:
     return frozenset(_CACHE_MISSES)
 
 
+def clear_cache_misses() -> None:
+    """Forget what this process has missed so far.
+
+    The set only ever grew, so a caller that measured, improved the cache, and measured again got
+    the first answer back both times -- it cannot report an improvement, only more misses. A
+    before/after over one process is the natural way to check a cache fill and it was silently
+    unable to fail in the useful direction."""
+    _CACHE_MISSES.clear()
+
+
 def _warn_once(op: str, gk: str, tag: str, reason: str, fallback: str = "") -> None:
     _CACHE_MISSES.add((op, gk, tag))
     key = (op, gk, tag, reason)
