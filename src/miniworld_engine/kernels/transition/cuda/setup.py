@@ -2,26 +2,32 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-setup(
-    name="transition_cuda_ext_v2",
-    ext_modules=[
-        CUDAExtension(
-            name="transition_cuda_ext_v2",
-            sources=["transition_cuda.cpp", "transition_cuda_kernel.cu"],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": [
-                    "-O3",
-                    "--use_fast_math",
-                    "-gencode=arch=compute_80,code=sm_80",
-                    "-gencode=arch=compute_86,code=sm_86",
-                    "-gencode=arch=compute_89,code=sm_89",
-                    "-gencode=arch=compute_90,code=sm_90",
-                ],
-            },
-            libraries=["cublas"],
-        )
-    ],
-    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=False)},
-    options={"build": {"build_base": "build_v2"}},
-)
+# `setup()` under a __main__ guard. This file lives INSIDE the importable package, so
+# without the guard `import miniworld_engine.kernels.<family>.cuda.setup` runs
+# setuptools and dies with `SystemExit: usage: cli.py ...` -- which is what
+# `dev audit`'s import sweep hit, reporting 2 not OK on every run. Running the script
+# directly (`python setup.py build_ext --inplace`) is unchanged.
+if __name__ == "__main__":
+    setup(
+        name="transition_cuda_ext_v2",
+        ext_modules=[
+            CUDAExtension(
+                name="transition_cuda_ext_v2",
+                sources=["transition_cuda.cpp", "transition_cuda_kernel.cu"],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": [
+                        "-O3",
+                        "--use_fast_math",
+                        "-gencode=arch=compute_80,code=sm_80",
+                        "-gencode=arch=compute_86,code=sm_86",
+                        "-gencode=arch=compute_89,code=sm_89",
+                        "-gencode=arch=compute_90,code=sm_90",
+                    ],
+                },
+                libraries=["cublas"],
+            )
+        ],
+        cmdclass={"build_ext": BuildExtension.with_options(use_ninja=False)},
+        options={"build": {"build_base": "build_v2"}},
+    )

@@ -23,7 +23,7 @@ Status: `todo` / `doing` / `done` / `deferred (reason)`.
 | P9 | C2 | quoted numbers traceable to a table | **done** (scope corrected) |
 | P10 | D4 | end the `configs/grid` duplication | **done** |
 | P11 | F4 | stale reference docs | **done** |
-| P12 | F5 | `todo.md` is not repository furniture | **done** (2 comment refs pending) |
+| P12 | F5 | `todo.md` is not repository furniture | **done** |
 | P13 | F6 | CONTRIBUTING | **done** |
 | P14 | A4 | the declared Python floor is untested | **done** |
 | P15 | E2 | a stale JIT build lock hangs the GPU suite forever | **done** (both halves) |
@@ -525,10 +525,9 @@ Moved whole, nothing removed, to
 from, what the 14 open items are, and that the section dates are the findings' dates rather than the
 move's. This item is the tracker for that tail; it does not restate it.
 
-**Done when.** The repo root holds no working notebook and nothing was thrown away. **Done** — with
-one loose end: `kernels/layernorm_linear/cute/__init__.py:44` and `.../cute/_tuned.py:26` cite
-`todo.md` by name. Both are one-line comment fixes, held back only because a GPU job is reading this
-worktree; they land with the other `src/` work rather than as a dangling reference.
+**Done when.** The repo root holds no working notebook and nothing was thrown away. **Done** — the
+two `src/` comments that cited `todo.md` by name (`kernels/layernorm_linear/cute/__init__.py:44`,
+`.../cute/_tuned.py:26`) now point at the moved record; `git grep todo.md -- src` is empty.
 
 **The tail, for reference (not duplicated — see the record):** 14 open items across cute autotune
 wiring (`resolve_config` for the remaining cute GEMMs, a capture driver for `sweep_and_cache`),
@@ -637,6 +636,20 @@ Three separate faults, and the third is the one that matters:
 
 **Done when.** A stale lock produces an error naming it within ~2 minutes instead of a hang, and
 `python -c "import miniworld_engine.kernels.layernorm"` runs no compiler.
+
+**Verified on a device, and it took looking to see that it worked.** `dev audit`'s import check
+still read `import: 0 OK, 2 not OK` after the lazy conversion — the same count as before. Same
+number, different cause, and concluding "the fix failed" without reading the message would have
+been wrong:
+
+    before   transition.cuda          RuntimeError: Error building extension 'transition_b2b_cuda'
+    after    .../cuda/setup.py x2     SystemExit: usage: cli.py [global_opts] cmd1 ...
+
+The build-at-import defect is gone. What surfaced underneath is a second, unrelated one:
+`kernels/<family>/cuda/setup.py` are standalone setuptools scripts that live INSIDE the importable
+package and call `setup()` at module scope, so anything walking the tree imports them and runs
+setuptools. Guarded with `if __name__ == "__main__":` — running `python setup.py build_ext` is
+unchanged — and `tests/test_no_build_at_import.py` grew a check for it, verified to bite.
 
 **Done — the hang half.** `kernels/_nvcc.load_extension()` wraps torch's `load`: a lock older than
 `STALE_LOCK_SECONDS` (30 min — longer than any real build here) is reclaimed with a note, and a

@@ -85,3 +85,34 @@ def test_importing_the_cuda_packages_runs_no_compiler() -> None:
         importlib.import_module(name)
         elapsed = time.monotonic() - started
         assert elapsed < 5.0, f"importing {name} took {elapsed:.1f}s -- something is building"
+
+
+# --- scripts that live inside the importable package ---------------------------------------- #
+
+def _setup_scripts() -> list[Path]:
+    return sorted(KERNELS.rglob("setup.py"))
+
+
+def test_there_are_setup_scripts_to_check() -> None:
+    assert _setup_scripts(), "no setup.py under kernels/; this check now covers nothing"
+
+
+@pytest.mark.parametrize("script", _setup_scripts(), ids=lambda p: str(p.parent.relative_to(KERNELS)))
+def test_a_setup_script_does_nothing_when_imported(script: Path) -> None:
+    """`setup()` at module scope means importing the module RUNS setuptools.
+
+    These are standalone build scripts (`python setup.py build_ext --inplace`) that happen to sit
+    inside the importable package, so anything walking the tree imports them. `dev audit`'s import
+    sweep did, and got `SystemExit: usage: cli.py [global_opts] ...` -- reporting 2 not OK on every
+    run, for a reason having nothing to do with what it audits.
+
+    A __main__ guard costs nothing and leaves running the script directly unchanged.
+    """
+    tree = ast.parse(script.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            name = getattr(node.value.func, "id", None) or getattr(node.value.func, "attr", None)
+            assert name != "setup", (
+                f"{script.relative_to(KERNELS.parent)}:{node.lineno} calls setup() at module "
+                f"scope, so importing it runs setuptools and raises SystemExit. Put it under "
+                f'`if __name__ == "__main__":`.')
