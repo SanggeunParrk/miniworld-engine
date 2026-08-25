@@ -174,5 +174,5 @@ they need a Blackwell (B200) node. Do when B200 access exists:
       stored (same zeros symptom). Test vs torch on H100 (cache OFF); if broken, rename to `mAuxOut`.
 - [ ] Re-check `dab_lnbwd` / other cute kernels for the same `mPostAct`/`postact_*` drift.
 - [ ] Now that the CUTE transition forward works (cos=1.0 end-to-end incl. `cute_transition_fused`),
-      re-evaluate the `implementation=triton` pin advice in `docs/quack-0.5.0-cute-port-plan.md` for
+      re-evaluate the `implementation=triton` pin advice in `docs/design/quack-0.5.0-cute-port.md` for
       the MINIWORLD/large-d_pair route on sm90.

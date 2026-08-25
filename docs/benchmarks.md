@@ -52,6 +52,12 @@ Do not add archive folders or repro source trees under a target. Do not add cura
 reports under `benchmarks/`; write durable explanations under `docs/` and keep generated
 tables/plots under the target's `artifacts/`.
 
+Two markdown files live here anyway, and both are the exception the rule means to allow: a file
+explaining the directory it sits in. `RESULTS.md` states the results/artifacts/plots layout;
+`compile_wrap/README.md` is the measurement behind the `compile_wrap` default and is cited from ten
+places. The two that were NOT that -- `pairformer_{B200,H100}_results.md`, standalone reports under
+`runners/` that nothing cited -- are now `docs/records/`.
+
 ## Hard Rule: All Benchmarks Run Compiled
 
 **Every benchmark MUST measure the `torch.compile`d path, never non-compiled PyTorch.**

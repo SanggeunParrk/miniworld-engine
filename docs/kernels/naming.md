@@ -175,7 +175,7 @@ detail 이 둘 이상이면 이 순서로 쓴다:
 
 이름표는 파일 기준이 아니라 **launch 지점 기준**으로 열거한다. 파일 기준으로 세면 `.cu` 커널과
 cute collective 클래스가 통째로 빠진다(현재 최소 6개 CUDA 커널이 이름표에 없다 —
-[naming-audit.md](../docs/kernels/naming-audit.md) §2 참조).
+[../records/naming-audit.md](../docs/records/../records/naming-audit.md) §2 참조).
 
 ---
 

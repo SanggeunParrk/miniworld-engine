@@ -12,8 +12,8 @@ claims must state the hardware behind them somewhere — which a provenance para
 including one that says which numbers are unattributed and why.
 
 DATED records are out of scope by design: `kernels/*/notes/**/v*.md` are per-version logs
-of "on this date, this config measured this", and `docs/kernels/{naming-audit,tiling-audit}.md` say
-in their own headers that they are records. A record does not go stale; a reference does.
+of "on this date, this config measured this", and `docs/records/**` says
+in each file's own header that it is a record. A record does not go stale; a reference does.
 """
 from __future__ import annotations
 
@@ -35,6 +35,13 @@ LIVE_DOCS = (
     "docs/benchmarks.md",
     "docs/benchmarking-cautions.md",
     "docs/operations/dispatch-cache.md",
+    # Written the day the product standard was, and every one of them quotes measurements: the
+    # cards a release ran on, the error a stack accumulates, the unit count a stale clone reports.
+    "docs/supported.md",
+    "docs/troubleshooting.md",
+    "docs/reproducing-a-report.md",
+    "docs/product-standards.md",
+    "docs/library-standards.md",
 )
 
 #: A latency or a speedup. Deliberately narrow: version numbers, tolerances and counts are not

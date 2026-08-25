@@ -382,6 +382,29 @@ The one that is not closed is **F7's consequence**: the shipped caches were buil
 budget on for 51 ops, so 349 entries are the grid's first config rather than the fastest. Rebuild
 is separate work and is not started.
 
+## G. Open technical work, indexed here and detailed elsewhere
+
+Two documents carry substantial open work and were invisible from this file, so "what is left"
+lived in three places and a reader could not know which. The detail stays where it is; this is the
+index.
+
+### G1 — the cute backend is mid-port to quack 0.5.0  (`docs/design/quack-0.5.0-cute-port.md`)
+
+*Gap:* phases 0-3 landed at `a1aea37`. Phase 4 is blocked on a cutlass-dsl 4.4.2 -> 4.5.2
+launch/stream ABI change, so the cute backend tracks two quack versions at once.
+
+*Done when:* the compat shim in `kernels/_quack_compat.py` is unnecessary and the port document
+becomes a record.
+
+### G2 — residual fusion is done for two op families, explicit for four  (`docs/design/residual-fusion.md`)
+
+*Gap:* Transition and TriangleMultiplication fuse the residual into the kernel epilogue.
+TriangleAttention, OuterProductMean and the two team-gm attention layers still add it explicitly,
+which is a separate pass over the pair tensor each time.
+
+*Done when:* the "remaining" column of that document's table is empty, or the entries left in it
+say why they will stay.
+
 ## Order
 
 **A1 → A3 → A2** first: version the package, make it buildable elsewhere, then move the

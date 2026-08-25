@@ -85,7 +85,7 @@ benchmarks/**/logs/
 
 # --- .bench: audit scratch, never tracked -----------------------------------------------------
 # One-off probes, per-run logs, result CSVs and sbatch wrappers. The audit tools worth keeping
-# live in src/miniworld_engine/tools/ instead, because docs/kernels/tiling-audit.md cites them by path and
+# live in src/miniworld_engine/tools/ instead, because docs/records/tiling-audit.md cites them by path and
 # the audit it records has to stay reproducible from a clean checkout.
 .bench/
 
