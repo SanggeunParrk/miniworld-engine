@@ -42,6 +42,14 @@ from miniworld_engine.autotune.cache import dtype_of_args as _dtype_of
 
 # op -> {"grid": [configs] | None, "entries": {(dtype, bucket): {sig: (config, ms)}}}
 _CAPTURE: dict = {}
+#: op -> configs this card could not run. They score +inf and are correctly not stored, but the
+#: unit reported only what survived -- "grid=864 ... 527 configs" and nothing about the other 337,
+#: which is a 39% hole in the searched space with no line anywhere saying so. Reconstructing it
+#: from the shard is possible and I got it wrong doing exactly that: `prune_configs` returns the
+#: full list, so nothing is pruned; triton itself returns [inf, inf, inf] for a config it cannot
+#: launch (OutOfResources: shared memory, e.g. 514,048 bytes required against an A6000's 101,376),
+#: without raising, so no exception reaches this module either. The count belongs in the report.
+_UNUSABLE: dict = {}
 _orig_bench = None
 _orig_run = None
 _SINGLE_SEEN: set = set()
@@ -696,6 +704,7 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
     if ms != ms and not unmeasured:
         return
     if ms == float("inf"):
+        _UNUSABLE[op] = _UNUSABLE.get(op, 0) + 1
         return
     # `nargs` is passed in by the single-config path, which records AFTER Autotuner.run has
     # finished -- and run() ends with `self.nargs = None`. Reading it off the autotuner there
@@ -976,6 +985,7 @@ def uninstall() -> None:
 
 def reset() -> None:
     _CAPTURE.clear()
+    _UNUSABLE.clear()
 
 
 def _rank(pairs):
@@ -1115,7 +1125,12 @@ def summary() -> str:
     for op, slot in sorted(_CAPTURE.items()):
         n_buckets = len(slot["entries"])
         n_grid = len(slot["grid"] or [])
-        lines.append(f"  {op}: grid={n_grid} buckets={n_buckets}")
+        bad = _UNUSABLE.get(op, 0)
+        # "unusable" is stated even when 0: a reader has to be able to tell "nothing was dropped"
+        # from "dropping is not reported", and for a long time those looked identical.
+        lines.append(f"  {op}: grid={n_grid} buckets={n_buckets} unusable={bad}"
+                     + (f" ({bad * 100 // max(n_grid * n_buckets, 1)}% of the searched space "
+                        f"could not run on this card)" if bad else ""))
         for (dtype, bucket), ent in sorted(slot["entries"].items()):
             best = min(ent.values(), key=lambda cm: cm[1]) if ent else None
             tag = f"{dtype}|{bucket}"

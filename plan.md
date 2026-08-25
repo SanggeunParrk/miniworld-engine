@@ -426,6 +426,7 @@ own failing.
 | H6 | the audit's brute/prune/keys checks -- 264 findings over 88 live autotuners -- ran nowhere automatic. They could not: H4 made the command exit 1 every time | a CI step, after H4 |
 | H7 | `cache.py` documents `_CACHE_MISSES` as "the only direct measure of whether the cache covers a workload" and pointed at `miniworld-engine audit`, which is the STATIC check and never reads it. The replay it meant, `builder.audit`, had **no caller in src, tests or benchmarks** | `dev audit --replay`, refusing without a card rather than reporting an empty miss set as a pass; a test pins the wiring |
 | H8 | `missing_pairs 0` read as "the cache covers the workload" when it means "every declared bucket is present". Declared work is (op, dtype, shape bucket); the cache key also carries each kernel's constexprs. Measured on an A6000: **363 lookups the module matrix asks for and the cache does not serve, across 42 of 91 ops** | the number carries its own limit next to it; the 363 recorded in `docs/records/cache-coverage-replay-a6000.md` as the rebuild's work list |
+| H10 | one unit reported `grid=864` and, under it, `527 configs, best 0.0338ms`. The other 337 appeared nowhere -- 39% of the searched space, in a build whose purpose is to search it. They are not a defect: triton returns `[inf, inf, inf]` for a config it cannot launch (`OutOfResources: shared memory, Required: 514048, Hardware limit: 101376` on an A6000) and a config that does not run must not be stored. Nor is it reconstructible from the shard, and I got it wrong trying -- `prune_configs` returns the full list so nothing is pruned, and triton swallows the exception so none reaches the capture layer | counted where the drop happens and printed: `grid=864 buckets=1 unusable=337 (39% of the searched space could not run on this card)`. Stated even when 0, because "nothing was dropped" and "dropping is not reported" looked identical |
 | H9 | `_CACHE_MISSES` only ever grew, so a before/after over one process returned the before twice -- it could not observe a filled cache. Found by exactly that happening: a scoped fill covered four keys, merged, and the second replay named the same four in 0s | `clear_cache_misses()`, called by `builder.audit`; the docstring names what the clear cannot fix (triton memoises per autotuner instance, so the replay must be a fresh process) |
 
 And one that is not a defect but the thing H8 exposed:
@@ -438,15 +439,37 @@ the second runs with `settings.fill_gaps` so a key the first pass already tuned 
 re-rank rather than a full-grid sweep. Without that flag the module pass re-benches everything the
 op sweep did -- the 244 GPU-h that made these an either/or.
 
-*Not yet verified:* that pass 2 actually empties the 363. The first attempt measured before and
-after in one process and was invalid for H9's reason; the re-run is scoped to `gated_projection`
-(4 misses) with each measurement in its own process. A 4 -> 0 is evidence, not proof, for 363.
+*Verified, scoped.* Each measurement in its own process, `gated_projection` on one card:
+**BEFORE 4 misses -> pass 2 (8 units, 0 failed, 8 (op, bucket) rows merged) -> AFTER 0.** The
+mechanism closes the gap it was added to close. Four keys is evidence for 363, not proof of it;
+the full number is only answerable by the rebuild.
 
-*Also not settled:* the A/B's two arms chose different winners for all three keys of the unit --
-5.1 vs 6.1 us, 8.2 vs 9.2 us, one quantisation step apart at this shape. The claim "the same
-configs are benched, only the compile path differs" holds (527/525, 288/288, 593/593 benched;
-4 ops recorded either way), but "the result is unchanged" needs a same-arm control, which is
-running.
+*Settled, by control.* The A/B's two arms chose different winners for all three keys of the unit
+-- 5.1 vs 6.1 us, 8.2 vs 9.2 us, one quantisation step apart at this shape -- so "the patch does
+not change the result" needed a same-arm baseline. Three more runs of the PATCHED arm, same node,
+same card, cold caches each:
+
+| compared | same winner | worst cost of taking the other's pick |
+|---|---|---|
+| patched vs patched (b, b1) | 1 of 3 | +2.9%, +20.0%, +0.0% |
+| patched vs patched (b1, b2) | 2 of 3 | +0.0%, +0.0%, +12.5% |
+| HEAD vs patched (a, b) | 0 of 3 | +3.0%, +20.0%, +12.5% |
+| HEAD vs patched (a, b1) | 1 of 3 | +0.0%, +20.0%, +12.5% |
+
+Identical code disagrees with itself as much as the two arms disagree, at the same magnitudes.
+The winner instability is the bench's own, not the patch's: at 5-8 us on this shape `do_bench`
+resolves to about 1 us, and one step is 12-20%. Wall time varies too -- 1818s, 1903s, 1879s for
+the same arm -- and so does the compile-monster set the SIGKILL budget catches (41, 43, 44
+known-bad across identical runs).
+
+Two things follow, and the second is the one that matters for the rebuild:
+
+* the capture fix is exonerated. It changes which code path compiles, not what is benched
+  (527/525, 288/288, 593/593 configs; 4 ops recorded in every run).
+* **a single tuning measurement does not identify the fastest config at this shape.** What
+  absorbs it is that an entry stores the top 5 and `_cached_subset` hands all 5 back, so triton
+  picks among them at run time rather than trusting the build's ordering. That is load-bearing,
+  and it was not written down anywhere.
 
 ## Order
 
