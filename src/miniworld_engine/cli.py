@@ -728,12 +728,42 @@ def cmd_audit(args: argparse.Namespace) -> int:
     """Verify the build system AND that every declared (op, bucket) is in the shipped cache."""
     from miniworld_engine.build import audit as _audit  # imports every kernel
 
+    if args.replay:
+        return _replay_audit()
     argv = ["--gpu", args.gpu] if args.gpu else []
     if args.shards:
         argv += ["--shards", *args.shards]
     if args.verbose:
         argv += ["--verbose"]
     return _audit.main(argv)
+
+
+def _replay_audit() -> int:
+    """The direct coverage measurement: run the build matrix against the finished cache and print
+    every lookup it did not serve.
+
+    `builder.audit` has always existed and `cache.py` has always pointed at it as "the only direct
+    measure of whether the cache covers a workload" -- while nothing called it, from any command
+    or any test. The static check (`dev audit` without this flag) compares DECLARED work against
+    the cache, and declared work is (op, dtype, shape bucket); the cache key also carries the
+    kernel's constexprs, so an op can be 100% covered by that measure and still miss at run time.
+    Measured: one pass of the GPU suite on an A6000 hit 14 such (op, key) misses against a cache
+    the static check reports as complete.
+
+    Needs a card: it launches the modules.
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        print("--replay runs the build matrix; this machine has no CUDA device")
+        return 2
+    from miniworld_engine.autotune import builder
+
+    misses = builder.audit(builder.cases())
+    for op, gpu, key in misses:
+        print(f"  MISS {op:44s} {gpu}  {key}")
+    print(f"\nreplay: {len(misses)} lookup(s) the cache did not serve")
+    return 1 if misses else 0
 
 
 def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
@@ -1068,6 +1098,9 @@ def build_parser() -> argparse.ArgumentParser:
     aud.add_argument("--shards", nargs="*", default=[],
                      help="shard dirs from real builds, for reachability evidence")
     aud.add_argument("--verbose", action="store_true", help="also print OK findings")
+    aud.add_argument("--replay", action="store_true",
+                     help="instead of the static checks, drive the build matrix against the "
+                          "finished cache and report every lookup it did not serve (needs a GPU)")
     aud.set_defaults(func=cmd_audit)
 
     bk = sub.add_parser("bench_kernel",

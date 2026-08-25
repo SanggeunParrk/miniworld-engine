@@ -351,8 +351,12 @@ _warned: set[tuple] = set()
 
 #: Every (op, gpu, dtype|bucket) this process failed to find in the cache. A build can only report
 #: what it captured; this records what a RUN actually asked for and did not get, which is the only
-#: direct measure of whether the cache covers a workload -- ``miniworld-engine audit`` replays the
-#: build matrix with capture off and requires this to come back empty.
+#: direct measure of whether the cache covers a workload.
+#:
+#: Read by ``miniworld-engine dev audit --replay``. That flag is new: the comment here named
+#: ``miniworld-engine audit``, which is the STATIC check in ``build/audit.py`` and has never
+#: touched this set -- and ``builder.audit``, the replay it meant, had no caller anywhere in the
+#: repo. The one measurement the coverage claim rests on was unreachable from every command.
 _CACHE_MISSES: set = set()
 
 
