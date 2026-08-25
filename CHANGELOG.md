@@ -8,6 +8,18 @@ The public surface is enforced by `tests/test_public_api.py`.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-25
+
+### Breaking
+- **The distribution and import name changed: `miniworld-kernels` →
+  `miniworld-engine`, `import miniworld_kernels` → `import miniworld_engine`.**
+  There is no compatibility alias: the old import raises `ModuleNotFoundError`.
+  This is why the version is 1.0.0 rather than 0.2.0 — the previous release and
+  this one are different packages, and `0.1.0` was published under both names,
+  so no consumer could tell them apart by any declared field. Pin
+  `miniworld-engine>=1.0.0` and rewrite the import; a submodule consumer must
+  also update the path and URL.
+
 ### Added
 - **`miniworld-engine dev audit`** — verifies the build system and, new, that every
   DECLARED `(op, dtype, shape-bucket)` is present in the shipped autotune cache.

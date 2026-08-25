@@ -1,6 +1,6 @@
 [project]
 name = "miniworld-engine"
-version = "0.1.0"
+version = "1.0.0"
 requires-python = ">=3.10"
 description = "MiniWorld GPU kernel development repo — Triton / CuTeDSL / CUDA ports + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
 license = "MIT"
