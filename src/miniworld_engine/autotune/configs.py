@@ -257,6 +257,14 @@ if _ENV_DIR:
     # Import-time selection: this module loads before any kernel module can call configs_for,
     # which is the only ordering that lets every op keep the list it was handed.
     _DIR = Path(_ENV_DIR)
+    if not _DIR.is_dir():
+        # Unchecked, a stale value is indistinguishable from a valid one: every op gets an empty
+        # config list and the first launch dies with `dynamic_func() missing N required positional
+        # arguments`, naming neither the op nor the cause. Four audit .sbatch pointed at
+        # `configs/grid` for weeks after that directory moved into the package.
+        raise RuntimeError(
+            f"MINIWORLD_CONFIG_DIR={_ENV_DIR!r} is not a directory. Unset it to use the packaged "
+            f"`grid` set, or point it at a config set that exists.")
 else:
     _DIR = default_config_dir()
     if _DIR is None:

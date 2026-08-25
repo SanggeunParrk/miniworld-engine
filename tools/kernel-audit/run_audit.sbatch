@@ -10,7 +10,6 @@ set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
 export PYTHONPATH=src
-export MINIWORLD_CONFIG_DIR=$R/configs/grid
 export TRITON_CACHE_DIR=${MINIWORLD_TRITON_CACHE:-$HOME/.cache/miniworld-triton}
 .pixi/envs/default/bin/python -u -m miniworld_engine.cli audit \
   --shards ${MINIWORLD_SHARDS:-$HOME/.cache/miniworld-build}

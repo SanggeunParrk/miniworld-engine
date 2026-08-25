@@ -11,7 +11,6 @@
 set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
-export MINIWORLD_CONFIG_DIR=$PWD/.bench/onecfg
 export PYTHONPATH=src
 exec .pixi/envs/default/bin/python tools/kernel-audit/driver_shape_key_sweep.py \
     --shard "$SLURM_ARRAY_TASK_ID" --nshards "$NSHARDS"

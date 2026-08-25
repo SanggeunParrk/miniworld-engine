@@ -10,6 +10,5 @@ set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
 export PYTHONPATH=src
-export MINIWORLD_CONFIG_DIR=$R/configs/blk64
 export TRITON_CACHE_DIR=${MINIWORLD_TRITON_CACHE:-$HOME/.cache/miniworld-triton}
 .pixi/envs/default/bin/python -m pytest tests/test_numerical.py -m gpu -q -p no:cacheprovider

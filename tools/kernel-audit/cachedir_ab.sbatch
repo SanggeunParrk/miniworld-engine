@@ -11,7 +11,6 @@ set -u
 R=${MINIWORLD_REPO:-$(git rev-parse --show-toplevel)}
 cd "$R"
 export PYTHONPATH=src
-export MINIWORLD_CONFIG_DIR=$R/src/miniworld_engine/autotune/configs/grid
 OUT=$R/tools/kernel-audit/prof
 PY=.pixi/envs/default/bin/python
 OP=adaln_bwd_dx_dlnw_triton
