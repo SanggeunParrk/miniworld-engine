@@ -119,7 +119,7 @@ fails when the newest verdict does not match `HEAD` or is older than N days. Tha
 more apparatus than the problem justified, so it was cut. J1 is exactly where it was this morning:
 103 kernels, 0 executed by CI. Whatever answers it must be smaller than what it guards.
 
-### B2 — no end-to-end test proves the kernels are substitutable  (K2)
+### B2 — DONE — no end-to-end test proves the kernels are substitutable  (K2)
 
 *Gap, measured:* 47 test files, all unit or contract. None runs a model with these kernels and
 compares against the same model without them.
@@ -130,6 +130,15 @@ per-kernel tolerances (B2/P2a) compounded across depth. Mark `gpu`; it belongs i
 verdict.
 
 *Done when:* it fails if any single kernel is swapped for a deliberately wrong one.
+
+*Closed, after three ways of being vacuous.* A default-built Pairformer zero-initialises its
+output projections, so both stacks were the IDENTITY -- `out == in` bitwise at L=64/128/256, and a
+weight perturbed by 0.05 moved nothing because no weight reached the output. Randomising fixed
+that. Then the residual diluted the branch, so a projection replaced with noise moved the output
+only 1.7x more than the honest error; measuring `out - in` instead traded dilution for bf16
+cancellation and reported 23%. The scale was chosen by sweeping it: at 0.15 the branch is 0.75x
+the input, honest error 1.30e-02, corrupted 1.09e-01 -- 8.4x apart. Budget 6e-02, 4x the measured
+value, the same margin as C2.
 
 ### B3 — DONE — the wheel is never built by anything automatic  (H1)
 

@@ -34,6 +34,40 @@ _DEVICES = _PKG / "autotune" / "manifests"
 
 _FIELDS = ["kernel", "backend", "family", "file", "status", "detail"]
 
+#: Written as the first row, kernel `#provenance`. A manifest is the only evidence that any kernel
+#: has ever run on a given card, and without this it does not say WHEN or against WHICH code -- so
+#: a file from six months and two rewrites ago is indistinguishable from one produced this morning.
+#: Carried in-band rather than in a sidecar because the evidence and its provenance must not be
+#: separable; a sidecar is a thing to lose.
+_PROVENANCE = "#provenance"
+
+
+def _provenance_row() -> dict:
+    import subprocess
+    from datetime import datetime, timezone
+
+    def _git(*args: str) -> str:
+        try:
+            out = subprocess.run(["git", *args], cwd=_PKG.parent.parent, capture_output=True,
+                                 text=True, check=False, timeout=20)
+            return out.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    version = ""
+    try:
+        from importlib.metadata import version as _v
+        version = _v("miniworld-engine")
+    except Exception:
+        pass
+    return {
+        "kernel": _PROVENANCE, "backend": version,
+        "family": _git("rev-parse", "HEAD")[:12],
+        "file": "dirty" if _git("status", "--porcelain") else "clean",
+        "status": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "detail": _git("describe", "--tags", "--always"),
+    }
+
 
 def registry() -> list[dict]:
     """Every kernel the repo declares. Add a kernel to the CSV when you add a kernel."""
@@ -82,6 +116,7 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]]) -> Path:
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=_FIELDS)
         writer.writeheader()
+        writer.writerow(_provenance_row())
         writer.writerows(rows)
     return path
 
@@ -91,7 +126,21 @@ def load_manifest(gpu_key: str) -> list[dict]:
     if not path.is_file():
         return []
     with path.open(newline="") as handle:
-        return list(csv.DictReader(handle))
+        return [r for r in csv.DictReader(handle) if r["kernel"] != _PROVENANCE]
+
+
+def provenance(gpu_key: str) -> dict | None:
+    """Version, commit, tree state and date behind this card's manifest, or None if it predates
+    the row being written."""
+    path = manifest_path(gpu_key)
+    if not path.is_file():
+        return None
+    with path.open(newline="") as handle:
+        for r in csv.DictReader(handle):
+            if r["kernel"] == _PROVENANCE:
+                return {"version": r["backend"], "commit": r["family"], "tree": r["file"],
+                        "date": r["status"], "describe": r["detail"]}
+    return None
 
 
 def runnable_kernels(gpu_key: str) -> frozenset[str]:

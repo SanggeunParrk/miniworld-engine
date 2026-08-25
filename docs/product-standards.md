@@ -292,9 +292,13 @@ these kernels and compares its output to the same model without them.
 is fine in isolation and compounds across 48 layers, a dtype that silently promotes, a kernel
 that is right on its own inputs and wrong on the ones the model actually produces.
 
-*Enforced by:* nothing.
+*Enforced by:* `tests/numerics/test_stack_substitutability_gpu.py`. One Pairformer, built twice
+from the same weights, `PYTORCH` against `MINIWORLD`: 1.30e-02 over four blocks against a 6e-02
+budget. Three separate tests keep it from being vacuous — the stack must not be the identity,
+dispatch must not have resolved to the reference, and a projection replaced with noise must break
+the comparison (it moves it to 1.09e-01).
 
-*Status:* **not met.**
+*Status:* **met.**
 
 ### K3. The speedup is measured where the consumer will feel it
 
