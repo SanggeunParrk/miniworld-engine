@@ -71,7 +71,7 @@ transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/tr
 transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=3.58e-03 (band 2e-02 declared)
 transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel dx=4.63e-03 dwa=3.87e-03 dwb=4.24e-03 dws=4.63e-03 (band 2e-02 declared)
 transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],"
-layernorm_bwd_privatized_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.07e-03 dgamma=2.75e-07 dbeta=9.90e-08 (band 9e-03 declared)
+layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.07e-03 dgamma=2.75e-07 dbeta=9.90e-08 (band 9e-03 declared)
 layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,ok,rel xn=2.28e-03 vs_layer_norm=2.28e-03 (band 9e-03 declared)
 transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,ok,rel dA=1.99e-03 dB=2.45e-03 (band 1e-02 declared)
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=3.58e-03 dAB=2.49e-03 xn=5.73e-04 (band 1e-02 declared)

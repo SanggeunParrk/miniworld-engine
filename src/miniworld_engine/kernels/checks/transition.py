@@ -236,7 +236,7 @@ def transition_bwd_transpose_packed_triton():
     }
 
 
-def layernorm_bwd_privatized_triton():
+def layernorm_bwd_foldstats_triton():
     """LN backward from saved stats -> (dx, dgamma, dbeta), the dgamma/dbeta column partials
     scattered over NUM_REPLICAS fp32 buffers and summed by the launcher.
 

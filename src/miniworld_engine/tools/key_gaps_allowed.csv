@@ -4,7 +4,7 @@ layernorm_fwd_rowscale_triton,EPS,"numeric tolerance: only use is rstd = 1/sqrt(
 layernorm_fwd_saveact_triton,eps,"numeric tolerance: only use is rstd = 1/sqrt(var + eps)"
 layernorm_bwd_split_mmajor_triton,VEC_HINT,"sole launch site passes N=K and VEC_HINT=(K<=128), so VEC_HINT == (N<=128) and N is already keyed"
 layernorm_linear_bwd_fp32_triton,USE_DOT,"sole launch site passes USE_DOT=(nh>=MIN_TL_DOT_DIM) with NH=nh, so it is a pure function of the keyed NH"
-layernorm_bwd_privatized_triton,NUM_REPLICAS,"64 when privatizing and 1 otherwise, nothing can vary it independently; a pure function of the keyed PRIVATIZE_DGDB"
+layernorm_bwd_foldstats_triton,NUM_REPLICAS,"64 when privatizing and 1 otherwise, nothing can vary it independently; a pure function of the keyed PRIVATIZE_DGDB"
 transition_fwd_b2b_triton,D,"D == K (both d_hidden); the CUDA twin asserts it, transition_b2b_kernel.cu TORCH_CHECK(D == K)"
 transition_fwd_b2b_triton,EPS,"numeric tolerance: only use is rstd = rsqrt(var + EPS), and only under the already-keyed FUSE_STATS"
 transition_fwd_b2b_ktiled_triton,D,"D == K (both d_hidden), K already keyed"

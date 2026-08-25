@@ -109,8 +109,8 @@ gated_projection_gate_triton,sigmoid_gate_fwd_kernel,miniworld_engine/kernels/ga
 layernorm_bwd_atomic_strided_triton,_ln_bwd_kernel,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,184,BLOCK_M1,64,128,16,32,64,128,16,64,64,0,0,,
 layernorm_bwd_atomic_triton,layer_norm_bwd_dx_fused,miniworld_engine/kernels/layernorm/triton/main.py,156,BLOCK_K,64,128,16,32,64,128,16,64,64,0,1,N,1
 layernorm_bwd_atomic_triton,layer_norm_bwd_dx_fused,miniworld_engine/kernels/layernorm/triton/main.py,156,BLOCK_M1,64,128,16,32,64,64,32,64,64,1,0,,
-layernorm_bwd_privatized_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,890,BLOCK_K,64,128,16,32,64,128,16,64,64,0,1,K,1
-layernorm_bwd_privatized_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,890,BLOCK_M1,64,128,16,32,64,64,32,64,64,1,0,,
+layernorm_bwd_foldstats_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,890,BLOCK_K,64,128,16,32,64,128,16,64,64,0,1,K,1
+layernorm_bwd_foldstats_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,890,BLOCK_M1,64,128,16,32,64,64,32,64,64,1,0,,
 layernorm_bwd_split_mmajor_triton,_ln_bwd_mmajor_kernel,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,56,BLOCK_K,64,128,16,32,64,128,16,64,64,1,1,N,1
 layernorm_bwd_split_mmajor_triton,_ln_bwd_mmajor_kernel,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,56,BLOCK_M1,64,128,16,32,64,64,32,64,64,0,0,,
 layernorm_bwd_split_triton,_ln_bwd_persistent,miniworld_engine/kernels/layernorm/triton/persistent.py,57,BLOCK_K,64,128,16,32,64,128,16,64,64,1,1,N,1

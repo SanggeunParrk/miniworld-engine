@@ -71,7 +71,7 @@ cast_kernel,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_
 swish_mul_kernel,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,untested,
 transition_grad_kernel,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,untested,
 SwiGLUGateBwdKernel.kernel,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,untested,
-layernorm_bwd_privatized_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,launched by bench
+layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,launched by bench
 layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,untested,
 transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,untested,
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,launched by bench

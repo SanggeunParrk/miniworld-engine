@@ -13,6 +13,8 @@ exception reaches the capture layer. The count has to be kept where the drop hap
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from miniworld_engine.autotune import capture
@@ -56,7 +58,7 @@ def test_the_counter_is_fed_by_the_drop_itself(monkeypatch) -> None:
     """Not by a second pass over the data -- the reason is only known at the drop point."""
     monkeypatch.setattr(capture, "_op_name", lambda at: "kern")
     class _AT:
-        configs = [_Cfg(32)]
+        configs: ClassVar = [_Cfg(32)]
     capture._record_one(_AT(), _Cfg(32), {}, float("inf"))
     assert capture._UNUSABLE == {"kern": 1}, capture._UNUSABLE
     capture._record_one(_AT(), _Cfg(64), {}, float("inf"))

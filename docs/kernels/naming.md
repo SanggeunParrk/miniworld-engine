@@ -53,6 +53,7 @@
     epilogue           본 GEMM 밖의 후처리 단계
     transpose          레이아웃 변환만
     fold               가중치/텐서 프리폴드
+    cast               dtype 변환만 (`dst = static_cast<dst_t>(static_cast<float>(src))`)
 
 두 규칙:
 
@@ -117,7 +118,13 @@ detail 이 둘 이상이면 이 순서로 쓴다:
     nosave       saveact 와 같은 축의 반대 방향. 방향은 "저장하는 쪽에 표시"로 고정
     persistent   split 에 흡수. persistent_bwd 와 partial_bwd 는 파라미터 철자만 다른 같은 커널이었고
                  (dx/part_dw/part_db 비트 동일) 이미 병합됐다
-    privatized   지칭 대상이 하나도 없다. 실물이 나오면 되살릴 것
+    privatized   `transition_cast_cuda` 와 함께, 이 어휘가 강제되지 않는 동안 남아 있던 둘 중 하나.
+                 지칭 대상은 있었다 -- `_transition_ln_bwd_kernel` 의 `PRIVATIZE_DGDB` -- 그런데
+                 그것은 autotune 키에 든 constexpr 플래그이고, SAVE_GATE/SAVE_PREACT 와 같은
+                 규칙으로 detail 을 얻지 못한다. 그 커널이 실제로 다른 점은 프리폴드된 c1 을
+                 읽는 계약이므로 `layernorm_bwd_foldstats_triton` 으로 개명했다
+                 (`rename-map.tsv`). 같은 family 의 `layernorm_fwd_recompute_foldstats_triton`
+                 과 같은 토큰이다.
     transpose    role 에 이미 있다. 레이아웃 축은 mmajor 가 담당
     memeff       실제 메커니즘은 atomic 또는 recompute
     lowreg       본문이 기본 커널과 동일했고 비트 동일로 병합 완료

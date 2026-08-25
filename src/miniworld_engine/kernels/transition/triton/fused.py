@@ -965,7 +965,7 @@ def _transition_expand_gatebwd_savedxn_stacked(
 # _TRANSITION_LNBWD_PRIVATIZE_REPLICAS (64) when privatizing and 1 otherwise -- i.e. a function of
 # PRIVATIZE_DGDB, and dead code on the non-privatized branch. Nothing (settings, env, launcher
 # argument) can vary it independently, so PRIVATIZE_DGDB above already separates its two values.
-@triton.autotune(configs=configs_for("layernorm_bwd_privatized_triton"),
+@triton.autotune(configs=configs_for("layernorm_bwd_foldstats_triton"),
                  key=['shape_key', 'K', 'PRIVATIZE_DGDB'],
                  reset_to_zero=['dg_ptr', 'db_ptr'])
 @triton.jit

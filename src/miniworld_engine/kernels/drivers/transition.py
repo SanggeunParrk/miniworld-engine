@@ -183,7 +183,7 @@ def transition_bwd_swiglu_recompute_triton() -> None:
                                        shape_key=SHAPE_KEY)
 
 
-def layernorm_bwd_privatized_triton() -> None:
+def layernorm_bwd_foldstats_triton() -> None:
     """_transition_ln_bwd_kernel via _transition_ln_bwd. ``transition_lnbwd_cuda`` defaults to
     True and would route bf16/K<=512 to the hand-CUDA LN backward instead, so it is turned off
     for this launch; PRIVATIZE_DGDB keeps its default (True)."""
