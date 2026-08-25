@@ -11,7 +11,7 @@ used, which is worse than saying it is unknown. So the rule is that a live doc m
 claims must state the hardware behind them somewhere — which a provenance paragraph satisfies,
 including one that says which numbers are unattributed and why.
 
-DATED records are out of scope by design: `docs/kernel-optimization/**/v*.md` are per-version logs
+DATED records are out of scope by design: `notebook/**/v*.md` are per-version logs
 of "on this date, this config measured this", and `docs/kernels/{naming-audit,tiling-audit}.md` say
 in their own headers that they are records. A record does not go stale; a reference does.
 """
@@ -68,5 +68,5 @@ def test_the_rule_is_not_vacuous() -> None:
 def test_dated_records_are_excluded_on_purpose_and_still_exist() -> None:
     """If the record trees vanish, the exclusion above is silently covering nothing -- and someone
     should notice that the reasoning in this file's docstring no longer applies."""
-    records = list((REPO / "docs" / "kernel-optimization").rglob("*.md"))
-    assert records, "docs/kernel-optimization/ is empty; the record/reference split needs revisiting"
+    records = list((REPO / "notebook").rglob("*.md"))
+    assert records, "notebook/ is empty; the record/reference split needs revisiting"

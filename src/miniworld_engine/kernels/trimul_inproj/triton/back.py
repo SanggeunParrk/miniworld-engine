@@ -197,7 +197,7 @@ def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tens
     """
     # B==1 by design; B>1 works via a per-batch loop, which is faster than a batched single
     # launch (L2 thrashing of large bdll intermediates). See front.py's note and
-    # docs/kernel-optimization/trimul_batch_generalization.
+    # notebook/trimul_batch_generalization.
     B, D, L, L2 = tri_bdll.shape
     assert B == 1 and L == L2
     M = L * L

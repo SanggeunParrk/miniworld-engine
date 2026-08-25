@@ -203,7 +203,7 @@ commands are copied verbatim into a test that runs them.
 
 ### D2 — 110 of 130 doc files are a lab notebook  (L2)
 
-*Gap, measured:* `docs/` has 124 tracked files; **101** are `docs/kernel-optimization/**/vN.md`
+*Gap, measured:* `docs/` has 124 tracked files; **101** are `notebook/**/vN.md`
 plus `.py`/`.txt`/ncu dumps.
 
 *Action:* move them under `docs/notebook/` with an index explaining what they are and that

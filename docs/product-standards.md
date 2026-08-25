@@ -327,16 +327,17 @@ repository, not around a newcomer's first hour.
 
 ### L2. Working notes are separated from consumer documentation
 
-`docs/` holds 124 tracked files. **101** of them are `docs/kernel-optimization/**/vN.md` —
-per-round optimization logs, plus `.py`, `.txt`, and `ncu` dumps. They are genuinely valuable
-and they are not documentation; they are a lab notebook.
+`docs/` held 124 tracked files, **101** of them per-round optimization logs, with their
+profiler captures split into a third tree (`profiles/`). Now separated: `docs/` is 24 pages
+written for a consumer, `notebook/` is the logs and their captures together.
 
 *Prevents:* a consumer unable to find the four pages that concern them among a hundred that do
 not.
 
-*Enforced by:* F5 states the principle. Nothing separates the trees.
+*Enforced by:* nothing yet -- the split is a fact of the layout, not a check. `notebook/README.md`
+states what the tree is and that it is not maintained.
 
-*Status:* **not met.**
+*Status:* **met, unenforced.**
 
 ### L3. Every failure mode a consumer can hit has a page
 
