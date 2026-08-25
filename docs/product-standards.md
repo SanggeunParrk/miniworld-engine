@@ -352,10 +352,13 @@ artifact. `kernels/NOTES.md` states what the tree is and that it is not maintain
 *Prevents:* a stale JIT lock, a missing mathdx include, a cache miss, or an unsupported arch
 each costing a consumer a day.
 
-*Enforced by:* E4 requires error messages to name the fix and today's lock error does exactly
-that. There is no troubleshooting document.
+*Enforced by:* E4 requires error messages to name the fix, and `docs/troubleshooting.md` gives
+each failure a section: what produces it and the command that ends it.
+`tests/layout/test_troubleshooting_quotes_real_messages.py` fails when a quoted message stops
+existing in `src/`, so a reworded message cannot leave a section describing something that no
+longer happens.
 
-*Status:* **partially met.**
+*Status:* **met.**
 
 ### L4. The supported set is a document, not a paragraph
 

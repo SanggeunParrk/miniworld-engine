@@ -225,7 +225,7 @@ they are not maintained. Consumer-facing pages stay at `docs/`. Nothing is delet
 
 *Done when:* `docs/` root holds only pages written for a consumer.
 
-### D3 — no troubleshooting page  (L3)
+### D3 — DONE — no troubleshooting page  (L3)
 
 *Gap, measured:* every failure mode that cost time this month — stale JIT lock, missing
 mathdx include, autotune cache miss, unsupported arch, a `build all` that reports 527 units
@@ -236,6 +236,12 @@ command that fixes it.
 
 *Done when:* each section quotes a message string that exists in the source, checked by a test
 so renamed messages cannot silently orphan a section.
+
+*Closed.* Ten sections, one per failure that cost time today. Anchors are declared in the test
+rather than guessed from the heading -- the messages are f-strings, so the heading shows an
+interpolated example while the source holds the template, and guessing the overlap failed on four
+correct sections first. A heading with no anchor and no `None` fails, so a new section cannot slip
+past the check.
 
 ### D4 — DONE — the supported set is a paragraph  (L4)
 
@@ -271,7 +277,7 @@ runnable on this cluster, so a consumer report can be reproduced instead of reas
 
 *Done when:* the recipe reproduces the 527-unit symptom on a pre-fix commit.
 
-### E3 — vocabulary tests read the working tree, not the repo  (D1, J4)
+### E3 — DONE — vocabulary tests read the working tree, not the repo  (D1, J4)
 
 *Gap, measured:* `test_bench_target_vocabulary` and `test_bench_config_per_target` scan
 `benchmarks/` on disk. Because results are gitignored, another branch's output makes them fail
@@ -283,6 +289,11 @@ state, which is what the criterion is about, and stops flagging local scratch.
 
 *Done when:* both pass with an unowned untracked directory present, and still fail when a
 tracked results directory has no owning target.
+
+*Closed.* Both scans go through one `tracked_subdirectories` helper that asks `git ls-files`, and
+it raises rather than falling back to `iterdir()` -- a silent fallback restores exactly what it
+replaces. Verified both ways: a leftover directory no longer turns them red, and removing a
+tracked `configs/bench.yaml` still does.
 
 ---
 

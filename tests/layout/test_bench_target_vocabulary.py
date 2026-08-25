@@ -51,6 +51,32 @@ LEVELS = {"kernel": (BENCH_KERNEL, cli.KERNEL_TARGETS),
           "module": (BENCH_MODULE, cli.MODULE_TARGETS)}
 
 
+
+def tracked_subdirectories(root: Path) -> set[str]:
+    """Subdirectories of `root` holding at least one git-tracked file.
+
+    `benchmarks/` results are gitignored, so a working checkout accumulates output under target
+    names that no longer exist and `iterdir()` sees them. That happened: fourteen directories under
+    the retired short vocabulary, plus 257 MB of another branch's `mpnn` output, turned this test
+    red locally while CI -- a fresh clone with only tracked files -- stayed green. A check that
+    depends on what a previous experiment left on disk is not checking the repository.
+
+    Raises rather than falling back to `iterdir()`: a silent fallback restores the behaviour this
+    replaces, and an empty result would make the caller pass vacuously.
+    """
+    import subprocess
+
+    rel = root.relative_to(REPO)
+    proc = subprocess.run(["git", "ls-files", "-z", "--", str(rel)],
+                          cwd=REPO, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git ls-files failed for {rel}: {proc.stderr.strip()}")
+    names = {Path(e).relative_to(rel).parts[0]
+             for e in proc.stdout.split("\0") if e and len(Path(e).relative_to(rel).parts) > 1}
+    assert names, f"no tracked files under {rel}; this check would pass vacuously"
+    return names
+
+
 @pytest.mark.parametrize("level", sorted(LEVELS))
 def test_the_cli_offers_exactly_what_bench_py_can_run(level: str) -> None:
     """A CLI target with no bench function cannot run; a bench function the CLI does not list
@@ -71,7 +97,7 @@ def test_every_target_owns_exactly_one_results_directory(level: str) -> None:
     root = REPO / "benchmarks" / f"{level}s"
     for target in in_bench:
         assert (root / target).is_dir(), f"missing {root / target}"
-    listed = {p.name for p in root.iterdir() if p.is_dir()}
+    listed = tracked_subdirectories(root)
     assert listed == set(in_bench), {
         "no target owns these directories": sorted(listed - set(in_bench)),
         "target has no directory": sorted(set(in_bench) - listed),

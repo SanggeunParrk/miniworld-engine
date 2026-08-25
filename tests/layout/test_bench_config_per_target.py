@@ -89,10 +89,12 @@ def test_the_config_directory_is_computed_not_hard_coded() -> None:
 def test_no_target_directory_is_left_without_a_config() -> None:
     """A directory under benchmarks/{kernels,modules}/ with no config is a target that cannot be
     run; `.gitkeep` used to stand in for the file and hid exactly that."""
+    from tests.layout.test_bench_target_vocabulary import tracked_subdirectories
+
     for level in ("kernel", "module"):
-        for target_dir in sorted((REPO / "benchmarks" / f"{level}s").iterdir()):
-            if not target_dir.is_dir():
-                continue
+        root = REPO / "benchmarks" / f"{level}s"
+        for name in sorted(tracked_subdirectories(root)):
+            target_dir = root / name
             assert (target_dir / "configs" / "bench.yaml").is_file(), \
                 f"{target_dir.relative_to(REPO)} has no configs/bench.yaml"
             assert not (target_dir / "configs" / ".gitkeep").exists(), \
