@@ -497,6 +497,15 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
         else:
             rep.add("coverage", OK, op, f"{len(got)} (dtype, bucket) pair(s)")
     rep.stats["missing_pairs"] = missing
+    # Say what this number does NOT cover, at the point it is produced. Declared work is
+    # (op, dtype, shape bucket); the cache key also carries each kernel's constexprs (H, ND,
+    # SAVE_PREACT, ADD_RESIDUAL, ...), which no declared work list enumerates. So "missing_pairs 0"
+    # means every declared BUCKET is present, not that a run finds what it asks for -- measured,
+    # the module matrix asks for 363 keys this cache does not have, across 42 of 91 ops, against a
+    # missing_pairs of 0. `dev audit --replay` is the measure that answers the other question.
+    rep.add("coverage", WARN, "(buckets only)",
+            "this compares DECLARED (op, dtype, shape bucket); the cache key also carries each "
+            "kernel's constexprs. Run `dev audit --replay` on a card for the direct measure")
 
 
 def main(argv=None) -> int:
