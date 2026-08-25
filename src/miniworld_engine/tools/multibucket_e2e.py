@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from miniworld_engine.autotune.configs import config_set
+
 REPO = Path(__file__).resolve().parents[3]
 OP = "layernorm_fwd_saveact_triton"          # level=both, real grid, cheap to drive
 LENGTHS = (256, 512, 1024)
@@ -73,7 +75,7 @@ def _run(code: str, args: list[str], length: int, cfg: Path) -> str:
 def main() -> int:
     tmp = REPO / ".bench/_multibucket"
     tmp.mkdir(parents=True, exist_ok=True)
-    cfg = REPO / "configs/grid"
+    cfg = config_set("grid")
 
     shards = []
     for L in LENGTHS:

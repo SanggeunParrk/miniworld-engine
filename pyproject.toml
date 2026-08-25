@@ -82,7 +82,12 @@ miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", 
 # from a parent package's tree. tests/test_notes_stay_out_of_the_wheel.py checks the result.
 
 [tool.setuptools.exclude-package-data]
-miniworld_engine = ["kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*"]
+miniworld_engine = ["kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
+                    # The A/B config sets. `grid` is the default and ships; accuracy/blk*/
+                    # warp*/mixed* exist to compare tilings during a sweep and a consumer
+                    # never selects one, so 819 CSVs stay out of the wheel.
+                    "autotune/configs/accuracy/*", "autotune/configs/blk*/*",
+                    "autotune/configs/warp*/*", "autotune/configs/mixed*/*"]
 
 # ----------------------------------------------------------------------------
 # ruff — practical repo policy.

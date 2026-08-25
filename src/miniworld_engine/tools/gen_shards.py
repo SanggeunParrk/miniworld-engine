@@ -31,6 +31,7 @@ import argparse
 import csv
 from pathlib import Path
 
+from miniworld_engine.autotune.configs import config_set
 from miniworld_engine.tools.classify import SRC, classify
 from miniworld_engine.tools.gen_grid import (
     GROUP_M,
@@ -112,7 +113,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--per-shard", type=int, default=8000, help="configs benched per job")
-    ap.add_argument("--out", default="configs/grid", help="directory to hold shard-NNNN dirs")
+    ap.add_argument("--out", default=str(config_set("grid")), help="directory to hold shard-NNNN dirs")
     ap.add_argument("--dry-run", action="store_true", help="report the plan, write nothing")
     ap.add_argument("--grid-only", action="store_true",
                     help="write ONE unsharded config dir holding the whole grid (no slice rows)")

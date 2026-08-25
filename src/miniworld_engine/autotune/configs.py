@@ -231,6 +231,24 @@ def missing_ops() -> list[str]:
     return sorted(op for op, live in _LISTS.items() if not live)
 
 
+#: Every config set lives in exactly one place, beside this module.
+CONFIG_ROOT = Path(__file__).parent / "configs"
+
+
+def config_set(name: str) -> Path:
+    """The directory for a named config set. Raises rather than returning a missing path.
+
+    The A/B sets (`accuracy`, `blk*`, `warp*`, `mixed*`) used to sit at the repo root while `grid`
+    was packaged, so a short name resolved against two different roots depending on the caller and
+    a wheel install could reach only one of them.
+    """
+    d = CONFIG_ROOT / name
+    if not d.is_dir():
+        have = sorted(p.name for p in CONFIG_ROOT.iterdir() if p.is_dir())
+        raise FileNotFoundError(f"no config set {name!r}; have {have}")
+    return d
+
+
 def default_config_dir() -> Path | None:
     """The config set used when ``MINIWORLD_CONFIG_DIR`` is not set, or None if none is present.
 

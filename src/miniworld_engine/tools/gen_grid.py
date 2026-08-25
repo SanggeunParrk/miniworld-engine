@@ -38,8 +38,8 @@ from __future__ import annotations
 import csv
 import itertools
 import sys
-from pathlib import Path
 
+from miniworld_engine.autotune.configs import config_set
 from miniworld_engine.tools.classify import SRC, classify
 
 REG = SRC / "miniworld_engine/kernels/registry.csv"
@@ -72,7 +72,7 @@ def role(axis: str) -> str:
 
 def op_axes() -> dict[str, list[str]]:
     out = {}
-    for p in sorted(Path("configs/accuracy").glob("*.csv")):
+    for p in sorted(config_set("accuracy").glob("*.csv")):
         rows = list(csv.DictReader(p.open(newline="")))
         if rows:
             out[p.stem] = [k for k in rows[0] if k and k not in META]

@@ -25,9 +25,12 @@ import csv
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent.parent
-_REPO = Path(__file__).resolve().parents[3]
 _REGISTRY = _PKG / "kernels" / "registry.csv"
-_DEVICES = _REPO / "configs" / "devices"
+#: Per-card manifests, beside the tuned caches in `autotune/data/`. They used to be resolved as
+#: `<repo>/configs/devices` via `parents[3]`, which is only the repo in an editable install: from a
+#: wheel that path is `<site-packages>/../../configs/devices` and does not exist, so `run_all`
+#: wrote its record nowhere.
+_DEVICES = _PKG / "autotune" / "manifests"
 
 _FIELDS = ["kernel", "backend", "family", "file", "status", "detail"]
 

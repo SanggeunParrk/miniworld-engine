@@ -12,7 +12,7 @@ holds the A-B sets used during development (`blk16` … `blk128`, `warp4`, `warp
 for them. A set that exists in both places resolves to the repo's — that is where an experiment
 edits it.
 
-`configs/devices/` sits alongside them but is **not** a config set: it is the tracked per-GPU
+`autotune/manifests/` is **not** a config set: it is the tracked per-GPU
 record of which kernels each card was observed to run, read by `autotune/devices.py`, and it holds
 one CSV per GPU rather than one per op. Passing it where a config set is expected fails at
 `resolve_config_dir` with "3/91 ops covered", which is the right answer but a confusing one if this

@@ -25,6 +25,8 @@ import ast
 import csv
 from pathlib import Path
 
+from miniworld_engine.autotune.configs import config_set
+
 SRC = Path(__file__).resolve().parents[2]
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 ALLOWED = Path(__file__).parent / "key_gaps_allowed.csv"
@@ -108,7 +110,7 @@ def audit(config_dir: Path) -> tuple[list, int]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config-dir", default="configs/accuracy")
+    ap.add_argument("--config-dir", default=str(config_set("accuracy")))
     args = ap.parse_args()
     findings, checked = audit(Path(args.config_dir))
     print(f"triton kernels checked: {checked}   "

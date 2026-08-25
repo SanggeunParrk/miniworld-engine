@@ -405,18 +405,16 @@ def resolve_config_dir(config_type: str, repo: Path) -> Path | int:
     short name resolving to ``configs/<name>``. There is no second mechanism: the same directory
     drives a build, a bench and any accuracy run, which is what keeps them measuring the same thing.
     """
-    # Three places, in this order: an explicit path, the repo's own `configs/<name>` (where the
-    # A-B sets live and where the generator writes), and the PACKAGED set inside the wheel. The
-    # last is what lets `configs/grid` exist in exactly one place: it used to exist at the repo
-    # root AND under `autotune/configs/`, byte-identical and asserted so, because a short name
-    # resolved only against the repo root while a wheel install reached the packaged copy through
-    # `configs.default_config_dir()`. Two copies, two readers, one of them a manual duplicate.
+    # Two places: an explicit path, or a short name against the ONE packaged root. There used to
+    # be a third -- the repo's own `configs/<name>`, where the A/B sets lived while `grid` was
+    # packaged -- so a short name resolved against a different root depending on the caller, and a
+    # wheel install could reach only one of them. Every set is packaged now, so the branch is gone.
     from miniworld_engine.autotune import configs as _configs  # heavy; import at use
 
-    packaged_root = Path(_configs.__file__).parent / CONFIG_ROOT
+    packaged_root = _configs.CONFIG_ROOT
     given = Path(config_type).expanduser()
     candidates = [given] if given.is_absolute() or given.parts[:1] == (CONFIG_ROOT,) else [
-        repo / CONFIG_ROOT / config_type, packaged_root / config_type, given,
+        packaged_root / config_type, given,
     ]
     for c in candidates:
         if c.is_dir():

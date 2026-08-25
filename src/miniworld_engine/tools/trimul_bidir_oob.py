@@ -37,8 +37,10 @@ from __future__ import annotations
 import os
 import sys
 
+from miniworld_engine.autotune.configs import config_set
+
 sys.path.insert(0, "src")
-os.environ.setdefault("MINIWORLD_CONFIG_DIR", os.path.abspath("configs/accuracy"))
+os.environ.setdefault("MINIWORLD_CONFIG_DIR", str(config_set("accuracy")))
 
 import torch
 

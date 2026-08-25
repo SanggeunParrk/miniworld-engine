@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from miniworld_engine.autotune.configs import config_set
+
 REPO = Path(__file__).resolve().parents[3]
 OP = ""
 CASE = "gated_projection"
@@ -44,7 +46,7 @@ def build_shards(tmp: Path, n_each: int = 6) -> list[Path]:
     assert len(grid) >= 2 * n_each, f"{OP} grid has only {len(grid)} configs"
     axes = [k for k in grid[0] if k not in ("num_warps", "num_stages")]
     cols = [*axes, "num_warps", "num_stages"]
-    src = REPO / "configs/accuracy"
+    src = config_set("accuracy")
     out = []
     for i in range(2):
         d = tmp / f"cfg{i}"
@@ -85,7 +87,7 @@ def discover_op(tmp: Path) -> str:
     length and mode, so the only reliable source is a real run.
     """
     sh = tmp / "discover.json"
-    rc, out = _run(sh, REPO / "configs/accuracy")
+    rc, out = _run(sh, config_set("accuracy"))
     if rc != 0:
         raise SystemExit(f"discovery run failed:\n{out[-2500:]}")
     fired = sorted(json.loads(sh.read_text()))

@@ -26,11 +26,13 @@ import os
 import re
 from pathlib import Path
 
+from miniworld_engine.autotune.configs import config_set
+
 ROOT = Path(os.environ.get("MASK_AUDIT_ROOT", "src/miniworld_engine"))
 META = {"num_warps", "num_stages", "maxnreg"}
 
 axes_of_op = {}
-for p in sorted(Path("configs/accuracy").glob("*.csv")):
+for p in sorted(config_set("accuracy").glob("*.csv")):
     rows = list(csv.DictReader(p.open(newline="")))
     if rows:
         axes_of_op[p.stem] = {k for k in rows[0] if k and k not in META}

@@ -353,9 +353,10 @@ def test_no_constexpr_is_invisible_to_the_autotune_cache() -> None:
     findings out of the union: it reported 31 ops, of which roughly a third were parameters the
     named kernel does not have, while missing two ops in ``modules/`` entirely.
     """
+    from miniworld_engine.autotune.configs import config_set
     from miniworld_engine.tools.key_gaps import audit
 
-    findings, checked = audit(ROOT / "configs/accuracy")
+    findings, checked = audit(config_set("accuracy"))
     assert checked > 80, f"only {checked} kernels resolved; the audit stopped resolving"
     assert not findings, (
         "constexpr(s) invisible to the autotune cache -- add to the kernel's key=[...], or record "

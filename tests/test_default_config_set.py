@@ -66,12 +66,12 @@ def test_grid_exists_in_exactly_one_place():
     The resolver now falls back to the packaged set, so there is one copy and nothing to keep in
     sync. This asserts that, rather than asserting the copies agree.
     """
-    packaged = Path(configs.__file__).parent / "configs" / "grid"
-    root = Path(configs.__file__).resolve().parents[3] / "configs" / "grid"
+    packaged = configs.CONFIG_ROOT / "grid"
+    root = Path(configs.__file__).resolve().parents[3] / "configs"
     assert packaged.is_dir(), f"the packaged set is gone: {packaged}"
     assert not root.is_dir(), (
-        f"{root} is back. `grid` has one home, inside the package, and `resolve_config_dir` falls "
-        f"back to it -- a second copy is a thing to keep in sync, which is what this replaced.")
+        f"{root} is back. Every config set has one home, inside the package -- a second root is a "
+        f"thing to keep in sync, and the half a wheel cannot reach.")
 
 
 def test_a_short_name_resolves_to_the_packaged_set(tmp_path):
@@ -85,14 +85,29 @@ def test_a_short_name_resolves_to_the_packaged_set(tmp_path):
     assert list(resolved.glob("*.csv")), "the packaged set is empty"
 
 
-def test_the_repo_root_sets_still_win_over_the_packaged_one(tmp_path):
-    """The A-B sets (blk16 ... warp8) live only at the repo root, and a set that exists in both
-    places must resolve to the repo's -- that is where an experiment edits it."""
+def test_every_set_has_one_home(tmp_path):
+    """A short name resolves to the package and nowhere else.
+
+    The A/B sets (accuracy, blk16 ... warp8) used to live at the repo root while `grid` was
+    packaged, so the resolver preferred `repo/configs/<name>` -- and a wheel install could reach
+    only the packaged half. They are all packaged now, so a repo-root directory of the same name
+    is not a config set and must not shadow one; if it did, the two-roots problem is back with the
+    preference reversed.
+    """
     from miniworld_engine import cli
 
     (tmp_path / "configs" / "grid").mkdir(parents=True)
     resolved = cli.resolve_config_dir("grid", tmp_path)
-    assert resolved == tmp_path / "configs" / "grid"
+    assert resolved == configs.CONFIG_ROOT / "grid", (
+        f"a repo-root directory shadowed the packaged set: {resolved}")
+
+
+def test_the_ab_sets_are_packaged_too():
+    """They were the reason a second root existed."""
+    have = sorted(p.name for p in configs.CONFIG_ROOT.iterdir() if p.is_dir())
+    for name in ("accuracy", "blk16", "blk128", "warp4", "warp8", "mixed1", "mixed2"):
+        assert name in have, f"{name} is not packaged; have {have}"
+        assert list(configs.config_set(name).glob("*.csv")), f"{name} is empty"
 
 
 def test_ops_get_configs_with_no_environment_variable(monkeypatch):

@@ -1,6 +1,6 @@
 """A partial run must not erase what earlier runs established about this card.
 
-`configs/devices/<gpu>.csv` is a TRACKED record of which kernels this card was observed to run.
+`autotune/manifests/<gpu>.csv` is a TRACKED record of which kernels this card was observed to run.
 Every writer is a partial run: `bench_kernel all` reaches 29 of the 103 declared kernels and
 `bench_module all` reaches a different subset. `record` wrote the whole registry every time and
 marked everything the run did not touch `untested`, so the file only ever described the last

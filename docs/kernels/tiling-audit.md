@@ -130,7 +130,7 @@ audit to close gaps 2 and 3 above.
 memory` at compile time, against the A6000's 101376 B limit:
 
 * `blk128` — 19 of 91 ops cannot be built on this card at all (131072 B to 262144 B required).
-  `configs/blk128` is therefore not a usable set on sm86 for those 19 ops, which nothing in the
+  `autotune/configs/blk128` is therefore not a usable set on sm86 for those 19 ops, which nothing in the
   repo previously recorded. Grouped by what they need:
 
   | required | ops |
@@ -528,7 +528,7 @@ Extents perturbed: `ROWS` 4096 -> 4093, `K_SMALL` 128 -> 125 and `K_LARGE` 256 -
 feature width, which is simultaneously the GEMM contraction extent, dragging `wa`/`wb`/`ws` and
 `gamma`/`beta` with it), `ND_SMALL` 512 -> 500 (expand/gate output width), `TRIMUL_ROWS`
 16384 -> 16381, `TRIMUL_D` 128 -> 125. `N_EXPAND` stays 4 — it is the op's expansion factor, not a
-tile extent. Every tile in `configs/accuracy` is 64, so all seven extents get a partial tail.
+tile extent. Every tile in `autotune/configs/accuracy` is 64, so all seven extents get a partial tail.
 
 * **11 mask correctly.**
 * **2 MASKING BUGS, measured** — the two `baseline_dtv1.py` ops the static audit predicted:

@@ -38,7 +38,7 @@ sm90·sm100 232,448 B). 그래서 stage는 넓게 두고 컴파일 실패로 걸
   자기 `Config({})`로 대체하며, 커널은
   `dynamic_func() missing required positional arguments`로 죽는다.
   → 비대상 op에는 filler 1행. (`shard-0000` 실측: 88 op registered, **missing 0**)
-- **IN-GRID** — filler는 `configs/accuracy`가 아니라 **그 op 자신의 생성 그리드**에서 가져온다.
+- **IN-GRID** — filler는 `autotune/configs/accuracy`가 아니라 **그 op 자신의 생성 그리드**에서 가져온다.
   `merge_shards`는 샤드들이 들고 있던 grid의 **합집합**을 해싱하므로, 그리드 밖 filler가 섞이면
   합집합이 실제 그리드를 넘어서고 해시가 full-grid 실행과 달라진다 →
   `store_ranked_configs`가 해시 불일치에 **entries 전체 리셋**으로 답한다.
