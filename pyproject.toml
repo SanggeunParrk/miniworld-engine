@@ -20,7 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # CuTeDSL / quack backends (the .cute kernel paths). cutlass ships as the
-# `nvidia-cutlass-dsl` wheel — no git submodule needed (see third_party/).
+# `nvidia-cutlass-dsl` wheel — no git submodule needed (see CONTRIBUTING.md).
 # Pinned to the quack 0.5.0 / cutlass-dsl 4.5.2 set so the cute kernels coexist with
 # FlashAttention-4 (which requires quack-kernels>=0.5.0). The cute launch path was
 # migrated to cutlass-dsl 4.5.2's TVM-FFI convention; the quack-import shim
@@ -112,7 +112,6 @@ exclude = [
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
-  "third_party",
 ]
 
 [tool.ruff.lint]
@@ -241,7 +240,6 @@ exclude = [
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
-  "third_party",
 ]
 pythonVersion = "3.10"
 # ty is the static-typing gate (see `[tool.ty]` below and the `types` task). This block
@@ -269,7 +267,6 @@ exclude = [
   "benchmarks/**/artifacts",
   "benchmarks/**/profiles",
   "benchmarks/**/plots",
-  "third_party",
   # Vendored kernel bodies -- the same set ruff excludes with `= ["ALL"]`: faithful copies from
   # team-gm branches and FlashAttentionBias, "not linted, exactly as the originals are not held
   # to this repo's standards". Holding them to a type checker but not a linter was an

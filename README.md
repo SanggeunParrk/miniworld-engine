@@ -74,7 +74,6 @@ benchmarks/
 ├── compile_wrap/                 # graph structure + regime A/B behind the compile_wrap default
 └── runners/                      # shared benchmark/render CLI entry points
 docs/                             # repo docs, cache policy, kernel notes
-third_party/                      # external checkouts/submodules
 benchmarks/runners/bench.py       # active bench runner
 benchmarks/modules/triangle_multiplication/configs/bench.yaml
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored

@@ -130,3 +130,13 @@ What holds this up:
 Currently deprecated: `kernels.cuda_transition` — it has never had an implementation (it deferred
 to a `transition/cuda` symbol git has no record of) and calling it raises `NotImplementedError`.
 It is in the frozen surface, so it could not simply be deleted; now it says so.
+
+## External dependencies
+
+Consume externals as **pinned pip packages, not git submodules**, so anything that vendors this
+repo does not inherit a recursive clone of a large upstream. CUTLASS / CuTeDSL come in through the
+`nvidia-cutlass-dsl` wheel plus `quack-kernels`, pinned in the `[cute]` optional-dependency group.
+Add a new external as an extra in `pyproject.toml` whenever a wheel exists.
+
+This used to be a `third_party/README.md`. A directory whose only content was a policy saying it
+should be empty, plus 45 files of first-party scratch that the name exempted from ruff and ty.
