@@ -1,4 +1,4 @@
-"""Milestone 2 (WIP): fused LayerNormLinear in ONE main kernel.
+"""Fused LayerNormLinear in ONE main kernel (sm90).
 
 Forks quack's `GemmSm90` (no smaller seam — confirmed by reading the source).
 Overrides 4 methods:

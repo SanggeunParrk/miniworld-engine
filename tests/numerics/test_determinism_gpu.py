@@ -3,11 +3,21 @@
 A library that autotunes has a nuanced answer, which is exactly why it has to be written down. The
 config a kernel launches with is selected per shape bucket from the tuned cache, so:
 
-* **Within one process and one cache state** the selection is fixed, and repeated calls on identical
-  inputs must be bitwise identical. That is what this file asserts.
+* **Within one process and one cache state** the config selection is fixed, so most kernels return
+  bitwise-identical output for identical input. Most, not all -- see below.
 * **Across cache states** -- a rebuild, a different GPU, a different config set -- a different
   config may win, and a different tile shape means a different reduction order. Results may then
   differ in the last bits. That is not a bug; it is what tuning is.
+* **A kernel whose accumulation order is not fixed** is not bitwise reproducible even within one
+  process. Measured: `augmented_attention_bwd_atomic_triton` returns different bytes for provably
+  identical input (the checker's torch-computed reference side matched across the two calls, the
+  kernel's did not). Notably `layernorm_bwd_atomic_triton` -- also atomics, and the kernel this
+  file's sample originally picked as "the interesting case" -- IS reproducible, so "uses atomics"
+  does not predict it and the sample gave false confidence about the whole class.
+
+The first bullet used to read "must be bitwise identical", full stop. It was a promise the library
+does not keep, and it went unchallenged because the one atomics kernel in the sample happens to
+keep it.
 
 Consumers cannot read that off the source, and the second half is the half that produces "your
 library is non-deterministic" reports. See README's Determinism section.
@@ -37,6 +47,14 @@ REGISTRY = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.t
 #: One kernel per family that has a checker, chosen for launch-path variety rather than coverage:
 #: an atomic accumulation, a split reduction, a persistent grid, a fused epilogue. Declared rather
 #: than derived so a family that loses its checker is a visible change here.
+#: Kernels that are NOT bitwise reproducible, with what makes them so. An exception list nothing
+#: verifies becomes a place to put failures, so `test_a_declared_exception_is_still_one` asserts
+#: each entry still differs -- if one becomes reproducible, it belongs in SAMPLE instead.
+NOT_BITWISE = {
+    "augmented_attention_bwd_atomic_triton":
+        "unordered atomic accumulation into dK/dV; the order varies run to run",
+}
+
 SAMPLE = (
     "adaln_fwd_triton",
     "layernorm_fwd_saveact_triton",
@@ -105,3 +123,33 @@ def test_two_calls_in_one_process_are_bitwise_identical(kernel: str) -> None:
             f"{kernel} output {i} differs between two calls in one process: "
             f"max|diff| = {(a.float() - b.float()).abs().max().item():.3e}. Either the kernel "
             f"reads uninitialised memory, or its reduction order is not fixed for a given config.")
+
+
+@pytest.mark.parametrize("kernel", sorted(NOT_BITWISE))
+def test_a_declared_exception_is_still_one(kernel: str) -> None:
+    """The other half of the statement. A kernel listed as non-reproducible must still be
+    non-reproducible -- and its difference must be reduction-order sized, not output sized, or it
+    is a bug wearing an exception's clothes."""
+    import torch
+
+    from miniworld_engine.autotune.run_all import declared_rtol, meets_arch
+
+    with REGISTRY.open(newline="") as fh:
+        rows = {r["kernel"]: r for r in csv.DictReader(fh)}
+    row = rows[kernel]
+    if not meets_arch(row):
+        pytest.skip(f"needs {row['arch']}, this card is lower")
+
+    first, second = _actuals(row["check"]), _actuals(row["check"])
+    differs = [i for i, (a, b) in enumerate(zip(first, second, strict=True)) if not torch.equal(a, b)]
+    assert differs, (
+        f"{kernel} is listed in NOT_BITWISE ({NOT_BITWISE[kernel]}) but reproduced exactly. "
+        f"Move it into SAMPLE -- the exception list must not outlive its reason.")
+    band = declared_rtol(row) or 5e-2
+    for i in differs:
+        a, b = first[i].float(), second[i].float()
+        scale = b.abs().max().item()
+        rel = (a - b).abs().max().item() / scale if scale else 0.0
+        assert rel <= band, (
+            f"{kernel} output {i} differs by rel {rel:.3e}, past its declared band {band:.0e}. "
+            f"Reduction order costs last bits; this is too large to be that.")
