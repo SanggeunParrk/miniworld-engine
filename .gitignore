@@ -86,3 +86,6 @@ benchmarks/**/logs/
 # live in tools/kernel-audit/ instead, because docs/kernels/tiling-audit.md cites them by path and
 # the audit it records has to stay reproducible from a clean checkout.
 .bench/
+
+# staging output of tools/release/gpu_verdict.py; the verdict JSON itself IS committed
+verdicts/.stage/

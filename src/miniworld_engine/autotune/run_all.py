@@ -19,6 +19,7 @@ import argparse
 import collections
 import importlib
 import math
+import pathlib
 import sys
 import traceback
 
@@ -32,6 +33,35 @@ def _resolve(path: str):
     if not fn_name:
         raise ValueError(f"driver must be 'module:function', got {path!r}")
     return getattr(importlib.import_module(mod_name), fn_name)
+
+
+#: Seed set before every checker call. The value does not matter; that it is the same one every
+#: time does.
+CHECKER_SEED = 0
+
+
+def run_checker(check: str):
+    """Resolve a checker and run it on a fixed RNG stream.
+
+    `checks._fixed()` exists for exactly this and its docstring promises that "a WRONG NUMBERS
+    line reproduces on the next run". It is called in two of the fourteen checker modules --
+    adaln.py (10 of 18 functions) and conditioned_transition.py (14 of 18). The other twelve
+    files, ~100 checkers, build their inputs with unseeded `torch.randn`.
+
+    Two consequences, both real. A failing `run_all` line was not reproducible on the next run
+    for most kernels. And two calls to the same checker saw *different inputs*, which is why
+    tests/test_determinism_gpu.py reported differences up to 1.6e+04 -- output-scale, not
+    reduction-scale -- and was measuring nothing.
+
+    Seeding here, at the one place a checker is invoked, rather than in ~100 function bodies:
+    a checker added tomorrow cannot forget, and `_fixed()` inside a checker stays harmless
+    (it sets the same seed again).
+    """
+    import torch
+
+    # Seeds every device, not just the CPU generator -- the inputs are built on the GPU.
+    torch.manual_seed(CHECKER_SEED)
+    return _resolve(check)()
 
 
 #: The band a kernel is held to when its registry row does not name one. bf16 carries ~3 decimal
@@ -57,7 +87,7 @@ def check_one(check: str, rtol: float | None = None) -> tuple[bool, str]:
     what it was measured against instead of leaving the reader to find the constant.
     """
     try:
-        got = _resolve(check)()
+        got = run_checker(check)
     except Exception as exc:
         return False, f"checker raised {type(exc).__name__}: {str(exc).strip().splitlines()[0][:150]}"
     pairs = got if isinstance(got, dict) else {"out": got}
@@ -202,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", default="", help="comma list of families to run")
     ap.add_argument("--verbose", action="store_true", help="print the traceback for each failure")
+    ap.add_argument("--json", default="", metavar="PATH",
+                    help="also write the counts as JSON, for a release verdict (plan.md B1)")
     args = ap.parse_args(argv)
 
     want = {f for f in args.only.split(",") if f}
@@ -272,8 +304,24 @@ def main(argv: list[str] | None = None) -> int:
     by = collections.Counter(r["family"] for r in devices.registry()
                              if not (r.get("driver") or "").strip())
     if by:
-        print("  드라이버 없는 커널 (계열별):",
+        print("  kernels with no driver, by family:",
               ", ".join(f"{k}:{v}" for k, v in sorted(by.items())))
+
+    if args.json:
+        # The same numbers the summary above prints, as data. A release verdict has to be
+        # machine-checkable (plan.md B1); re-parsing the human summary would break the moment
+        # its wording changed, which is the kind of check that fails for the wrong reason.
+        import json
+        payload = {
+            "declared": declared, "driven": len(results), "ok": have,
+            "failed": len(results) - have, "skipped": len(skipped), "no_driver": no_driver,
+            "checked_against_reference": checked, "launched_unverified": have - checked,
+            "arch": here, "accounting_ok": accounted == declared,
+            "mislabelled_arch": len(mislabelled),
+            "failures": {k: v[1] for k, v in sorted(results.items()) if not v[0]},
+        }
+        pathlib.Path(args.json).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        print(f"  wrote {args.json}")
     return 0
 
 

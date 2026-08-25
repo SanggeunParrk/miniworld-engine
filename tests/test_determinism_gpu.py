@@ -12,10 +12,16 @@ config a kernel launches with is selected per shape bucket from the tuned cache,
 Consumers cannot read that off the source, and the second half is the half that produces "your
 library is non-deterministic" reports. See README's Determinism section.
 
-The check runs each kernel's own checker twice and compares what the KERNEL produced (the checkers
-seed their inputs, so both calls see the same tensors). A sample rather than all 99: the point is
-the property, and one kernel per family covers the distinct launch paths -- atomics, split
-reductions, persistent grids -- without paying for the whole suite twice.
+The check runs each kernel's own checker twice and compares what the KERNEL produced. Both calls
+must see the same tensors, and that is the harness's job, not the checker's: only two of the
+fourteen checker modules ever called `checks._fixed()`, so ~100 checkers built their inputs from
+unseeded `torch.randn`. This file's first version trusted them and compared two different inputs,
+reporting differences up to 1.6e+04 -- output-scale, not reduction-scale, which is what gave the
+lie away. `run_all.run_checker` now seeds at the single invocation point.
+
+A sample rather than all 99: the point is the property, and one kernel per family covers the
+distinct launch paths -- atomics, split reductions, persistent grids -- without paying for the
+whole suite twice.
 """
 from __future__ import annotations
 
@@ -60,10 +66,10 @@ def test_the_sample_still_names_real_kernels_with_checkers() -> None:
 
 
 def _actuals(checker: str):
-    """Run a checker and return only what the KERNEL produced, as a flat list of tensors."""
-    from miniworld_engine.autotune.run_all import _resolve
+    """Run a checker on the fixed seed and return only what the KERNEL produced."""
+    from miniworld_engine.autotune.run_all import run_checker
 
-    got = _resolve(checker)()
+    got = run_checker(checker)
     pairs = got if isinstance(got, dict) else {"out": got}
     return [actual for actual, _expected in pairs.values()]
 
