@@ -24,7 +24,7 @@ with one job. Nothing else belongs at the target root.
   (`config_path` used to be the constant `../modules/triangle_multiplication/configs`, so
   every target loaded that one file and the other 25 configs were read by nothing —
   `augmented_attention_atom` declared a 128–384 ladder and was swept at 384–1024.
-  `tests/test_bench_config_per_target.py` is what keeps it honest.)
+  `tests/layout/test_bench_config_per_target.py` is what keeps it honest.)
 - `artifacts/` — **generated benchmark outputs only**: `*.csv`, `*.svg`,
   `*_autotune_summary.txt`. No Python, no profiler captures, no repro trees.
   (`.gitignore` already drops everything under `artifacts/` except the data

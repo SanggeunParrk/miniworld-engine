@@ -79,7 +79,7 @@ miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", 
                     "**/*.csv"]
 # ...but not the optimization logs. `exclude` above drops `notes` as a package; these
 # `exclude-package-data` entries drop the assets the globs above would otherwise sweep in
-# from a parent package's tree. tests/test_notes_stay_out_of_the_wheel.py checks the result.
+# from a parent package's tree. tests/layout/test_notes_stay_out_of_the_wheel.py checks the result.
 
 [tool.setuptools.exclude-package-data]
 miniworld_engine = ["kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
@@ -128,7 +128,7 @@ exclude = [
   # 121 lint errors CI could not see, which is the kind of gap that teaches you to ignore ruff.
   # A kernel's optimization log: the write-up per round and the scratch .py a version was
   # measured with. Records, not maintained code -- they are not imported, not run, and not
-  # shipped (no __init__.py, enforced by tests/test_kernel_layout.py). Excluded for what they
+  # shipped (no __init__.py, enforced by tests/layout/test_kernel_layout.py). Excluded for what they
   # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
   "src/miniworld_engine/kernels/*/notes",
   "benchmarks/**/artifacts",
@@ -261,7 +261,7 @@ exclude = [
   # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
   # A kernel's optimization log: the write-up per round and the scratch .py a version was
   # measured with. Records, not maintained code -- they are not imported, not run, and not
-  # shipped (no __init__.py, enforced by tests/test_kernel_layout.py). Excluded for what they
+  # shipped (no __init__.py, enforced by tests/layout/test_kernel_layout.py). Excluded for what they
   # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
   "src/miniworld_engine/kernels/*/notes",
   "benchmarks/**/artifacts",
@@ -293,7 +293,7 @@ exclude = [
   # has them; a working tree does, and a checker that reads them reports findings CI cannot see.
   # A kernel's optimization log: the write-up per round and the scratch .py a version was
   # measured with. Records, not maintained code -- they are not imported, not run, and not
-  # shipped (no __init__.py, enforced by tests/test_kernel_layout.py). Excluded for what they
+  # shipped (no __init__.py, enforced by tests/layout/test_kernel_layout.py). Excluded for what they
   # ARE, unlike the old third_party/ exclusion which was a label that had stopped being true.
   "src/miniworld_engine/kernels/*/notes",
   "benchmarks/**/artifacts",
@@ -319,7 +319,7 @@ invalid-method-override = "ignore"
 
 [tool.ty.environment]
 python-version = "3.10"
-# tests/test_registry_complete.py imports classify/launch_bind/key_gaps from
+# tests/registry/test_registry_complete.py imports classify/launch_bind/key_gaps from
 
 # ----------------------------------------------------------------------------
 # pixi — single unified environment for the whole repo (triton + Transformer

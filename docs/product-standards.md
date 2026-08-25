@@ -59,7 +59,7 @@ is a promise to a consumer choosing hardware. A promise nothing runs against is 
 *Prevents:* a consumer buying or booking time on hardware the library claims to support and
 discovering at run time that the claim was aspirational.
 
-*Enforced by:* `tests/test_hardware_support.py` and `tests/test_arch_gating.py` check that the
+*Enforced by:* `tests/registry/test_hardware_support.py` and `tests/registry/test_arch_gating.py` check that the
 declaration is internally coherent and that unsupported hardware fails clearly — not that the
 kernel was ever *run* on the arch it names. In practice everything has been verified on sm86
 (A5000 / A6000) by hand. sm90 and sm100 kernels have never been executed by any automated
@@ -185,7 +185,7 @@ and no version).
 ### I3. The changelog describes released things
 
 `CHANGELOG.md` exists, is 264 lines, is written well, and is **entirely** under
-`## [Unreleased]`. It documents a public-API contract enforced by `tests/test_public_api.py`
+`## [Unreleased]`. It documents a public-API contract enforced by `tests/compile/test_public_api.py`
 (A1) — for a package that has never published a version.
 
 *Prevents:* a consumer being unable to learn what changed between the version they have and
@@ -232,7 +232,7 @@ the author having run something by hand on one of two Ampere cards.
 change altered bucket indices; the check that nothing was orphaned was a one-off script run by
 hand, not a test.
 
-*Enforced by:* `tests/test_shipped_cache_wellformed.py` checks shape; `dev audit` checks
+*Enforced by:* `tests/autotune/test_shipped_cache_wellformed.py` checks shape; `dev audit` checks
 declared-vs-present reachability, but is a CLI command nobody runs automatically.
 
 *Status:* **partially met.**
@@ -242,7 +242,7 @@ declared-vs-present reachability, but is a CLI command nobody runs automatically
 *Prevents:* a README number that was true on one card, one torch version, and one config set,
 and is quoted forever.
 
-*Enforced by:* `tests/test_performance_claims.py` traces prose numbers to artifacts (C1/C2).
+*Enforced by:* `tests/numerics/test_performance_claims.py` traces prose numbers to artifacts (C1/C2).
 It does not re-run them, and cannot without J1.
 
 *Status:* **partially met** — provenance enforced, freshness not.

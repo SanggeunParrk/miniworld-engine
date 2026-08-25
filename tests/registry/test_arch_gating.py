@@ -3,7 +3,7 @@
 `run_all` had no notion of it. On an A6000 it reported six CuTeDSL kernels as `failed` because they
 raise "expects arch to be sm_90a, but got sm_86" at every shape, which is the report being red for
 hardware they were never written for. The build side already draws this distinction
-(`is_bad_unit`, tests/test_permanent_skip_classification.py); this is the same rule for the
+(`is_bad_unit`, tests/registry/test_permanent_skip_classification.py); this is the same rule for the
 driver/checker side.
 
 Two mechanisms, in this order:
@@ -15,7 +15,7 @@ Two mechanisms, in this order:
    the declared gate and *then* refuses on arch grounds is a registry error, and `run_all` prints
    it as one instead of absorbing it into the skip count.
 
-The predicate lives in `run_all`, not in a test. It was in `tests/test_numerical.py` -- which is
+The predicate lives in `run_all`, not in a test. It was in `tests/numerics/test_numerical.py` -- which is
 why `run_all` did not have it.
 """
 from __future__ import annotations

@@ -119,14 +119,14 @@ pair가 1024에서 멈추는 이유: L=2048은 4.2M행, L=8192는 67M행이고 �
 
 ## 강제
 
-`tests/test_registry_complete.py`가 검사한다. GPU 불필요.
+`tests/registry/test_registry_complete.py`가 검사한다. GPU 불필요.
 
 * **모든 launch 키워드가 대상 커널의 파라미터인지.** 이게 없어서 실제로 깨졌다: 90개
   파라미터를 `shape_key`로 rename할 때 커널을 정의하지 않는 파일이 건너뛰어져, 14곳이 옛 키워드를
   계속 넘겼다. Triton은 모르는 키워드를 삼킨 뒤 필수 인자가 없다고 죽으므로 에러 메시지가 원인이 된
   낡은 키워드가 아니라 **없는 파라미터**를 가리킨다. 그래서 push된 커밋까지 갔다.
 
-`tests/test_both_level_row_key.py`가 both 쪽을 검사한다. GPU 불필요.
+`tests/registry/test_both_level_row_key.py`가 both 쪽을 검사한다. GPU 불필요.
 
 * 같은 길이의 pair와 atom이 **다른 버킷**인지. 이게 없어서 1024가 한 버킷이었다.
 * `BOTH_ROWS`의 모든 버킷에 work list 유닛이 정확히 하나씩 있는지 — 옛 리스트는 11개 중 8개만

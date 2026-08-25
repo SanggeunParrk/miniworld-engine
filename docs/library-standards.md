@@ -13,11 +13,11 @@ says so, and `plan.md` carries the work.
 Two rules govern the whole document.
 
 **A standard is enforced or it is decoration.** "We keep names consistent" is not a standard;
-`tests/test_bench_target_vocabulary.py` is. Every criterion here names the check that fails when it
+`tests/layout/test_bench_target_vocabulary.py` is. Every criterion here names the check that fails when it
 is violated, or admits there isn't one.
 
 **The check must fail for the right reason.** A test that passes because it stopped finding
-anything is worse than no test. `tests/test_lazy_import_targets.py::test_there_are_lazy_wrappers_to_check`
+anything is worse than no test. `tests/builder/test_lazy_import_targets.py::test_there_are_lazy_wrappers_to_check`
 exists for exactly this: the import-style change made its collector return zero cases, and without
 that guard the file would have kept passing while checking nothing.
 
@@ -34,7 +34,7 @@ act rather than a side effect of a refactor.
 *Prevents:* a rename that compiles locally and breaks every downstream import; a private helper
 that becomes load-bearing for a consumer because nothing said it was private.
 
-*Enforced by:* `tests/test_public_api.py` freezes `kernels.__all__` and `ops.__all__` against
+*Enforced by:* `tests/compile/test_public_api.py` freezes `kernels.__all__` and `ops.__all__` against
 `_CONTRACT` / `_OPS_CONTRACT`. Changing either fails the suite and the message says to update the
 CHANGELOG.
 
@@ -48,7 +48,7 @@ libraries inside test collection, inside CLI startup, inside other libraries' im
 *Prevents:* a consumer's unrelated test suite paying a 2-minute triton compile; an import that
 fails on a machine with no CUDA.
 
-*Enforced by:* `tests/test_public_api.py` asserts the import is side-effect-free; the whole CPU
+*Enforced by:* `tests/compile/test_public_api.py` asserts the import is side-effect-free; the whole CPU
 suite runs with `CUDA_VISIBLE_DEVICES=""` in CI.
 
 *Status:* **met.**
@@ -107,9 +107,9 @@ that family.
 *Prevents:* the state this repo was in before `checks/` existed — 56 kernels reached by a driver
 with no reference at all, where "ok" meant "did not raise".
 
-*Enforced by:* `tests/test_kernel_layout.py` requires `reference.py` per family;
-`tests/test_registry_complete.py::test_every_kernel_with_a_driver_declares_a_checker`;
-`tests/test_numerical.py` runs all 99 declared checkers on GPU.
+*Enforced by:* `tests/layout/test_kernel_layout.py` requires `reference.py` per family;
+`tests/registry/test_registry_complete.py::test_every_kernel_with_a_driver_declares_a_checker`;
+`tests/numerics/test_numerical.py` runs all 99 declared checkers on GPU.
 
 *Status:* **met** for existence and execution. See B2 for the band.
 
@@ -138,8 +138,8 @@ and every unreachable case drops out of numerator and denominator together, and 
 *Prevents:* exactly that. It is why `_report_coverage` reads `registry.csv` and not the set of ops
 that happened to fire.
 
-*Enforced by:* `registry.csv` as the declared inventory; `tests/test_registry_complete.py`,
-`tests/test_declared_dtype_coverage.py`, `tests/test_spread_shape_key.py`; `dev audit` for the
+*Enforced by:* `registry.csv` as the declared inventory; `tests/registry/test_registry_complete.py`,
+`tests/registry/test_declared_dtype_coverage.py`, `tests/autotune/test_spread_shape_key.py`; `dev audit` for the
 cache side.
 
 *Status:* **met.**
@@ -187,7 +187,7 @@ of the table was eager code labelled compiled.
 
 *Enforced by:* the long-form CSV is the artifact and carries device, torch/cuda version, mode,
 `compiled`, `cudagraph`, `compile_wrap`, precision, dtypes and the execution path per row;
-`tests/test_compiled_flag_is_what_ran.py` asserts the `compiled` column says what ran.
+`tests/compile/test_compiled_flag_is_what_ran.py` asserts the `compiled` column says what ran.
 
 *Status:* **met** for the tables.
 
@@ -231,9 +231,9 @@ Code, CLI, docs, config, data and directory names are one vocabulary. The same c
 *Prevents:* `bench_kernel triangle_attention` returning "unknown target" for a kernel that exists;
 a doc command nobody can run.
 
-*Enforced by:* `tests/test_bench_target_vocabulary.py` ties four namespaces together (bench.py's
+*Enforced by:* `tests/layout/test_bench_target_vocabulary.py` ties four namespaces together (bench.py's
 tables, the CLI's, `builder.CASE_NAMES`, the directory tree);
-`tests/test_cli_documented_commands.py` parses every `miniworld-engine ...` line in the docs.
+`tests/layout/test_cli_documented_commands.py` parses every `miniworld-engine ...` line in the docs.
 
 *Status:* **met.**
 
@@ -254,9 +254,9 @@ who has seen one has seen them all.
 *Prevents:* each new instance copying whichever neighbour its author opened. This repo had one
 family that was not a package at all and `interface.py` for four of thirteen.
 
-*Enforced by:* `tests/test_kernel_layout.py`, `tests/test_module_layout.py`,
-`tests/test_registry_complete.py::test_the_harness_is_one_module_per_family`,
-`tests/test_bench_config_per_target.py`.
+*Enforced by:* `tests/layout/test_kernel_layout.py`, `tests/layout/test_module_layout.py`,
+`tests/registry/test_registry_complete.py::test_the_harness_is_one_module_per_family`,
+`tests/layout/test_bench_config_per_target.py`.
 
 *Status:* **met.**
 
@@ -275,7 +275,7 @@ names will drift, and the drift will be silent.
 root and inside the package, and every other config set lived only at the root — so a short name
 resolved against a different root depending on the caller, and a wheel could reach only one of
 them. All eleven sets are packaged now, `configs.config_set(name)` is the single resolver, and
-`tests/test_default_config_set.py` asserts a repo-root directory cannot shadow the package.
+`tests/autotune/test_default_config_set.py` asserts a repo-root directory cannot shadow the package.
 
 ### D5. A name collision that Python resolves by accident is a defect
 
@@ -308,7 +308,7 @@ set is an argument; `build` decomposes, runs and merges in one invocation.
 "This card cannot hold this shape" is a permanent, correct answer. Counting it as a failure made a
 resumed job report "0 ok, 9 failed" and refuse to merge.
 
-*Enforced by:* `is_bad_unit`, `tests/test_permanent_skip_classification.py`.
+*Enforced by:* `is_bad_unit`, `tests/registry/test_permanent_skip_classification.py`.
 
 *Status:* **met.**
 
@@ -317,7 +317,7 @@ resumed job report "0 ok, 9 failed" and refuse to merge.
 One OOM must not discard 526 good measurements. Merge what succeeded, report the holes, and offer
 `--strict` for CI.
 
-*Enforced by:* `_merge_built_shards`, `tests/test_shard_merge.py`, `dev audit`.
+*Enforced by:* `_merge_built_shards`, `tests/autotune/test_shard_merge.py`, `dev audit`.
 
 *Status:* **met.**
 
@@ -338,7 +338,7 @@ hand.
 A cache, a table, a figure: each says what produced it.
 
 *Enforced by:* the `provenance` block in each `data/<op>/<gpu>.json` (build time, torch, triton);
-the CSV's version columns; `tests/test_shipped_cache_wellformed.py`.
+the CSV's version columns; `tests/autotune/test_shipped_cache_wellformed.py`.
 
 *Status:* **met.**
 
@@ -396,7 +396,7 @@ mode is a reference doc that has quietly become a record.
 *Prevents:* a reader following `benchmarks/kernels/layernorm_linear/artifacts` — a path that never
 existed.
 
-*Enforced by:* `tests/test_cli_documented_commands.py` for commands. Op names and paths in prose
+*Enforced by:* `tests/layout/test_cli_documented_commands.py` for commands. Op names and paths in prose
 are not checked.
 
 *Status:* **partially met** — `docs/kernels/l2-swizzle.md` names 21 pre-rename ops.

@@ -25,7 +25,7 @@ It matters for this rule though: ``from .ops import sigmoid_gate`` kept working 
 ``modules/attention_pair_bias/module.py``, so the flat-to-folder move is exactly when a relative
 import breaks.
 
-The kernel-side twin of this file is ``tests/test_kernel_layout.py``.
+The kernel-side twin of this file is ``tests/layout/test_kernel_layout.py``.
 """
 from __future__ import annotations
 

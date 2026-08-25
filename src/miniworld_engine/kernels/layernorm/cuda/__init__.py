@@ -38,7 +38,7 @@ def _ext():
     Functions in THIS module must call this, not the bare name `layer_norm_cuda`. A module-level
     `__getattr__` is consulted for `module.attr` from outside; a bare global lookup inside the
     module is not, so `return layer_norm_cuda.layer_norm_bwd(...)` would raise NameError at call
-    time. (`tests/test_no_undefined_names.py` catches exactly that, and did.)
+    time. (`tests/layout/test_no_undefined_names.py` catches exactly that, and did.)
     """
     ext = globals().get("layer_norm_cuda")
     if ext is None:

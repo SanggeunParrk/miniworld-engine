@@ -16,7 +16,7 @@ of the nine module targets because the "all" group read a table that was missing
 coverage report looked them up, found nothing, and reported their kernels as never launched.
 
 bench.py cannot be imported without a GPU (it raises at import), so the two tables in it are read
-out of its source with `ast`, the same way tests/test_compiled_flag_is_what_ran.py does.
+out of its source with `ast`, the same way tests/compile/test_compiled_flag_is_what_ran.py does.
 """
 from __future__ import annotations
 

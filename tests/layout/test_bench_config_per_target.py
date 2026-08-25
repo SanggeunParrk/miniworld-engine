@@ -13,7 +13,7 @@ returns that target's directory. This file is the static half of the guarantee: 
 directory always exists, and that what is in it says the same thing its path does.
 
 bench.py cannot be imported without a GPU, so its tables are read out of the source with ``ast``,
-the same way tests/test_compiled_flag_is_what_ran.py does.
+the same way tests/compile/test_compiled_flag_is_what_ran.py does.
 """
 from __future__ import annotations
 

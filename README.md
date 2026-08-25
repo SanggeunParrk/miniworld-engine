@@ -62,7 +62,7 @@ src/miniworld_engine/
     ├── attention_pair_bias/ conditioned_transition/ outer_product/ pairformer/
     ├── msa_pair_weighted_averaging/ swa_atom_attention/
     │                             #   every op is a folder holding module.py --
-    │                             #     tests/test_module_layout.py enforces it
+    │                             #     tests/layout/test_module_layout.py enforces it
     ├── dispatch.py               #   ImplementationType -> internal KernelBackend
     ├── exceptions.py             #   ImplementationType (pytorch/triton/cuda/cute/cuequivariance)
     ├── primitives.py             #   layer classes the ops compose (LayerNorm, Linear, Dropout)
@@ -81,7 +81,7 @@ pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cut
 src/miniworld_engine/tools/               # one-off probes + their .sbatch launchers (not shipped in a wheel)
 ```
 
-Every kernel family has the same shape, and `tests/test_kernel_layout.py` enforces it:
+Every kernel family has the same shape, and `tests/layout/test_kernel_layout.py` enforces it:
 
 | file | what it is | required |
 |---|---|---|
@@ -201,7 +201,7 @@ Numbers, and the scripts that produced them: `benchmarks/compile_wrap/`.
 ## Supported hardware
 
 Every kernel declares its minimum architecture in `kernels/registry.csv`'s `arch` column, and the
-table below is checked against that column by `tests/test_hardware_support.py` — so it cannot drift
+table below is checked against that column by `tests/registry/test_hardware_support.py` — so it cannot drift
 from the code.
 
 <!-- BEGIN GENERATED: hardware-support -->
@@ -258,7 +258,7 @@ git config core.hooksPath .githooks   # refuses to commit tuned cache data with 
 pixi run ruff-check     # lint  (src tests benchmarks)
 pixi run types          # ty    (src tests benchmarks) -- gates CI, no findings allowed
 pixi run test           # the CPU suite (~30 s, no GPU)
-pixi run test-gpu       # tests/test_numerical.py, on an allocated node
+pixi run test-gpu       # tests/numerics/test_numerical.py, on an allocated node
 pixi run ci             # all three, in CI's order
 ```
 

@@ -79,8 +79,8 @@ dims/length/mode에 달려 있으므로 **한 번 돌려보고 발견**하게 �
 | `_record_one`의 (dtype, bucket)이 prune 객체에서 왔음 | prune이 사라진 뒤 전부 `any|any`. 저장소의 모든 캐시가 op당 엔트리 **1개** |
 | kernel 38개 파일이 `key_bucket_of`/`tensor_dtype_of`를 import만 하고 호출 안 함 | `kernels/**/triton/*.py`가 ruff 제외라 lint가 못 봄 |
 | `build/audit.py`가 같은 죽은 속성을 읽음 | op 이름 0/83, bucket key 0/83 해석. 전 op에 "not introspectable" 경고만 내고 검증한 게 없음 |
-| `tests/test_build_matrix.py`가 삭제된 `_is_compile_monster`를 import | 모듈 자체가 collect 불가 → **빌드 매트릭스 규칙 테스트 20개도 같이 부재** |
-| `tests/test_int64_offsets.py`가 리터럴 `tl.arange(0, BLOCK_M)`을 고정 | 같은 커밋의 `BLOCK_M`→`BLOCK_M1` 개명에 실패. 지키려던 `.to(tl.int64)`는 멀쩡했음 |
+| `tests/builder/test_build_matrix.py`가 삭제된 `_is_compile_monster`를 import | 모듈 자체가 collect 불가 → **빌드 매트릭스 규칙 테스트 20개도 같이 부재** |
+| `tests/numerics/test_int64_offsets.py`가 리터럴 `tl.arange(0, BLOCK_M)`을 고정 | 같은 커밋의 `BLOCK_M`→`BLOCK_M1` 개명에 실패. 지키려던 `.to(tl.int64)`는 멀쩡했음 |
 
 `any|any`가 왜 위험한가: `shape_key`는 모든 커널의 `key=[...]`에 들어 있으므로 **Triton은
 in-process에서 shape bucket별로 재튜닝한다.** 느려지지 않으니 아무도 눈치채지 못한다. 잃어버리는

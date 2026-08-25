@@ -20,7 +20,7 @@ paragraph does not exist.
 
 `grid` must stay the set the shipped `data/**` caches were tuned over: the cache reader intersects a
 stored entry against the live config list, so a narrower default would resolve every shipped entry
-to nothing and silently re-tune on every call. `tests/test_default_config_set.py` asserts exactly
+to nothing and silently re-tune on every call. `tests/autotune/test_default_config_set.py` asserts exactly
 that against the committed caches, and also that there is only one copy of `grid`.
 
 The generator writes here too: `src/miniworld_engine/tools/gen_shards.py --out

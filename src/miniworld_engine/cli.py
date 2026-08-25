@@ -509,7 +509,7 @@ def is_bad_unit(result: dict) -> bool:
     the leftover OOM shapes report "0 ok, 9 failed" and refuse to merge.
 
     One function, not an expression inlined at the call site, because the rule has to agree with
-    the `skipped` flag the builder sets -- see tests/test_permanent_skip_classification.py, which
+    the `skipped` flag the builder sets -- see tests/registry/test_permanent_skip_classification.py, which
     drives both ends of it.
     """
     return (result["rc"] != 0 or not result["ops"]) and not result.get("skipped")
@@ -936,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
     """The whole CLI, built but not run.
 
     Separate from :func:`main` so a test can parse a command line without executing it -- which
-    is what lets tests/test_cli_documented_commands.py check that every `miniworld-engine ...`
+    is what lets tests/layout/test_cli_documented_commands.py check that every `miniworld-engine ...`
     line in the README and the docs is a command this parser accepts. The module docstring used
     to advertise `miniworld-engine bench all`; the subcommands are `bench_kernel` and
     `bench_module`, and there has never been a `bench`.
@@ -955,7 +955,7 @@ def build_parser() -> argparse.ArgumentParser:
     #                  48) and kept only for its shape-ladder overrides
     #   dev merge     fold shards in by hand -- `build` does this itself; this is for shards from
     #                 another machine, or a re-merge after a cache-key scheme bump
-    #   dev audit     the build-system checks. tests/test_registry_complete.py,
+    #   dev audit     the build-system checks. tests/registry/test_registry_complete.py,
     #                 test_declared_dtype_coverage.py and test_spread_shape_key.py already drive
     #                 these; the command adds only `--shards`, i.e. evidence from a real build
     #                 that a CPU test cannot have.

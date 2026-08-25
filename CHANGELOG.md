@@ -4,7 +4,7 @@ Notable changes to the public API (`miniworld_engine.kernels`) are recorded
 here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-The public surface is enforced by `tests/test_public_api.py`.
+The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
@@ -70,11 +70,11 @@ The public surface is enforced by `tests/test_public_api.py`.
   fwd/bwd inside), consumed as a single call: `triangle_multiplicative_update`,
   `triangle_attention`, `transition`, `conditioned_transition`,
   `augmented_attention_pair_bias`, `layer_norm_linear`, `layer_norm`. Lazy,
-  side-effect-free import; pinned by `_OPS_CONTRACT` in `tests/test_public_api.py`.
+  side-effect-free import; pinned by `_OPS_CONTRACT` in `tests/compile/test_public_api.py`.
   Verified fwd+bwd vs the pytorch/cuequiv reference on B200 (≥0.9998).
-- Public API contract test (`tests/test_public_api.py`): freezes the
+- Public API contract test (`tests/compile/test_public_api.py`): freezes the
   `kernels` surface and asserts the package import is side-effect-free.
-- Numerical correctness suite (`tests/test_numerical.py`): each op's fused
+- Numerical correctness suite (`tests/numerics/test_numerical.py`): each op's fused
   MINIWORLD backend vs the PyTorch reference (forward + input gradient),
   GPU-gated, asserting the fused path is actually engaged (no silent
   dtype-degrade). Promotes the benchmark cosine checks into an enforced
@@ -116,7 +116,7 @@ The public surface is enforced by `tests/test_public_api.py`.
   an old name in their `run_name`/`target`/`implementation` columns were rewritten in
   place; **no measured value changed** (checked cell by cell), and the 40 plots whose
   drawn title named the old target were re-rendered from those same tables.
-  `tests/test_bench_target_vocabulary.py` now holds the four name spaces —
+  `tests/layout/test_bench_target_vocabulary.py` now holds the four name spaces —
   bench.py's tables, the CLI's, `builder.CASE_NAMES`, and the directory tree — to
   each other.
 - **Each bench target loads its own config.** `@hydra.main(config_path=...)` was the
@@ -148,7 +148,7 @@ The public surface is enforced by `tests/test_public_api.py`.
   `swa_atom_attention.py` were flat files. They are now packages like the other eight,
   and `modules/ops.py` — one level below `miniworld_engine.ops`, the public whole-op
   contract, and meaning the opposite thing — is `modules/functional.py`.
-  `tests/test_module_layout.py` holds the rule and the four shared modules that are
+  `tests/layout/test_module_layout.py` holds the rule and the four shared modules that are
   legitimately flat.
 - **The linter now checks what the code was already written against.** `select` was
   `["E", "F", "W"]` while the source carried ~700 `# noqa:` comments naming PLC0415,

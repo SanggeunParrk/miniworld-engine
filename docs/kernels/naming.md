@@ -233,7 +233,7 @@ cute collective 클래스가 통째로 빠진다(현재 최소 6개 CUDA 커널�
 
 ### 강제
 
-`tests/test_registry_complete.py`가 검사한다. GPU가 필요 없다.
+`tests/registry/test_registry_complete.py`가 검사한다. GPU가 필요 없다.
 
 * 빈 셀 (`check` 제외), 어휘 밖의 `kind`/`level`, 한 family 안에서 갈리는 `level`
 * **`dtypes`가 `level`을 따르는지**, 그리고 `bf16`/`fp32`/`fp16`의 `|` 결합인지

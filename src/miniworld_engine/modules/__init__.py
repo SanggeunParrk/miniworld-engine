@@ -17,7 +17,7 @@ from, and they are exactly these four:
 beside them. It was ``ops.py``, one level below :mod:`miniworld_engine.ops` -- which is the public
 WHOLE-OP contract, the opposite kind of thing.
 
-``tests/test_module_layout.py`` holds both halves of this rule.
+``tests/layout/test_module_layout.py`` holds both halves of this rule.
 
 NOTE: this namespace is an INTERNAL reference / benchmark harness that
 composes the kernels. It is NOT the consumed public contract (that is

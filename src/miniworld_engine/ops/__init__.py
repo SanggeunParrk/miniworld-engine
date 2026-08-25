@@ -11,7 +11,7 @@ units (per-GEMM / LN / gate kernels). Those are an implementation detail of thes
 and are not part of the consumed contract.
 
 Import stays cheap and side-effect-free: heavy backends (triton / cutlass) load lazily
-on first *call*, not on import (see ``tests/test_public_api.py``).
+on first *call*, not on import (see ``tests/compile/test_public_api.py``).
 """
 
 from __future__ import annotations

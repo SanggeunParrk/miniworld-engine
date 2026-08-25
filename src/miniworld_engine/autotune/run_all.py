@@ -128,7 +128,7 @@ def is_arch_gated(detail: str) -> bool:
     An sm100 CuTe kernel raises on an A6000 at every shape. Counting that as a failure makes the
     report red on hardware the kernel was never meant for, and a report that is always red is one
     nobody reads. Lives here rather than in the test that first needed it: `run_all` is what
-    produces the verdict, so it is what has to classify it, and `tests/test_numerical.py` imports
+    produces the verdict, so it is what has to classify it, and `tests/numerics/test_numerical.py` imports
     this instead of keeping a second copy.
     """
     d = detail.lower()

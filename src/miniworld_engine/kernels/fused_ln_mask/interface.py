@@ -29,7 +29,7 @@ def fused_ln_mask(
 
     The import is function-local so that importing this module loads no GPU backend. Every
     entry the flat ``kernels`` bridge can reach must keep ``import miniworld_engine.kernels``
-    free of triton/cutlass (``tests/test_public_api.py::test_import_is_side_effect_free``), and
+    free of triton/cutlass (``tests/compile/test_public_api.py::test_import_is_side_effect_free``), and
     the backend module builds its autotuned kernel at import. (Despite the ``cute/`` folder
     name, that backend is Triton today, not CuTeDSL -- the deferral holds either way.)
     """

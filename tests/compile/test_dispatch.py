@@ -1,7 +1,7 @@
 """Dispatch-layer tests: public/internal backend split, MINIWORLD auto-routing,
 GPU-arch policy, and the parity of MINIWORLD vs the PYTORCH reference.
 
-Run: ``pixi run python -m pytest tests/test_dispatch.py -q``
+Run: ``pixi run python -m pytest tests/compile/test_dispatch.py -q``
 """
 
 from __future__ import annotations

@@ -120,7 +120,7 @@ def test_capture_saw_ops(captured):
 #:
 #: So differentiating one of these ops DIRECTLY is not part of its contract, and asserting it is
 #: fails 20+ ops with "no autograd formula was registered" -- a property the design does not claim.
-#: The gradients are checked one level up, where they exist: `tests/test_numerical.py` compares each
+#: The gradients are checked one level up, where they exist: `tests/numerics/test_numerical.py` compares each
 #: kernel's dq/dk/dv/dbias against a torch reference through the Function.
 #:
 #: The compile path is NOT dropped along with it. The aot tests run with the arguments detached,

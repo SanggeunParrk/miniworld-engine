@@ -2834,7 +2834,7 @@ def _target_config_path() -> str:
     if not (config_dir / "bench.yaml").is_file():
         msg = (f"no bench config for level={level} target={target}: expected "
                f"{config_dir / 'bench.yaml'}. Every target owns one -- see "
-               f"tests/test_bench_config_per_target.py.")
+               f"tests/layout/test_bench_config_per_target.py.")
         raise FileNotFoundError(msg)
     return os.path.relpath(config_dir, here)
 

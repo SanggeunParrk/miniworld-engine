@@ -18,7 +18,7 @@ code should not reach into them directly.
 
 Both ``ops`` and ``kernels`` are intentionally cheap and side-effect-free to
 import (no triton/cutlass/cuequivariance loaded until an op/kernel is first
-called). Their public names are covered by ``tests/test_public_api.py``.
+called). Their public names are covered by ``tests/compile/test_public_api.py``.
 
 ``miniworld_engine.modules`` (Pairformer, Transition, ...) is an internal
 reference / benchmark harness; it is not part of the supported surface and pulls

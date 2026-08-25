@@ -43,7 +43,7 @@ def test_m_index_is_int64(rel: str, pattern: str):
     text = (_SRC / rel).read_text()
     assert re.search(pattern, text), (
         f"{rel} lost its int64 M-index promotion (no match for {pattern!r}); large-L offsets "
-        f"will overflow int32. See tests/test_int64_offsets.py."
+        f"will overflow int32. See tests/numerics/test_int64_offsets.py."
     )
 
 

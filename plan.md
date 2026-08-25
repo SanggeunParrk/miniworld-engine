@@ -54,7 +54,7 @@ declares `name = "miniworld-engine", version = "0.1.0"`. `import miniworld_kerne
 *Action:* the rename is a breaking change, so the next version is **1.0.0**, not 0.2.0 — a
 0.x bump would understate it. Move `[Unreleased]` to `## [1.0.0] - 2026-08-25` with an
 explicit **Breaking** section naming `miniworld-kernels` → `miniworld-engine` and the import
-path change. Tag `v1.0.0`. Add `tests/test_version_is_released.py`: the version in
+path change. Tag `v1.0.0`. Add `tests/layout/test_version_is_released.py`: the version in
 `pyproject.toml` must have a matching `## [<version>]` heading in `CHANGELOG.md`, and
 `[Unreleased]` must not be the only section.
 
@@ -90,7 +90,7 @@ mine to fold into a commit. A `uv sync` is still needed to provision the environ
 
 *Action:* resolve mathdx from, in order: an explicit setting, `MATHDX_HOME`/`NVIDIA_MATHDX_HOME`,
 the installed `nvidia-mathdx` package, then a documented failure that names the variable to
-set (E4). Add `tests/test_no_machine_paths.py`: no shipped source under `src/` may contain
+set (E4). Add `tests/layout/test_no_machine_paths.py`: no shipped source under `src/` may contain
 `/home/<user>` or another absolute path outside the package or toolchain.
 
 *Done when:* the new test fails on today's tree and passes after, and the kernel builds on a
@@ -109,7 +109,7 @@ executed by CI.** `run_all` (`ok 94, failed 0, skipped 9`), the numerical suite 
 
 *Action:* a self-hosted runner is not available, so make the gate Slurm-shaped instead: a
 `scripts/ci-gpu.sbatch` that runs `pytest -m gpu`, `run_all`, and opcheck, writes a JSON
-verdict with the commit SHA and the device, and a `tests/test_gpu_verdict_is_current.py` that
+verdict with the commit SHA and the device, and a test that
 fails when the newest verdict does not match `HEAD` or is older than N days. That converts
 "the author ran it" into a dated, checkable artifact.
 
@@ -186,7 +186,7 @@ recorded per-kernel `rel`, so the data to calibrate exists.
 default only where there is no measurement, and say so in the row.
 
 *Done when:* no kernel's declared `rtol` is more than the stated margin above its measured
-`rel`, checked by `tests/test_declared_tolerance.py`.
+`rel`, checked by `tests/registry/test_declared_tolerance.py`.
 
 ### C3 — `arch` conflates an enforced gate with an intention  (G2, P7)
 
@@ -197,7 +197,7 @@ that would have run and been checked on sm86**.
 *Action:* split into `arch` (minimum required, enforced) and `tuned_for` (informational).
 Re-run `run_all` and confirm the 3 kernels move from skipped to checked.
 
-*Done when:* the skip count drops by 3 and `tests/test_arch_gating.py` distinguishes the two.
+*Done when:* the skip count drops by 3 and `tests/registry/test_arch_gating.py` distinguishes the two.
 
 ---
 

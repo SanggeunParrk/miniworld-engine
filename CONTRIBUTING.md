@@ -32,7 +32,7 @@ The CPU suite must stay CPU-only and fast. A test that needs a device goes behin
 
 **A test that fails without it.** Not a test that exercises the new code — a test that reproduces
 the defect. If the change is a refactor with no behaviour delta, the test is the invariant the
-refactor establishes (see `tests/test_kernel_layout.py`, `tests/test_bench_target_vocabulary.py`:
+refactor establishes (see `tests/layout/test_kernel_layout.py`, `tests/layout/test_bench_target_vocabulary.py`:
 each exists because something drifted silently).
 
 **A CHANGELOG entry for anything a consumer can observe** — the public surface, the CLI, a config
@@ -52,11 +52,11 @@ record; treat it as one.
 
 | you are adding | it goes | the shape is enforced by |
 |---|---|---|
-| a fused kernel | `src/miniworld_engine/kernels/<family>/` | `tests/test_kernel_layout.py` |
-| a model-level op | `src/miniworld_engine/modules/<op>/module.py` | `tests/test_module_layout.py` |
-| a kernel's launcher / checker | `kernels/drivers/<family>.py`, `kernels/checks/<family>.py` | `tests/test_registry_complete.py` |
-| a benchmark target | `benchmarks/{kernels,modules}/<target>/` + a `configs/bench.yaml` | `tests/test_bench_config_per_target.py` |
-| a public name | `kernels/__init__.py` or `ops/__init__.py`, **and** `_CONTRACT` in `tests/test_public_api.py` | `tests/test_public_api.py` |
+| a fused kernel | `src/miniworld_engine/kernels/<family>/` | `tests/layout/test_kernel_layout.py` |
+| a model-level op | `src/miniworld_engine/modules/<op>/module.py` | `tests/layout/test_module_layout.py` |
+| a kernel's launcher / checker | `kernels/drivers/<family>.py`, `kernels/checks/<family>.py` | `tests/registry/test_registry_complete.py` |
+| a benchmark target | `benchmarks/{kernels,modules}/<target>/` + a `configs/bench.yaml` | `tests/layout/test_bench_config_per_target.py` |
+| a public name | `kernels/__init__.py` or `ops/__init__.py`, **and** `_CONTRACT` in `tests/compile/test_public_api.py` | `tests/compile/test_public_api.py` |
 
 Every new kernel needs a row in `src/miniworld_engine/kernels/registry.csv`: that file is the
 declared inventory, and coverage is measured against it rather than against whatever ran. A kernel
@@ -67,7 +67,7 @@ with no driver is reported `untested` — a visible hole, never a pass.
 One name per thing, across code, CLI, docs, config and directories. A kernel bench target is named
 after its family in `registry.csv`; a module bench target after the module it constructs; the two
 levels are separate namespaces, which is why `triangle_attention` is legal as both.
-`tests/test_bench_target_vocabulary.py` ties the four namespaces together and will reject a name
+`tests/layout/test_bench_target_vocabulary.py` ties the four namespaces together and will reject a name
 that exists in only three of them.
 
 No abbreviations that the engine does not itself use as a canonical name. `adaln` is fine (it is a
@@ -111,12 +111,12 @@ why and **what to use instead**; a bare "deprecated" just makes the consumer gre
 name keeps working. Add a `### Deprecated` entry to the CHANGELOG for that release.
 
 **Step 2 — remove, no earlier than two releases later.** Drop it from `__all__` / `_LAZY_EXPORTS`
-and from `_CONTRACT` in `tests/test_public_api.py`, in the same commit, with a CHANGELOG entry
+and from `_CONTRACT` in `tests/compile/test_public_api.py`, in the same commit, with a CHANGELOG entry
 under `### Removed`.
 
 What holds this up:
 
-- `tests/test_public_api.py` freezes the surface, so a removal that skips the CHANGELOG fails.
+- `tests/compile/test_public_api.py` freezes the surface, so a removal that skips the CHANGELOG fails.
 - it also asserts every `_DEPRECATED` name is still in `__all__` (deprecated is not removed), that
   each message names a replacement, and that using the name really does warn.
 - "using" has two shapes and both count: most of the surface resolves through `__getattr__`, so

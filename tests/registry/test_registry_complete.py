@@ -72,7 +72,7 @@ def test_dtypes_stay_within_what_the_level_permits() -> None:
     holes against a cache that was complete.
 
     Narrowing is therefore allowed and has to be earned:
-    tests/test_declared_dtypes_match_reality.py checks each narrowed row against what the shipped
+    tests/registry/test_declared_dtypes_match_reality.py checks each narrowed row against what the shipped
     cache actually recorded, so a row cannot claim less than its kernel runs either.
     """
     permitted = {"token": {"bf16"}, "atom": {"bf16", "fp32"}, "both": {"bf16", "fp32"}}

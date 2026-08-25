@@ -76,14 +76,14 @@ jobs:
         run: pytest -q tests/ -m "not gpu"
 
       - name: Numerical suite is wired up (collect-only, no device here)
-        # tests/test_numerical.py is the GPU suite: one case per registry kernel that declares a
+        # tests/numerics/test_numerical.py is the GPU suite: one case per registry kernel that declares a
         # checker, comparing it against a torch reference. CI has no GPU, so it cannot run them --
         # but it CAN prove the suite still collects, which is what would have caught the previous
-        # state: `pixi run test-gpu` pointed at tests/test_numerical.py and the file did not exist,
+        # state: `pixi run test-gpu` pointed at tests/numerics/test_numerical.py and the file did not exist,
         # so "the numerical suite" was a name in a comment for as long as anyone cared to read it.
         env:
           CUDA_VISIBLE_DEVICES: ""
-        run: pytest -q tests/test_numerical.py --collect-only -m gpu | tail -1
+        run: pytest -q tests/numerics/test_numerical.py --collect-only -m gpu | tail -1
 
   floor:
     name: declared Python floor (3.10, CPU suite only)

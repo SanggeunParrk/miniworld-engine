@@ -8,7 +8,7 @@ Model code should consume ``ops.*`` (whole model-layer ops), never reach in here
 Each name resolves lazily to the canonical Triton entry point for that op, without
 knowing the per-op / per-backend folder layout. Import stays side-effect-free (no
 triton/cutlass loaded until a name is first accessed); the name set is pinned by
-``tests/test_public_api.py`` for internal stability.
+``tests/compile/test_public_api.py`` for internal stability.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from importlib import import_module
 
 #: Public names on their way out: ``name -> why, and what to use instead``.
 #:
-#: Removing a name from :data:`__all__` fails ``tests/test_public_api.py`` on purpose, which is
+#: Removing a name from :data:`__all__` fails ``tests/compile/test_public_api.py`` on purpose, which is
 #: the right guard and was also the whole mechanism -- so in practice nothing was ever removed.
 #: This is the missing half. A name listed here still resolves and still works exactly as before;
 #: it just says, once per process, that it is going away. See CONTRIBUTING.md ("Deprecation"):
@@ -53,7 +53,7 @@ _LAZY_EXPORTS = {
     # module's docstring, and it was false for 13 of these 16 until the interfaces existed: the
     # map pointed at `.adaln.triton.main`, `.transition.triton.fused` and so on, so moving a
     # kernel between backends -- the whole point of having backends -- silently broke the public
-    # surface. tests/test_kernel_layout.py keeps it true.
+    # surface. tests/layout/test_kernel_layout.py keeps it true.
     "adaln_inference": (".adaln.interface", "adaln_inference"),
     "adaln_train": (".adaln.interface", "adaln_train"),
     "cond_transition_inference_dispatch": (
@@ -117,7 +117,7 @@ def cuda_transition(*args, **kwargs):  # signature kept for the frozen surface
     ``x`` and an expansion factor ``n``, a signature nothing here provides.
 
     It raised ``ImportError`` from inside a forward. Raising here instead says what is wrong and
-    what does exist; ``tests/test_lazy_import_targets.py`` keeps any other lazy wrapper from
+    what does exist; ``tests/builder/test_lazy_import_targets.py`` keeps any other lazy wrapper from
     reaching the same state.
     """
     _warn_deprecated("cuda_transition")

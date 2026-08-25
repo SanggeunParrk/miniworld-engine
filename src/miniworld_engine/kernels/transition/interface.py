@@ -9,7 +9,7 @@ normalised ``x`` and fuses only the expand pair, gate and squeeze;
 :func:`cuda_transition_b2b` and :func:`cute_transition_fused` are deliberately lazy. The
 hand-CUDA path compiles its ``.so`` through nvcc on first call and the cute path pulls in
 cutlass, so importing either at module scope would make merely importing this family do
-compiler and toolkit work -- which ``tests/test_public_api.py::test_import_is_side_effect_free``
+compiler and toolkit work -- which ``tests/compile/test_public_api.py::test_import_is_side_effect_free``
 forbids. Wrapping them keeps the name available on the public surface while the cost stays
 on the first call. The Triton entries need no such treatment: Triton is a hard dependency
 and its modules do no work at import.

@@ -63,7 +63,7 @@ def test_public_kernel_surface_is_frozen() -> None:
     assert (added, removed) == (set(), set()), (
         f"kernels public surface changed (added={sorted(added)}, "
         f"removed={sorted(removed)}). This is a semver-relevant contract change: "
-        f"update _CONTRACT in tests/test_public_api.py and CHANGELOG.md."
+        f"update _CONTRACT in tests/compile/test_public_api.py and CHANGELOG.md."
     )
 
 
@@ -122,7 +122,7 @@ def test_ops_surface_is_frozen() -> None:
     removed = _OPS_CONTRACT - surface
     assert (added, removed) == (set(), set()), (
         f"ops public surface changed (added={sorted(added)}, removed={sorted(removed)}). "
-        f"Update _OPS_CONTRACT in tests/test_public_api.py and CHANGELOG.md."
+        f"Update _OPS_CONTRACT in tests/compile/test_public_api.py and CHANGELOG.md."
     )
 
 

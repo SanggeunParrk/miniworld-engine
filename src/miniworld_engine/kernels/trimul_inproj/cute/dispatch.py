@@ -40,7 +40,7 @@ def pick(name, key, candidates):
 
     A HIT traces fine -- reading a global dict is just a guard -- so a run that calibrates before
     it compiles (any eager warm-up step) still gets the tuned choice inside the graph. This was
-    found by tests/test_compile_regimes_gpu.py: with a cold cache a pairformer block traced to 6
+    found by tests/compile/test_compile_regimes_gpu.py: with a cold cache a pairformer block traced to 6
     graphs, with a warm one to 1, and the whole difference was this function.
     """
     if not _ENABLED or len(candidates) == 1:
