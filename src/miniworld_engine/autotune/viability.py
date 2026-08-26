@@ -51,6 +51,7 @@ class Piece:
 
     coef: dict[str, float] = field(default_factory=dict)
     bias: float = 0.0
+    affine: bool = False
 
     def m(self, tile: dict[str, int]) -> float:
         raw = sum(w * _feature_value(n, tile) for n, w in self.coef.items())
@@ -86,8 +87,8 @@ class Fit:
         p = self.pieces[0]
         if stages <= 1:                       # un-pipelined: a measured constant, not the form
             return max(self.at_one - self.bias, 0.0)
-        raw = sum(w * _feature_value(n, tile) for n, w in p.coef.items()) * (stages - 1)
-        return max(raw - self.bias, 0.0)
+        names = [n for n in p.coef if not n.endswith("@s")]
+        return max(_raw(p, tile, stages, names, p.affine) - self.bias, 0.0)
 
 
 def _feature_value(name: str, tile: dict[str, int]) -> float:
@@ -167,7 +168,15 @@ def choose_probes(configs: list[dict], per_group: int = 0) -> list[dict]:
     # Three times the feature count: two thirds to fit on, one third to score the fit on points it
     # has not seen. Fewer and there is nothing left to validate with, which is how a model with a
     # 5.69 held-out error was still being trusted.
-    per_group = per_group or 3 * (len(feature_names(axes)) + 1)
+    # Sized against the column count, then capped at a share of the group. Validation has to
+    # scale with the model -- the affine form has twice the columns and, with a probe sized for
+    # the narrower one, produced fits that matched every held-out point and still discarded 27
+    # configs that would have run. But a probe is only worth paying for if it is much cheaper
+    # than what it saves: unbounded, this compiled 77% of one kernel's grid to predict the other
+    # 23%, which is worse than not predicting at all.
+    want = 6 * (2 * len(feature_names(axes)) + 1)
+    cap = max(1, len({c["num_warps"] for c in configs}) and len(configs) // 10)
+    per_group = per_group or max(8, min(want, cap // max(len({c["num_warps"] for c in configs}), 1)))
     out: list[dict] = []
     for w in sorted({c["num_warps"] for c in configs}):
         group = sorted((c for c in configs if c["num_warps"] == w),
@@ -262,19 +271,33 @@ def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None
         pts = [(dict(zip(axes, k, strict=False)), k[len(axes) + 1], float(v))
                for k, v in measured.items()
                if k[len(axes)] == w and k[len(axes) + 1] > 1]
-        if len(pts) < 3 * len(names):
+        if len(pts) < 6 * len(names):
             out[w] = None
             continue
         hold = pts[::3]
         train = [q for q in pts if q not in hold]
-        piece = _piece_full(train, names)
-        if piece is None:
+        # Try both shapes and keep whichever the held-out points accept. Proportional is the
+        # narrower one -- half the columns, so it survives on fewer probe points -- and it is
+        # exact for some kernels: `_wgrad_kernel` fits it to the byte and scores 96.7%, while the
+        # affine form has too many parameters for the probe it gets and drops that kernel to
+        # 47.5%. Affine is what the others need. Neither is a superset of the other in practice,
+        # so the choice is measured rather than argued.
+        best = None
+        for affine in (False, True):
+            piece = _piece_full(train, names, affine=affine)
+            if piece is None:
+                continue
+            over = [_raw(piece, t, st, names, affine) - y for t, st, y in hold]
+            err = max(abs(d) / max(y, 1) for d, (_, _, y) in zip(over, hold, strict=True))
+            if best is None or err < best[0]:
+                best = (err, piece, max(max(over), 0.0), affine)
+        if best is None:
             out[w] = None
             continue
+        err, piece, bias, affine = best
+        piece.affine = affine
         f = Fit(pieces=[piece], at_one=(sum(ones) / len(ones)) if ones else 0.0)
-        over = [_raw(piece, t, st, names) - y for t, st, y in hold]
-        f.bias = max(max(over), 0.0)
-        f.heldout_error = max(abs(d) / max(y, 1) for d, (_, _, y) in zip(over, hold, strict=True))
+        f.bias, f.heldout_error = bias, err
         # EXACT on the held-out third, or not used. Shared memory is not a noisy measurement --
         # the compiler computes it, and the same config always reports the same number. So a
         # linear form that reproduces unseen points to the byte is almost certainly the formula
@@ -291,25 +314,59 @@ def _limit_hint(pts) -> float:
     return max((y for *_, y in pts), default=1.0)
 
 
-def _raw(piece: Piece, tile: dict, stages: int, names: list[str]) -> float:
-    """`f(tile) * (stages - 1)`. Proportional, and deliberately not more than that.
+def _raw(piece: Piece, tile: dict, stages: int, names: list[str], affine: bool) -> float:
+    """Shared memory this fit predicts, in whichever of the two shapes it was built as.
 
-    It does not describe every kernel: `_attn_fwd` measures 6,656 B at two stages and 10,752 at
-    three, so its line does not pass through zero and no coefficient of this form reaches it.
-    Generalising to affine in `num_stages` -- the same features again, times stages -- was tried
-    and is worse, measured across nine kernels: recall fell from 62.6% to 47.0% and, worse, 27
-    configs that would have run were discarded where the proportional form discarded none.
-    Doubling the columns lets a fit reproduce the held-out points exactly and still be wrong off
-    the sample, and an exactness check cannot see that. The narrower form either fits a kernel or
-    visibly fails it, which is the property the gate depends on.
+    proportional  `f(tile) * (stages - 1)` -- forced through zero at one stage
+    affine        `g(tile) + h(tile) * stages`
+
+    Neither covers every kernel. `_wgrad_kernel` is exact under the proportional form and scores
+    96.7%; under the affine one it drops to 47.5%, because twice the columns need more probe
+    points than it gets and the fit stops passing the exactness gate. `_dx_swiglubwd_kernel` is
+    the other way round: it measures 10,240 B at two stages and 18,432 at three, so its line meets
+    stages=1 at 2,048 rather than 0 and the proportional form cannot reach it at any coefficient
+    -- 58.6% proportional against 96.1% affine.
+
+    So both are fitted and the held-out points choose. Which one wins is a fact about the kernel,
+    not something to settle in advance.
     """
-    return sum(piece.coef[n] * _feature_value(n, tile) for n in names) * (stages - 1)
+    if not affine:
+        return sum(piece.coef[n] * _feature_value(n, tile) for n in names) * (stages - 1)
+    return sum(piece.coef[k] * v for k, v in _terms(tile, stages, names))
 
 
-def _piece_full(points, names: list[str]) -> Piece | None:
-    rows = [[_feature_value(n, t) * (st - 1) for n in names] for t, st, _ in points]
+def _terms(tile: dict, stages: int, names: list[str]):
+    """Every feature twice: flat, and multiplied by `num_stages`.
+
+    `f(tile) * (stages - 1)` is proportional -- forced to zero at one stage -- and that is the
+    shape of some kernels and not others. `_dx_swiglubwd_kernel` measures 10,240 B at two stages
+    and 18,432 at three, a step of 8,192, so its line meets stages=1 at 2,048 rather than 0 and no
+    coefficient of the proportional form reaches it. Fitted on its two-stage points it predicts
+    20,480 for three.
+
+    The extra columns are not free: they doubled the parameters and, on the first attempt, let
+    fits reproduce the held-out points exactly while being wrong off-sample -- 27 configs
+    discarded that would have run. The probe is sized against the column count for that reason
+    (`choose_probes`), so validation scales with the model rather than staying at whatever was
+    enough for the narrower one.
+    """
+    for n in names:
+        v = _feature_value(n, tile)
+        yield n, v
+        yield f"{n}@s", v * stages
+
+
+def _piece_full(points, names: list[str], affine: bool = True) -> Piece | None:
+    if affine:
+        cols = [k for n in names for k in (n, f"{n}@s")]
+        rows = [[v for _, v in _terms(t, st, names)] for t, st, _ in points]
+    else:
+        cols = list(names)
+        rows = [[_feature_value(n, t) * (st - 1) for n in names] for t, st, _ in points]
+    if len(points) < 2 * len(cols):
+        return None
     coef = _solve(rows, [y for *_, y in points])
-    return None if coef is None else Piece(coef=dict(zip(names, coef, strict=True)))
+    return None if coef is None else Piece(coef=dict(zip(cols, coef, strict=True)))
 
 
 def _piece(points: list[tuple[dict, float]], names: list[str]) -> Piece | None:

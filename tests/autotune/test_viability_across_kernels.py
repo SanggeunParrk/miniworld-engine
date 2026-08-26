@@ -87,7 +87,21 @@ def test_it_catches_a_useful_share_of_what_cannot_run(scored) -> None:
     tp = sum(v["tp"] for v in scored.values())
     over = sum(v["over"] for v in scored.values())
     assert over > 1000, over
-    assert tp >= 0.4 * over, f"caught {tp} of {over} unusable configs"
+    assert tp >= 0.75 * over, f"caught {tp} of {over} unusable configs"
+
+
+def test_the_probe_is_cheap_where_it_matters(scored) -> None:
+    """A probe is only worth paying for if it is much cheaper than what it saves.
+
+    Sizing it purely by the model's column count compiled 77% of one small kernel's grid to
+    predict the other 23%, which is worse than not predicting. The cap is a share of the grid, so
+    the big grids -- the ones where compiling is the cost -- get the cheapest probes: 3% of a
+    15,065-config kernel against 33% of a 240-config one.
+    """
+    big = {k: v for k, v in scored.items() if v["n"] > 3000}
+    assert big, "no large-grid kernel in the fixtures"
+    for k, v in big.items():
+        assert v["probes"] <= v["n"] // 8, f"{k}: {v['probes']} probes for {v['n']} configs"
 
 
 def test_the_probe_stays_a_small_fraction(scored) -> None:
