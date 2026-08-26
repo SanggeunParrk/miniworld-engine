@@ -2668,7 +2668,7 @@ packages:
   name: miniworld-engine
   requires_dist:
   - torch>=2.8
-  - triton
+  - triton>=3.3
   - einops
   - jaxtyping
   - numpy
