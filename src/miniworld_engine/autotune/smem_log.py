@@ -2,23 +2,26 @@
 
 A build writes one line per compile -- `<kernel>\\t<config sig>\\t<bytes>` -- from inside the
 compile child (see `capture._compile_payload`). The point of keeping them is that a config which
-exceeds the card's shared-memory limit is knowable BEFORE it is compiled, and compiling is 77% of
-a unit's wall time while 40-74% of the configs of the larger grids are exactly that. What the logs
-cannot say is why a config was slow or why ptxas took ten minutes on it; those are different
-mechanisms and they need their own evidence.
+exceeds the card's shared-memory limit is knowable BEFORE it is compiled, and compiling is 72% of
+a unit's wall time while 40-74% of the configs of the larger grids are exactly that.
+
+A config the compile budget KILLED writes `!<kernel>\\t<config sig>\\t<budget>` instead. It is
+a different mechanism -- ptxas grinding on register spill, not shared memory -- and it arrives at
+the bench as the same undifferentiated +inf, so it needs its own evidence to be predictable at
+all. It is worth having: measured on the A6000 rebuild, 13,875 of 869,844 configs were killed and
+those 1.6% took 54% of the whole build's compile CPU.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 
-def read(shard_dir: Path) -> dict[str, dict[str, int]]:
-    """kernel -> {config sig: shared bytes}, merged over every unit in a shard directory.
+def _rows(shard_dir: Path):
+    """(killed, kernel, sig, value) for every well-formed line under `shard_dir`.
 
     `.smem.gz` is read too: a build's logs run to megabytes and the copies kept as test fixtures
     compress about eighteen-fold, which is the difference between a fixture and a liability.
     """
-    out: dict[str, dict[str, int]] = {}
     for f in sorted([*shard_dir.glob("*.smem"), *shard_dir.glob("*.smem.gz")]):
         if f.suffix == ".gz":
             import gzip
@@ -31,9 +34,32 @@ def read(shard_dir: Path) -> dict[str, dict[str, int]]:
                 continue
             kernel, sig, val = parts
             try:
-                out.setdefault(kernel, {})[sig] = int(val)
+                number = int(val)
             except ValueError:
                 continue
+            yield kernel.startswith("!"), kernel.removeprefix("!"), sig, number
+
+
+def read(shard_dir: Path) -> dict[str, dict[str, int]]:
+    """kernel -> {config sig: shared bytes}, merged over every unit in a shard directory.
+
+    Killed configs are NOT in here. They have no shared-memory reading -- they never got far
+    enough to have one -- and folding their budget in as if it were a byte count would put a
+    60 next to real values in the hundreds of thousands.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for killed, kernel, sig, number in _rows(shard_dir):
+        if not killed:
+            out.setdefault(kernel, {})[sig] = number
+    return out
+
+
+def killed(shard_dir: Path) -> dict[str, set[str]]:
+    """kernel -> config sigs the compile budget killed."""
+    out: dict[str, set[str]] = {}
+    for is_killed, kernel, sig, _ in _rows(shard_dir):
+        if is_killed:
+            out.setdefault(kernel, set()).add(sig)
     return out
 
 

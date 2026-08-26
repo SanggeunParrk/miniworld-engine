@@ -102,3 +102,25 @@ def test_a_killed_config_is_charged_the_budget(monkeypatch, fast_budget):
                         lambda p, pre=None: time.sleep(3600) if p[0] == "monster" else None)
     got = capture._worker_compile([_payload("a"), _payload("monster"), _payload("b")])
     assert got[1][2] >= capture._COMPILE_BUDGET_S
+
+
+def test_a_killed_config_is_named_not_just_counted(monkeypatch, tmp_path, fast_budget):
+    """13,875 of the A6000 rebuild's 869,844 configs were killed by the budget and they took 54%
+    of its compile CPU. Deciding whether that is predictable -- the way shared-memory overflow
+    now is -- needs to know WHICH configs they were, and a count says nothing."""
+    from miniworld_engine.autotune import smem_log
+    log = tmp_path / "u.smem"
+    monkeypatch.setenv("MINIWORLD_SMEM_LOG", str(log))
+    monkeypatch.setattr(capture, "_resolve_jit", lambda *a: None)
+    monkeypatch.setattr(capture, "_compile_payload",
+                        lambda p, pre=None: time.sleep(3600) if p[0] == "monster" else None)
+
+    def _payload_named(tag, sig):
+        return (tag, "the_kernel", {}, {}, {}, ("cuda", 86, 32), {}, sig)
+
+    capture._worker_compile([_payload_named("a", "BLOCK_M=32"),
+                             _payload_named("monster", "BLOCK_M=256,num_stages=8")])
+    assert smem_log.killed(tmp_path) == {"the_kernel": {"BLOCK_M=256,num_stages=8"}}
+    assert smem_log.read(tmp_path) == {}, (
+        "a killed config has no shared-memory reading; recording the budget as one would put a "
+        "60 among values in the hundreds of thousands")

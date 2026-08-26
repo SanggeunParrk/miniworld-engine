@@ -648,13 +648,41 @@ def _compile_chunk(chunk: list) -> list:
         with contextlib.suppress(OSError):
             os.waitpid(pid, 0)
     else:
-        # The config that stalled. It is charged the whole budget, which is what it cost.
+        # The config that stalled. It is charged the whole budget, which is what it cost, and
+        # it is NAMED: these are 1.6% of a build's configs and 54% of its compile CPU, and
+        # deciding whether they can be predicted (the way shared-memory overflow now is) needs
+        # to know WHICH configs they were. Same file as the smem log, tagged, because the two
+        # answer the same question -- why a config scored +inf -- for different reasons.
         results.append((False, float(_COMPILE_BUDGET_S)))
+        _log_killed(chunk[killed_at])
         rest = chunk[len(results):]
         if rest:
             results.extend(_compile_chunk(rest))    # never attempted; give them their own child
     results.extend([(False, 0.0)] * (len(chunk) - len(results)))
     return results
+
+
+def _log_killed(payload) -> None:
+    """Name a config the compile budget killed, into ``MINIWORLD_SMEM_LOG`` with a ``!`` tag.
+
+    A config that overflows shared memory and a config that spills registers both arrive at the
+    bench as +inf, and only the first one leaves a shared-memory reading. Without this the second
+    kind is invisible: the build reports a count and nothing that could be fitted or checked.
+    """
+    import os
+
+    log = os.environ.get("MINIWORLD_SMEM_LOG")
+    if not log:
+        return
+    try:
+        fn_name, sig = payload[1], payload[7]
+    except (IndexError, TypeError):
+        return
+    try:
+        with open(log, "a") as fh:
+            fh.write(f"!{fn_name}\t{sig}\t{int(_COMPILE_BUDGET_S)}\n")
+    except OSError:
+        pass
 
 
 def _chunk_cost(config) -> int:
