@@ -220,10 +220,32 @@ the units means half the workers each, not twice the load.
 
     miniworld-engine build all --gpus 8 --units-per-gpu 2
 
-Two things to watch when you raise it: both units hold their driver's tensors on the same card at
-once, which is a real out-of-memory risk on a 24 GB card at large shapes; and the per-unit log's
-`[bench-lock] ... waited on the other unit Ns` says whether they are queueing behind each other
-instead of overlapping.
+**It is not a free win, and the default is 1 because of a measurement.** Twenty-eight units of
+750-864-config grids, an idle 8x A5000 node, the same units both ways:
+
+    --units-per-gpu 1    wall 4436 s    compile 2.64 h   bench 7.02 h   lock wait 0.00 h
+    --units-per-gpu 2    wall 5940 s    compile 3.01 h   bench 7.35 h   lock wait 4.54 h
+
+34% SLOWER. Those units spend 73% of their time benching, not compiling, so both units on a card
+wanted the lock at once and it became a queue rather than an overlap -- 4.54 hours of waiting.
+
+Which way it goes is decided by the unit's grid, and the two ends are far apart:
+
+| | compile | bench |
+|---|---:|---:|
+| the A6000 rebuild's 283 units (big grids dominate the total) | 72% | 20% |
+| these 28 units (750-864 configs each) | 27% | 73% |
+
+A config costs roughly 125 ms to bench whatever the grid size -- `do_bench` fills its 25 ms warmup
+and 100 ms measurement budget by construction -- while compile cost grows with the grid. So raise
+it for a run over the large grids and leave it at 1 for a run over small ones. The per-unit log's
+`[bench-lock] ... waited on the other unit Ns` is the number that says which one you got.
+
+The lock itself did its job: over 26 buckets both arms chose the SAME config, every one, with
+measured times 0.3-5% apart -- the run-to-run drift that was there before.
+
+One more thing to watch: both units hold their driver's tensors on the same card at once, which is
+a real out-of-memory risk on a 24 GB card at large shapes.
 
 `dev audit` is the check that closes the loop — it compares the shipped cache against the declared
 work list and names the holes. A hole is not a wrong answer, only a bucket that pays the bounded

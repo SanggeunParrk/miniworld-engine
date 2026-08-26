@@ -83,6 +83,29 @@ whose readings drift picks a different config. Units sharing a card take that ca
 whole tuning round -- once per round, not once per config; 542,146 lock operations would cost
 more than the contention.
 
+**Measured, and it is not a free win.** Twenty-eight units of 750-864-config grids on an idle
+8x A5000 node, the same units both ways:
+
+    --units-per-gpu 1    wall 4436 s    compile 2.64 h   bench 7.02 h   lock wait 0.00 h
+    --units-per-gpu 2    wall 5940 s    compile 3.01 h   bench 7.35 h   lock wait 4.54 h
+
+34% slower. Those units spend 73% of their time benching, so both units on a card wanted the lock
+at once and it became a queue -- 4.54 hours of waiting. The split is a property of the unit's
+grid, not of the build:
+
+| | compile | bench |
+|---|---:|---:|
+| the 283 units above (big grids dominate the total) | 72% | 20% |
+| these 28 (750-864 configs each) | 27% | 73% |
+
+A config costs ~125 ms to bench whatever the grid size -- `do_bench` fills its 25 ms warmup and
+100 ms measurement budget by construction -- while compile cost grows with the grid. So the flag
+helps a run over the large grids and hurts a run over small ones, the default is 1, and the
+per-unit log reports which one happened.
+
+The lock itself worked: over 26 buckets both arms chose the SAME config, every one, with measured
+times 0.3-5% apart -- the run-to-run drift that was already there.
+
 ## The largest item left, which none of these three touch
 
 13,875 of the build's 869,844 configs ran the full 60 s compile budget and were SIGKILLed. In

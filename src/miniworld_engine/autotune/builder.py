@@ -990,6 +990,13 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     unit its whole compile pool sat idle, and during the rest the card did nothing. Units on the
     same card take that card's bench lock while they measure, so the overlap is compile-against-
     measure and never measure-against-measure.
+
+    The default is 1 because raising it is only a win when compile dominates. Measured on 28 units
+    of 750-864-config grids, which spend 73% of their time BENCHING: 4436 s at 1, 5940 s at 2 --
+    34% slower, with 4.54 hours spent waiting on the other unit's bench lock. Both units wanted
+    the card, so the lock became a queue. A config costs ~125 ms to bench whatever the grid size
+    (`do_bench` fills its budget by construction) while compile cost grows with the grid, so the
+    answer is per unit-set and the log reports it. See docs/operations/dispatch-cache.md.
     """
     import concurrent.futures as cf
 
