@@ -135,7 +135,7 @@ _BENCH_T: dict = {"calls": 0, "seconds": 0.0}
 #: interval, and the in-process call is a lookup in ~/.triton/cache, which currently holds 88k+
 #: entries. Measured apart so the fix targets the real one.
 _COMPILE_T: dict = {"calls": 0, "fork_s": 0.0, "wait_s": 0.0, "parent_s": 0.0, "polls": 0,
-                    "forkless": 0, "forkless_s": 0.0, "known_bad": 0}
+                    "forkless": 0, "forkless_s": 0.0, "known_bad": 0, "predicted_bad": 0}
 
 #: First-launch cost per config, split. warm_s minus compile() left ~500s unexplained on a unit
 #: whose kernels ran 2.2s of device time; these are the three things a first launch does that a
@@ -432,6 +432,13 @@ def precompile_summary() -> str:
         budget += (f"\n  [bench] {b['calls']} configs timed {b['seconds']:.0f}s"
                    f" | compile {pool_and_guard:.0f}s (pool {p['seconds']:.0f}s"
                    f" + guard {pool_and_guard - p['seconds']:.0f}s)")
+    pr = _PREDICT
+    if pr["kernels"]:
+        budget += (f"\n  [predict] {pr['kernels']} kernel(s), {pr['probes']} probes"
+                   f" -> {pr['skipped']} of {pr['grid']} configs ruled out"
+                   f" ({100 * pr['skipped'] / max(pr['grid'], 1):.0f}%)"
+                   f" | {pr['gave_up']} kernel(s) it could not describe"
+                   f" | {c['predicted_bad']} compile calls answered without a fork")
     lk = _BENCH_LOCK
     if lk["rounds"]:
         budget += (f"\n  [bench-lock] {lk['rounds']} rounds | held {lk['held']:.0f}s"
@@ -736,6 +743,242 @@ def _balanced_chunks(items, costs, n_chunks: int) -> list:
     return [c for c in chunks if c]
 
 
+def _payloads_for(src, target, options, configs) -> list:
+    """The argument tuples ``_compile_chunk`` rebuilds an ASTSource from, one per config.
+
+    Split out because the probe pass compiles a SLICE of the grid before the round decides what
+    the round is, and both need the same tuple. The shape is load-bearing: the last element is the
+    config signature, which is what names a config in the smem log and in the settled set.
+    """
+    arg_names = list(src.fn.arg_names)
+    base_constants = dict(src.constants)
+    out = []
+    for config in configs:
+        constants = dict(base_constants)
+        for name, value in config.kwargs.items():
+            if name in arg_names:
+                constants[(arg_names.index(name),)] = value
+        opts = dict(options)
+        for knob in ("num_warps", "num_stages", "num_ctas", "maxnreg"):
+            value = getattr(config, knob, None)
+            if value is not None:
+                opts[knob] = value
+        out.append((src.fn.module, src.fn.__name__, src.signature, constants,
+                    src.attrs, target, opts, _cfg_sig(config)))
+    return out
+
+
+#: Configs a probe pass predicted cannot pay off. Read by the compile guard, which raises for
+#: them so `_bench` scores +inf without a fork -- the same path a config the pool FAILED takes.
+#: NOT written to `.compiled`: those rows are measurements and a restart is entitled to trust
+#: them, while these are predictions and a restart should re-derive them (its probes are cache
+#: hits by then, so re-deriving is nearly free).
+_PREDICTED_BAD: set = set()
+
+#: What the probe pass did, for the per-unit log. A prediction that silently skipped a third of a
+#: grid and a prediction that skipped nothing look identical from the outside.
+_PREDICT: dict = {"kernels": 0, "gave_up": 0, "probes": 0, "skipped": 0, "grid": 0}
+
+#: A probe pass only pays for itself on a grid large enough that the probes are a small share of
+#: it. Below this the round compiles everything, as it always did.
+_PREDICT_MIN_GRID = 600
+
+
+def _predict_enabled() -> bool:
+    import os
+
+    return os.environ.get("MINIWORLD_PREDICT_UNUSABLE", "") == "1"
+
+
+def _config_dict(config) -> dict | None:
+    """A config as the flat integer mapping `viability` and `compile_budget` take.
+
+    Anything non-integer is dropped rather than coerced: a bool axis is not a tile size, and a
+    model fitted through one would be fitting noise.
+    """
+    out = {}
+    for name, value in config.kwargs.items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        out[name] = value
+    if not out:
+        return None
+    out["num_warps"] = getattr(config, "num_warps", None)
+    out["num_stages"] = getattr(config, "num_stages", None)
+    if out["num_warps"] is None or out["num_stages"] is None:
+        return None
+    return out
+
+
+def _shared_limit() -> int:
+    import torch
+
+    return int(torch.cuda.get_device_properties(0).shared_memory_per_block_optin)
+
+
+def _read_smem_from(offset: int) -> dict[str, int]:
+    """`{config sig: shared bytes}` for the lines the probe pass just appended.
+
+    The child writes the reading, because that is where the compiled kernel exists; the pipe back
+    to the parent carries one byte per config and widening it would put a measurement inside the
+    stall detector (see `_compile_chunk`). So the parent reads the log, from where it ended before
+    the probes -- not the whole file, which by the end of a unit holds every earlier round.
+    """
+    import os
+
+    path = os.environ.get("MINIWORLD_SMEM_LOG")
+    if not path:
+        return {}
+    out: dict[str, int] = {}
+    try:
+        with open(path) as fh:
+            fh.seek(offset)
+            for raw in fh:
+                parts = raw.rstrip("\n").split("\t")
+                if len(parts) == 3 and not parts[0].startswith(("!", "~")):
+                    try:
+                        out[parts[1]] = int(parts[2])
+                    except ValueError:
+                        continue
+    except OSError:
+        return {}
+    return out
+
+
+def _smem_log_end() -> int:
+    import os
+
+    path = os.environ.get("MINIWORLD_SMEM_LOG")
+    if not path:
+        return 0
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _predict_unusable(src, target, options, configs, kname: str, rnd: str, jobs: int) -> list:
+    """Compile a probe slice of the grid, fit both models, and return what is worth compiling.
+
+    Two different reasons a config cannot pay off, and the probe round answers both at once:
+
+      * it needs more shared memory than the card has. `viability` fits that per kernel from the
+        probes' `metadata.shared` and reports the kernels it cannot describe. Scored on nine
+        kernels, 24,189 configs: 85.6% of the unusable ones ruled out, no false positives.
+      * its compile does not finish inside the budget. `compile_budget` anchors on the probes that
+        were killed. Scored on eight kernels, 18,393 configs: 63% ruled out, 0.19% wrongly.
+
+    Never raises and never returns fewer configs than it can justify. Anything unexpected -- no
+    device, a kernel whose axes are not integers, a model that does not hold, an exception -- and
+    the full grid comes back, which is what the build did before this existed.
+    """
+    maybe = [_config_dict(c) for c in configs]
+    if any(d is None for d in maybe) or len(configs) < _PREDICT_MIN_GRID:
+        # One config whose axes are not plain integers and the kernel is not describable by either
+        # model. Compiling the grid is the fallback, and it is what the build did before this.
+        return configs
+    dicts: list[dict] = [d for d in maybe if d is not None]
+    try:
+        from miniworld_engine.autotune import compile_budget, viability
+
+        limit = _shared_limit()
+        by_sig = {_cfg_sig(c): (c, d) for c, d in zip(configs, dicts, strict=True)}
+        axes = viability.tile_axes(dicts)
+
+        def key(d):
+            return (*(d[a] for a in axes), d["num_warps"], d["num_stages"])
+
+        probe_dicts = viability.choose_probes(dicts)
+        wanted = {key(d) for d in probe_dicts}
+        probes = [c for c, d in by_sig.values() if key(d) in wanted]
+        if len(probes) < 2 * len(axes) + 4 or len(probes) >= len(configs) // 2:
+            return configs
+
+        offset = _smem_log_end()
+        times, killed = _compile_probes(src, target, options, probes, kname, rnd, jobs)
+        shared = _read_smem_from(offset)
+
+        measured = {key(by_sig[sig][1]): b for sig, b in shared.items() if sig in by_sig}
+        fits = viability.fit(measured, dicts)
+        over = [by_sig[sig][1] for sig, b in shared.items() if b > limit and sig in by_sig]
+        smem_split = viability.classify(
+            dicts, fits, limit, measured_over=over,
+            comparison_ok=viability.comparison_holds(measured, dicts))
+
+        kill_dicts = [by_sig[sig][1] for sig in killed if sig in by_sig]
+        probe_times = {key(by_sig[sig][1]): t for sig, t in times.items() if sig in by_sig}
+        holds = compile_budget.dominance_holds(
+            probe_times, kill_dicts, dicts, float(_COMPILE_BUDGET_S))
+        budget_split = compile_budget.classify(dicts, kill_dicts, holds)
+
+        drop = {key(d) for d in smem_split["skip"]} | {key(d) for d in budget_split["skip"]}
+        probe_keys = {key(by_sig[_cfg_sig(c)][1]) for c in probes}
+        drop -= probe_keys                          # already compiled; dropping them helps nobody
+        keep = [c for c, d in by_sig.values() if key(d) not in drop]
+        _PREDICT["kernels"] += 1
+        _PREDICT["probes"] += len(probes)
+        _PREDICT["grid"] += len(configs)
+        _PREDICT["skipped"] += len(configs) - len(keep)
+        if not drop:
+            _PREDICT["gave_up"] += 1
+        for c, d in by_sig.values():
+            if key(d) in drop:
+                _PREDICTED_BAD.add(f"{kname}\t{rnd}\t{_cfg_sig(c)}")
+        print(f"  [predict] {kname}: {len(probes)} probes -> {len(configs) - len(keep)} of "
+              f"{len(configs)} configs ruled out "
+              f"({len(smem_split['skip'])} over {limit} B shared, "
+              f"{len(budget_split['skip'])} past the {_COMPILE_BUDGET_S}s budget"
+              f"{'' if holds else ', budget rule does not hold here'})", flush=True)
+        return keep
+    except Exception as exc:   # an optimisation; a build must never fail because of it
+        print(f"  [predict] {kname}: gave up ({type(exc).__name__}: {exc}); compiling the whole "
+              f"grid", flush=True)
+        _PREDICT["gave_up"] += 1
+        return configs
+
+
+def _compile_probes(src, target, options, probes, kname: str, rnd: str, jobs: int):
+    """Compile the probe slice. Returns `{sig: seconds}` for what compiled and `{sig}` for kills.
+
+    The probes are compiled through the same pool and the same per-config SIGKILL budget as the
+    round, because that is the point: a probe that runs past the budget is the evidence
+    `compile_budget` anchors on, and one measured under different rules would not be.
+    """
+    global _PRECOMPILE_POOL
+    import multiprocessing as mp
+
+    payloads = _payloads_for(src, target, options, probes)
+    if _PRECOMPILE_POOL is None:
+        _PRECOMPILE_POOL = mp.get_context("spawn").Pool(jobs)
+    costs = [_chunk_cost(c) for c in probes]
+    csize = max(1, min(32, len(payloads) // max(jobs * 4, 1) or 1))
+    pairs = _balanced_chunks(list(zip(payloads, [_cfg_sig(c) for c in probes], strict=True)),
+                             costs, max(1, -(-len(payloads) // csize)))
+    chunks = [[pl for pl, _ in c] for c in pairs]
+    sent = [sig for c in pairs for _, sig in c]
+    budget = _COMPILE_BUDGET_S * (len(payloads) // jobs + 2)
+    try:
+        done = [r for res in _PRECOMPILE_POOL.map_async(
+            _worker_compile, chunks, chunksize=1).get(timeout=budget) for r in res]
+    except Exception:
+        done = []
+    times: dict[str, float] = {}
+    killed: set[str] = set()
+    for sig, row in zip(sent, done, strict=False):
+        if row and row[0]:
+            times[sig] = row[2]
+        else:
+            killed.add(sig)
+    # The probes ARE compiles; record them so the round does not redo them and the serial pass
+    # does not fork for them.
+    _mark_settled((f"{kname}\t{rnd}\t{sig}", bool(row and row[0]))
+                  for sig, row in zip(sent, done, strict=False))
+    _PRECOMPILE["compiled"] += len(times)
+    _PRECOMPILE["failed"] += len(killed)
+    _PRECOMPILE["configs"] += len(payloads)
+    return times, killed
+
+
 def _precompile_round(src, target, options, configs, rnd: str = "") -> None:
     """Compile every config of this round in parallel, blocking until done. Never raises."""
     global _PRECOMPILE_POOL
@@ -758,24 +1001,20 @@ def _precompile_round(src, target, options, configs, rnd: str = "") -> None:
               f"compiled for THIS kernel and key on an earlier attempt", flush=True)
         return
     configs = todo
+    # Probe first, when a grid is big enough for the probes to be a small share of it. What comes
+    # back is the configs the probes could not rule out; the rest never reach the compiler.
+    if _predict_enabled():
+        configs = _predict_unusable(src, target, options, configs, kname, rnd, jobs)
+        configs = [c for c in configs if not _settled(kname, rnd, _cfg_sig(c))]
+        if not configs:
+            print(f"  [precompile] {kname}: nothing left to compile after the probe pass",
+                  flush=True)
+            _PRECOMPILE["seconds"] += time.monotonic() - started
+            return
     try:
         import multiprocessing as mp
 
-        arg_names = list(src.fn.arg_names)
-        base_constants = dict(src.constants)
-        payloads = []
-        for config in configs:
-            constants = dict(base_constants)
-            for name, value in config.kwargs.items():
-                if name in arg_names:
-                    constants[(arg_names.index(name),)] = value
-            opts = dict(options)
-            for knob in ("num_warps", "num_stages", "num_ctas", "maxnreg"):
-                value = getattr(config, knob, None)
-                if value is not None:
-                    opts[knob] = value
-            payloads.append((src.fn.module, src.fn.__name__, src.signature, constants,
-                             src.attrs, target, opts, _cfg_sig(config)))
+        payloads = _payloads_for(src, target, options, configs)
         keys = [f"{kname}\t{rnd}\t{_cfg_sig(c)}" for c in configs]
         import os as _os
         _os.environ["_MW_PRECOMPILE_FIRST"] = "1" if _PRECOMPILE["rounds"] == 0 else "0"
@@ -1034,6 +1273,11 @@ def install() -> None:
             name = getattr(getattr(src, "fn", None), "__name__", None)
             if name:
                 settled = f"{name}\t{_CURRENT.get('round', '')}\t{_sig_line(_CURRENT_CFG)}"
+        if settled is not None and settled in _PREDICTED_BAD:
+            # Not a measurement: a probe pass predicted this one cannot pay off. Raising here is
+            # the same path a pool FAILURE takes -- _bench catches it and the config scores +inf.
+            _COMPILE_T["predicted_bad"] += 1
+            raise RuntimeError("a probe pass ruled this config out; not compiled")
         if settled is not None and settled in _COMPILE_BAD:
             _COMPILE_T["known_bad"] += 1
             raise RuntimeError("triton compile failed in the precompile pool; config skipped")
