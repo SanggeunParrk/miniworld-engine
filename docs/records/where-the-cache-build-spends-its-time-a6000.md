@@ -137,6 +137,29 @@ At 20 s the first kernel loses configs that compile fine in 17-47 s.
 The build now prints that distribution per round and names every killed config in the `.smem`
 log, which is what a per-kernel decision needs and what did not exist. Tracked as plan.md G3.
 
+## What a full build should now cost, and how to check it
+
+The compile WORK does not change -- 446 CPU-hours for these 283 units. What changes is how many
+cores it lands on.
+
+| | compile | bench | node wall, 283 units | extrapolated to 859 |
+|---|---:|---:|---:|---:|
+| as measured (pool at 50% occupancy) | 9.3 h | 2.4 h | 11.5 h | **35.0 h** |
+| with the three fixes (93%) | 5.0 h | 2.4 h | 7.3 h | **22.3 h** |
+| and both predictors, if they hold | 2.5 h | 2.4 h | 4.8 h | **14.7 h** |
+
+The first row is not only arithmetic: the job itself finished 292 of 859 units in 12 h, which is
+35.3 h for all of them. The other two are projections from measured parts -- 93% is the median of
+thirteen rounds under the new chunk deal, and the predictor row assumes the two models halve the
+compile work, which is what they scored offline and has not been measured end to end.
+
+Three things would make them wrong. The 283 units are the queue's first 283, not a random sample.
+93% was measured on the expensive ops, and the cheap ones were never at 50%, so their share
+improves less. And bench does not move: eight cards, and `do_bench` spends its 125 ms per config by
+construction -- which means that once the predictors are on, compile and bench are the same size
+and the overlap that did not pay off at 5.0 h against 2.4 h has to be re-measured at 2.5 against
+2.4.
+
 ## What this does not say
 
 * Whether the configs the shared-memory predictor already skips are the same configs the budget
