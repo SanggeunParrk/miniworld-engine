@@ -37,6 +37,7 @@ from queue import Empty, Queue
 import torch
 
 from miniworld_engine import build as build_matrix
+from miniworld_engine.autotune import triton_cache
 
 BF16 = torch.bfloat16
 
@@ -914,7 +915,8 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 # 922-unit sweep that produced the shipped cache was an OpUnit.
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
                          compile_jobs: int, config_dir: Path | None = None,
-                         fill_gaps: bool = False, share_card: bool = False) -> dict:
+                         fill_gaps: bool = False, share_card: bool = False,
+                         keep_ir: bool = False) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -932,6 +934,9 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     log.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = str(device)   # CUDA's own interface, not an engine switch
+    # Write cubin + metadata and not the five IR levels: 187 KB an entry becomes 71, and the A6000
+    # rebuild's cache was 40 GB of a shared filesystem. See autotune/triton_cache.py.
+    triton_cache.store_binary_only_env(env, keep_ir)
     if share_card:
         # Units sharing a card may compile at the same time -- that is the point -- but must not
         # MEASURE at the same time. One lock file per card, taken per tuning round; see
@@ -981,7 +986,7 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
               config_dir: Path | None = None, fill_gaps: bool = False,
-              units_per_gpu: int = 1) -> list[dict]:
+              units_per_gpu: int = 1, keep_ir: bool = False) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit.
 
     ``units_per_gpu`` > 1 puts that many units on each card so their phases interleave. A unit
@@ -1081,7 +1086,8 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             except Empty:
                 return got
             res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs,
-                                       config_dir, fill_gaps, share_card=units_per_gpu > 1)
+                                       config_dir, fill_gaps, share_card=units_per_gpu > 1,
+                                       keep_ir=keep_ir)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else

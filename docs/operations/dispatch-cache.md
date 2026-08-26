@@ -210,6 +210,26 @@ dispatch to": driving modules reached 48 of 91 triton kernels on an A6000.
     miniworld-engine build all                  # config set defaults to `grid`
     miniworld-engine dev audit                  # did every declared (op, dtype, bucket) land?
 
+**Point `TRITON_CACHE_DIR` at a directory of the build's own, and let the build empty it.** The
+triton cache is a build artifact: what ships is the JSON under `autotune/data/`, and nothing reads
+the cache afterwards. One A6000 rebuild left 221,487 entries and 40 GB of it on a filesystem
+shared with the rest of the lab.
+
+    export TRITON_CACHE_DIR=/scratch/$USER/build-cache
+    miniworld-engine build all --gpus 8 --prune-cache
+
+`--prune-cache` empties it after a SUCCESSFUL merge and never before -- until the merge writes,
+the cache is the only place the build's work exists. `miniworld-engine dev prune-cache` does it by
+hand, `--dry-run` says what would go. Both refuse a directory that is not unmistakably a triton
+cache, and both refuse outright when `TRITON_CACHE_DIR` is unset, because then the build is
+sharing `~/.triton/cache` with everything else on the machine.
+
+The build also writes only what a launch needs -- the cubin and the metadata -- rather than every
+IR level, which is 71 KB an entry instead of 187. `--keep-ir` turns that off when you want the
+ttgir for a kernel. It is safe as a default because the knob is not one of triton's
+cache-invalidating variables: the same config compiles to the same hash either way, verified on an
+A6000, with the warm-hit path returning metadata and launcher intact.
+
 A unit alternates between compiling (a pool of processes, no card) and measuring (one card, one
 core), roughly 72% and 20% of its wall on an A6000. With one unit per card neither overlaps the
 other, so `--units-per-gpu 2` puts two units on each card and each one's compile fills the other's

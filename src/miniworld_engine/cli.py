@@ -624,7 +624,8 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     results = builder.build_all(selected, Path(args.shards).expanduser(),
                                 _resolve_gpus(args.gpus), args.compile_jobs,
                                 resume=args.resume, config_dir=directory,
-                                units_per_gpu=getattr(args, "units_per_gpu", 1))
+                                units_per_gpu=getattr(args, "units_per_gpu", 1),
+                                keep_ir=getattr(args, "keep_ir", False))
     return _merge_built_shards(args, results)
 
 
@@ -740,7 +741,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                                   _resolve_gpus(args.gpus), args.compile_jobs,
                                   resume=args.resume, reclaim=args.reclaim,
                                   config_dir=directory, fill_gaps=fill_gaps,
-                                  units_per_gpu=getattr(args, "units_per_gpu", 1))
+                                  units_per_gpu=getattr(args, "units_per_gpu", 1),
+                                  keep_ir=getattr(args, "keep_ir", False))
         results += stage
         # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
         # cache, and it can only see pass 1 once pass 1's shards are folded in.
@@ -759,7 +761,40 @@ def cmd_build(args: argparse.Namespace) -> int:
     # returned straight to the shell. A 527-unit sweep therefore finished, wrote 145 GB of shards,
     # and left `data/` untouched -- the build looked complete and shipped nothing. Same policy as
     # the other two: merge what succeeded, name the holes, fail only if nothing succeeded.
-    return _merge_built_shards(args, results)
+    rc = _merge_built_shards(args, results)
+    # AFTER the merge, never before: the shipped output is the JSON the merge writes, and until it
+    # is written the triton cache is the only place the build's work exists.
+    if getattr(args, "prune_cache", False) and not rc:
+        _empty_triton_cache(dry_run=False)
+    return rc
+
+
+def _empty_triton_cache(dry_run: bool) -> int:
+    """Empty the triton cache the build filled. Returns a process exit code.
+
+    A build artifact, not an output: what ships is `autotune/data/`, which names configs. Measured
+    on the A6000 rebuild, the cache was 221,487 entries and 40 GB of a filesystem shared with the
+    rest of the lab.
+    """
+    import os
+
+    from miniworld_engine.autotune import triton_cache
+
+    raw = os.environ.get("TRITON_CACHE_DIR")
+    if not raw:
+        print("TRITON_CACHE_DIR is not set, so this build shares the default cache "
+              "(~/.triton/cache) with everything else on this machine. Refusing to empty it: "
+              "point the build at its own directory and this becomes safe.")
+        return 2
+    directory = Path(raw).expanduser()
+    try:
+        entries, total = triton_cache.clear(directory, dry_run=dry_run)
+    except ValueError as exc:
+        print(f"  {exc}")
+        return 2
+    verb = "would remove" if dry_run else "removed"
+    print(f"  triton cache: {verb} {entries:,} entries, {total / 1024**3:.1f} GB from {directory}")
+    return 0
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
@@ -1053,6 +1088,11 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--d-pairs", default="", help="comma list overriding the d_pair ladder")
     cap.set_defaults(func=cmd_capture)
 
+    prn = dev.add_parser("prune-cache",
+                         help="empty $TRITON_CACHE_DIR -- the build artifact, not the output")
+    prn.add_argument("--dry-run", action="store_true", help="say what would go, remove nothing")
+    prn.set_defaults(func=lambda a: _empty_triton_cache(a.dry_run))
+
     mrg = dev.add_parser("merge", help="fold shards into the in-repo cache by hand")
     mrg.add_argument("--shards", default="~/.cache/miniworld-shards", help="dir holding the shards")
     mrg.add_argument("--gpu", default="", help="cache key; defaults to this machine's GPU")
@@ -1075,6 +1115,13 @@ def build_parser() -> argparse.ArgumentParser:
                           "between compiling and measuring; >1 lets one unit's compile overlap "
                           "another's measurement. Units sharing a card never measure at the "
                           "same time.")
+    bld.add_argument("--keep-ir", action="store_true",
+                     help="let triton keep every IR level in its cache. Off, the build writes "
+                          "only the cubin and metadata a launch needs: 71 KB an entry instead of "
+                          "187, which was 40 GB over one rebuild.")
+    bld.add_argument("--prune-cache", action="store_true",
+                     help="after a successful merge, empty $TRITON_CACHE_DIR. It is a build "
+                          "artifact -- what ships is the JSON under autotune/data/.")
     bld.add_argument("--resume", action="store_true",
                      help="skip units whose shard already has entries")
     bld.add_argument("--per-op", action="store_true",
