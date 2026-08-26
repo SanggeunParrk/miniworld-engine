@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from miniworld_engine import settings
 from miniworld_engine.autotune import capture
 
 
@@ -26,20 +27,26 @@ class _Cfg:
 
 
 @pytest.fixture(autouse=True)
-def _clean(monkeypatch):
-    monkeypatch.delenv("MINIWORLD_PREDICT_UNUSABLE", raising=False)
+def _clean():
+    settings.configure(predict_unusable=False)
     capture._PREDICTED_BAD.clear()
     for k, v in list(capture._PREDICT.items()):
         capture._PREDICT[k] = type(v)()
     yield
     capture._PREDICTED_BAD.clear()
+    settings.configure(predict_unusable=False)
 
 
-def test_it_is_off_unless_asked_for(monkeypatch):
+def test_it_is_off_unless_asked_for():
     """It changes what a build's cache contains. Until that is measured against a build without
-    it, the default has to be the behaviour that was measured."""
+    it, the default has to be the behaviour that was measured.
+
+    And it is a SETTING, reaching a unit on its command line -- not an environment variable. Every
+    other knob a unit takes is an argument, so that what a unit did is readable off the command
+    line that ran it rather than out of whatever shell started the build.
+    """
     assert not capture._predict_enabled()
-    monkeypatch.setenv("MINIWORLD_PREDICT_UNUSABLE", "1")
+    settings.configure(predict_unusable=True)
     assert capture._predict_enabled()
 
 

@@ -78,6 +78,19 @@ class Settings:
     #: Worker processes used to PRE-compile an autotune round before it is timed. None = one per
     #: usable core (capped). 1 disables it. Only a build ever sets this; see autotune.capture.
     compile_jobs: int | None = None
+    #: Compile a PROBE slice of a round first, fit the two models in `autotune/viability.py` and
+    #: `autotune/compile_budget.py` from it, and skip the configs the probes prove cannot pay off
+    #: -- they need more shared memory than the card has, or their compile does not finish inside
+    #: the budget. Both are fitted per kernel and validated per kernel; a kernel neither can
+    #: describe compiles its whole grid, which is what a build did before either existed.
+    #:
+    #: Only a build ever sets this. It changes what a build's cache CONTAINS, so it is off until
+    #: an A/B on real units shows the chosen configs unchanged.
+    predict_unusable: bool = False
+    #: Path to a per-card lock file a unit holds while it MEASURES, so two units sharing a card
+    #: never measure at once (their readings would both drift). Empty = this unit has the card to
+    #: itself. Set by the build when --units-per-gpu > 1; see autotune.capture.
+    bench_lock: str = ""
     #: On a cache MISS, how many configs the autotuner may sweep before it gives up on tuning and
     #: uses a heuristic subset instead. 0 disables the fallback and restores the full-grid sweep.
     #:

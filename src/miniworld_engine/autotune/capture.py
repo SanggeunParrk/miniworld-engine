@@ -259,7 +259,7 @@ def _mark_settled(keys_ok) -> None:
 
 
 def _bench_lock_acquire() -> None:
-    """Take this card's bench lock, if the build gave one (``MINIWORLD_BENCH_LOCK``).
+    """Take this card's bench lock, if the build gave one (`settings.bench_lock`).
 
     A build can put more than one unit on a card so that one compiles while the other measures --
     compile was 72% of the A6000 rebuild and bench 20%, and today neither overlaps the other. What
@@ -273,12 +273,13 @@ def _bench_lock_acquire() -> None:
     Blocking on purpose. flock is released by the kernel when the holder dies, so a unit that is
     killed mid-round cannot strand the card.
     """
-    import os
     import time
 
     if _BENCH_LOCK["fh"] is not None:      # already ours; rounds do not nest, but be safe
         return
-    path = os.environ.get("MINIWORLD_BENCH_LOCK")
+    from miniworld_engine import settings
+
+    path = settings.current().bench_lock
     if not path:
         return
     import fcntl
@@ -785,9 +786,11 @@ _PREDICT_MIN_GRID = 600
 
 
 def _predict_enabled() -> bool:
-    import os
+    """`settings.predict_unusable`. An argument, not inherited shell state -- the same reason
+    every other knob a unit takes reaches it on its command line."""
+    from miniworld_engine import settings
 
-    return os.environ.get("MINIWORLD_PREDICT_UNUSABLE", "") == "1"
+    return bool(settings.current().predict_unusable)
 
 
 def _config_dict(config) -> dict | None:

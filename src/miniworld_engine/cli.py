@@ -625,7 +625,8 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
                                 _resolve_gpus(args.gpus), args.compile_jobs,
                                 resume=args.resume, config_dir=directory,
                                 units_per_gpu=getattr(args, "units_per_gpu", 1),
-                                keep_ir=getattr(args, "keep_ir", False))
+                                keep_ir=getattr(args, "keep_ir", False),
+                                predict=getattr(args, "predict_unusable", False))
     return _merge_built_shards(args, results)
 
 
@@ -742,7 +743,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                                   resume=args.resume, reclaim=args.reclaim,
                                   config_dir=directory, fill_gaps=fill_gaps,
                                   units_per_gpu=getattr(args, "units_per_gpu", 1),
-                                  keep_ir=getattr(args, "keep_ir", False))
+                                  keep_ir=getattr(args, "keep_ir", False),
+                                  predict=getattr(args, "predict_unusable", False))
         results += stage
         # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
         # cache, and it can only see pass 1 once pass 1's shards are folded in.
@@ -1119,6 +1121,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="let triton keep every IR level in its cache. Off, the build writes "
                           "only the cubin and metadata a launch needs: 71 KB an entry instead of "
                           "187, which was 40 GB over one rebuild.")
+    bld.add_argument("--predict-unusable", action="store_true",
+                     help="probe a slice of each round first and skip the configs the probes "
+                          "prove cannot pay off -- over the card's shared memory, or past the "
+                          "compile budget. Fitted and validated per kernel; a kernel neither "
+                          "model describes compiles its whole grid.")
     bld.add_argument("--prune-cache", action="store_true",
                      help="after a successful merge, empty $TRITON_CACHE_DIR. It is a build "
                           "artifact -- what ships is the JSON under autotune/data/.")

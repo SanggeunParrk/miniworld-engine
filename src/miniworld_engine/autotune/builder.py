@@ -916,7 +916,7 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
                          compile_jobs: int, config_dir: Path | None = None,
                          fill_gaps: bool = False, share_card: bool = False,
-                         keep_ir: bool = False) -> dict:
+                         keep_ir: bool = False, predict: bool = False) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -937,13 +937,15 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     # Write cubin + metadata and not the five IR levels: 187 KB an entry becomes 71, and the A6000
     # rebuild's cache was 40 GB of a shared filesystem. See autotune/triton_cache.py.
     triton_cache.store_binary_only_env(env, keep_ir)
+    cmd = [sys.executable, "-u", "-m", "miniworld_engine.autotune.builder",
+           "--shard", str(shard), "--compile-jobs", str(compile_jobs), *unit.cmd_args()]
     if share_card:
         # Units sharing a card may compile at the same time -- that is the point -- but must not
         # MEASURE at the same time. One lock file per card, taken per tuning round; see
         # capture._bench_lock_acquire.
-        env["MINIWORLD_BENCH_LOCK"] = str(shard_dir / f"gpu{device}.benchlock")
-    cmd = [sys.executable, "-u", "-m", "miniworld_engine.autotune.builder",
-           "--shard", str(shard), "--compile-jobs", str(compile_jobs), *unit.cmd_args()]
+        cmd += ["--bench-lock", str(shard_dir / f"gpu{device}.benchlock")]
+    if predict:
+        cmd += ["--predict-unusable"]
     # Paths rather than the parsed configs: the child re-reads the CSVs itself, so a unit's config
     # space is reproducible from its own command line (the same reason every other knob here is an
     # argument and not inherited shell state).
@@ -986,7 +988,8 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
               config_dir: Path | None = None, fill_gaps: bool = False,
-              units_per_gpu: int = 1, keep_ir: bool = False) -> list[dict]:
+              units_per_gpu: int = 1, keep_ir: bool = False,
+              predict: bool = False) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit.
 
     ``units_per_gpu`` > 1 puts that many units on each card so their phases interleave. A unit
@@ -1087,7 +1090,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                 return got
             res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs,
                                        config_dir, fill_gaps, share_card=units_per_gpu > 1,
-                                       keep_ir=keep_ir)
+                                       keep_ir=keep_ir, predict=predict)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
@@ -1225,6 +1228,12 @@ def _child_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fill-gaps", action="store_true",
                     help="leave keys the cache already holds alone; full-grid only the misses. "
                          "See settings.Settings.fill_gaps")
+    ap.add_argument("--predict-unusable", action="store_true",
+                    help="probe a slice of each round first and skip the configs the probes prove "
+                         "cannot pay off. See settings.Settings.predict_unusable")
+    ap.add_argument("--bench-lock", default="",
+                    help="per-card lock file held while this unit MEASURES, so two units sharing "
+                         "a card never measure at once. See settings.Settings.bench_lock")
     args = ap.parse_args(argv)
 
     if args.config_dir:
@@ -1240,9 +1249,17 @@ def _child_main(argv: list[str] | None = None) -> int:
     # own OutOfResources inside `Autotuner._bench` and returns [inf, inf, inf], so shared-memory
     # overflow, a register-spill kill and a genuinely slow config all arrive identical. A build
     # that cannot tell them apart cannot decide what to stop compiling.
+    #
+    # The ENVIRONMENT, unlike every knob above it, and not for want of trying: the reading is taken
+    # inside the spawned compile workers (`capture._compile_payload`), and a spawned process does
+    # not get this one's argv. A setting cannot cross that boundary either -- `settings.configure`
+    # runs here, in the parent. Derived from --shard rather than passed in, so it is still a
+    # function of the command line and not of the shell.
     os.environ["MINIWORLD_SMEM_LOG"] = str(Path(args.shard).with_suffix(".smem"))
     settings.configure(run_autotune=True, capture=True, fill_gaps=args.fill_gaps,
-                       compile_jobs=(args.compile_jobs or None))
+                       compile_jobs=(args.compile_jobs or None),
+                       predict_unusable=args.predict_unusable,
+                       bench_lock=args.bench_lock)
     p_drop = 0.0
     if args.switch == "p_drop":
         p_drop = float(args.value)          # a module argument, not a settings pin
