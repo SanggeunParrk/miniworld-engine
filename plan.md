@@ -405,6 +405,27 @@ which is a separate pass over the pair tensor each time.
 *Done when:* the "remaining" column of that document's table is empty, or the entries left in it
 say why they will stay.
 
+### G3 — half a cache build's compile CPU goes to configs it throws away
+(`docs/records/where-the-cache-build-spends-its-time-a6000.md`)
+
+*Gap:* 13,875 of the A6000 rebuild's 869,844 configs ran the full 60 s compile budget and were
+SIGKILLed. Those 1.6% took 231 of the build's 429 compile CPU-hours. It is not the same mechanism
+as shared-memory overflow -- which `autotune/viability.py` already predicts and skips -- but the
+same shape of problem: a config whose outcome is knowable before it is compiled.
+
+Lowering the budget is not the answer on its own. The per-kernel distributions differ by an order
+of magnitude, and the tail of one kernel is the body of another:
+
+    transition_fwd_b2b_ktiled      p50 0.35s  p90 1.76s  p99 17.29s  max 47s   0 killed
+    augmented_attention_bwd_split  p50 1.66s  p90 8.52s  p99 60.00s  max 60s  11 killed, 18% of CPU
+
+At a 20 s budget the first kernel loses configs that compile fine.
+
+*Done when:* the killed set is either predicted per kernel from probe data (as shared memory is)
+or bounded by a budget chosen from the measured distribution -- and the build reports which it
+did. The evidence it needs now exists: every round prints its distribution, and every killed
+config is named in the `.smem` log (`smem_log.killed()`).
+
 
 ---
 
