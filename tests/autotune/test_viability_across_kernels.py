@@ -14,6 +14,19 @@ for every config it compiled, across a reduction, two elementwise kernels, three
 and three GEMM-shaped ones. The number that has to hold is FALSE POSITIVES: a config predicted
 unusable that in fact runs is a config removed from the search, which is the mistake `cache.py`'s
 old static `num_warps>=16` filter made and was reverted for.
+
+Not one card's answer, within one architecture. The same nine kernels were re-measured on an
+A6000 (job kcheck6, 2026-08-26) against these A5000 fixtures: **all 24,189 configs measured on
+both cards reported the identical `metadata.shared`**, and the predictor scored the same 85.6%
+caught with 0 false positives on each. That is what one would expect -- the requirement is the
+compiler's, and both cards are sm86 with the same 101,376 B limit -- but it was worth checking
+rather than assuming, and it is the reason the fixtures are not duplicated here: the second
+card's log is byte-identical in what it says.
+
+It says nothing about sm90 or sm100, where the limit is roughly 227 KB and the compiler makes
+different choices. Every model in `viability.py` is fitted per kernel from probes taken on the
+card being built for, so a different architecture refits rather than inherits -- but the SHARE it
+catches there is unmeasured.
 """
 from __future__ import annotations
 
