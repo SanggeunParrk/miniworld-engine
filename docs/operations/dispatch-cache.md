@@ -210,6 +210,21 @@ dispatch to": driving modules reached 48 of 91 triton kernels on an A6000.
     miniworld-engine build all                  # config set defaults to `grid`
     miniworld-engine dev audit                  # did every declared (op, dtype, bucket) land?
 
+A unit alternates between compiling (a pool of processes, no card) and measuring (one card, one
+core), roughly 72% and 20% of its wall on an A6000. With one unit per card neither overlaps the
+other, so `--units-per-gpu 2` puts two units on each card and each one's compile fills the other's
+measurement. They never measure at the same time -- two kernels sharing the SMs both read slower
+by an amount that drifts over a round, which would change which config wins -- so a unit takes its
+card's lock for a whole tuning round. Each unit's compile pool is sized `cores / slots`, so twice
+the units means half the workers each, not twice the load.
+
+    miniworld-engine build all --gpus 8 --units-per-gpu 2
+
+Two things to watch when you raise it: both units hold their driver's tensors on the same card at
+once, which is a real out-of-memory risk on a 24 GB card at large shapes; and the per-unit log's
+`[bench-lock] ... waited on the other unit Ns` says whether they are queueing behind each other
+instead of overlapping.
+
 `dev audit` is the check that closes the loop — it compares the shipped cache against the declared
 work list and names the holes. A hole is not a wrong answer, only a bucket that pays the bounded
 fallback above at runtime.
