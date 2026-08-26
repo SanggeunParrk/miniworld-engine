@@ -60,7 +60,12 @@ def test_the_probe_set_is_small(data) -> None:
     probes, _ = _run(configs, shared)
     assert len(probes) <= len(configs) // 4, (
         f"{len(probes)} probe compiles for {len(configs)} configs is not a probe")
-    assert {p["num_stages"] for p in viability.choose_probes(configs)} == {1, 2}
+    stages = {p["num_stages"] for p in viability.choose_probes(configs)}
+    assert len(stages) > 2, (
+        f"the probe only covers num_stages {sorted(stages)}. It used to cover 1 and 2 -- the two "
+        f"cheapest configs in the grid -- while the model was applied out to 12, so the direction "
+        f"it extrapolated in was the one never validated. That discarded configs which would have "
+        f"run on four of nine kernels.")
 
 
 def test_it_never_discards_a_config_that_would_have_run(data) -> None:

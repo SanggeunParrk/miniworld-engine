@@ -13,10 +13,19 @@ from pathlib import Path
 
 
 def read(shard_dir: Path) -> dict[str, dict[str, int]]:
-    """kernel -> {config sig: shared bytes}, merged over every unit in a shard directory."""
+    """kernel -> {config sig: shared bytes}, merged over every unit in a shard directory.
+
+    `.smem.gz` is read too: a build's logs run to megabytes and the copies kept as test fixtures
+    compress about eighteen-fold, which is the difference between a fixture and a liability.
+    """
     out: dict[str, dict[str, int]] = {}
-    for f in sorted(shard_dir.glob("*.smem")):
-        for raw in f.read_text(errors="ignore").splitlines():
+    for f in sorted([*shard_dir.glob("*.smem"), *shard_dir.glob("*.smem.gz")]):
+        if f.suffix == ".gz":
+            import gzip
+            text = gzip.decompress(f.read_bytes()).decode(errors="ignore")
+        else:
+            text = f.read_text(errors="ignore")
+        for raw in text.splitlines():
             parts = raw.split("\t")
             if len(parts) != 3:
                 continue

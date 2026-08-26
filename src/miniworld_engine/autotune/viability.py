@@ -35,9 +35,10 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass, field
 
-#: A fit is only useful if its bias (below) is small next to the device limit. Past this it is
-#: reported unpredictable rather than kept as a bound that can never fire.
-MAX_USEFUL_BIAS = 0.5
+#: Relative error at which a fit is treated as reproducing the compiler rather than approximating
+#: it. Not a tolerance to tune: `shared` is deterministic, so anything above rounding is a sign
+#: that the model has the wrong shape for this kernel.
+EXACT = 1e-9
 
 #: Largest relative error the fit may show on the probe points it did NOT train on, before its
 #: bias is applied. Diagnostic only -- soundness comes from the bias, not from this.
@@ -75,17 +76,18 @@ class Fit:
     at_one: float = 0.0                                    # measured shared at num_stages == 1
     heldout_error: float = 0.0
 
-    @property
-    def bias(self) -> float:
-        return max((p.bias for p in self.pieces), default=0.0)
+    #: Worst over-prediction on points the fit did NOT train on.
+    bias: float = 0.0
 
     def predict(self, tile: dict[str, int], stages: int) -> float:
         """A LOWER BOUND on the shared memory this config needs, never an estimate of it."""
         if not self.pieces:
             return 0.0
-        if stages <= 1:
+        p = self.pieces[0]
+        if stages <= 1:                       # un-pipelined: a measured constant, not the form
             return max(self.at_one - self.bias, 0.0)
-        return max(min(p.m(tile) for p in self.pieces) * (stages - 1), 0.0)
+        raw = sum(w * _feature_value(n, tile) for n, w in p.coef.items()) * (stages - 1)
+        return max(raw - self.bias, 0.0)
 
 
 def _feature_value(name: str, tile: dict[str, int]) -> float:
@@ -149,33 +151,35 @@ def _solve(rows: list[list[float]], rhs: list[float]) -> list[float] | None:
 
 
 def choose_probes(configs: list[dict], per_group: int = 0) -> list[dict]:
-    """The configs to compile first: a spread of tiles at `num_stages` 1 and 2, per warp count.
+    """A sample that spans EVERY axis, per warp count -- including the one being extrapolated into.
 
-    Two stages are the minimum that pins the model -- 1 gives the un-pipelined constant, 2 gives
-    the slope -- and a spread of tiles rather than the first few, because a fit trained only on
-    small tiles mispredicted the large ones by 38% in the sample this was built from.
+    The first version of this probed `num_stages` 1 and 2 only: the two points that pin a
+    `m * (stages - 1)` model, and the two cheapest configs in the grid. The model was then applied
+    out to stages 12 and scored on held-out points that were also stages 1 and 2, so the direction
+    it extrapolated in was the one direction never validated. Measured across nine kernels, that
+    discarded configs which would have run on four of them -- 168, 100, 81 and 14 of them.
+
+    A validation set has to be drawn from the region the model is applied to. So the probe is a
+    deterministic stride through the group ordered by every axis at once, which lands points at
+    small and large stages, small and large tiles, and the corners in between.
     """
     axes = _tile_axes(configs)
-    # Enough tiles to determine the fit AND hold some back to score it. Fewer and every fit is
-    # underdetermined, which reads as "this kernel is unpredictable" and quietly disables the
-    # whole mechanism.
-    per_group = per_group or len(feature_names(axes)) + 3
+    # Three times the feature count: two thirds to fit on, one third to score the fit on points it
+    # has not seen. Fewer and there is nothing left to validate with, which is how a model with a
+    # 5.69 held-out error was still being trusted.
+    per_group = per_group or 3 * (len(feature_names(axes)) + 1)
     out: list[dict] = []
     for w in sorted({c["num_warps"] for c in configs}):
-        tiles = sorted({tuple(c[a] for a in axes) for c in configs if c["num_warps"] == w})
-        if not tiles:
+        group = sorted((c for c in configs if c["num_warps"] == w),
+                       key=lambda c: (c["num_stages"], *(c[a] for a in axes)))
+        if not group:
             continue
-        step = max(1, len(tiles) // per_group)
-        picked = tiles[::step][:per_group]
-        if tiles[-1] not in picked:                 # the largest tile is where a fit goes wrong
-            picked = [*picked[:-1], tiles[-1]]
-        for t in picked:
-            for stages in (1, 2):
-                cand = next((c for c in configs
-                             if c["num_warps"] == w and c["num_stages"] == stages
-                             and tuple(c[a] for a in axes) == t), None)
-                if cand is not None:
-                    out.append(cand)
+        step = max(1, len(group) // per_group)
+        picked = group[::step][:per_group]
+        for corner in (group[0], group[-1]):        # both extremes, always
+            if corner not in picked:
+                picked.append(corner)
+        out.extend(picked)
     return out
 
 
@@ -184,58 +188,87 @@ def _tile_axes(configs: list[dict]) -> list[str]:
 
 
 def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None]:
-    """One `Fit` per warp count, or None where the model does not describe that kernel.
+    """One `Fit` per warp count, or None where the model is not safe to use for that kernel.
 
     `measured` maps a config tuple (values in `_tile_axes` order, then warps, then stages) to the
-    `shared` the compiler reported. Every fit is scored on probe points held out of its own
-    training set, and a warp count whose held-out error exceeds `MAX_HELDOUT_ERROR` returns None
-    -- which the caller must read as "compile everything for this warp count", never as zero.
+    `shared` the compiler reported.
+
+    Two thirds of the probe points train the fit; the remaining third -- drawn from the same
+    full-range sample, so it covers the region the fit is applied to -- does two jobs:
+
+      * it decides whether the fit is used at all, and
+      * it supplies `bias`, the worst amount the fit OVER-predicted a point it had not seen.
+
+    Both come from held-out points on purpose. A bias measured on training points is meaningless:
+    least squares drives those residuals to zero whatever the true shape is, and a bias of 0 taken
+    that way discarded 37 usable configs the first time it was tried.
+
+    There is no assumed shape beyond "a linear combination of the tile edges and areas, times the
+    pipeline depth". Whether that describes a given kernel is not assumed either -- measured
+    across nine kernels it describes some and not others, and shared memory does not even move in
+    the same DIRECTION for all of them (a reduction's went DOWN as its tile grew, 399 times).
     """
     axes = _tile_axes(configs)
     names = feature_names(axes)
     out: dict[int, Fit | None] = {}
     for w in sorted({c["num_warps"] for c in configs}):
-        pts = [(k, v) for k, v in measured.items() if k[len(axes)] == w]
-        ones = [v for k, v in pts if k[len(axes) + 1] == 1]
-        slopes = [(dict(zip(axes, k, strict=False)), float(v))
-                  for k, v in pts if k[len(axes) + 1] == 2]
-        if len(slopes) < 2:
+        # `num_stages == 1` is a DIFFERENT form -- no pipeline, so a measured constant rather
+        # than `f(tile) * (stages - 1)`, which would be zero there. Folding those points into the
+        # same least-squares system pollutes it: every fit that had been exact to the byte failed
+        # the exactness gate, and prediction switched off for all nine kernels at once.
+        ones = [float(v) for k, v in measured.items()
+                if k[len(axes)] == w and k[len(axes) + 1] == 1]
+        pts = [(dict(zip(axes, k, strict=False)), k[len(axes) + 1], float(v))
+               for k, v in measured.items()
+               if k[len(axes)] == w and k[len(axes) + 1] > 1]
+        if len(pts) < 3 * len(names):
             out[w] = None
             continue
-        hold = slopes[::3] if len(slopes) > 3 else []
-        train = [s for s in slopes if s not in hold] or slopes
-
-        first = _piece(train, names)
-        if first is None:
+        hold = pts[::3]
+        train = [q for q in pts if q not in hold]
+        piece = _piece_full(train, names)
+        if piece is None:
             out[w] = None
             continue
-        pieces = [first]
-        # Residuals over ALL probe points, not just the training ones. Least squares drives the
-        # training residuals to ~0 whatever the true shape is, so a split decided on them never
-        # fires -- measured, it stayed at one piece for every warp count while the held-out error
-        # was 5.69. The held-out points are where a straight line through two regimes shows.
-        resid = [(t, y, sum(c * _feature_value(n, t) for n, c in first.coef.items()) - y)
-                 for t, y in slopes]
-        worst = max((abs(r) / max(y, 1) for _, y, r in resid), default=0.0)
-        if worst > MAX_HELDOUT_ERROR:                 # one line through two regimes: split them
-            lo = [(t, y) for t, y, r in resid if r <= 0]
-            hi = [(t, y) for t, y, r in resid if r > 0]
-            split = [p for p in (_piece(lo, names), _piece(hi, names)) if p is not None]
-            if len(split) == 2:
-                pieces = split
-
-        for p in pieces:                              # bias over EVERY probe point, held out too
-            p.bias = max((sum(c * _feature_value(n, t) for n, c in p.coef.items()) - y
-                          for t, y in slopes), default=0.0)
-            p.bias = max(p.bias, 0.0)
-
-        f = Fit(pieces=pieces, at_one=(sum(ones) / len(ones)) if ones else 0.0)
-        f.heldout_error = max((abs(min(p.m(t) for p in pieces) - y) / max(y, 1)
-                               for t, y in (hold or train)), default=0.0)
-        # The gate is what keeps this sound. Without it a warp count whose shape the model does
-        # not capture still produces predictions, and those wrongly discarded 27 usable configs.
-        out[w] = f if f.heldout_error <= MAX_HELDOUT_ERROR else None
+        f = Fit(pieces=[piece], at_one=(sum(ones) / len(ones)) if ones else 0.0)
+        over = [_raw(piece, t, st, names) - y for t, st, y in hold]
+        f.bias = max(max(over), 0.0)
+        f.heldout_error = max(abs(d) / max(y, 1) for d, (_, _, y) in zip(over, hold, strict=True))
+        # EXACT on the held-out third, or not used. Shared memory is not a noisy measurement --
+        # the compiler computes it, and the same config always reports the same number. So a
+        # linear form that reproduces unseen points to the byte is almost certainly the formula
+        # the compiler is using, while one that is merely close is the wrong shape and its error
+        # off the sample is unbounded. Gating on "close" (a held-out error under 5%, a bias
+        # measured on held-out points) still discarded 119 configs that would have run, across two
+        # of nine kernels. Gating on exact is the only version of this that has held.
+        out[w] = f if f.heldout_error <= EXACT else None
     return out
+
+
+def _limit_hint(pts) -> float:
+    """Scale for judging a bias, without the caller having to pass the device limit in twice."""
+    return max((y for *_, y in pts), default=1.0)
+
+
+def _raw(piece: Piece, tile: dict, stages: int, names: list[str]) -> float:
+    """`f(tile) * (stages - 1)`. Proportional, and deliberately not more than that.
+
+    It does not describe every kernel: `_attn_fwd` measures 6,656 B at two stages and 10,752 at
+    three, so its line does not pass through zero and no coefficient of this form reaches it.
+    Generalising to affine in `num_stages` -- the same features again, times stages -- was tried
+    and is worse, measured across nine kernels: recall fell from 62.6% to 47.0% and, worse, 27
+    configs that would have run were discarded where the proportional form discarded none.
+    Doubling the columns lets a fit reproduce the held-out points exactly and still be wrong off
+    the sample, and an exactness check cannot see that. The narrower form either fits a kernel or
+    visibly fails it, which is the property the gate depends on.
+    """
+    return sum(piece.coef[n] * _feature_value(n, tile) for n in names) * (stages - 1)
+
+
+def _piece_full(points, names: list[str]) -> Piece | None:
+    rows = [[_feature_value(n, t) * (st - 1) for n in names] for t, st, _ in points]
+    coef = _solve(rows, [y for *_, y in points])
+    return None if coef is None else Piece(coef=dict(zip(names, coef, strict=True)))
 
 
 def _piece(points: list[tuple[dict, float]], names: list[str]) -> Piece | None:
@@ -264,8 +297,34 @@ def _dominated_by_a_known_bad(c: dict, axes: list[str], bad: list[dict]) -> bool
     return False
 
 
+def comparison_holds(measured: dict[tuple, int], configs: list[dict]) -> bool:
+    """Does "bigger on every axis needs at least as much shared memory" hold for THIS kernel?
+
+    Checked, not assumed, and per kernel, because it is false for some. Counted over nine kernels
+    at fixed `num_warps`: zero violations for the five attention and transpose kernels, and 399,
+    147 and 6 for a reduction and two GEMM-shaped ones. A reduction's shared memory went DOWN as
+    its tile grew -- 256 bytes at BLOCK=64 against 128 at BLOCK=256 -- because a wider tile leaves
+    fewer partial sums per warp to reduce. The GEMM intuition is backwards there.
+
+    Only the probe points are available to check against, so this can miss a violation that the
+    sample does not contain. It is a filter for the kernels that are obviously wrong, not a proof.
+    """
+    axes = _tile_axes(configs)
+    pts = dict(measured)
+    keys = list(pts)
+    for a, b in itertools.combinations(keys, 2):
+        if a[len(axes)] != b[len(axes)]:                      # num_warps must match
+            continue
+        if all(x <= y for x, y in zip(a, b, strict=True)) and pts[a] > pts[b]:
+            return False
+        if all(x >= y for x, y in zip(a, b, strict=True)) and pts[b] > pts[a]:
+            return False
+    return True
+
+
 def classify(configs: list[dict], fits: dict[int, Fit | None], limit: int,
-             measured_over: list[dict] | None = None) -> dict[str, list]:
+             measured_over: list[dict] | None = None,
+             comparison_ok: bool = True) -> dict[str, list]:
     """Split the grid into what is worth compiling and what provably is not.
 
     `skip` is only ever populated for a warp count that produced a usable fit, and only for
@@ -273,7 +332,7 @@ def classify(configs: list[dict], fits: dict[int, Fit | None], limit: int,
     config of an unpredictable warp count -- the fallback is the old behaviour, not silence.
     """
     axes = _tile_axes(configs)
-    bad = measured_over or []
+    bad = (measured_over or []) if comparison_ok else []
     keep, skip = [], []
     for c in configs:
         f = fits.get(c["num_warps"])
@@ -282,14 +341,10 @@ def classify(configs: list[dict], fits: dict[int, Fit | None], limit: int,
             # model at all, then to compiling it.
             (skip if _dominated_by_a_known_bad(c, axes, bad) else keep).append(c)
             continue
-        if f.bias > limit * MAX_USEFUL_BIAS:      # a bound that can never fire is not a bound
-            keep.append(c)
-            continue
         pred = f.predict({a: c[a] for a in axes}, c["num_stages"])
         (skip if pred > limit else keep).append(c)
     return {"keep": keep, "skip": skip,
-            "unpredictable_warps": sorted(w for w, f in fits.items()
-                                          if f is None or f.bias > limit * MAX_USEFUL_BIAS)}
+            "unpredictable_warps": sorted(w for w, f in fits.items() if f is None)}
 
 
 def choose_anchor_probes(configs: list[dict], fits: dict[int, Fit | None],
