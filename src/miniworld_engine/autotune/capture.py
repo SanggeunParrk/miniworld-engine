@@ -900,9 +900,34 @@ def _predict_unusable(src, target, options, configs, kname: str, rnd: str, jobs:
         offset = _smem_log_end()
         times, killed = _compile_probes(src, target, options, probes, kname, rnd, jobs)
         shared = _read_smem_from(offset)
-
         measured = {key(by_sig[sig][1]): b for sig, b in shared.items() if sig in by_sig}
         fits = viability.fit(measured, dicts)
+
+        # A SECOND, smaller round for the warp counts the fit could not describe. The first round
+        # pins the model with the cheapest configs in the grid, so not one of them exceeds the
+        # card, which leaves the comparison rule nothing to compare against -- it skipped nothing
+        # at all. This one probes the expensive end deliberately. Leaving it out is not a small
+        # loss: on `_attn_fwd` the pass ruled out 75 of 864 configs without it and 171 with it.
+        anchor_dicts = viability.choose_anchor_probes(dicts, fits)
+        anchor_keys = {key(d) for d in anchor_dicts} - {key(d) for c, d in by_sig.values()
+                                                        if _cfg_sig(c) in shared}
+        anchors = [c for c, d in by_sig.values() if key(d) in anchor_keys]
+        if anchors:
+            offset2 = _smem_log_end()
+            more_times, more_killed = _compile_probes(src, target, options, anchors,
+                                                      kname, rnd, jobs)
+            times.update(more_times)
+            killed |= more_killed
+            shared.update(_read_smem_from(offset2))
+            probes = probes + anchors
+            measured = {key(by_sig[sig][1]): b for sig, b in shared.items() if sig in by_sig}
+            # NOT refitted. The first round's points are the cheap end and they PIN the model; the
+            # anchor round's are the expensive end and they exist to be compared against, not
+            # fitted through. Refitting with them included broke the exactness gate that the fit
+            # had passed, so warp counts that had a usable fit lost it and skipped nothing:
+            # measured on the fixture, _attn_bwd_dq ruled out 107 configs refitted against 190
+            # not, and _attn_bwd_dkdv 79 against 99.
+
         over = [by_sig[sig][1] for sig, b in shared.items() if b > limit and sig in by_sig]
         smem_split = viability.classify(
             dicts, fits, limit, measured_over=over,
