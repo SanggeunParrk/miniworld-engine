@@ -179,12 +179,52 @@ def choose_probes(configs: list[dict], per_group: int = 0) -> list[dict]:
         for corner in (group[0], group[-1]):        # both extremes, always
             if corner not in picked:
                 picked.append(corner)
+        # Pairs that differ in exactly ONE axis. A stride through the space almost never produces
+        # them, and without them nothing can tell an axis that moves shared memory from one that
+        # does not: `GROUP_M` is an L2 swizzle and never moved it by a byte across 2,538 otherwise
+        # identical configs, yet it contributed four columns to the fit -- free parameters that
+        # absorb residual and cost the byte-exact gate.
+        base = picked[len(picked) // 2]
+        for a in [*axes, "num_stages"]:
+            for other in group:
+                if other is base:
+                    continue
+                if other[a] != base[a] and all(other[b] == base[b]
+                                               for b in [*axes, "num_stages"] if b != a):
+                    if other not in picked:
+                        picked.append(other)
+                    break
         out.extend(picked)
     return out
 
 
 def _tile_axes(configs: list[dict]) -> list[str]:
     return sorted(k for k in configs[0] if k not in ("num_warps", "num_stages"))
+
+
+def inert_axes(measured: dict[tuple, int], configs: list[dict]) -> list[str]:
+    """Axes the probe shows have NO effect on shared memory, so they should not be features.
+
+    `GROUP_M` is an L2 swizzle -- it changes the order tiles are visited, not what is held in
+    shared memory -- and measured over 2,538 groups of otherwise-identical configs its value never
+    moved `shared` by a byte. It still contributed four columns to the fit (itself and its three
+    pair products), and those columns are free parameters that absorb residual: with them the
+    kernel's fit missed the byte-exact gate for all six warp counts and the prediction was switched
+    off, leaving 5,505 unusable configs to be compiled and discovered at launch.
+
+    Detected rather than named, because which axis is inert differs by kernel and a list of axis
+    names in this file would be another thing to keep in sync with 91 kernels.
+    """
+    axes = _tile_axes(configs)
+    out = []
+    for i, a in enumerate(axes):
+        groups: dict[tuple, set[int]] = {}
+        for k, v in measured.items():
+            rest = k[:i] + k[i + 1:]
+            groups.setdefault(rest, set()).add(v)
+        if groups and all(len(v) == 1 for v in groups.values()) and len(groups) < len(measured):
+            out.append(a)
+    return out
 
 
 def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None]:
@@ -209,7 +249,8 @@ def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None
     the same DIRECTION for all of them (a reduction's went DOWN as its tile grew, 399 times).
     """
     axes = _tile_axes(configs)
-    names = feature_names(axes)
+    live = [a for a in axes if a not in inert_axes(measured, configs)]
+    names = feature_names(live or axes)
     out: dict[int, Fit | None] = {}
     for w in sorted({c["num_warps"] for c in configs}):
         # `num_stages == 1` is a DIFFERENT form -- no pipeline, so a measured constant rather
