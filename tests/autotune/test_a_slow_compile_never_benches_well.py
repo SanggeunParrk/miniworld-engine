@@ -11,10 +11,23 @@ produces both symptoms.
 
 So this is not "slow compiles happen to lose". It is the same register pressure, measured twice.
 
-The fixture is `(bench microseconds, compile milliseconds)` for every config of three
-(op, shape bucket) pairs of one A6000 run -- two reductions and a GEMM-shaped kernel, 4,405
-configs. Nothing else is kept: the question needs two numbers per config and the config signature
-would only make the file bigger.
+The fixture is `(bench microseconds, compile milliseconds)` for every config of five
+(op, shape bucket) pairs of one A6000 run -- two reductions, two attention kernels and a
+GEMM-shaped one, 5,526 configs. Buckets with no slow compile at all are left out; they would make
+every assertion here vacuously true. Nothing else is kept: the question needs two numbers per
+config and the config signature would only make the file bigger.
+
+    op                              configs   over 30 s   best rank of one   off the best time
+    augmented_attention_fwd             587       9       559  (bottom  5%)        25.2x
+    augmented_attention_bwd_split       534       7       521  (bottom  2%)        28.5x
+    layernorm_stats  K=128             1434      18      1225  (bottom 15%)         6.4x
+    layernorm_stats  K=256             1434      18      1327  (bottom  7%)         6.4x
+    transition_fwd_b2b_ktiled          1537      12      1290  (bottom 16%)        32.7x
+
+What this does NOT contain is the three kernels `compile_budget` actually produces false positives
+on -- `_dgrad_epi`, `_dx_swiglubwd_kernel`, `fused_sigmoid_gate_fwd_kernel`. Their grids are the
+large ones and had not finished benching when this was written. So the argument that those 35
+configs cost nothing is an inference from the property measured here, not a measurement of them.
 """
 from __future__ import annotations
 
