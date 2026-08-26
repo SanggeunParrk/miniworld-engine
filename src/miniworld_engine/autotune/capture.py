@@ -376,14 +376,40 @@ def _resolve_jit(module_path: str, fn_name: str):
 
 
 def _compile_payload(payload, prefetched=None) -> None:
-    """The compile itself, with no process management. Raises on failure."""
-    module_path, fn_name, signature, constants, attrs, target, options = payload
+    """The compile itself, with no process management. Raises on failure.
+
+    Also records how much shared memory the compiler ended up needing, when the payload carries a
+    config signature and ``MINIWORLD_SMEM_LOG`` names a file. That number is the reason a config
+    later scores +inf, and until now nothing anywhere held it: triton catches its own
+    `OutOfResources` inside `Autotuner._bench` and returns `[inf, inf, inf]`, so the wrapper above
+    it cannot tell shared-memory overflow from a register-spill kill from a genuine slow config.
+    Everything arrived as one undifferentiated "inf", which is no basis for deciding what not to
+    compile next time.
+
+    It is written from the CHILD, appended a line at a time, because the pipe back to the parent
+    carries exactly one byte per config and the stall detector counts those bytes to know which
+    config hung. Widening that protocol to carry a number would put a measurement inside the one
+    mechanism that stops a compile from running forever.
+    """
+    import os
+
+    module_path, fn_name, signature, constants, attrs, target, options = payload[:7]
+    sig = payload[7] if len(payload) > 7 else None
     from triton.compiler.compiler import ASTSource, compile
 
     fn = prefetched if prefetched is not None else _resolve_jit(module_path, fn_name)
     src = ASTSource(fn=fn, signature=signature, attrs=attrs)
     src.constants = constants   # already keyed by arg-index tuple, as ASTSource stores it
-    compile(src, target=target, options=options)
+    kernel = compile(src, target=target, options=options)
+    log = os.environ.get("MINIWORLD_SMEM_LOG")
+    if sig and log:
+        shared = getattr(getattr(kernel, "metadata", None), "shared", None)
+        if shared is not None:
+            try:
+                with open(log, "a") as fh:
+                    fh.write(f"{fn_name}\t{sig}\t{int(shared)}\n")
+            except OSError:
+                pass
 
 
 def _worker_compile(chunk: list) -> list:
@@ -552,7 +578,7 @@ def _precompile_round(src, target, options, configs) -> None:
                 if value is not None:
                     opts[knob] = value
             payloads.append((src.fn.module, src.fn.__name__, src.signature, constants,
-                             src.attrs, target, opts))
+                             src.attrs, target, opts, _cfg_sig(config)))
         import os as _os
         _os.environ["_MW_PRECOMPILE_FIRST"] = "1" if _PRECOMPILE["rounds"] == 0 else "0"
 

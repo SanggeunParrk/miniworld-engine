@@ -69,3 +69,34 @@ def test_reset_clears_it_with_the_capture() -> None:
     capture._UNUSABLE["k"] = 5
     capture.reset()
     assert not capture._UNUSABLE
+
+
+def test_the_smem_log_round_trips(tmp_path) -> None:
+    """The build writes one line per compile; the reader has to survive a truncated one.
+
+    Lines are appended from a forked child that can be SIGKILLed mid-write when it stalls on a
+    compile -- that is what the kill is for -- so a partial final line is the normal state of
+    these files, not a corruption to report.
+    """
+    from miniworld_engine.autotune import smem_log
+
+    (tmp_path / "u1.smem").write_text(
+        "kern_a\tBLOCK_M=32,num_stages=2\t3136\n"
+        "kern_a\tBLOCK_M=64,num_stages=2\t196608\n"
+        "kern_b\tBLOCK_E=16,num_stages=1\t2048\n"
+        "kern_b\tBLOCK_E=32,num_st")            # SIGKILLed here
+    (tmp_path / "u2.smem").write_text("kern_a\tBLOCK_M=128,num_stages=2\t400000\n")
+
+    got = smem_log.read(tmp_path)
+    assert got["kern_a"] == {"BLOCK_M=32,num_stages=2": 3136,
+                             "BLOCK_M=64,num_stages=2": 196608,
+                             "BLOCK_M=128,num_stages=2": 400000}
+    assert got["kern_b"] == {"BLOCK_E=16,num_stages=1": 2048}
+
+    assert smem_log.over_limit(tmp_path, 101376) == {"kern_a": (3, 2), "kern_b": (1, 0)}
+
+
+def test_an_empty_shard_dir_is_not_an_error(tmp_path) -> None:
+    from miniworld_engine.autotune import smem_log
+    assert smem_log.read(tmp_path) == {}
+    assert smem_log.over_limit(tmp_path, 101376) == {}

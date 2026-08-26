@@ -1193,6 +1193,12 @@ def _child_main(argv: list[str] | None = None) -> int:
         print(f"  [config] set to {args.config_dir}"
               f"{'  [fill-gaps] keys the cache already holds are left alone' if args.fill_gaps else ''}",
               flush=True)
+    # Every compile records the shared memory it needed, beside this unit's shard. It is the one
+    # number that says WHY a config later scores +inf, and triton throws it away: it catches its
+    # own OutOfResources inside `Autotuner._bench` and returns [inf, inf, inf], so shared-memory
+    # overflow, a register-spill kill and a genuinely slow config all arrive identical. A build
+    # that cannot tell them apart cannot decide what to stop compiling.
+    os.environ["MINIWORLD_SMEM_LOG"] = str(Path(args.shard).with_suffix(".smem"))
     settings.configure(run_autotune=True, capture=True, fill_gaps=args.fill_gaps,
                        compile_jobs=(args.compile_jobs or None))
     p_drop = 0.0
