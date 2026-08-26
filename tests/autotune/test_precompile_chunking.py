@@ -80,3 +80,25 @@ def test_the_budget_is_per_config_not_per_chunk(monkeypatch, fast_budget):
 
 def test_an_empty_chunk_is_not_a_fork():
     assert capture._worker_compile([]) == []
+
+
+def test_each_config_is_timed_on_its_own(monkeypatch):
+    """The tail is the whole story of a build's compile cost. The A6000 rebuild spent 54% of its
+    429 compile CPU-hours on the 1.6% of configs that ran the full budget and were killed, and
+    nothing said so, because the only number kept per config was the chunk mean -- 0.83 s."""
+    monkeypatch.setattr(capture, "_resolve_jit", lambda *a: None)
+    monkeypatch.setattr(capture, "_compile_payload",
+                        lambda p, pre=None: time.sleep(0.6) if p[0] == "slow" else None)
+    got = capture._worker_compile([_payload("fast"), _payload("slow"), _payload("fast2")])
+    slow = got[1][2]
+    assert slow > 0.4, f"the slow config was charged {slow:.2f}s, not its own time"
+    assert sum(g[2] for g in got) > 0.5, "the per-config times must still sum to the chunk's cost"
+
+
+def test_a_killed_config_is_charged_the_budget(monkeypatch, fast_budget):
+    """It really did cost that; a build that reports it as free cannot choose a budget."""
+    monkeypatch.setattr(capture, "_resolve_jit", lambda *a: None)
+    monkeypatch.setattr(capture, "_compile_payload",
+                        lambda p, pre=None: time.sleep(3600) if p[0] == "monster" else None)
+    got = capture._worker_compile([_payload("a"), _payload("monster"), _payload("b")])
+    assert got[1][2] >= capture._COMPILE_BUDGET_S

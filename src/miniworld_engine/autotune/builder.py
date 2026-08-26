@@ -914,7 +914,7 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 # 922-unit sweep that produced the shipped cache was an OpUnit.
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
                          compile_jobs: int, config_dir: Path | None = None,
-                         fill_gaps: bool = False) -> dict:
+                         fill_gaps: bool = False, share_card: bool = False) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -932,6 +932,11 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     log.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = str(device)   # CUDA's own interface, not an engine switch
+    if share_card:
+        # Units sharing a card may compile at the same time -- that is the point -- but must not
+        # MEASURE at the same time. One lock file per card, taken per tuning round; see
+        # capture._bench_lock_acquire.
+        env["MINIWORLD_BENCH_LOCK"] = str(shard_dir / f"gpu{device}.benchlock")
     cmd = [sys.executable, "-u", "-m", "miniworld_engine.autotune.builder",
            "--shard", str(shard), "--compile-jobs", str(compile_jobs), *unit.cmd_args()]
     # Paths rather than the parsed configs: the child re-reads the CSVs itself, so a unit's config
@@ -975,8 +980,17 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
 
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
-              config_dir: Path | None = None, fill_gaps: bool = False) -> list[dict]:
-    """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit."""
+              config_dir: Path | None = None, fill_gaps: bool = False,
+              units_per_gpu: int = 1) -> list[dict]:
+    """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit.
+
+    ``units_per_gpu`` > 1 puts that many units on each card so their phases interleave. A unit
+    alternates between compiling (a pool of processes, no GPU) and measuring (one GPU, one core),
+    and on the A6000 rebuild those were 72% and 20% of the wall -- so during a fifth of every
+    unit its whole compile pool sat idle, and during the rest the card did nothing. Units on the
+    same card take that card's bench lock while they measure, so the overlap is compile-against-
+    measure and never measure-against-measure.
+    """
     import concurrent.futures as cf
 
     repo = Path(__file__).resolve().parents[3]
@@ -998,9 +1012,10 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             cores = len(os.sched_getaffinity(0))
         except (AttributeError, OSError):
             cores = os.cpu_count() or 1
-        compile_jobs = max(1, cores // max(1, len(gpus)))
-        print(f"  [compile] {cores} cores / {len(gpus)} gpus -> {compile_jobs} compile workers "
-              f"per unit ({compile_jobs * len(gpus)} total)", flush=True)
+        slots = max(1, len(gpus) * max(1, units_per_gpu))
+        compile_jobs = max(1, cores // slots)
+        print(f"  [compile] {cores} cores / {slots} unit slot(s) -> {compile_jobs} compile "
+              f"workers per unit ({compile_jobs * slots} total)", flush=True)
 
     # OpUnits carry no Case, and `check` is a per-case module smoke test, so there is nothing for
     # it to check -- a driver that cannot run its shape reports that as a skipped unit, which is
@@ -1048,7 +1063,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             except Empty:
                 return got
             res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs,
-                                       config_dir, fill_gaps)
+                                       config_dir, fill_gaps, share_card=units_per_gpu > 1)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
@@ -1059,8 +1074,11 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             got.append(res)
 
     results: list[dict] = []
-    with cf.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
-        for future in cf.as_completed([pool.submit(worker, g) for g in gpus]):
+    # One thread per unit SLOT, not per card: `units_per_gpu` slots share each card and pull from
+    # the same queue, so a card whose unit is measuring still has a unit compiling.
+    slots = [g for g in gpus for _ in range(max(1, units_per_gpu))]
+    with cf.ThreadPoolExecutor(max_workers=len(slots)) as pool:
+        for future in cf.as_completed([pool.submit(worker, g) for g in slots]):
             results.extend(future.result())
     return results
 

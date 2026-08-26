@@ -39,6 +39,10 @@ class _Cfg:
         self.num_stages = stages
 
 
+def _key(kernel, cfg, rnd="r"):
+    return f"{kernel}\t{rnd}\t{capture._cfg_sig(cfg)}"
+
+
 def _arm(cfg):
     """Put the guard in the state a bench iteration puts it in for `cfg`."""
     capture._CURRENT_CFG.clear()
@@ -50,10 +54,9 @@ def _arm(cfg):
 def test_a_pool_settled_config_is_recorded_with_its_outcome(tmp_path):
     capture._COMPILED_FILE.append(tmp_path / "u.compiled")
     good, bad = _Cfg(32), _Cfg(64)
-    capture._mark_outcome("k", [(capture._cfg_sig(good), True),
-                                (capture._cfg_sig(bad), False)])
-    assert f"k\t{capture._cfg_sig(good)}" in capture._COMPILE_OK
-    assert f"k\t{capture._cfg_sig(bad)}" in capture._COMPILE_BAD
+    capture._mark_settled([(_key("k", good), True), (_key("k", bad), False)])
+    assert _key("k", good) in capture._COMPILE_OK
+    assert _key("k", bad) in capture._COMPILE_BAD
 
 
 def test_the_outcome_survives_a_restart(tmp_path):
@@ -61,12 +64,12 @@ def test_the_outcome_survives_a_restart(tmp_path):
     shard = tmp_path / "u.json"
     capture.load_compile_state(shard)
     cfg = _Cfg(32)
-    capture._mark_outcome("k", [(capture._cfg_sig(cfg), True)])
+    capture._mark_settled([(_key("k", cfg), True)])
     capture._COMPILE_OK.clear()
     capture._COMPILED_FILE.clear()
     capture.load_compile_state(shard)                     # the restart
-    assert f"k\t{capture._cfg_sig(cfg)}" in capture._COMPILE_OK
-    assert capture._settled("k", capture._cfg_sig(cfg)), "the ROUND skip must still see it"
+    assert _key("k", cfg) in capture._COMPILE_OK
+    assert capture._settled("k", "r", capture._cfg_sig(cfg)), "the ROUND skip must still see it"
 
 
 def test_a_legacy_bare_line_claims_nothing(tmp_path):
@@ -79,7 +82,7 @@ def test_a_legacy_bare_line_claims_nothing(tmp_path):
     assert capture.load_compile_state(shard) == 0
     assert not capture._COMPILE_OK
     assert not capture._COMPILE_BAD
-    assert not capture._settled("k", "BLOCK_M1=32,num_warps=4,num_stages=2")
+    assert not capture._settled("k", "r", "BLOCK_M1=32,num_warps=4,num_stages=2")
 
 
 def test_one_kernels_configs_do_not_settle_anothers(tmp_path):
@@ -91,18 +94,35 @@ def test_one_kernels_configs_do_not_settle_anothers(tmp_path):
     capture._COMPILED_FILE.append(tmp_path / "u.compiled")
     cfg = _Cfg(32)
     sig = capture._cfg_sig(cfg)
-    capture._mark_outcome("augmented_attention_bwd_atomic", [(sig, True)])
-    assert capture._settled("augmented_attention_bwd_atomic", sig)
-    assert not capture._settled("augmented_attention_fwd", sig), (
+    capture._mark_settled([(_key("augmented_attention_bwd_atomic", cfg), True)])
+    assert capture._settled("augmented_attention_bwd_atomic", "r", sig)
+    assert not capture._settled("augmented_attention_fwd", "r", sig), (
         "a different kernel's identical config sig must not settle this one's round")
 
 
+def test_one_autotune_key_does_not_settle_another(tmp_path):
+    """The A6000 rebuild's largest single serialisation. One kernel is tuned once per autotune
+    key, and each key reaches triton's compiler with its own signature and specialisation -- so
+    the two keys do NOT share a compiled binary. Keyed by (kernel, config) alone, the second
+    key's precompile round was skipped as 'already compiled', the settled-set told the serial
+    guard the configs were warm cache hits, and the parent then really compiled all 14,996 of
+    them one at a time on ONE core: 1084 ms apiece against 3.5 ms on single-key units, 9.0 hours
+    in adaln_gemm_gate-L256 alone, with fifteen pool workers idle throughout."""
+    capture._COMPILED_FILE.append(tmp_path / "u.compiled")
+    cfg = _Cfg(32)
+    sig = capture._cfg_sig(cfg)
+    capture._mark_settled([(_key("adaln_gemm_gate", cfg, "512|torch.bfloat16"), True)])
+    assert capture._settled("adaln_gemm_gate", "512|torch.bfloat16", sig)
+    assert not capture._settled("adaln_gemm_gate", "1024|torch.bfloat16", sig), (
+        "a second autotune key compiles different code; its round must still run")
+
+
 def test_load_is_idempotent_across_repeated_appends(tmp_path):
-    """`_mark_outcome` appends; a resumed unit re-marking the same configs must not grow the file
+    """`_mark_settled` appends; a resumed unit re-marking the same configs must not grow the file
     without bound -- 527 units x 1944 configs is where that turns into real I/O."""
     shard = tmp_path / "u.json"
     capture.load_compile_state(shard)
     cfg = _Cfg(32)
     for _ in range(5):
-        capture._mark_outcome("k", [(capture._cfg_sig(cfg), True)])
+        capture._mark_settled([(_key("k", cfg), True)])
     assert len((tmp_path / "u.compiled").read_text().strip().splitlines()) == 1

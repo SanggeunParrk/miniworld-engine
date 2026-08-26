@@ -623,7 +623,8 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     print(f"=== build before bench: {', '.join(names)}  (config set {config_type})", flush=True)
     results = builder.build_all(selected, Path(args.shards).expanduser(),
                                 _resolve_gpus(args.gpus), args.compile_jobs,
-                                resume=args.resume, config_dir=directory)
+                                resume=args.resume, config_dir=directory,
+                                units_per_gpu=getattr(args, "units_per_gpu", 1))
     return _merge_built_shards(args, results)
 
 
@@ -738,7 +739,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         stage = builder.build_all(selected, Path(args.shards).expanduser(),
                                   _resolve_gpus(args.gpus), args.compile_jobs,
                                   resume=args.resume, reclaim=args.reclaim,
-                                  config_dir=directory, fill_gaps=fill_gaps)
+                                  config_dir=directory, fill_gaps=fill_gaps,
+                                  units_per_gpu=getattr(args, "units_per_gpu", 1))
         results += stage
         # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
         # cache, and it can only see pass 1 once pass 1's shards are folded in.
@@ -1068,6 +1070,11 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
     bld.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
     bld.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
+    bld.add_argument("--units-per-gpu", type=int, default=1,
+                     help="units to run on each card at once (default 1). A unit alternates "
+                          "between compiling and measuring; >1 lets one unit's compile overlap "
+                          "another's measurement. Units sharing a card never measure at the "
+                          "same time.")
     bld.add_argument("--resume", action="store_true",
                      help="skip units whose shard already has entries")
     bld.add_argument("--per-op", action="store_true",

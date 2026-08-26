@@ -103,7 +103,9 @@ _COMPILE_BUDGET_S = 60
 # an entry nobody looks up. Worst case is wasted CPU, never a wrong binary.
 _PRECOMPILE_POOL = None
 _PRECOMPILE = {"rounds": 0, "configs": 0, "compiled": 0, "failed": 0, "seconds": 0.0}
-#: autotuner id -> configs of the round it is about to time, set by the patched prune_configs.
+#: autotuner id -> (configs, round id) of the round it is about to time, set by the patched
+#: prune_configs. The round id is triton's own autotune key (see :func:`_round_id`): one autotuner
+#: tunes once per key, and two keys of one kernel compile to different cache entries.
 #: Keyed per autotuner because rounds interleave: a module fires several kernels, and a single
 #: "pending" slot loses every round but the last (which is how an earlier version silently
 #: pre-compiled only the first round of a whole build).
@@ -111,6 +113,21 @@ _ROUND: dict = {}
 #: id of the autotuner whose _bench is currently on the stack, so the compile hook knows which
 #: armed round the compile it is servicing belongs to.
 _CURRENT: dict = {}
+#: autotuner id -> configs of its round still to be timed. Separate from _ROUND, which the first
+#: compile of the round pops: this one has to survive to the LAST config, because that is when
+#: the card's bench lock is released.
+_ROUND_LEFT: dict = {}
+
+#: The open, flock-held file for this card's bench lock, plus what it cost. See
+#: :func:`_bench_lock_acquire`.
+_BENCH_LOCK: dict = {"fh": None, "waited": 0.0, "held": 0.0, "since": 0.0, "rounds": 0}
+
+#: Time inside ``Autotuner._bench`` -- do_bench's launches AND the synchronize that waits for the
+#: device. Reported on its own because inferring it cost a wrong answer: the only bench-shaped
+#: number the build printed was ``fn.run``, and the first compile of a round happens INSIDE
+#: fn.run, so fn.run was carrying the whole precompile pool. Read as "bench", it said the GPU was
+#: 1.2% of the build; measured here it is 20%.
+_BENCH_T: dict = {"calls": 0, "seconds": 0.0}
 
 #: Where a compile() call actually spends its time. The guard forks a child, waits for it, and then
 #: recompiles in-process expecting a cache hit -- three costs that look like one. They have
@@ -158,18 +175,19 @@ def load_compile_state(shard_path) -> int:
             ln = raw.strip()
             if not ln:
                 continue
-            if ln[0] in "+-":  # "<+|-><kernel>\t<cfg sig>"
+            if ln[0] in "+-" and ln.count("\t") == 2:  # "<+|-><kernel>\t<round>\t<cfg sig>"
                 (_COMPILE_OK if ln[0] == "+" else _COMPILE_BAD).add(ln[1:])
-            # A legacy bare sig names no kernel, so it cannot answer either question and is
-            # dropped. It costs one round of recompiling on the first restart of a unit whose
-            # `.compiled` predates the outcome tags; every later restart reads tagged rows.
+            # A row from an older layout -- a bare sig, or one that names no round -- cannot
+            # answer either question under the current key, so it is dropped. That costs one
+            # round of recompiling on the first restart of a unit whose `.compiled` predates the
+            # layout; every later restart reads rows it can use.
     return len(_COMPILE_OK) + len(_COMPILE_BAD)
 
 
 _COMPILED_FILE: list = []
 
-#: "<kernel>\t<cfg sig>" for compiles the precompile POOL already settled, split by outcome. Two
-#: questions are answered off this one record, and they must be answered with the SAME key:
+#: "<kernel>\t<round>\t<cfg sig>" for compiles the precompile POOL already settled, split by
+#: outcome. Two questions are answered off this one record, with the SAME key:
 #:
 #:   * should the ROUND recompile this? -- avoids re-submitting a warm round to a fresh spawn
 #:     pool on every restart, 446 s a time, which is what turned 87 legitimate kills into 7799 s.
@@ -179,26 +197,54 @@ _COMPILED_FILE: list = []
 #:     triton.compile that is a warm on-disk cache hit (3.5 ms). A config the pool FAILED needs no
 #:     child either: the answer is known and the bench scores it +inf.
 #:
-#: They were once keyed differently -- the round by bare sig, the fork by "<kernel>\t<sig>" -- and
-#: rounds interleave across the kernels of one unit (see `prune_configs`). A second kernel reusing
-#: the first one's tile axes therefore produced identical sigs, its round was skipped as "already
-#: compiled", the pool never ran for it, and every one of its configs fell through to the fork it
-#: was the pool's job to avoid: 864 forks, 4166 s, on a unit that should have spent ~400 s.
+#: EVERY component of the key is there because leaving it out cost a measured build:
+#:
+#:   * <kernel> -- rounds interleave across the kernels of one unit (see `prune_configs`), so a
+#:     second kernel reusing the first one's tile axes produced identical sigs, its round was
+#:     skipped as "already compiled", and every config fell through to the fork the pool was
+#:     supposed to avoid: 864 forks, 4166 s, on a unit that should have spent ~400 s.
+#:   * <round> -- one kernel is tuned once per autotune key, and two keys of the same kernel
+#:     compile to DIFFERENT cache entries (different signature, constants, specialisation). Keyed
+#:     without it, the second key's round was skipped, the settled-set told the serial pass the
+#:     configs were warm, and the parent then really compiled all 14996 of them one at a time on
+#:     ONE core while fifteen pool workers sat idle. Measured on the A6000 rebuild: 1084 ms per
+#:     "warm hit" against 3.5 ms on single-key units, and 15.8 of the build's 16.7 serial CPU-hours
+#:     in the three two-key units -- 9.0 h of them in adaln_gemm_gate-L256 alone.
 _COMPILE_OK: set = set()
 _COMPILE_BAD: set = set()
 
 
-def _settled(kernel: str, sig: str) -> bool:
-    key = f"{kernel}\t{sig}"
+def _round_id(autotuner, kwargs) -> str:
+    """Triton's own autotune key, stringified. This is what makes two rounds of one kernel two
+    rounds: ``Autotuner.run`` tunes once per key, and each key reaches ``compile`` with its own
+    signature and specialisation. Reproduced from triton's ``run`` rather than intercepted,
+    because ``prune_configs`` -- the only hook that fires once per round -- is not handed it."""
+    try:
+        all_args = {**(getattr(autotuner, "nargs", None) or {}), **kwargs}
+        names = set(getattr(autotuner, "arg_names", ()) or ())
+        args = {k: v for k, v in all_args.items() if k in names}
+        # An autotune key is normally a scalar (a length, a flag). Anything else is named by
+        # type: str() on a tensor would serialise the tensor into a dict key on every round.
+        parts = [str(args[k]) if isinstance(args[k], (int, float, str, bool))
+                 else type(args[k]).__name__
+                 for k in (getattr(autotuner, "keys", ()) or ()) if k in args]
+        parts += [str(a.dtype) for a in args.values() if hasattr(a, "dtype")]
+        return "|".join(parts)
+    except Exception:   # an identity, not a correctness gate: worst case two rounds share one
+        return ""
+
+
+def _settled(kernel: str, rnd: str, sig: str) -> bool:
+    key = f"{kernel}\t{rnd}\t{sig}"
     return key in _COMPILE_OK or key in _COMPILE_BAD
 
 
-def _mark_outcome(kernel: str, sigs_ok) -> None:
-    """Record per-(kernel, config) compile outcomes from the pool, so the serial pass can skip
-    the fork. Appended to the same ``.compiled`` file, tagged, so a restart inherits them."""
+def _mark_settled(keys_ok) -> None:
+    """Record compile outcomes so the serial pass can skip the fork. ``keys_ok`` yields full
+    ``"<kernel>\t<round>\t<cfg sig>"`` keys. Appended to the ``.compiled`` file, tagged, so a
+    restart inherits them."""
     rows = []
-    for sig, ok in sigs_ok:
-        key = f"{kernel}\t{sig}"
+    for key, ok in keys_ok:
         target = _COMPILE_OK if ok else _COMPILE_BAD
         if key in target:
             continue
@@ -210,6 +256,60 @@ def _mark_outcome(kernel: str, sigs_ok) -> None:
                 fh.write("".join(r + "\n" for r in rows))
         except OSError:
             pass
+
+
+def _bench_lock_acquire() -> None:
+    """Take this card's bench lock, if the build gave one (``MINIWORLD_BENCH_LOCK``).
+
+    A build can put more than one unit on a card so that one compiles while the other measures --
+    compile was 72% of the A6000 rebuild and bench 20%, and today neither overlaps the other. What
+    two units on one card must NOT do is measure at the same time: two kernels sharing the SMs
+    both read slower, by an amount that drifts over the round, and that changes which config wins.
+
+    Taken once per ROUND, not once per config. 542,146 configs were timed in that rebuild; a lock
+    operation apiece would cost more than the contention it prevents. Held across the round's
+    whole sweep and released when its last config has been timed.
+
+    Blocking on purpose. flock is released by the kernel when the holder dies, so a unit that is
+    killed mid-round cannot strand the card.
+    """
+    import os
+    import time
+
+    if _BENCH_LOCK["fh"] is not None:      # already ours; rounds do not nest, but be safe
+        return
+    path = os.environ.get("MINIWORLD_BENCH_LOCK")
+    if not path:
+        return
+    import fcntl
+
+    started = time.monotonic()
+    try:
+        fh = open(path, "w")   # noqa: SIM115 -- held until the round ends, closed by the release
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except OSError:            # no lock is worse than a lock, but far better than no build
+        return
+    _BENCH_LOCK["fh"] = fh
+    _BENCH_LOCK["waited"] += time.monotonic() - started
+    _BENCH_LOCK["since"] = time.monotonic()
+    _BENCH_LOCK["rounds"] += 1
+
+
+def _bench_lock_release() -> None:
+    import time
+
+    fh = _BENCH_LOCK["fh"]
+    if fh is None:
+        return
+    _BENCH_LOCK["fh"] = None
+    _BENCH_LOCK["held"] += time.monotonic() - _BENCH_LOCK["since"]
+    try:
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+    except OSError:
+        pass
 
 
 def _cfg_sig(config) -> str:
@@ -324,6 +424,18 @@ def precompile_summary() -> str:
                    f" | fork {c['fork_s']:.0f}s + wait {c['wait_s']:.0f}s"
                    f" ({c['polls']} polls x 50ms) + parent-recompile {c['parent_s']:.0f}s"
                    f" = {c['fork_s'] + c['wait_s'] + c['parent_s']:.0f}s")
+    b = _BENCH_T
+    if b["calls"]:
+        # `fn.run` is NOT this number: a round's first compile happens inside it. Print both, and
+        # print what the pool did apart from either, so no one has to infer the split again.
+        pool_and_guard = p["seconds"] + c["forkless_s"] + c["fork_s"] + c["wait_s"] + c["parent_s"]
+        budget += (f"\n  [bench] {b['calls']} configs timed {b['seconds']:.0f}s"
+                   f" | compile {pool_and_guard:.0f}s (pool {p['seconds']:.0f}s"
+                   f" + guard {pool_and_guard - p['seconds']:.0f}s)")
+    lk = _BENCH_LOCK
+    if lk["rounds"]:
+        budget += (f"\n  [bench-lock] {lk['rounds']} rounds | held {lk['held']:.0f}s"
+                   f" | waited on the other unit {lk['waited']:.0f}s")
     lt = _LAUNCH_T
     if lt["run_calls"]:
         budget += (f"\n  [first-launch] fn.run {lt['run_calls']} calls {lt['run_s']:.0f}s"
@@ -415,20 +527,16 @@ def _compile_payload(payload, prefetched=None) -> None:
 def _worker_compile(chunk: list) -> list:
     """Compile a CHUNK of configs in ONE forked child, returning one row per config.
 
-    Thin wrapper: ``_compile_chunk`` does the work and returns plain pass/fail, so the retry can
+    Thin wrapper: ``_compile_chunk`` does the work and returns ``(ok, seconds)``, so the retry can
     recurse without the accounting tuple being wrapped a second time. Must stay importable at
     module level (spawn).
     """
-    import time
-
-    t0 = time.monotonic()
-    oks = _compile_chunk(chunk)
-    per = (time.monotonic() - t0) / max(len(chunk), 1)
-    return [(ok, 0.0, per, 0.0) for ok in oks]
+    rows = _compile_chunk(chunk)
+    return [(ok, 0.0, seconds, 0.0) for ok, seconds in rows]
 
 
 def _compile_chunk(chunk: list) -> list:
-    """Compile a CHUNK of configs in ONE forked child; returns a bool per config.
+    """Compile a CHUNK of configs in ONE forked child; returns ``(ok, seconds)`` per config.
 
     Touches no CUDA: it rebuilds each ASTSource from plain data plus a re-imported JITFunction and
     compiles against the ``target`` the parent resolved. Results land in triton's on-disk cache;
@@ -496,14 +604,23 @@ def _compile_chunk(chunk: list) -> list:
     killed_at = None
     while len(results) < len(chunk):
         try:
-            buf = os.read(rfd, len(chunk) - len(results))
+            # ONE byte per read, not the whole backlog: a batched read timestamps every config in
+            # it identically, so a 0.6 s compile whose neighbour finished in the same poll window
+            # is charged 0.3 s. Draining one at a time costs one syscall per config and charges
+            # each the gap since the previous one, which is what it took.
+            buf = os.read(rfd, 1)
         except BlockingIOError:
             buf = b""
         except OSError:
             buf = b""
         if buf:
-            results.extend(b == 1 for b in buf)
-            last = time.monotonic()
+            # Per-config seconds, not the chunk average: the whole compile budget question turns
+            # on the TAIL. Measured on the A6000 rebuild, 13,875 configs of 869,844 ran the full
+            # 60 s before being killed -- 1.6% of the configs and 54% of all compile CPU. Nothing
+            # in the build said so, because the only number it kept was the chunk mean (0.83 s).
+            now = time.monotonic()
+            results.append((buf[0] == 1, now - last))
+            last = now
             continue
         try:
             done, _status = os.waitpid(pid, os.WNOHANG)
@@ -531,15 +648,46 @@ def _compile_chunk(chunk: list) -> list:
         with contextlib.suppress(OSError):
             os.waitpid(pid, 0)
     else:
-        results.append(False)                       # the config that stalled
+        # The config that stalled. It is charged the whole budget, which is what it cost.
+        results.append((False, float(_COMPILE_BUDGET_S)))
         rest = chunk[len(results):]
         if rest:
             results.extend(_compile_chunk(rest))    # never attempted; give them their own child
-    results.extend([False] * (len(chunk) - len(results)))
+    results.extend([(False, 0.0)] * (len(chunk) - len(results)))
     return results
 
 
-def _precompile_round(src, target, options, configs) -> None:
+def _chunk_cost(config) -> int:
+    """Rough compile cost of one config, used ONLY to balance chunks against each other.
+
+    Big tiles and deep pipelines are what make triton's compiler slow, and they are also what
+    runs past the SIGKILL budget -- so this orders a round expensive-first and the chunks are then
+    dealt round-robin, which puts one monster in each chunk instead of thirty-two in one. An
+    ordering that is wrong for some kernel costs nothing beyond the imbalance we already have.
+    """
+    volume = 1
+    for value in config.kwargs.values():
+        if isinstance(value, int) and value > 1:
+            volume *= value
+    return volume * max(getattr(config, "num_stages", 1) or 1, 1)
+
+
+def _balanced_chunks(items, costs, n_chunks: int) -> list:
+    """Deal ``items`` into ``n_chunks`` lists, most expensive first, round-robin.
+
+    The measured failure this replaces: a round's chunks were contiguous slices of 32, one worker
+    drew the slice holding thirteen configs that each ran the full 60 s budget before being
+    killed, and fifteen workers waited ~800 s for it. Aggregate pool occupancy over the A6000
+    rebuild was 50% -- 429 CPU-hours of workers waiting on a tail.
+    """
+    order = sorted(range(len(items)), key=lambda i: -costs[i])
+    chunks: list = [[] for _ in range(max(1, n_chunks))]
+    for rank, i in enumerate(order):
+        chunks[rank % len(chunks)].append(items[i])
+    return [c for c in chunks if c]
+
+
+def _precompile_round(src, target, options, configs, rnd: str = "") -> None:
     """Compile every config of this round in parallel, blocking until done. Never raises."""
     global _PRECOMPILE_POOL
     jobs = _compile_jobs()
@@ -554,11 +702,11 @@ def _precompile_round(src, target, options, configs) -> None:
 
     started = time.monotonic()
     kname = getattr(getattr(src, "fn", None), "__name__", "?")
-    todo = [c for c in configs if not _settled(kname, _cfg_sig(c))]
+    todo = [c for c in configs if not _settled(kname, rnd, _cfg_sig(c))]
     skipped = len(configs) - len(todo)
     if not todo:
         print(f"  [precompile] {kname}: round skipped, all {len(configs)} configs already "
-              f"compiled for THIS kernel on an earlier attempt", flush=True)
+              f"compiled for THIS kernel and key on an earlier attempt", flush=True)
         return
     configs = todo
     try:
@@ -579,6 +727,7 @@ def _precompile_round(src, target, options, configs) -> None:
                     opts[knob] = value
             payloads.append((src.fn.module, src.fn.__name__, src.signature, constants,
                              src.attrs, target, opts, _cfg_sig(config)))
+        keys = [f"{kname}\t{rnd}\t{_cfg_sig(c)}" for c in configs]
         import os as _os
         _os.environ["_MW_PRECOMPILE_FIRST"] = "1" if _PRECOMPILE["rounds"] == 0 else "0"
 
@@ -592,7 +741,14 @@ def _precompile_round(src, target, options, configs) -> None:
         # several chunks (stragglers stay cheap to rebalance) while the ~1 s fork is amortised
         # over enough configs to disappear: 1944 configs / 8 workers / 8 chunks each = 30.
         csize = max(1, min(32, len(payloads) // max(jobs * 8, 1) or 1))
-        chunks = [payloads[i:i + csize] for i in range(0, len(payloads), csize)]
+        n_chunks = max(1, -(-len(payloads) // csize))
+        costs = [_chunk_cost(c) for c in configs]
+        # Chunk the KEYS alongside the payloads, on the same permutation: `done` comes back in
+        # chunk order, and zipping it against the original config order is what would silently
+        # record every outcome against the wrong config.
+        pairs = _balanced_chunks(list(zip(payloads, keys, strict=True)), costs, n_chunks)
+        chunks = [[pl for pl, _ in c] for c in pairs]
+        sent = [k for c in pairs for _, k in c]
         results = _PRECOMPILE_POOL.map_async(_worker_compile, chunks, chunksize=1)
         try:
             done = [r for chunk_res in results.get(timeout=budget) for r in chunk_res]
@@ -601,23 +757,38 @@ def _precompile_round(src, target, options, configs) -> None:
         ok = sum(1 for d in done if d and d[0])
         bad = sum(1 for d in done if not (d and d[0]))
         wt = sum(d[2] for d in done if d)
-        print(f"  [precompile-worker] {len(chunks)} chunks x {csize} | child time"
+        # The tail is the whole story of a build's compile cost, and averaging it away is how it
+        # stayed invisible: on the A6000 rebuild 1.6% of configs ran the full 60 s budget before
+        # being killed and took 54% of all compile CPU, while the reported per-config number was
+        # the chunk mean, 0.83 s. Print the shape so the budget can be chosen from evidence.
+        secs = sorted(d[2] for d in done if d)
+        if secs:
+            def _q(f):
+                return secs[min(len(secs) - 1, int(f * len(secs)))]
+            over = [x for x in secs if x >= _COMPILE_BUDGET_S]
+            print(f"  [precompile-time] p50 {_q(0.5):.2f}s p90 {_q(0.9):.2f}s p99 {_q(0.99):.2f}s"
+                  f" max {secs[-1]:.0f}s | {len(over)} at the {_COMPILE_BUDGET_S}s budget"
+                  f" = {100 * sum(over) / max(sum(secs), 1e-9):.0f}% of the round's CPU",
+                  flush=True)
+        print(f"  [precompile-worker] {len(chunks)} chunks x ~{csize} | child time"
               f" {wt:.0f} worker-s -> {wt / max(jobs, 1):.0f}s of the round", flush=True)
-        # settled = attempted and answered, pass or fail. `done` is shorter than `configs` only
+        # settled = attempted and answered, pass or fail. `done` is shorter than `sent` only
         # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
         # unsettled and is retried, which is the intent.
-        _mark_outcome(kname,
-                      ((_cfg_sig(c), bool(d and d[0])) for c, d in zip(configs, done, strict=False)))
+        _mark_settled((k, bool(d and d[0])) for k, d in zip(sent, done, strict=False))
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
         _PRECOMPILE["rounds"] += 1
         _PRECOMPILE["configs"] += len(payloads)
         # Printed per round, not just in the final summary: when this stalled before, nothing was
         # visible until the shard finished, so a dead pool and a slow one looked identical.
+        wall = time.monotonic() - started
+        # Occupancy is the number the chunk deal exists to move: 15 workers that finish in
+        # sequence are not 15 workers. The A6000 rebuild averaged 50% across 461 rounds.
         print(f"  [precompile] round {_PRECOMPILE['rounds']}: {len(payloads)} configs "
               f"({skipped} already compiled) on {jobs} "
               f"workers -> {ok} compiled, {bad} failed, "
-              f"{time.monotonic() - started:.0f}s", flush=True)
+              f"{wall:.0f}s at {100 * wt / max(wall, 1e-9) / jobs:.0f}% occupancy", flush=True)
     except Exception:  # an optimisation; a build must never fail because of it
         pass
     _PRECOMPILE["seconds"] += time.monotonic() - started
@@ -625,6 +796,7 @@ def _precompile_round(src, target, options, configs) -> None:
 
 def shutdown_precompile() -> None:
     global _PRECOMPILE_POOL
+    _bench_lock_release()   # a round that died mid-sweep must not hold the card to process exit
     if _PRECOMPILE_POOL is not None:
         with contextlib.suppress(Exception):
             _PRECOMPILE_POOL.terminate()
@@ -799,7 +971,7 @@ def install() -> None:
         current = _CURRENT.get("id")
         armed = _ROUND.pop(current, None) if current is not None else None
         if armed and src is not None and kwargs.get("target") is not None:
-            _precompile_round(src, kwargs["target"], kwargs.get("options"), armed)
+            _precompile_round(src, kwargs["target"], kwargs.get("options"), armed[0], armed[1])
         if _COMPILE_BUDGET_S <= 0:
             return _orig_compile(*args, **kwargs)
         # The pool already answered this one. Forking again costs 179 ms to re-derive a fact we
@@ -812,7 +984,7 @@ def install() -> None:
         if _CURRENT.get("id") is not None and _CURRENT_CFG and src is not None:
             name = getattr(getattr(src, "fn", None), "__name__", None)
             if name:
-                settled = f"{name}\t{_sig_line(_CURRENT_CFG)}"
+                settled = f"{name}\t{_CURRENT.get('round', '')}\t{_sig_line(_CURRENT_CFG)}"
         if settled is not None and settled in _COMPILE_BAD:
             _COMPILE_T["known_bad"] += 1
             raise RuntimeError("triton compile failed in the precompile pool; config skipped")
@@ -866,16 +1038,14 @@ def install() -> None:
             if _CURRENT.get("id") is None:
                 return _orig_compile(*args, **kwargs)
             if settled is not None:
-                _mark_outcome(settled.partition("\t")[0],
-                              [(settled.partition("\t")[2], False)])
+                _mark_settled([(settled, False)])
             raise RuntimeError("triton compile failed in isolated child; config skipped")
         # The child surviving IS the proof the fast path needs. Recording it here (not only from
         # the pool) is what makes a RESTART cheap: a unit whose `.compiled` predates the outcome
         # tags, or whose round was skipped because every config was already settled, would
         # otherwise fork all over again on every attempt.
         if settled is not None:
-            _mark_outcome(settled.partition("\t")[0],
-                          [(settled.partition("\t")[2], True)])
+            _mark_settled([(settled, True)])
         _t_parent = time.monotonic()
         try:
             return _orig_compile(*args, **kwargs)  # expected: ~/.triton/cache hit
@@ -898,7 +1068,10 @@ def install() -> None:
 
     def prune_configs(self, kwargs):
         pruned = _orig_prune(self, kwargs)
-        _ROUND[id(self)] = list(pruned)     # per autotuner: rounds interleave across kernels
+        # per autotuner AND per autotune key: rounds interleave across the kernels of a unit, and
+        # one kernel is tuned once per key.
+        _ROUND[id(self)] = (list(pruned), _round_id(self, kwargs))
+        _ROUND_LEFT[id(self)] = len(pruned)
         # A round is exactly one prune_configs + one sweep of the pruned list for ONE autotune key,
         # so this is where the running best resets. Keeping it per autotuner rather than global:
         # rounds from different kernels interleave, and a fast elementwise kernel's best would
@@ -913,11 +1086,20 @@ def install() -> None:
         # Tell the compile hook which round it is servicing: the first config that actually
         # compiles triggers the fan-out for the whole round.
         previous = _CURRENT.get("id")
+        previous_round = _CURRENT.get("round", "")
         _CURRENT["id"] = id(self)
+        # The armed entry is popped by the first compile of the round, so read the id from
+        # whichever of the two still holds it.
+        armed = _ROUND.get(id(self))
+        _CURRENT["round"] = armed[1] if armed else previous_round
+        # One acquire per round, released below when its last config has been timed.
+        if id(self) in _ROUND_LEFT:
+            _bench_lock_acquire()
         _CURRENT_CFG.clear()
         _CURRENT_CFG.update(config.kwargs)
         _CURRENT_CFG["num_warps"] = config.num_warps
         _CURRENT_CFG["num_stages"] = config.num_stages
+        _t_bench = time.monotonic()
         try:
             res = _orig_bench(self, *args, config=config, **meta)
         except Exception:  # a config that fails to compile/run simply loses
@@ -930,7 +1112,17 @@ def install() -> None:
             # the compile budget started dropping configs.
             res = [float("inf")] * 3
         finally:
+            _BENCH_T["calls"] += 1
+            _BENCH_T["seconds"] += time.monotonic() - _t_bench
             _CURRENT["id"] = previous
+            _CURRENT["round"] = previous_round
+            if id(self) in _ROUND_LEFT:
+                left = _ROUND_LEFT[id(self)] - 1
+                if left <= 0:
+                    del _ROUND_LEFT[id(self)]
+                    _bench_lock_release()
+                else:
+                    _ROUND_LEFT[id(self)] = left
         med = _median(res)
         try:
             _record_one(self, config, meta, med)
@@ -962,14 +1154,20 @@ def install() -> None:
         # the bottom, so by the time the single-config record below fires it is gone.
         nargs0 = dict(zip(getattr(self, "arg_names", ()) or (), args, strict=False))
         previous = _CURRENT.get("id")
+        previous_round = _CURRENT.get("round", "")
         if len(cfgs0) == 1 and id(self) not in _ROUND:
-            _ROUND[id(self)] = list(cfgs0)
+            # `self.nargs` is set by _orig_run, which has not run yet -- hand _round_id the same
+            # binding it will build.
+            rnd = _round_id(self, {**nargs0, **kwargs})
+            _ROUND[id(self)] = (list(cfgs0), rnd)
             _CURRENT["id"] = id(self)
+            _CURRENT["round"] = rnd
         try:
             out = _orig_run(self, *args, **kwargs)
         finally:
             if _CURRENT.get("id") == id(self):
                 _CURRENT["id"] = previous
+                _CURRENT["round"] = previous_round
         cfgs = getattr(self, "configs", None) or []
         if len(cfgs) == 1:
             mark = (id(self), tuple(sorted((k, str(v)) for k, v in kwargs.items()
