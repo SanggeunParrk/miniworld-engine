@@ -178,7 +178,7 @@ def choose_probes(configs: list[dict], per_group: int = 0) -> list[dict]:
     deterministic stride through the group ordered by every axis at once, which lands points at
     small and large stages, small and large tiles, and the corners in between.
     """
-    axes = _tile_axes(configs)
+    axes = tile_axes(configs)
     # Three times the feature count: two thirds to fit on, one third to score the fit on points it
     # has not seen. Fewer and there is nothing left to validate with, which is how a model with a
     # 5.69 held-out error was still being trusted.
@@ -221,7 +221,7 @@ def choose_probes(configs: list[dict], per_group: int = 0) -> list[dict]:
     return out
 
 
-def _tile_axes(configs: list[dict]) -> list[str]:
+def tile_axes(configs: list[dict]) -> list[str]:
     return sorted(k for k in configs[0] if k not in ("num_warps", "num_stages"))
 
 
@@ -238,7 +238,7 @@ def inert_axes(measured: dict[tuple, int], configs: list[dict]) -> list[str]:
     Detected rather than named, because which axis is inert differs by kernel and a list of axis
     names in this file would be another thing to keep in sync with 91 kernels.
     """
-    axes = _tile_axes(configs)
+    axes = tile_axes(configs)
     out = []
     for i, a in enumerate(axes):
         groups: dict[tuple, set[int]] = {}
@@ -253,7 +253,7 @@ def inert_axes(measured: dict[tuple, int], configs: list[dict]) -> list[str]:
 def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None]:
     """One `Fit` per warp count, or None where the model is not safe to use for that kernel.
 
-    `measured` maps a config tuple (values in `_tile_axes` order, then warps, then stages) to the
+    `measured` maps a config tuple (values in `tile_axes` order, then warps, then stages) to the
     `shared` the compiler reported.
 
     Two thirds of the probe points train the fit; the remaining third -- drawn from the same
@@ -271,7 +271,7 @@ def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None
     across nine kernels it describes some and not others, and shared memory does not even move in
     the same DIRECTION for all of them (a reduction's went DOWN as its tile grew, 399 times).
     """
-    axes = _tile_axes(configs)
+    axes = tile_axes(configs)
     live = [a for a in axes if a not in inert_axes(measured, configs)]
     names = feature_names(live or axes)
     out: dict[int, Fit | None] = {}
@@ -391,15 +391,18 @@ def _piece(points: list[tuple[dict, float]], names: list[str]) -> Piece | None:
     return None if coef is None else Piece(coef=dict(zip(names, coef, strict=True)))
 
 
-def _dominated_by_a_known_bad(c: dict, axes: list[str], bad: list[dict]) -> bool:
-    """True when some config already MEASURED over the limit is <= this one on every axis.
+def dominated_by(c: dict, axes: list[str], bad: list[dict]) -> bool:
+    """True when some config already MEASURED bad is <= this one on every axis.
 
     No model and no arithmetic: a larger tile with at least as many pipeline stages cannot need
     less shared memory. Measured over 12,377 comparable pairs of one kernel at fixed `num_warps`,
     zero violations -- and `num_warps` has to be fixed, because raising it lets the compiler stop
     staging an operand through smem, which made 18% of the steps up that axis go DOWN.
 
-    This is what covers the warp counts where the linear fit does not hold.
+    This is what covers the warp counts where the linear fit does not hold. Shared with
+    `compile_budget`, which anchors the same rule on configs the compile budget killed rather
+    than on configs measured over the shared-memory limit -- the rule is about the ordering of
+    configs, not about what was measured.
     """
     for b in bad:
         if b["num_warps"] != c["num_warps"]:
@@ -421,7 +424,7 @@ def comparison_holds(measured: dict[tuple, int], configs: list[dict]) -> bool:
     Only the probe points are available to check against, so this can miss a violation that the
     sample does not contain. It is a filter for the kernels that are obviously wrong, not a proof.
     """
-    axes = _tile_axes(configs)
+    axes = tile_axes(configs)
     pts = dict(measured)
     keys = list(pts)
     for a, b in itertools.combinations(keys, 2):
@@ -443,7 +446,7 @@ def classify(configs: list[dict], fits: dict[int, Fit | None], limit: int,
     configs whose prediction clears `limit * MARGIN`. Everything else compiles, including every
     config of an unpredictable warp count -- the fallback is the old behaviour, not silence.
     """
-    axes = _tile_axes(configs)
+    axes = tile_axes(configs)
     bad = (measured_over or []) if comparison_ok else []
     keep, skip = [], []
     for c in configs:
@@ -451,7 +454,7 @@ def classify(configs: list[dict], fits: dict[int, Fit | None], limit: int,
         if f is None:
             # No usable fit for this warp count -- fall back to the comparison, which needs no
             # model at all, then to compiling it.
-            (skip if _dominated_by_a_known_bad(c, axes, bad) else keep).append(c)
+            (skip if dominated_by(c, axes, bad) else keep).append(c)
             continue
         pred = f.predict({a: c[a] for a in axes}, c["num_stages"])
         (skip if pred > limit else keep).append(c)
@@ -470,7 +473,7 @@ def choose_anchor_probes(configs: list[dict], fits: dict[int, Fit | None],
     anchor: everything at or above it on every axis, at the same warp count, is then known to be
     over without compiling.
     """
-    axes = _tile_axes(configs)
+    axes = tile_axes(configs)
     area = lambda c: sum(c[a] for a in axes) * c["num_stages"]
     out: list[dict] = []
     for w, f in sorted(fits.items()):
