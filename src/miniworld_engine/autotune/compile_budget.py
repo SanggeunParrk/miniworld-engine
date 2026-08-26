@@ -47,12 +47,47 @@ warp count, and at low warp counts those are already being killed -- one to twen
 per kernel across all eight. So this rule rides on a probe round that is already paid for, and
 adds a set membership test.
 
-The cost is bounded by how close its mistakes are to the line: a config wrongly ruled out took a
-median 53 s of a 60 s budget, which is a spilling kernel that only just survived and that the
-bench was going to reject anyway. `dominance_holds` gates on exactly that, at half the budget.
-It can only check the PROBE points, so a violation the sample does not contain reaches `classify`
-unseen -- one of the 35 came in at 29 s. That is the same limitation `viability.comparison_holds`
-carries, for the same reason.
+WHY THIS ONE HAS FALSE POSITIVES AND `viability` DOES NOT
+--------------------------------------------------------
+
+Shared memory is a deterministic function of the config: the same config compiles to the same byte
+count every time, so a rule can be exactly right. Compile time is not. It depends on how loaded
+the node is, and "killed" is a threshold on that noisy quantity -- so the LABEL is noisy, and no
+rule can be exactly right against a noisy label.
+
+It shows in the data as neighbours straddling the line. One kernel, same tile, same warp count:
+
+    BLOCK_K=16 BLOCK_M1=256 BLOCK_N=64  warps=1  stages=3   KILLED at 60 s
+                                                 stages=4   compiled in 47 s
+                                                 stages=5   compiled in 48 s
+                                                 stages=8   compiled in 45 s
+                                                 stages=12  compiled in 48 s
+
+The killed one has the FEWEST stages of the family. It did not lose because it was bigger; it lost
+a coin flip at the boundary, and its neighbours land at 45-48 s.
+
+Tightening the rule does not fix that, it just trades away the coverage:
+
+    <= on every axis, <= stages  (this rule)     caught 63%   FP 35  (0.19%)  fastest FP 29 s
+    plus: only axes that raise compile time      caught 20%   FP 19  (0.10%)  fastest FP 41 s
+    plus: stages must be equal                   caught  5%   FP  3  (0.02%)  fastest FP 56 s
+
+The middle row is worth reading: validating each axis's direction from the probe times rejects
+almost every axis, `BLOCK_M1` and `BLOCK_N` included, because raising one alone made the compile
+more than 25% FASTER in over 5% of comparable pairs. The times are too noisy to validate a
+direction from, which is the same finding from the other side.
+
+So the rule is kept where it is, and what makes that safe is not the FP count but what an FP
+COSTS. A shared-memory false positive removes a config that runs at full speed. Here it removes a
+config that took 29-60 s to compile -- median 53 -- and a config that spills enough registers to
+grind ptxas for a minute spills them at run time too. Measured against the bench for the three
+(op, bucket) pairs where both numbers exist so far: the top five configs by measured time compiled
+in 0.0-3.1 s, against grid maxima of 54-57 s, and NO top-five config anywhere took over 29 s.
+Three pairs is a thin sample and is recorded as one.
+
+`dominance_holds` gates on half the budget and can only check the PROBE points, so a violation the
+sample does not contain reaches `classify` unseen -- one of the 35 came in at 29 s. That is the
+same limitation `viability.comparison_holds` carries, for the same reason.
 """
 from __future__ import annotations
 

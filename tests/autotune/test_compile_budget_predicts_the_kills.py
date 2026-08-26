@@ -155,3 +155,36 @@ def test_an_anchor_does_not_reach_across_warp_counts() -> None:
     split = compile_budget.classify(configs, killed, holds=True)
     assert [c["num_warps"] for c in split["skip"]] == [1]
     assert [c["num_warps"] for c in split["keep"]] == [8]
+
+
+def test_tightening_the_rule_trades_away_the_coverage(scored) -> None:
+    """Pins the reason the rule is where it is, so a future tightening has to beat this.
+
+    Requiring equal `num_stages` removes the neighbour-straddling-the-line false positives -- and
+    with them three quarters of the catches, because a kill at stages=3 is the evidence that
+    stages=6 at the same tile will not compile either.
+    """
+    ms, killed = smem_log.compile_ms(DATA), smem_log.killed(DATA)
+    caught = kills = 0
+    for k in ms:
+        good = [(c, v / 1000) for s, v in ms[k].items() if (c := _parse(s)) and "num_warps" in c]
+        kc = [c for s in killed.get(k, set()) if (c := _parse(s)) and "num_warps" in c]
+        if not good or not kc:
+            continue
+        configs = [c for c, _ in good] + kc
+        axes = viability.tile_axes(configs)
+
+        def key(c, axes=axes):
+            return (*(c[a] for a in axes), c["num_warps"], c["num_stages"])
+
+        probes = {key(p) for p in viability.choose_probes(configs)}
+        anchors = compile_budget.anchors([c for c in kc if key(c) in probes])
+        strict = [c for c in kc
+                  if any(b["num_warps"] == c["num_warps"] and b["num_stages"] == c["num_stages"]
+                         and all(b[a] <= c[a] for a in axes) for b in anchors)]
+        caught += len(strict)
+        kills += len(kc)
+    loose = sum(v["caught"] for v in scored.values())
+    assert caught < loose / 2, (
+        f"stage-equality catches {caught} of {kills} against {loose} -- if it no longer costs "
+        f"most of the coverage, take it: it removes the boundary false positives")
