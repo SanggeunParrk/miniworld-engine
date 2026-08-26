@@ -10,6 +10,7 @@ to no single kernel.
 | `tiling-audit.md` | one sweep of every kernel's tile axes. Kernel names are the ones `registry.csv` held at the time. |
 | `pairformer-b200-latency.md` | Pairformer pair-track latency on B200 (sm100). |
 | `pairformer-h100-latency.md` | the same on H100 (sm90). |
+| `where-the-cache-build-spends-its-time-a6000.md` | the compile/bench split of an A6000 rebuild, and the three things that were idling: a second autotune key compiling on one core, a pool at 50% occupancy, and compile never overlapping bench. |
 | `cache-coverage-replay-a6000.md` | the 363 lookups the module matrix asks for and the shipped cache does not serve, against a static coverage check that reports zero missing. Work list for the pending rebuild. |
 
 The two latency files were under `benchmarks/runners/`, which `docs/benchmarks.md` forbids —
