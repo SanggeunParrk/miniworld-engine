@@ -14,8 +14,25 @@ run, job paircost. The plain shared-memory rows are stripped -- this module need
 and the times, and the config list is implied by them. They live in their own directory so the
 nine-kernel shared-memory fixtures in the parent stay the sample that module was scored on.
 
-What has to hold is FALSE POSITIVES, as it is there: a config predicted unusable that in fact
-compiles is a config removed from the search.
+TWO ERROR RATES, and only the second one is the build's
+------------------------------------------------------
+
+"Ruled out but it compiled" is the error rate against what this rule CLAIMS -- that a config will
+be killed -- and it is the one that can be checked without benching anything. It is reported and
+asserted on below.
+
+It is not what a build loses. A build's output is the top few configs per bucket; a config that
+compiles in 53 s and then places 1300th of 1434 cost compile time and contributed nothing, so
+ruling it out is right and counting it as an error measures the wrong thing. The error that costs
+something is "ruled out but it would have been CHOSEN", and that needs bench times joined to the
+same signatures.
+
+Both are here. The first is asserted directly; the second is asserted through
+`test_a_slow_compile_never_benches_well`, which measures the property the inference rests on --
+every config compiling over 30 s placed in the bottom 7-16% of its bucket, 6.4x to 32.7x off the
+fastest. What is NOT yet measured is those exact ruled-out configs: they belong to three kernels
+(`_dgrad_epi`, `_dx_swiglubwd_kernel`, `fused_sigmoid_gate_fwd_kernel`) for which no bench data is
+in these fixtures. The two kernels that do have bench data produced no false positives at all.
 """
 from __future__ import annotations
 
@@ -70,7 +87,12 @@ def scored():
 
 
 def test_it_almost_never_discards_a_config_that_would_have_compiled(scored) -> None:
-    """The one error that costs something. 35 of 18,393 when this was written -- 0.19%."""
+    """The error against what the rule CLAIMS: 35 of 18,393 when this was written -- 0.19%.
+
+    Not the error that costs a build anything; see the module docstring. Kept as the tightest
+    number that can be checked without benching, and because a rule whose stated claim drifts is
+    a rule nobody can reason about.
+    """
     fp = sum(v["fp"] for v in scored.values())
     n = sum(v["n"] for v in scored.values())
     assert fp / n < 0.005, f"{fp} false positives over {n} configs"

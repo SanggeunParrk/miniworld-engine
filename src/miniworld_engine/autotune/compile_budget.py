@@ -77,6 +77,12 @@ almost every axis, `BLOCK_M1` and `BLOCK_N` included, because raising one alone 
 more than 25% FASTER in over 5% of comparable pairs. The times are too noisy to validate a
 direction from, which is the same finding from the other side.
 
+TWO ERROR RATES. "Ruled out but it compiled" -- 35 of 18,393 -- is the error against what this
+rule CLAIMS, and the only one checkable without benching. It is not what a build loses: a build's
+output is the top few configs per bucket, so ruling out a config that compiles in 53 s and then
+places 1300th of 1434 is right, and counting it as an error measures the wrong thing. The error
+that costs something is "ruled out but it would have been CHOSEN".
+
 So the rule is kept where it is, and what makes that safe is not the FP count but what an FP
 COSTS. A shared-memory false positive removes a config that runs at full speed. Here it removes a
 config that took 29-60 s to compile -- median 53 -- and that is the SAME register pressure measured
