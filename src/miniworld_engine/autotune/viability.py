@@ -6,6 +6,20 @@ The build compiles every config in the grid and finds out at LAUNCH which ones d
 time -- so roughly half the build is spent producing kernels that can never be launched on the
 card producing them.
 
+Nothing here is written for a particular card. The limit is passed in by the caller, which reads
+`shared_memory_per_block_optin` off the device; the coefficients are fitted, per kernel, from
+compiles done on the machine running the build; and both the fit and the comparison are validated
+against that machine's own measurements before either is used. A card with a different limit, or
+a compiler that lays kernels out differently, changes the numbers the probe collects and therefore
+the answer -- it does not change what has to be true for the answer to be trusted.
+
+What IS card-specific is the EVIDENCE. Every number quoted in this module was measured on sm86
+(A5000 and A6000, both 101,376 B). Whether a fit stays byte-exact on sm90 or sm100, where the
+compiler has TMA and clusters and 227 KB to work with, is not known here and cannot be: no such
+card is reachable from this cluster (`docs/supported.md`). The gates are what make that safe
+rather than merely unknown -- a shape that stops holding stops being used, and the fallback is to
+compile everything, which is what the build did before any of this existed.
+
 Shared memory turns out to be an exact function of the config, not an approximation. For one
 Triton GEMM, 595 measured configs fit
 
