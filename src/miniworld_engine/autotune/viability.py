@@ -45,27 +45,47 @@ MAX_HELDOUT_ERROR = 0.05
 
 
 @dataclass
-class Fit:
-    """One warp count's model: `shared = m(tile) * (stages - 1)`, plus the stages=1 value."""
+class Piece:
+    """One linear regime. `bias` is the worst amount it over-predicted any probe point."""
 
-    coef: dict[str, float] = field(default_factory=dict)   # feature name -> weight
+    coef: dict[str, float] = field(default_factory=dict)
+    bias: float = 0.0
+
+    def m(self, tile: dict[str, int]) -> float:
+        raw = sum(w * _feature_value(n, tile) for n, w in self.coef.items())
+        return raw - self.bias
+
+
+@dataclass
+class Fit:
+    """One warp count's model: `shared = m(tile) * (stages - 1)`, plus the stages=1 value.
+
+    `m` is piecewise, not linear. Triton either stages an operand through shared memory or keeps
+    it in registers, and which one it picks changes with the tile -- at 4 warps the same kernel
+    reports 6,208 B for a tile that a 1-warp launch reports 8,192 B for. One straight line through
+    both regimes fits neither: it was rejected by the held-out check for four of six warp counts,
+    which disabled the prediction for two thirds of the grid.
+
+    So the probe points are split by the sign of their residual against a first pass and each side
+    is refitted. A prediction is the MINIMUM over the pieces -- the minimum of sound lower bounds
+    is a sound lower bound, and it does not require knowing which regime a config will land in.
+    """
+
+    pieces: list[Piece] = field(default_factory=list)
     at_one: float = 0.0                                    # measured shared at num_stages == 1
     heldout_error: float = 0.0
-    #: The worst amount by which the raw fit OVER-predicted a probe point, subtracted from every
-    #: prediction. This is what makes the output a lower bound rather than an estimate: a margin
-    #: guards against the model being wrong in general, a bias guards against it being wrong the
-    #: way it was actually observed to be wrong. With a bias there is no margin to choose, and a
-    #: fit that recovered the layout exactly (bias 0) skips a config the moment its prediction
-    #: clears the limit at all -- a flat 15% margin kept a config predicted at 102,080 against a
-    #: real 102,080 and a limit of 101,376.
-    bias: float = 0.0
+
+    @property
+    def bias(self) -> float:
+        return max((p.bias for p in self.pieces), default=0.0)
 
     def predict(self, tile: dict[str, int], stages: int) -> float:
         """A LOWER BOUND on the shared memory this config needs, never an estimate of it."""
+        if not self.pieces:
+            return 0.0
         if stages <= 1:
             return max(self.at_one - self.bias, 0.0)
-        m = sum(w * _feature_value(name, tile) for name, w in self.coef.items())
-        return max(m * (stages - 1) - self.bias, 0.0)
+        return max(min(p.m(tile) for p in self.pieces) * (stages - 1), 0.0)
 
 
 def _feature_value(name: str, tile: dict[str, int]) -> float:
@@ -85,15 +105,22 @@ def _product(name: str, tile: dict[str, int]) -> int | None:
 
 
 def feature_names(axes: list[str]) -> list[str]:
-    """`1` and every pair product -- the tile AREAS.
+    """`1`, each axis, and every pair product -- the tile AREAS and the edges.
 
     Not hand-written per kernel: which axes bound an operand tile differs by kernel
-    (`BLOCK_M1*BLOCK_K` here), so all pairs are offered and the fit picks. Singleton axes are NOT
-    features: smem holds tiles, so a term linear in one axis has no operand behind it, and every
-    unused feature costs a probe compile -- with singletons included the fit needed more training
-    points than the probe collected and fell back to "unpredictable" for five of six warp counts.
+    (`BLOCK_M1*BLOCK_K` on a GEMM), so all pairs are offered and the fit picks. The singletons are
+    there for the kernels that have ONE axis -- a reduction over `BLOCK_E` stages a vector, not a
+    tile, and with pairs only its feature set is the constant term alone, which can express
+    nothing and sends every such kernel to the fallback. The cost of an unused feature is one more
+    probe tile, and `choose_probes` sizes itself from the feature count.
     """
-    return ["1", *(f"{a}*{b}" for a, b in itertools.combinations(axes, 2))]
+    pairs = [f"{a}*{b}" for a, b in itertools.combinations(axes, 2)]
+    # Singletons only when the pairs alone would be too thin to express anything. A kernel with
+    # one axis has NO pairs, so without this its whole feature set is the constant term and it can
+    # never be predicted; a kernel with three has three areas already, and every extra feature
+    # costs a probe tile (adding singletons there took the probe from 107 compiles to 143 and
+    # caught not one more config).
+    return ["1", *pairs] if len(pairs) >= 3 else ["1", *axes, *pairs]
 
 
 def _solve(rows: list[list[float]], rhs: list[float]) -> list[float] | None:
@@ -170,32 +197,53 @@ def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None
     for w in sorted({c["num_warps"] for c in configs}):
         pts = [(k, v) for k, v in measured.items() if k[len(axes)] == w]
         ones = [v for k, v in pts if k[len(axes) + 1] == 1]
-        slopes = [(dict(zip(axes, k, strict=False)), v) for k, v in pts if k[len(axes) + 1] == 2]
+        slopes = [(dict(zip(axes, k, strict=False)), float(v))
+                  for k, v in pts if k[len(axes) + 1] == 2]
         if len(slopes) < 2:
             out[w] = None
             continue
         hold = slopes[::3] if len(slopes) > 3 else []
         train = [s for s in slopes if s not in hold] or slopes
-        rows = [[_feature_value(n, t) for n in names] for t, _ in train]
-        coef = _solve(rows, [float(v) for _, v in train])
-        if coef is None:
+
+        first = _piece(train, names)
+        if first is None:
             out[w] = None
             continue
-        f = Fit(coef=dict(zip(names, coef, strict=True)),
-                at_one=(sum(ones) / len(ones)) if ones else 0.0)
-        err = bias = 0.0
-        for t, real in slopes:                       # EVERY probe point, held out or not
-            p = sum(c * _feature_value(n, t) for n, c in f.coef.items())
-            bias = max(bias, p - real)               # only over-prediction matters for a bound
-            if (t, real) in (hold or train):
-                err = max(err, abs(p - real) / max(real, 1))
-        f.heldout_error, f.bias = err, bias
-        # The bias alone is NOT enough. It is the worst over-prediction on points the fit was
-        # BUILT from, and a fit that is wrong in shape over-predicts far more elsewhere: measured,
-        # a warp count with bias 0 and a 7.8% held-out error wrongly discarded 37 usable configs.
-        # So the held-out score gates, and the bias trims what survives the gate.
-        out[w] = f if err <= MAX_HELDOUT_ERROR else None
+        pieces = [first]
+        # Residuals over ALL probe points, not just the training ones. Least squares drives the
+        # training residuals to ~0 whatever the true shape is, so a split decided on them never
+        # fires -- measured, it stayed at one piece for every warp count while the held-out error
+        # was 5.69. The held-out points are where a straight line through two regimes shows.
+        resid = [(t, y, sum(c * _feature_value(n, t) for n, c in first.coef.items()) - y)
+                 for t, y in slopes]
+        worst = max((abs(r) / max(y, 1) for _, y, r in resid), default=0.0)
+        if worst > MAX_HELDOUT_ERROR:                 # one line through two regimes: split them
+            lo = [(t, y) for t, y, r in resid if r <= 0]
+            hi = [(t, y) for t, y, r in resid if r > 0]
+            split = [p for p in (_piece(lo, names), _piece(hi, names)) if p is not None]
+            if len(split) == 2:
+                pieces = split
+
+        for p in pieces:                              # bias over EVERY probe point, held out too
+            p.bias = max((sum(c * _feature_value(n, t) for n, c in p.coef.items()) - y
+                          for t, y in slopes), default=0.0)
+            p.bias = max(p.bias, 0.0)
+
+        f = Fit(pieces=pieces, at_one=(sum(ones) / len(ones)) if ones else 0.0)
+        f.heldout_error = max((abs(min(p.m(t) for p in pieces) - y) / max(y, 1)
+                               for t, y in (hold or train)), default=0.0)
+        # The gate is what keeps this sound. Without it a warp count whose shape the model does
+        # not capture still produces predictions, and those wrongly discarded 27 usable configs.
+        out[w] = f if f.heldout_error <= MAX_HELDOUT_ERROR else None
     return out
+
+
+def _piece(points: list[tuple[dict, float]], names: list[str]) -> Piece | None:
+    if len(points) < 2:
+        return None
+    rows = [[_feature_value(n, t) for n in names] for t, _ in points]
+    coef = _solve(rows, [y for _, y in points])
+    return None if coef is None else Piece(coef=dict(zip(names, coef, strict=True)))
 
 
 def _dominated_by_a_known_bad(c: dict, axes: list[str], bad: list[dict]) -> bool:
