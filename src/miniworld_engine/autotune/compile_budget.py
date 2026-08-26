@@ -79,11 +79,16 @@ direction from, which is the same finding from the other side.
 
 So the rule is kept where it is, and what makes that safe is not the FP count but what an FP
 COSTS. A shared-memory false positive removes a config that runs at full speed. Here it removes a
-config that took 29-60 s to compile -- median 53 -- and a config that spills enough registers to
-grind ptxas for a minute spills them at run time too. Measured against the bench for the three
-(op, bucket) pairs where both numbers exist so far: the top five configs by measured time compiled
-in 0.0-3.1 s, against grid maxima of 54-57 s, and NO top-five config anywhere took over 29 s.
-Three pairs is a thin sample and is recorded as one.
+config that took 29-60 s to compile -- median 53 -- and that is the SAME register pressure measured
+twice: ptxas grinds looking for an allocation, and the overflow it cannot avoid is spilled to
+memory at run time.
+
+So the two are not merely correlated. Joined against the bench over three (op, bucket) pairs,
+4,405 configs (`tests/autotune/compile_budget/bench_vs_compile.csv.gz`), every config compiling
+over 30 s placed in the bottom 7-16% by measured time, and the best-placed one was still 6.4x,
+6.4x and 32.7x off its bucket's fastest config. Not one came close to being chosen. Pinned in
+`test_a_slow_compile_never_benches_well`; if it ever fails, these false positives have started to
+cost something and the tightening priced out in the other test module is what to reach for.
 
 `dominance_holds` gates on half the budget and can only check the PROBE points, so a violation the
 sample does not contain reaches `classify` unseen -- one of the 35 came in at 29 s. That is the
