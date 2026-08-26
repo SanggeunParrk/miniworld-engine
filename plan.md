@@ -427,7 +427,29 @@ At a 20 s budget the first kernel loses configs that compile fine.
 *Done when:* the killed set is either predicted per kernel from probe data (as shared memory is)
 or bounded by a budget chosen from the measured distribution -- and the build reports which it
 did. The evidence it needs now exists: every round prints its distribution, and every killed
-config is named in the `.smem` log (`smem_log.killed()`).
+config is named in the `.smem` log (`smem_log.killed()`). `autotune/compile_budget.py` is the
+first half of the answer: 63% of the kills ruled out from the probe round already paid for, at
+0.19% wrongly ruled out. It is not wired into the build.
+
+### G4 -- a round re-verifies configs triton's on-disk cache already holds
+
+*Gap:* a compiled binary is shared across input SIZES. Measured on two kernels with one shared
+`TRITON_CACHE_DIR`, running L=256, 512, 1024: the first length added 37-38 cache entries, every
+later length added **zero**. Triton's compile key carries the constexprs and the argument
+specialisation, not the argument values, so 256 and 512 are the same binary.
+
+The build nonetheless submits every config to the pool again at each new length, to find out they
+are all cache hits. `.compiled` stops that WITHIN a unit and across its restarts, but it is per
+shard and its key carries the autotune round, so a second length matches nothing.
+
+The parent could answer it itself: triton's cache key is ~0.34 ms to compute and the lookup is a
+stat. Filtering the payload list before chunking would skip the pool entirely for a warm length.
+
+*Not sized yet.* The measurement that would size it needs a LARGE grid run twice at two lengths
+in one cache dir; the run above used 36-config grids where the chunk size collapses to 1 and a
+fork per config dominates everything, so it does not scale up. Of the rebuild's 869,844 compile
+attempts only 221,487 produced a distinct binary, so about three quarters were re-verification --
+but at what per-config cost is exactly the unmeasured part.
 
 
 ---

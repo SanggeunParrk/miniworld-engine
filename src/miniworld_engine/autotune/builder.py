@@ -991,12 +991,17 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     same card take that card's bench lock while they measure, so the overlap is compile-against-
     measure and never measure-against-measure.
 
-    The default is 1 because raising it is only a win when compile dominates. Measured on 28 units
-    of 750-864-config grids, which spend 73% of their time BENCHING: 4436 s at 1, 5940 s at 2 --
-    34% slower, with 4.54 hours spent waiting on the other unit's bench lock. Both units wanted
-    the card, so the lock became a queue. A config costs ~125 ms to bench whatever the grid size
-    (`do_bench` fills its budget by construction) while compile cost grows with the grid, so the
-    answer is per unit-set and the log reports it. See docs/operations/dispatch-cache.md.
+    The default is 1. First measured at 2 it was 34% SLOWER -- 4436 s to 5940 s on 28 units --
+    and the cause was the pool sizing, not the idea: `compile_jobs` divided the cores by the
+    SLOTS, so every unit got half a pool, its compile phase took twice the wall, and the card sat
+    idle waiting for one of its two units to finish compiling. Card busy fell from 71% to 56%.
+    That is fixed above (divide by the cards) and the flag has not been re-measured since.
+
+    What remains true either way: a config costs ~125 ms to bench whatever the grid size, because
+    `do_bench` fills its 25 ms warmup and 100 ms measurement budget by construction, while compile
+    cost grows with the grid. So a unit set of small grids is bench-bound -- those 28 spent 73% of
+    their wall measuring -- and there is nothing for a second unit to fill. See
+    docs/operations/dispatch-cache.md.
     """
     import concurrent.futures as cf
 
@@ -1019,10 +1024,16 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             cores = len(os.sched_getaffinity(0))
         except (AttributeError, OSError):
             cores = os.cpu_count() or 1
+        # Divide by the CARDS, not by the slots. At most one slot per card is measuring at any
+        # moment -- that is what the bench lock enforces -- and a measuring slot needs about one
+        # core, so the slots sharing a card are not compiling at the same time either. Dividing by
+        # the slots instead halved every unit's pool, stretched its compile phase to twice the
+        # wall, and left the card idle waiting for someone to finish: measured at 4436 s -> 5940 s
+        # on 28 units, with the card busy 71% of the wall against 56%.
+        compile_jobs = max(1, cores // max(1, len(gpus)))
         slots = max(1, len(gpus) * max(1, units_per_gpu))
-        compile_jobs = max(1, cores // slots)
-        print(f"  [compile] {cores} cores / {slots} unit slot(s) -> {compile_jobs} compile "
-              f"workers per unit ({compile_jobs * slots} total)", flush=True)
+        print(f"  [compile] {cores} cores / {len(gpus)} gpu(s) -> {compile_jobs} compile workers "
+              f"per unit, {slots} unit slot(s)", flush=True)
 
     # OpUnits carry no Case, and `check` is a per-case module smoke test, so there is nothing for
     # it to check -- a driver that cannot run its shape reports that as a skipped unit, which is
