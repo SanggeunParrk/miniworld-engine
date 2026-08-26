@@ -83,9 +83,43 @@ whose readings drift picks a different config. Units sharing a card take that ca
 whole tuning round -- once per round, not once per config; 542,146 lock operations would cost
 more than the contention.
 
+## The largest item left, which none of these three touch
+
+13,875 of the build's 869,844 configs ran the full 60 s compile budget and were SIGKILLed. In
+every round measured since, the round's `failed` count and its killed count are the same number,
+so those kills cost 231 of the 429 compile CPU-hours -- **54% of all compile work, on 1.6% of the
+configs.**
+
+Concentrated, not spread. 205 of the 461 rounds kill nothing; the per-round median is 19%, the
+p75 is 82%.
+
+| round | kills | CPU on kills | share of that round |
+|---|---:|---:|---:|
+| `adaln_gemm_gate-bf16-L256` | 564 | 9.4 h | 48% |
+| `adaln_gemm_gate-bf16-L512` | 556 | 9.3 h | 98% |
+| `adaln_gemm_gate-bf16-L1024` | 525 | 8.8 h | 94% |
+| `cond_transition_fwd_b2b_saveact-fp32` x3 | 1014 | 16.9 h | 39-97% |
+
+One op at three lengths is 27.5 of the 231 CPU-hours, on 3.6% of its grid.
+
+The budget cannot simply be lowered, because the per-kernel distributions differ by an order of
+magnitude and one kernel's tail is another's body:
+
+    transition_fwd_b2b_ktiled      p50 0.35s  p90 1.76s  p99 17.29s  max 47s   0 killed
+    augmented_attention_bwd_split  p50 1.66s  p90 8.52s  p99 60.00s  max 60s  11 killed
+    adaln_bwd_dw                   p50 2.01s  p90 8.58s  p99 60.00s  max 60s  27 killed
+
+At 20 s the first kernel loses configs that compile fine in 17-47 s.
+
+The build now prints that distribution per round and names every killed config in the `.smem`
+log, which is what a per-kernel decision needs and what did not exist. Tracked as plan.md G3.
+
 ## What this does not say
 
-* Whether compile cost per config is uniform. It is not measured, and the configs the smem
-  predictor skips are the big-tile end, which is the expensive end.
+* Whether the configs the shared-memory predictor already skips are the same configs the budget
+  kills. They are different mechanisms -- overflow is reported by a compile that FINISHES, a kill
+  is a compile that does not -- but both live at the big-tile end of a grid, so the overlap could
+  be large. Deciding it needs a build run with `smem_log.killed()`, which did not exist when this
+  was taken.
 * Anything about a card other than sm86. The split between compile and bench depends on both the
   host's core count and the card's speed.

@@ -9,7 +9,8 @@ A config the compile budget KILLED writes `!<kernel>\\t<config sig>\\t<budget>` 
 a different mechanism -- ptxas grinding on register spill, not shared memory -- and it arrives at
 the bench as the same undifferentiated +inf, so it needs its own evidence to be predictable at
 all. It is worth having: measured on the A6000 rebuild, 13,875 of 869,844 configs were killed and
-those 1.6% took 54% of the whole build's compile CPU.
+those 1.6% took 54% of the whole build's compile CPU. Concentrated, not spread: 205 of 461 rounds
+kill nothing at all, and one op at three lengths accounts for 27.5 of the 231 CPU-hours.
 """
 from __future__ import annotations
 

@@ -616,8 +616,10 @@ def _compile_chunk(chunk: list) -> list:
         if buf:
             # Per-config seconds, not the chunk average: the whole compile budget question turns
             # on the TAIL. Measured on the A6000 rebuild, 13,875 configs of 869,844 ran the full
-            # 60 s before being killed -- 1.6% of the configs and 54% of all compile CPU. Nothing
-            # in the build said so, because the only number it kept was the chunk mean (0.83 s).
+            # 60 s before being killed -- 1.6% of the configs and 54% of all compile CPU, though
+            # the per-ROUND median is 19% and 205 of 461 rounds kill nothing: it is a few rounds
+            # that are almost entirely kills. Nothing in the build said so, because the only
+            # number it kept was the chunk mean (0.83 s).
             now = time.monotonic()
             results.append((buf[0] == 1, now - last))
             last = now

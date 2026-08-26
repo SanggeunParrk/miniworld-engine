@@ -409,7 +409,10 @@ say why they will stay.
 (`docs/records/where-the-cache-build-spends-its-time-a6000.md`)
 
 *Gap:* 13,875 of the A6000 rebuild's 869,844 configs ran the full 60 s compile budget and were
-SIGKILLed. Those 1.6% took 231 of the build's 429 compile CPU-hours. It is not the same mechanism
+SIGKILLed. Those 1.6% took 231 of the build's 429 compile CPU-hours, and they are CONCENTRATED:
+205 of 461 rounds kill nothing at all, while `adaln_gemm_gate` at three lengths burned 27.5
+CPU-hours on kills that were 98%, 94% and 48% of those rounds -- 556 of its 15,552 configs. The
+per-round median is 19%; the build-wide 54% is those few rounds. It is not the same mechanism
 as shared-memory overflow -- which `autotune/viability.py` already predicts and skips -- but the
 same shape of problem: a config whose outcome is knowable before it is compiled.
 
