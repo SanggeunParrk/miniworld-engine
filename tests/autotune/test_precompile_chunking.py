@@ -124,3 +124,24 @@ def test_a_killed_config_is_named_not_just_counted(monkeypatch, tmp_path, fast_b
     assert smem_log.read(tmp_path) == {}, (
         "a killed config has no shared-memory reading; recording the budget as one would put a "
         "60 among values in the hundreds of thousands")
+
+
+def test_every_config_records_what_its_compile_cost(monkeypatch, tmp_path):
+    """"The predictor skips 85.6% of the configs that cannot launch" is a count. Turning it into
+    a saving needs the seconds, and a config that overflows shared memory still COMPILES -- if
+    those are the cheap compiles, skipping them saves configs and not time. This is the pairing
+    that settles it: shared bytes and milliseconds under the same signature."""
+    from miniworld_engine.autotune import smem_log
+    monkeypatch.setenv("MINIWORLD_SMEM_LOG", str(tmp_path / "u.smem"))
+    monkeypatch.setattr(capture, "_resolve_jit", lambda *a: None)
+    monkeypatch.setattr(capture, "_compile_payload",
+                        lambda p, pre=None: time.sleep(0.5) if p[0] == "slow" else None)
+
+    def _p(tag, sig):
+        return (tag, "the_kernel", {}, {}, {}, ("cuda", 86, 32), {}, sig)
+
+    capture._worker_compile([_p("fast", "BLOCK_M=32"), _p("slow", "BLOCK_M=256")])
+    got = smem_log.compile_ms(tmp_path)["the_kernel"]
+    assert set(got) == {"BLOCK_M=32", "BLOCK_M=256"}
+    assert got["BLOCK_M=256"] > 400, f"the slow config recorded {got['BLOCK_M=256']} ms"
+    assert got["BLOCK_M=32"] < 400

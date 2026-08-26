@@ -622,6 +622,7 @@ def _compile_chunk(chunk: list) -> list:
             # number it kept was the chunk mean (0.83 s).
             now = time.monotonic()
             results.append((buf[0] == 1, now - last))
+            _log_time(chunk[len(results) - 1], now - last)
             last = now
             continue
         try:
@@ -671,6 +672,24 @@ def _log_killed(payload) -> None:
     bench as +inf, and only the first one leaves a shared-memory reading. Without this the second
     kind is invisible: the build reports a count and nothing that could be fitted or checked.
     """
+    _log_row("!", payload, int(_COMPILE_BUDGET_S))
+
+
+def _log_time(payload, seconds: float) -> None:
+    """Record what one config's compile COST, tagged ``~``, in milliseconds.
+
+    Without it the shared-memory predictor's saving cannot be stated. It skips 85.6% of the
+    configs that cannot launch, and "85.6% of the configs" was turned into "36% of the build" by
+    assuming every config costs the same to compile -- which is exactly the assumption this file
+    has now disproved twice over: the p50 is 0.35-2.0 s and the p90 runs to 60 s.
+    A config that overflows shared memory still COMPILES, and compiles fine; if those are the
+    cheap ones, skipping them saves configs and not time. This is the pairing that settles it --
+    every config's shared bytes and its seconds, under the same signature.
+    """
+    _log_row("~", payload, int(seconds * 1000))
+
+
+def _log_row(tag: str, payload, value: int) -> None:
     import os
 
     log = os.environ.get("MINIWORLD_SMEM_LOG")
@@ -682,7 +701,7 @@ def _log_killed(payload) -> None:
         return
     try:
         with open(log, "a") as fh:
-            fh.write(f"!{fn_name}\t{sig}\t{int(_COMPILE_BUDGET_S)}\n")
+            fh.write(f"{tag}{fn_name}\t{sig}\t{value}\n")
     except OSError:
         pass
 

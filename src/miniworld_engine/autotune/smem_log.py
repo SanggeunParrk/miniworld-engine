@@ -18,7 +18,10 @@ from pathlib import Path
 
 
 def _rows(shard_dir: Path):
-    """(killed, kernel, sig, value) for every well-formed line under `shard_dir`.
+    """(tag, kernel, sig, value) for every well-formed line under `shard_dir`.
+
+    The tag is "" for a shared-memory reading, "!" for a config the compile budget killed, and
+    "~" for a compile time in milliseconds.
 
     `.smem.gz` is read too: a build's logs run to megabytes and the copies kept as test fixtures
     compress about eighteen-fold, which is the difference between a fixture and a liability.
@@ -38,7 +41,8 @@ def _rows(shard_dir: Path):
                 number = int(val)
             except ValueError:
                 continue
-            yield kernel.startswith("!"), kernel.removeprefix("!"), sig, number
+            tag = kernel[0] if kernel[:1] in ("!", "~") else ""
+            yield tag, kernel[len(tag):], sig, number
 
 
 def read(shard_dir: Path) -> dict[str, dict[str, int]]:
@@ -49,8 +53,8 @@ def read(shard_dir: Path) -> dict[str, dict[str, int]]:
     60 next to real values in the hundreds of thousands.
     """
     out: dict[str, dict[str, int]] = {}
-    for killed, kernel, sig, number in _rows(shard_dir):
-        if not killed:
+    for tag, kernel, sig, number in _rows(shard_dir):
+        if not tag:
             out.setdefault(kernel, {})[sig] = number
     return out
 
@@ -58,9 +62,24 @@ def read(shard_dir: Path) -> dict[str, dict[str, int]]:
 def killed(shard_dir: Path) -> dict[str, set[str]]:
     """kernel -> config sigs the compile budget killed."""
     out: dict[str, set[str]] = {}
-    for is_killed, kernel, sig, _ in _rows(shard_dir):
-        if is_killed:
+    for tag, kernel, sig, _ in _rows(shard_dir):
+        if tag == "!":
             out.setdefault(kernel, set()).add(sig)
+    return out
+
+
+def compile_ms(shard_dir: Path) -> dict[str, dict[str, int]]:
+    """kernel -> {config sig: milliseconds its compile took}.
+
+    Pairs with :func:`read` under the same signature, which is what makes "the predictor skips
+    85.6% of the unusable configs" answerable as a saving rather than a count: a config that
+    overflows shared memory still compiles, and if those are the CHEAP compiles then skipping
+    them saves configs and not time.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for tag, kernel, sig, number in _rows(shard_dir):
+        if tag == "~":
+            out.setdefault(kernel, {})[sig] = number
     return out
 
 
