@@ -628,7 +628,8 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
                                 keep_ir=getattr(args, "keep_ir", False),
                                 predict=getattr(args, "predict_unusable", False),
                                 bench_clear_mb=getattr(args, "bench_clear_mb", 0),
-                                bench_rep_ms=getattr(args, "bench_rep_ms", 0))
+                                bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                pin_cores=getattr(args, "pin_cores", False))
     return _merge_built_shards(args, results)
 
 
@@ -748,7 +749,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                                   keep_ir=getattr(args, "keep_ir", False),
                                   predict=getattr(args, "predict_unusable", False),
                                   bench_clear_mb=getattr(args, "bench_clear_mb", 0),
-                                  bench_rep_ms=getattr(args, "bench_rep_ms", 0))
+                                  bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                  pin_cores=getattr(args, "pin_cores", False))
         results += stage
         # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
         # cache, and it can only see pass 1 once pass 1's shards are folded in.
@@ -1137,6 +1139,10 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--bench-rep-ms", type=int, default=0,
                      help="ms of measurement per config (0 = triton's 100). 16 MB at 10 ms was "
                           "7x cheaper than the default with 30%% more samples, on one kernel.")
+    bld.add_argument("--pin-cores", action="store_true",
+                     help="give each unit slot its own cores instead of pooling the node's. A "
+                          "unit that is MEASURING otherwise competes with every other unit's "
+                          "compile workers, and the measurement is what a build produces.")
     bld.add_argument("--prune-cache", action="store_true",
                      help="after a successful merge, empty $TRITON_CACHE_DIR. It is a build "
                           "artifact -- what ships is the JSON under autotune/data/.")

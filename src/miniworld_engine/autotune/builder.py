@@ -917,7 +917,8 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
                          compile_jobs: int, config_dir: Path | None = None,
                          fill_gaps: bool = False, share_card: bool = False,
                          keep_ir: bool = False, predict: bool = False,
-                         bench_clear_mb: int = 0, bench_rep_ms: int = 0) -> dict:
+                         bench_clear_mb: int = 0, bench_rep_ms: int = 0,
+                         cores: str = "") -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -940,6 +941,18 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     triton_cache.store_binary_only_env(env, keep_ir)
     cmd = [sys.executable, "-u", "-m", "miniworld_engine.autotune.builder",
            "--shard", str(shard), "--compile-jobs", str(compile_jobs), *unit.cmd_args()]
+    if cores:
+        # A slot's own cores, shared with nobody. A unit alternates between compiling on a pool of
+        # processes and MEASURING on one thread, and the measurement is the build's product: with
+        # the node's cores pooled, a unit that is measuring competes with every other unit's
+        # compile workers, and each of those forks a child per chunk, so four units asking for 32
+        # workers put ~256 runnable processes on 128 cores. Measured, one launch cost 21 ms inside
+        # a loaded build against 329 us on an idle card -- and the timer's own step is 1.024 us,
+        # so at that point configs stop being distinguishable from each other.
+        #
+        # The cost is real and is the other half of the trade: while a slot measures, its own
+        # compile cores sit idle and no other slot may borrow them.
+        cmd = ["taskset", "-c", cores, *cmd]
     if share_card:
         # Units sharing a card may compile at the same time -- that is the point -- but must not
         # MEASURE at the same time. One lock file per card, taken per tuning round; see
@@ -988,11 +1001,43 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
             "seconds": round(time.monotonic() - started, 1), "shard": str(shard), "log": str(log)}
 
 
+def _core_slices(slots: int) -> list[str]:
+    """One disjoint core list per slot, from the cores this job was actually given.
+
+    MEASURED AND IT DOES NOT PAY, on the case it was written for. Two units, two cards, 48 cores:
+    pooled 1655 s, pinned 1687 s -- 2% slower, and both arms chose configs whose measured times
+    were identical. The reasoning that motivated it was sound and the arithmetic was not: at
+    `cores / gpus` workers per unit the pool already fits the allocation exactly (24 + 24 = 48),
+    so there is nothing to contend over, and pinning only takes away a slot's ability to borrow
+    the other's cores while it measures.
+
+    The contention that IS real comes from `_compile_chunk` forking a child per chunk, which
+    doubles the process count for as long as a chunk runs -- and that happens inside a slot's own
+    slice too, so a slice does not prevent it. Kept behind `--pin-cores`, default off, because the
+    trade could go the other way on a node whose core count is not a multiple of its cards.
+
+
+    Read from `sched_getaffinity`, not `cpu_count`: under Slurm the job owns a subset, and slicing
+    the machine instead of the allocation would hand a slot cores it may not run on. Returns empty
+    strings when there are fewer cores than slots, which leaves every slot unpinned -- pinning one
+    core per slot would cost more than the contention.
+    """
+    try:
+        allowed = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return [""] * slots
+    if slots < 2 or len(allowed) < 2 * slots:
+        return [""] * slots
+    per = len(allowed) // slots
+    return [",".join(str(c) for c in allowed[i * per:(i + 1) * per]) for i in range(slots)]
+
+
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
               config_dir: Path | None = None, fill_gaps: bool = False,
               units_per_gpu: int = 1, keep_ir: bool = False, predict: bool = False,
-              bench_clear_mb: int = 0, bench_rep_ms: int = 0) -> list[dict]:
+              bench_clear_mb: int = 0, bench_rep_ms: int = 0,
+              pin_cores: bool = False) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit.
 
     ``units_per_gpu`` > 1 puts that many units on each card so their phases interleave. A unit
@@ -1084,7 +1129,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
         for label, why in skipped:
             print(f"    - {label}: {why}", flush=True)
 
-    def worker(device: int) -> list[dict]:
+    def worker(device: int, cores: str = "") -> list[dict]:
         got = []
         while True:
             try:
@@ -1094,7 +1139,8 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             res = _run_unit_subprocess(unit, device, shard_dir, repo, compile_jobs,
                                        config_dir, fill_gaps, share_card=units_per_gpu > 1,
                                        keep_ir=keep_ir, predict=predict,
-                                       bench_clear_mb=bench_clear_mb, bench_rep_ms=bench_rep_ms)
+                                       bench_clear_mb=bench_clear_mb, bench_rep_ms=bench_rep_ms,
+                                       cores=cores)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
@@ -1108,8 +1154,13 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     # One thread per unit SLOT, not per card: `units_per_gpu` slots share each card and pull from
     # the same queue, so a card whose unit is measuring still has a unit compiling.
     slots = [g for g in gpus for _ in range(max(1, units_per_gpu))]
+    slices = _core_slices(len(slots)) if pin_cores else [""] * len(slots)
+    if pin_cores and any(slices):
+        print(f"  [cores] {len(slots)} slot(s), {slices[0].count(',') + 1} core(s) each, "
+              f"shared with no other slot", flush=True)
     with cf.ThreadPoolExecutor(max_workers=len(slots)) as pool:
-        for future in cf.as_completed([pool.submit(worker, g) for g in slots]):
+        for future in cf.as_completed([pool.submit(worker, g, c)
+                                       for g, c in zip(slots, slices, strict=True)]):
             results.extend(future.result())
     return results
 
