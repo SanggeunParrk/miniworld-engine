@@ -117,6 +117,13 @@ _CURRENT: dict = {}
 #: compile of the round pops: this one has to survive to the LAST config, because that is when
 #: the card's bench lock is released.
 _ROUND_LEFT: dict = {}
+#: autotuner id -> the round id, for the whole round. Also separate from _ROUND, and for a reason
+#: that cost a measured 5x: the settled set is keyed on the round, the pool writes those keys, and
+#: the compile guard reads them back for EVERY config -- but _ROUND is popped by the round's first
+#: compile, so reading the id from there gave the first config the real id and every other config
+#: an empty one. Nothing matched, the forkless fast path never fired, and one 2,592-config unit
+#: forked 2,591 children (1,325 s) where it had forked none.
+_ROUND_ID: dict = {}
 
 #: The open, flock-held file for this card's bench lock, plus what it cost. See
 #: :func:`_bench_lock_acquire`.
@@ -1391,7 +1398,9 @@ def install() -> None:
         pruned = _orig_prune(self, kwargs)
         # per autotuner AND per autotune key: rounds interleave across the kernels of a unit, and
         # one kernel is tuned once per key.
-        _ROUND[id(self)] = (list(pruned), _round_id(self, kwargs))
+        rnd = _round_id(self, kwargs)
+        _ROUND[id(self)] = (list(pruned), rnd)
+        _ROUND_ID[id(self)] = rnd
         _ROUND_LEFT[id(self)] = len(pruned)
         # A round is exactly one prune_configs + one sweep of the pruned list for ONE autotune key,
         # so this is where the running best resets. Keeping it per autotuner rather than global:
@@ -1411,8 +1420,7 @@ def install() -> None:
         _CURRENT["id"] = id(self)
         # The armed entry is popped by the first compile of the round, so read the id from
         # whichever of the two still holds it.
-        armed = _ROUND.get(id(self))
-        _CURRENT["round"] = armed[1] if armed else previous_round
+        _CURRENT["round"] = _ROUND_ID.get(id(self), previous_round)
         # One acquire per round, released below when its last config has been timed.
         if id(self) in _ROUND_LEFT:
             _bench_lock_acquire()
@@ -1481,6 +1489,7 @@ def install() -> None:
             # binding it will build.
             rnd = _round_id(self, {**nargs0, **kwargs})
             _ROUND[id(self)] = (list(cfgs0), rnd)
+            _ROUND_ID[id(self)] = rnd
             _CURRENT["id"] = id(self)
             _CURRENT["round"] = rnd
         try:

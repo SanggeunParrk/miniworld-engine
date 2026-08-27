@@ -23,6 +23,8 @@ def _clean():
         s.clear()
     capture._COMPILED_FILE.clear()
     capture._CURRENT_CFG.clear()
+    capture._ROUND.clear()
+    capture._ROUND_ID.clear()
     for k, v in list(capture._COMPILE_T.items()):
         capture._COMPILE_T[k] = type(v)()
     yield
@@ -126,3 +128,36 @@ def test_load_is_idempotent_across_repeated_appends(tmp_path):
     for _ in range(5):
         capture._mark_settled([(_key("k", cfg), True)])
     assert len((tmp_path / "u.compiled").read_text().strip().splitlines()) == 1
+
+
+def test_the_guard_reads_the_same_round_id_the_pool_wrote(tmp_path):
+    """The two halves of the settled key have to agree for the WHOLE round, not just its start.
+
+    The pool writes `<kernel>\\t<round>\\t<sig>` for every config it compiles. The guard rebuilds
+    that key for every config triton asks it to compile, and if the two disagree the fast path
+    never fires and the guard forks a child per config -- which is the cost the fast path exists
+    to remove: a 2,592-config unit forked 2,591 children, 1,325 s, where it had forked none.
+
+    It disagreed for a whole session's worth of runs because the round id was read out of `_ROUND`,
+    which the round's FIRST compile pops. Config one got the real id; every config after it got an
+    empty string.
+    """
+    capture._COMPILED_FILE.append(tmp_path / "u.compiled")
+    autotuner = object()
+    rnd = "512|torch.bfloat16"
+    capture._ROUND[id(autotuner)] = ([], rnd)
+    capture._ROUND_ID[id(autotuner)] = rnd
+    try:
+        capture._ROUND.pop(id(autotuner))          # what the round's first compile does
+        assert capture._ROUND_ID.get(id(autotuner)) == rnd, (
+            "the round id must outlive the entry the first compile pops")
+
+        cfg = _Cfg(32)
+        pool_key = f"k\t{rnd}\t{capture._cfg_sig(cfg)}"
+        capture._mark_settled([(pool_key, True)])
+        guard_key = f"k\t{capture._ROUND_ID.get(id(autotuner), '')}\t{capture._sig_line({**cfg.kwargs, 'num_warps': cfg.num_warps, 'num_stages': cfg.num_stages})}"
+        assert guard_key == pool_key
+        assert guard_key in capture._COMPILE_OK, "the guard would fork for a config the pool built"
+    finally:
+        capture._ROUND_ID.pop(id(autotuner), None)
+        capture._COMPILED_FILE.clear()
