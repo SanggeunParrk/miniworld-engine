@@ -84,8 +84,24 @@ class Settings:
     #: the budget. Both are fitted per kernel and validated per kernel; a kernel neither can
     #: describe compiles its whole grid, which is what a build did before either existed.
     #:
-    #: Only a build ever sets this. It changes what a build's cache CONTAINS, so it is off until
-    #: an A/B on real units shows the chosen configs unchanged.
+    #: Only a build ever sets this. Measured on an A6000, four ops, 7 (op, bucket) pairs, each arm
+    #: from a cold cache:
+    #:
+    #:     arm wall      1166 s -> 948 s      19% faster
+    #:     compile        2229 -> 1208 s      46% less
+    #:     one op         2,592 configs -> 1,116 ruled out, compile 763 s -> 247 s
+    #:     the op with nothing to rule out    0 ruled out, and the kernel reported undescribable
+    #:
+    #: And the control the comparison needed, because the instrument is coarse here: running the
+    #: SAME settings twice disagreed about 3 of the 7 buckets, worst penalty 12.5%. With the
+    #: predictor on it disagreed about 6 of 7 -- worst penalty also 12.5%, which is 8,192 ns
+    #: against 9,216 ns, one step of the event timer's own 1.024 us. The disagreement is the same
+    #: KIND and the same SIZE as the instrument's disagreement with itself; there are more of them
+    #: because ruling a config out changes which of several TIED configs is drawn.
+    #:
+    #: Still default-off: seven buckets on one card is a thin sample for a default, and a full
+    #: build compares 1,244. Turn it on for a build and compare that build's cache against the
+    #: shipped one -- that is the evidence a default needs.
     predict_unusable: bool = False
     #: Megabytes zeroed before each timed iteration, to evict the previous one from L2. 0 leaves
     #: triton's own buffer, which is 256 MB on every card.
