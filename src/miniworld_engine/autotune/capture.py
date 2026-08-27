@@ -134,7 +134,7 @@ _BENCH_LOCK: dict = {"fh": None, "waited": 0.0, "held": 0.0, "since": 0.0, "roun
 #: number the build printed was ``fn.run``, and the first compile of a round happens INSIDE
 #: fn.run, so fn.run was carrying the whole precompile pool. Read as "bench", it said the GPU was
 #: 1.2% of the build; measured here it is 20%.
-_BENCH_T: dict = {"calls": 0, "seconds": 0.0}
+_BENCH_T: dict = {"calls": 0, "seconds": 0.0, "budget": ""}
 
 #: Where a compile() call actually spends its time. The guard forks a child, waits for it, and then
 #: recompiles in-process expecting a cache hit -- three costs that look like one. They have
@@ -263,6 +263,67 @@ def _mark_settled(keys_ok) -> None:
                 fh.write("".join(r + "\n" for r in rows))
         except OSError:
             pass
+
+
+def _bench_clear_buffer():
+    """The buffer `do_bench` zeroes before each timed iteration, sized to `settings`.
+
+    Triton's is 256 MB on every card, which is what the largest L2 in its fleet needs. On a 6 MB
+    A6000 that is 40x the eviction and it dominates the measurement: 390 us to zero against 10 us
+    for the kernel being timed. Anything at or above twice the card's L2 evicts just as completely.
+    """
+    import torch
+
+    mb = int(settings_now().bench_clear_mb)
+    return torch.empty(mb * 2**20 // 4, dtype=torch.int, device="cuda")
+
+
+def settings_now():
+    from miniworld_engine import settings
+
+    return settings.current()
+
+
+def _bench_driver():
+    """The active triton driver. Its own function so a test can stand in for it off-GPU."""
+    import triton.runtime
+
+    return triton.runtime.driver.active
+
+
+def _use_a_smaller_bench_budget(autotuner) -> None:
+    """Point one autotuner at a cheaper `do_bench`, if the build asked for one.
+
+    The two knobs are ONE decision and this is where that is enforced. `do_bench` chooses its
+    repeat count to fill a time budget, so shrinking the clear buffer alone buys more iterations
+    rather than less time -- measured on an idle A6000, 16 MB at triton's 100 ms budget ran 4,243
+    launches in 145 ms against 348 in 104 ms. Together, 16 MB at 10 ms ran 452 launches in 15 ms:
+    seven times cheaper than the default, with thirty percent more samples.
+
+    Never raises: a build that cannot install this benches the way it always did.
+    """
+    cur = settings_now()
+    mb, rep = int(cur.bench_clear_mb), int(cur.bench_rep_ms)
+    if not mb and not rep:
+        return
+    if not mb or not rep:
+        print(f"  [bench] bench_clear_mb={mb} and bench_rep_ms={rep} -- these are one decision "
+              f"and one of them is unset; benching unchanged", flush=True)
+        return
+    try:
+        import triton.testing
+
+        # A monkeypatch on a third-party object, like the two above it: the buffer belongs to the
+        # backend driver and triton offers no knob for it. Both halves land or neither does -- the
+        # budget alone is the row of the table that came out SLOWER.
+        _bench_driver().get_empty_cache_for_benchmark = _bench_clear_buffer
+        warmup = max(1, rep // 4)      # triton's own 25:100 ratio, kept
+        autotuner._do_bench = lambda call, quantiles: triton.testing.do_bench(
+            call, warmup=warmup, rep=rep, quantiles=quantiles)
+        _BENCH_T["budget"] = f"{mb} MB clear, {warmup}/{rep} ms"
+    except Exception as exc:
+        print(f"  [bench] could not install the smaller budget ({type(exc).__name__}: {exc}); "
+              f"benching unchanged", flush=True)
 
 
 def _bench_lock_acquire() -> None:
@@ -411,6 +472,7 @@ def _install_launch_probes() -> None:
                     _LAUNCH_T["prehook_s"] += time.monotonic() - t
 
             self.pre_hook = pre_hook
+            _use_a_smaller_bench_budget(self)
         return orig_at_run(self, *a, **k)
 
     Autotuner.run = at_run
@@ -437,7 +499,8 @@ def precompile_summary() -> str:
         # `fn.run` is NOT this number: a round's first compile happens inside it. Print both, and
         # print what the pool did apart from either, so no one has to infer the split again.
         pool_and_guard = p["seconds"] + c["forkless_s"] + c["fork_s"] + c["wait_s"] + c["parent_s"]
-        budget += (f"\n  [bench] {b['calls']} configs timed {b['seconds']:.0f}s"
+        shape = f" [{b['budget']}]" if b["budget"] else ""
+        budget += (f"\n  [bench] {b['calls']} configs timed {b['seconds']:.0f}s{shape}"
                    f" | compile {pool_and_guard:.0f}s (pool {p['seconds']:.0f}s"
                    f" + guard {pool_and_guard - p['seconds']:.0f}s)")
     pr = _PREDICT

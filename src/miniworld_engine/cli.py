@@ -626,7 +626,9 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
                                 resume=args.resume, config_dir=directory,
                                 units_per_gpu=getattr(args, "units_per_gpu", 1),
                                 keep_ir=getattr(args, "keep_ir", False),
-                                predict=getattr(args, "predict_unusable", False))
+                                predict=getattr(args, "predict_unusable", False),
+                                bench_clear_mb=getattr(args, "bench_clear_mb", 0),
+                                bench_rep_ms=getattr(args, "bench_rep_ms", 0))
     return _merge_built_shards(args, results)
 
 
@@ -744,7 +746,9 @@ def cmd_build(args: argparse.Namespace) -> int:
                                   config_dir=directory, fill_gaps=fill_gaps,
                                   units_per_gpu=getattr(args, "units_per_gpu", 1),
                                   keep_ir=getattr(args, "keep_ir", False),
-                                  predict=getattr(args, "predict_unusable", False))
+                                  predict=getattr(args, "predict_unusable", False),
+                                  bench_clear_mb=getattr(args, "bench_clear_mb", 0),
+                                  bench_rep_ms=getattr(args, "bench_rep_ms", 0))
         results += stage
         # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
         # cache, and it can only see pass 1 once pass 1's shards are folded in.
@@ -1126,6 +1130,13 @@ def build_parser() -> argparse.ArgumentParser:
                           "prove cannot pay off -- over the card's shared memory, or past the "
                           "compile budget. Fitted and validated per kernel; a kernel neither "
                           "model describes compiles its whole grid.")
+    bld.add_argument("--bench-clear-mb", type=int, default=0,
+                     help="MB zeroed before each timed iteration (0 = triton's 256, which is 40x "
+                          "an A6000's L2 and 97%% of a bench iteration). Set with --bench-rep-ms: "
+                          "alone it buys more iterations, not less time.")
+    bld.add_argument("--bench-rep-ms", type=int, default=0,
+                     help="ms of measurement per config (0 = triton's 100). 16 MB at 10 ms was "
+                          "7x cheaper than the default with 30%% more samples, on one kernel.")
     bld.add_argument("--prune-cache", action="store_true",
                      help="after a successful merge, empty $TRITON_CACHE_DIR. It is a build "
                           "artifact -- what ships is the JSON under autotune/data/.")

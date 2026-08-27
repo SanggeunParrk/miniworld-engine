@@ -87,6 +87,26 @@ class Settings:
     #: Only a build ever sets this. It changes what a build's cache CONTAINS, so it is off until
     #: an A/B on real units shows the chosen configs unchanged.
     predict_unusable: bool = False
+    #: Megabytes zeroed before each timed iteration, to evict the previous one from L2. 0 leaves
+    #: triton's own buffer, which is 256 MB on every card.
+    #:
+    #: 256 MB is sized for the largest L2 in the fleet. On a 6 MB A6000 it is 40x more than the
+    #: eviction needs, and it dominates: measured on an idle card, zeroing it takes 390 us against
+    #: 10 us for the kernel being timed -- 97% of a bench iteration.
+    #:
+    #: MUST move together with `bench_rep_ms`. `do_bench` picks its repeat count to fill a time
+    #: budget, so a cheaper iteration alone just buys more iterations: 16 MB at triton's 100 ms
+    #: budget ran 4,243 launches in 145 ms against 348 in 104 ms -- slower. 16 MB at 10 ms ran 452
+    #: launches in 15 ms: seven times cheaper than the default WITH thirty percent more samples.
+    bench_clear_mb: int = 0
+    #: Milliseconds of measurement per config. 0 leaves triton's 100 (with 25 ms of warmup); a
+    #: value here also scales the warmup by the same 1:4. See `bench_clear_mb` -- these two are
+    #: one decision.
+    #:
+    #: Changing either changes the number a config REPORTS -- 5.1 us against 8.2 us for the same
+    #: kernel in the measurement above -- so it changes what the build might choose. Off until an
+    #: A/B shows the chosen configs unchanged.
+    bench_rep_ms: int = 0
     #: Path to a per-card lock file a unit holds while it MEASURES, so two units sharing a card
     #: never measure at once (their readings would both drift). Empty = this unit has the card to
     #: itself. Set by the build when --units-per-gpu > 1; see autotune.capture.
