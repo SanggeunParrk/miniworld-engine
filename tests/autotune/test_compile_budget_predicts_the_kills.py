@@ -44,6 +44,7 @@ from miniworld_engine.autotune import compile_budget, smem_log, viability
 
 DATA = Path(__file__).parent / "compile_budget"
 BUDGET = 60.0
+LIMIT = 101376   # the A6000 these were measured on
 
 
 def _parse(sig: str) -> dict | None:
@@ -210,3 +211,50 @@ def test_tightening_the_rule_trades_away_the_coverage(scored) -> None:
     assert caught < loose / 2, (
         f"stage-equality catches {caught} of {kills} against {loose} -- if it no longer costs "
         f"most of the coverage, take it: it removes the boundary false positives")
+
+
+def test_every_config_it_wrongly_ruled_out_could_never_have_been_CHOSEN() -> None:
+    """The direct check the module docstring said was missing, on the kernel it was missing for.
+
+    `fused_sigmoid_gate_fwd_kernel`, re-run on an A6000 with shared-memory readings AND compile
+    times AND bench results for the same grid (job fpcheck, 2,596 configs). The rule ruled out 177
+    of them, 175 correctly; the four it got wrong all compiled -- 43, 44, 55 and 59 s -- and not
+    one of them could have been chosen:
+
+        59 s    49,152 B      fits the card, and produced no bench time at all
+        55 s   368,640 B      3.6x the card's 101,376 -- cannot launch
+        44 s   270,336 B      2.7x  -- cannot launch
+        43 s   405,504 B      4.0x  -- cannot launch
+
+    Three of the four are the shared-memory predictor's business and it rules them out
+    independently. The fourth fits and still never benched: 64 threads for a 256x128 tile is more
+    registers than a thread has, so it fails at launch for the same reason it took 59 s to
+    compile.
+    """
+    # Its OWN directory. `smem_log.read` merges every log in a directory by kernel name, and this
+    # kernel also appears in the eight-kernel fixture beside it from a different run -- merged,
+    # the two grids make a kernel that never existed and the false-positive count triples.
+    one = DATA / "a6000_one_grid"
+    ms, killed, shared = (smem_log.compile_ms(one), smem_log.killed(one), smem_log.read(one))
+    name = "fused_sigmoid_gate_fwd_kernel"
+    assert shared.get(name), "the fixture no longer carries shared-memory readings for this kernel"
+    good = [(c, v / 1000) for s, v in ms[name].items() if (c := _parse(s)) and "num_warps" in c]
+    kills = [c for s in killed[name] if (c := _parse(s)) and "num_warps" in c]
+    configs = [c for c, _ in good] + kills
+    axes = viability.tile_axes(configs)
+
+    def key(c):
+        return (*(c[a] for a in axes), c["num_warps"], c["num_stages"])
+
+    def sig(c):
+        return ",".join(f"{a}={c[a]}" for a in sorted(c))
+
+    probes = {key(p) for p in viability.choose_probes(configs)}
+    seen = [c for c in kills if key(c) in probes]
+    skip = {key(c) for c in compile_budget.classify(configs, seen, holds=True)["skip"]}
+    fp = [(c, v) for c, v in good if key(c) in skip]
+    assert fp, "no false positives left in the fixture; this test proves nothing"
+    fits = [c for c, _ in fp if shared[name].get(sig(c), 0) <= LIMIT]
+    assert len(fits) <= 1, (
+        f"{len(fits)} of {len(fp)} wrongly-ruled-out configs fit the card; when this was written "
+        f"it was one, and the other three needed 2.7-4.0x the card's shared memory")

@@ -89,12 +89,28 @@ config that took 29-60 s to compile -- median 53 -- and that is the SAME registe
 twice: ptxas grinds looking for an allocation, and the overflow it cannot avoid is spilled to
 memory at run time.
 
-So the two are not merely correlated. Joined against the bench over three (op, bucket) pairs,
-4,405 configs (`tests/autotune/compile_budget/bench_vs_compile.csv.gz`), every config compiling
-over 30 s placed in the bottom 7-16% by measured time, and the best-placed one was still 6.4x,
-6.4x and 32.7x off its bucket's fastest config. Not one came close to being chosen. Pinned in
-`test_a_slow_compile_never_benches_well`; if it ever fails, these false positives have started to
-cost something and the tightening priced out in the other test module is what to reach for.
+So the two are not merely correlated. Joined against the bench over five (op, bucket) pairs,
+5,526 configs (`tests/autotune/compile_budget/bench_vs_compile.csv.gz`), every config compiling
+over 30 s placed in the bottom 2-16% by measured time, and the best-placed one was still 6.4x to
+32.7x off its bucket's fastest config.
+
+And checked directly, on one kernel where the shared-memory readings, the compile times and the
+bench results all exist for the same grid (`a6000_one_grid/`, 2,596 configs). The rule ruled out
+177, of which 175 were really killed. All four it got wrong compiled -- 43, 44, 55, 59 s -- and
+not one of them could have been CHOSEN:
+
+    59 s     49,152 B    fits the card, and still produced no bench time
+    55 s    368,640 B    3.6x the card's 101,376 -- cannot launch
+    44 s    270,336 B    2.7x
+    43 s    405,504 B    4.0x
+
+Three are the shared-memory predictor's business and it rules them out independently. The fourth
+fits and never benched anyway: 64 threads for a 256x128 tile is more registers than a thread has,
+which is why it failed at launch AND why it took 59 s to compile.
+
+On that same run the gate refused two of four kernels outright -- `_dgrad_epi` and
+`_dx_swiglubwd_kernel`, both with killed probes available -- and they skipped nothing. That is the
+gate working, not failing.
 
 `dominance_holds` gates on half the budget and can only check the PROBE points, so a violation the
 sample does not contain reaches `classify` unseen -- one of the 35 came in at 29 s. That is the
