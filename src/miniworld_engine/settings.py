@@ -104,8 +104,23 @@ class Settings:
     #: one decision.
     #:
     #: Changing either changes the number a config REPORTS -- 5.1 us against 8.2 us for the same
-    #: kernel in the measurement above -- so it changes what the build might choose. Off until an
-    #: A/B shows the chosen configs unchanged.
+    #: kernel -- and an A/B has now shown that it changes what the build CHOOSES, for the worse.
+    #:
+    #: 16 MB at 10 ms, four units, against the same units unchanged: five of seven buckets picked a
+    #: different config, and scored on the unchanged arm's own measurements those picks were 8%,
+    #: 13%, 21%, 25% and 40% slower. The winner was never removed -- it was benched every time and
+    #: placed 8th, 11th, 17th and 44th.
+    #:
+    #: The mechanism is the one that makes the clear expensive in the first place. Zeroing 256 MB
+    #: takes 390 us, which is long enough for the CPU to stay ahead of the card, so the events
+    #: bracket the kernel. Zeroing 16 MB takes ~24 us, the launch loop becomes the bottleneck, and
+    #: the events bracket the LAUNCH GAP instead -- every fast kernel reads about 8.19 us, which is
+    #: a multiple of the timer's own 1.024 us step, and configs stop being distinguishable.
+    #:
+    #: So this pair is not the way to make benching cheaper. Two things that might be: cut
+    #: `bench_rep_ms` while LEAVING the clear alone, which shortens the measurement without
+    #: changing what it measures; or `use_cuda_graph`, which removes the launch loop from the
+    #: measurement entirely. Neither is measured yet.
     bench_rep_ms: int = 0
     #: Path to a per-card lock file a unit holds while it MEASURES, so two units sharing a card
     #: never measure at once (their readings would both drift). Empty = this unit has the card to
