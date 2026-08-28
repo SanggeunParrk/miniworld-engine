@@ -453,65 +453,79 @@ but at what per-config cost is exactly the unmeasured part.
 
 
 
-### G5 -- 78 kernels still key on shape axes standing beside the shape key
+### G5 -- DONE -- the shape key carries the whole shape
 
-*What is wrong:* `K`, `ND`, `H`, `HEAD_DIM`, `N`, `D` are SHAPE -- dimensions of the tensors the
-kernel reads, exactly as the row count is. They stood in `key=[...]` as separate entries next to
-`shape_key`, as though they were a different kind of thing, and the name `shape_key` then claimed
-the whole idea for one axis. `shape_key` is the one parameter that exists ONLY to be keyed on
-(a404fb9: asserted to be read in no body), which makes it the right place to carry all of it.
+*What was wrong:* `K`, `ND`, `H`, `HEAD_DIM`, `N`, `D` are SHAPE -- dimensions of the tensors the
+kernel reads, exactly as the row count is -- but they stood in `key=[...]` as separate entries
+beside `shape_key`, as though they were a different kind of thing. `shape_key` is the one parameter
+that exists ONLY to be keyed on (a404fb9: asserted to be read in no body), which makes it the right
+place to carry all of it.
 
-*The mechanism, already in:* `autotune/shape_key.pack`, and the three bucket helpers take the axes
-as keywords -- `atom_key(L, H=H, HEAD_DIM=D)`. Two properties, both of them failure modes this repo
-has already paid for:
+*Done.* 87 of 88 autotune kernels, across nine families:
 
-  * axes pack by SORTED NAME, so two launchers cannot disagree about what a positional argument
-    meant -- that disagreement is 3d47a78 and 7c16d16;
-  * the axis NAMES are folded in, so a launcher naming a different set MISSES rather than
-    colliding. 6948c77 cost 1.73x because a lossy key collided.
+    key entries   238 -> 111        shape axes   122 -> 2        flags   29 -> 22
+    key length    was 1:6  2:38 3:29 4:8 5:5 6:2
+                  now 1:72 2:10 3:5  4:1
 
-Passing no axes returns the old value unchanged, so unconverted kernels keep working.
+The two remaining shape axes are `transition_fold_triton`'s `['N', 'K']`, which is correct and
+stays: that kernel reads only the WEIGHTS and never the activation, so N and K are its whole shape
+and it has no `shape_key` at all (6e1d9e8).
 
-*The guard:* `tools/key_gaps.py` reads the launches, takes the keyword axes of each `shape_key=`
-expression, and INTERSECTS across every launch of that kernel -- an axis counts as keyed only if
-EVERY launcher folds it. One site that forgets makes the kernel report the gap again, which is what
-the cache does. Scoped to the kernel's family, because four kernels are named `_attn_fwd`.
+*The mechanism:* `autotune/shape_key.pack`, with the three bucket helpers taking the axes as
+keywords -- `atom_key(L, H=H, HEAD_DIM=D)`. Axes pack by SORTED NAME, so two launchers cannot
+disagree about what a positional argument meant (3d47a78, 7c16d16 were exactly that), and the axis
+NAMES are folded in, so a launcher naming a different set MISSES rather than colliding -- 6948c77
+cost 1.73x because a lossy key collided. Passing no axes returns the old value unchanged.
 
-*Done:* augmented_attention (4 kernels, 7 launch sites). Plus, from the same reading of the bodies,
-`D` deleted from 4 kernels (= K, the CUDA twin asserts it), `A`/`B` from 2, USE_BF16/USE_FP16 from
-`adaln_bwd_input_kernel` (its four `tl.dot` hardcode `input_precision="ieee"`), the five pure-store
-flags recorded in `key_gaps_allowed.csv`, and `(n, N)` -> `(K, ND)` in `transition_fwd_kernel`.
+*The guard, and what it caught.* `tools/key_gaps.py` reads the launches, takes the axes of each
+`shape_key=` expression and INTERSECTS them across every launch of a kernel: an axis counts as keyed
+only if EVERY launcher folds it. Four holes in it were found by the families themselves, each one a
+way for a forgotten site to pass silently:
 
-    key entries   238 -> 223      shape axes   122 -> 114      flags   29 -> 22
+    conditional  `both_key(M, K=K) if shape_key is None else pack(shape_key, K=K)`   family 2
+    aliased      `import _ln_bwd_persistent as _ln_bwd_persistent_jit`               family 3
+    positional   `_shape_key(shape_key, M)` passed by position, not keyword           family 4
+    runtime arg  an axis that is not `tl.constexpr` at all -- outside its reach       family 5
 
-*Remaining, in the order to do it -- launch-site count is the cost, not kernel count:*
+The first three are fixed in the tool (7e2a32e and the family commits) and verified by removing one
+site's fold and watching that kernel reappear. The fourth cannot be: the tool checks constexprs, and
+`_bwd_elem_kernel`'s `N` is a runtime argument. It was found by reading, and then by a one-off sweep
+-- every axis each key has LOST since f3ca735 against the axes its launches now fold -- which also
+found `checks/gated_projection.py`'s backward site, folded in neither family 1 nor 5.
 
-| # | family | kernels | launch sites | axes |
-|---|--------|--------:|-------------:|------|
-| 1 | tm1, tm2, fused_ln_mask, gated_projection | 7 | 12 | N, D, R |
-| 2 | layernorm_linear | 9 | 9 | K, N, NH |
-| 3 | layernorm | 4 | 15 | D, N |
-| 4 | transition | 9 | 12 | K, N, ND |
-| 5 | adaln | 12 | 14 | K, K2, N, NC, NX |
-| 6 | conditioned_transition | 14 | 14 | D, DC, K, N, ND, ND2 |
-| 7 | trimul_inproj | 11 | 16 | D, H, H2, K, N |
-| 8 | bias_only_attention | 5 | 22 | DH, H, HEAD_DIM, N |
-| 9 | triangle_attention | 7 | 40 | H, HEAD_DIM |
-|   | **total** | **78** | **154** | |
+Resolution is by IMPORT, not by directory or by name: four kernels are called `_attn_fwd`,
+`gated_projection_gate_gemm_triton` is DEFINED in `bias_only_attention/`, and
+`layernorm_linear/triton/mmajor_bwd.py` launches a `layernorm` kernel.
 
-Families 1-6 are mostly one launch site per kernel (53 of the 78 kernels have exactly one), so they
-are a line each. 8 and 9 are last on purpose: `_attn_bwd_preprocess` is launched from 10 places in
-each, `_attn_fwd` from 6, and those are the sites 3d47a78 and 7c16d16 were about. The audit's
-intersection rule is what makes them safe to do at all -- a missed site fails the check rather than
-silently writing a key nobody reads.
+*Open, from the same reading of the bodies:* five flags are kept with no measurement either way --
+`HAS_W`, `HAS_SB`, `HAS_BIAS`, `HAS_ROWSCALE`, `FROM_PREACT`. Each adds a row-vector load, broadcast
+across the tile: small against an (M, N) tile, but not nothing. What would settle them is the
+comparison SAVE_GATE got -- same shape, both flag values, same card -- which needs a cache holding
+both values, which the next full build produces.
 
-One commit and one GPU verification per family, so a break names its family.
+*Next:* the cache must be rebuilt on the new keys. Every shipped entry is stale by construction.
 
-*Open judgement, not blocked on the above:* five flags are kept for now with no measurement either
-way -- `HAS_W`, `HAS_SB`, `HAS_BIAS`, `HAS_ROWSCALE`, `FROM_PREACT`. Each adds a row-vector load,
-broadcast across the tile: small against an (M, N) tile, but not nothing. What would settle them is
-the comparison SAVE_GATE got -- same shape, both flag values, same card -- which needs a cache that
-holds both values, which the next full build produces.
+### G6 -- the miss fallback is unmeasured on the kernels it exists for
+
+`heuristic_subset` could not launch at all on three adaln backward kernels: ranking by distance
+from the middle of every block axis puts every axis at its middle AT ONCE, the offsets compound,
+and all 24 candidates land in the largest-tile corner. Measured on an A5000 with a stale cache,
+`adaln_bwd_dw_triton` asked for 294,912 B of shared memory against a 101,376 B limit -- 2.9x, with
+no launchable config in the subset. Fixed in 72c131b by reserving a quarter of the cap for the
+smallest tiles, chosen from the same industry centre so the existing test still holds.
+
+*What is still open:* the fix makes the subset launchable; it does not say what it costs. The
+docstring's claim -- warps=4/stages=2 lands within 5% of the full-grid winner in 83% of buckets --
+was measured for the old subset, over this repo's 374-bucket sweep. Giving a quarter of the cap to
+the smallest tiles cannot improve that number and nobody has re-measured it.
+
+The measurement is cheap and the data already exists: for each bucket in a built cache, compare the
+full-grid winner against the best of `heuristic_subset(grid)` under both rules. It needs a cache
+built on the current keys, which is the same prerequisite as everything else here.
+
+Worth doing at the same time: the three kernels found this by dying, which means no test walks the
+fallback path. `tests/autotune` exercises `heuristic_subset` on synthetic configs, not on a real
+grid against a real shared-memory limit.
 
 
 ---
