@@ -98,9 +98,14 @@ SHAPES_BY_LEVEL: dict[str, tuple[int, ...]] = {
 }
 
 
-#: Radix the packer uses per axis. Every width this repo launches is far below it (the largest is
-#: ND=1536), and :func:`pack` refuses anything that is not, because a width at or above the radix
-#: would carry into its neighbour's digit and two different shapes would share one key.
+#: Radix the packer uses per axis. :func:`pack` refuses any axis at or above it, because a width
+#: that large would carry into its neighbour's digit and two different shapes would share one key.
+#:
+#: The ceiling this has to clear is not a fixed number: `driver_width` makes the base width a knob,
+#: and a family's widest derived axis scales with it -- `ND2 = 8 * base` in conditioned_transition
+#: is 1,024 at base 128 and 3,072 at 384, but exactly 4,096 at 512, which is a DECLARED
+#: `DIM_BUCKETS` entry. So the radix bounds the sweep as much as the sweep bounds the radix; raise
+#: it (and re-check the int64 budget in `pack`) before driving a width that widens an axis past it.
 _RADIX = 4096
 
 
@@ -137,7 +142,36 @@ def pack(base: int, **axes: int) -> int:
                 f"_RADIX and re-tune, or check that {name} is really a width."
             )
         value = value * _RADIX + w
-    return value * _RADIX + (_zlib.crc32(",".join(sorted(axes)).encode()) & (_RADIX - 1))
+    value = value * _RADIX + (_zlib.crc32(",".join(sorted(axes)).encode()) & (_RADIX - 1))
+    # The per-axis check above is not the whole bound. `shape_key` reaches the kernel as a RUNTIME
+    # scalar argument, so the assembled value has to stay an int64: the budget is
+    # bits(base) + 12 * (axes + 1), and `both_key`'s top bucket (1,048,576 rows) leaves room for
+    # two axes at 57 bits and overflows at three (69). Nothing folds three axes onto a row bucket
+    # today -- the three-axis folds are all atom-keyed, at 61 -- but "today" is one driver width
+    # away from being wrong, and an int64 that wraps is a COLLISION, which is the one failure this
+    # function exists to make impossible.
+    if value.bit_length() > 63:
+        raise ValueError(
+            f"shape key {value} needs {value.bit_length()} bits: base {base} with {len(axes)} axis "
+            f"/axes {sorted(axes)} does not fit an int64, and `shape_key` is a runtime kernel "
+            f"argument. Fold fewer axes (a derived one is implied by its base) or narrow _RADIX."
+        )
+    return value
+
+
+def unpack_base(value: int, n_axes: int) -> int:
+    """The row/length bucket inside a key :func:`pack` built, given how many axes it folded.
+
+    A coverage check has the two halves in different forms: the CACHE holds the packed key a launch
+    recorded, while a declared work list holds the bare bucket a unit will drive. Comparing them
+    directly reports every folded op as missing -- which is the whole cache, once every op folds.
+
+    ``n_axes`` is not guessable from the value: the same integer is a different base for a different
+    axis count. Read it from the kernel, which is what ``tools.key_gaps`` already resolves.
+    """
+    if n_axes <= 0:
+        return int(value)
+    return int(value) // (_RADIX ** (n_axes + 1))   # + 1 for the axis-name checksum digit
 
 
 def _floor_clamp(value: int, buckets: tuple[int, ...]) -> int:

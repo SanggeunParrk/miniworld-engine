@@ -9,11 +9,21 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import BF16, TensorKw, _grad, dev, ragged
+from miniworld_engine.kernels.drivers import (
+    BF16,
+    TensorKw,
+    _grad,
+    dev,
+    driver_width,
+    ragged,
+)
 from miniworld_engine.kernels.drivers.triangle_attention import D, H, L
 
-DH = ragged(128)          # d_hidden: gate/out_r width == the gate-out GEMM's contraction
-DP = ragged(128, by=5)    # d_pair: the gate-out GEMM's output width N == wo.shape[0]
+# Both follow the swept width, and they have to move TOGETHER with the imported `H`: H is
+# d_pair // head dim, so an H that says d_pair=384 beside a DP that says 128 describes no d_pair
+# the model ever runs, and DH is folded into the shape key.
+DH = ragged(driver_width(128))          # d_hidden: gate/out_r width == the gate-out GEMM's contraction
+DP = ragged(driver_width(128), by=5)    # d_pair: the gate-out GEMM's output width N == wo.shape[0]
 
 
 def _bias_only_vb() -> tuple[torch.Tensor, ...]:

@@ -91,8 +91,15 @@ ROWS = ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR)  # M: pair rows L*L, o
 #: times.
 SHAPE_KEY = both_key(ROWS)
 N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, not a tile extent
-K_SMALL = ragged(driver_width(128))  # K: the AF3 transition d; ragged -> 125
-K_LARGE = ragged(2 * driver_width(128))  # K for the ktiled kernel's K > _B2B_MAX_K(=128) reason to exist -> 253
+# K_SMALL does NOT follow the swept width, and that is not an oversight. `transition_b2b` is
+# dispatched only when `K <= _B2B_MAX_K` (128): above it the full-K-row load plus the weight tiles
+# overflow shared memory, which is why the K-tiled variant exists. Driving this kernel at the swept
+# width would tune a bucket the dispatcher never routes to it, and at 384 it would not tune at all
+# -- it would die OutOfResources at every length.
+K_SMALL = ragged(128)  # K: the AF3 transition d, and the b2b path's ceiling; ragged -> 125
+# The ktiled kernel is the one that sweeps: it exists FOR K > _B2B_MAX_K, so it follows the width
+# whenever that clears the threshold, and otherwise takes the smallest width that does.
+K_LARGE = ragged(max(256, driver_width(256)))  # -> 253 at the default width
 ND_SMALL = N_EXPAND * K_SMALL  # expand/gate width for the K_SMALL paths: 512 -> 500
 
 

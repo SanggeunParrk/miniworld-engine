@@ -712,7 +712,11 @@ _B2B_MAX_K = 128
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_bwd_swiglu_recompute_triton"),
-                 key=['shape_key', 'NORMALIZE'])
+# STORE_H IS in the key: its guarded store is a whole extra (M, ND) tensor on a kernel whose
+# other five stores are the outputs. STACK_DAB is NOT, and the difference is volume, not shape:
+# both of its branches store the SAME two tiles with the same masks, into one 2*ND-wide buffer or
+# two ND-wide ones, so only the addressing changes.
+                 key=['shape_key', 'NORMALIZE', 'STORE_H'])
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,

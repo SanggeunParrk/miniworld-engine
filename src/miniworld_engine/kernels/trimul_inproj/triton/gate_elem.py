@@ -37,18 +37,14 @@ from miniworld_engine.autotune.shape_key import length_of, pack, token_key
 
 
 
-# SAVE_GATE belongs in the key for the same reason ADD_RESIDUAL/USE_DROPOUT already do: it is a
-# compile-time branch that adds a full (M, N) store (the saved gate) to an elementwise kernel whose
-# cost IS its memory traffic -- training (return_gate=True) writes 2 tensors, inference 1.
+# SAVE_GATE IS in the key here, unlike `adaln_gemm_gate_triton` where the same flag was measured
+# out of it. The difference is what the kernel is: `_gemm_gate_kernel` has two `tl.dot`, so the
+# extra store is noise against the GEMM and 12 of 12 comparisons chose the same config to the
+# nanosecond. This one has ZERO `tl.dot` -- it is elementwise, its cost IS its memory traffic, and
+# the guarded store is a whole extra (M, N) tensor: training (return_gate=True) writes two,
+# inference one. "Pure store" is the right reading of the BODY and the wrong reading of the COST.
 @triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"),
-# SAVE_GATE is NOT in the key. Its guarded block is one `tl.store` of a tile the kernel already
-# holds in registers -- same iteration space, same tile shapes, same register-resident working
-# set -- so it cannot move which config is fastest, and keying on it doubled this op's buckets to
-# measure the same thing twice. Measured on the shipped cache, both cards, all six shape buckets:
-# SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond,
-# 12 comparisons out of 12. Contrast SAVE_XN in transition/triton/fused.py, which looks like the
-# same kind of flag and is not: its else path re-reads x over a full K loop, so it stays keyed.
-                 key=['shape_key', 'ADD_RESIDUAL', 'USE_DROPOUT'])
+                 key=['shape_key', 'ADD_RESIDUAL', 'USE_DROPOUT', 'SAVE_GATE'])
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
                      N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, SAVE_GATE: tl.constexpr,

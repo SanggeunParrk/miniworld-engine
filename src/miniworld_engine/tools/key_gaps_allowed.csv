@@ -1,7 +1,7 @@
 op,param,reason
 adaln_fwd_triton,USE_LOW,"pure function of X's dtype (use_low = x.dtype in (bf16,fp16)) and the cache keys dtype separately and more finely; inference.py never consults autocast so they cannot diverge"
 layernorm_fwd_rowscale_triton,EPS,"numeric tolerance: only use is rstd = 1/sqrt(var + EPS); gates no branch, changes no trip count"
-layernorm_fwd_saveact_triton,eps,"numeric tolerance: only use is rstd = 1/sqrt(var + eps)"
+layernorm_fwd_saveact_triton,eps,numeric tolerance: only use is rstd = 1/sqrt(var + eps)
 layernorm_bwd_split_mmajor_triton,VEC_HINT,"sole launch site passes N=K and VEC_HINT=(K<=128), so VEC_HINT == (N<=128) and N is already keyed"
 layernorm_linear_bwd_fp32_triton,USE_DOT,"sole launch site passes USE_DOT=(nh>=MIN_TL_DOT_DIM) with NH=nh, so it is a pure function of the keyed NH"
 layernorm_bwd_foldstats_triton,NUM_REPLICAS,"64 when privatizing and 1 otherwise, nothing can vary it independently; a pure function of the keyed PRIVATIZE_DGDB"
@@ -9,26 +9,23 @@ transition_fwd_b2b_triton,D,"D == K (both d_hidden); the CUDA twin asserts it, t
 transition_fwd_b2b_triton,EPS,"numeric tolerance: only use is rstd = rsqrt(var + EPS), and only under the already-keyed FUSE_STATS"
 transition_fwd_b2b_ktiled_triton,D,"D == K (both d_hidden), K already keyed"
 cond_transition_fwd_b2b_triton,D,"D == K == d_hidden, stated in modules/conditioned_transition/module.py; K already keyed"
-cond_transition_fwd_b2b_saveact_triton,D,"D == K == d_hidden; K already keyed"
-trimul_gemm_gate_packed_mmajor_triton,K,"sole launch site (trimul_front_triton) passes K=D and D=D -- the in-proj is square; D already keyed"
-trimul_outproj_gemm_sigmoid_triton,K,"sole launch site passes K=D and D=D; D already keyed"
+cond_transition_fwd_b2b_saveact_triton,D,D == K == d_hidden; K already keyed
+trimul_gemm_gate_packed_mmajor_triton,K,sole launch site (trimul_front_triton) passes K=D and D=D -- the in-proj is square; D already keyed
+trimul_outproj_gemm_sigmoid_triton,K,sole launch site passes K=D and D=D; D already keyed
 trimul_outproj_layernorm_gemm_gate_triton,N,"sole launch site (trimul_back_triton) passes K=D and N=D since Wp/Wg are (D,D), so N == K and K is keyed"
 trimul_gemm_gate_saveact_triton,N,"N == 2*K, proved at the launch site in _input_gemm_fwd; K already keyed"
 trimul_outproj_gemm_gate_saveact_triton,N,"N == K, proved at the launch site in _output_gemm_fwd; K already keyed"
 augmented_attention_fwd_triton,A,"augmentation count; never referenced in the kernel body, the grid extent is computed at the launcher, so the emitted code is identical for every A"
 augmented_attention_fwd_triton,B,"batch size; only scalar index decode (off_a = off_z // B), no branch and no tile-shape change"
-augmented_attention_bwd_split_triton,A,"never referenced in the body"
-augmented_attention_bwd_split_triton,B,"folds into the constant M_offset stride"
-augmented_attention_bwd_atomic_triton,A,"never referenced in the body"
-augmented_attention_bwd_atomic_triton,B,"folds into the constant M_offset stride"
-augmented_attention_bwd_pre_triton,A,"never referenced in the body"
-augmented_attention_bwd_pre_triton,B,"never referenced in the body"
+augmented_attention_bwd_split_triton,A,never referenced in the body
+augmented_attention_bwd_split_triton,B,folds into the constant M_offset stride
+augmented_attention_bwd_atomic_triton,A,never referenced in the body
+augmented_attention_bwd_atomic_triton,B,folds into the constant M_offset stride
+augmented_attention_bwd_pre_triton,A,never referenced in the body
+augmented_attention_bwd_pre_triton,B,never referenced in the body
 augmented_attention_bwd_pre_triton,stride_k,"== 1 at both launch sites, always; contiguity is invariant here, not a distinguishing property"
 augmented_attention_bwd_pre_triton,stride_h,"== HEAD_DIM, already keyed"
 augmented_attention_bwd_pre_triton,stride_m,"== H*HEAD_DIM, product of two already-keyed entries"
 augmented_attention_bwd_pre_triton,stride_z,"== L*H*HEAD_DIM; keying it keys the EXACT L rather than its bucket -- one entry per sequence length, which is what shape_key exists to prevent"
-adaln_gemm_gate_triton,SAVE_GATE,"pure store: the guarded block is one tl.store of a tile already in registers, so the iteration space, the tile shapes and the register-resident working set are identical either way. Measured on the shipped cache, both cards, all six shape buckets: SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond, 12 of 12. Control: layernorm_stats_triton K=128 vs K=256 differs in 9 of 22 buckets at 1.8-2.0x"
-gated_projection_gate_dropres_triton,SAVE_GATE,"pure store, same reading and same measurement as adaln_gemm_gate_triton's SAVE_GATE"
-transition_bwd_swiglu_recompute_triton,STORE_H,"pure store: tl.store(h_ptr, silu * b) of values the kernel already holds; both branches of the surrounding code compute dA and dB regardless"
-transition_bwd_swiglu_recompute_triton,STACK_DAB,"store ADDRESSING only: both branches store the same two tiles with the same masks, into one 2*ND-wide dAB or into two ND-wide dA/dB. Same tile shapes, same values, same count of stores"
-trimul_gemm_gate_mmajor_triton,SAVE_PREACT,"pure store: two tl.store of g and p, both already produced by the tl.split above it, in the same tl.trans form as the unconditional store on the next line. outl/outr are computed either way"
+adaln_gemm_gate_triton,SAVE_GATE,"pure store AND measured: the guarded block is one tl.store of a tile already in registers, and this kernel is a GEMM (two tl.dot), so that store is noise against the contraction. Both cards, all six shape buckets: SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and the same time to the nanosecond, 12 of 12. Control: layernorm_stats_triton K=128 vs K=256 differs in 9 of 22 buckets at 1.8-2.0x. NOT extrapolated to store-bound kernels -- gated_projection_gate_dropres_triton has zero tl.dot and keeps the flag"
+transition_bwd_swiglu_recompute_triton,STACK_DAB,"store ADDRESSING only: both branches store the same two tiles with the same masks, into one 2*ND-wide dAB or into two ND-wide dA/dB. Same tile shapes, same values, same COUNT of stores -- which is what separates it from STORE_H in the same kernel, whose guarded store is a whole extra (M, ND) tensor and which stays keyed"

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import importlib
 import itertools
 import json
@@ -29,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import triton
+
+from miniworld_engine.autotune.shape_key import unpack_base
 
 WARN = "WARN"
 FAIL = "FAIL"
@@ -59,6 +62,23 @@ class Report:
 # --------------------------------------------------------------------------- #
 # live introspection
 # --------------------------------------------------------------------------- #
+@functools.cache
+def _folded_axes(op: str) -> frozenset:
+    """The axes this op's launches fold into `shape_key`, from the same resolver the key-gap audit
+    uses. Empty for an op that folds none, which is also the answer when the registry cannot name
+    it -- and then `unpack_base` is the identity, i.e. the pre-G5 behaviour."""
+    import csv as _csv
+
+    from miniworld_engine.tools.key_gaps import REG, _folds_for
+    for r in _csv.DictReader(REG.open()):
+        if r["kernel"] == op and r["backend"] == "triton":
+            try:
+                return frozenset(_folds_for(r["file"], r["symbol"]))
+            except Exception:
+                return frozenset()
+    return frozenset()
+
+
 def import_all_kernels() -> list[tuple[str, str]]:
     """Import every kernel module. Returns the ones that could not be imported."""
     import miniworld_engine.kernels as pkg
@@ -455,6 +475,14 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
             _, _, dims = k.partition("|")
             sk = next((int(x.split("=")[1]) for x in dims.split(",")
                        if x.startswith("shape_key=")), None)
+            # The recorded key is PACKED: `shape_key` carries the row/length bucket AND every width
+            # axis the launch folded in (plan.md G5), so it is a composite integer of order 1e14
+            # while the declared side below holds the bare bucket. Comparing them raw reports every
+            # folded op as missing, which after G5 is every op. Unfold it back to the bucket, using
+            # the axis count the kernel itself declares -- the same resolution the key-gap audit
+            # does, so the two cannot disagree about what a kernel folds.
+            if sk is not None:
+                sk = unpack_base(sk, len(_folded_axes(d["op"])))
             # A capture records the dtypes the kernel actually SAW, e.g. "bfloat16+float32" for
             # mixed operands. Count each declared precision the entry satisfies, so (op, dtype,
             # bucket) is what gets checked -- not (op, bucket), which reported 527/527 over a

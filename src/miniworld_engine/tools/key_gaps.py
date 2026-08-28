@@ -90,6 +90,11 @@ def _axes_of(expr) -> set[str]:
     catch, not to wave through.
     """
     if isinstance(expr, ast.Call):
+        # The keyword NAME is the kernel's axis; what it is bound to has to be the same expression
+        # the launch passes for that axis, or the fold is a decoration. `token_key(L, K=something)`
+        # beside `..., K=K_real, ...` would silence a real gap on the kernel's K. Recorded here
+        # rather than checked, because the binding is only visible at the launch node -- see
+        # `_folded_into_shape_key`, which is where the launch's own kwargs are in scope.
         return {k.arg for k in expr.keywords if k.arg}
     if isinstance(expr, ast.IfExp):
         return _axes_of(expr.body) & _axes_of(expr.orelse)
@@ -105,7 +110,7 @@ def _shape_key_pos(src_file: str, symbol: str) -> int:
     those sites invisible to the intersection, which is the same hole aliased imports were: a site
     that does not fold is never noticed, and it writes a key the other launchers never read.
     """
-    for base in (SRC, SRC.parent):
+    for base in (SRC, SRC / "miniworld_engine"):
         path = base / src_file
         if path.is_file():
             fn = _kernel_ast(path, symbol)
@@ -117,8 +122,12 @@ def _shape_key_pos(src_file: str, symbol: str) -> int:
 
 
 @functools.lru_cache(maxsize=1)
-def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
-    """(file, symbol) -> the axes every launch of that kernel folds into ``shape_key``.
+def _folded_into_shape_key() -> dict[tuple[str, str, str], set[str]]:
+    """(launching file, symbol, defining file) -> the axes THAT FILE's launches fold.
+
+    Per launching file, not per kernel: intersecting across the files that launch one kernel is
+    :func:`_folds_for`'s job, and it needs the defining file to know which of the four kernels
+    named ``_attn_fwd`` this row is about.
 
     ``shape_key.pack`` lets a launcher put a kernel's width axes INTO the shape key
     (``atom_key(L, H=H, HEAD_DIM=D)``) instead of listing them beside it in ``key=[...]``. They are
@@ -131,7 +140,7 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
     report the gap, which is the answer that matches what the cache does -- that site writes a key
     the others never read.
     """
-    out: dict[tuple[str, str], set[str]] = {}
+    out: dict[tuple[str, str, str], set[str]] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text())
@@ -170,6 +179,14 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
                 i = _shape_key_pos(src_file, alias.get(local, local))
                 sk = node.args[i] if 0 <= i < len(node.args) else None
             folded = _axes_of(sk)
+            # Drop any axis whose folded value disagrees with what the launch passes for the
+            # same-named kernel argument. Without this a launcher can name an axis in the shape key
+            # and hand the kernel a different one, and the audit reads it as covered.
+            passed = {k.arg: ast.dump(k.value) for k in node.keywords if k.arg}
+            if isinstance(sk, ast.Call):
+                bound = {k.arg: ast.dump(k.value) for k in sk.keywords if k.arg}
+                folded -= {a for a in folded
+                           if a in passed and a in bound and passed[a] != bound[a]}
             key = (str(path.relative_to(SRC)), alias.get(local, local),
                    origin.get(local, str(path.relative_to(SRC))))
             prev = out.get(key)

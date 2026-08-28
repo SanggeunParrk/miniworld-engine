@@ -76,7 +76,11 @@ DRIVER_LENGTH: int | None = int(_ENV_LEN) if _ENV_LEN else None
 #: same reason as DRIVER_LENGTH; see :func:`driver_width` for why it is one number and not one per
 #: axis.
 _ENV_WIDTH = os.environ.get("MINIWORLD_DRIVER_WIDTH", "").strip()
-DRIVER_WIDTH: int | None = int(_ENV_WIDTH) if _ENV_WIDTH else None
+#: `or None` and not `if _ENV_WIDTH`: "0" is a truthy STRING, so the second form makes an
+#: explicit MINIWORLD_DRIVER_WIDTH=0 mean width zero rather than "use the default", and
+#: `ragged(0)` then builds a zero-width tensor. Only `if self.width` in OpUnit.env keeps
+#: that unreachable today.
+DRIVER_WIDTH: int | None = int(_ENV_WIDTH) or None if _ENV_WIDTH else None
 
 
 class TensorKw(TypedDict, total=False):

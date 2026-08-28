@@ -15,6 +15,7 @@ from miniworld_engine.kernels.drivers import (
     both_level_is_pair,
     dev,
     driver_length,
+    driver_width,
     ragged,
     rows2d,
 )
@@ -27,7 +28,7 @@ TRIMUL_L = driver_length(128)  # L: i == j of the (1, L, L, d) pair activation t
 TRIMUL_IS_PAIR = both_level_is_pair(TRIMUL_L)
 TRIMUL_ROWS = (ragged(TRIMUL_L) ** 2 if TRIMUL_IS_PAIR
                else ragged(TRIMUL_L))  # M = b*i*j for a (1, L, L, d) pair activation, or A
-TRIMUL_D = ragged(128)  # d: the contraction width; the gate/proj weights have 2*d or d rows
+TRIMUL_D = ragged(driver_width(128))  # d: the contraction width; gate/proj weights have 2*d or d rows
 #: ``baseline_dtv1._shape_key`` is ``token_key(seq_len)``, and ``seq_len=None`` -- what a driver that
 #: passes nothing gets -- means ``token_key(0)``, the clamped BOTTOM bucket 128 at every L. These
 #: launchers already take ``seq_len=``; the driver is the caller that has to supply it.

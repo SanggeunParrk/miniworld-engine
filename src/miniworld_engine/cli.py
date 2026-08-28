@@ -687,30 +687,29 @@ def cmd_build(args: argparse.Namespace) -> int:
         return rc
 
     # `build all` on a fresh card must produce a COMPLETE cache with no one curating a list and no
-    # flags. Neither work list is complete on its own, and for a long time this had to pick one:
+    # flags, and the per-op sweep is what does it. Coverage is DECLARED -- registry.csv x level x
+    # width -- so every kernel with a driver is tuned, at every shape the model runs.
     #
-    #   per-op    coverage is DECLARED (registry.csv x level), so every kernel with a driver is
-    #             tuned -- but each is driven through its own driver, which never produces the
-    #             constexpr combinations a module's real dispatch does. Measured on an A6000, a
-    #             cache built this way answers `missing_pairs 0` to the declared question and
-    #             misses 363 lookups the module matrix makes, across 42 of 91 ops.
-    #   per-module reaches those keys, and reaches only the 48 of 91 triton kernels some module
-    #             happens to dispatch to, leaving 43 with working drivers untuned and invisible.
+    # It was not always enough. Each kernel is driven through its own harness, and a harness's WIDTH
+    # constants were frozen at import while only its length could be overridden, so the sweep reached
+    # one width per kernel and every other width the model uses missed the cache: 363 lookups across
+    # 42 of 91 ops, measured on an A6000. The module matrix was the answer -- a second pass, running
+    # with `fill_gaps` so it re-ranked rather than re-swept -- and it reaches only the 48 of 91
+    # kernels some module happens to dispatch to, so neither list covered the other.
     #
-    # So the default is BOTH, in that order, with a merge between them. The second pass runs with
-    # `fill_gaps`, which is what makes it affordable: a key the first pass already tuned costs a
-    # 3-config re-rank instead of a full-grid sweep, so only the gaps are searched. Without that
-    # the module pass re-benches everything the op sweep did -- 244 GPU-h -- which is what made
-    # these an either/or in the first place.
+    # `driver_width` closes that at the source (plan.md G5): a unit is (op, dtype, side, length,
+    # WIDTH), the drivers take the base width from the environment the way they already took the
+    # length, and every other width derives from it as it does in the model. One pass again.
     #
-    # --per-op and --per-module still ask for one pass alone.
+    # --per-module still asks for the module matrix, and it is still the honest way to exercise real
+    # dispatch paths. What it is no longer is a REQUIREMENT for coverage.
     def _op_pass():
         only = None if args.case == "all" else {args.case}
         units = builder.op_units(only, config_dir=directory)
         if not units:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
             return None
-        print(f"per-op sweep: {len(units)} (op, shape) items", flush=True)
+        print(f"per-op sweep: {len(units)} (op, shape, width) items", flush=True)
         return units
 
     def _module_pass():
@@ -721,56 +720,30 @@ def cmd_build(args: argparse.Namespace) -> int:
             return None
         return units
 
-    if args.per_op:
-        passes = [(_op_pass, False, "per-op sweep")]
-    elif args.per_module or args.case != "all":
-        # Two passes are what `build all` means. A NAMED target keeps its old single pass: the two
-        # name spaces are different -- `build <case>` names a module and `--per-op <kernel>` names
-        # a kernel -- so running the op pass for a case name filters `op_units` by a name no kernel
-        # has and returns "no triton op with a driver matched". Which is what this did for one
-        # commit, turning `build gated_projection grid` from a working command into exit 2.
-        passes = [(_module_pass, False, "module matrix")]
-    else:
-        # ONE pass. The op sweep used to reach exactly one WIDTH per kernel -- whichever its driver
-        # happened to build -- because a driver's width constants were frozen at import while only
-        # its length was overridable. Every other width the model uses then missed the cache and
-        # fell back to the grid at runtime: 363 lookups across 42 of 91 ops, measured on an A6000
-        # (docs/records/cache-coverage-replay-a6000.md). The module matrix was added to reach them,
-        # at the cost of a second pass over the whole build.
-        #
-        # `driver_width` closes that: a unit is (op, dtype, side, length, WIDTH), the drivers take
-        # the base width from the environment the way they already took the length, and every other
-        # width derives from it exactly as it does in the model (ND = n*D, NH = D//32, DC). The op
-        # sweep now covers the shape space it always declared it covered.
-        #
-        # --per-module still asks for the module pass, and it is still the honest way to exercise
-        # real dispatch paths. What it is no longer is a REQUIREMENT for coverage.
-        passes = [(_op_pass, False, "per-op sweep")]
+    # A NAMED target drives its MODULE: the two name spaces are different -- `build <case>` names a
+    # module and `--per-op <kernel>` names a kernel -- so running the op sweep for a case name
+    # filters `op_units` by a name no kernel has and returns "no triton op with a driver matched".
+    # Which is what this did for one commit, turning `build gated_projection grid` into exit 2.
+    module_pass = args.per_module or (args.case != "all" and not args.per_op)
+    selected = (_module_pass if module_pass else _op_pass)()
+    if selected is None:
+        return 2
 
-    results: list = []
-    for i, (build_units, fill_gaps, label) in enumerate(passes):
-        selected = build_units()
-        if selected is None:
-            return 2
-        if len(passes) > 1:
-            print(f"\n=== pass {i + 1} of {len(passes)}: {label} ===", flush=True)
-        stage = builder.build_all(selected, Path(args.shards).expanduser(),
-                                  _resolve_gpus(args.gpus), args.compile_jobs,
-                                  resume=args.resume, reclaim=args.reclaim,
-                                  config_dir=directory, fill_gaps=fill_gaps,
-                                  units_per_gpu=getattr(args, "units_per_gpu", 1),
-                                  keep_ir=getattr(args, "keep_ir", False),
-                                  predict=getattr(args, "predict_unusable", False),
-                                  bench_clear_mb=getattr(args, "bench_clear_mb", 0),
-                                  bench_rep_ms=getattr(args, "bench_rep_ms", 0),
-                                  pin_cores=getattr(args, "pin_cores", False))
-        results += stage
-        # Merge BETWEEN passes, not only at the end: pass 2 decides what to skip by asking the
-        # cache, and it can only see pass 1 once pass 1's shards are folded in.
-        if i + 1 < len(passes):
-            rc = _merge_built_shards(args, stage)
-            if rc:
-                return rc
+    # `fill_gaps=False`: this is one pass and it searches the whole grid. The flag exists for a pass
+    # that runs AFTER another has already tuned a key -- it re-ranks 3 configs instead of sweeping --
+    # and since G5 collapsed `build all` to one pass, nothing sets it. The machinery stays (builder
+    # takes it, the child parses --fill-gaps, tests pin it) because `--per-module` over an already
+    # built cache is the case it was written for; it just has no caller today.
+    results: list = builder.build_all(selected, Path(args.shards).expanduser(),
+                                      _resolve_gpus(args.gpus), args.compile_jobs,
+                                      resume=args.resume, reclaim=args.reclaim,
+                                      config_dir=directory, fill_gaps=False,
+                                      units_per_gpu=getattr(args, "units_per_gpu", 1),
+                                      keep_ir=getattr(args, "keep_ir", False),
+                                      predict=getattr(args, "predict_unusable", False),
+                                      bench_clear_mb=getattr(args, "bench_clear_mb", 0),
+                                      bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                      pin_cores=getattr(args, "pin_cores", False))
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
