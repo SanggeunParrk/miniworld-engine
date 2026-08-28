@@ -550,7 +550,7 @@ def transition_b2b(
 
 
 
-# `D` is a tl.constexpr and is left OUT of the key on purpose: it is ws.shape[0] and K is
+# `D` is GONE from this kernel, not merely unkeyed: it is ws.shape[0] and K is
 # x2.shape[1], both the module's d_hidden, so `K` (keyed) already partitions this axis. See the
 # longer note on `_transition_b2b_kernel` above. `ND` is independent (n is a module argument).
 # fmt: off

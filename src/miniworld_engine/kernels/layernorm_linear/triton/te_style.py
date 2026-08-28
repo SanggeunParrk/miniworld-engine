@@ -76,7 +76,7 @@ def _fp32_matmul_ctx(dtype):
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev
 
-# Keyed on (N, shape_key) so the config is tuned PER (d, M-bucket) — not reused across M for a given
+# Keyed on shape_key, which carries BOTH N and the M-bucket, so the config is tuned PER (d, M-bucket) — not reused across M for a given
 # d (the earlier ["N"]-only key tuned on whichever M was hit first and reused it for all M).
 # BLOCK_M1 and BLOCK_K come from the CSV.
 

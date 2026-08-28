@@ -66,7 +66,7 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 # ───────────── forward epilogue: y = σ(scale)·LN(x) + bias, saving mean_x, rstd_x, gate ─────────
-# Keyed on N. The dtype needs no key entry: triton's Autotuner appends str(arg.dtype) for every
+# Keyed on N, folded into shape_key. The dtype needs no key entry: triton's Autotuner appends str(arg.dtype) for every
 # tensor argument, so fp32 and bf16 already land in different cache slots.
 
 

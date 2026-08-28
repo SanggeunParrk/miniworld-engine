@@ -56,7 +56,7 @@ from miniworld_engine.autotune.shape_key import token_key
 
 # N is constexpr but deliberately NOT in the key: trimul_back_triton is the only launch site and it
 # passes ``K=D, N=D`` (Wp/Wg are (D, D)), so N == K and the K entry already covers it. The
-# BLOCK_K >= K covering-tile branch is likewise selected by K, which is keyed.
+# BLOCK_K >= K covering-tile branch is likewise selected by K, which is folded into shape_key.
 @triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key', 'ADD_RESIDUAL'])
 @triton.jit
 def _back_kernel(

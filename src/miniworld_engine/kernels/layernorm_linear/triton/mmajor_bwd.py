@@ -52,7 +52,7 @@ _WAVES = 2
 # program grid-strides over. The atomic fallback in this file already bucketed the row count.
 # VEC_HINT is deliberately NOT keyed even though it gates a code path (the tl.max_contiguous vector
 # hint): the sole launcher (`_ln_bwd_persistent_new`) passes `N=K` and `VEC_HINT=(K <= 128)`, so it
-# is a pure function of N -- already in the key. Keying it too would only duplicate a partition the
+# is a pure function of N -- which is folded into shape_key. Keying it too would only duplicate a partition the
 # cache makes anyway.
 @triton.autotune(configs=configs_for("layernorm_bwd_split_mmajor_triton"), key=['shape_key'])
 @triton.jit

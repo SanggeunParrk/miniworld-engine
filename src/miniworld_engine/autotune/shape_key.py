@@ -1,17 +1,29 @@
 """Autotune shape keys: one definition of "shape", one bucket set per kernel level.
 
-WHAT SHAPE MEANS
-----------------
-``shape`` is L -- the number of TOKENS or ATOMS -- never the row count a kernel happens to receive.
-A pair kernel iterating M = L*L rows and a linear kernel iterating M = L rows are at the same shape
-when they are at the same L, and they should share a bucket space.
+WHAT A SHAPE KEY IS
+-------------------
+``shape_key`` is the ONE parameter a kernel takes purely to be keyed on -- never read in a body
+(a404fb9) -- and it carries the whole shape:
 
-That was not previously true. Three edge sets were in use (squared on L*L, linear on L, and their
-union) against two different base quantities (L at the attention families, M elsewhere, plus a flat
-element count at two sites). Each call site was internally consistent with its own set, so nothing
-failed -- but the same physical L landed in a different bucket space depending on the family, and a
-``both``-level kernel bucketing raw M could not tell a linear M=384 from a pair M=384 that came from
-L=20. The point of this module is that there is now one answer.
+    shape_key = pack(<row-or-length bucket>, <every width axis>, <axis-name checksum>)
+
+Both halves are shape. ``K``, ``ND``, ``H``, ``HEAD_DIM`` are dimensions of the tensors the kernel
+reads, exactly as the row count is, so they belong inside the key rather than standing beside it in
+``key=[...]``. The body still takes them as ``tl.constexpr`` parameters, because it reads them for
+masks and loop bounds; what changed is that the autotune key names one thing. See :func:`pack`.
+
+WHICH AXIS THE BUCKET IS, AND WHY IT DEPENDS ON THE LEVEL
+---------------------------------------------------------
+The first component is the bucketed LENGTH for a ``token`` or ``atom`` kernel and the bucketed ROW
+COUNT for a ``level=both`` one. That is not an inconsistency to tidy away -- it is the fix for a
+measured 1.73x regression, and the ``BOTH_ROWS`` block below is the argument. In short: a both-level
+kernel is launched from both sides, the call site cannot say which, and rows are the one quantity
+that means the same thing either way.
+
+A pair kernel iterating M = L*L rows and a linear kernel iterating M = L rows are at the same shape
+when they are at the same L, and they share a bucket space. That was not previously true: three edge
+sets were in use against two different base quantities, so the same physical L landed in a different
+bucket space depending on the family. The point of this module is that there is now one answer.
 
 THE BUCKETS
 -----------

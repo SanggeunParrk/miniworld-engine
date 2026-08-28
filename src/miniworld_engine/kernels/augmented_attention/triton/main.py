@@ -113,7 +113,7 @@ def _attn_fwd_inner(
 # the generated code is the same for every A and a key entry could only split the cache. `B` appears
 # only in the scalar index decomposition (`off_z // B`, `off_z % B`): no branch, no change to the
 # tile's work shape, and it varies per run, so keying it would fragment every bucket by batch size
-# for two integer ops. What does set the work shape is already keyed -- HEAD_DIM (and with it
+# for two integer ops. What does set the work shape is folded into shape_key -- HEAD_DIM (and with it
 # HEAD_DIM_PAD = next_power_of_2(HEAD_DIM)), H (also the q/k/v row-stride multiplier H*D), and
 # shape_key (the L bucket).
 @triton.autotune(configs=configs_for("augmented_attention_fwd_triton"),
