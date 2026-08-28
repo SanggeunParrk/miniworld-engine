@@ -241,12 +241,14 @@ def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
 # fmt: off
 
 
-# `D` is a tl.constexpr and is NOT in the key -- deliberately, because `K` already covers it.
-# D = ws.shape[0] and K = x.shape[1] are both the module's d_hidden (ConditionedTransition:
-# "K = D = d_hidden"; expand d_hidden -> n*d_hidden, squeeze n*d_hidden -> d_hidden), and every
-# launcher in the repo -- module.py, drivers.conditioned_transition._ct_args, checks.conditioned_transition -- builds ws as (D, ND)
-# with D == K. Keying on both would only duplicate the same partition. ND stays keyed: n differs
-# per module (2 here, 4 in transition/) and the driver harness moves ND independently of D.
+# `D` is GONE from this kernel, not merely unkeyed. It came from `ws.shape[0]` and `K` from
+# `x.shape[1]`, and both are the module's d_hidden: ConditionedTransition's docstring states it
+# ("K = D = d_hidden"), its Linears are expand (d_hidden -> n*d_hidden) / squeeze
+# (n*d_hidden -> d_hidden), and every launcher in the repo (module.py,
+# drivers.conditioned_transition._ct_args, checks.conditioned_transition) builds ws as (D, ND)
+# with D == K. Its one read was the squeeze output mask, which `K` states exactly as well. ND is
+# a different matter and stays keyed: n varies per module (2 here, 4 in transition/), and the
+# driver harness perturbs ND on its own axis, so ND is not recoverable from K.
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_saveact_triton"),
                  key=['ND', 'K', 'DC', 'shape_key'])
 @triton.jit
@@ -254,7 +256,7 @@ def _b2b_fwd_train_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr,
     y_ptr, ab_ptr, h_ptr, out_ptr, scale_ptr,
     M, ND,
-    K: tl.constexpr, D: tl.constexpr, DC: tl.constexpr,
+    K: tl.constexpr, DC: tl.constexpr,
     stride_xm, stride_xk,
     stride_cm, stride_cc,
     stride_wn, stride_wk,     # Wa, Wb: (ND, K)
@@ -274,7 +276,7 @@ def _b2b_fwd_train_kernel(
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
     dcols = pid_d * BLOCK_N + tl.arange(0, BLOCK_N)
-    d_mask = dcols < D
+    d_mask = dcols < K
     out_acc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
     for n0 in range(0, ND, BLOCK_K_ND):
         cols = n0 + tl.arange(0, BLOCK_K_ND)
@@ -353,7 +355,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),  # noqa: E731
                          triton.cdiv(D, meta["BLOCK_N"]))
     _b2b_fwd_train_kernel[grid](
-        x, cond, wa, wb, ws, wsc, bsc, y, ab, h, out, scale, M, ND, K, D, DC,
+        x, cond, wa, wb, ws, wsc, bsc, y, ab, h, out, scale, M, ND, K, DC,
         x.stride(0), x.stride(1), cond.stride(0), cond.stride(1),
         wa.stride(0), wa.stride(1), ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),

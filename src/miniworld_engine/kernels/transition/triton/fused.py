@@ -271,15 +271,15 @@ def transition_expand_gate(
 
 
 
-# TWO tl.constexprs are deliberately absent from the key below.
+# ONE tl.constexpr is deliberately absent from the key below, and one is gone from the kernel.
 #
-# `D` -- redundant with `K`, which is already keyed. D = ws.shape[0] and K = x2.shape[1] are the
-# same d_hidden at every launcher (Transition's Linears are expand d -> n*d and squeeze n*d -> d;
-# drivers/checks transition build ws as rows2d(k, nd)), and the ADD_RESIDUAL branch below relies
-# on exactly that ("D == K here") when it reloads x over the D output columns. The hand-CUDA twin
-# asserts it outright (transition_b2b_kernel.cu: `TORCH_CHECK(D == K, ...)`). Keying on D would
-# add a second copy of the partition `K` already makes. `ND` is NOT implied -- n is a module
-# argument (4 in Transition, 2 in ConditionedTransition) -- so it stays.
+# `D` -- GONE, not merely unkeyed. It was `ws.shape[0]` and `K` is `x2.shape[1]`, and both are
+# the same d_hidden at every launcher (Transition's Linears are expand d -> n*d and squeeze
+# n*d -> d; drivers/checks transition build ws as rows2d(k, nd)). The hand-CUDA twin asserts it
+# outright (transition_b2b_kernel.cu: `TORCH_CHECK(D == K, ...)`), and the ADD_RESIDUAL branch
+# below relies on it when it reloads x over the output columns. Its one read was the squeeze
+# output mask, which `K` states exactly as well. `ND` is NOT implied -- n is a module argument
+# (4 in Transition, 2 in ConditionedTransition) -- so it stays.
 #
 # `EPS` -- a numeric tolerance, not a shape and not a code path. It reaches the kernel only as
 # `tl.rsqrt(var + EPS)` under FUSE_STATS (which IS keyed), it is nn.LayerNorm's `ln_in.eps`, and
@@ -292,7 +292,7 @@ def transition_expand_gate(
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
     wa_ptr, wb_ptr, ws_ptr, out_ptr, xn_ptr,
-    M, ND, K: tl.constexpr, D: tl.constexpr, shape_key, EPS: tl.constexpr,
+    M, ND, K: tl.constexpr, shape_key, EPS: tl.constexpr,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
@@ -311,7 +311,7 @@ def _transition_b2b_kernel(
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
     dcols = pid_d * BLOCK_K_ND + tl.arange(0, BLOCK_K_ND)   # squeeze output tile: BLOCK_K_ND-wide
-    d_mask = dcols < D
+    d_mask = dcols < K
     out_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
 
     if BLOCK_K_D >= K:
@@ -518,7 +518,7 @@ def transition_b2b(
     _transition_b2b_kernel[grid](
         x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
-        M, ND, K, D, _shape_key(shape_key, M), eps,
+        M, ND, K, _shape_key(shape_key, M), eps,
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),
@@ -561,7 +561,7 @@ def _transition_b2b_ktiled_kernel(
     wa_ptr, wb_ptr, ws_ptr, out_ptr,
     # K is tl.constexpr (model d, fixed per module, already in this kernel's autotune key) so the
     # `BLOCK_K_D >= K` guard below resolves at COMPILE time and only one branch is emitted.
-    M, ND, K: tl.constexpr, D: tl.constexpr, shape_key,
+    M, ND, K: tl.constexpr, shape_key,
     stride_xm, stride_xk,
     stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
@@ -578,7 +578,7 @@ def _transition_b2b_ktiled_kernel(
     rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
     c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
     dcols = pid_d * BLOCK_K_ND + tl.arange(0, BLOCK_K_ND)   # squeeze output tile: BLOCK_K_ND-wide
-    d_mask = dcols < D
+    d_mask = dcols < K
     out_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
 
     if BLOCK_K_D >= K:
@@ -683,7 +683,7 @@ def transition_b2b_ktiled(
     _transition_b2b_ktiled_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out,
-        M, ND, K, D, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),

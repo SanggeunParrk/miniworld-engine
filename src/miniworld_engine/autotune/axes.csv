@@ -148,7 +148,7 @@ transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniwor
 transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,682,BLOCK_N,64,128,16,32,64,32,64,64,64,1,0,,
 transition_bwd_transpose_packed_triton,_cdup_interleave_kernel,miniworld_engine/kernels/transition/cute/backward_gatebwd.py,77,BLOCK_M1,64,128,16,32,64,128,16,64,64,1,0,,
 transition_bwd_transpose_packed_triton,_cdup_interleave_kernel,miniworld_engine/kernels/transition/cute/backward_gatebwd.py,77,BLOCK_N,64,128,16,32,64,64,32,64,64,1,0,,
-transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/transition/triton/main.py,32,BLOCK_K,64,128,16,32,64,128,16,64,64,0,1,N,1
+transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/transition/triton/main.py,32,BLOCK_K,64,128,16,32,64,128,16,64,64,0,1,K,1
 transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/transition/triton/main.py,32,BLOCK_M1,64,128,16,32,64,64,32,64,64,1,0,,
 transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/transition/triton/main.py,32,BLOCK_N,64,128,16,32,64,32,64,64,64,1,0,,
 transition_fold_triton,_fold_kernel,miniworld_engine/kernels/transition/triton/fold.py,33,BLOCK_K,64,128,16,32,64,128,16,64,64,0,1,K,1

@@ -23,11 +23,11 @@ def get_seq_group(length) -> int:
 
 
 # Cache-narrowing prunes composed OVER the smem safety prune (see autotune package). Bucket on
-# the autotune key (shape_key, n, N); dtype from x (defaults bf16). Separate op ids for fwd/bwd
+# the autotune key (shape_key, ND, K); dtype from x (defaults bf16). Separate op ids for fwd/bwd
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'n', 'N'])
+@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'ND', 'K'])
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -35,15 +35,15 @@ def transition_fwd_kernel(
     W2_ptr,
     out_ptr,
     M,
-    n: tl.constexpr,
-    N: tl.constexpr,
+    K: tl.constexpr,
+    ND: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
     shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
-    num_pid_n = tl.cdiv(n * N, BLOCK_N)
+    num_pid_n = tl.cdiv(ND, BLOCK_N)
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
@@ -56,21 +56,21 @@ def transition_fwd_kernel(
     A_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
     B_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
 
-    for k in range(0, N, BLOCK_K):
+    for k in range(0, K, BLOCK_K):
         offs_k = k + tl.arange(0, BLOCK_K)
         x_tile = tl.load(
-            x_ptr + (offs_m[:, None] * N + offs_k[None, :]),
-            mask=((offs_m[:, None] < M) & (offs_k[None, :] < N)),
+            x_ptr + (offs_m[:, None] * K + offs_k[None, :]),
+            mask=((offs_m[:, None] < M) & (offs_k[None, :] < K)),
             other=0.0,
         )
         W1_tile = tl.load(
-            W1_ptr + (offs_n[None, :] * N + offs_k[:, None]),
-            mask=((offs_n[None, :] < n * N) & (offs_k[:, None] < N)),
+            W1_ptr + (offs_n[None, :] * K + offs_k[:, None]),
+            mask=((offs_n[None, :] < ND) & (offs_k[:, None] < K)),
             other=0.0,
         )
         W2_tile = tl.load(
-            W2_ptr + (offs_n[None, :] * N + offs_k[:, None]),
-            mask=((offs_n[None, :] < n * N) & (offs_k[:, None] < N)),
+            W2_ptr + (offs_n[None, :] * K + offs_k[:, None]),
+            mask=((offs_n[None, :] < ND) & (offs_k[:, None] < K)),
             other=0.0,
         )
 
@@ -80,11 +80,11 @@ def transition_fwd_kernel(
     swish_A = A_tile * tl.sigmoid(A_tile)
     swish_AB = swish_A * B_tile
 
-    out_ptr_ = out_ptr + (offs_m[:, None] * n * N + offs_n[None, :])
+    out_ptr_ = out_ptr + (offs_m[:, None] * ND + offs_n[None, :])
     tl.store(
         out_ptr_,
         swish_AB.to(out_ptr.dtype.element_ty),
-        mask=((offs_m[:, None] < M) & (offs_n[None, :] < n * N)),
+        mask=((offs_m[:, None] < M) & (offs_n[None, :] < ND)),
     )
 
 
@@ -120,8 +120,8 @@ def _expand_swiglu(
         expand_b_weight,
         expand,
         M,
-        n,
-        N,
+        N,          # K -- the input width
+        n * N,      # ND -- the expanded width
         shape_key=shape_key,
     )
     return expand

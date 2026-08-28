@@ -58,20 +58,20 @@ import triton.language as tl
 from miniworld_engine.autotune.shape_key import atom_key, length_of
 
 
-# `D` is a tl.constexpr and is NOT in the key -- deliberately, because it is not independent of
-# one that is. D comes from `ws.shape[0]` and K from `x.shape[1]`, and both are the module's
-# d_hidden: ConditionedTransition's docstring states it ("K = D = d_hidden"), its Linears are
-# expand (d_hidden -> n*d_hidden) / squeeze (n*d_hidden -> d_hidden), and every launcher in the
-# repo (module.py, drivers.conditioned_transition._ct_args, checks.conditioned_transition) builds ws as (D, ND) with D == K. So
-# `K` already partitions the cache on this axis and adding D would only duplicate it. ND is a
-# different matter and is keyed: n varies per module (2 here, 4 in transition/), and the driver
-# harness perturbs ND on its own axis, so ND is not recoverable from K.
+# `D` is GONE from this kernel, not merely unkeyed. It came from `ws.shape[0]` and `K` from
+# `x.shape[1]`, and both are the module's d_hidden: ConditionedTransition's docstring states it
+# ("K = D = d_hidden"), its Linears are expand (d_hidden -> n*d_hidden) / squeeze
+# (n*d_hidden -> d_hidden), and every launcher in the repo (module.py,
+# drivers.conditioned_transition._ct_args, checks.conditioned_transition) builds ws as (D, ND)
+# with D == K. Its one read was the squeeze output mask, which `K` states exactly as well. ND is
+# a different matter and stays keyed: n varies per module (2 here, 4 in transition/), and the
+# driver harness perturbs ND on its own axis, so ND is not recoverable from K.
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['ND', 'K', 'DC', 'shape_key'])
 @triton.jit
 def _cond_transition_inference_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
     M, ND,
-    K: tl.constexpr, D: tl.constexpr, DC: tl.constexpr,
+    K: tl.constexpr, DC: tl.constexpr,
     stride_xm, stride_xk,
     stride_cm, stride_cc,
     stride_wn, stride_wk,     # Wa, Wb: (ND, K) row-major
@@ -88,7 +88,7 @@ def _cond_transition_inference_kernel(
     row_mask = rows < M
 
     dcols = pid_d * BLOCK_K_ND + tl.arange(0, BLOCK_K_ND)   # output tile of the squeeze/gate
-    d_mask = dcols < D
+    d_mask = dcols < K
     out_acc = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
     for n0 in range(0, ND, BLOCK_K_ND):
         cols = n0 + tl.arange(0, BLOCK_K_ND)
@@ -177,7 +177,7 @@ def cond_transition_inference(
     _cond_transition_inference_kernel[grid](
         x, cond, wa.contiguous(), wb.contiguous(), ws.contiguous(),
         wsc.contiguous(), bsc.contiguous(), out,
-        M, ND, K, D, DC,
+        M, ND, K, DC,
         x.stride(0), x.stride(1),
         cond.stride(0), cond.stride(1),
         wa.stride(0), wa.stride(1),

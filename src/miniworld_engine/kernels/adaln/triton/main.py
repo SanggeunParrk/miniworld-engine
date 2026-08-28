@@ -196,9 +196,12 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
 
 
 
+# NO USE_BF16/USE_FP16 here, unlike every other kernel in this file. They select tl.dot operand
+# precision, and this kernel does not offer the choice: all four of its `tl.dot` calls hardcode
+# `input_precision="ieee"`. The flags reached the signature and the key without ever being read, so
+# one binary was tuned four times under four bucket names.
 @triton.autotune(configs=configs_for("adaln_bwd_dx_dbias_triton"),
-                 # USE_BF16/USE_FP16: tl.dot operand precision, see adaln_fwd_kernel.
-                 key=['shape_key', 'NX', 'NC', 'USE_BF16', 'USE_FP16'],
+                 key=['shape_key', 'NX', 'NC'],
                  reset_to_zero=['DScaleB'])
 @triton.jit
 def adaln_bwd_input_kernel(  # noqa: PLR0915
@@ -225,8 +228,6 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
     M,
     NX: tl.constexpr,
     NC: tl.constexpr,
-    USE_BF16: tl.constexpr,
-    USE_FP16: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     BLOCK_K_NX: tl.constexpr,
     BLOCK_K_NC: tl.constexpr,
@@ -883,8 +884,6 @@ def _adaln_bwd(
         m,
         NX=nx,
         NC=nc,
-        USE_BF16=use_bf16,
-        USE_FP16=use_fp16,
         shape_key=shape_key,
     )
     weight_grid = lambda meta: (
