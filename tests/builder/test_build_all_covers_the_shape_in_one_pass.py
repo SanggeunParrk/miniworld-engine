@@ -1,19 +1,21 @@
-"""`build all` with no flags must produce a complete cache, and one work list is not enough.
+"""`build all` with no flags must produce a complete cache, and one work list now is enough.
 
-Two lists exist and neither covers the other:
+It was not, and the reason was a driver's WIDTH. `op_units` is declared coverage -- registry.csv x
+level -- so every kernel with a driver gets tuned; but each was driven through its own harness, and
+a harness's width constants were frozen at import while only its length could be overridden. The
+sweep therefore reached one width per kernel, and every other width the model uses missed the cache
+and fell back to the grid at runtime. Measured on an A6000: the resulting cache answers
+`missing_pairs 0` to the declared question and misses 363 lookups the module matrix makes, across
+42 of 91 ops.
 
-  * `op_units` -- declared coverage, registry.csv x level. Every kernel with a driver gets tuned,
-    but each through its own driver, so the constexpr combinations a module's real dispatch
-    produces (`SAVE_PREACT=1`, `ADD_RESIDUAL=0`, `H2=512,K=256`) never occur. Measured on an
-    A6000: the resulting cache answers `missing_pairs 0` to the declared question and misses 363
-    lookups the module matrix makes, across 42 of 91 ops.
-  * `cases` -- the module matrix. Reaches those keys, reaches only 48 of the 91 triton kernels.
+The second pass -- `cases`, the module matrix -- existed to reach those, at the cost of a whole
+second pass, and it reaches only 48 of the 91 triton kernels itself.
 
-The default was the first list alone, so `build all` on a fresh card left the 363. Now it is both,
-in order, with a merge between them, and the second runs with `fill_gaps` so a key the first pass
-already tuned costs a 3-config re-rank rather than a full-grid sweep. That flag is not a detail:
-without it the module pass re-benches everything the op sweep did, which is the 244 GPU-h that
-made these an either/or.
+`driver_width` closes the hole at its source: a unit is (op, dtype, side, length, WIDTH), the
+drivers read the base width from the environment exactly as they already read the length, and every
+other width derives from it the way it does in the model (ND = n*D, NH = D//32, DC). So `build all`
+is one pass again, and the module matrix is what `--per-module` asks for when you want to exercise
+real dispatch paths -- not a requirement for coverage.
 """
 from __future__ import annotations
 
@@ -50,18 +52,31 @@ def _run(args):
     assert rc == 0, rc
 
 
-def test_the_default_runs_the_op_sweep_then_the_module_matrix(spy) -> None:
+def test_the_default_is_the_op_sweep_alone(spy) -> None:
     _run(_args())
-    assert len(spy) == 2, f"`build all` ran {len(spy)} pass(es); one work list is not complete"
+    assert len(spy) == 1, f"`build all` ran {len(spy)} pass(es); the op sweep now covers the shape"
     assert spy[0]["kind"] == "OpUnit", spy
-    assert spy[1]["kind"] == "Case", spy
-
-
-def test_only_the_second_pass_fills_gaps(spy) -> None:
-    """The op sweep must search the whole grid; the module pass must not repeat it."""
-    _run(_args())
     assert spy[0]["fill_gaps"] is False, "the declared sweep must bench the full grid"
-    assert spy[1]["fill_gaps"] is True, "without this the module pass re-benches 244 GPU-h"
+
+
+def test_the_op_sweep_drives_more_than_one_width(monkeypatch) -> None:
+    """The whole reason one pass is enough. Without this the sweep tunes one width per kernel and
+    the other widths the model uses fall back to the grid -- the 363 lookups the second pass
+    existed to reach."""
+    from miniworld_engine.autotune import builder
+    from miniworld_engine.autotune.configs import config_set
+
+    units = builder.op_units(config_dir=config_set("grid"))
+    widths = {u.width for u in units}
+    assert len(widths) > 1, f"the op sweep drives one width ({widths}); the module pass was for this"
+    assert 0 not in widths, "a unit with no width leaves its driver at whatever it was frozen at"
+    # and the width has to REACH the driver, or the unit list is a decoration
+    one = next(u for u in units if u.width)
+    assert one.env().get("MINIWORLD_DRIVER_WIDTH") == str(one.width), one.env()
+    assert "--width" in one.cmd_args(), one.cmd_args()
+    # two widths of the same (op, length) must be different units, or one overwrites the other
+    stems = {u.stem for u in units}
+    assert len(stems) == len(units), "two units share a shard stem; one would overwrite the other"
 
 
 @pytest.mark.parametrize(("flag", "kind"), [("--per-op", "OpUnit"), ("--per-module", "Case")])

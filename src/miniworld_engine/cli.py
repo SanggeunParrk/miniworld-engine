@@ -731,8 +731,21 @@ def cmd_build(args: argparse.Namespace) -> int:
         # commit, turning `build gated_projection grid` from a working command into exit 2.
         passes = [(_module_pass, False, "module matrix")]
     else:
-        passes = [(_op_pass, False, "per-op sweep"),
-                  (_module_pass, True, "module matrix, gaps only")]
+        # ONE pass. The op sweep used to reach exactly one WIDTH per kernel -- whichever its driver
+        # happened to build -- because a driver's width constants were frozen at import while only
+        # its length was overridable. Every other width the model uses then missed the cache and
+        # fell back to the grid at runtime: 363 lookups across 42 of 91 ops, measured on an A6000
+        # (docs/records/cache-coverage-replay-a6000.md). The module matrix was added to reach them,
+        # at the cost of a second pass over the whole build.
+        #
+        # `driver_width` closes that: a unit is (op, dtype, side, length, WIDTH), the drivers take
+        # the base width from the environment the way they already took the length, and every other
+        # width derives from it exactly as it does in the model (ND = n*D, NH = D//32, DC). The op
+        # sweep now covers the shape space it always declared it covered.
+        #
+        # --per-module still asks for the module pass, and it is still the honest way to exercise
+        # real dispatch paths. What it is no longer is a REQUIREMENT for coverage.
+        passes = [(_op_pass, False, "per-op sweep")]
 
     results: list = []
     for i, (build_units, fill_gaps, label) in enumerate(passes):

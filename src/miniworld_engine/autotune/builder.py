@@ -610,6 +610,13 @@ class OpUnit:
     op: str
     length: int
     dtype: str = "bfloat16"
+    #: Base channel WIDTH to drive at. The shape key carries the whole shape (plan.md G5), so a
+    #: bucket is a (rows, widths) pair and a sweep that varies only the length reaches exactly one
+    #: width per op -- whichever its driver happens to build. That is the 363 uncovered lookups the
+    #: module pass exists to reach. One number per unit, not one per axis: a driver derives its
+    #: other widths from a base (`_DC`, `ND = n*D`, `NH = D//32`), so overriding the base moves them
+    #: together, the way changing `d_pair` does in the model.
+    width: int = 0
     #: "" for a token/atom kernel, "pair" or "atom" for a `level=both` one. A both-level kernel
     #: keys on ROWS, so its two sides are different buckets at the same length -- atom A=256 is
     #: 256 rows, pair L=256 is 65,536 -- and the side has to be said, not inferred.
@@ -634,15 +641,19 @@ class OpUnit:
     @property
     def label(self) -> str:
         tag = f" {self.side}" if self.side else ""
-        return f"{self.op}[{self.dtype}]{tag} L={self.length}"
+        w = f" D={self.width}" if self.width else ""
+        return f"{self.op}[{self.dtype}]{tag} L={self.length}{w}"
 
     @property
     def stem(self) -> str:
         tag = f"-{self.side}" if self.side else ""
-        return f"op-{self.op}-{self.dtype}{tag}-L{self.length}"
+        w = f"-D{self.width}" if self.width else ""
+        return f"op-{self.op}-{self.dtype}{tag}-L{self.length}{w}"
 
     def cmd_args(self) -> list[str]:
         args = ["--op", self.op, "--dtype", self.dtype, "--length", str(self.length)]
+        if self.width:
+            args += ["--width", str(self.width)]
         return args + (["--side", self.side] if self.side else [])
 
     def env(self) -> dict[str, str]:
@@ -650,6 +661,8 @@ class OpUnit:
         # are module-level and the kernels reach them through helpers that close over them, so a
         # per-call override would have to reach inside every driver module. Per-process does not.
         env = {"MINIWORLD_DRIVER_LENGTH": str(self.length)}
+        if self.width:
+            env["MINIWORLD_DRIVER_WIDTH"] = str(self.width)
         if self.side:
             env["MINIWORLD_DRIVER_SIDE"] = self.side
         return env
@@ -724,7 +737,7 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
     return problems
 
 
-def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> list[OpUnit]:
+def op_units(only: set[str] | None = None, config_dir: Path | None = None, driver_widths=None) -> list[OpUnit]:
     """One item per (triton op with a driver, DECLARED dtype, shape bucket of its declared level).
 
     The level comes from registry.csv and decides the bucket set, so a token kernel is never
@@ -756,6 +769,19 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
     )
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    # The WIDTHS to drive each op at. The shape key carries the whole shape now (plan.md G5), so a
+    # sweep that varies only the length tunes one width per op -- whichever the driver happens to
+    # build -- and every other width the model uses falls back to the grid at runtime. Measured on
+    # an A6000: 363 such lookups across 42 of 91 ops
+    # (docs/records/cache-coverage-replay-a6000.md), which is precisely what the module pass was
+    # added to reach.
+    #
+    # These are the model's own widths, not DIM_BUCKETS. `cases()` states them -- d_pair 128,
+    # d_single 384 -- and driving the two the model actually runs costs 2x, where the six declared
+    # buckets would cost 6x to tune four widths nothing asks for. `dim_bucket` still refuses
+    # anything outside DIM_BUCKETS at runtime, so an unlisted width is a loud miss, not a silent
+    # one.
+    widths = tuple(driver_widths) if driver_widths else (128, 384)
     out = []
     for r in csv.DictReader(reg.open()):
         if r["backend"] != "triton" or not (r["driver"] or "").strip():
@@ -782,8 +808,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None) -> li
             sided = sided[:1]
         alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
         dtypes = [alias.get(x, x) for x in (r.get("dtypes") or "bf16").split("|") if x]
-        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side)
-                    for dt in dtypes for side, length in sided])
+        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)
+                    for dt in dtypes for w in widths for side, length in sided])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands
@@ -1271,6 +1297,10 @@ def _child_main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dims", type=int, default=0)
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--length", type=int, default=0)
+    ap.add_argument("--width", type=int, default=0,
+                    help="base channel width for this unit. Reaches the drivers through "
+                         "MINIWORLD_DRIVER_WIDTH before they import, like --length; it is on the "
+                         "command line so the unit is reproducible from it.")
     ap.add_argument("--side", default="", choices=("", "pair", "atom"),
                     help="which side of a `level=both` kernel to drive. It keys on rows, so pair "
                          "L and atom A of the same value are different buckets and the side "
