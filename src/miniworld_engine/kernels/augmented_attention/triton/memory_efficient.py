@@ -15,7 +15,7 @@ import triton.language as tl
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.autotune.shape_key import atom_key, pack
 
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
@@ -112,7 +112,7 @@ def _attn_bwd_dqdkdv(
 # folds into the constant M_offset stride (B*H*N_CTX), so neither can change which config wins;
 # keying them would partition the cache per augmentation count and per batch size.
 @triton.autotune(configs=configs_for("augmented_attention_bwd_atomic_triton"),
-                 key=['shape_key', 'H', 'HEAD_DIM'],
+                 key=['shape_key'],
                  reset_to_zero=['DQ', 'DBias'])
 @triton.jit
 def _attn_bwd(
@@ -299,7 +299,7 @@ def _memeff_fwd(
         L,
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
 
@@ -352,7 +352,7 @@ def _memeff_bwd(
         q.stride(4),
         H,
         D,
-        shape_key=atom_key(L),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
 
@@ -395,7 +395,7 @@ def _memeff_bwd(
         L,
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=atom_key(L),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D),
     )
 
     return dq, dk, dv, dbias

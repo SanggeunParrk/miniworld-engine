@@ -67,7 +67,7 @@ def augmented_attention_bwd_pre_triton() -> Pair:
     _attn_bwd_preprocess[grid](
         o, do, delta, L,
         o.stride(1), o.stride(2), o.stride(3), o.stride(4), H, D,
-        shape_key=atom_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # Delta is (A,B,H,L) -- stored at off_z*H*N_CTX + off_h*N_CTX + off_m with off_z over A*B --
     # while the rowsum over d leaves (A,B,L,H), so H moves in front of L.

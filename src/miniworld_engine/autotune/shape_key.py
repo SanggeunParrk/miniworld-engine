@@ -45,6 +45,8 @@ The bucket VALUE is returned, not an index: it is what lands in the cache key an
 
 from __future__ import annotations
 
+import zlib as _zlib
+
 #: Channel width. Exact -- a kernel is compiled for one of these and no other.
 DIM_BUCKETS: tuple[int, ...] = (64, 128, 256, 384, 512, 768)
 
@@ -94,6 +96,48 @@ SHAPES_BY_LEVEL: dict[str, tuple[int, ...]] = {
     "atom": ATOM_SHAPES,
     "both": BOTH_SHAPES,
 }
+
+
+#: Radix the packer uses per axis. Every width this repo launches is far below it (the largest is
+#: ND=1536), and :func:`pack` refuses anything that is not, because a width at or above the radix
+#: would carry into its neighbour's digit and two different shapes would share one key.
+_RADIX = 4096
+
+
+def pack(base: int, **axes: int) -> int:
+    """One cache label carrying the WHOLE shape: the row/length bucket plus every width axis.
+
+    ``K``, ``ND``, ``H``, ``HEAD_DIM`` and the rest are shape -- they are dimensions of the tensors
+    the kernel reads, exactly as the row count is -- so they belong in the shape key rather than
+    standing beside it as separate ``key=[...]`` entries. The body still takes them as
+    ``tl.constexpr`` parameters (it reads them for masks and loop bounds); what changes is that the
+    autotune key names ONE thing, and that thing is the shape.
+
+    Order-independent by construction: axes are packed by SORTED NAME, so a launcher that writes
+    ``atom_key(L, HEAD_DIM=d, H=h)`` and one that writes ``atom_key(L, H=h, HEAD_DIM=d)`` produce
+    the same key. Ordering by argument position is how ``3d47a78`` and ``7c16d16`` both went wrong
+    -- one site disagreeing with another about what a positional argument meant -- and naming the
+    axes removes that failure mode instead of documenting it.
+
+    The axis NAMES are folded in too. A launcher that forgets an axis, or names a different set
+    than the one that wrote the cache, then produces a DIFFERENT key rather than a colliding one:
+    the lookup misses, the reader warns and falls back to the full grid, and nothing silently runs
+    a config tuned for another shape. That is the direction to be wrong in -- ``6948c77`` cost
+    1.73x precisely because a lossy key collided instead of missing.
+    """
+    if not axes:
+        return int(base)
+    value = int(base)
+    for name in sorted(axes):
+        w = int(axes[name])
+        if not 0 < w < _RADIX:
+            raise ValueError(
+                f"shape axis {name}={w} is outside (0, {_RADIX}); packing it would carry into the "
+                f"next axis's digit and two different shapes would share one autotune key. Raise "
+                f"_RADIX and re-tune, or check that {name} is really a width."
+            )
+        value = value * _RADIX + w
+    return value * _RADIX + (_zlib.crc32(",".join(sorted(axes)).encode()) & (_RADIX - 1))
 
 
 def _floor_clamp(value: int, buckets: tuple[int, ...]) -> int:
@@ -156,23 +200,26 @@ def pair_length(rows: int) -> int:
     return L
 
 
-def token_key(length: int) -> int:
-    """Shape key for a token/pair-level kernel (`level=token` in registry.csv)."""
-    return _floor_clamp(int(length), TOKEN_SHAPES)
+def token_key(length: int, **axes: int) -> int:
+    """Shape key for a token/pair-level kernel (`level=token` in registry.csv).
+
+    ``**axes`` are the kernel's width dimensions (``K``, ``ND``, ``H``, ...). They are shape, so
+    they belong in the key rather than beside it; see :func:`pack`."""
+    return pack(_floor_clamp(int(length), TOKEN_SHAPES), **axes)
 
 
-def atom_key(length: int) -> int:
-    """Shape key for an atom-level kernel (`level=atom`)."""
-    return _floor_clamp(int(length), ATOM_SHAPES)
+def atom_key(length: int, **axes: int) -> int:
+    """Shape key for an atom-level kernel (`level=atom`). ``**axes``: see :func:`pack`."""
+    return pack(_floor_clamp(int(length), ATOM_SHAPES), **axes)
 
 
-def both_key(rows: int) -> int:
+def both_key(rows: int, **axes: int) -> int:
     """Cache key for a kernel used at both levels (`level=both`), from its ROW COUNT.
 
     Rows, not length -- see :data:`BOTH_ROWS` for why, and for the 1.73x this cost. Call it as
     ``both_key(rows_of(x.shape))``; a call site that already has the flattened M passes that.
     """
-    return _floor_clamp(int(rows), BOTH_ROWS)
+    return pack(_floor_clamp(int(rows), BOTH_ROWS), **axes)
 
 
 def rows_of(shape) -> int:

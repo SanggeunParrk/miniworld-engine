@@ -9,7 +9,7 @@ import triton.language as tl
 
 from jaxtyping import Bool, Float
 
-from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.autotune.shape_key import atom_key, pack
 from miniworld_engine._typecheck import typecheck
 
 
@@ -117,7 +117,7 @@ def _attn_fwd_inner(
 # HEAD_DIM_PAD = next_power_of_2(HEAD_DIM)), H (also the q/k/v row-stride multiplier H*D), and
 # shape_key (the L bucket).
 @triton.autotune(configs=configs_for("augmented_attention_fwd_triton"),
-                 key=['shape_key', 'H', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_fwd(
     Q,
@@ -249,7 +249,7 @@ def _attn_fwd(
 # bucket -- one cache entry per sequence length, which is what shape_key exists to prevent. None of
 # them changes the tile or the loop trip count: they only shift each program's base pointer.
 @triton.autotune(configs=configs_for("augmented_attention_bwd_pre_triton"),
-                 key=['shape_key', 'H', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd_preprocess(
     O,
@@ -378,7 +378,7 @@ def _attn_bwd_dqdkdv(
 # AUTOTUNE KEY: `A`/`B` out for the same reason as the forward -- `A` is unread here, and `B` only
 # folds into the constant M_offset stride (B*H*N_CTX).
 @triton.autotune(configs=configs_for("augmented_attention_bwd_split_triton"),
-                 key=['shape_key', 'H', 'HEAD_DIM'],
+                 key=['shape_key'],
                  reset_to_zero=['DQ', 'DBias'])
 @triton.jit
 def _attn_bwd(
@@ -623,7 +623,7 @@ def _aa_fwd(
         L,
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
 
@@ -677,7 +677,7 @@ def _aa_bwd(
         q.stride(4),
         H,
         D,
-        shape_key=atom_key(L),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
 
@@ -728,7 +728,7 @@ def _aa_bwd(
         L,
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=atom_key(L),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D),
     )
 
     # sum the splits into the final dq
