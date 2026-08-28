@@ -25,7 +25,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 from miniworld_engine.kernels.transition.triton.fused import (
     _transition_expand_gatebwd_savedxn,
@@ -36,7 +36,7 @@ from miniworld_engine.kernels.transition.triton.fused import (
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_recompute_foldstats_triton"), key=['shape_key', 'K'])
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_foldstats_triton"), key=['shape_key'])
 @triton.jit
 def _xn_recompute_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, b_ptr, o_ptr, M, K, sm, sk,
@@ -76,7 +76,7 @@ def _xn_recompute(x2, rstd, c1, gamma, beta, *, shape_key: int | None = None):
         # both_key(rows_of(<pre-flatten shape>)) from the caller (the backward below).
         # None = drivers/checks transition, which the coordinator threads; that path
         # buckets the flattened ROW count, the ambiguity autotune.shape_key removes.
-        shape_key=both_key(M) if shape_key is None else shape_key,
+        shape_key=both_key(M, K=K) if shape_key is None else pack(shape_key, K=K),
     )
     return xn
 from miniworld_engine.kernels.transition.cute.gemm_transition_swiglu import (

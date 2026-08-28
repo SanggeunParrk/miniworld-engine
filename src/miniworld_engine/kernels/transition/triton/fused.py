@@ -35,7 +35,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, pack, length_of, rows_of
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = settings.current().autotunes("transition")
@@ -68,7 +68,7 @@ def get_seq_group(length) -> int:
     return bucket_mixed(length)
 
 
-def _shape_key(shape_key: int | None, rows: int) -> int:
+def _shape_key(shape_key: int | None, rows: int, **axes: int) -> int:
     """The autotune shape key for a launch: L bucketed against the ``both`` set.
 
     Every launcher in this module takes ``shape_key`` = ``both_key(rows_of(<pre-flatten
@@ -79,7 +79,7 @@ def _shape_key(shape_key: int | None, rows: int) -> int:
     flattened ROW count, which is exactly the L-vs-L*L ambiguity ``autotune.shape_key`` exists
     to remove. No model path reaches it.
     """
-    return both_key(rows) if shape_key is None else shape_key
+    return both_key(rows, **axes) if shape_key is None else pack(shape_key, **axes)
 
 
 
@@ -92,7 +92,7 @@ def _shape_key(shape_key: int | None, rows: int) -> int:
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_layernorm_expand_swiglu_triton"),
-                 key=['shape_key', 'ND', 'K', 'SAVE_XN'])
+                 key=['shape_key', 'SAVE_XN'])
 @triton.jit
 def _transition_expand_gate_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
@@ -244,7 +244,7 @@ def transition_expand_gate(
     _transition_expand_gate_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), expand, xn,
-        M, ND, K, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         expand.stride(0), expand.stride(1),
@@ -287,7 +287,7 @@ def transition_expand_gate(
 # for nothing.
 # fmt: off
 @triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
-                 key=['shape_key', 'ND', 'K', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
+                 key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
@@ -518,7 +518,7 @@ def transition_b2b(
     _transition_b2b_kernel[grid](
         x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
-        M, ND, K, _shape_key(shape_key, M), eps,
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K), eps,
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),
@@ -554,7 +554,7 @@ def transition_b2b(
 # x2.shape[1], both the module's d_hidden, so `K` (keyed) already partitions this axis. See the
 # longer note on `_transition_b2b_kernel` above. `ND` is independent (n is a module argument).
 # fmt: off
-@triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['shape_key', 'ND', 'K'])
+@triton.autotune(configs=configs_for("transition_fwd_b2b_ktiled_triton"), key=['shape_key'])
 @triton.jit
 def _transition_b2b_ktiled_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr,
@@ -683,7 +683,7 @@ def transition_b2b_ktiled(
     _transition_b2b_ktiled_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out,
-        M, ND, K, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         ws.stride(0), ws.stride(1),
@@ -712,7 +712,7 @@ _B2B_MAX_K = 128
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_bwd_swiglu_recompute_triton"),
-                 key=['shape_key', 'ND', 'K', 'NORMALIZE'])
+                 key=['shape_key', 'NORMALIZE'])
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,
@@ -824,7 +824,7 @@ def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.T
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
         h, dA, dB, dA, xn,
-        M, ND, K, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
@@ -855,7 +855,7 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
         h, dAB, dAB, dAB, xn,
-        M, ND, K, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         x2.stride(0), x2.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
@@ -886,7 +886,7 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool
         xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
         wa.contiguous(), wb.contiguous(), grad_expand,
         h, dA, dB, dA, xn,           # dAB/xn_ptr unused — pass existing tensors as filler
-        M, ND, K, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         xn.stride(0), xn.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
@@ -926,7 +926,7 @@ def _transition_expand_gatebwd_savedxn_stacked(
         xn, xn, xn, xn, xn,
         wa.contiguous(), wb.contiguous(), grad_expand,
         h, dAB, dAB, dAB, xn,
-        M, ND, K, _shape_key(shape_key, M),
+        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         xn.stride(0), xn.stride(1),
         wa.stride(0), wa.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
@@ -966,7 +966,7 @@ def _transition_expand_gatebwd_savedxn_stacked(
 # PRIVATIZE_DGDB, and dead code on the non-privatized branch. Nothing (settings, env, launcher
 # argument) can vary it independently, so PRIVATIZE_DGDB above already separates its two values.
 @triton.autotune(configs=configs_for("layernorm_bwd_foldstats_triton"),
-                 key=['shape_key', 'K', 'PRIVATIZE_DGDB'],
+                 key=['shape_key', 'PRIVATIZE_DGDB'],
                  reset_to_zero=['dg_ptr', 'db_ptr'])
 @triton.jit
 def _transition_ln_bwd_kernel(
@@ -1100,7 +1100,7 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma, *, shape_key: int | None = None
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _transition_ln_bwd_kernel[grid](
         dxn, x2, rstd, c1, gamma.contiguous(), dx, dgamma_acc, dbeta_acc,
-        M, K, _shape_key(shape_key, M), x2.stride(0), x2.stride(1),
+        M, K, _shape_key(shape_key, M, K=K), x2.stride(0), x2.stride(1),
         dgamma_acc.stride(0), dgamma_acc.stride(-1),
         dbeta_acc.stride(0), dbeta_acc.stride(-1),
         NUM_REPLICAS=num_replicas, PRIVATIZE_DGDB=privatize_dgdb,

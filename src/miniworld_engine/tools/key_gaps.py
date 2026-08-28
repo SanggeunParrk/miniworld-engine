@@ -96,6 +96,26 @@ def _axes_of(expr) -> set[str]:
     return set()
 
 
+@functools.cache
+def _shape_key_pos(src_file: str, symbol: str) -> int:
+    """Index of ``shape_key`` in the kernel's parameter list, or -1.
+
+    Half of `transition/triton/fused.py`'s launches pass it POSITIONALLY
+    (``M, ND, K, _shape_key(shape_key, M), eps``). Reading only the ``shape_key=`` keyword makes
+    those sites invisible to the intersection, which is the same hole aliased imports were: a site
+    that does not fold is never noticed, and it writes a key the other launchers never read.
+    """
+    for base in (SRC, SRC.parent):
+        path = base / src_file
+        if path.is_file():
+            fn = _kernel_ast(path, symbol)
+            if fn is None:
+                continue
+            names = [a.arg for a in fn.args.args]
+            return names.index("shape_key") if "shape_key" in names else -1
+    return -1
+
+
 @functools.lru_cache(maxsize=1)
 def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
     """(file, symbol) -> the axes every launch of that kernel folds into ``shape_key``.
@@ -143,9 +163,13 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
             # `<symbol>[grid](...)`: a Subscript whose value is the kernel name
             if not (isinstance(f, ast.Subscript) and isinstance(f.value, ast.Name)):
                 continue
-            sk = next((k.value for k in node.keywords if k.arg == "shape_key"), None)
-            folded = _axes_of(sk)
             local = f.value.id
+            sk = next((k.value for k in node.keywords if k.arg == "shape_key"), None)
+            if sk is None:
+                src_file = origin.get(local, str(path.relative_to(SRC)))
+                i = _shape_key_pos(src_file, alias.get(local, local))
+                sk = node.args[i] if 0 <= i < len(node.args) else None
+            folded = _axes_of(sk)
             key = (str(path.relative_to(SRC)), alias.get(local, local),
                    origin.get(local, str(path.relative_to(SRC))))
             prev = out.get(key)

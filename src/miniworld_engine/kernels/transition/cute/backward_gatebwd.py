@@ -53,7 +53,7 @@ from quack.activation import dgate_fn_map
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from miniworld_engine.kernels._quack_compat import jit_cache
-from miniworld_engine.autotune.shape_key import both_key, rows_of
+from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from quack.gemm_config import GemmConfig
 from quack.gemm_tvm_ffi_utils import (
     perm3d_single,
@@ -73,7 +73,7 @@ from quack.gemm_tvm_ffi_utils import (
 
 # Both axes are now tuned tiles; the launch used to pin BLOCK_M1=64 / BLOCK_N=128 and grid-divide by the
 # same literals, so no card could ever pick a different shape for this copy.
-@triton.autotune(configs=configs_for("transition_bwd_transpose_packed_triton"), key=['shape_key', 'N'])
+@triton.autotune(configs=configs_for("transition_bwd_transpose_packed_triton"), key=['shape_key'])
 @triton.jit
 def _cdup_interleave_kernel(g_ptr, o_ptr, M, N, N2, sgm, sgn, som, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, shape_key):
     # Duplicate grad_expand (M,N) -> interleaved (M,2N): out[m,2j]=out[m,2j+1]=ge[m,j], so the
@@ -112,7 +112,7 @@ def _cdup_interleave(ge: Tensor, shape_key: int | None = None) -> Tensor:
         # both_key(rows_of(<pre-flatten shape>)) from transition/cute/fused.py's backward.
         # None = drivers/checks transition (coordinator-owned): buckets the flattened ROW
         # count, the L-vs-L*L ambiguity autotune.shape_key removes.
-        shape_key=both_key(M) if shape_key is None else shape_key,
+        shape_key=both_key(M, N=N) if shape_key is None else pack(shape_key, N=N),
     )
     return o
 

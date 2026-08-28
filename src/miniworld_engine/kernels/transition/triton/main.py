@@ -10,7 +10,7 @@ import triton.language as tl
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of
 
 def get_seq_group(length) -> int:
     """Delegates to canonical size-bucketing (autotune.buckets)."""
@@ -27,7 +27,7 @@ def get_seq_group(length) -> int:
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'ND', 'K'])
+@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key'])
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -122,7 +122,7 @@ def _expand_swiglu(
         M,
         N,          # K -- the input width
         n * N,      # ND -- the expanded width
-        shape_key=shape_key,
+        shape_key=pack(shape_key, K=N, ND=n * N),
     )
     return expand
 
