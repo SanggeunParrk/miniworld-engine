@@ -117,6 +117,25 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
             tree = ast.parse(path.read_text())
         except SyntaxError:
             continue
+        # `from ...persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit` launches the
+        # SAME kernel under another name. Without this the aliased site is invisible: it is not
+        # intersected, so a site that forgets to fold an axis reports nothing and quietly writes a
+        # key the other launchers never read -- the exact failure this check exists to prevent.
+        alias, origin = {}, {}
+        here = path.relative_to(SRC).parent
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.ImportFrom):
+                continue
+            base = here
+            for _ in range(max(0, n.level - 1)):
+                base = base.parent
+            mod = (n.module or "").replace(".", "/")
+            src_file = f"{base.as_posix()}/{mod}.py" if n.level else f"{mod}.py".replace(
+                "miniworld_engine/", "")
+            for a in n.names:
+                if a.asname:
+                    alias[a.asname] = a.name
+                origin[a.asname or a.name] = src_file
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -126,7 +145,9 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
                 continue
             sk = next((k.value for k in node.keywords if k.arg == "shape_key"), None)
             folded = _axes_of(sk)
-            key = (str(path.relative_to(SRC)), f.value.id)
+            local = f.value.id
+            key = (str(path.relative_to(SRC)), alias.get(local, local),
+                   origin.get(local, str(path.relative_to(SRC))))
             prev = out.get(key)
             out[key] = folded if prev is None else (prev & folded)
     return out
@@ -135,22 +156,22 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
 def _folds_for(kernel_file: str, symbol: str) -> set[str]:
     """The axes EVERY launch of this kernel folds into ``shape_key``.
 
-    Scoped to the kernel's own family -- its package directory, plus the ``checks/`` and
-    ``drivers/`` modules named for it -- because four different kernels are named ``_attn_fwd`` and
-    two are named ``_gate_mul_kernel``. Resolving by symbol alone unions them and invents an
-    answer, which is the same mistake this module's audit docstring already records for a
-    ``name -> constexprs`` dict.
+    A launch site counts for this kernel when the launching file either IS the kernel's file, or
+    IMPORTS that symbol from it. Resolving by symbol alone unions the four different kernels named
+    ``_attn_fwd`` and the two named ``_gate_mul_kernel`` -- the mistake this module's audit
+    docstring already records for a ``name -> constexprs`` dict. Resolving by DIRECTORY is not
+    enough either: ``layernorm_linear/triton/mmajor_bwd.py`` launches ``layernorm``'s
+    ``_ln_bwd_persistent``, so a directory rule drops the one site most likely to be forgotten.
     """
-    def _family(path: str) -> str:
-        # registry rows are `miniworld_engine/kernels/<family>/...`; the scanned paths are relative
-        # to SRC, so `kernels/<family>/...`. Take the component after `kernels` either way.
+    def _norm(path: str) -> str:
+        # registry rows, scanned paths and resolved imports disagree about the prefix
+        # (`miniworld_engine/kernels/...` vs `kernels/...`). Compare from `kernels/` on.
         parts = pathlib.PurePosixPath(path).parts
-        return parts[parts.index("kernels") + 1] if "kernels" in parts else ""
+        return "/".join(parts[parts.index("kernels"):]) if "kernels" in parts else path
 
-    family = _family(kernel_file)
-    sets = [v for (f, sym), v in _folded_into_shape_key().items()
-            if sym == symbol and (_family(f) == family
-                                  or f.endswith((f"checks/{family}.py", f"drivers/{family}.py")))]
+    want = _norm(kernel_file)
+    sets = [v for (f, sym, src), v in _folded_into_shape_key().items()
+            if sym == symbol and want in (_norm(src), _norm(f))]
     return set.intersection(*sets) if sets else set()
 
 
