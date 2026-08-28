@@ -21,7 +21,7 @@ AUTOTUNE = settings.current().autotunes("adaln")
 # `atom_key`, and the value comes from `length_of(x.shape)` -- x's shape[-2] BEFORE the
 # `reshape(-1, nx)` below. The flattened M is B*A, which is why it cannot be the key: two batch
 # sizes at the same A are the same shape for tuning, and M cannot tell them apart.
-from miniworld_engine.autotune.shape_key import atom_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
 
 
 # USE_BF16/USE_FP16 belong in the key: they select the tl.dot operand precision -- a 16-bit
@@ -31,7 +31,7 @@ from miniworld_engine.autotune.shape_key import atom_key, length_of
 # below is the AUTOCAST dtype when autocast is on, while X/DY stay whatever the caller passed, so
 # one fp32 operand reaches both flag settings and the two compiles would share one cache entry.
 @triton.autotune(configs=configs_for("adaln_fwd_saveact_triton"),
-                 key=['NX', 'NC', 'USE_BF16', 'USE_FP16', 'shape_key'])
+                 key=['USE_BF16', 'USE_FP16', 'shape_key'])
 @triton.jit
 def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
     X,
@@ -201,7 +201,7 @@ def adaln_fwd_kernel(  # noqa: C901, PLR0912, PLR0915
 # `input_precision="ieee"`. The flags reached the signature and the key without ever being read, so
 # one binary was tuned four times under four bucket names.
 @triton.autotune(configs=configs_for("adaln_bwd_dx_dbias_triton"),
-                 key=['shape_key', 'NX', 'NC'],
+                 key=['shape_key'],
                  reset_to_zero=['DScaleB'])
 @triton.jit
 def adaln_bwd_input_kernel(  # noqa: PLR0915
@@ -488,7 +488,7 @@ def adaln_bwd_input_kernel(  # noqa: PLR0915
 
 @triton.autotune(configs=configs_for("adaln_bwd_dw_triton"),
                  # USE_BF16/USE_FP16: tl.dot operand precision, see adaln_fwd_kernel.
-                 key=['shape_key', 'NX', 'NC', 'USE_BF16', 'USE_FP16'])
+                 key=['shape_key', 'USE_BF16', 'USE_FP16'])
 @triton.jit
 def adaln_bwd_weight_kernel(
     DY,
@@ -583,7 +583,7 @@ def adaln_bwd_weight_kernel(
 
 @triton.autotune(configs=configs_for("adaln_bwd_dlnw_triton"),
                  # USE_BF16/USE_FP16: tl.dot operand precision, see adaln_fwd_kernel.
-                 key=['shape_key', 'NX', 'NC', 'USE_BF16', 'USE_FP16'])
+                 key=['shape_key', 'USE_BF16', 'USE_FP16'])
 @triton.jit
 def adaln_bwd_lnw_kernel(
     DY,
@@ -803,7 +803,7 @@ def _adaln_fwd(
         eps_cond=eps_cond,
         USE_BF16=use_bf16,
         USE_FP16=use_fp16,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, NX=nx, NC=nc),
     )
     return y, x_hat, cond_norm, gate, rstd_x, rstd_cond
 
@@ -884,7 +884,7 @@ def _adaln_bwd(
         m,
         NX=nx,
         NC=nc,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, NX=nx, NC=nc),
     )
     weight_grid = lambda meta: (
         triton.cdiv(nx, meta["BLOCK_N_NX"]),
@@ -911,7 +911,7 @@ def _adaln_bwd(
         NC=nc,
         USE_BF16=use_bf16,
         USE_FP16=use_fp16,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, NX=nx, NC=nc),
     )
     lnw_grid = lambda meta: [triton.cdiv(nc, meta["BLOCK_N"])]
     adaln_bwd_lnw_kernel[lnw_grid](
@@ -935,7 +935,7 @@ def _adaln_bwd(
         NC=nc,
         USE_BF16=use_bf16,
         USE_FP16=use_fp16,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, NX=nx, NC=nc),
     )
 
     return dx, dcond, dlnw, dscale_w, dscale_b, dbias_w

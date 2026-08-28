@@ -91,7 +91,7 @@ def _fp32_matmul_ctx(dtype):
 # takes the key from the caller that still holds the pre-flatten shape; the default covers a caller
 # that hands in a genuinely 2-D activation (nothing folded into the rows, so shape[-2] IS L), which
 # is what the drivers and checkers do.
-from miniworld_engine.autotune.shape_key import atom_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
 
 
 def _cond_affine_fake(cond, lnw, eps, out_dtype=None, shape_key=None):
@@ -116,7 +116,7 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
     _ln_kernel[grid](
         cond, aff, lnw, M, int(N), eps,
         cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
-        HAS_W=True, shape_key=shape_key,
+        HAS_W=True, shape_key=pack(shape_key, N=N),
     )
     return aff
 
@@ -124,7 +124,7 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
 
 
-@triton.autotune(configs=configs_for("adaln_epilogue_triton"), key=['N', 'shape_key'])
+@triton.autotune(configs=configs_for("adaln_epilogue_triton"), key=['shape_key'])
 @triton.jit
 def _adaln_epilogue_kernel(
     X, SB, Y, M, N: tl.constexpr, eps,
@@ -204,7 +204,7 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
     _adaln_epilogue_kernel[grid](
         x, sb, y, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1), y.stride(0), y.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return y
 
@@ -332,7 +332,7 @@ def adaln_inference_lnfold(
 # autotune/cache.py). The dtype component is strictly finer (it separates bf16 from fp16, which
 # USE_LOW does not), so keying on USE_LOW as well would add no partition. Unlike the training
 # kernels in main.py, nothing here consults autocast, so the two cannot diverge.
-@triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['NX', 'NC', 'shape_key'])
+@triton.autotune(configs=configs_for("adaln_fwd_triton"), key=['shape_key'])
 @triton.jit
 def _adaln_fused_kernel(  # noqa: PLR0915
     X, Cond, LnW, ScaleW, ScaleB, BiasW, Y,
@@ -456,7 +456,7 @@ def adaln_inference_fused(
         bias_weight.stride(0), bias_weight.stride(1), y.stride(0), y.stride(1),
         m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low,
         # L is x's pre-flatten shape[-2]; m = B*A is the row count, not the shape.
-        shape_key=atom_key(length_of(orig_x_shape)),
+        shape_key=atom_key(length_of(orig_x_shape), NX=nx, NC=nc),
     )
     return y.reshape(orig_x_shape)
 

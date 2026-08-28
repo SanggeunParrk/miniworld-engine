@@ -75,13 +75,13 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # launchers that only see the (M, D) matrices, so each takes the key from the caller that still
 # holds the pre-flatten shape; the default covers a caller that hands in a genuinely 2-D activation
 # (nothing folded into the rows, so shape[-2] IS L), which is what the drivers and checkers do.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
 # `both_key` is only for the borrowed layernorm_linear helpers (`_ln_materialize`/`_ln_bwd`):
 # those kernels are level=both in registry.csv and bucket against the union set. This family's
 # own kernels stay on `atom_key`. Same L, different bucket set.
 
 
-@triton.autotune(configs=configs_for("adaln_epilogue_saveact_triton"), key=['N', 'HAS_SB', 'shape_key'])
+@triton.autotune(configs=configs_for("adaln_epilogue_saveact_triton"), key=['shape_key', 'HAS_SB'])
 @triton.jit
 def _epilogue_train_kernel(
     X, SB, Y, MeanX, RstdX, Gate, ScaleBias, M, N: tl.constexpr, eps,
@@ -190,7 +190,7 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
         x, sb, y, mean, rstd, gate, scale_bias, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1), HAS_SB=scale_bias is not None,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return y, mean, rstd, gate
 
@@ -201,7 +201,7 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['N', 'shape_key'])
+@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['shape_key'])
 @triton.jit
 def _bwd_x_kernel(
     DY, X, MeanX, RstdX, Gate, D, DX, M, N: tl.constexpr,
@@ -309,7 +309,7 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
         dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
         dy.stride(0), dy.stride(1), x.stride(0), x.stride(1), gate.stride(0), gate.stride(1),
         D.stride(0), D.stride(1), dx.stride(0), dx.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return D, dx
 
@@ -328,7 +328,7 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
 
 
 @triton.autotune(configs=configs_for("adaln_bwd_dx_dlnw_triton"),
-                 key=['NC', 'K2', 'shape_key'],
+                 key=['shape_key'],
                  reset_to_zero=['DLNW'])
 @triton.jit
 def _dgrad_condln_kernel(
@@ -474,7 +474,7 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
         D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
         D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
         cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, NC=int(NC), K2=K2),
     )
     return dcond, dlnw.to(lnw.dtype)
 

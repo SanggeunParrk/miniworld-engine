@@ -37,13 +37,13 @@ import triton.language as tl
 # from the caller that still holds the pre-flatten shape. The default covers the callers that hand
 # in a genuinely 2-D activation (no batch axis was folded in, so shape[-2] IS L) -- the drivers and
 # checkers do exactly that.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
 # `both_key` is for the borrowed layernorm_linear helpers only (`_ln_materialize`/`_ln_bwd`):
 # those kernels are level=both in registry.csv, so they bucket against the union set, while
 # this family's own kernels stay on `atom_key`. Same L either way -- different bucket set.
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['N', 'HAS_W', 'shape_key'])
+@triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['shape_key', 'HAS_W'])
 @triton.jit
 def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
               HAS_W: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -123,7 +123,7 @@ def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
     # did not already force.
     _ln_kernel[grid](x, y, weight if weight is not None else x, M, int(N), eps,
                      x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-                     HAS_W=weight is not None, shape_key=shape_key,)
+                     HAS_W=weight is not None, shape_key=pack(shape_key, N=int(N)),)
     return y
 
 
@@ -145,7 +145,7 @@ def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
 # SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond,
 # 12 comparisons out of 12. Contrast SAVE_XN in transition/triton/fused.py, which looks like the
 # same kind of flag and is not: its else path re-reads x over a full K loop, so it stays keyed.
-@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=['N', 'K', 'shape_key'])
+@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=['shape_key'])
 @triton.jit
 def _gemm_gate_kernel(
     Xn, Cn, Ws, Wb, Sb, Y, Gate, M, N, K,
@@ -221,7 +221,7 @@ def _gemm_gate(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
         x_norm.stride(0), x_norm.stride(1), cond_norm.stride(0), cond_norm.stride(1),
         Ws.stride(0), Ws.stride(1), Wb.stride(0), Wb.stride(1), y.stride(0), y.stride(1),
         0, 0,                       # Gate is unread when SAVE_GATE=False
-        shape_key=shape_key, SAVE_GATE=False,
+        shape_key=pack(shape_key, N=N, K=K), SAVE_GATE=False,
     )
     return y
 
@@ -254,7 +254,7 @@ def _gemm_gate_train(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Te
         x_norm.stride(0), x_norm.stride(1), cond_norm.stride(0), cond_norm.stride(1),
         Ws.stride(0), Ws.stride(1), Wb.stride(0), Wb.stride(1),
         y.stride(0), y.stride(1), gate.stride(0), gate.stride(1),
-        shape_key=shape_key, SAVE_GATE=True,)
+        shape_key=pack(shape_key, N=N, K=K), SAVE_GATE=True,)
     return y, gate
 
 
@@ -264,7 +264,7 @@ def _gemm_gate_train(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Te
 # from the same next_pow2(N) launch, so the candidate set has to keep reaching a whole row (1024)
 # rather than stopping at the canonical BLOCK_K's 256 — dropping the value the launcher used is
 # not a fix. With no reduction there is a single pass over the N tiles.
-@triton.autotune(configs=configs_for("adaln_bwd_pre_triton"), key=['N', 'shape_key'])
+@triton.autotune(configs=configs_for("adaln_bwd_pre_triton"), key=['shape_key'])
 @triton.jit
 def _bwd_elem_kernel(DY, Xn, Gate, Dscale, Dxn, M, N,
                      sy0, sy1, sxn0, sxn1, sg0, sg1, sds0, sds1, sdx0, sdx1,
@@ -307,7 +307,7 @@ def _bwd_elem(dy: torch.Tensor, x_norm: torch.Tensor, gate: torch.Tensor,
     _bwd_elem_kernel[grid](dy, x_norm, gate, dscale, dxn, M, N,
                            dy.stride(0), dy.stride(1), x_norm.stride(0), x_norm.stride(1),
                            gate.stride(0), gate.stride(1), dscale.stride(0), dscale.stride(1),
-                           dxn.stride(0), dxn.stride(1), shape_key=shape_key,)
+                           dxn.stride(0), dxn.stride(1), shape_key=pack(shape_key, N=int(N)),)
     return dscale, dxn
 
 
