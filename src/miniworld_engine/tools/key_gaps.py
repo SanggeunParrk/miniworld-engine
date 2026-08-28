@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
+import functools
+import pathlib
 from pathlib import Path
 
 from miniworld_engine.autotune.configs import config_set
@@ -78,6 +80,64 @@ def allowed() -> dict[tuple[str, str], str]:
     return {(r["op"], r["param"]): r["reason"] for r in csv.DictReader(ALLOWED.open())}
 
 
+@functools.lru_cache(maxsize=1)
+def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
+    """(file, symbol) -> the axes every launch of that kernel folds into ``shape_key``.
+
+    ``shape_key.pack`` lets a launcher put a kernel's width axes INTO the shape key
+    (``atom_key(L, H=H, HEAD_DIM=D)``) instead of listing them beside it in ``key=[...]``. They are
+    then still keyed -- more finely, since the axis names are folded in too -- but this audit,
+    which reads only the ``key=[...]`` list, would report them as invisible.
+
+    So read the launches. For each ``<symbol>[grid](...)`` call, take the keywords of the
+    ``shape_key=`` expression, and INTERSECT across every launch of that symbol: an axis only
+    counts as folded if EVERY launcher folds it. One site that forgets it makes the whole kernel
+    report the gap, which is the answer that matches what the cache does -- that site writes a key
+    the others never read.
+    """
+    out: dict[tuple[str, str], set[str]] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            # `<symbol>[grid](...)`: a Subscript whose value is the kernel name
+            if not (isinstance(f, ast.Subscript) and isinstance(f.value, ast.Name)):
+                continue
+            sk = next((k.value for k in node.keywords if k.arg == "shape_key"), None)
+            folded = {k.arg for k in sk.keywords if k.arg} if isinstance(sk, ast.Call) else set()
+            key = (str(path.relative_to(SRC)), f.value.id)
+            prev = out.get(key)
+            out[key] = folded if prev is None else (prev & folded)
+    return out
+
+
+def _folds_for(kernel_file: str, symbol: str) -> set[str]:
+    """The axes EVERY launch of this kernel folds into ``shape_key``.
+
+    Scoped to the kernel's own family -- its package directory, plus the ``checks/`` and
+    ``drivers/`` modules named for it -- because four different kernels are named ``_attn_fwd`` and
+    two are named ``_gate_mul_kernel``. Resolving by symbol alone unions them and invents an
+    answer, which is the same mistake this module's audit docstring already records for a
+    ``name -> constexprs`` dict.
+    """
+    def _family(path: str) -> str:
+        # registry rows are `miniworld_engine/kernels/<family>/...`; the scanned paths are relative
+        # to SRC, so `kernels/<family>/...`. Take the component after `kernels` either way.
+        parts = pathlib.PurePosixPath(path).parts
+        return parts[parts.index("kernels") + 1] if "kernels" in parts else ""
+
+    family = _family(kernel_file)
+    sets = [v for (f, sym), v in _folded_into_shape_key().items()
+            if sym == symbol and (_family(f) == family
+                                  or f.endswith((f"checks/{family}.py", f"drivers/{family}.py")))]
+    return set.intersection(*sets) if sets else set()
+
+
 def audit(config_dir: Path) -> tuple[list, int]:
     rows = list(csv.DictReader(REG.open()))
     findings, checked = [], 0
@@ -100,7 +160,8 @@ def audit(config_dir: Path) -> tuple[list, int]:
                 axes = set(head[0])                        # materialised form
         checked += 1
         ok = allowed()
-        gap = sorted(p for p in _constexprs(fn) - set(keys) - axes - IGNORE
+        folded = _folds_for(r["file"], r["symbol"])
+        gap = sorted(p for p in _constexprs(fn) - set(keys) - axes - folded - IGNORE
                      if (r["kernel"], p) not in ok)
         if gap:
             findings.append((r["file"], r["kernel"], sorted(keys), gap))

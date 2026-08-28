@@ -27,3 +27,8 @@ augmented_attention_bwd_pre_triton,stride_k,"== 1 at both launch sites, always; 
 augmented_attention_bwd_pre_triton,stride_h,"== HEAD_DIM, already keyed"
 augmented_attention_bwd_pre_triton,stride_m,"== H*HEAD_DIM, product of two already-keyed entries"
 augmented_attention_bwd_pre_triton,stride_z,"== L*H*HEAD_DIM; keying it keys the EXACT L rather than its bucket -- one entry per sequence length, which is what shape_key exists to prevent"
+adaln_gemm_gate_triton,SAVE_GATE,"pure store: the guarded block is one tl.store of a tile already in registers, so the iteration space, the tile shapes and the register-resident working set are identical either way. Measured on the shipped cache, both cards, all six shape buckets: SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond, 12 of 12. Control: layernorm_stats_triton K=128 vs K=256 differs in 9 of 22 buckets at 1.8-2.0x"
+gated_projection_gate_dropres_triton,SAVE_GATE,"pure store, same reading and same measurement as adaln_gemm_gate_triton's SAVE_GATE"
+transition_bwd_swiglu_recompute_triton,STORE_H,"pure store: tl.store(h_ptr, silu * b) of values the kernel already holds; both branches of the surrounding code compute dA and dB regardless"
+transition_bwd_swiglu_recompute_triton,STACK_DAB,"store ADDRESSING only: both branches store the same two tiles with the same masks, into one 2*ND-wide dAB or into two ND-wide dA/dB. Same tile shapes, same values, same count of stores"
+trimul_gemm_gate_mmajor_triton,SAVE_PREACT,"pure store: two tl.store of g and p, both already produced by the tl.split above it, in the same tl.trans form as the unconditional store on the next line. outl/outr are computed either way"
