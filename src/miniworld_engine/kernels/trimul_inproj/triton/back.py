@@ -57,7 +57,7 @@ from miniworld_engine.autotune.shape_key import token_key
 # N is constexpr but deliberately NOT in the key: trimul_back_triton is the only launch site and it
 # passes ``K=D, N=D`` (Wp/Wg are (D, D)), so N == K and the K entry already covers it. The
 # BLOCK_K >= K covering-tile branch is likewise selected by K, which is keyed.
-@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key', 'K', 'ADD_RESIDUAL'])
+@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key', 'ADD_RESIDUAL'])
 @triton.jit
 def _back_kernel(
     tri_ptr,  # (D, M) channel-major: tri[k, m] at k*M + m
@@ -209,5 +209,5 @@ def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tens
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
                        ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
-                       K=D, N=D, shape_key=token_key(L), ADD_RESIDUAL=add_residual)
+                       K=D, N=D, shape_key=token_key(L, K=D), ADD_RESIDUAL=add_residual)
     return y.view(B, L, L, D)

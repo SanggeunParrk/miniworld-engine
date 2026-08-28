@@ -67,7 +67,7 @@ import triton.language as tl
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
 
 
 # ============================================================================
@@ -80,7 +80,7 @@ from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, r
 
 
 @triton.autotune(configs=configs_for("cond_transition_expand_swiglu_saveact_triton"),
-                 key=['shape_key', 'ND', 'K'])
+                 key=['shape_key'])
 @triton.jit
 def _fwd_expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr, ab_ptr,
@@ -127,7 +127,7 @@ def _fwd_expand_swiglu_kernel(
 
 
 @triton.autotune(configs=configs_for("cond_transition_squeeze_gate_saveact_triton"),
-                 key=['shape_key', 'ND', 'D', 'DC'])
+                 key=['shape_key'])
 @triton.jit
 def _fwd_squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, y_ptr, out_ptr, scale_ptr,
@@ -202,7 +202,7 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         x, wa, wb, h, ab, M, ND, K, 2 * ND,
         x.stride(0), x.stride(1), wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1), ab.stride(0), ab.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND, K=K),
     )
     return h, ab
 
@@ -236,7 +236,7 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
         ws.stride(0), ws.stride(1), wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), out.stride(0), out.stride(1),
         scale.stride(0), scale.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND, D=D, DC=DC),
     )
     return y, out, scale
 
@@ -287,7 +287,7 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_gemm_triton"), key=['shape_key', 'N', 'K'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_gemm_triton"), key=['shape_key'])
 @triton.jit
 def _dgemm_kernel(
     a_ptr, w_ptr, c_ptr, M, N, K,
@@ -340,7 +340,7 @@ def _dgemm(a: torch.Tensor, w: torch.Tensor, M: int, N: int, K: int, swk: int, s
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(N, meta["BLOCK_N"]),)  # noqa: E731
     # GROUP_M stays a CSV tile knob for this kernel; only shape_key's VALUE changes here.
     _dgemm_kernel[grid](a, w, c, M, N, K, a.stride(0), a.stride(1), swk, swn,
-                        c.stride(0), c.stride(1), shape_key=shape_key)
+                        c.stride(0), c.stride(1), shape_key=pack(shape_key, N=N, K=K))
     return c
 
 
@@ -352,7 +352,7 @@ def _dgemm(a: torch.Tensor, w: torch.Tensor, M: int, N: int, K: int, swk: int, s
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_dx_triton"), key=['shape_key', 'K', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_dx_triton"), key=['shape_key'])
 @triton.jit
 def _dx_fused_kernel(
     dh_ptr, ab_ptr, wa_ptr, wb_ptr, dx_ptr,
@@ -419,7 +419,7 @@ def _dx_fused(dh: torch.Tensor, ab: torch.Tensor, wa: torch.Tensor, wb: torch.Te
         dh, ab, wa, wb, dx, M, K, ND,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1),
         wa.stride(0), wa.stride(1), dx.stride(0), dx.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, K=K, ND=ND),
     )
     return dx
 
@@ -436,7 +436,7 @@ def _dx_fused(dh: torch.Tensor, ab: torch.Tensor, wa: torch.Tensor, wb: torch.Te
 
 
 @triton.autotune(configs=configs_for("cond_transition_bwd_gate_squeeze_dx_triton"),
-                 key=['shape_key', 'ND', 'D'])
+                 key=['shape_key'])
 @triton.jit
 def _dh_gatebwd_kernel(
     out_ptr, scale_ptr, dy_ptr, ws_ptr, dh_ptr, dout_ptr, dscale_ptr,
@@ -499,7 +499,8 @@ def _dh_gatebwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor, ws: to
     _dh_gatebwd_kernel[grid](
         out, scale, dy, ws, dh, dout, dscale, M, ND, D,
         out.stride(0), out.stride(1), ws.stride(0), ws.stride(1), dh.stride(0), dh.stride(1),
-        shape_key=shape_key,   # GROUP_M is still the CSV tile knob; this is only its cache label
+        # GROUP_M is still the CSV tile knob; this is only its cache label
+        shape_key=pack(shape_key, ND=ND, D=D),
     )
     return dh, dout, dscale
 
@@ -509,7 +510,7 @@ def _dh_gatebwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor, ws: to
 
 
 @triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_dx_packed_triton"),
-                 key=['shape_key', 'K', 'ND2'])
+                 key=['shape_key'])
 @triton.jit
 def _dx_swiglubwd_kernel(
     dh_ptr, ab_ptr, wcat_ptr, dx_ptr, dab_ptr,
@@ -580,7 +581,8 @@ def _dx_swiglubwd(dh: torch.Tensor, ab: torch.Tensor, wcat: torch.Tensor,
         dh, ab, wcat, dx, dab, M, K, ND, ND2,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1),
         wcat.stride(0), wcat.stride(1), dx.stride(0), dx.stride(1), dab.stride(0), dab.stride(1),
-        shape_key=shape_key,   # GROUP_M is still the CSV tile knob; this is only its cache label
+        # GROUP_M is still the CSV tile knob; this is only its cache label
+        shape_key=pack(shape_key, K=K, ND2=ND2),
     )
     return dx, dab
 
@@ -600,7 +602,7 @@ def _dx_swiglubwd(dh: torch.Tensor, ab: torch.Tensor, wcat: torch.Tensor,
 # makes the loads coalesce along the stride-1 axis.
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_packed_triton"), key=['shape_key', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_packed_triton"), key=['shape_key'])
 @triton.jit
 def _swiglu_bwd_pack_kernel(
     dh_ptr, ab_ptr, dab_ptr, M, ND,
@@ -642,7 +644,7 @@ def _swiglu_bwd_pack(dh: torch.Tensor, ab: torch.Tensor, shape_key: int | None =
     _swiglu_bwd_pack_kernel[grid](
         dh, ab, dab, M, ND,
         dh.stride(0), dh.stride(1), ab.stride(0), ab.stride(1), dab.stride(0), dab.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND),
     )
     return dab
 
@@ -653,7 +655,7 @@ def _swiglu_bwd_pack(dh: torch.Tensor, ab: torch.Tensor, shape_key: int | None =
 # fmt: off
 
 
-@triton.autotune(configs=configs_for("cond_transition_bwd_dw_triton"), key=['N', 'K', 'shape_key'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_dw_triton"), key=['shape_key'])
 @triton.jit
 def _wgrad_kernel(
     g_ptr, x_ptr, dw_ptr, M, N, K,
@@ -698,7 +700,8 @@ def _wgrad(g: torch.Tensor, x: torch.Tensor, N: int, K: int, shape_key: int | No
     dw = torch.empty(N, K, device=g.device, dtype=g.dtype)
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_N_ROW"]), triton.cdiv(K, meta["BLOCK_N_COL"]))  # noqa: E731
     _wgrad_kernel[grid](g, x, dw, M, N, K, g.stride(0), g.stride(1),
-                       x.stride(0), x.stride(1), dw.stride(0), dw.stride(1), shape_key=shape_key)
+                       x.stride(0), x.stride(1), dw.stride(0), dw.stride(1),
+                       shape_key=pack(shape_key, N=N, K=K))
     return dw
 
 

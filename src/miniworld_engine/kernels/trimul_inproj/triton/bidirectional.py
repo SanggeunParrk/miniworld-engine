@@ -42,7 +42,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
 )
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew,
@@ -60,7 +60,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 # swing in store traffic on a store-bound kernel, so the two forms want different tiles -- without
 # it in the key they shared one cache entry and whichever ran first served its config to the other.
 @triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"),
-                 key=['shape_key', 'H2', 'K'])
+                 key=['shape_key'])
 @triton.jit
 def _bidir_front_kernel(
     x_ptr, w_ptr,
@@ -210,7 +210,8 @@ def _bidir_front_launch(
     grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)          # noqa: E731
     _bidir_front_kernel[grid](
         x_flat, Wlr, left, right, preact, m, m,
-        K=x_flat.shape[1], H2=H2, shape_key=shape_key, SAVE_PREACT=save_preact,
+        K=x_flat.shape[1], H2=H2,
+        shape_key=pack(shape_key, H2=H2, K=x_flat.shape[1]), SAVE_PREACT=save_preact,
     )
     if not save_preact:
         preact = x_flat.new_empty((0, 0))

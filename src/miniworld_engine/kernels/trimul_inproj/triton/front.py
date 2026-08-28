@@ -47,14 +47,14 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 
 
 # K is constexpr but deliberately NOT in the key: trimul_front_triton is the only launch site and
 # it passes ``K=D, D=D`` (the in-proj is square), so D already distinguishes every compiled form.
-@triton.autotune(configs=configs_for("trimul_gemm_gate_packed_mmajor_triton"), key=['shape_key', 'D'])
+@triton.autotune(configs=configs_for("trimul_gemm_gate_packed_mmajor_triton"), key=['shape_key'])
 @triton.jit
 def _lr_kernel(
     x_ptr, wlr_ptr,                        # x:(M,K)  wlr:(K,4D)=[Lhalf|Rhalf]
@@ -114,7 +114,7 @@ def _lr_kernel(
 
 
 # K not in the key for the same reason as _lr_kernel: the one launch site passes K=D.
-@triton.autotune(configs=configs_for("trimul_outproj_gemm_sigmoid_triton"), key=['shape_key', 'D'])
+@triton.autotune(configs=configs_for("trimul_outproj_gemm_sigmoid_triton"), key=['shape_key'])
 @triton.jit
 def _gate_kernel(
     x_ptr, wg_ptr,                         # x:(M,K)  wg:(K,D)
@@ -187,6 +187,6 @@ def _front_launch(x_flat: torch.Tensor, Wlr: torch.Tensor, Wg: torch.Tensor, L: 
     gate = torch.empty(m, D, device=x_flat.device, dtype=x_flat.dtype)          # blld
     lr_grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]), triton.cdiv(2 * D, meta["BLOCK_N"]))  # noqa: E731
     g_grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))       # noqa: E731
-    _lr_kernel[lr_grid](x_flat, Wlr, lr, m, m, K=D, D=D, shape_key=shape_key)
-    _gate_kernel[g_grid](x_flat, Wg, gate, m, K=D, D=D, shape_key=shape_key)
+    _lr_kernel[lr_grid](x_flat, Wlr, lr, m, m, K=D, D=D, shape_key=pack(shape_key, D=D))
+    _gate_kernel[g_grid](x_flat, Wg, gate, m, K=D, D=D, shape_key=pack(shape_key, D=D))
     return lr, gate

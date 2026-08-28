@@ -35,7 +35,7 @@ from miniworld_engine.autotune.shape_key import token_key
 
 
 
-@triton.autotune(configs=configs_for("trimul_transpose_triton"), key=['shape_key', 'N'])
+@triton.autotune(configs=configs_for("trimul_transpose_triton"), key=['shape_key'])
 @triton.jit
 def _transpose_kernel(src_ptr, dst_ptr, M, N, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
                       shape_key):
@@ -72,7 +72,7 @@ def _transpose_blld_to_bdll(blld: torch.Tensor, out_2d_m: torch.Tensor,
     M, N = blld.shape
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(N, meta["BLOCK_N"]))  # noqa: E731
     _transpose_kernel[grid](blld, out_2d_m, M, N,
-                            shape_key=token_key(seq_len if seq_len is not None else 0))
+                            shape_key=token_key(seq_len if seq_len is not None else 0, N=N))
 
 
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:

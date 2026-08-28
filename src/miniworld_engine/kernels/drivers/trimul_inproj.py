@@ -200,7 +200,7 @@ def gated_projection_gate_packed_mmajor_triton() -> None:
     preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
     lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
     grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)
-    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L))
+    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L, H=h))
 
 
 def fused_preact_gemm_kernel() -> None:

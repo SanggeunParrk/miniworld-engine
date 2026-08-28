@@ -356,7 +356,7 @@ def trimul_bwd_gate_transpose_packed_triton():
     dconc5 = torch.empty(5 * H, M, device=dev(), dtype=x_n.dtype)
     _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
         d_left.reshape(H * M), d_right.reshape(H * M), preact.reshape(4 * H, M),
-        d_glogit.reshape(M, H), dconc5, M, DM, D=H, shape_key=token_key(L))
+        d_glogit.reshape(M, H), dconc5, M, DM, D=H, shape_key=token_key(L, D=H))
 
     dL, dR = _f(d_left).reshape(H, M), _f(d_right).reshape(H, M)
     p = _f(preact).reshape(4 * H, M)
@@ -404,7 +404,7 @@ def gated_projection_gate_packed_mmajor_triton():
     preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
     lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
     grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)
-    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L))
+    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L, H=h))
 
     p = _f(preact)
     ref_l = torch.sigmoid(p[0:2 * h:2]) * p[1:2 * h:2]

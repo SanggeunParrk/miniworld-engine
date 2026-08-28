@@ -20,7 +20,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 # `_dx_kernel` and `_dw_kernel` were removed here. Both were @triton.jit with NO autotune and no
@@ -33,7 +33,7 @@ from miniworld_engine.autotune.shape_key import token_key
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['shape_key', 'D'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['shape_key'])
 @triton.jit
 def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
                     shape_key):
@@ -67,7 +67,7 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_transpose_packed_triton"), key=['shape_key', 'D'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_transpose_packed_triton"), key=['shape_key'])
 @triton.jit
 def _dconcat5_kernel(dL_ptr, dR_ptr, preact, dglog_ptr, out, M, DM, D: tl.constexpr,
                      BLOCK_E: tl.constexpr, shape_key):
@@ -135,7 +135,7 @@ def front_bwd_dW_glogit(d_left: torch.Tensor, d_right: torch.Tensor, preact: tor
     dconc5 = torch.empty(5 * H, M, device=x_n.device, dtype=dt)
     DM = H * M
     _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, shape_key=token_key(L))
+        dL2, dR2, preact2, dglog, dconc5, M, DM, D=H, shape_key=token_key(L, D=H))
 
     dWs = dconc5 @ xf                                            # (5H, Din) cuBLAS huge-K
     dWLg = dWs[:H].t().contiguous()
@@ -185,7 +185,7 @@ def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int
     dm = D * M
     dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
     _dconcat_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dconc, M, dm, D=D, shape_key=shape_key)
+        dL2, dR2, preact2, dconc, M, dm, D=D, shape_key=pack(shape_key, D=D))
     return dconc
 
 
@@ -219,7 +219,7 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
 # ── σ(gate) backward: reconstruct GLU grads from lr + sg (no preact) ──────────────────────────
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_recompute_triton"), key=['shape_key', 'D'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_packed_recompute_triton"), key=['shape_key'])
 @triton.jit
 def _dconcat_sig_kernel(dL_ptr, dR_ptr, lrL_ptr, lrR_ptr, sg_ptr, out, M, DM,
                         D: tl.constexpr, BLOCK_E: tl.constexpr, shape_key):
@@ -257,7 +257,7 @@ def _dconcat_sig(dL2: torch.Tensor, dR2: torch.Tensor, lrL: torch.Tensor, lrR: t
     dm = D * M
     dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
     _dconcat_sig_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
-        dL2, dR2, lrL, lrR, sg2, dconc, M, dm, D=D, shape_key=shape_key)
+        dL2, dR2, lrL, lrR, sg2, dconc, M, dm, D=D, shape_key=pack(shape_key, D=D))
     return dconc
 
 

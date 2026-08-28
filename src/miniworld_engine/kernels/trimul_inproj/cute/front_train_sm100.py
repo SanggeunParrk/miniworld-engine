@@ -106,7 +106,7 @@ def prepack_lr_operand_sm100(WL, WLg, WR, WRg) -> torch.Tensor:
 
 
 from miniworld_engine.autotune.buckets import bucket_squared as _bucket
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 def get_seq_group(rows) -> int:
@@ -114,7 +114,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_packed_mmajor_triton"), key=['H', 'shape_key'])
+@triton.autotune(configs=configs_for("gated_projection_gate_packed_mmajor_triton"), key=['shape_key'])
 @triton.jit
 def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLOCK_E: tl.constexpr, shape_key):
     """preact (4H,M) channel-major -> lr (2H,M). Per side: even plane=gate, odd=proj.
@@ -172,7 +172,7 @@ def _glu_bdll(preact_2d: torch.Tensor, lr_2d: torch.Tensor, H: int, M: int,
     its left/right split stays a free view (an op's outputs may not alias each other).
     """
     grid = lambda meta: (triton.cdiv(H * M, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_bdll_kernel[grid](preact_2d, lr_2d, H=H, M=M, shape_key=shape_key)
+    _glu_bdll_kernel[grid](preact_2d, lr_2d, H=H, M=M, shape_key=pack(shape_key, H=H))
 
 
 def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):

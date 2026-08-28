@@ -42,10 +42,10 @@ import triton.language as tl
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, length_of
+from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
 
 
-@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['shape_key', 'ND', 'K'])
+@triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['shape_key'])
 @triton.jit
 def _expand_swiglu_kernel(
     x_ptr, wa_ptr, wb_ptr, h_ptr,
@@ -97,7 +97,7 @@ def _expand_swiglu_kernel(
 
 
 # fmt: off
-@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['shape_key', 'ND', 'DC'])
+@triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['shape_key'])
 @triton.jit
 def _squeeze_gate_kernel(
     h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
@@ -179,7 +179,7 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         x.stride(0), x.stride(1),
         wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND, K=K),
     )
     return h
 
@@ -208,7 +208,7 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND, DC=DC),
     )
     return out
 

@@ -66,7 +66,7 @@ from miniworld_engine.autotune.shape_key import atom_key, length_of
 # with D == K. Its one read was the squeeze output mask, which `K` states exactly as well. ND is
 # a different matter and stays keyed: n varies per module (2 here, 4 in transition/), and the
 # driver harness perturbs ND on its own axis, so ND is not recoverable from K.
-@triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['ND', 'K', 'DC', 'shape_key'])
+@triton.autotune(configs=configs_for("cond_transition_fwd_b2b_triton"), key=['shape_key'])
 @triton.jit
 def _cond_transition_inference_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
@@ -184,6 +184,7 @@ def cond_transition_inference(
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=atom_key(length if length is not None else length_of(x.shape)),
+        shape_key=atom_key(length if length is not None else length_of(x.shape),
+                           ND=ND, K=K, DC=DC),
     )
     return out

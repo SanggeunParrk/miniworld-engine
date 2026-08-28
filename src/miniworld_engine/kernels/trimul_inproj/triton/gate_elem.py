@@ -32,7 +32,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import length_of, token_key
+from miniworld_engine.autotune.shape_key import length_of, pack, token_key
 
 
 
@@ -48,7 +48,7 @@ from miniworld_engine.autotune.shape_key import length_of, token_key
 # SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond,
 # 12 comparisons out of 12. Contrast SAVE_XN in transition/triton/fused.py, which looks like the
 # same kind of flag and is not: its else path re-reads x over a full K loop, so it stays keyed.
-                 key=['shape_key', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT'])
+                 key=['shape_key', 'ADD_RESIDUAL', 'USE_DROPOUT'])
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
                      N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, SAVE_GATE: tl.constexpr,
@@ -94,7 +94,7 @@ def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, 
 # per element -- enough to move the arithmetic intensity of an otherwise pure-bandwidth pass, and
 # both values are live in production (bidir/v6 training pass True, GateElem's own bwd False).
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_dropres_triton"),
-                 key=['shape_key', 'N', 'USE_DROPOUT', 'FROM_PREACT'])
+                 key=['shape_key', 'USE_DROPOUT', 'FROM_PREACT'])
 @triton.jit
 def _gate_elem_bwd_ew_kernel(
     dy_ptr, proj_ptr, gate_ptr,    # (M, N)
@@ -197,7 +197,8 @@ def _gate_elem_launch(
     ds_flat = dropscale.reshape(L, N) if use_dropout else proj_flat   # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_mul_kernel[grid](glogit, proj_flat, y, gate, res_flat, ds_flat, M, L, N=N,
-                           SAVE_GATE=return_gate, shape_key=_shape_key(seq_len, x_n),
+                           SAVE_GATE=return_gate,
+                           shape_key=pack(_shape_key(seq_len, x_n), N=N),
                            ADD_RESIDUAL=add_residual, USE_DROPOUT=use_dropout)
     return (y, gate) if return_gate else (y, y.new_empty((0, 0)))
 
@@ -286,7 +287,8 @@ def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
     ds_flat = dropscale.reshape(L, N) if use_dropout else dy  # dummy ptr when off
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N,
-                                   shape_key=_shape_key(seq_len), FROM_PREACT=from_preact,
+                                   shape_key=pack(_shape_key(seq_len), N=N),
+                                   FROM_PREACT=from_preact,
                                    USE_DROPOUT=use_dropout)
     return d_proj, d_glogit
 
@@ -315,7 +317,7 @@ def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate:
     # gate_elem_bwd is the 2-D-only ``GateElem`` autograd path: x_n arrives already flattened
     # to (M, K) and nothing upstream carries L, so the key is UNKNOWN here (smallest bucket).
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, dy, 0, M, N=N,
-                                   shape_key=_shape_key(None), USE_DROPOUT=False)
+                                   shape_key=pack(_shape_key(None), N=N), USE_DROPOUT=False)
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
     dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS
     return d_proj, dx_gate, dWg

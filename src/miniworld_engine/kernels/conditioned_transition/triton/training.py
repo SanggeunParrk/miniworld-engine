@@ -65,10 +65,10 @@ import triton.language as tl
 # and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
 # registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
-from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
 
 
-@triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['shape_key', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_swiglu_triton"), key=['shape_key'])
 @triton.jit
 def _swiglu_fwd_kernel(
     a_ptr, b_ptr, h_ptr, M, ND,
@@ -105,7 +105,7 @@ def _swiglu(a: torch.Tensor, b: torch.Tensor,
     h = torch.empty(M, ND, device=a.device, dtype=a.dtype)  # contiguous output
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1),
-                             shape_key=shape_key)
+                             shape_key=pack(shape_key, ND=ND))
     return h
 
 
@@ -135,7 +135,7 @@ def _gate(out: torch.Tensor, scale: torch.Tensor,
 
 # FLAT 1-D — same measurement as _swiglu_fwd_kernel; this one was the larger of the two
 # regressions (822us of GPU time as a 2-D tile).
-@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_flat_triton"), key=['shape_key', 'ND'])
+@triton.autotune(configs=configs_for("cond_transition_bwd_swiglu_flat_triton"), key=['shape_key'])
 @triton.jit
 def _swiglu_bwd_kernel(
     a_ptr, b_ptr, dh_ptr, dab_ptr, M, ND,
@@ -208,7 +208,7 @@ def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
         a.stride(0), a.stride(1),
         dh.stride(0), dh.stride(1),
         dab.stride(0), dab.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND),
     )
     return dab
 
@@ -250,7 +250,7 @@ def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
 # a different matter and stays keyed: n varies per module (2 here, 4 in transition/), and the
 # driver harness perturbs ND on its own axis, so ND is not recoverable from K.
 @triton.autotune(configs=configs_for("cond_transition_fwd_b2b_saveact_triton"),
-                 key=['ND', 'K', 'DC', 'shape_key'])
+                 key=['shape_key'])
 @triton.jit
 def _b2b_fwd_train_kernel(
     x_ptr, cond_ptr, wa_ptr, wb_ptr, ws_ptr, wsc_ptr, bsc_ptr,
@@ -361,7 +361,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
         wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
         out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, ND=ND, K=K, DC=DC),
     )
     return y, ab, h, out, scale
 
