@@ -40,7 +40,13 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.autotune.shape_key import atom_key
-from miniworld_engine.kernels.drivers import FP32, _rand, driver_length, ragged
+from miniworld_engine.kernels.drivers import (
+    FP32,
+    _rand,
+    driver_length,
+    driver_width,
+    ragged,
+)
 
 # Tile alignment (see drivers.py). Every extent below is an aligned base run through
 # ``ragged()``: unchanged by default, minus a small odd amount under MINIWORLD_SHAPE_MODE=ragged,
@@ -62,7 +68,7 @@ from miniworld_engine.kernels.drivers import FP32, _rand, driver_length, ragged
 # them, and an independent 509 keeps ND's tile remainder (61) from coinciding with _D's, so a mask
 # bug that only shows when the two axes are congruent mod BLOCK cannot hide. _N_EXPAND is
 # therefore only the aligned-mode base of _ND, not a live multiplier.
-_D_BASE = 128  # BenchConfig.d_pair default / interface.ATOM_D_MAX
+_D_BASE = driver_width(128)  # BenchConfig.d_pair default / interface.ATOM_D_MAX
 _N_EXPAND = 4  # ConditionedTransition(D, D, n=4), as bench_kernel_cond_transition_tail builds it
 
 _M = ragged(driver_length(512))       # drivers.rows2d default row count

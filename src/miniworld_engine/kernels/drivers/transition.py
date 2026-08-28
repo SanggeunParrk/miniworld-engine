@@ -62,6 +62,7 @@ from miniworld_engine.kernels.drivers import (
     both_level_is_pair,
     dev,
     driver_length,
+    driver_width,
     ragged,
     rows2d,
     vec,
@@ -90,8 +91,8 @@ ROWS = ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR)  # M: pair rows L*L, o
 #: times.
 SHAPE_KEY = both_key(ROWS)
 N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, not a tile extent
-K_SMALL = ragged(128)  # K: the AF3 transition d; ragged -> 125
-K_LARGE = ragged(256)  # K for the ktiled kernel's K > _B2B_MAX_K(=128) reason to exist -> 253
+K_SMALL = ragged(driver_width(128))  # K: the AF3 transition d; ragged -> 125
+K_LARGE = ragged(2 * driver_width(128))  # K for the ktiled kernel's K > _B2B_MAX_K(=128) reason to exist -> 253
 ND_SMALL = N_EXPAND * K_SMALL  # expand/gate width for the K_SMALL paths: 512 -> 500
 
 

@@ -36,6 +36,7 @@ from miniworld_engine.kernels.drivers import (
     both_level_is_pair,
     dev,
     driver_length,
+    driver_width,
     ragged,
 )
 
@@ -49,7 +50,7 @@ from miniworld_engine.kernels.drivers import (
 #   L  sequence length. The activation is [B, L, L, D], so one perturbation makes BOTH spatial
 #      axes ragged at once, and M = L*L (the flattened row count every kernel tiles over) goes
 #      ragged with it: 64 -> 61, M 4096 -> 3721.
-D = ragged(128)  # BenchConfig.d_pair
+D = ragged(driver_width(128))  # BenchConfig.d_pair
 L = ragged(driver_length(64))   # BenchConfig.min_seq_len
 #: A level=both kernel meets 512 and below as a PAIR activation (1, L, L, D) flattening to
 #: M = L*L, and 1024 and above as an ATOM activation (1, A, D) flattening to M = A -- see

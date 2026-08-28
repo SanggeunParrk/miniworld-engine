@@ -16,6 +16,7 @@ from miniworld_engine.kernels.drivers import (
     both_level_is_pair,
     dev,
     driver_length,
+    driver_width,
     pair,
     ragged,
     rows2d,
@@ -47,7 +48,7 @@ _IS_PAIR = both_level_is_pair(_L)   # token side -> (1,L,L,D); atom side -> (1,A
 # M is what the FLAT drivers in this file build, and it must equal what _act()
 # flattens to: L*L on the pair side, A on the atom side.
 _M = ragged(_L) ** 2 if both_level_is_pair(_L) else ragged(_L)
-_D = ragged(128)
+_D = ragged(driver_width(128))
 _PAIR_N = ragged(_L)
 
 #: The bucket a launch at `_L` must record, for the launchers that only ever see the flattened

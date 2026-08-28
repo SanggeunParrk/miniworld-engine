@@ -66,11 +66,12 @@ from miniworld_engine.kernels.drivers import (
     aligned_only,
     dev,
     driver_length,
+    driver_width,
     ragged,
 )
 
 L = ragged(driver_length(128))   # sequence length: tiles in BOTH the query loop and the key/value loop
-H = 4             # d_pair (128) // head dim (32); a grid extent, never a tl.arange block
+H = driver_width(128) // 32   # d_pair // head dim; a grid extent, never a tl.arange block
 D = ragged(32)    # head dim, masked against HEAD_DIM inside the HEAD_DIM_PAD block
 
 #: The atomic triangle path refuses any other head dim, so it keeps a power-of-two 32.

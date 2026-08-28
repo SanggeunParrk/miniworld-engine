@@ -72,6 +72,12 @@ ALIGNMENT_REQUIRED: dict[str, str] = {}
 _ENV_LEN = os.environ.get("MINIWORLD_DRIVER_LENGTH", "").strip()
 DRIVER_LENGTH: int | None = int(_ENV_LEN) if _ENV_LEN else None
 
+#: Base channel WIDTH to drive at, or None for each driver's own default. Same mechanism and the
+#: same reason as DRIVER_LENGTH; see :func:`driver_width` for why it is one number and not one per
+#: axis.
+_ENV_WIDTH = os.environ.get("MINIWORLD_DRIVER_WIDTH", "").strip()
+DRIVER_WIDTH: int | None = int(_ENV_WIDTH) if _ENV_WIDTH else None
+
 
 class TensorKw(TypedDict, total=False):
     """Keyword args splatted into a torch factory (``torch.randn(..., **kw)``).
@@ -138,6 +144,30 @@ def driver_length(default: int) -> int:
     thing everywhere -- and L is what ``token_key`` / ``atom_key`` / ``both_key`` bucket.
     """
     return DRIVER_LENGTH if DRIVER_LENGTH is not None else default
+
+
+def driver_width(default: int) -> int:
+    """The base channel WIDTH this driver should build its tensors at.
+
+    The shape key carries the whole shape now -- the width axes are packed into it rather than
+    standing beside it in ``key=[...]`` (plan.md G5) -- so a bucket is a (rows, widths) pair and a
+    driver frozen at one width can only ever tune the widths its own harness happened to build.
+    That is what left 363 lookups uncovered across 42 of 91 ops
+    (docs/records/cache-coverage-replay-a6000.md) and what made a second, module-driven pass
+    necessary to reach them.
+
+    ONE number, not one per axis, because that is how the modules do it. A family derives every
+    other width from a base: ``_DC = ragged(_D_BASE, by=5)``, ``_ND = 4 * _D_BASE``,
+    ``_NH = _D // 32``. Overriding the base propagates exactly the way changing ``d_pair`` does in
+    the model, and it keeps the sweep to one axis per family instead of a free cross product over
+    all of them -- the cross product is 1,136 constexpr combinations, and almost none of them are
+    reachable.
+
+    Read from the environment at import, for the same ordering reason as :func:`driver_length`:
+    these constants are module-level and the kernels read them through helpers that close over
+    them, so a per-call override would have to reach inside every driver module.
+    """
+    return DRIVER_WIDTH if DRIVER_WIDTH is not None else default
 
 
 def ragged(n: int, *, by: int = 3, floor: int = 16) -> int:
