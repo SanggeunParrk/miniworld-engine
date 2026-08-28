@@ -11,7 +11,7 @@ from einops import rearrange
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import length_of, token_key
+from miniworld_engine.autotune.shape_key import length_of, token_key, pack
 
 
 def get_seq_group(length) -> int:
@@ -31,7 +31,7 @@ def get_seq_group(length) -> int:
 
 
 
-@triton.autotune(configs=configs_for("trimul_gemm_gate_triton"), key=['shape_key', 'N'])
+@triton.autotune(configs=configs_for("trimul_gemm_gate_triton"), key=['shape_key'])
 @triton.jit
 def fused_sigmoid_gate_fwd_kernel(
     x_ptr,
@@ -122,7 +122,7 @@ def fused_sigmoid_gate_fwd_kernel(
 
 
 
-@triton.autotune(configs=configs_for("trimul_bwd_gate_recompute_triton"), key=['shape_key', 'N'])
+@triton.autotune(configs=configs_for("trimul_bwd_gate_recompute_triton"), key=['shape_key'])
 @triton.jit
 def fused_sigmoid_gate_bwd_kernel(
     x_ptr,
@@ -267,7 +267,7 @@ def _tm1_fwd(
         right,
         M,
         N,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return left, right
 
@@ -317,7 +317,7 @@ def _tm1_bwd(
         dRB,
         M,
         N,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return dLA, dLB, dRA, dRB
 

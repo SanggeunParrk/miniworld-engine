@@ -452,6 +452,68 @@ attempts only 221,487 produced a distinct binary, so about three quarters were r
 but at what per-config cost is exactly the unmeasured part.
 
 
+
+### G5 -- 78 kernels still key on shape axes standing beside the shape key
+
+*What is wrong:* `K`, `ND`, `H`, `HEAD_DIM`, `N`, `D` are SHAPE -- dimensions of the tensors the
+kernel reads, exactly as the row count is. They stood in `key=[...]` as separate entries next to
+`shape_key`, as though they were a different kind of thing, and the name `shape_key` then claimed
+the whole idea for one axis. `shape_key` is the one parameter that exists ONLY to be keyed on
+(a404fb9: asserted to be read in no body), which makes it the right place to carry all of it.
+
+*The mechanism, already in:* `autotune/shape_key.pack`, and the three bucket helpers take the axes
+as keywords -- `atom_key(L, H=H, HEAD_DIM=D)`. Two properties, both of them failure modes this repo
+has already paid for:
+
+  * axes pack by SORTED NAME, so two launchers cannot disagree about what a positional argument
+    meant -- that disagreement is 3d47a78 and 7c16d16;
+  * the axis NAMES are folded in, so a launcher naming a different set MISSES rather than
+    colliding. 6948c77 cost 1.73x because a lossy key collided.
+
+Passing no axes returns the old value unchanged, so unconverted kernels keep working.
+
+*The guard:* `tools/key_gaps.py` reads the launches, takes the keyword axes of each `shape_key=`
+expression, and INTERSECTS across every launch of that kernel -- an axis counts as keyed only if
+EVERY launcher folds it. One site that forgets makes the kernel report the gap again, which is what
+the cache does. Scoped to the kernel's family, because four kernels are named `_attn_fwd`.
+
+*Done:* augmented_attention (4 kernels, 7 launch sites). Plus, from the same reading of the bodies,
+`D` deleted from 4 kernels (= K, the CUDA twin asserts it), `A`/`B` from 2, USE_BF16/USE_FP16 from
+`adaln_bwd_input_kernel` (its four `tl.dot` hardcode `input_precision="ieee"`), the five pure-store
+flags recorded in `key_gaps_allowed.csv`, and `(n, N)` -> `(K, ND)` in `transition_fwd_kernel`.
+
+    key entries   238 -> 223      shape axes   122 -> 114      flags   29 -> 22
+
+*Remaining, in the order to do it -- launch-site count is the cost, not kernel count:*
+
+| # | family | kernels | launch sites | axes |
+|---|--------|--------:|-------------:|------|
+| 1 | tm1, tm2, fused_ln_mask, gated_projection | 7 | 12 | N, D, R |
+| 2 | layernorm_linear | 9 | 9 | K, N, NH |
+| 3 | layernorm | 4 | 15 | D, N |
+| 4 | transition | 9 | 12 | K, N, ND |
+| 5 | adaln | 12 | 14 | K, K2, N, NC, NX |
+| 6 | conditioned_transition | 14 | 14 | D, DC, K, N, ND, ND2 |
+| 7 | trimul_inproj | 11 | 16 | D, H, H2, K, N |
+| 8 | bias_only_attention | 5 | 22 | DH, H, HEAD_DIM, N |
+| 9 | triangle_attention | 7 | 40 | H, HEAD_DIM |
+|   | **total** | **78** | **154** | |
+
+Families 1-6 are mostly one launch site per kernel (53 of the 78 kernels have exactly one), so they
+are a line each. 8 and 9 are last on purpose: `_attn_bwd_preprocess` is launched from 10 places in
+each, `_attn_fwd` from 6, and those are the sites 3d47a78 and 7c16d16 were about. The audit's
+intersection rule is what makes them safe to do at all -- a missed site fails the check rather than
+silently writing a key nobody reads.
+
+One commit and one GPU verification per family, so a break names its family.
+
+*Open judgement, not blocked on the above:* five flags are kept for now with no measurement either
+way -- `HAS_W`, `HAS_SB`, `HAS_BIAS`, `HAS_ROWSCALE`, `FROM_PREACT`. Each adds a row-vector load,
+broadcast across the tile: small against an (M, N) tile, but not nothing. What would settle them is
+the comparison SAVE_GATE got -- same shape, both flag values, same card -- which needs a cache that
+holds both values, which the next full build produces.
+
+
 ---
 
 ## H. Closed by verifying what the repo claims

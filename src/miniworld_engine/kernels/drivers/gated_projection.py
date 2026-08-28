@@ -43,7 +43,7 @@ def gated_projection_bwd_gate_triton() -> None:
     dgate, dx = torch.empty_like(gate), torch.empty_like(x)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)
     sigmoid_gate_bwd_kernel[grid](gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0),
-                                  M, D, shape_key=both_key(M))
+                                  M, D, shape_key=both_key(M, R=D))
 
 
 def gated_projection_gate_flat_triton() -> None:

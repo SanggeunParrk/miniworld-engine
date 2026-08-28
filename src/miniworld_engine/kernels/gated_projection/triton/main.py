@@ -12,7 +12,7 @@ import triton.language as tl
 from einops import rearrange
 from jaxtyping import Float
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
 from miniworld_engine._typecheck import typecheck
 
 AUTOTUNE = settings.current().autotunes("tri_attention")
@@ -33,7 +33,7 @@ AUTOTUNE = settings.current().autotunes("tri_attention")
 # BLOCK_K column loop -- and was absent from the key, so a new width recompiled (it is constexpr
 # here) but silently reused the config tuned for a different width. It is a searched axis now.
 @triton.autotune(configs=configs_for("gated_projection_gate_triton"),
-                 key=['shape_key', 'R'])
+                 key=['shape_key'])
 @triton.jit
 def sigmoid_gate_fwd_kernel(
     gate_ptr,
@@ -72,7 +72,7 @@ def sigmoid_gate_fwd_kernel(
 # row count M (shape_key is its bucket), and `R` (the column-loop extent, a plain runtime arg here)
 # is the second real axis.
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_triton"),
-                 key=['shape_key', 'R'])
+                 key=['shape_key'])
 @triton.jit
 def sigmoid_gate_bwd_kernel(
     gate_ptr,
@@ -133,7 +133,7 @@ def _sigmoid_gate(gate: torch.Tensor, x: torch.Tensor, shape_key: int) -> torch.
     out = torch.empty_like(x)
     grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
     sigmoid_gate_fwd_kernel[grid](
-        gate, x, gate.stride(0), x.stride(0), out, M, N, shape_key=shape_key,
+        gate, x, gate.stride(0), x.stride(0), out, M, N, shape_key=pack(shape_key, R=N),
     )
     return out
 
@@ -153,7 +153,7 @@ def _sigmoid_gate_bwd(gate: torch.Tensor, x: torch.Tensor, grad_out: torch.Tenso
     dx = torch.empty_like(x)
     grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
     sigmoid_gate_bwd_kernel[grid](
-        gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0), M, N, shape_key=shape_key,
+        gate, x, grad_out, dgate, dx, gate.stride(0), x.stride(0), M, N, shape_key=pack(shape_key, R=N),
     )
     return dgate, dx
 

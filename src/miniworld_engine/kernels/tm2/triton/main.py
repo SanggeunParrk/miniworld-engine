@@ -11,7 +11,7 @@ from einops import rearrange
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import length_of, token_key
+from miniworld_engine.autotune.shape_key import length_of, token_key, pack
 
 # Real cross-product tile search (was: 2 fwd pinned / 3 bwd configs with BLOCK_N pinned to 64).
 # BLOCK_M1 (grid M-tile), BLOCK_N (grid N-output tile) and BLOCK_K (contraction-loop tile) are
@@ -25,7 +25,7 @@ from miniworld_engine.autotune.shape_key import length_of, token_key
 
 
 
-@triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_triton"), key=['shape_key', 'N'])
+@triton.autotune(configs=configs_for("trimul_outproj_gemm_gate_triton"), key=['shape_key'])
 @triton.jit
 def fused_sigmoid_gate2_fwd_kernel(
     x_gate_ptr,
@@ -91,7 +91,7 @@ def fused_sigmoid_gate2_fwd_kernel(
 
 
 
-@triton.autotune(configs=configs_for("trimul_outproj_bwd_gate_recompute_triton"), key=['shape_key', 'N'])
+@triton.autotune(configs=configs_for("trimul_outproj_bwd_gate_recompute_triton"), key=['shape_key'])
 @triton.jit
 def fused_sigmoid_gate2_bwd_kernel(
     x_gate_ptr,
@@ -205,7 +205,7 @@ def _tm2_fwd(
         out,
         M,
         N,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return out
 
@@ -241,7 +241,7 @@ def _tm2_bwd(
         dB,
         M,
         N,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=N),
     )
     return dA, dB
 

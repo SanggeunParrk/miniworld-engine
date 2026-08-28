@@ -32,7 +32,7 @@ def gated_projection_gate_triton():
     out = torch.empty_like(x)
     grid = lambda meta: [triton.cdiv(M, meta["BLOCK_M1"])]
     sigmoid_gate_fwd_kernel[grid](gate, x, gate.stride(0), x.stride(0), out, M, D,
-                                  shape_key=both_key(M))
+                                  shape_key=both_key(M, R=D))
     return out, torch.sigmoid(_f(gate)) * _f(x)
 
 

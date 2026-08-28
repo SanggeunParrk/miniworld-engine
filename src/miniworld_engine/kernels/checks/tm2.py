@@ -60,7 +60,7 @@ def trimul_outproj_bwd_gate_recompute_triton():
     dA, dB = torch.empty_like(x), torch.empty_like(x)
     grid = lambda meta: [triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(D, meta["BLOCK_N"])]
     fused_sigmoid_gate2_bwd_kernel[grid](x, y, Wg, Wo, grad_out, dA, dB, M, D,
-                                        shape_key=token_key(L))
+                                        shape_key=token_key(L, N=D))
     g = torch.sigmoid(_f(x) @ _f(Wg))
     B = _f(y) @ _f(Wo)
     dy = _f(grad_out)

@@ -67,7 +67,7 @@ def trimul_bwd_gate_recompute_triton():
     dLA, dLB, dRA, dRB = (torch.empty_like(x) for _ in range(4))
     grid = lambda meta: [triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(D, meta["BLOCK_N"])]
     fused_sigmoid_gate_bwd_kernel[grid](x, WLg, WL, WRg, WR, dleft, dright,
-                                        dLA, dLB, dRA, dRB, M, D, shape_key=token_key(L))
+                                        dLA, dLB, dRA, dRB, M, D, shape_key=token_key(L, N=D))
     xf = _f(x)
     LB, RB = xf @ _f(WL), xf @ _f(WR)
     Lg, Rg = torch.sigmoid(xf @ _f(WLg)), torch.sigmoid(xf @ _f(WRg))

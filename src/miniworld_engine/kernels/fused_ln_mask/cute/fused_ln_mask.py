@@ -46,7 +46,7 @@ def get_seq_group(rows) -> int:
 # sets it >= D keeps the single-pass schedule. BLOCK_M1 is the row tile. Both come from the CSV.
 # EPS is constexpr but deliberately NOT keyed: it only appears in `rsqrt(var + EPS)`, so it
 # branches nothing and shifts no work -- keying it would just multiply the bucket count.
-@triton.autotune(configs=configs_for("layernorm_fwd_rowscale_triton"), key=['shape_key', 'D'])
+@triton.autotune(configs=configs_for("layernorm_fwd_rowscale_triton"), key=['shape_key'])
 @triton.jit
 def _fused_ln_mask_kernel(
     x_ptr,
@@ -163,6 +163,6 @@ def fused_ln_mask(
         D,
         EPS=eps,
         # L = x.shape[-2] of the (B, L, L, D) pair activation, not M = B*L*L.
-        shape_key=both_key(rows_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape), D=D),
     )
     return out.view(B, L1, L2, D)
