@@ -42,7 +42,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key  # every kernel here is level=both
+from miniworld_engine.autotune.shape_key import both_key, pack  # every kernel here is level=both
 
 # ── dtype support ──────────────────────────────────────────────────────────────────────────────
 # The Triton LN kernels are dtype-generic (compute in fp32, store `element_ty`), so fp32/bf16/fp16
@@ -93,7 +93,7 @@ def _fp32_matmul_ctx(dtype):
 # register cap never won on `_ln_mat_kernel` (it was added for the m-major `_ln_bwd_kernel`).
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_saveact_strided_triton"), key=['N', 'shape_key'])
+@triton.autotune(configs=configs_for("layernorm_fwd_saveact_strided_triton"), key=['shape_key'])
 @triton.jit
 def _ln_mat_kernel(X, Xn, Mean, Rstd, G, B, M, N: tl.constexpr, eps,
                    sx0, sx1, sn0, sn1,
@@ -189,7 +189,7 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
     _ln_mat_kernel[grid](
         x, xn, mean, rstd, gamma, beta, M, int(K), eps,
         x.stride(0), x.stride(1), xn.stride(0), xn.stride(1),
-        shape_key=both_key(0) if shape_key is None else shape_key,
+        shape_key=both_key(0, N=int(K)) if shape_key is None else pack(shape_key, N=int(K)),
     )
     return xn, mean, rstd
 
@@ -198,7 +198,7 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
 
 
 @triton.autotune(configs=configs_for("layernorm_bwd_atomic_strided_triton"),
-                 key=['N', 'shape_key'],
+                 key=['shape_key'],
                  reset_to_zero=['DG', 'DB'])
 @triton.jit
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,

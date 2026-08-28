@@ -27,7 +27,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key  # kernels here are level=both
+from miniworld_engine.autotune.shape_key import both_key, pack  # kernels here are level=both
 from ...layernorm.triton.persistent import _ln_bwd_persistent as _ln_bwd_persistent_jit
 from .te_style import _ln_bwd_kernel  # atomic small-M fallback
 from miniworld_engine import settings
@@ -54,7 +54,7 @@ _WAVES = 2
 # hint): the sole launcher (`_ln_bwd_persistent_new`) passes `N=K` and `VEC_HINT=(K <= 128)`, so it
 # is a pure function of N -- already in the key. Keying it too would only duplicate a partition the
 # cache makes anyway.
-@triton.autotune(configs=configs_for("layernorm_bwd_split_mmajor_triton"), key=['N', 'shape_key'])
+@triton.autotune(configs=configs_for("layernorm_bwd_split_mmajor_triton"), key=['shape_key'])
 @triton.jit
 def _ln_bwd_mmajor_kernel(
     DX, PDG, PDB, DXn, X, G, Mean, Rstd,
@@ -179,7 +179,7 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | No
         dxn.stride(0), dxn.stride(1), x.stride(0), x.stride(1),
         dx.stride(0), dx.stride(1),
         N_PAD=triton.next_power_of_2(K),
-        shape_key=both_key(0) if shape_key is None else shape_key,
+        shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
     )
     return dx, dg, db
 
@@ -202,7 +202,7 @@ def _ln_bwd_persistent_new(dxn, x, gamma, mean, rstd, dx_strides, *,
         dx, pdg, pdb, dxn, x, gamma, mean, rstd,
         pdg.stride(0), x.stride(1),      # feature stride (= M); row stride assumed 1
         M, N=K, VEC_HINT=(K <= 128),
-        shape_key=both_key(0) if shape_key is None else shape_key,
+        shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
     )
     return dx, pdg.sum(0), pdb.sum(0)
 

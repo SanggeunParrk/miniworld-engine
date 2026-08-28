@@ -33,7 +33,7 @@ import triton.language as tl
 # would mint a fresh autotune (a full-grid sweep on a cache miss) for every distinct M the model
 # runs, which is a per-shape stall, not a better config.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, rows_of
+from miniworld_engine.autotune.shape_key import both_key, rows_of, pack
 
 
 def get_seq_group(rows) -> int:
@@ -41,7 +41,7 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("layernorm_stats_triton"), key=['K', 'shape_key'])
+@triton.autotune(configs=configs_for("layernorm_stats_triton"), key=['shape_key'])
 @triton.jit
 def _stats_kernel(
     x_ptr, rstd_ptr, c1_ptr, M, K, eps,
@@ -103,6 +103,6 @@ def stats_triton(x: torch.Tensor, eps: float, shape_key: int | None = None,
         # threaded (transition/cuda/__init__.py, gemm_transition_swiglu.py, drivers/checks --
         # all outside this change's file set); it buckets the flattened ROW count, the L-vs-L*L
         # ambiguity autotune.shape_key removes.
-        shape_key=both_key(M) if shape_key is None else shape_key,
+        shape_key=both_key(M, K=K) if shape_key is None else pack(shape_key, K=K),
     )
     return rstd, c1

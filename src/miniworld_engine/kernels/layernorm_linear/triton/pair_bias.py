@@ -37,7 +37,7 @@ MIN_TL_DOT_DIM = 16
 # shape_key is keyed: the grid is cdiv(M, BLOCK_M1) and M is the pair row count (B*L^2), so one
 # BLOCK_M1 was being reused from L=128 to L=1024+.
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
 
 
 def get_seq_group(rows) -> int:
@@ -46,7 +46,7 @@ def get_seq_group(rows) -> int:
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_fp32_triton"),
-                 key=['N', 'NH', 'shape_key'])
+                 key=['shape_key'])
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -154,7 +154,7 @@ def _layer_norm_linear_fwd(
 # projection vs the scalar `tl.static_range(NH)` loop): the sole launcher passes `NH=nh` and
 # `USE_DOT=nh >= MIN_TL_DOT_DIM`, so it is a pure function of NH -- already in the key.
 @triton.autotune(configs=configs_for("layernorm_linear_bwd_fp32_triton"),
-                 key=['N', 'NH', 'shape_key'],
+                 key=['shape_key'],
                  reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
 @triton.jit
 def _layer_norm_linear_bwd(
@@ -315,7 +315,7 @@ def _fwd_op(
         nh,
         eps,
         # L = x.shape[-2] (the op takes the pre-flatten activation), never the row count M.
-        shape_key=both_key(rows_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape), N=N, NH=nh),
     )
     return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
 
@@ -372,7 +372,7 @@ def _bwd_op(
         N,
         nh,
         USE_DOT=nh >= MIN_TL_DOT_DIM,
-        shape_key=both_key(M) if shape_key is None else shape_key,
+        shape_key=both_key(M, N=N, NH=nh) if shape_key is None else pack(shape_key, N=N, NH=nh),
     )
     return dx, dlnw.to(ln_weight.dtype), dpw.to(proj_weight.dtype)
 

@@ -13,10 +13,10 @@ from miniworld_engine.autotune.configs import configs_for
 # Both recompute kernels are level=both in kernels/registry.csv, so the key is `both_key(L)` --
 # L is the token/atom count, NOT the row count M these launchers receive (x reaches them already
 # flattened, and M = L*L for a pair view). Both launchers take it from their caller.
-from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.autotune.shape_key import both_key, pack
 
 
-@triton.autotune(configs=configs_for("layernorm_fwd_recompute_triton"), key=['shape_key', 'K'])
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_triton"), key=['shape_key'])
 @triton.jit
 def _xnormed_kernel(x_ptr, g_ptr, b_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
@@ -60,11 +60,11 @@ def _recompute_xnormed(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _xnormed_kernel[grid](
         x, gamma, beta, mean, rstd, y, M, K, x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-        shape_key=both_key(0) if shape_key is None else shape_key,
+        shape_key=both_key(0, K=K) if shape_key is None else pack(shape_key, K=K),
     )
     return y
 
-@triton.autotune(configs=configs_for("layernorm_fwd_recompute_noaffine_triton"), key=['shape_key', 'K'])
+@triton.autotune(configs=configs_for("layernorm_fwd_recompute_noaffine_triton"), key=['shape_key'])
 @triton.jit
 def _xhat_kernel(x_ptr, mean_ptr, rstd_ptr, y_ptr, M, K, sx0, sx1, sy0, sy1,
                  BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
@@ -101,5 +101,5 @@ def _recompute_xhat(x: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
     y = torch.empty(M, K, device=x.device, dtype=x.dtype)   # contiguous out
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _xhat_kernel[grid](x, mean, rstd, y, M, K, x.stride(0), x.stride(1), y.stride(0), y.stride(1),
-                       shape_key=both_key(0) if shape_key is None else shape_key)
+                       shape_key=both_key(0, K=K) if shape_key is None else pack(shape_key, K=K))
     return y

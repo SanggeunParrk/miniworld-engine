@@ -80,6 +80,22 @@ def allowed() -> dict[tuple[str, str], str]:
     return {(r["op"], r["param"]): r["reason"] for r in csv.DictReader(ALLOWED.open())}
 
 
+def _axes_of(expr) -> set[str]:
+    """The shape axes a ``shape_key=`` expression folds in.
+
+    A launcher that can be handed a key from its caller writes a conditional --
+    ``both_key(M, K=K) if shape_key is None else pack(shape_key, K=K)`` -- so the two branches are
+    INTERSECTED: an axis counts only if BOTH paths fold it. A launcher that folds K on one path and
+    not the other writes two different keys for one shape, which is the thing this check exists to
+    catch, not to wave through.
+    """
+    if isinstance(expr, ast.Call):
+        return {k.arg for k in expr.keywords if k.arg}
+    if isinstance(expr, ast.IfExp):
+        return _axes_of(expr.body) & _axes_of(expr.orelse)
+    return set()
+
+
 @functools.lru_cache(maxsize=1)
 def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
     """(file, symbol) -> the axes every launch of that kernel folds into ``shape_key``.
@@ -109,7 +125,7 @@ def _folded_into_shape_key() -> dict[tuple[str, str], set[str]]:
             if not (isinstance(f, ast.Subscript) and isinstance(f.value, ast.Name)):
                 continue
             sk = next((k.value for k in node.keywords if k.arg == "shape_key"), None)
-            folded = {k.arg for k in sk.keywords if k.arg} if isinstance(sk, ast.Call) else set()
+            folded = _axes_of(sk)
             key = (str(path.relative_to(SRC)), f.value.id)
             prev = out.get(key)
             out[key] = folded if prev is None else (prev & folded)
