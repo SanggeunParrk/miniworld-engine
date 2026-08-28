@@ -41,7 +41,14 @@ from miniworld_engine.autotune.shape_key import length_of, token_key
 # compile-time branch that adds a full (M, N) store (the saved gate) to an elementwise kernel whose
 # cost IS its memory traffic -- training (return_gate=True) writes 2 tensors, inference 1.
 @triton.autotune(configs=configs_for("gated_projection_gate_dropres_triton"),
-                 key=['shape_key', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT', 'SAVE_GATE'])
+# SAVE_GATE is NOT in the key. Its guarded block is one `tl.store` of a tile the kernel already
+# holds in registers -- same iteration space, same tile shapes, same register-resident working
+# set -- so it cannot move which config is fastest, and keying on it doubled this op's buckets to
+# measure the same thing twice. Measured on the shipped cache, both cards, all six shape buckets:
+# SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond,
+# 12 comparisons out of 12. Contrast SAVE_XN in transition/triton/fused.py, which looks like the
+# same kind of flag and is not: its else path re-reads x over a full K loop, so it stays keyed.
+                 key=['shape_key', 'N', 'ADD_RESIDUAL', 'USE_DROPOUT'])
 @triton.jit
 def _gate_mul_kernel(glogit_ptr, proj_ptr, y_ptr, gate_ptr, res_ptr, ds_ptr, M, L,
                      N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, SAVE_GATE: tl.constexpr,

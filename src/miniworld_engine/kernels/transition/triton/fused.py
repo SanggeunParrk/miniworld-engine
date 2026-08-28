@@ -712,7 +712,7 @@ _B2B_MAX_K = 128
 
 # fmt: off
 @triton.autotune(configs=configs_for("transition_bwd_swiglu_recompute_triton"),
-                 key=['shape_key', 'ND', 'K', 'NORMALIZE', 'STORE_H', 'STACK_DAB'])
+                 key=['shape_key', 'ND', 'K', 'NORMALIZE'])
 @triton.jit
 def _transition_expand_gatebwd_kernel(
     x_ptr, rstd_ptr, c1_ptr, g_ptr, beta_ptr, wa_ptr, wb_ptr, ge_ptr,

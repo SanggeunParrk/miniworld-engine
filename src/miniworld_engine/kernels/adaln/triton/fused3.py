@@ -138,7 +138,14 @@ def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
 # The row count is keyed too: this is a 2-D GEMM whose grid is cdiv(M,BLOCK_M1)*cdiv(N,BLOCK_N),
 # and both N and K are weight extents -- so without shape_key the key was constant across every
 # sequence length and one tile served a 128-row launch and a 1M-row launch alike.
-@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=['N', 'K', 'shape_key', 'SAVE_GATE'])
+# SAVE_GATE is NOT in the key. Its guarded block is one `tl.store` of a tile the kernel already
+# holds in registers -- same iteration space, same tile shapes, same register-resident working
+# set -- so it cannot move which config is fastest, and keying on it doubled this op's buckets to
+# measure the same thing twice. Measured on the shipped cache, both cards, all six shape buckets:
+# SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and recorded the same time to the nanosecond,
+# 12 comparisons out of 12. Contrast SAVE_XN in transition/triton/fused.py, which looks like the
+# same kind of flag and is not: its else path re-reads x over a full K loop, so it stays keyed.
+@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=['N', 'K', 'shape_key'])
 @triton.jit
 def _gemm_gate_kernel(
     Xn, Cn, Ws, Wb, Sb, Y, Gate, M, N, K,

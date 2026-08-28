@@ -345,8 +345,6 @@ def _memeff_bwd(
         o,
         grad_output,
         delta,
-        A,
-        B,
         L,
         q.stride(1),
         q.stride(2),

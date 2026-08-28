@@ -60,7 +60,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 # swing in store traffic on a store-bound kernel, so the two forms want different tiles -- without
 # it in the key they shared one cache entry and whichever ran first served its config to the other.
 @triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"),
-                 key=['shape_key', 'H2', 'K', 'SAVE_PREACT'])
+                 key=['shape_key', 'H2', 'K'])
 @triton.jit
 def _bidir_front_kernel(
     x_ptr, w_ptr,

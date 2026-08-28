@@ -65,7 +65,7 @@ def augmented_attention_bwd_pre_triton() -> Pair:
     delta = torch.empty(A, B, H, L, device=dev(), dtype=torch.float32)
     grid = lambda META: (triton.cdiv(L, META["BLOCK_M1"]), A * B, H)
     _attn_bwd_preprocess[grid](
-        o, do, delta, A, B, L,
+        o, do, delta, L,
         o.stride(1), o.stride(2), o.stride(3), o.stride(4), H, D,
         shape_key=atom_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
