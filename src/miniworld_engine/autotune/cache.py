@@ -564,7 +564,37 @@ def heuristic_subset(configs: list, cap: int = 24) -> list:
                 off,
                 abs(c.num_warps - 4), abs(c.num_stages - 2))
 
-    return sorted(configs, key=score)[:cap] or list(configs)
+    # The ranking above puts every axis at its middle AT ONCE, which is the largest tile in the
+    # "reasonable" region -- the offsets compound. When that corner does not fit in shared memory
+    # nothing in the subset does, and the launch dies with OutOfResources instead of being slow:
+    # measured on an A5000, adaln_bwd_dw_triton's stale-cache fallback asked for 294,912 B against
+    # a 101,376 B limit, and all 24 candidates were over. So reserve a quarter of the cap for the
+    # SMALLEST tiles. They are rarely the winner -- that is what the other three quarters are for --
+    # but they are what makes the subset launchable at all, and a slow kernel beats a dead one.
+    ranked = sorted(configs, key=score)
+    floor = cap // 4
+    if floor:
+        def volume(c) -> int:
+            v = 1
+            for k, x in getattr(c, "kwargs", {}).items():
+                if k in axes and isinstance(x, int) and x > 0:
+                    v *= x
+            return v * max(1, c.num_stages)
+        # Still inside the industry centre: warps in {4,8}, stages in {2,3,4}. The floor is about
+        # TILE SIZE, not about widening the warps/stages search, and
+        # test_the_fallback_prefers_the_industry_centre_of_the_space pins that.
+        centre = [c for c in configs if c.num_warps in (4, 8) and c.num_stages in (2, 3, 4)]
+        smallest = sorted(centre or configs, key=volume)[:floor]
+        keep, seen = [], set()
+        for c in smallest + ranked:
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            keep.append(c)
+            if len(keep) >= cap:
+                break
+        return keep or list(configs)
+    return ranked[:cap] or list(configs)
 
 
 def _miss(op, gk, what, why, configs):
