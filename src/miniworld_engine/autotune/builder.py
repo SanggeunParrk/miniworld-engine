@@ -1047,17 +1047,23 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     same card take that card's bench lock while they measure, so the overlap is compile-against-
     measure and never measure-against-measure.
 
-    The default is 1. First measured at 2 it was 34% SLOWER -- 4436 s to 5940 s on 28 units --
-    and the cause was the pool sizing, not the idea: `compile_jobs` divided the cores by the
-    SLOTS, so every unit got half a pool, its compile phase took twice the wall, and the card sat
-    idle waiting for one of its two units to finish compiling. Card busy fell from 71% to 56%.
-    That is fixed above (divide by the cards) and the flag has not been re-measured since.
+    Measured twice, and the first measurement was wrong twice over. At 2 it first came out 34%
+    SLOWER, from a pool-sizing bug -- `compile_jobs` divided the cores by the SLOTS, so each unit
+    got half a pool and its compile phase took twice the wall -- on a unit set that spent 73% of
+    its wall BENCHING, where a second unit has nothing to fill. Fixed (divide by the cards) and
+    re-measured on compile-dominated units, four units on two cards, 48 cores either way:
 
-    What remains true either way: a config costs ~125 ms to bench whatever the grid size, because
-    `do_bench` fills its 25 ms warmup and 100 ms measurement budget by construction, while compile
-    cost grows with the grid. So a unit set of small grids is bench-bound -- those 28 spent 73% of
-    their wall measuring -- and there is nothing for a second unit to fill. See
-    docs/operations/dispatch-cache.md.
+        units-per-gpu 1    6097 s
+        units-per-gpu 2    5793 s      5% faster
+
+    Safe: four of six buckets chose the same config and the two that differed were 0.0% and 2.6%
+    off, against a control -- the same settings run twice -- that disagreed about three of seven
+    with a worst case of 12.5%.
+
+    Five percent and not more, and the log says why: one unit spent 3,962 s waiting on the other's
+    bench lock. The ceiling is the bench, ~18% of a unit's wall, and half of it went to queueing.
+    Cheapening the bench (`bench_rep_ms`) should raise this ceiling; the two have not been
+    measured together. See docs/operations/dispatch-cache.md.
     """
     import concurrent.futures as cf
 

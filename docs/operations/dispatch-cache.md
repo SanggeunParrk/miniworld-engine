@@ -240,14 +240,26 @@ the units means half the workers each, not twice the load.
 
     miniworld-engine build all --gpus 8 --units-per-gpu 2
 
-**It is not a free win, and the default is 1 because of a measurement.** Twenty-eight units of
-750-864-config grids, an idle 8x A5000 node, the same units both ways:
+**It is worth about 5%, and which way it goes depends on the units.** Measured twice.
 
-    --units-per-gpu 1    wall 4436 s    compile 2.64 h   bench 7.02 h   lock wait 0.00 h
-    --units-per-gpu 2    wall 5940 s    compile 3.01 h   bench 7.35 h   lock wait 4.54 h
+First, on 28 units of 750-864-config grids: 4436 s at 1 against 5940 s at 2, **34% slower**. Two
+reasons, and neither was the idea: `compile_jobs` divided the cores by the SLOTS so each unit got
+half a pool (since fixed -- it divides by the cards), and those units spend 73% of their wall
+BENCHING, so both units on a card wanted the lock at once and it became a queue.
 
-34% SLOWER. Those units spend 73% of their time benching, not compiling, so both units on a card
-wanted the lock at once and it became a queue rather than an overlap -- 4.54 hours of waiting.
+Re-measured with that fixed, on compile-dominated units -- four units, two cards, 48 cores either
+way:
+
+    --units-per-gpu 1    6097 s
+    --units-per-gpu 2    5793 s      5% faster
+
+Four of six buckets chose the same config; the two that differed were 0.0% and 2.6% off, against a
+control (the same settings twice) that disagreed about three of seven with a worst case of 12.5%.
+
+Five percent and not more, and the log says why: one unit spent 3,962 s waiting on the other's
+bench lock. The ceiling is the bench itself, about 18% of a unit's wall, and half of that went to
+queueing. Making the bench cheaper should raise the ceiling; the two have not been measured
+together.
 
 Which way it goes is decided by the unit's grid, and the two ends are far apart:
 
