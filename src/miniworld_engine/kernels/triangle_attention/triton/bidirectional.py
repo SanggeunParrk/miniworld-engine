@@ -40,7 +40,8 @@ def _fwd_dir(q, k, v, bias, out, m, sm_scale):
     _attn_fwd[grid](
         q, k, v, bias, sm_scale, m, out,
         *q.stride(), *out.stride(), *bias.stride(), *m.stride(),
-        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
+        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, H=H, HEAD_DIM=D),
     )
     return bias
 
@@ -61,20 +62,20 @@ def _bwd_dir(q, k, v, bias, m, out, dout, dq, dk, dv, sm_scale):
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         out, dout, delta, *out.stride(), *dout.stride(), HL, B, L, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L, HEAD_DIM=D),
     )
     dbias = torch.empty(B, HL, L, L, device=q.device, dtype=bias.dtype)
     grid_kv = lambda META: [triton.cdiv(L, META["BLOCK_M2"]), 1, B * HL]
     _attn_bwd_dkdv[grid_kv](
         q, k, v, bias, sm_scale, dout, dk, dv, dbias, m_m, delta,
         *q.stride(), *dk.stride(), *dout.stride(), *bias.stride(), L * L, L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L, HEAD_DIM=D),
     )
     grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
     _attn_bwd_dq[grid_q](
         q, k, v, bias, sm_scale, dout, dq, m_m, delta,
         *q.stride(), *dq.stride(), *dout.stride(), *bias.stride(), L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L),
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=token_key(L, HEAD_DIM=D),
     )
     return reduce(dbias, "B (H L3) L L2 -> B H L L2", "sum", L3=L)
 

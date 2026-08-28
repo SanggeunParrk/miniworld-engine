@@ -11,7 +11,7 @@ import os
 
 from einops import rearrange, repeat, reduce
 
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 AUTOTUNE = settings.current().autotunes("tri_attention")
@@ -95,7 +95,7 @@ def _attn_fwd_inner(
 
 
 @triton.autotune(configs=configs_for("triangle_attention_fwd_contig_triton"),
-                 key=['shape_key', 'H', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_fwd(
     Q, K, V, Bias, sm_scale,
@@ -226,7 +226,7 @@ def _attn_fwd(
 # parameter was named H and keyed on: token-derived, so it partitioned the cache per sequence length
 # and defeated the shape_key bucket sitting next to it -- for a value the body never reads. Dropped.
 @triton.autotune(configs=configs_for("triangle_attention_bwd_pre_contig_triton"),
-                 key=['shape_key', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd_preprocess(
     O, DO, Delta,
@@ -359,7 +359,7 @@ def _attn_bwd_dqdkdv(
 # below divides by H*L. Keying it would partition the cache per sequence length and make shape_key
 # redundant, so only the bucket is keyed.
 @triton.autotune(configs=configs_for("triangle_attention_bwd_atomic_triton"),
-                 key=['shape_key', 'HEAD_DIM'],
+                 key=['shape_key'],
                  reset_to_zero=['DQ'])
 @triton.jit
 def _attn_bwd(
@@ -524,7 +524,7 @@ def _atomic_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.T
         bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
         M.stride(0), M.stride(1), M.stride(2), M.stride(3),
         B, H, L, D,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, H=H, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # fmt: on
@@ -567,7 +567,7 @@ def _atomic_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.T
     _attn_bwd_preprocess[grid](
         o, grad_output, delta,
         B, L, D,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # fmt: on
@@ -587,7 +587,7 @@ def _atomic_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.T
         bias.stride(0), bias.stride(1), bias.stride(2), bias.stride(3),
         HL, L, D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, HEAD_DIM=D),
     )
     # fmt: on
 

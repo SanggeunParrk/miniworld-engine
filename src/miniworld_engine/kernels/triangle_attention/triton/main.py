@@ -11,7 +11,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 
 
 def get_seq_group(length) -> int:
@@ -28,7 +28,7 @@ def get_seq_group(length) -> int:
 
 
 
-@triton.autotune(configs=configs_for("triangle_attention_fwd_triton"), key=['shape_key', 'H', 'HEAD_DIM'])
+@triton.autotune(configs=configs_for("triangle_attention_fwd_triton"), key=['shape_key'])
 @triton.jit
 def _attn_fwd(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, m_ptr, out_ptr,
@@ -108,7 +108,7 @@ def _attn_fwd(
 # per sequence length and made the shape_key bucket beside it redundant -- for a duplicate the body
 # never read. Both the parameter and the key entry are gone.
 @triton.autotune(configs=configs_for("triangle_attention_bwd_pre_triton"),
-                 key=['shape_key', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd_preprocess(
     o, DO, Delta,
@@ -158,7 +158,7 @@ _SMEM_FUDGE = 2.8
 
 
 @triton.autotune(configs=configs_for("triangle_attention_bwd_dkdv_triton"),
-                 key=['shape_key', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd_dkdv(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dk_ptr, dv_ptr, dbias_ptr, m_ptr, d_ptr,
@@ -259,7 +259,7 @@ def _attn_bwd_dkdv(
 
 
 @triton.autotune(configs=configs_for("triangle_attention_bwd_dq_triton"),
-                 key=['shape_key', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd_dq(
     q_ptr, k_ptr, v_ptr, bias_ptr, sm_scale, do_ptr, dq_ptr, m_ptr, d_ptr,
@@ -372,7 +372,8 @@ def _tri_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
         *out.stride(),    # o-group STRIDED 5D (projection layout, head_dim stride-1)
         *bias.stride(),   # bias contiguous (B,H,m,n)
         *m.stride(),
-        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=shape_key,
+        B, H, L, D, HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
 
@@ -413,7 +414,7 @@ def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
         out, grad_output, delta,
         *out.stride(),           # out STRIDED 5D (projection layout)
         *grad_output.stride(), HL, B, L, D,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
 
@@ -442,7 +443,7 @@ def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
         *bias.stride(),     # bias contiguous (B,H,m,n)  broadcast over row
         L * L,              # dbias HL-dim stride
         L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=shape_key,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=pack(shape_key, HEAD_DIM=D),
     )
     grid_q = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), 1, B * HL]
     _attn_bwd_dq[grid_q](
@@ -452,7 +453,7 @@ def _tri_attn_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
         *grad_output.stride(),
         *bias.stride(),
         L, HL, D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=shape_key,
+        HEAD_DIM_PAD=triton.next_power_of_2(D), shape_key=pack(shape_key, HEAD_DIM=D),
     )
 
     # dq/dk/dv are already (B,H,L,L2,D) strided views over [B,L,L2,H*D] -> returned as-is;

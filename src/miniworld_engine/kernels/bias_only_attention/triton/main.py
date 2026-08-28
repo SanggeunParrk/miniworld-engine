@@ -11,7 +11,7 @@ from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.autotune.shape_key import pack, token_key
 
 # HEAD_DIM_PAD was a launch constant (next_power_of_2(HEAD_DIM)). delta = sum_d(o*do) is a plain
 # reduction over d, so it tiles with an accumulating loop and HEAD_DIM_PAD joins the sweep.
@@ -71,7 +71,7 @@ def _attn_fwd_inner(
 
 
 @triton.autotune(configs=configs_for("bias_only_attention_fwd_triton"),
-                 key=['shape_key', 'H', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_fwd(
     v_ptr,
@@ -179,7 +179,7 @@ def _attn_fwd(
 # keying on it partitioned the cache per sequence length -- defeating the shape_key bucket next to it --
 # for a value this kernel never reads. Dropped.
 @triton.autotune(configs=configs_for("bias_only_attention_bwd_pre_triton"),
-                 key=['shape_key', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd_preprocess(
     o,
@@ -277,7 +277,7 @@ def _attn_bwd_dvdbias(
 # HL, not H: `bhid` runs over B*HL, so the decode below divides by H*L. Keyed on shape_key only --
 # keying the raw product would partition the cache per sequence length.
 @triton.autotune(configs=configs_for("bias_only_attention_bwd_triton"),
-                 key=['shape_key', 'HEAD_DIM'])
+                 key=['shape_key'])
 @triton.jit
 def _attn_bwd(
     v_ptr,
@@ -397,7 +397,7 @@ def _bias_only_fwd(v: torch.Tensor, bias: torch.Tensor,
         L,
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
 
@@ -434,7 +434,7 @@ def _bias_only_bwd(v: torch.Tensor, bias: torch.Tensor, grad_output: torch.Tenso
         B,
         L,
         D,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, HEAD_DIM=D),
         HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
 
@@ -456,7 +456,7 @@ def _bias_only_bwd(v: torch.Tensor, bias: torch.Tensor, grad_output: torch.Tenso
         L,
         D,
         HEAD_DIM_PAD=triton.next_power_of_2(D),
-        shape_key=shape_key,
+        shape_key=pack(shape_key, HEAD_DIM=D),
     )
 
     return dv, dbias

@@ -64,7 +64,7 @@ def bias_only_attention_bwd_pre_triton() -> Pair:
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D,
-        shape_key=token_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     return delta, _rowsum(o, do)
 

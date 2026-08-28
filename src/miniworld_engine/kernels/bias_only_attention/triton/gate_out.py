@@ -28,7 +28,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, token_key
+from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of, token_key
 
 
 
@@ -54,7 +54,7 @@ def _key_of(shape) -> int:
     return token_key(length_of(shape))
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['shape_key', 'N', 'DH'])
+@triton.autotune(configs=configs_for("gated_projection_gate_gemm_triton"), key=['shape_key'])
 @triton.jit
 def _gate_out_fwd(
     gate_ptr,   # [M, DH]
@@ -113,7 +113,7 @@ def _gate_out_fwd(
 # free (non-reduced) axis here -- the contraction is N -- so it moves onto the grid. ``BLOCK_N`` is not
 # constrained, so its candidate values live in the CSV like every other axis; they are the
 # canonical 2-D set.
-@triton.autotune(configs=configs_for("gated_projection_bwd_dx_triton"), key=['shape_key', 'N', 'DH'])
+@triton.autotune(configs=configs_for("gated_projection_bwd_dx_triton"), key=['shape_key'])
 @triton.jit
 def _dgrad_epi(
     do_ptr,     # [M, N]   = grad_out
@@ -188,7 +188,7 @@ def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: t
         do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
         g2.stride(0), g2.stride(1), r2.stride(0), r2.stride(1),
         dr.stride(0), dr.stride(1),
-        shape_key=token_key(0) if shape_key is None else shape_key,
+        shape_key=token_key(0, N=N, DH=DH) if shape_key is None else pack(shape_key, N=N, DH=DH),
     )
     return dr, dg, a
 
@@ -213,7 +213,7 @@ def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor,
         outr2d.stride(0), outr2d.stride(1),
         wo.stride(0), wo.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=token_key(0) if shape_key is None else shape_key,
+        shape_key=token_key(0, N=N, DH=DH) if shape_key is None else pack(shape_key, N=N, DH=DH),
     )
     return out
 

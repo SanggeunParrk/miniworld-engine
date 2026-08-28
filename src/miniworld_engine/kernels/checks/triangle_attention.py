@@ -130,7 +130,7 @@ def triangle_attention_bwd_pre_triton() -> Pair:
     _attn_bwd_preprocess[grid](
         out, do, delta,
         *out.stride(), *do.stride(), HL, B, L, D,
-        shape_key=token_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D),
+        shape_key=token_key(L, HEAD_DIM=D), HEAD_DIM_PAD=triton.next_power_of_2(D),
     )
     # Delta is addressed off_hz*N_CTX + off_m with off_hz enumerating (b, h, i_row) as
     # b*HL + h*L + i_row -- i.e. exactly the [B, H*L, L] flattening of the rowsum.
@@ -185,7 +185,7 @@ def triangle_attention_bwd_pre_contig_triton() -> Pair:
     grid = lambda META: [triton.cdiv(L, META["BLOCK_M1"]), B * HL, 1]
     _attn_bwd_preprocess[grid](
         o, do, delta, B, L, D32,
-        shape_key=token_key(L), HEAD_DIM_PAD=triton.next_power_of_2(D32),
+        shape_key=token_key(L, HEAD_DIM=D32), HEAD_DIM_PAD=triton.next_power_of_2(D32),
     )
     return delta, _rowsum(o, do)
 
