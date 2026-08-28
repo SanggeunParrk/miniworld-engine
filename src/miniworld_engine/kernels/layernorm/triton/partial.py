@@ -14,7 +14,7 @@ import triton.language as tl
 
 
 from .main import layer_norm_fwd_fused
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
 
 
 def _bwd_block_m(n: int) -> int:
@@ -81,7 +81,7 @@ def _partial_fwd(
         m,
         n,
         eps,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=n),
         HAS_ROWSCALE=False,
     )
     return y_2d, mean, rstd
@@ -136,7 +136,7 @@ def _partial_bwd(
         x.stride(1),
         m,
         N=n,
-        shape_key=shape_key,
+        shape_key=pack(shape_key, N=n),
     )
 
     dw = partial_dw.sum(dim=0).to(weight.dtype)

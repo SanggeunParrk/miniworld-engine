@@ -130,7 +130,7 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
         # L = x.shape[-2], read before the reshape above (pair (B,L,L,D) / token (B,L,D)),
         # not the row count m. The kernel parameter is `shape_key`; `GROUP_M` here was a
         # stale name from before the rename.
-        shape_key=both_key(rows_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape), N=n),
         HAS_ROWSCALE=False,
     )
     return y_2d.view_as(x), mean, rstd
@@ -160,7 +160,7 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
         x_2d.stride(1),
         m,
         n,
-        shape_key=both_key(rows_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape), N=n),
         HAS_ROWSCALE=False,
     )
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
@@ -192,7 +192,7 @@ def _bwd_partial_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd:
         x_2d.stride(1),
         m,
         N=n,
-        shape_key=both_key(rows_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape), N=n),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)
@@ -226,7 +226,7 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
         x_2d.stride(1),
         m,
         N=n,
-        shape_key=both_key(rows_of(x.shape)),
+        shape_key=both_key(rows_of(x.shape), N=n),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)

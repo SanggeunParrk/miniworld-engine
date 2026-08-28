@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
 from miniworld_engine import settings
 
 
@@ -52,7 +52,7 @@ def _ln_cuda_bwd_enabled() -> bool:
 # `eps` is constexpr but deliberately NOT keyed: it only appears in `1 / sqrt(var + eps)`, so it
 # branches nothing and shifts no work -- keying it would just multiply the bucket count.
 @triton.autotune(configs=configs_for("layernorm_fwd_saveact_triton"),
-                 key=['N', 'shape_key', 'HAS_ROWSCALE'])
+                 key=['shape_key', 'HAS_ROWSCALE'])
 @triton.jit
 def layer_norm_fwd_fused(
     X, Y, W, B, Mean, Rstd, Rowscale,
@@ -152,7 +152,7 @@ def layer_norm_fwd_fused(
 # autotune cache is keyed only on `key=[...]` -- without it the tile measured on the dense path is
 # reused by the masked one, which does strictly more work per row.
 @triton.autotune(configs=configs_for("layernorm_bwd_atomic_triton"),
-                 key=['N', 'shape_key', 'HAS_ROWSCALE'],
+                 key=['shape_key', 'HAS_ROWSCALE'],
                  reset_to_zero=['DW', 'DB'])
 @triton.jit
 def layer_norm_bwd_dx_fused(
@@ -286,7 +286,7 @@ def _ln_fwd(
         x_2d, y_2d, weight, bias, mean, rstd, rs if has_rs else rstd,
         x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
-        shape_key=shape_key, HAS_ROWSCALE=has_rs,
+        shape_key=pack(shape_key, N=N), HAS_ROWSCALE=has_rs,
     )
     # fmt: on
     return y_2d, mean, rstd
@@ -409,7 +409,7 @@ def _ln_bwd(
         x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)
         dw.stride(0), db.stride(0), x.stride(0), x.stride(1),
         M, N,
-        shape_key=shape_key, HAS_ROWSCALE=has_rs,
+        shape_key=pack(shape_key, N=N), HAS_ROWSCALE=has_rs,
     )
     # fmt: on
 
@@ -451,7 +451,7 @@ def triton_layernorm_masked(
         x_2d, y_2d, weight, bias, mean, rstd, rs,
         x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
-        shape_key=both_key(rows_of(x.shape)), HAS_ROWSCALE=True,
+        shape_key=both_key(rows_of(x.shape), N=N), HAS_ROWSCALE=True,
     )
     # fmt: on
     return y_2d.view_as(x)

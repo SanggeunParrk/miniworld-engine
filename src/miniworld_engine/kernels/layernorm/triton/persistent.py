@@ -33,7 +33,7 @@ import triton
 import triton.language as tl
 
 from .main import layer_norm_fwd_fused
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
 
 # Persistent grid = (#SMs * PERSIST_WAVES) blocks on axis 0. A couple of blocks per SM keeps
 # the memory system saturated while keeping the partial buffer (and its final
@@ -52,7 +52,7 @@ PERSIST_WAVES = 2
 
 # shape_key is in the key: the grid is FIXED at g programs, so BLOCK_M1 alone sets num_tiles and
 # whether the persistent grid is even filled -- the row count picks the winner.
-@triton.autotune(configs=configs_for("layernorm_bwd_split_triton"), key=['N', 'shape_key'])
+@triton.autotune(configs=configs_for("layernorm_bwd_split_triton"), key=['shape_key'])
 @triton.jit
 def _ln_bwd_persistent(
     DX, PART_DW, PART_DB, DY, X, W, Mean, Rstd,
@@ -188,7 +188,7 @@ def _persist_fwd(
         x_2d, y_2d, weight, bias, mean, rstd, rstd,
         x_2d.stride(0), x_2d.stride(1),
         m, n, eps,
-        shape_key=shape_key, HAS_ROWSCALE=False,
+        shape_key=pack(shape_key, N=n), HAS_ROWSCALE=False,
     )
     return y_2d, mean, rstd
 
@@ -231,7 +231,7 @@ def _persist_bwd(
     _ln_bwd_persistent[grid_bwd](
         dx_2d, partial_dw, partial_db, dy_2d, x, weight, mean, rstd,
         partial_dw.stride(0), x.stride(0), x.stride(1),
-        m, N=n, shape_key=shape_key,
+        m, N=n, shape_key=pack(shape_key, N=n),
     )
 
     dw = partial_dw.sum(dim=0).to(weight.dtype)

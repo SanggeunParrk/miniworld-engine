@@ -94,7 +94,7 @@ def ln_out_mmajor(tri_bkll: torch.Tensor, w: torch.Tensor, b: torch.Tensor,
     # length; a `level=both` kernel keys on rows now (see BOTH_ROWS) precisely so that a pair
     # L=1024 and an atom A=1024 stop sharing a bucket. (The kernel parameter is `shape_key`;
     # `GROUP_M` was a stale name from before the rename.)
-    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, shape_key=both_key(M))
+    _ln_transpose_dbn_kernel[grid](x, Y, w, b, M, float(eps), D=K, shape_key=both_key(M, D=K))
     return Y
 
 

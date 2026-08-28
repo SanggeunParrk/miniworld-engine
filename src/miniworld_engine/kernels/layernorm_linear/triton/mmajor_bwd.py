@@ -231,7 +231,7 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
         dx, pdw, pdb, dxn, x, gamma, mean, rstd,
         pdw.stride(0), x.stride(0), x.stride(1),
         M, N=K,
-        shape_key=both_key(0) if shape_key is None else shape_key,
+        shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
     )
     return dx, pdw.sum(0), pdb.sum(0)
 
