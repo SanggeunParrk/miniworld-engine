@@ -75,6 +75,37 @@ class KernelBackend(_StrEnum):
 
 
 # --------------------------------------------------------------------------- #
+# Train-vs-inference kernel choice (single source of truth for the module layer)
+# --------------------------------------------------------------------------- #
+def needs_backward(module: torch.nn.Module, *inputs: torch.Tensor) -> bool:
+    """Does this forward have to SAVE what a backward will need?
+
+    Two module families ask this to pick between a training kernel that saves activations and an
+    inference one that does not, and they each had their own answer. Both were wrong in a different
+    direction, so the condition lives here now and neither restates it.
+
+    Gradients must be RECORDABLE. Under ``torch.no_grad()`` / ``inference_mode`` nothing can learn
+    through this call whatever the tensors say, so saving activations is pure waste -- and both
+    families were paying it. A module-level bench asking for `mode=inference` measured the TRAINING
+    forward, because parameters always require grad and a module is in train mode until someone
+    calls ``.eval()``: neither is a statement about the call in front of it, and neither had a
+    ``torch.is_grad_enabled()`` in front of it either.
+
+    And then EVERY tensor that can carry one counts, not just the first argument. An ``@opaque``
+    custom op is opaque to autograd as well as to Dynamo (kernels/_compile.py): its output has no
+    ``grad_fn``, so an inference kernel reached with a live gradient gives right numbers and learns
+    nothing, with no error. ConditionedTransition tested ``x.requires_grad`` alone, which sent a
+    detached x with a live conditioning tensor -- or a live WEIGHT, and the projections are
+    parameters, so that is the common case -- down the inference path.
+    """
+    if not torch.is_grad_enabled():
+        return False
+    return (module.training
+            or any(t is not None and t.requires_grad for t in inputs)
+            or any(p.requires_grad for p in module.parameters()))
+
+
+# --------------------------------------------------------------------------- #
 # GPU-architecture policy (single source of truth for the module layer)
 # --------------------------------------------------------------------------- #
 def capability(device: torch.device | None = None) -> tuple[int, int]:

@@ -1214,13 +1214,20 @@ def bench_module_conditioned_transition(
         model.compile()
     model = fabric.setup_module(model)
 
+    # requires_grad ONLY when the mode is training. AdaptiveLayerNorm and ConditionedTransition
+    # both pick their kernel by asking whether anything in the graph carries a gradient -- an input
+    # that always requires one routes the INFERENCE bench through the training forward, which saves
+    # activations for a backward that never runs. The smoke run showed it: `mode=inference` launched
+    # adaln_epilogue_saveact_triton and layernorm_fwd_saveact_strided_triton, both save-activation
+    # kernels. Training keeps it: these are mid-network blocks, so dx is real work the model does.
+    wants_grad = not is_inference_mode(conf.mode)
     x = torch.randn(
         conf.n_augment,
         1,
         seq_len,
         conf.d_single_token,
         device=DEVICE,
-        requires_grad=True,
+        requires_grad=wants_grad,
     )
     cond = torch.randn(
         conf.n_augment,
@@ -1228,24 +1235,40 @@ def bench_module_conditioned_transition(
         seq_len,
         conf.d_single,
         device=DEVICE,
-        requires_grad=True,
+        requires_grad=wants_grad,
     )
     dy = torch.randn_like(x)
 
     def inference_step() -> torch.Tensor:
-        return model(x, cond)
+        # Under no_grad, like every other module bench here (see the triangle_multiplication one).
+        # Without it the module still saves activations for a backward this mode never runs:
+        # `dispatch.needs_backward` asks whether gradients are RECORDABLE, and outside no_grad a
+        # module that nobody called .eval() on, holding parameters that require grad, says yes.
+        # The smoke run showed the cost -- `mode=inference` launching *_saveact_* kernels.
+        with torch.no_grad():
+            return model(x, cond)
 
     def training_step() -> None:
-        y = inference_step()
+        y = model(x, cond)
         fabric.backward(y, dy)
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, cond, *list(model.parameters())]
-    if spec.impl in {ImplementationType.TRITON, ImplementationType.CUEQUIVARIANCE}:
+    if spec.impl in {ImplementationType.TRITON, ImplementationType.CUEQUIVARIANCE,
+                     ImplementationType.MINIWORLD}:
         if is_inference_mode(conf.mode):
+            # The dispatch reads d_hidden, and d_hidden is `d_single_token`. This branched on
+            # `conf.d_pair` -- the pair width, which this module never sees -- so at the token
+            # width it recorded the fused b2b path while the composed one ran. The threshold is
+            # imported rather than re-typed: a bench that keeps its own copy of a dispatch constant
+            # is a second place for it to drift.
+            from miniworld_engine.kernels.conditioned_transition.triton.dispatch import (
+                ATOM_D_MAX,
+            )
+
             execution_path = (
                 "kernels.conditioned_transition.triton.inference"
-                if conf.d_pair <= 128
+                if conf.d_single_token <= ATOM_D_MAX
                 else "kernels.conditioned_transition.triton.composed"
             )
         else:
@@ -1310,6 +1333,13 @@ def bench_module_adaptive_layernorm(
         model.compile()
     model = fabric.setup_module(model)
 
+    # requires_grad ONLY when the mode is training. AdaptiveLayerNorm and ConditionedTransition
+    # both pick their kernel by asking whether anything in the graph carries a gradient -- an input
+    # that always requires one routes the INFERENCE bench through the training forward, which saves
+    # activations for a backward that never runs. The smoke run showed it: `mode=inference` launched
+    # adaln_epilogue_saveact_triton and layernorm_fwd_saveact_strided_triton, both save-activation
+    # kernels. Training keeps it: these are mid-network blocks, so dx is real work the model does.
+    wants_grad = not is_inference_mode(conf.mode)
     x = torch.randn(
         conf.n_augment,
         1,
@@ -1317,7 +1347,7 @@ def bench_module_adaptive_layernorm(
         conf.d_single_token,
         device=DEVICE,
         dtype=dtype,
-        requires_grad=True,
+        requires_grad=wants_grad,
     )
     cond = torch.randn(
         conf.n_augment,
@@ -1326,15 +1356,21 @@ def bench_module_adaptive_layernorm(
         conf.d_single,
         device=DEVICE,
         dtype=dtype,
-        requires_grad=True,
+        requires_grad=wants_grad,
     )
     dy = torch.randn_like(x)
 
     def inference_step() -> torch.Tensor:
-        return model(x, cond)
+        # Under no_grad, like every other module bench here (see the triangle_multiplication one).
+        # Without it the module still saves activations for a backward this mode never runs:
+        # `dispatch.needs_backward` asks whether gradients are RECORDABLE, and outside no_grad a
+        # module that nobody called .eval() on, holding parameters that require grad, says yes.
+        # The smoke run showed the cost -- `mode=inference` launching *_saveact_* kernels.
+        with torch.no_grad():
+            return model(x, cond)
 
     def training_step() -> None:
-        y = inference_step()
+        y = model(x, cond)
         fabric.backward(y, dy)
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
@@ -1348,10 +1384,16 @@ def bench_module_adaptive_layernorm(
             is_train=not is_inference_mode(conf.mode),
             input_dtype=str(x.dtype).replace("torch.", ""),
             parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+            # What the module ACTUALLY dispatches to. `kernels.adaln.triton.main` named a file
+            # that no longer exists (it was split into inference.py / ln_strided.py), and it named
+            # one path where the module picks between two: AdaptiveLayerNorm.forward calls
+            # `adaln_train` when anything in the graph carries a gradient and `adaln_inference`
+            # otherwise, and those are two different kernel files with different kernels.
             execution_path=(
                 "module.reference.torch"
                 if implementation_type == ImplementationType.PYTORCH
-                else "kernels.adaln.triton.main"
+                else ("kernels.adaln.triton.inference" if is_inference_mode(conf.mode)
+                      else "kernels.adaln.triton.training")
             ),
             reference="module.reference.torch",
         )

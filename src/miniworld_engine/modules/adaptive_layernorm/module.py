@@ -5,7 +5,11 @@ from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.kernels import adaln_inference, adaln_train
-from miniworld_engine.modules.dispatch import KernelBackend, resolve_adaptive_layernorm
+from miniworld_engine.modules.dispatch import (
+    KernelBackend,
+    needs_backward,
+    resolve_adaptive_layernorm,
+)
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -55,18 +59,10 @@ class AdaptiveLayerNorm(nn.Module):
         if self._backend == KernelBackend.TRITON:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
             #
-            # EVERY tensor that can carry a gradient decides this, not just `x`. `adaln_inference`
-            # bottoms out in `@opaque` custom ops, and an opaque op is opaque to AUTOGRAD as well as
-            # to Dynamo (see kernels/_compile.py): its output has no `grad_fn`, so the numbers are
-            # right and nothing learns through it. Testing `x.requires_grad` alone sent a module in
-            # `.eval()` with a detached `x` but a conditioning tensor -- or a weight -- that still
-            # requires grad down the inference path, and the gradient vanished with no error. The
-            # projections are parameters, so they are the common case, not the exotic one.
-            needs_grad = (self.training
-                          or x.requires_grad
-                          or cond.requires_grad
-                          or any(p.requires_grad for p in self.parameters()))
-            fn = adaln_train if needs_grad else adaln_inference
+            # `dispatch.needs_backward` owns the condition -- see its docstring. It was written
+            # out here, and ConditionedTransition had its own shorter version, and the two
+            # disagreed; neither asked whether gradients were being recorded at all.
+            fn = adaln_train if needs_backward(self, x, cond) else adaln_inference
             return fn(
                 x,
                 cond,

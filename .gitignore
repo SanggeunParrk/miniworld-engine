@@ -92,3 +92,7 @@ benchmarks/**/logs/
 # staging output of tools/release/gpu_verdict.py; the verdict JSON itself IS committed
 verdicts/.stage/
 benchmarks/*/*/results/*/plots/
+
+# scratch: one-off sbatch scripts and their logs (they belong in a scratchpad, not here)
+*.sbatch
+*.log

@@ -1,8 +1,0 @@
-..                                                                       [100%]
-=============================== warnings summary ===============================
-tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_expand_swiglu_saveact_triton]
-
-tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_squeeze_gate_saveact_triton]
-
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-2 passed, 2 warnings in 42.10s

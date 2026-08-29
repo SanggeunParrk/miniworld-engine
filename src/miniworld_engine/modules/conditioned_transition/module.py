@@ -31,6 +31,7 @@ from miniworld_engine.autotune.shape_key import length_of
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
+    needs_backward,
     resolve_conditioned_transition,
 )
 from miniworld_engine.modules.exceptions import (
@@ -137,7 +138,12 @@ class ConditionedTransition(nn.Module):
             length = length_of(x.shape)
             x2 = x.reshape(-1, d)
             cond2 = cond.reshape(-1, cond.shape[-1])
-            if self.training or x2.requires_grad:
+            # `x2.requires_grad` alone missed the conditioning tensor AND the projection
+            # weights, which are parameters -- so a detached x with live weights took the
+            # inference path and the gradient vanished silently (the kernels are `@opaque`, so
+            # there is no grad_fn and no error). `dispatch.needs_backward` is the one condition
+            # both this and AdaptiveLayerNorm now ask.
+            if needs_backward(self, x2, cond2):
                 y = kernels.cond_transition_train(
                     x2, cond2,
                     self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
