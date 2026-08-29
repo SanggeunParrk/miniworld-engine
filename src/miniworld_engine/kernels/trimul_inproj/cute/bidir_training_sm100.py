@@ -97,7 +97,6 @@ class BidirBackHalfSm100(torch.autograd.Function):
 
         # contraction bwd (contiguous-grad formulas), split outgoing/incoming
         d_o_out, d_o_in = d_tri[:h], d_tri[h:]
-        del d_tri
         lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
         d_left = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)
         d_right = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)
@@ -107,12 +106,15 @@ class BidirBackHalfSm100(torch.autograd.Function):
         torch.bmm(li, d_o_in, out=d_right[h:])            #                       dr=L@G
         d_left = d_left.reshape(B, H, L, L)
         d_right = d_right.reshape(B, H, L, L)
+        # the bmms are done, so d_tri and its two slices can go -- 288 MiB together
+        del d_o_out, d_o_in, d_tri, lo, ro, li, ri
 
         # front bwd, then dxn = (dconcᵀ@W_stack) + (d_glogit@Wgᵀ) with the gate's dx_gate add
         # FUSED into one cuBLAS addmm epilogue (== v12 single-dir). dW stays cuBLAS.
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW_sig(
             d_left, d_right, lf, rf, sg, x_n, WL, WLg, WR, WRg)
         dx_n = torch.mm(d_glogit, Wg.t())                         # (M, D) gate term
+        del d_left, d_right      # 2 x (H, L, L) = 576 MiB, dead once front_bwd_dW_sig returns
         del d_glogit
         dx_n.addmm_(dconc.t(), W_stack)                           # += dconcᵀ@W_stack, in-place
         del W_stack, dconc

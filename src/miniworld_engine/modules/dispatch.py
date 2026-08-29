@@ -101,7 +101,7 @@ def needs_backward(module: torch.nn.Module, *inputs: torch.Tensor) -> bool:
     if not torch.is_grad_enabled():
         return False
     return (module.training
-            or any(t is not None and t.requires_grad for t in inputs)
+            or any(isinstance(t, torch.Tensor) and t.requires_grad for t in inputs)
             or any(p.requires_grad for p in module.parameters()))
 
 

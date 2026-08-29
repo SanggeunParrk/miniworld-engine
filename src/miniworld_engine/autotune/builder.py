@@ -690,7 +690,15 @@ class OpUnit:
         # default, bf16, and the fp32 half of the sweep was 360 of `build trunk`'s 1,269 units
         # doing exactly what the bf16 half had already done. No fp32 entry has ever been built for
         # any kernel, on any card.
-        env["MINIWORLD_DRIVER_DTYPE"] = self._DRIVER_DTYPE[self.dtype]
+        try:
+            env["MINIWORLD_DRIVER_DTYPE"] = self._DRIVER_DTYPE[self.dtype]
+        except KeyError:
+            # `dtypes` aliases fp16 -> float16 in op_units, and drivers.DTYPE_MODE takes bf16 or
+            # fp32 only. Without this the mismatch surfaces as a bare KeyError out of env.update,
+            # after the build has started, naming neither the kernel nor the column.
+            msg = (f"{self.op}: registry.csv declares dtype {self.dtype!r}, which the drivers "
+                   f"cannot build -- MINIWORLD_DRIVER_DTYPE is bf16 or fp32. Fix the dtypes column.")
+            raise ValueError(msg) from None
         return env
 
 
@@ -803,6 +811,12 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         SHAPES_BY_LEVEL,
     )
 
+    if stack is not None and stack not in ("trunk", "diffusion"):
+        # Returning the `both` rows for an unrecognised name -- a third of the sweep -- and having
+        # the CLI report it as a build is worse than not running.
+        msg = f"op_units(stack={stack!r}): the halves are 'trunk' and 'diffusion'"
+        raise ValueError(msg)
+
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
     # The WIDTHS to drive each op at. The shape key carries the whole shape now (plan.md G5), so a
     # sweep that varies only the length tunes one width per op -- whichever the driver happens to
@@ -887,7 +901,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # all. So 768 was 24 of the model's 27 blocks and no unit ever built it: production opened a
         # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
         # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
-        klass = r.get("width") or "both"
+        # stripped: an unstripped "pair " matches no LADDER key and falls through to the
+        # union, which is the exact failure test_width_column_selects_a_ladder exists to stop
+        klass = (r.get("width") or "both").strip() or "both"
 
         def _widths(side: str, _k=klass) -> tuple:
             if driver_widths:

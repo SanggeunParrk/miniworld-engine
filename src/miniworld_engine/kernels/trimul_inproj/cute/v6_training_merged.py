@@ -112,7 +112,8 @@ class _SingleBackHalf(torch.autograd.Function):
         # spot: fuse only the cheap add. dW stays cuBLAS.)
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
-        del d_left, d_right
+        # d_left/d_right are reshape VIEWS of d_lf/d_rf, so the bmm outputs go with them
+        del d_left, d_right, d_lf, d_rf
         # dx_n = dconcᵀ@W_stack + d_glogit@Wgᵀ. Compute the gate term into a fresh (M,D) buffer,
         # then accumulate the front term IN-PLACE. Out-of-place torch.addmm(C, A, B) stages β·C by
         # copying C (a full (M,D)=268MB DtoD memcpy, ~175us/step at L=1024) into the output before

@@ -20,8 +20,9 @@ Which value wins is a property of the SHAPE AND THE CARD, which is why it belong
 CSV rather than in a kernel. The benefit comes from the big operand not fitting in L2, so it tracks
 its size against L2: measured across M, within noise up to activation/L2 = 2, appearing at 4 and
 flat past it. An A6000 holds 6 MB and a B200 126 MB, so the same kernel at the same shape wants
-different orders on different cards. Every ladder therefore carries a value larger than any n_m --
-the old behaviour stays reachable, and a card that gains nothing loses nothing.
+different orders on different cards. Every ladder therefore carries both ends -- 1, and a rung
+`tile_order` clamps to n_m -- so whatever a kernel did before the axis existed stays reachable and
+a card that gains nothing loses nothing.
 
 Tuned against tuned, with both arms free to choose tile, warps and stages, the axis was worth 1.10x
 on that kernel. A fixed tile makes it look like 1.33x: the warp/stage pair that suits a row-first
@@ -41,9 +42,15 @@ def tile_order(pid, n_m, n_n, GROUP_M: tl.constexpr):
     ``pid`` comes from a 1-D grid of ``n_m * n_n`` programs -- the launcher multiplies where it
     used to pass a tuple, and the kernel derives both indices here.
     """
-    per_group = GROUP_M * n_n
-    first_m = (pid // per_group) * GROUP_M
-    size_m = min(n_m - first_m, GROUP_M)
+    # Clamp to n_m so a ladder's top rung ALWAYS means column-first. Without it the guarantee is
+    # arithmetic luck: a pair kernel has M = L*L, so at BLOCK_M1=16 and L=1536 n_m is 147,456 and
+    # a rung of 65536 would group rather than reproduce the old schedule -- unreachable at exactly
+    # the largest shapes. Clamped, any rung >= n_m collapses to first_m=0, size_m=n_m, which is
+    # `pid_m = pid % n_m`: the 2-D grid, exactly.
+    g = min(GROUP_M, n_m)
+    per_group = g * n_n
+    first_m = (pid // per_group) * g
+    size_m = min(n_m - first_m, g)
     pid_m = first_m + ((pid % per_group) % size_m)
     pid_n = (pid % per_group) // size_m
     return pid_m, pid_n

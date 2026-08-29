@@ -7,7 +7,7 @@ so a wrong number was only ever caught by someone running a module by hand.
 
 Marked `gpu` and excluded from the CPU suite: these launch real kernels.
 
-The tolerance is `run_all`'s, not a new one -- max |a-e| / max |e| < 5e-2, the band bf16's ~3
+The tolerance is `run_all`'s, not a new one -- max |a-e| / max |e| the band registry.csv declares for that kernel AT THE RUNNING PRECISION (run_all.declared_rtol), falling back to DEFAULT_RTOL, the band bf16's ~3
 decimal digits and the bench already work in. Two suites disagreeing about what "correct" means
 is worse than one of them not existing.
 """

@@ -22,18 +22,37 @@ import ast
 import csv
 from pathlib import Path
 
-ROOT = Path("src/miniworld_engine")
+ROOT = Path(__file__).resolve().parents[1]
 META = {"num_warps", "num_stages", "maxnreg"}
-SETS = sorted(d.name for d in Path("configs").iterdir() if d.is_dir() and d.name != "devices")
+#: The config sets moved under the package (autotune/configs) after this file was written, and it
+#: still looked for a top-level `configs/`, so it raised FileNotFoundError from any directory --
+#: which is why axes.csv had not been regenerated since. Both paths are package-relative now, so
+#: it runs from anywhere.
+CONFIGS = ROOT / "autotune" / "configs"
+SETS = sorted(d.name for d in CONFIGS.iterdir() if d.is_dir() and d.name != "devices")
 
-vals: dict[str, dict[str, dict[str, int]]] = {}
+vals: dict[str, dict[str, dict[str, str]]] = {}
 for s in SETS:
-    for p in sorted((Path("configs") / s).glob("*.csv")):
-        rows = list(csv.DictReader(p.open(newline="")))
-        if rows:
-            for k, v in rows[0].items():
-                if k and k not in META and v:
-                    vals.setdefault(p.stem, {}).setdefault(k, {})[s] = int(v)
+    for p in sorted((CONFIGS / s).glob("*.csv")):
+        with p.open(newline="") as fh:
+            header = fh.readline().strip()
+        if header.startswith("axis,"):
+            # GRID SPEC: one row per AXIS, `NAME,v1 v2 v3`. This format postdates the first
+            # version of this file, which read every set as if a row were a config and died on
+            # `int("BLOCK_K_K2")` -- the axis name in the first data cell. Record the value SET.
+            with p.open(newline="") as fh:
+                next(fh)
+                for line in fh:
+                    name, _, values = line.strip().partition(",")
+                    if name and name not in META and name != "slice" and values:
+                        vals.setdefault(p.stem, {}).setdefault(name, {})[s] = values
+        else:
+            # MATERIALISED: one row IS one config, so the first row's values are representative.
+            rows = list(csv.DictReader(p.open(newline="")))
+            if rows:
+                for k, v in rows[0].items():
+                    if k and k not in META and v:
+                        vals.setdefault(p.stem, {}).setdefault(k, {})[s] = v
 
 
 def fname(c: ast.Call) -> str:

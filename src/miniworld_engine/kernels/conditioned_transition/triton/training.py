@@ -513,7 +513,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # squeeze bwd
         dh = dout @ ws                                  # (M, ND)
         dWs = dout.t() @ h                              # (D, ND)
-        del dout
+        del dout, dy      # dy is the same (M, D) block and `_gate_bwd` was its last reader
         # swiglu bwd (fused elementwise) -> packed [da | db] : (M, 2*ND)
         dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
         # `del` after last use, and it is not cosmetic. A hand-written backward holds every

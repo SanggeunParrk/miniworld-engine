@@ -203,17 +203,26 @@ def declared_rtol(row: dict, dtype: str | None = None) -> float | None:
         for part in raw.split("|"):
             key, _, value = part.partition("=")
             key = key.strip()
-            if key not in ("bf16", "fp32", "fp16"):
-                msg = (f"{kernel}: rtol names precision {key!r}, which is not one of "
-                       f"bf16/fp32/fp16")
+            # bf16/fp32 only, matching drivers.DTYPE_MODE, which rejects anything else outright.
+            if key not in ("bf16", "fp32"):
+                msg = (f"{kernel}: rtol names precision {key!r}; the drivers build bf16 or fp32 "
+                       f"and nothing else")
+                raise ValueError(msg)
+            if key in bands:
+                msg = f"{kernel}: rtol names {key} twice"
                 raise ValueError(msg)
             bands[key] = _band(kernel, value)
         if dtype is None:
-            return max(bands.values())      # no precision asked for: the widest it ever allows
+            # NOT the widest: handing an fp32 run a bf16 band is exactly the hole this spelling
+            # exists to close, and a caller who forgets the argument would get it silently.
+            msg = (f"{kernel}: rtol is priced per precision {sorted(bands)}, so declared_rtol needs "
+                   f"the dtype the run is at; it was called without one.")
+            raise ValueError(msg)
         short = {"bfloat16": "bf16", "float32": "fp32", "float16": "fp16"}.get(dtype, dtype)
         if short not in bands:
-            msg = (f"{kernel}: rtol prices {sorted(bands)} but the run is {short}. Add it, or drop "
-                   f"{short} from the dtypes column.")
+            msg = (f"{kernel}: rtol prices {sorted(bands)} but this process runs {short}. Either "
+                   f"price {short} too, or -- if the kernel does not run there -- make sure the "
+                   f"dtypes column does not claim it.")
             raise ValueError(msg)
         return bands[short]
     return _band(kernel, raw)
@@ -295,6 +304,12 @@ def main(argv: list[str] | None = None) -> int:
         ok, detail = run_one(drv)
         chk = (r.get("check") or "").strip()
         if ok and chk:
+            # A kernel is checked at a precision IT DECLARES. Without this, one row priced for
+            # the other precision raised out of the loop and discarded every result collected so
+            # far -- `devices.record` runs after it, so hours of compiling went unwritten.
+            declared = {a.strip() for a in (r.get("dtypes") or "bf16").split("|") if a.strip()}
+            if _running_dtype() not in declared:
+                continue
             ok, cdetail = check_one(chk, declared_rtol(r, _running_dtype()))
             detail = cdetail if ok else f"WRONG NUMBERS: {cdetail}"
         elif ok:

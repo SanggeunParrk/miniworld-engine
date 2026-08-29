@@ -83,8 +83,9 @@ def test_the_ladder_reaches_both_ends() -> None:
     """Whatever a kernel did BEFORE the axis existed has to stay reachable.
 
     The two ends are the two things a kernel could already have been doing, and the repo had both:
-    a 2-D grid pins column-first, which is any GROUP_M >= n_m; a hand-written
-    `pid_m = pid // num_pid_n` pins row-first, which is GROUP_M = 1. Seven of the twenty converted
+    a 2-D grid walks the ROWS of the tile grid first (CUDA varies axis 0 fastest), which is any
+    GROUP_M >= n_m; a hand-written `pid_m = pid // num_pid_n` walks the COLUMNS first, which is
+    GROUP_M = 1. See kernels/_tiles.py, which is where these names are defined. Seven of the twenty converted
     kernels were the second kind, and the first ladder written for them held 4, 16 and 65536 -- so
     the claim that "the tuner can always choose today's behaviour" was false for those seven, in
     the direction that matters: if 1 was already their best, tuning could only make them worse.
@@ -104,9 +105,13 @@ def test_the_ladder_reaches_both_ends() -> None:
                 continue
             values = {int(v) for v in line.split(",", 1)[1].split()}
             if 1 not in values:
-                bad.append(f"{f.parent.name}/{f.name}: no 1 (row-first)")
-            if not any(v >= 4096 for v in values):
-                bad.append(f"{f.parent.name}/{f.name}: nothing >= 4096 (column-first)")
+                bad.append(f"{f.parent.name}/{f.name}: no 1 (columns first)")
+            # 65536, matching what the ladders carry and what the materialised sets
+            # pin. `tile_order` clamps to n_m, so any rung this large is the row-first
+            # end whatever M is -- a lower threshold would accept a ladder that stops
+            # short of n_m at pair shapes (M = L*L).
+            if not any(v >= 65536 for v in values):
+                bad.append(f"{f.parent.name}/{f.name}: no rung that reaches n_m (rows first)")
     assert not bad, ("GROUP_M ladders that cannot reproduce a kernel's pre-axis behaviour:\n  "
                      + "\n  ".join(bad))
 

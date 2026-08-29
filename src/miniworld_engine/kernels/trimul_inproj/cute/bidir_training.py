@@ -97,7 +97,6 @@ class BidirBackHalf(torch.autograd.Function):
 
         # contraction bwd (contiguous-grad formulas), split outgoing/incoming
         d_o_out, d_o_in = d_tri[:h], d_tri[h:]
-        del d_tri
         lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
         d_lo = dispatch.bmm("contr_o_dl", d_o_out, ro)          # outgoing: O=lo@roᵀ
         d_ro = dispatch.bmm("contr_o_dr", d_o_out.transpose(1, 2), lo)
@@ -106,7 +105,10 @@ class BidirBackHalf(torch.autograd.Function):
         d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
         del d_li, d_lo
         d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
-        del d_ri, d_ro
+        # d_tri's slices keep its storage alive, so the base and both views go together or not at
+        # all -- 288 MiB at B=1 L=768 h=128 bf16. lo/ro/li/ri are slices of the SAVED lf/rf, which
+        # ctx holds regardless; they are named here only so no slice of d_tri is missed.
+        del d_ri, d_ro, d_o_out, d_o_in, d_tri, lo, ro, li, ri
 
         # front bwd: d_concat + dW (cuBLAS) + W_stack; dxn fused with the gate add.
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(

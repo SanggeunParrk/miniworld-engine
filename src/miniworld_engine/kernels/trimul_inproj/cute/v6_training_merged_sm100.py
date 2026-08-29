@@ -96,7 +96,8 @@ class _SingleBackHalfSm100(torch.autograd.Function):
         # FUSED into one cuBLAS addmm epilogue (== v6). dW stays cuBLAS.
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW_sig(
             d_left, d_right, lf, rf, sg, x_n, WL, WLg, WR, WRg)
-        del d_left, d_right
+        # d_left/d_right are reshape VIEWS of d_lf/d_rf, so the bmm outputs go with them
+        del d_left, d_right, d_lf, d_rf
         dx_n = torch.mm(d_glogit, Wg.t())                         # (M, D) gate term
         del d_glogit
         dx_n.addmm_(dconc.t(), W_stack)                           # += dconcᵀ@W_stack, in-place

@@ -101,12 +101,16 @@ class TriMulManualBwd(torch.autograd.Function):
         # gate GEMM: x_n@Wg
         dx_n = d_glog @ Wg.t()                              # gate→x_n
         dWg = flat(x_n).t() @ flat(d_glog)
+        # three more (B,L,L,D) blocks, all read for the last time above and all live at the peak
+        # inside gated_bwd, which allocates three of its own
+        del d_proj, d_gate, d_glog
         # LN_out bwd → d_tri (B,L,L,D), then to bdll
         d_tri_lld, dWln_out, dBln_out = _ln_bwd(d_out_n, xhat_out, rstd_out, ln_out_w)
-        # `del` after last use, inserted where no reference to the name remains anywhere below.
-        # autograd frees an intermediate when its consumer node has run; this function holds every
-        # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128
-        # bf16. Measured on the triton bidirectional twin: 1,008 MiB off a 7,662 MiB peak.
+        # `del` after last use. autograd frees an intermediate when its consumer node has run;
+        # this function holds every local until it returns, and these are pair-shaped -- 144 MiB
+        # each at B=1 L=768 d=128 bf16. The 1,008 MiB figure in the commit that started this is
+        # the TRITON bidirectional path's, measured there; this file's saving is its own and has
+        # not been measured (it is the torch reference path).
         del d_out_n
         d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()  # (B,D,L,L)
         del d_tri_lld
@@ -136,6 +140,7 @@ class TriMulManualBwd(torch.autograd.Function):
         dxn_R, dWR, dWRg = gated_bwd(d_right, pR, gR, WR, WRg)
         del d_right
         dx_n = dx_n + dxn_L + dxn_R
+        del dxn_L, dxn_R
 
         # ── ④ LN_in bwd ──────────────────────────────────────────────────
         dx, dWln_in, dBln_in = _ln_bwd(dx_n, xhat_in, rstd_in, ln_in_w)

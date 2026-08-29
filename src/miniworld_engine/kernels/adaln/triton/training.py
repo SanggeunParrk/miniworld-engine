@@ -577,6 +577,7 @@ class AdaLNTrainFn(torch.autograd.Function):
             dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c,
                                      list(cond2d.stride()),
                                      shape_key=both_key(rows_of(ctx.orig_cond_shape)))
+            del dcond_aff    # a fresh (M, NC); _ln_bwd was its last reader
 
         # `D` is (2*NX, M) -- the largest tensor in this function, 192 MiB at B=32, L=1024,
         # d=768, bf16 -- and it is dead here: the wgrad, the dsb reduction and the dgrad above are

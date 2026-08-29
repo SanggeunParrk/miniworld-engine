@@ -178,8 +178,13 @@ def test_a_declared_exception_is_still_one(kernel: str) -> None:
     assert differs, (
         f"{kernel} is listed in NOT_BITWISE ({why}) but reproduced exactly. "
         f"Move it into SAMPLE -- the exception list must not outlive its reason.")
+    from miniworld_engine.autotune.run_all import DEFAULT_RTOL
     from miniworld_engine.kernels.drivers import DTYPE_MODE
-    band = declared_rtol(row, DTYPE_MODE) or 5e-2
+
+    # `or` would turn a declared band of 0.0 -- which test_declared_tolerance says must mean
+    # EXACT -- into the default, and 5e-2 was the default's value copied by hand.
+    declared = declared_rtol(row, DTYPE_MODE)
+    band = DEFAULT_RTOL if declared is None else declared
     for i in differs:
         a, b = first[i].float(), second[i].float()
         scale = b.abs().max().item()

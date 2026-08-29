@@ -278,7 +278,12 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
             d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
-        d_tri = d_view.t().reshape(H, L, L)   # .t().reshape copies, so d_view is dead here
+        # `_te_backward` writes dx at x's strides and x here is `view` ((1, M)), so d_view is
+        # m-major, `.t()` is contiguous and this reshape is a FREE VIEW -- d_tri ALIASES
+        # d_view. Deleting the name frees nothing on its own; the storage goes at the `del`
+        # below, which names d_tri and both of its slices. (bidir_training_sm100.py's header
+        # states the same aliasing; an earlier comment here claimed a copy and was wrong.)
+        d_tri = d_view.t().reshape(H, L, L)
         del d_view, d_proj, view
 
         # contraction bwd (split outgoing/incoming), cuBLAS bmm
