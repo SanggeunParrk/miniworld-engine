@@ -95,11 +95,21 @@ rather than against the registry. `git pull`.
 
 ---
 
-## A kernel is `skipped (this card is smXX)`
+## A kernel is `skipped (wrong card smXX, or not declared at bf16)`
 
-Its `arch` is above your card, so it was never launched — a correct answer, not a failure. Nine
-kernels are declared sm90/sm100; see `docs/supported.md` for which, and note that `tuned_for` is
-informational while `arch` is the enforced gate.
+Two reasons, one line, and neither is a failure — the kernel was never launched.
+
+**Wrong card**: its `arch` is above yours. Nine kernels are declared sm90/sm100; see
+`docs/supported.md` for which, and note that `tuned_for` is informational while `arch` is the
+enforced gate.
+
+**Not declared at this precision**: `registry.csv`'s `dtypes` column says which precisions the
+kernel runs at, and a run at another one passes it by. Export `MINIWORLD_DRIVER_DTYPE=fp32` (or
+`bf16`) to run the other half; between the two, every declared kernel is reached.
+
+Both are decided before the driver runs. Driving a kernel a run is not going to judge costs a
+compile, and a compile that fails gets recorded as the kernel's failure — which is how an fp32 run
+once reported `trimul_outproj_layernorm_gemm_gate_triton`, a bf16-only row, as FAILED.
 
 ---
 

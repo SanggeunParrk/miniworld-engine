@@ -141,6 +141,29 @@ def is_arch_gated(detail: str) -> bool:
     return any(m in d for m in _ARCH_GATED_MARKERS)
 
 
+def declines_this_run(row: dict, arch: str, dtype: str) -> str | None:
+    """Why this run does not launch this kernel, or None if it does.
+
+    ONE predicate, because there are two reasons and they behave identically: a kernel this card
+    cannot run and a kernel not declared at this precision are both ABSENT, not failing, and both
+    must be decided BEFORE the driver runs -- a launch that is not going to be judged still costs
+    a compile, and a compile that fails gets recorded as the kernel's failure.
+
+    They were two checks in two places, and the precision one sat inside `if ok and chk`, i.e. it
+    was consulted only when the drive had already SUCCEEDED. So an fp32 run reported
+    `trimul_outproj_layernorm_gemm_gate_triton` -- a row that declares bf16 -- as FAILED, from a
+    CompilationError that says nothing except that nobody asked it to build there. It also left 44
+    of 91 kernels in neither `results` nor `skipped`, which the accounting line reported and
+    nothing acted on.
+    """
+    if not meets_arch(row, arch):
+        return f"needs {row['arch']}, this card is {arch}"
+    declared = {a.strip() for a in (row.get("dtypes") or "bf16").split("|") if a.strip()}
+    if dtype not in declared:
+        return f"declares {'|'.join(sorted(declared))}, this run is {dtype}"
+    return None
+
+
 def device_arch() -> str:
     """This card's compute capability as `registry.csv`'s `arch` spells it, e.g. ``"sm86"``."""
     import torch
@@ -293,23 +316,17 @@ def main(argv: list[str] | None = None) -> int:
         drv = (r.get("driver") or "").strip()
         if not drv:
             continue
-        # Declared gate first: a kernel this card cannot run is not launched at all, so it costs no
-        # compile and cannot be reported as a failure. Six of these on an A6000 were counted as
-        # failures before, which is the "failure vs absence" mistake `is_bad_unit` already avoids
-        # on the build side.
-        if not meets_arch(r, here):
-            skipped[r["kernel"]] = f"needs {r['arch']}, this card is {here}"
-            print(f"  [skip] {r['kernel']:46s} {skipped[r['kernel']]}", flush=True)
+        # DECLARED GATES FIRST, both of them: a kernel this card cannot run and a kernel not
+        # declared at this precision are absent, not failing, and neither is launched. The
+        # "failure vs absence" distinction `is_bad_unit` already draws on the build side.
+        why = declines_this_run(r, here, _running_dtype())
+        if why is not None:
+            skipped[r["kernel"]] = why
+            print(f"  [skip] {r['kernel']:46s} {why}", flush=True)
             continue
         ok, detail = run_one(drv)
         chk = (r.get("check") or "").strip()
         if ok and chk:
-            # A kernel is checked at a precision IT DECLARES. Without this, one row priced for
-            # the other precision raised out of the loop and discarded every result collected so
-            # far -- `devices.record` runs after it, so hours of compiling went unwritten.
-            declared = {a.strip() for a in (r.get("dtypes") or "bf16").split("|") if a.strip()}
-            if _running_dtype() not in declared:
-                continue
             ok, cdetail = check_one(chk, declared_rtol(r, _running_dtype()))
             detail = cdetail if ok else f"WRONG NUMBERS: {cdetail}"
         elif ok:
@@ -340,7 +357,8 @@ def main(argv: list[str] | None = None) -> int:
     # `no driver` is what made an A6000 run report six failures it could not have avoided.
     print(f"  declared {declared}   driven {len(results)}   "
           f"ok {have}   failed {len(results) - have}   "
-          f"skipped (this card is {here}) {len(skipped)}   no driver {no_driver}")
+          f"skipped (wrong card {here}, or not declared at {_running_dtype()}) {len(skipped)}   "
+          f"no driver {no_driver}")
     accounted = len(results) + len(skipped) + no_driver
     if accounted != declared:
         print(f"  ACCOUNTING: {accounted} of {declared} classified -- "

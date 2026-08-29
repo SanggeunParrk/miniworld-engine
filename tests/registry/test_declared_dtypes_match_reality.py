@@ -87,9 +87,23 @@ def test_a_single_precision_kernel_declares_exactly_that_precision():
 def test_the_two_families_the_bug_was_found_in_are_single_precision():
     """Named, because both are documented in the source and neither had reached the registry."""
     declared = _declared()
+    #: The one conditioned_transition kernel that really is fp32-only, and why: the training
+    #: autograd Function reroutes bf16 away from it ("use cuBLAS split"), so no bf16 unit would
+    #: measure the kernel -- it would measure a path nothing takes. Its driver names
+    #: torch.float32 outright rather than the overridable BF16 name, for the same reason.
+    FP32_ONLY = {"cond_transition_fwd_b2b_saveact_triton"}
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
-            assert want == {"float32"}, f"{op}: conditioned_transition is fp32 io (drivers/conditioned_transition)"
+            # The family used to be fp32 EVERYWHERE, in the driver and in this column together --
+            # two true halves that added up to never tuning krystal's own precision, which is
+            # bf16. The driver was fixed to build at the overridable `BF16` name; this column was
+            # the half left behind, so all eight rows still said fp32 and the build made fp32
+            # units for kernels the model only ever calls in bf16.
+            expect = {"float32"} if op in FP32_ONLY else {"bfloat16", "float32"}
+            assert want == expect, (
+                f"{op}: conditioned_transition builds at drivers.BF16 and krystal runs bf16, so "
+                f"the row declares both -- except {sorted(FP32_ONLY)}, whose bf16 calls are "
+                f"rerouted before they reach the kernel")
         if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
             if op.endswith("lowp_triton"):
                 continue

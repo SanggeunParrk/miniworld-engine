@@ -477,7 +477,15 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ctx.length = L
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
         if x.dtype == torch.bfloat16 and mode == "fused":
-            mode = "cublas"  # bf16 fused b2b train kernel is broken (dtype/spill); use cuBLAS split
+            # The reroute stands on ONE of its two original reasons now. It read "broken
+            # (dtype/spill)": the dtype half was `tl.dot` being handed an fp32 accumulator beside
+            # a bf16 weight, so the kernel did not COMPILE at bf16 -- fixed above by casting `h`,
+            # and the checker now measures 3.13e-03 there, the same as the inference twin the
+            # model already runs at bf16. The SPILL half is untested: nothing has benchmarked this
+            # kernel at bf16, where the register pressure differs from the fp32 shape it was tuned
+            # at. So bf16 still takes the cuBLAS split, and lifting this needs a measurement, not
+            # an argument. registry.csv declares this kernel fp32 to match.
+            mode = "cublas"
         if mode == "fused":
             y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
                                                     shape_key=atom_key(L))

@@ -70,10 +70,18 @@ def test_a_run_that_touched_a_kernel_always_wins(manifest):
 
 
 def test_the_whole_registry_is_still_written(manifest):
-    """Merging must not turn the manifest into only-what-ran."""
+    """Merging must not turn the manifest into only-what-ran.
+
+    "The whole registry" means every kernel that DECLARES the precision being recorded: a bf16-only
+    kernel has nothing to say about an fp32 run, and marking it `untested` there invents a hole
+    nothing can ever fill. One fp32 run put 50 such rows in the file.
+    """
     a = _some_kernels(1)[0]
-    devices.record(GPU, {a: (True, "x")})
-    assert len(manifest()) == len(devices.registry())
+    devices.record(GPU, {a: (True, "x")}, dtype="bf16")
+    want = [e["kernel"] for e in devices.registry()
+            if "bf16" in ((e.get("dtypes") or "bf16").split("|"))]
+    assert want, "no kernel declares bf16; this would pass vacuously"
+    assert sorted(manifest()) == sorted(want)
 
 
 def test_a_manifest_says_when_and_against_what_it_was_produced(manifest) -> None:
@@ -92,6 +100,10 @@ def test_a_manifest_says_when_and_against_what_it_was_produced(manifest) -> None
 def test_provenance_is_not_mistaken_for_a_kernel(manifest) -> None:
     """It shares the file with the kernel rows, so every reader has to skip it. `load_manifest`
     does; a reader that does not would report a 104th kernel that does not exist."""
-    devices.record(GPU, {})
-    assert all(r["kernel"] != devices._PROVENANCE for r in devices.load_manifest(GPU))
-    assert len(devices.load_manifest(GPU)) == len(devices.registry())
+    devices.record(GPU, {}, dtype="bf16")
+    got = devices.load_manifest(GPU)
+    assert all(r["kernel"] != devices._PROVENANCE for r in got)
+    # One row per kernel that declares bf16 -- not per registry row: an fp32-only kernel has no
+    # bf16 row at all. What this is about is that the provenance row is not counted as one of them.
+    assert len(got) == sum(1 for e in devices.registry()
+                           if "bf16" in (e.get("dtypes") or "bf16").split("|"))

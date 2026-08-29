@@ -29,7 +29,7 @@ ANCHORS: dict[str, str | None] = {
     # -- "the count is wrong" and "a kernel was skipped" are what the reader arrives with -- but
     # there is no literal to keep alive, so they anchor on the source of the behaviour instead.
     "build all` reports far fewer units than expected": None,
-    "A kernel is `skipped (this card is smXX)": "skipped (this card is ",
+    "A kernel is `skipped (wrong card smXX, or not declared at bf16)": "skipped (wrong card ",
 }
 
 

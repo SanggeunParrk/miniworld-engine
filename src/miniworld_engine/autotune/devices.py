@@ -97,6 +97,11 @@ def manifest_path(gpu_key: str) -> Path:
     return _DEVICES / f"{gpu_key}.csv"
 
 
+def _declares(entry: dict) -> frozenset[str]:
+    """The precisions a registry row says its kernel runs at. Blank means bf16, as everywhere."""
+    return frozenset(a.strip() for a in (entry.get("dtypes") or "bf16").split("|") if a.strip())
+
+
 def record(gpu_key: str, results: dict[str, tuple[bool, str]],
            dtype: str | None = None) -> Path:
     """Merge what a run observed -- ``kernel -> (ran, detail)`` -- into this GPU's manifest.
@@ -124,6 +129,12 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
     mine = {r["kernel"]: r for r in prior if r["dtype"] == dtype}
     rows = []
     for entry in registry():
+        # Only kernels this precision applies to. A bf16-only kernel has nothing to say about an
+        # fp32 run -- writing it `untested` there invents a hole that can never be filled, and one
+        # fp32 run put 50 of them in the file. A row exists for a (kernel, precision) the registry
+        # declares, and for no other.
+        if dtype not in _declares(entry):
+            continue
         ran, detail = results.get(entry["kernel"], (None, ""))
         if ran is None:
             was = mine.get(entry["kernel"], {})
@@ -135,9 +146,16 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
             "family": entry["family"], "file": entry["file"],
             "status": status, "detail": detail, "dtype": dtype,
         })
-    # Every OTHER precision's rows, carried through untouched. Sorted after this run's, so the
-    # file reads as one block per precision rather than interleaved.
-    rows += [r for r in prior if r["dtype"] != dtype]
+    # Every OTHER precision's rows, carried through -- but only for precisions the registry still
+    # declares. A row for a precision a kernel no longer runs at is evidence about a configuration
+    # that no longer exists, and it does not merely sit there: the declared bands are calibrated
+    # from these numbers, so a stale fp32 row would price a band the kernel is never held to, and a
+    # stale bf16 row (this family had eight, left over from when the driver was pinned to fp32 and
+    # the numbers in them are fp32 numbers) would price the bf16 band from the wrong precision
+    # entirely. Written after this run's rows, so the file reads as one block per precision.
+    declared = {e["kernel"]: _declares(e) for e in registry()}
+    rows += [r for r in prior
+             if r["dtype"] != dtype and r["dtype"] in declared.get(r["kernel"], frozenset())]
     _DEVICES.mkdir(parents=True, exist_ok=True)
     path = manifest_path(gpu_key)
     # BEFORE opening the file. `_provenance_row` shells out to `git status`, and opening the

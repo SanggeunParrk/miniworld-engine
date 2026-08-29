@@ -49,3 +49,25 @@ def test_a_triton_row_declares_a_width() -> None:
     blank = sorted(r["kernel"] for r in _rows()
                    if r["backend"] == "triton" and not (r.get("width") or "").strip())
     assert not blank, f"triton rows with no width declared: {blank}"
+
+
+def test_a_both_level_row_declares_the_union_and_nothing_else() -> None:
+    """`level=both` is the one case where the column cannot decide anything -- and must still agree.
+
+    A `both` row is driven once per SIDE (`op_units` splits it into pair units and atom units), and
+    the side names the stream outright, so `_widths` takes the ladder from the side and never looks
+    at the column. The value is therefore inert on these 27 rows, which is how a review found it.
+
+    Inert is not the same as free to be wrong. A row saying `level=both,width=pair` would be a
+    contradiction -- it claims to meet only one stream while its own level says it meets two -- and
+    nothing would have caught it, because nothing reads the cell. Pinning the biconditional turns
+    the dead value into a consistency check: `width=both` exactly when `level=both`.
+    """
+    wrong = sorted(f"{r['kernel']}: level={r['level']} width={(r.get('width') or '').strip()}"
+                   for r in _rows() if r["backend"] == "triton"
+                   and (r["level"] == "both") != ((r.get("width") or "").strip() == "both"))
+    assert not wrong, (
+        "level and width disagree about whether the kernel meets both streams. A `level=both` row "
+        "is driven once per side and its ladder comes from the side, so the column can only say "
+        "`both`; and a row that says `both` while its level names one stream is claiming a ladder "
+        "it will never be given:\n  " + "\n  ".join(wrong))

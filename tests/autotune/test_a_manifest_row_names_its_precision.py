@@ -75,7 +75,9 @@ def test_loading_can_ask_for_one_precision(rows):
     bf = devices.load_manifest(GPU, "bf16")
     assert {r["dtype"] for r in bf} == {"bf16"}
     assert next(r for r in bf if r["kernel"] == a)["detail"] == "bf16 a"
-    assert len(devices.load_manifest(GPU)) == 2 * len(bf), "unfiltered must return both precisions"
+    both = devices.load_manifest(GPU)
+    assert {r["dtype"] for r in both} == {"bf16", "fp32"}, "unfiltered must return both precisions"
+    assert len(both) == len(bf) + len(devices.load_manifest(GPU, "fp32"))
 
 
 def test_a_row_written_before_the_column_reads_as_bf16(tmp_path, monkeypatch):
@@ -114,3 +116,29 @@ def test_the_committed_manifests_all_name_a_precision():
                     continue
                 assert (r.get("dtype") or "").strip() in ("bf16", "fp32"), (
                     f"{path.name}: {r['kernel']} has dtype {r.get('dtype')!r}")
+
+
+def test_a_row_for_a_precision_the_kernel_no_longer_declares_is_dropped(rows, monkeypatch):
+    """Carrying a row forward is right only while the row still describes something real.
+
+    conditioned_transition had eight such rows. The family's driver was pinned to fp32, so every
+    number it ever recorded was an fp32 number -- and when the driver was fixed to build at the
+    switchable dtype and the rows were labelled by the precision the PROCESS ran at, those numbers
+    became bf16 rows saying 1.4e-07. The declared bands are calibrated from these numbers, so the
+    stale row would have priced a bf16 band from an fp32 measurement: five orders too tight.
+    """
+    a, b = _two_kernels()
+    devices.record(GPU, {a: (True, "bf16 a"), b: (True, "bf16 b")}, dtype="bf16")
+    devices.record(GPU, {a: (True, "fp32 a")}, dtype="fp32")
+    assert {r["dtype"] for r in rows()} == {"bf16", "fp32"}
+
+    # `a` becomes fp32-only. Its bf16 row is evidence about a configuration that no longer exists.
+    real = devices.registry
+    monkeypatch.setattr(devices, "registry", lambda: [
+        {**e, "dtypes": "fp32"} if e["kernel"] == a else e for e in real()])
+    devices.record(GPU, {a: (True, "fp32 a again")}, dtype="fp32")
+
+    got = {(r["kernel"], r["dtype"]) for r in rows()}
+    assert (a, "fp32") in got
+    assert (a, "bf16") not in got, "a bf16 row survived for a kernel that no longer declares bf16"
+    assert (b, "bf16") in got, "an unrelated kernel's bf16 row was dropped too"

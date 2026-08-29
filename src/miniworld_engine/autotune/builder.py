@@ -913,6 +913,10 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # 128) and its pair units a real pair one, whatever the row's own class says. The
             # class ladder is for rows with no side -- `level=token`/`atom` -- where the column is
             # the only thing that knows which stream the kernel sees.
+            #
+            # So the `width` cell is never READ on a `level=both` row. It is still required to say
+            # `both` there, and a test pins the biconditional: unread is not free to be wrong, and
+            # `level=both,width=pair` would be a row contradicting itself with nothing to catch it.
             if side == "atom":
                 return (ATOM_WIDTH,)
             if side == "pair":
