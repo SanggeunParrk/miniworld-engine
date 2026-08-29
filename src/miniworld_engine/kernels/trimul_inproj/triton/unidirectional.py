@@ -103,13 +103,20 @@ class _UniBackHalfTriton(torch.autograd.Function):
         # ② gate bwd (elementwise; dx_gate folded into the dxn GEMM below); dropout-scale dy
         d_proj, d_glogit = gate_elem_bwd_ew(gy.contiguous(), proj.contiguous(), gate.contiguous(),
                                             dropscale=ctx.dropscale, seq_len=ctx.seq_len)
+        # `del` after last use, inserted where no reference to the name remains anywhere below.
+        # autograd frees an intermediate when its consumer node has run; this function holds every
+        # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128
+        # bf16. Measured on the triton bidirectional twin: 1,008 MiB off a 7,662 MiB peak.
+        del gy
         dWg = torch.mm(x_n.reshape(M, D).t(), d_glogit)          # (D, D) cuBLAS
 
         # ① LN_out + @Wp bwd (te_style)
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
             d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+        del d_proj, view
         d_tri = d_view.t().reshape(H, L, L)
+        del d_view
 
         # contraction bwd (single direction), cuBLAS bmm. lf/rf are the MASKED
         # inputs (saved post-mask), so these grads are w.r.t. the masked tensors.
@@ -119,6 +126,7 @@ class _UniBackHalfTriton(torch.autograd.Function):
         else:                                                    # O = lfᵀ @ rf
             d_left = torch.bmm(rf, d_tri.transpose(1, 2))
             d_right = torch.bmm(lf, d_tri)
+        del d_tri
         # chain back through the elementwise mask (left_masked = left*mm)
         if ctx.mm is not None:
             d_left = d_left * ctx.mm
@@ -129,9 +137,13 @@ class _UniBackHalfTriton(torch.autograd.Function):
         # front bwd: d_concat (triton) + dW (cuBLAS) + W_stack; dxn fuses the gate add
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+        del d_left, d_right
         dx = torch.mm(d_glogit, Wg.t())                         # dx_gate  (M, D)
+        del d_glogit
         dx.addmm_(dconc.t(), W_stack)                           # + dconcᵀ@W_stack (in-place)
+        del W_stack, dconc
         dx_n = dx.reshape(B, L, L, D)
+        del dx
         # trailing Nones: eps, outgoing, mask; then d_residual (fused residual input), dropscale
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
                 d_residual, None)

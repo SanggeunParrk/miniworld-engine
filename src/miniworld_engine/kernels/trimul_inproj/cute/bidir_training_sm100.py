@@ -80,16 +80,24 @@ class BidirBackHalfSm100(torch.autograd.Function):
         # ② gate bwd (elementwise; dx_gate add is fused into the dxn addmm below).
         # gate_src is the saved PREACT (glogit); recompute gate=σ(preact) in-kernel.
         d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate_src, from_preact=True)
+        # `del` after last use, inserted where no reference to the name remains anywhere below.
+        # autograd frees an intermediate when its consumer node has run; this function holds every
+        # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128
+        # bf16. Measured on the triton bidirectional twin: 1,008 MiB off a 7,662 MiB peak.
+        del gy
         dWg = x_n.reshape(M, D).t() @ d_glogit                     # (D,D) huge-K -> cuBLAS
 
         # ① LN_out + @Wp bwd
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
             d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+        del d_proj, view
         d_tri = d_view.t().reshape(H, L, L)
+        del d_view
 
         # contraction bwd (contiguous-grad formulas), split outgoing/incoming
         d_o_out, d_o_in = d_tri[:h], d_tri[h:]
+        del d_tri
         lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
         d_left = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)
         d_right = torch.empty(H, L, L, dtype=lf.dtype, device=lf.device)
@@ -105,7 +113,9 @@ class BidirBackHalfSm100(torch.autograd.Function):
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW_sig(
             d_left, d_right, lf, rf, sg, x_n, WL, WLg, WR, WRg)
         dx_n = torch.mm(d_glogit, Wg.t())                         # (M, D) gate term
+        del d_glogit
         dx_n.addmm_(dconc.t(), W_stack)                           # += dconcᵀ@W_stack, in-place
+        del W_stack, dconc
         dx_n = dx_n.reshape(B, L, L, D)
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None)
 

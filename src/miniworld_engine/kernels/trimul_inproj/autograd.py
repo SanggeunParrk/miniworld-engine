@@ -103,14 +103,23 @@ class TriMulManualBwd(torch.autograd.Function):
         dWg = flat(x_n).t() @ flat(d_glog)
         # LN_out bwd → d_tri (B,L,L,D), then to bdll
         d_tri_lld, dWln_out, dBln_out = _ln_bwd(d_out_n, xhat_out, rstd_out, ln_out_w)
+        # `del` after last use, inserted where no reference to the name remains anywhere below.
+        # autograd frees an intermediate when its consumer node has run; this function holds every
+        # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128
+        # bf16. Measured on the triton bidirectional twin: 1,008 MiB off a 7,662 MiB peak.
+        del d_out_n
         d_tri = d_tri_lld.permute(0, 3, 1, 2).contiguous()  # (B,D,L,L)
+        del d_tri_lld
 
         # ── ② bmm bwd ────────────────────────────────────────────────────
         # tri = einsum("bdik,bdjk->bdij", left, right)
         d_left_b = torch.einsum("bdij,bdjk->bdik", d_tri, right_b)
         d_right_b = torch.einsum("bdij,bdik->bdjk", d_tri, left_b)
+        del d_tri
         d_left = d_left_b.permute(0, 2, 3, 1).contiguous()  # (B,L,L,D)
+        del d_left_b
         d_right = d_right_b.permute(0, 2, 3, 1).contiguous()
+        del d_right_b
 
         # ── ③ front gated-GEMM bwd (left & right) ────────────────────────
         def gated_bwd(d_out, p, g, Wp_proj, Wg_gate):
@@ -123,7 +132,9 @@ class TriMulManualBwd(torch.autograd.Function):
             return dxn, dWproj, dWgate
 
         dxn_L, dWL, dWLg = gated_bwd(d_left, pL, gL, WL, WLg)
+        del d_left
         dxn_R, dWR, dWRg = gated_bwd(d_right, pR, gR, WR, WRg)
+        del d_right
         dx_n = dx_n + dxn_L + dxn_R
 
         # ── ④ LN_in bwd ──────────────────────────────────────────────────

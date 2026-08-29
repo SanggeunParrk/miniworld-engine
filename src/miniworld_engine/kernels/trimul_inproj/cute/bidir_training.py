@@ -87,22 +87,33 @@ class BidirBackHalf(torch.autograd.Function):
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
             d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+        # `del` after last use, inserted where no reference to the name remains anywhere below.
+        # autograd frees an intermediate when its consumer node has run; this function holds every
+        # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128
+        # bf16. Measured on the triton bidirectional twin: 1,008 MiB off a 7,662 MiB peak.
+        del d_proj, view
         d_tri = d_view.t().reshape(H, L, L)
+        del d_view
 
         # contraction bwd (contiguous-grad formulas), split outgoing/incoming
         d_o_out, d_o_in = d_tri[:h], d_tri[h:]
+        del d_tri
         lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
         d_lo = dispatch.bmm("contr_o_dl", d_o_out, ro)          # outgoing: O=lo@roᵀ
         d_ro = dispatch.bmm("contr_o_dr", d_o_out.transpose(1, 2), lo)
         d_li = dispatch.bmm("contr_i_dl", ri, d_o_in.transpose(1, 2))   # incoming: O=liᵀ@ri
         d_ri = dispatch.bmm("contr_i_dr", li, d_o_in)
         d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
+        del d_li, d_lo
         d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
+        del d_ri, d_ro
 
         # front bwd: d_concat + dW (cuBLAS) + W_stack; dxn fused with the gate add.
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+        del d_left, d_right
         dconcT = dconc.t()
+        del dconc
         Wg_t = Wg.t()
 
         def _dxn_cute():   # quack: dxn_front + (d_glogit@Wgᵀ) fused via C-add epilogue (cute)
@@ -122,6 +133,7 @@ class BidirBackHalf(torch.autograd.Function):
         dx_n = dispatch.pick("dxn", (M, 4 * H + D, D),
                              [("cute", _dxn_cute), ("cublas", _dxn_cublas)]).reshape(B, L, L, D)
         d_residual = gy.reshape(B, L, L, D) if ctx.add_residual else None
+        del gy
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
                 d_residual, None)
 
