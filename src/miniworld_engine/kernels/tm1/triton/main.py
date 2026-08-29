@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_order
+
 from einops import rearrange
 from jaxtyping import Float
 
@@ -46,12 +48,14 @@ def fused_sigmoid_gate_fwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid = tl.program_id(0).to(tl.int64)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
+    # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
+    # and just as fixed. Which end suits the shape is what the tuner now decides.
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
@@ -141,12 +145,14 @@ def fused_sigmoid_gate_bwd_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid = tl.program_id(0).to(tl.int64)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
+    # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
+    # and just as fixed. Which end suits the shape is what the tuner now decides.
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     row_start = pid_m * BLOCK_M1
     col_start = pid_n * BLOCK_N
