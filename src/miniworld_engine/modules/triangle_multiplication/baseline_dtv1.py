@@ -78,6 +78,8 @@ from miniworld_engine.autotune.configs import configs_for
 import torch
 import triton
 import triton.language as tl
+
+from miniworld_engine.kernels._tiles import tile_order
 from cuequivariance_ops.triton import Layout
 
 from miniworld_engine.autotune import tensor_dtype_of
@@ -251,6 +253,7 @@ def _input_gated_gemm_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
     """Fused gated GEMM: out = sigmoid(xn @ wg.T) * (xn @ wp.T) [* mask].
@@ -263,10 +266,10 @@ def _input_gated_gemm_kernel(
     When TRANSPOSE_OUT=True outputs are written as (N, M) instead of (M, N),
     which lets the caller reshape directly to (D, B, I, J) without an extra copy.
     """
-    pid = tl.program_id(0)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
+    # GROUP_M = 1 on that axis -- fixed, like every other kernel here was before the axis existed.
+    pid_m, pid_n = tile_order(tl.program_id(0),
+                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     xn_bp = tl.make_block_ptr(
         base=xn_ptr,
@@ -414,6 +417,7 @@ def _output_gated_gemm_kernel(
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
     """Single-pass dual-accumulator output GEMM. Also writes sig = sigmoid(x1n @ wg.T).
@@ -423,10 +427,10 @@ def _output_gated_gemm_kernel(
     fully hiding HBM latency in one pass vs. the two-pass approach that reads
     the weight tiles twice and serialises the two K-loops.
     """
-    pid = tl.program_id(0)
-    num_pid_n = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
+    # GROUP_M = 1 on that axis -- fixed, like every other kernel here was before the axis existed.
+    pid_m, pid_n = tile_order(tl.program_id(0),
+                              tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
 
     x1_bp = tl.make_block_ptr(x1n_ptr, (M, K), (K, 1), (pid_m * BLOCK_M1, 0), (BLOCK_M1, BLOCK_K), (1, 0))
     x2_bp = tl.make_block_ptr(x2_ptr,  (M, K), (K, 1), (pid_m * BLOCK_M1, 0), (BLOCK_M1, BLOCK_K), (1, 0))

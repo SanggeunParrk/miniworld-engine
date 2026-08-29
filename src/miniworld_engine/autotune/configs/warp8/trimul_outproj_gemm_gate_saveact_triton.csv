@@ -1,2 +1,2 @@
-BLOCK_K,BLOCK_M1,BLOCK_N,num_warps,num_stages
-64,64,64,8,3
+BLOCK_K,BLOCK_M1,BLOCK_N,GROUP_M,num_warps,num_stages
+64,64,64,65536,8,3
