@@ -107,3 +107,41 @@ def test_provenance_is_not_mistaken_for_a_kernel(manifest) -> None:
     # bf16 row at all. What this is about is that the provenance row is not counted as one of them.
     assert len(got) == sum(1 for e in devices.registry()
                            if "bf16" in (e.get("dtypes") or "bf16").split("|"))
+
+
+def test_a_bench_launch_does_not_erase_a_measured_row(manifest):
+    """"It launched" is weaker evidence than "it launched and the numbers matched", and the weaker
+    one must not overwrite the stronger.
+
+    `bench` writes `(True, "launched by bench")` for every kernel a run touched -- that is all it
+    knows. The declared rtol bands are calibrated by parsing the measured numbers out of these
+    details (`tests/registry/test_declared_tolerance.py`), so one `bench_kernel all` after a
+    `run_all` left ~29 kernels with status `ok` and no numbers behind it, and they dropped out of
+    calibration without anything failing. The merge fix protected kernels a run did not TOUCH; this
+    is the same failure for one it did.
+    """
+    a, b = _some_kernels(2)
+    devices.record(GPU, {a: (True, "rel out=2.8e-03")}, dtype="bf16")
+    devices.record(GPU, {a: (True, "launched by bench"), b: (True, "launched by bench")},
+                   dtype="bf16", weak=True)
+
+    got = manifest()
+    assert got[a] == ("ok", "rel out=2.8e-03"), "a bench launch overwrote a measured row"
+    assert got[b] == ("ok", "launched by bench"), (
+        "a bench launch must still fill a row nothing had written")
+
+
+def test_a_bench_launch_does_not_clear_a_failure(manifest):
+    """The kernel launching says nothing about the numbers that made it fail."""
+    a = _some_kernels(1)[0]
+    devices.record(GPU, {a: (False, "WRONG NUMBERS: rel out=9.9e-01")}, dtype="bf16")
+    devices.record(GPU, {a: (True, "launched by bench")}, dtype="bf16", weak=True)
+    assert manifest()[a][0] == "failed", "a bench launch turned a failure into a pass"
+
+
+def test_a_real_run_still_overwrites(manifest):
+    """`weak` is opt-in. run_all's own results must keep replacing whatever was there."""
+    a = _some_kernels(1)[0]
+    devices.record(GPU, {a: (True, "launched by bench")}, dtype="bf16", weak=True)
+    devices.record(GPU, {a: (True, "rel out=2.8e-03")}, dtype="bf16")
+    assert manifest()[a] == ("ok", "rel out=2.8e-03")

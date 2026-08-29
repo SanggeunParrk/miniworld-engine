@@ -1026,7 +1026,10 @@ def _report_coverage(targets: tuple[str, ...], repo: Path, level: str, *,
 
     declared = devices.registered_kernels()
     hit = declared & launched
-    devices.record(key, dict.fromkeys(hit, (True, "launched by bench")))
+    # weak: the bench knows the kernel LAUNCHED and nothing about its numbers. Without this it
+    # overwrote `run_all`'s measured `rel out=2.8e-03` with "launched by bench", and the declared
+    # rtol bands are calibrated from exactly those numbers.
+    devices.record(key, dict.fromkeys(hit, (True, "launched by bench")), weak=True)
     missed = sorted(declared - launched)
     print(f"\n=== coverage on {key}")
     print(f"    declared: {len(declared)}   launched: {len(hit)}   never launched: {len(missed)}")

@@ -110,7 +110,8 @@ def _declares(entry: dict) -> frozenset[str]:
 
 
 def record(gpu_key: str, results: dict[str, tuple[bool, str]],
-           dtype: str | None = None, skipped: dict[str, str] | None = None) -> Path:
+           dtype: str | None = None, skipped: dict[str, str] | None = None,
+           weak: bool = False) -> Path:
     """Merge what a run observed -- ``kernel -> (ran, detail)`` -- into this GPU's manifest.
 
     MERGE, not overwrite. Every caller is a PARTIAL run: `bench_kernel all` reaches 29 of the 103
@@ -128,6 +129,9 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
     into ITS precision's rows and leaves the other precision's alone -- the two are different
     measurements of the same kernel, not competing answers, and before the column existed the
     second one overwrote the first.
+
+    ``weak`` is for an observation that says a kernel LAUNCHED and nothing about its numbers, which
+    is all the bench knows. It fills a row nothing has written yet and leaves any other alone.
     """
     if dtype is None:
         from miniworld_engine.kernels.drivers import DTYPE_MODE
@@ -143,7 +147,18 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
         if dtype not in _declares(entry):
             continue
         ran, detail = results.get(entry["kernel"], (None, ""))
-        if ran is not None:
+        was = mine.get(entry["kernel"], {})
+        if ran is not None and weak and was.get("status", "untested") != "untested":
+            # A WEAK observation says the kernel LAUNCHED and nothing about its numbers, which is
+            # all `bench` knows -- it writes `(True, "launched by bench")` for every kernel a run
+            # touched. Letting that overwrite a checked row destroys the measurement: the declared
+            # rtol bands are calibrated from these details
+            # (tests/registry/test_declared_tolerance.py parses the `name=1.2e-03` out of them), so
+            # one `bench_kernel all` after a `run_all` silently dropped ~29 kernels out of
+            # calibration -- the status stayed `ok` and the numbers behind it were gone. The merge
+            # fix protected kernels a run did not TOUCH; this is the same failure for one it did.
+            status, detail = was["status"], was.get("detail", "")
+        elif ran is not None:
             status = "ok" if ran else "failed"
         elif entry["kernel"] in (skipped or {}):
             # A THIRD status, because there are three answers and "failed" is not one of them for a
@@ -153,7 +168,6 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
             # updated its own row. The verdict outlived the run that produced it.
             status, detail = "skipped", skipped[entry["kernel"]]
         else:
-            was = mine.get(entry["kernel"], {})
             status, detail = was.get("status", "untested"), was.get("detail", "")
         rows.append({
             "kernel": entry["kernel"], "backend": entry["backend"],
