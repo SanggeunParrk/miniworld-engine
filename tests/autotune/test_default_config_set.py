@@ -50,7 +50,7 @@ def test_the_default_ships_inside_the_package():
     packaged = Path(configs.__file__).parent / "configs" / "grid"
     assert packaged.is_dir(), "the default set is not inside the package; a wheel would ship none"
     assert configs.default_config_dir() == packaged, "the packaged copy is not the one chosen"
-    assert len(list(packaged.glob("*.csv"))) > 80
+    assert len(list(packaged.glob("*.csv"))) > 70
 
 
 def test_grid_exists_in_exactly_one_place():

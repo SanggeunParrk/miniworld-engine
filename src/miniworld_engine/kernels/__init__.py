@@ -67,7 +67,6 @@ _LAZY_EXPORTS = {
     "fused_gate_out": (".bias_only_attention.interface", "fused_gate_out"),
     "layernorm_kernel": (".layernorm.interface", "layernorm_kernel"),
     "sigmoid_gate_fused": (".bias_only_attention.interface", "sigmoid_gate_fused"),
-    "triton_adaptive_layer_norm": (".adaln.interface", "triton_adaptive_layer_norm"),
     "triton_augmented_attention_pair_bias": (
         ".augmented_attention.interface",
         "triton_augmented_attention_pair_bias",
@@ -156,7 +155,6 @@ __all__ = [
     "fused_gate_out",
     "layernorm_kernel",
     "sigmoid_gate_fused",
-    "triton_adaptive_layer_norm",
     "triton_augmented_attention_pair_bias",
     "triton_bias_only_attention",
     "triton_layernorm",

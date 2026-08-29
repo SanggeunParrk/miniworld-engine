@@ -27,7 +27,7 @@ from miniworld_engine.autotune.configs import configs_for
 
 # The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
 # HAS_W=True -- bitwise equal on the output (.bench/direct.out). Imported now.
-from .fused3 import _ln_kernel
+from .ln_strided import _ln_kernel
 
 import contextlib
 

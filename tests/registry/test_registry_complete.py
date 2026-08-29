@@ -357,7 +357,7 @@ def test_no_constexpr_is_invisible_to_the_autotune_cache() -> None:
     from miniworld_engine.tools.key_gaps import audit
 
     findings, checked = audit(config_set("accuracy"))
-    assert checked > 80, f"only {checked} kernels resolved; the audit stopped resolving"
+    assert checked > 70, f"only {checked} kernels resolved; the audit stopped resolving"
     assert not findings, (
         "constexpr(s) invisible to the autotune cache -- add to the kernel's key=[...], or record "
         "the judgement in miniworld_engine/tools/key_gaps_allowed.csv:\n  "

@@ -2,9 +2,3 @@ kernel,reason
 bias_only_attention_fwd_triton,"loses to the torch reference on every committed card -- a100, a5000, a6000 and h100, 9 sweep points each, 0 wins in 36, median 1.75x and worst 3.74x. It is NOT dead weight: measured on an A6000 it uses HALF the memory at every length (384: 73.1 -> 38.3 MiB, 1024: 520 -> 272, exactly 0.52x across the sweep), because the fused kernel consumes the (L, L) attention tile instead of materialising it. Held out of `build all` as a judgement about where tuning time goes, not a verdict on the kernel -- re-tune it deliberately if the memory path is what a run needs"
 bias_only_attention_bwd_triton,"same implementation and same measurement as bias_only_attention_fwd_triton -- one bench target, `triton_bias_only_attention`, covers all three kernels in bias_only_attention/triton/main.py"
 bias_only_attention_bwd_pre_triton,same implementation and same measurement as bias_only_attention_fwd_triton
-adaln_fwd_saveact_triton,"main.py, reached only through TritonAdaptiveLayerNormFunction, whose callers are the bench, the driver and the checker. modules/adaptive_layernorm/module.py:58 dispatches to adaln_train / adaln_inference and never to this Function, so tuning it fills cache entries no production forward reads"
-adaln_bwd_dx_dbias_triton,"same Function as adaln_fwd_saveact_triton -- TritonAdaptiveLayerNormFunction's backward, no module reaches it"
-adaln_bwd_dw_triton,same Function as adaln_fwd_saveact_triton -- no module reaches it
-adaln_bwd_dlnw_triton,same Function as adaln_fwd_saveact_triton -- no module reaches it
-adaln_gemm_gate_triton,"fused3.py, reached only through adaln_fused3 / adaln_fused3_train, whose only callers are benchmarks/runners/bench.py:1824 and :2261 plus the driver and checker. No module selects fused3"
-adaln_bwd_pre_triton,"fused3.py, same as adaln_gemm_gate_triton -- adaln_fused3 is not reachable from any module"

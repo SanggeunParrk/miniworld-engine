@@ -1,15 +1,9 @@
 kernel,backend,family,file,status,detail
-adaln_bwd_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,launched by bench
-adaln_bwd_dw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,launched by bench
-adaln_bwd_dx_dbias_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,launched by bench
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,launched by bench
 adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,launched by bench
-adaln_bwd_pre_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/fused3.py,ok,launched by bench
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,launched by bench
 adaln_epilogue_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,untested,
-adaln_fwd_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/main.py,ok,launched by bench
 adaln_fwd_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,ok,launched by bench
-adaln_gemm_gate_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/fused3.py,ok,launched by bench
 layernorm_fwd_strided_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/fused3.py,ok,launched by bench
 augmented_attention_bwd_atomic_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,untested,
 augmented_attention_bwd_pre_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,untested,

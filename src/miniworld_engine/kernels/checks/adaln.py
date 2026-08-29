@@ -126,7 +126,7 @@ def _main_train():
 
 
 def layernorm_fwd_strided():
-    """fused3._ln_kernel (HAS_W=True) via inference._cond_affine: aff = LN(cond) * lnw.
+    """ln_strided._ln_kernel (HAS_W=True) via inference._cond_affine: aff = LN(cond) * lnw.
 
     ``ln_cond`` of the module: affine-free biased-variance LayerNorm times a weight, no bias. The
     reduce axis is _DC, which ragged mode moves to a different partial tail than _D.
@@ -154,28 +154,6 @@ def adaln_fwd():
     return y[0], _adaln_ref(x[0], cond[0], lnw, ws, sb, wb)[0]
 
 
-def adaln_fwd_saveact():
-    """main.adaln_fwd_kernel: y AND the five buffers it saves for the backward.
-
-    x_hat / cond_norm / gate / rstd_x / rstd_cond are read back off ``y.grad_fn`` (the forward
-    stores them under its own x_offsets / c_offsets masks, which is a separate correctness question
-    from y). ``requires_grad`` on x is the only change from the driver -- it makes grad_fn exist.
-    """
-    from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
-
-    _fixed()
-    # OUTER entry point (see ``adaln_fwd``): the (1, M, D) activation, as the driver passes it.
-    # The five saved buffers are allocated off the forward's own x_2d and so are 2-D/1-D; only
-    # y carries x's shape back, so y[0] is what lines up with the 2-D reference.
-    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
-    x.requires_grad_(True)
-    y = triton_adaptive_layer_norm(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
-    x_hat, cond_norm, gate, _, _, _, rstd_x, rstd_c = y.grad_fn.saved_tensors
-    e_y, e_xh, e_cn, e_g, e_rx, e_rc = _adaln_ref(x[0], cond[0], lnw, ws, sb, wb)
-    return {"Y": (y[0], e_y), "XHat": (x_hat, e_xh), "CondNorm": (cond_norm, e_cn),
-            "Gate": (gate, e_g), "RstdX": (rstd_x, e_rx), "RstdC": (rstd_c, e_rc)}
-
-
 def adaln_epilogue_saveact():
     """training._epilogue_train_kernel: y, mean_x, rstd_x and gate, with HAS_SB=True.
 
@@ -193,24 +171,6 @@ def adaln_epilogue_saveact():
     e_gate = torch.sigmoid(sb[:, :_D].float() + scale_b.float())
     return {"Y": (y, e_gate * x_hat + sb[:, _D:].float()), "Mean": (mean, x.float().mean(dim=-1)),
             "Rstd": (rstd, e_rstd), "Gate": (gate, e_gate)}
-
-
-def adaln_bwd_pre():
-    """fused3._bwd_elem_kernel: (dscale, dxn) from (dy, x_norm, gate), elementwise.
-
-    gate is sigmoid(randn) rather than the driver's randn -- a gate outside (0,1) is not any
-    sigmoid(scale), so there would be no reference but the kernel's own formula (module docstring).
-    x_norm is left as the driver's randn: the kernel is elementwise in it and the reference treats
-    it as a leaf, so its value carries no assumption.
-    """
-    from miniworld_engine.kernels.adaln.triton.fused3 import _bwd_elem
-
-    _fixed()
-    dy, x_norm = _rand(_M, _D), _rand(_M, _D)
-    gate = torch.sigmoid(_rand(_M, _D).float()).to(dy.dtype)
-    dscale, dxn = _bwd_elem(dy, x_norm, gate, shape_key=_SHAPE_KEY)
-    e_dscale, e_dxn = _gate_bwd_saved(gate, x_norm, dy)
-    return {"DScale": (dscale, e_dscale), "DXn": (dxn, e_dxn)}
 
 
 def adaln_bwd_pre_dx():
@@ -260,24 +220,6 @@ def adaln_bwd_dx_dlnw():
     return {"DCond": (dcond, cr.grad), "DLnW": (dlnw, lw.grad)}
 
 
-def adaln_bwd_dx_dbias():
-    """main.adaln_bwd_input_kernel: dx, dcond and dscale_b (the (N,) atomic accumulation)."""
-    got, exp = _main_train()
-    return {"DX": (got[0], exp[0]), "DCond": (got[1], exp[1]), "DScaleB": (got[4], exp[4])}
-
-
-def adaln_bwd_dw():
-    """main.adaln_bwd_weight_kernel: dWs = dscale^T@cond_aff and dWb = dy^T@cond_aff."""
-    got, exp = _main_train()
-    return {"DScaleW": (got[3], exp[3]), "DBiasW": (got[5], exp[5])}
-
-
-def adaln_bwd_dlnw():
-    """main.adaln_bwd_lnw_kernel: dlnw = sum_m (dscale@Ws + dy@Wb) * cond_norm."""
-    got, exp = _main_train()
-    return got[2], exp[2]
-
-
 def adaln_epilogue():
     """inference._adaln_epilogue_kernel: y = sigmoid(SB[:, :N]) * LN(x) + SB[:, N:].
 
@@ -293,26 +235,3 @@ def adaln_epilogue():
     return y, torch.sigmoid(scale) * _ln(x) + bias
 
 
-def adaln_gemm_gate():
-    """fused3._gemm_gate_kernel: the dual in-kernel GEMM + gate, both SAVE_GATE settings.
-
-    y = sigmoid(cond_norm@Wsᵀ + sb) * x_norm + cond_norm@Wbᵀ, and with SAVE_GATE=True the same
-    kernel also stores gate = sigmoid(scale) for the backward -- so both outputs are compared.
-    The kernel's inputs are the already-normalized x_norm/cond_norm (the two LN kernels are
-    upstream), which is what the driver feeds it.
-    """
-    from miniworld_engine.kernels.adaln.triton.fused3 import (
-        _gemm_gate,
-        _gemm_gate_train,
-    )
-
-    _fixed()
-    x_norm, cond_norm, _, ws, sb, wb = _adaln_args()
-    y = _gemm_gate(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
-    y_save, gate = _gemm_gate_train(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
-    with _no_tf32():
-        scale = torch.addmm(sb.float(), cond_norm.float(), ws.float().t())
-        bias = cond_norm.float() @ wb.float().t()
-    exp_gate = torch.sigmoid(scale)
-    exp_y = exp_gate * x_norm.float() + bias
-    return {"Y": (y, exp_y), "Ysave": (y_save, exp_y), "Gate": (gate, exp_gate)}

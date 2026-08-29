@@ -58,7 +58,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 # (H2 x BLOCK_M1) transposed stores per channel chunk per side -- the whole (4*H2, M) preact
 # tensor, four of this kernel's six stores -- while inference writes only left/right. The tiles
 # are already in registers, so the BODY reads as a pure store, but the swing in store traffic is
-# what picks the tile here. See gate_elem.py for the same distinction, and adaln/triton/fused3.py
+# what picks the tile here. See gate_elem.py for the same distinction, and adaln/triton/ln_strided.py
 # for the GEMM where the opposite reading was the measured one.
 @triton.autotune(configs=configs_for("trimul_gemm_gate_mmajor_triton"),
                  key=['shape_key', 'SAVE_PREACT'])

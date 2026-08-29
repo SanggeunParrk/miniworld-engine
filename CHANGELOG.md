@@ -9,6 +9,28 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 ## [Unreleased]
 
 ### Removed
+- **`kernels.triton_adaptive_layer_norm`, and twelve kernels no production path reached.** Two
+  audits of the adaln and conditioned_transition families found that half their registry surface
+  was unreachable from any module, and the build was tuning all of it.
+
+  adaln dispatches to `adaln_train` / `adaln_inference` and to nothing else. `main.py`'s
+  `TritonAdaptiveLayerNormFunction` and `fused3.py`'s `adaln_fused3` / `adaln_fused3_train` were
+  reached only by the bench, the drivers and the checkers — six kernels between them. `main.py` is
+  gone; `fused3.py` kept the one kernel `inference.py` imports and is now `ln_strided.py`, named
+  for it, at 110 lines instead of 430.
+
+  conditioned_transition had three training files and one live one. `train_12_345.py` could not run
+  at all — neither of its Functions takes a `length`, so every inner launch hit the `shape_key=None`
+  branch, which raises. `train_fused.py`'s fused backward was never selected, and its own H100
+  measurement says why: it lost to cuBLAS+elementwise by 1.6-7.1x at every stage. Its forward pair
+  survives as `fwd_saveact.py` because `training.py` calls it. Six more kernels gone, plus the
+  duplicate `cond_transition_fwd_12_345`.
+
+  `triton_adaptive_layer_norm` was the only one of these on the public kernel surface, so this is
+  the semver-relevant part. The registry, `axes.csv`, the device manifests, the config sets, the
+  shipped tuned caches and the drivers/checkers were pruned with them: 91 triton kernels -> 79.
+
+### Removed
 - **`--bench-budget` and `settings.bench_budget_*`.** The feature abandoned an autotune config
   once one timed launch exceeded `factor x` the best so far. Its safety argument — "a config
   that could still win runs FASTER than the current best and is therefore always inside the

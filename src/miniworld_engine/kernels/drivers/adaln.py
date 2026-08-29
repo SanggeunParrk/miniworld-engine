@@ -63,28 +63,6 @@ def adaln_epilogue():
     _adaln_epilogue(_rand(_M, _D), _rand(_M, 2 * _D), _EPS, shape_key=_SHAPE_KEY)
 
 
-def adaln_gemm_gate():
-    """fused3._gemm_gate_kernel, both settings of the SAVE_GATE constexpr (it is in the autotune
-    key, so the two launchers are two distinct compiles): _gemm_gate is False, _gemm_gate_train
-    True."""
-    from miniworld_engine.kernels.adaln.triton.fused3 import (
-        _gemm_gate,
-        _gemm_gate_train,
-    )
-
-    x_norm, cond_norm, _, ws, sb, wb = _adaln_args()
-    _gemm_gate(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
-    _gemm_gate_train(x_norm, cond_norm, ws, wb, sb, shape_key=_SHAPE_KEY)
-
-
-def adaln_bwd_pre():
-    """fused3._bwd_elem_kernel: (dy, x_norm, gate), all (M, N) in x's dtype (see _Fused3TrainFn:
-    gate comes from _gemm_gate_train as torch.empty_like(x_norm))."""
-    from miniworld_engine.kernels.adaln.triton.fused3 import _bwd_elem
-
-    _bwd_elem(_rand(_M, _D), _rand(_M, _D), _rand(_M, _D), shape_key=_SHAPE_KEY)
-
-
 def adaln_epilogue_saveact():
     """training._epilogue_train_kernel: x (M,N), sb (M,2N) raw [scale|bias], scale_bias (N,)
     folded in (HAS_SB=True)."""
@@ -132,21 +110,3 @@ def _adaln_main(*, backward: bool):
         y.backward(torch.randn_like(y))
 
 
-def adaln_fwd_saveact():
-    """main.adaln_fwd_kernel (forward only)."""
-    _adaln_main(backward=False)
-
-
-def adaln_bwd_dx_dbias():
-    """main.adaln_bwd_input_kernel (via the autograd backward)."""
-    _adaln_main(backward=True)
-
-
-def adaln_bwd_dw():
-    """main.adaln_bwd_weight_kernel (via the autograd backward)."""
-    _adaln_main(backward=True)
-
-
-def adaln_bwd_dlnw():
-    """main.adaln_bwd_lnw_kernel (via the autograd backward)."""
-    _adaln_main(backward=True)
