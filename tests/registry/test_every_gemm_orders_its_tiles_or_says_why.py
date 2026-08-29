@@ -77,3 +77,59 @@ def test_no_exemption_outlives_its_kernel() -> None:
 def test_every_reason_says_something() -> None:
     thin = sorted(k for k, why in _exempt().items() if len(why) < 40)
     assert not thin, f"exemptions whose reason is too short to be one: {thin}"
+
+
+def test_the_ladder_reaches_both_ends() -> None:
+    """Whatever a kernel did BEFORE the axis existed has to stay reachable.
+
+    The two ends are the two things a kernel could already have been doing, and the repo had both:
+    a 2-D grid pins column-first, which is any GROUP_M >= n_m; a hand-written
+    `pid_m = pid // num_pid_n` pins row-first, which is GROUP_M = 1. Seven of the twenty converted
+    kernels were the second kind, and the first ladder written for them held 4, 16 and 65536 -- so
+    the claim that "the tuner can always choose today's behaviour" was false for those seven, in
+    the direction that matters: if 1 was already their best, tuning could only make them worse.
+    """
+
+    cfg = ROOT / "src/miniworld_engine/autotune/configs"
+    live = {r["kernel"] for r in _gemms()}
+    bad = []
+    for f in sorted(cfg.rglob("*.csv")):
+        if f.stem not in live:
+            continue          # a config file for a kernel the registry no longer declares
+        with f.open(newline="") as fh:
+            if not fh.readline().startswith("axis,"):
+                continue
+        for line in f.read_text().splitlines():
+            if not line.startswith("GROUP_M,"):
+                continue
+            values = {int(v) for v in line.split(",", 1)[1].split()}
+            if 1 not in values:
+                bad.append(f"{f.parent.name}/{f.name}: no 1 (row-first)")
+            if not any(v >= 4096 for v in values):
+                bad.append(f"{f.parent.name}/{f.name}: nothing >= 4096 (column-first)")
+    assert not bad, ("GROUP_M ladders that cannot reproduce a kernel's pre-axis behaviour:\n  "
+                     + "\n  ".join(bad))
+
+
+def test_the_materialised_sets_pin_one_value() -> None:
+    """A set that lists whole configs is not searching this axis; it must state which end it is at."""
+    import csv as _csv
+
+    cfg = ROOT / "src/miniworld_engine/autotune/configs"
+    live = {r["kernel"] for r in _gemms()}
+    bad = []
+    for f in sorted(cfg.rglob("*.csv")):
+        if f.stem not in live:
+            continue
+        with f.open(newline="") as fh:
+            header = fh.readline().strip()
+        if header.startswith("axis,") or "GROUP_M" not in header:
+            continue
+        i = header.split(",").index("GROUP_M")
+        with f.open(newline="") as fh:
+            rows = list(_csv.reader(fh))[1:]
+        seen = {r[i] for r in rows if r}
+        if seen - {"1", "65536"}:
+            bad.append(f"{f.parent.name}/{f.name}: {sorted(seen)}")
+    assert not bad, ("materialised sets whose GROUP_M is neither end -- they do not tune it, so it "
+                     "should say which behaviour they mean:\n  " + "\n  ".join(bad))

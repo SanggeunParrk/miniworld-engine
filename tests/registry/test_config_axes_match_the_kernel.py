@@ -68,3 +68,19 @@ def test_every_config_axis_is_a_kernel_constexpr() -> None:
             # (`ADD_RESIDUAL`) is passed explicitly at the call site and belongs to no config set.
     assert not bad, ("config and kernel disagree -- each of these is a launch failure on a GPU:"
                      "\n  " + "\n  ".join(bad))
+
+
+def test_no_config_file_outlives_its_kernel() -> None:
+    """A config set for a deleted kernel is a search space nothing can search.
+
+    108 of them survived the kernel deletions earlier in this branch -- nine sets each for twelve
+    kernels registry.csv no longer declares -- and they were not inert: four still carried a
+    GROUP_M column from before that axis was removed with its kernels, which is exactly the sort of
+    thing a later reader mines for precedent.
+    """
+    with REG.open(newline="") as fh:
+        live = {r["kernel"] for r in csv.DictReader(fh)}
+    orphans = sorted({f.stem for f in CFG.rglob("*.csv") if f.stem not in live})
+    assert not orphans, (
+        "config sets for kernels registry.csv does not declare -- delete them, or the kernel "
+        f"should be back in the registry: {orphans}")
