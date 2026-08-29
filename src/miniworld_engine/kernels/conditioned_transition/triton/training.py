@@ -500,14 +500,25 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         dcond = dscale @ wsc                            # (M, DC)
         dWsc = dscale.t() @ cond                        # (D, DC)
         db_sc = dscale.sum(0)                           # (D,) — cheap cuBLAS-adjacent reduction
+        del dscale                                      # last use; see the `del` note below
         # squeeze bwd
         dh = dout @ ws                                  # (M, ND)
         dWs = dout.t() @ h                              # (D, ND)
+        del dout
         # swiglu bwd (fused elementwise) -> packed [da | db] : (M, 2*ND)
         dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
+        # `del` after last use, and it is not cosmetic. A hand-written backward holds every
+        # intermediate in a LOCAL until the function returns, where autograd frees each one as soon
+        # as its consumer node has run -- so the peak here carried dscale, dout and dh (48 + 48 +
+        # 96 = 192 MiB at B=32, L=1024, d=768, bf16) that were dead by the time the biggest
+        # allocation, dab @ wcat, ran. Measured with the allocator trace: at the peak instant torch
+        # held three (M, ND) blocks and NO (M, d) block, while this function held three of them.
+        # That difference was the whole of this module's training-memory disadvantage.
+        del dh
         # expand bwd: one concatenated GEMM each (vs 2 + add).
         dx = dab @ wcat                                 # (M, K)
         dWcat = dab.t() @ x                             # (2*ND, K)
+        del dab                                         # (M, 2*ND) -- the largest block here
         dWa, dWb = dWcat[:ND], dWcat[ND:]
         # 8 returns for 8 forward inputs: the trailing None is `length` (an int shape key, not a
         # differentiable tensor). A missing one is an arity error, which is the point.

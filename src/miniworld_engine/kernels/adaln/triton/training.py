@@ -578,6 +578,14 @@ class AdaLNTrainFn(torch.autograd.Function):
                                      list(cond2d.stride()),
                                      shape_key=both_key(rows_of(ctx.orig_cond_shape)))
 
+        # `D` is (2*NX, M) -- the largest tensor in this function, 192 MiB at B=32, L=1024,
+        # d=768, bf16 -- and it is dead here: the wgrad, the dsb reduction and the dgrad above are
+        # its only consumers. A hand-written backward holds every local until it returns, where
+        # autograd frees each intermediate as soon as its consumer node has run, so without this
+        # the peak carries D through the reshape/cast of every return value. Same reason as the
+        # four `del`s in conditioned_transition/triton/training.py; measured there as the whole of
+        # that module's training-memory disadvantage.
+        del D
         dW_scale = dW_cat[:nx].contiguous()
         dW_bias = dW_cat[nx:].contiguous()
 
