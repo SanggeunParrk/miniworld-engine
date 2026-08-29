@@ -9,7 +9,10 @@ config a kernel launches with is selected per shape bucket from the tuned cache,
   config may win, and a different tile shape means a different reduction order. Results may then
   differ in the last bits. That is not a bug; it is what tuning is.
 * **A kernel whose accumulation order is not fixed** is not bitwise reproducible even within one
-  process, AND WHETHER IT IS DEPENDS ON THE PRECISION. Measured:
+  process, AND WHETHER IT IS DEPENDS ON THE PRECISION. It is also not a coin flip: the output is a
+  DISTRIBUTION, and two runs can coincide. `augmented_attention_bwd_atomic_triton` in bf16 gives 7
+  distinct outputs in 40 runs, the commonest 22 times -- so two consecutive calls agree about 37%
+  of the time. Every claim in this file therefore takes `SAMPLES` runs, not two. Measured:
   `augmented_attention_bwd_atomic_triton` returns different bytes for provably identical input in
   both precisions (the checker's torch-computed reference side matched across the two calls, the
   kernel's did not). `layernorm_bwd_atomic_triton` -- also atomics -- reproduces in bf16 and does
@@ -72,6 +75,27 @@ NOT_BITWISE = {
     },
 }
 
+#: How many times a kernel is run before this file says anything about it.
+#:
+#: TWO IS NOT ENOUGH, and the number comes from a measurement rather than a feeling.
+#: `augmented_attention_bwd_atomic_triton` accumulates dK/dV with unordered atomics, so its output
+#: is a DISTRIBUTION, not a coin flip. Measured on an A6000, one config (`configs/blk64`), 40 runs:
+#:
+#:     bf16  40 runs -> 7 distinct outputs, the commonest 22 times, then 9, 4, 2, 1
+#:     fp32  40 runs -> 40 distinct outputs
+#:
+#: So in bf16 two consecutive calls land on the same bytes about 37% of the time, and
+#: `test_a_declared_exception_is_still_one` -- which asserted that two calls DIFFER -- failed on
+#: roughly one run in three. It had passed on the runs before it, which is the worst way for a
+#: test to be wrong. At 12 samples the chance of every one coinciding is about (22/40)^11, under
+#: 0.1%. The same number does the opposite job for the positive half: a kernel that is quietly
+#: non-reproducible had a 37% chance of slipping through two calls.
+#:
+#: (Under the full `grid` config set both precisions give 40 distinct outputs in 40 runs -- the
+#: autotuner re-benches and can pick a different config, which adds its own variation. The number
+#: above is the harder case, one fixed config.)
+SAMPLES = 12
+
 #: One kernel per family that has a checker, chosen for launch-path variety rather than coverage:
 #: an atomic accumulation, a split reduction, a persistent grid, a fused epilogue. Declared rather
 #: than derived so a family that loses its checker is a visible change here.
@@ -126,8 +150,7 @@ def test_two_calls_in_one_process_are_bitwise_identical(kernel: str) -> None:
         pytest.skip(f"needs {row['arch']}, this card is lower")
 
     try:
-        first = _actuals(row["check"])
-        second = _actuals(row["check"])
+        runs = [_actuals(row["check"]) for _ in range(SAMPLES)]
     except Exception as exc:
         if is_arch_gated(str(exc)):
             pytest.skip(f"not runnable on this device: {exc}")
@@ -136,16 +159,20 @@ def test_two_calls_in_one_process_are_bitwise_identical(kernel: str) -> None:
     why = _excused(kernel)
     if why is not None:
         pytest.skip(f"{kernel} is declared non-reproducible at this precision: {why}")
-    assert len(first) == len(second) == max(len(first), 1)
-    for i, (a, b) in enumerate(zip(first, second, strict=True)):
-        assert a.shape == b.shape, f"output {i}: {a.shape} vs {b.shape}"
-        assert a.dtype == b.dtype, f"output {i}: {a.dtype} vs {b.dtype}"
-        # Bitwise, not allclose. A tolerance here would hide exactly what is being asked: whether
-        # the same inputs and the same cached config give the same bytes.
-        assert torch.equal(a, b), (
-            f"{kernel} output {i} differs between two calls in one process: "
-            f"max|diff| = {(a.float() - b.float()).abs().max().item():.3e}. Either the kernel "
-            f"reads uninitialised memory, or its reduction order is not fixed for a given config.")
+    first = runs[0]
+    assert first, "the checker returned nothing to compare"
+    for n, later in enumerate(runs[1:], start=2):
+        assert len(later) == len(first)
+        for i, (a, b) in enumerate(zip(first, later, strict=True)):
+            assert a.shape == b.shape, f"output {i}: {a.shape} vs {b.shape}"
+            assert a.dtype == b.dtype, f"output {i}: {a.dtype} vs {b.dtype}"
+            # Bitwise, not allclose. A tolerance here would hide exactly what is being asked:
+            # whether the same inputs and the same cached config give the same bytes.
+            assert torch.equal(a, b), (
+                f"{kernel} output {i} differs between call 1 and call {n} of {SAMPLES} in one "
+                f"process: max|diff| = {(a.float() - b.float()).abs().max().item():.3e}. Either "
+                f"the kernel reads uninitialised memory, or its reduction order is not fixed for "
+                f"a given config.")
 
 
 def _excused(kernel: str) -> str | None:
@@ -173,10 +200,13 @@ def test_a_declared_exception_is_still_one(kernel: str) -> None:
     if why is None:
         pytest.skip(f"{kernel} is only excused at other precisions; this process is another")
 
-    first, second = _actuals(row["check"]), _actuals(row["check"])
-    differs = [i for i, (a, b) in enumerate(zip(first, second, strict=True)) if not torch.equal(a, b)]
+    runs = [_actuals(row["check"]) for _ in range(SAMPLES)]
+    first = runs[0]
+    differs = sorted({i for later in runs[1:]
+                      for i, (a, b) in enumerate(zip(first, later, strict=True))
+                      if not torch.equal(a, b)})
     assert differs, (
-        f"{kernel} is listed in NOT_BITWISE ({why}) but reproduced exactly. "
+        f"{kernel} is listed in NOT_BITWISE ({why}) but reproduced exactly across {SAMPLES} runs. "
         f"Move it into SAMPLE -- the exception list must not outlive its reason.")
     from miniworld_engine.autotune.run_all import DEFAULT_RTOL
     from miniworld_engine.kernels.drivers import DTYPE_MODE
@@ -185,8 +215,10 @@ def test_a_declared_exception_is_still_one(kernel: str) -> None:
     # EXACT -- into the default, and 5e-2 was the default's value copied by hand.
     declared = declared_rtol(row, DTYPE_MODE)
     band = DEFAULT_RTOL if declared is None else declared
+    worst = max(runs[1:], key=lambda later: max(
+        (later[i].float() - first[i].float()).abs().max().item() for i in differs))
     for i in differs:
-        a, b = first[i].float(), second[i].float()
+        a, b = first[i].float(), worst[i].float()
         scale = b.abs().max().item()
         rel = (a - b).abs().max().item() / scale if scale else 0.0
         assert rel <= band, (

@@ -97,6 +97,14 @@ def needs_backward(module: torch.nn.Module, *inputs: torch.Tensor) -> bool:
     nothing, with no error. ConditionedTransition tested ``x.requires_grad`` alone, which sent a
     detached x with a live conditioning tensor -- or a live WEIGHT, and the projections are
     parameters, so that is the common case -- down the inference path.
+
+    ``module.training`` is kept although it is strictly redundant: with grad enabled and nothing
+    requiring one, no graph is built and no backward can follow, so the saved activations are
+    waste. It costs a module whose parameters are ALL frozen and whose inputs are detached -- a
+    frozen submodule during fine-tuning -- and it buys the safe direction of a mistake. The
+    expensive direction is the other one: an inference kernel reached with a live gradient returns
+    right numbers and silently learns nothing, which is the bug this function was written for.
+    Dropping it is a performance change and wants a measurement, not an argument.
     """
     if not torch.is_grad_enabled():
         return False
