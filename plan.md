@@ -530,6 +530,43 @@ grid against a real shared-memory limit.
 
 ---
 
+### G7 -- the tile visit order is a tuned axis on 20 kernels, and its ladder is measured on four
+
+*What it is.* A matmul kernel splits its output into tiles and gives one to each program. Two
+programs share memory when they share a row or a column, and whether that sharing becomes a cache
+hit is decided by the ORDER the programs run in. A 2-D grid cannot express the choice -- CUDA varies
+axis 0 fastest, so `pid_m = program_id(0)` pins every kernel to one end of the axis, whatever suits
+the shape. `GROUP_M` is the order as one tuned number; `kernels/_tiles.py` holds it and the reason.
+
+*Done.* 20 kernels take the axis and launch a 1-D grid through `tile_grid`/`tile_order`. 18 cannot
+and say why, one line each, in `kernels/tile_order_exempt.csv` -- 8 are 1-D grids over M alone (no
+column-tile axis exists) and 10 are attention (the contraction is a loop in a jit helper, not a grid
+axis). A test refuses a new GEMM that is neither. The ladder is `1 4 16 65536`, and it carries BOTH
+ends on purpose: 7 of the 20 walked columns first before the axis existed and 13 walked rows first,
+so whatever a kernel did before stays reachable and a card that gains nothing loses nothing.
+
+*Measured so far,* A6000, full grid, tuned against tuned (both arms free to choose tile, warps and
+stages), best time per rung:
+
+    transition_expand_swiglu_triton            G=1 49.15us  vs 2-D order 58.37us   1.187x
+    trimul_outproj_gemm_gate_saveact_triton    G=4 33.79us  vs 2-D order 35.84us   1.061x
+    transition_fwd_b2b_ktiled_triton           G=4 1019.9us vs 2-D order 1068.0us  1.047x
+    cond_transition_expand_swiglu_triton        all four rungs 15.36us              1.000x
+
+Three of four gain and one gains nothing -- the fourth's operand fits L2, which is what `_tiles.py`
+predicts. The middle rungs win twice, which is the evidence they earn their place; before this,
+`4` and `16` rested on one kernel at one shape.
+
+*What is still open.* The remaining 347 of 351 (op, dtype, shape, width) units. The question the
+full sweep answers is not only "where does it pay" but whether a FOUR-rung ladder is worth 4x the
+config grid on every future build -- `transition_expand_swiglu_triton` alone searches 6,904 configs
+per unit now. If the answer is that two rungs capture the gain, the ladder should shrink.
+
+Also unmeasured: `trimul_gemm_gate_mmajor_triton` is exempt because one program produces BOTH the
+left and right outputs from one row block of x, and putting channels on the grid would make several
+programs re-read the same rows. Whether breaking that fusion to gain the order axis would pay is a
+judgement, not a measurement.
+
 ## H. Closed by verifying what the repo claims
 
 Separate from F: F was found by tidying the tree, these were found by RUNNING the things this
