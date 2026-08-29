@@ -1,5 +1,5 @@
 kernel,backend,family,file,status,detail,dtype
-#provenance,1.0.0,012e9cafcc8d,dirty,2026-08-29,v1.0.0-133-g012e9ca,
+#provenance,1.0.0,bb1dda5a46a5,clean,2026-08-29,v1.0.0-134-gbb1dda5,
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=7.55e-04 DLnW=7.75e-04 (band 3e-03 declared),fp32
 adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=6.99e-08 DX=1.64e-07 (band 7e-07 declared),fp32
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=1.37e-07 Mean=0.00e+00 Rstd=2.02e-07 Gate=1.80e-07 (band 8e-07 declared),fp32
@@ -19,22 +19,22 @@ cond_transition_swiglu_triton,triton,conditioned_transition,miniworld_engine/ker
 layernorm_bwd_split_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dx=1.74e-07 dw=4.24e-07 db=4.92e-07 (band 2e-06 declared),fp32
 layernorm_bwd_reduce_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dw=4.24e-07 db=4.92e-07 (band 2e-06 declared),fp32
 layernorm_fwd_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel y=1.65e-07 mean=1.80e-07 rstd=1.79e-07 (band 7e-07 declared),fp32
-layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel dx=1.74e-07 dw=5.33e-07 db=6.56e-07 (band 3e-06 declared),fp32
+layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel dx=1.74e-07 dw=4.74e-07 db=7.50e-07 (band 3e-06 declared),fp32
 layernorm_bwd_split_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/persistent.py,ok,rel dx=1.74e-07 dw=5.08e-07 db=5.16e-07 (band 2e-06 declared),fp32
 layernorm_fwd_saveact_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel out=1.65e-07 (band 7e-07 declared),fp32
-layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,untested,,fp32
-layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=1.73e-07 dgamma=4.16e-07 dbeta=4.05e-07 (band 2e-06 declared),fp32
-layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=1.73e-07 dgamma=2.77e-07 dbeta=3.95e-07 (band 3e-06 declared),fp32
+layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,skipped,"needs sm90, this card is sm86",fp32
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=1.73e-07 dgamma=4.51e-07 dbeta=5.12e-07 (band 2e-06 declared),fp32
+layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=1.73e-07 dgamma=2.77e-07 dbeta=3.95e-07 (band 2e-06 declared),fp32
 layernorm_fwd_recompute_noaffine_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=0.00e+00 (band 2e-07 declared),fp32
 layernorm_fwd_recompute_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=8.26e-08 (band 4e-07 declared),fp32
 layernorm_fwd_saveact_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel x_normed=2.38e-07 mean=1.28e-07 rstd=1.83e-07 (band 9e-07 declared),fp32
-layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel dx=1.46e-07 dln_weight=7.34e-07 dproj_weight=4.88e-07 (band 2e-06 declared),fp32
+layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel dx=1.46e-07 dln_weight=5.51e-07 dproj_weight=3.99e-07 (band 2e-06 declared),fp32
 layernorm_linear_fwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel out=3.30e-07 mean=0.00e+00 rstd=1.79e-07 (band 1e-06 declared),fp32
 layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=8.95e-08 c1=7.76e-08 (band 5e-07 declared),fp32
 transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=3.58e-03 (band 1e-02 declared),fp32
-transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=7.41e-08 (band 5e-07 declared),fp32
+transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=7.41e-08 (band 3e-07 declared),fp32
 transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel dx=2.16e-07 dwa=1.94e-07 dwb=1.46e-07 dws=1.46e-07 (band 1e-06 declared),fp32
-transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,untested,,fp32
+transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,skipped,"needs sm100, this card is sm86",fp32
 layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=1.28e-07 dgamma=3.20e-07 dbeta=2.97e-07 (band 1e-06 declared),fp32
 layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,ok,rel xn=1.40e-07 vs_layer_norm=1.40e-07 (band 8e-07 declared),fp32
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=1.43e-03 dAB=4.78e-03 xn=1.40e-07 (band 1e-02 declared),fp32
@@ -64,7 +64,7 @@ cond_transition_fwd_b2b_triton,triton,conditioned_transition,miniworld_engine/ke
 cond_transition_squeeze_gate_saveact_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,ok,rel Y=2.03e-03 Out=3.44e-03 Scale=2.53e-03 (band 1e-02 declared),bf16
 cond_transition_squeeze_gate_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/composed.py,ok,rel out=2.03e-03 (band 8e-03 declared),bf16
 cond_transition_swiglu_triton,triton,conditioned_transition,miniworld_engine/kernels/conditioned_transition/triton/training.py,ok,rel out=3.13e-03 (band 1e-02 declared),bf16
-layernorm_fwd_rowscale_triton,triton,fused_ln_mask,miniworld_engine/kernels/fused_ln_mask/cute/fused_ln_mask.py,ok,rel out=6.76e-04 (band 5e-03 declared),bf16
+layernorm_fwd_rowscale_triton,triton,fused_ln_mask,miniworld_engine/kernels/fused_ln_mask/cute/fused_ln_mask.py,ok,rel out=6.76e-04 (band 3e-03 declared),bf16
 gated_projection_bwd_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel dg=2.89e-03 do=2.27e-03 (band 1e-02 declared),bf16
 gated_projection_bwd_gate_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel dgate=2.89e-03 drep=2.27e-03 (band 1e-02 declared),bf16
 gated_projection_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.08e-03 (band 8e-03 declared),bf16
@@ -76,8 +76,8 @@ layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/
 layernorm_bwd_split_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/persistent.py,ok,rel dx=2.85e-03 dw=2.07e-03 db=2.36e-03 (band 1e-02 declared),bf16
 layernorm_fwd_mmajor_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/transpose.py,ok,rel out=2.61e-03 (band 1e-02 declared),bf16
 layernorm_fwd_saveact_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel out=2.70e-03 (band 1e-02 declared),bf16
-layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,failed,AssertionError: SM90 (H100) only,bf16
-layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.70e-03 dgamma=4.16e-07 dbeta=1.71e-07 (band 1e-02 declared),bf16
+layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,skipped,"needs sm90, this card is sm86",bf16
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.70e-03 dgamma=5.89e-07 dbeta=1.71e-07 (band 1e-02 declared),bf16
 layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=2.70e-03 dgamma=3.47e-07 dbeta=8.54e-08 (band 1e-02 declared),bf16
 layernorm_fwd_recompute_noaffine_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=3.26e-03 (band 1e-02 declared),bf16
 layernorm_fwd_recompute_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=2.70e-03 (band 1e-02 declared),bf16
@@ -86,19 +86,19 @@ layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernel
 layernorm_linear_fwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel out=2.16e-03 mean=2.25e-08 rstd=1.79e-07 (band 9e-03 declared),bf16
 layernorm_linear_fwd_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/fused.py,ok,rel out=4.10e-03 (band 2e-02 declared),bf16
 layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=1.34e-07 c1=1.55e-07 (band 6e-07 declared),bf16
-trimul_gemm_gate_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/sm100_gate_gemm_collective.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
-trimul_gemm_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/_blackwell_dense_gemm.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+trimul_gemm_gate_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/sm100_gate_gemm_collective.py,skipped,"needs sm100, this card is sm86",bf16
+trimul_gemm_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/_blackwell_dense_gemm.py,skipped,"needs sm100, this card is sm86",bf16
 gated_projection_gate_inplace_flat_triton,triton,tm1,miniworld_engine/kernels/tm1/cute/launch.py,ok,rel out=3.57e-03 (band 1e-02 declared),bf16
 gated_projection_gate_packed_flat_triton,triton,tm1,miniworld_engine/kernels/tm1/cute/launch.py,ok,rel out=2.05e-03 (band 9e-03 declared),bf16
 trimul_bwd_gate_recompute_triton,triton,tm1,miniworld_engine/kernels/tm1/triton/main.py,ok,rel dLA=2.71e-03 dLB=2.03e-03 dRA=2.59e-03 dRB=2.24e-03 (band 1e-02 declared),bf16
 trimul_gemm_gate_triton,triton,tm1,miniworld_engine/kernels/tm1/triton/main.py,ok,rel left=2.08e-03 right=2.09e-03 (band 8e-03 declared),bf16
-trimul_outproj_gemm_gate_sm90_cute,cute,tm2,miniworld_engine/kernels/tm2/cute/tm2_cute_kernel.py,failed,"OpError: OpError: expects arch to be sm_90a, but got sm_86",bf16
+trimul_outproj_gemm_gate_sm90_cute,cute,tm2,miniworld_engine/kernels/tm2/cute/tm2_cute_kernel.py,skipped,"needs sm90, this card is sm86",bf16
 trimul_outproj_bwd_gate_recompute_triton,triton,tm2,miniworld_engine/kernels/tm2/triton/main.py,ok,rel dA=3.09e-03 dB=2.07e-03 (band 1e-02 declared),bf16
 trimul_outproj_gemm_gate_triton,triton,tm2,miniworld_engine/kernels/tm2/triton/main.py,ok,rel out=1.78e-03 (band 8e-03 declared),bf16
 transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=3.58e-03 (band 1e-02 declared),bf16
 transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=3.58e-03 (band 2e-02 declared),bf16
 transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel dx=4.63e-03 dwa=3.87e-03 dwb=4.24e-03 dws=4.63e-03 (band 2e-02 declared),bf16
-transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,skipped,"needs sm100, this card is sm86",bf16
 layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.07e-03 dgamma=2.75e-07 dbeta=9.90e-08 (band 9e-03 declared),bf16
 layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,ok,rel xn=2.28e-03 vs_layer_norm=2.28e-03 (band 9e-03 declared),bf16
 transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,ok,rel dA=1.99e-03 dB=2.45e-03 (band 1e-02 declared),bf16
@@ -119,7 +119,7 @@ triangle_attention_fwd_triton,triton,triangle_attention,miniworld_engine/kernels
 gated_projection_bwd_gate_recompute_flat_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel d_gate=2.60e-03 d_proj=3.38e-03 (band 1e-02 declared),bf16
 trimul_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel ab=2.45e-03 sig_m=1.97e-06 (band 1e-02 declared),bf16
 trimul_outproj_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel ab=2.21e-03 sig=1.91e-06 (band 9e-03 declared),bf16
-trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,skipped,"needs sm100, this card is sm86",bf16
 gated_projection_bwd_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel d_proj=2.04e-03 d_glogit=2.80e-03 d_proj_drop=2.44e-03 d_glogit_drop=1.81e-03 d_proj_preact=2.05e-03 d_glogit_preact=2.96e-03 (band 1e-02 declared),bf16
 gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel y=2.67e-03 gate=2.73e-03 y_dropres=2.91e-03 (band 1e-02 declared),bf16
 gated_projection_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_train_sm100.py,ok,rel lr_left=2.09e-03 lr_right=2.13e-03 (band 1e-02 declared),bf16

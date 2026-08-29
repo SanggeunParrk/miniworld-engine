@@ -10,23 +10,37 @@ Every row here is backed by an artifact in the repo: a device manifest under
 
 ## GPU
 
-| card | arch | torch | CUDA | triton | Python | result | evidence |
-|---|---|---|---|---|---|---|---|
-| RTX A6000 | sm86 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 94, ok 94, failed 0, skipped 9` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
-| RTX A5000 | sm86 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | same shape | `manifests/NVIDIA RTX A5000 (sm86).csv` |
+A kernel is run at the PRECISIONS it declares (`registry.csv`'s `dtypes`), so a card has a result
+per precision and the manifest has a row per (kernel, precision). 89 of the 91 declared kernels
+declare bf16 and 42 declare fp32; the two sets overlap, which is why they do not add to 91.
 
-The nine skips are kernels whose declared `arch` is above sm86; they are not launched, so they
-cost nothing and cannot be reported as failures.
+| card | precision | torch | CUDA | triton | Python | result | evidence |
+|---|---|---|---|---|---|---|---|
+| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 83, ok 83, failed 0, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
+| RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 40, ok 40, failed 0, skipped 2` | same file, `dtype` column |
+| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `ok 85, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
+| RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | the node is drained |
+
+Every skip is a kernel whose declared `arch` is above sm86. It is not launched, so it costs nothing
+and is not a failure — the manifest says `skipped` with the reason, in its own column, rather than
+carrying a stale verdict from before the arch gate existed.
+
+The A5000 rows predate the two-precision scheme: its six arch-gated kernels were relabelled from
+`failed` to `skipped` from the refusal message they already carried, and its fp32 half has never
+been run because the only A5000 node is drained. Read it as bf16 evidence and nothing more.
+
+`tests/registry/test_the_support_page_counts_its_own_evidence.py` checks every number above against
+the manifest it cites, so this table cannot age past its evidence again.
 
 ## GPU that has NOT been run
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 94 | yes, on sm86 (which satisfies sm80) |
+| sm80 | 85 | yes, on sm86 (which satisfies sm80) |
 | sm90 | 2 | **no** |
-| sm100 | 7 | **no** |
+| sm100 | 4 | **no** |
 
-Nine kernels are declared for hardware nothing in this repository has ever run them on. They may
+Six kernels are declared for hardware nothing in this repository has ever run them on. They may
 work; the point is that nobody knows, and `arch` should be read as "written for", not "verified
 on", until a manifest for that card exists here.
 

@@ -35,7 +35,7 @@ layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/
 layernorm_bwd_split_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/persistent.py,ok,rel dx=1.98e-03 dw=2.66e-03 db=2.60e-03,bf16
 layernorm_fwd_mmajor_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/transpose.py,ok,rel out=2.76e-03,bf16
 layernorm_fwd_saveact_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel out=2.51e-03,bf16
-layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,failed,AssertionError: SM90 (H100) only,bf16
+layernorm_linear_fwd_sm90_cute,cute,layernorm_linear,miniworld_engine/kernels/layernorm_linear/cute/gemm_layernorm_linear_fused.py,skipped,"needs sm90, this card is sm86 -- AssertionError: SM90 (H100) only",bf16
 layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.58e-03 dgamma=4.44e-07 dbeta=3.20e-07,bf16
 layernorm_bwd_split_mmajor_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,ok,rel dx=2.46e-03 dgamma=5.47e-07 dbeta=1.04e-07,bf16
 layernorm_fwd_recompute_noaffine_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/recompute.py,ok,rel out=3.23e-03,bf16
@@ -45,19 +45,19 @@ layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernel
 layernorm_linear_fwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel out=2.16e-03 mean=2.04e-08 rstd=1.76e-07,bf16
 layernorm_linear_fwd_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/fused.py,ok,rel out=3.46e-03,bf16
 layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=1.38e-07 c1=7.75e-08,bf16
-trimul_gemm_gate_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/sm100_gate_gemm_collective.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
-trimul_gemm_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/_blackwell_dense_gemm.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+trimul_gemm_gate_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/sm100_gate_gemm_collective.py,skipped,"needs sm100, this card is sm86 -- OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+trimul_gemm_sm100_cute,cute,tm1,miniworld_engine/kernels/tm1/cute/_blackwell_dense_gemm.py,skipped,"needs sm100, this card is sm86 -- OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
 gated_projection_gate_inplace_flat_triton,triton,tm1,miniworld_engine/kernels/tm1/cute/launch.py,ok,rel out=2.12e-03,bf16
 gated_projection_gate_packed_flat_triton,triton,tm1,miniworld_engine/kernels/tm1/cute/launch.py,ok,rel out=2.15e-03,bf16
 trimul_bwd_gate_recompute_triton,triton,tm1,miniworld_engine/kernels/tm1/triton/main.py,ok,rel dLA=2.71e-03 dLB=1.97e-03 dRA=2.73e-03 dRB=2.04e-03,bf16
 trimul_gemm_gate_triton,triton,tm1,miniworld_engine/kernels/tm1/triton/main.py,ok,rel left=2.02e-03 right=2.10e-03,bf16
-trimul_outproj_gemm_gate_sm90_cute,cute,tm2,miniworld_engine/kernels/tm2/cute/tm2_cute_kernel.py,failed,"OpError: OpError: expects arch to be sm_90a, but got sm_86",bf16
+trimul_outproj_gemm_gate_sm90_cute,cute,tm2,miniworld_engine/kernels/tm2/cute/tm2_cute_kernel.py,skipped,"needs sm90, this card is sm86 -- OpError: OpError: expects arch to be sm_90a, but got sm_86",bf16
 trimul_outproj_bwd_gate_recompute_triton,triton,tm2,miniworld_engine/kernels/tm2/triton/main.py,ok,rel dA=2.48e-03 dB=2.40e-03,bf16
 trimul_outproj_gemm_gate_triton,triton,tm2,miniworld_engine/kernels/tm2/triton/main.py,ok,rel out=2.05e-03,bf16
 transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=2.94e-03,bf16
 transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel y=5.55e-03,bf16
 transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,ok,rel dx=4.27e-03 dwa=4.08e-03 dwb=3.92e-03 dws=5.00e-03,bf16
-transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+transition_bwd_swiglu_gate_sm100_cute,cute,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,skipped,"needs sm100, this card is sm86 -- OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
 layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.26e-03 dgamma=4.33e-07 dbeta=5.38e-08,bf16
 layernorm_fwd_recompute_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/cute/fused.py,ok,rel xn=2.35e-03 vs_layer_norm=2.35e-03,bf16
 transition_bwd_epilogue_triton,triton,transition,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,ok,rel dA=2.52e-03 dB=2.16e-03,bf16
@@ -78,7 +78,7 @@ triangle_attention_fwd_triton,triton,triangle_attention,miniworld_engine/kernels
 gated_projection_bwd_gate_recompute_flat_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel d_gate=2.75e-03 d_proj=3.19e-03,bf16
 trimul_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel ab=2.15e-03 sig_m=2.03e-06,bf16
 trimul_outproj_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,ok,rel ab=1.99e-03 sig=1.67e-06,bf16
-trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,failed,"OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
+trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,skipped,"needs sm100, this card is sm86 -- OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
 gated_projection_bwd_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel d_proj=2.17e-03 d_glogit=2.92e-03 d_proj_drop=2.35e-03 d_glogit_drop=3.09e-03 d_proj_preact=2.17e-03 d_glogit_preact=2.85e-03,bf16
 gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel y=2.45e-03 gate=2.73e-03 y_dropres=3.00e-03,bf16
 gated_projection_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_train_sm100.py,ok,rel lr_left=2.27e-03 lr_right=1.97e-03,bf16
