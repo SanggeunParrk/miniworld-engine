@@ -1794,10 +1794,22 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     sw, sb, bw = ref_mod.to_scale.weight, ref_mod.to_scale.bias, ref_mod.to_bias.weight
     ex, ec = ref_mod.ln_in.eps, ref_mod.ln_cond.eps
 
+    # SINGLE, not pair. This bench used to build `(1, L, L, D)` -- 147,456 rows at L=384 -- and it
+    # is the only adaln-vs-torch measurement in the repo that showed a win (5-6x on every card).
+    # Nothing in src/ hands adaln a 4-D pair activation: the two construction sites,
+    # augmented_attention/module.py:62 and conditioned_transition/module.py:79, both pass
+    # `(B, L, D)`. So the win was measured on a shape the model does not run, while the module
+    # bench -- on the shape it does -- has adaln LOSING at inference on all five cards.
+    #
+    # It also collided in the cache. adaln is `level=atom` and keys on `atom_key(length_of(shape))`
+    # = `shape[-2]` floored, so the pair bench at L=384 and the module bench at L=384 resolved to
+    # the SAME entry with 12x different row counts. That is the failure `shape_key.BOTH_ROWS`
+    # documents at 1.73x, and `level=atom` has no protection from it because a pair launch was
+    # assumed impossible -- it was the bench, not the model, that made one.
     def _xc():
         torch.manual_seed(1)
-        return (torch.randn(1, L, L, D, device=DEVICE, dtype=dtype),
-                torch.randn(1, L, L, D, device=DEVICE, dtype=dtype))
+        return (torch.randn(1, L, D, device=DEVICE, dtype=dtype),
+                torch.randn(1, L, D, device=DEVICE, dtype=dtype))
 
     if implementation == "pytorch":
         kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
@@ -2041,8 +2053,11 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
 
     def _xc():
         torch.manual_seed(1)
-        return (torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32),
-                torch.randn(1, L, L, D, device=DEVICE, dtype=torch.float32))
+        # SINGLE. This built a pair activation -- M = L*L -- and then passed `length=L` into an
+        # atom-level family, so at L=512 it asked for the config tuned at 512 rows to run 262,144.
+        # modules/conditioned_transition/module.py:123 hands this family `(B, L, D)`.
+        return (torch.randn(1, L, D, device=DEVICE, dtype=torch.float32),
+                torch.randn(1, L, D, device=DEVICE, dtype=torch.float32))
 
     # The kernel is the POST-AdaLN tail: ConditionedTransition.forward runs `ada_ln_in` first and
     # only then calls it. Normalize once here so both sides see the same input.
@@ -2056,7 +2071,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
         # `length_of` on a 2-D shape, which the guard refuses.
         kfn = lambda x, c: raw(
             ref_mod.ada_ln_in(x, c).reshape(-1, D), c.reshape(-1, D),
-            wa, wb, ws, wsc, bsc, length=L).reshape(1, L, L, D)
+            wa, wb, ws, wsc, bsc, length=L).reshape(1, L, D)
         path = "kernels.conditioned_transition.triton"
     else:
         return as_bench_result(float("nan"))
@@ -2239,9 +2254,11 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     sw, sb, bw = ref_mod.to_scale.weight, ref_mod.to_scale.bias, ref_mod.to_bias.weight
     ex, ec = ref_mod.ln_in.eps, ref_mod.ln_cond.eps
     torch.manual_seed(1)
-    x0 = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
-    c0 = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
-    dy = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
+    # SINGLE, not pair -- see bench_kernel_adaln for why. adaln has no 4-D caller in src/, and a
+    # pair activation here shares an atom bucket with the module bench at 12x the rows.
+    x0 = torch.randn(1, L, D, device=DEVICE, dtype=dtype)
+    c0 = torch.randn(1, L, D, device=DEVICE, dtype=dtype)
+    dy = torch.randn(1, L, D, device=DEVICE, dtype=dtype)
     xr, cr = x0.clone().requires_grad_(True), c0.clone().requires_grad_(True)
     ref_mod(xr, cr).backward(dy)
     ref_dx = xr.grad

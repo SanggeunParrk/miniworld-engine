@@ -114,11 +114,26 @@ SHAPES_BY_LEVEL: dict[str, tuple[int, ...]] = {
 #: that large would carry into its neighbour's digit and two different shapes would share one key.
 #:
 #: The ceiling this has to clear is not a fixed number: `driver_width` makes the base width a knob,
-#: and a family's widest derived axis scales with it -- `ND2 = 8 * base` in conditioned_transition
-#: is 1,024 at base 128 and 3,072 at 384, but exactly 4,096 at 512, which is a DECLARED
-#: `DIM_BUCKETS` entry. So the radix bounds the sweep as much as the sweep bounds the radix; raise
-#: it (and re-check the int64 budget in `pack`) before driving a width that widens an axis past it.
+#: and a family's widest derived axis scales with it. `ND2 = 8 * base` in conditioned_transition is
+#: 1,024 at base 128 and 3,072 at 384, but exactly 4,096 at 512 and 6,144 at 768 -- both of which
+#: the single-side ladder drives.
+#:
+#: Raising the radix does not fix that, it moves the wall: `shape_key` is a RUNTIME scalar argument
+#: to the kernel, so the assembled value must stay an int64, and the budget is
+#: bits(base) + log2(radix) * (axes + 1). At radix 8192 a three-axis fold on `both_key`'s top row
+#: bucket is 72 bits. So the radix stays, and a launch whose axis does not fit RAISES -- see `pack`.
+#: The builder turns that into a skipped unit with a printed reason, which is the honest outcome:
+#: that width is outside what this packing can key, and a silent wrap would be a collision.
 _RADIX = 4096
+
+
+class ShapeKeyTooWide(ValueError):
+    """An axis (or the assembled key) does not fit the packing.
+
+    Its own type because it is a PERMANENT fact about a (kernel, width), exactly like OOM or
+    OutOfResources: retrying the unit cannot make the axis smaller. The builder's skip path reads
+    the type to decide whether a resumed run should claim it again.
+    """
 
 
 def pack(base: int, **axes: int) -> int:
@@ -148,7 +163,7 @@ def pack(base: int, **axes: int) -> int:
     for name in sorted(axes):
         w = int(axes[name])
         if not 0 < w < _RADIX:
-            raise ValueError(
+            raise ShapeKeyTooWide(
                 f"shape axis {name}={w} is outside (0, {_RADIX}); packing it would carry into the "
                 f"next axis's digit and two different shapes would share one autotune key. Raise "
                 f"_RADIX and re-tune, or check that {name} is really a width."
@@ -163,7 +178,7 @@ def pack(base: int, **axes: int) -> int:
     # away from being wrong, and an int64 that wraps is a COLLISION, which is the one failure this
     # function exists to make impossible.
     if value.bit_length() > 63:
-        raise ValueError(
+        raise ShapeKeyTooWide(
             f"shape key {value} needs {value.bit_length()} bits: base {base} with {len(axes)} axis "
             f"/axes {sorted(axes)} does not fit an int64, and `shape_key` is a runtime kernel "
             f"argument. Fold fewer axes (a derived one is implied by its base) or narrow _RADIX."

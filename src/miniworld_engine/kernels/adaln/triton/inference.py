@@ -21,6 +21,8 @@ eager/compiled path runs — one launch, cond_aff read once, TF32 policy for fp3
 """
 
 from __future__ import annotations
+
+from collections import OrderedDict
 from miniworld_engine.autotune.configs import configs_for
 
 # The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
@@ -54,7 +56,17 @@ _GEMM_BF16 = False
 
 # Cache for adaln_inference_lnfold's prefolded GEMM operands, keyed on (fixed) weight identities +
 # dtype. Inference weights are static, so folding once and reusing avoids a per-forward fold pass.
-_LNFOLD_CACHE: dict = {}
+#: Folded GEMM operands, keyed on the weights' identity AND their version counters, with the source
+#: tensors held so the key cannot go stale under it. Bounded, oldest-out.
+#:
+#: `data_ptr()` alone was two silent-wrong-answer paths. A weight mutated IN PLACE -- a checkpoint
+#: load into a live module, or `.eval()` after an optimizer step -- keeps its address, so the key
+#: does not move and the stale fold is served. And a freed tensor's allocation, reused at the same
+#: address by another module of the same dtype, hits the previous module's entry. `_version` catches
+#: the first; holding the source tensors catches the second, because the allocator cannot hand that
+#: address to anyone else while this dict is alive.
+_LNFOLD_MAX = 32
+_LNFOLD_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 
 
 def set_gemm_bf16(flag: bool) -> None:
@@ -89,7 +101,10 @@ def _fp32_matmul_ctx(dtype):
 # kernels/registry.csv) -- not the flattened row count M = B*A the kernels iterate.
 # `_cond_affine` and `_adaln_epilogue` are INNER launchers that only see the (M, D) matrix, so each
 # takes the key from the caller that still holds the pre-flatten shape; the default covers a caller
-# that hands in a genuinely 2-D activation (nothing folded into the rows, so shape[-2] IS L), which
+# `shape_key=None` is NOT a working fallback: `length_of` refuses a rank-2 shape, so the
+# branch raises with a message saying to compute the key at the caller. The default stays only
+# because the `@opaque` fakes share the signature.
+# (This used to claim the default covered a genuinely 2-D activation.) Which
 # is what the drivers and checkers do.
 from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
 
@@ -109,7 +124,13 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
     """
     M, N = cond.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(cond.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
@@ -197,7 +218,13 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
     """
     M, N = x.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
@@ -288,17 +315,21 @@ def adaln_inference_lnfold(
     # keyed on the weight identities + dtype (inference weights are static). Callers may also pass
     # weight_cat/bias_cat/prefolded explicitly to bypass the cache.
     if prefolded is None and weight_cat is None:
-        key = (scale_weight.data_ptr(), bias_weight.data_ptr(), scale_bias.data_ptr(),
-               cond_ln_weight.data_ptr(), x.dtype)
+        srcs = (scale_weight, bias_weight, scale_bias, cond_ln_weight)
+        key = (tuple((t.data_ptr(), t._version) for t in srcs), x.dtype)
         hit = _LNFOLD_CACHE.get(key)
         if hit is None:
             weight_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
             bias_cat = torch.cat([scale_bias, scale_bias.new_zeros(nx)], dim=0)  # (2NX,)
             ln_bias = cond_ln_weight.new_zeros(cond_ln_weight.shape)             # cond LN: no bias
             prefolded = fold_for_gemm(weight_cat, cond_ln_weight, ln_bias, bias_cat, w2_dtype=x.dtype)
-            _LNFOLD_CACHE[key] = (weight_cat, bias_cat, prefolded)
+            # `srcs` rides along unused: it is what keeps the allocator from reusing these
+            # addresses for another module while this entry stands.
+            _LNFOLD_CACHE[key] = (weight_cat, bias_cat, prefolded, srcs)
+            while len(_LNFOLD_CACHE) > _LNFOLD_MAX:
+                _LNFOLD_CACHE.popitem(last=False)
         else:
-            weight_cat, bias_cat, prefolded = hit
+            weight_cat, bias_cat, prefolded, _ = hit
     else:
         if weight_cat is None:
             weight_cat = torch.cat([scale_weight, bias_weight], dim=0)

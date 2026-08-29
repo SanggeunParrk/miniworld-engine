@@ -101,7 +101,13 @@ def _swiglu(a: torch.Tensor, b: torch.Tensor,
     """h = silu(a)*b, reading a and b through their shared strides and writing h contiguous."""
     M, ND = a.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(a.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     h = torch.empty(M, ND, device=a.device, dtype=a.dtype)  # contiguous output
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_fwd_kernel[grid](a, b, h, M, ND, a.stride(0), a.stride(1),
@@ -200,7 +206,13 @@ def _swiglu_bwd_packed(a: torch.Tensor, b: torch.Tensor, dh: torch.Tensor,
     """Return dab = [da | db] : (M, 2*ND), contiguous, for a single concatenated expand-bwd GEMM."""
     M, ND = a.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(a.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
     grid = lambda meta: (triton.cdiv(M * ND, meta["BLOCK_E"]),)  # noqa: E731
     _swiglu_bwd_kernel[grid](
@@ -343,7 +355,13 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     """atom fused b2b training forward -> (y, ab=[a|b], h, out, scale)."""
     M, K = x.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     ND = wa.shape[0]
     D = ws.shape[0]
     DC = cond.shape[1]
@@ -472,7 +490,12 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # re-read). `_sigmul_bwd` is a level=both kernel, so its label uses the union bucket set.
         L = ctx.length
         shape_key = atom_key(L)
-        dout, dscale = _gate_bwd(out, scale, dy, shape_key=both_key(L))   # (M, D), (M, D)
+        # both_key buckets ROWS, and `out` is the flattened (M, D) the forward keyed with
+        # `both_key(out.shape[0])` twenty lines up. Passing L here fed a LENGTH to a row
+        # bucket: the two agreed only at B == 1, and otherwise the forward and the backward
+        # of the same `_sigmul_*` kernel landed in different buckets. That is the mismatch
+        # 6948c77 measured at 1.73x, in the same function.
+        dout, dscale = _gate_bwd(out, scale, dy, shape_key=both_key(out.shape[0]))
         # conditioning grads
         dcond = dscale @ wsc                            # (M, DC)
         dWsc = dscale.t() @ cond                        # (D, DC)

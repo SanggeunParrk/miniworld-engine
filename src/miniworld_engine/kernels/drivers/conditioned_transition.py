@@ -69,11 +69,23 @@ from miniworld_engine.kernels.drivers import (
 # bug that only shows when the two axes are congruent mod BLOCK cannot hide. _N_EXPAND is
 # therefore only the aligned-mode base of _ND, not a live multiplier.
 _D_BASE = driver_width(128)  # BenchConfig.d_pair default / interface.ATOM_D_MAX
-_N_EXPAND = 4  # ConditionedTransition(D, D, n=4), as bench_kernel_cond_transition_tail builds it
+# ConditionedTransition(d_hidden=128, d_cond=384, n=2) -- module.py's own defaults, NOT the bench's.
+# This used to be 4, "as bench_kernel_cond_transition_tail builds it", and the two disagree: the
+# module's n is 2, so production asks for ND = 2*d_hidden while every cached entry said ND = 4*d.
+# ND is folded into the shape key, so those are different buckets and the family's 84 entries never
+# matched a single production launch -- it missed and fell back to the heuristic subset, every time.
+# A driver's extents are a claim about what the model runs; when they are copied from a bench
+# instead, the cache is tuned for the bench.
+_N_EXPAND = 2
+#: d_cond is its OWN axis and its own default (384), not d_hidden. The two are separately tiled
+#: (NC / DC) and the module is built with them unequal -- bench_module_conditioned_transition runs
+#: d_hidden=128 with d_cond=768 -- so pinning DC to d_hidden tuned a square case production does
+#: not present.
+_DC_BASE = 384
 
 _M = ragged(driver_length(512))       # drivers.rows2d default row count
 _D = ragged(_D_BASE)                  # d_hidden (NX) / the tail's K and D
-_DC = ragged(_D_BASE, by=5)           # d_cond (NC / DC) -- separately tiled axis
+_DC = ragged(_DC_BASE, by=5)          # d_cond (NC / DC) -- separately tiled axis
 _ND = ragged(_N_EXPAND * _D_BASE)     # expand width (ND)
 
 # The autotune SHAPE bucket for every inner launcher below (see the docstring). L is ``_M``: the

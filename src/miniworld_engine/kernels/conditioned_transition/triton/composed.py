@@ -39,9 +39,11 @@ import triton.language as tl
 # does `x.reshape(-1, d)` before it calls -- so `length_of` of that 2-D matrix is M = B*A, which is
 # the atom count A only when B == 1. The module therefore reads A off the un-flattened activation
 # and passes it down as the `length` argument of every entry point; the entry point buckets it once
-# and hands the result to the inner launchers as `shape_key`. `length=None` falls back to
+# and hands the result to the inner launchers as `shape_key`. `length=None` does NOT fall back to
 # `length_of(x.shape)` == M for the direct callers that have no un-flattened tensor to read (the
-# registry drivers/checkers, and train_12_345.py), which is exactly the old behaviour.
+# anything: `length_of` refuses a rank-2 shape, so that path raises with a message saying to compute
+# the key at the caller. Every live caller passes `length`; the drivers and checkers pass
+# `shape_key=` directly.
 from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
 
 
@@ -169,7 +171,13 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     """h = silu(x @ Wa^T) * (x @ Wb^T) -> (M, ND)."""
     M, K = x.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
@@ -195,7 +203,13 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
     """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D)."""
     M, ND = h.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(h.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     D = ws.shape[0]
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
@@ -219,7 +233,7 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=Non
     Same math/signature as ``cond_transition_inference`` but K-tiled, so d>=256 compiles.
 
     ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
-    modules/conditioned_transition/module.py. None falls back to this matrix's row count M.
+    modules/conditioned_transition/module.py. None raises: M alone cannot say whether it is L or L*L.
     """
     wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
@@ -241,7 +255,7 @@ def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc, length=None):
     fp32 io, TF32 tensor cores. This is the structure to ship (simpler than the b2b/CUTLASS paths).
 
     ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
-    modules/conditioned_transition/module.py. None falls back to this matrix's row count M.
+    modules/conditioned_transition/module.py. None raises: M alone cannot say whether it is L or L*L.
     """
     wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
     wsc = wsc.contiguous(); bsc = bsc.contiguous()

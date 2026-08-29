@@ -35,7 +35,10 @@ import triton.language as tl
 # The four launchers below are INNER launchers: they only ever see the flattened (M, D) matrix, and
 # M is B*A, so L is not recoverable here. Each therefore takes the key as a `shape_key` argument
 # from the caller that still holds the pre-flatten shape. The default covers the callers that hand
-# in a genuinely 2-D activation (no batch axis was folded in, so shape[-2] IS L) -- the drivers and
+# `shape_key=None` is NOT a working fallback: `length_of` refuses a rank-2 shape, so the
+# branch raises with a message saying to compute the key at the caller. The default stays only
+# because the `@opaque` fakes share the signature.
+# (This used to claim the default covered a caller handing in a genuinely 2-D activation.) The drivers and
 # checkers do exactly that.
 from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
 # `both_key` is for the borrowed layernorm_linear helpers only (`_ln_materialize`/`_ln_bwd`):
@@ -115,7 +118,13 @@ def _layernorm(x: torch.Tensor, eps: float, weight: torch.Tensor | None = None,
     """
     M, N = x.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     y = torch.empty_like(x)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     # N is a tl.constexpr now (it drives the BLOCK_N >= N fold), so it must reach the kernel as a
@@ -212,7 +221,13 @@ def _gemm_gate(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Tensor,
     # Ws, Wb are the (N, K) nn.Linear weights (k-contiguous tile = MMA-friendly B layout).
     M, N = x_norm.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x_norm.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     K = cond_norm.shape[1]
     y = torch.empty_like(x_norm)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),)  # noqa: E731
@@ -244,7 +259,13 @@ def _gemm_gate_train(x_norm: torch.Tensor, cond_norm: torch.Tensor, Ws: torch.Te
     """
     M, N = x_norm.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x_norm.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     K = cond_norm.shape[1]
     y = torch.empty_like(x_norm)
     gate = torch.empty_like(x_norm)
@@ -300,7 +321,13 @@ def _bwd_elem(dy: torch.Tensor, x_norm: torch.Tensor, gate: torch.Tensor,
     """
     M, N = dy.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(dy.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     dscale = torch.empty_like(dy)
     dxn = torch.empty_like(dy)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731

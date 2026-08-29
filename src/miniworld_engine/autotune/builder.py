@@ -781,10 +781,28 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     # buckets would cost 6x to tune four widths nothing asks for. `dim_bucket` still refuses
     # anything outside DIM_BUCKETS at runtime, so an unlisted width is a loud miss, not a silent
     # one.
-    widths = tuple(driver_widths) if driver_widths else (128, 384)
+    # The WIDTH ladder per class. `level` says which LENGTH axis a kernel is on; `width` says which
+    # side's channel width it sees, and the two are independent -- a kernel can be token-level and
+    # still be driven at several d_pair values. Ladders come from what the model runs: d_pair walks
+    # 128/256/512, d_single walks those plus 384 and 768 (`cases()` -- adaptive_layernorm at 768,
+    # attention_pair_bias and augmented_attention at d_single 384 and 768).
+    #
+    # A kernel used on BOTH sides gets the union, because it meets both.
+    #: An atom activation is (B, A, ATOM_D_MAX): the channel width is fixed, so an atom-side unit
+    #: has exactly one width and sweeping more of them tunes shapes production never presents.
+    ATOM_WIDTH = 128
+    LADDER = {"pair": (128, 256, 512),
+              "single": (128, 256, 384, 512, 768),
+              "both": (128, 256, 384, 512, 768)}
     out = []
     for r in csv.DictReader(reg.open()):
         if r["backend"] != "triton" or not (r["driver"] or "").strip():
+            continue
+        # `developed` is a HAND-MAINTAINED judgement, not a rule derived from the benchmark tables,
+        # and it has to be: bias_only_attention loses on time on every committed card and uses half
+        # the memory at every length, so a rule reading either number alone gets it wrong. Every
+        # `no` carries its reason in kernels/undeveloped.csv, which a test pins.
+        if (r.get("developed") or "yes").strip() == "no":
             continue
         if only and r["kernel"] not in only:
             continue
@@ -808,8 +826,21 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             sided = sided[:1]
         alias = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
         dtypes = [alias.get(x, x) for x in (r.get("dtypes") or "bf16").split("|") if x]
+        # The ladder is per UNIT, not per op, because the width depends on which SIDE the unit
+        # drives. An ATOM activation's channel width is fixed -- (B, A, 128), `interface.ATOM_D_MAX`
+        # -- so sweeping 384 or 768 there builds a shape the model never presents. A token/pair
+        # activation's width is exactly what varies. A `level=both` kernel therefore splits inside
+        # one op: its pair units walk the ladder, its atom units are 128 and only 128.
+        klass = r.get("width") or "both"
+        atom_only = r["level"] == "atom"
+
+        def _widths(side: str, _k=klass, _a=atom_only) -> tuple:
+            if driver_widths:
+                return tuple(driver_widths)
+            return (ATOM_WIDTH,) if (_a or side == "atom") else LADDER.get(_k, LADDER["both"])
+
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)
-                    for dt in dtypes for w in widths for side, length in sided])
+                    for dt in dtypes for side, length in sided for w in _widths(side)])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands
@@ -1252,7 +1283,10 @@ def _run_one_driver(op: str) -> int:
         # in a line the parent can read is what stops a resumed run from re-claiming them forever
         # and -- because the parent counts "did anything succeed?" -- from refusing to merge the
         # 526 units that did.
-        perm = type(exc).__name__ in ("OutOfMemoryError", "OutOfResources") or \
+        # ShapeKeyTooWide joins them: a width whose derived axis does not fit the shape-key
+        # packing (ND2 = 8*base is 6,144 at base 768) cannot be keyed at all, so the unit is not
+        # retryable either. See autotune/shape_key.pack.
+        perm = type(exc).__name__ in ("OutOfMemoryError", "OutOfResources", "ShapeKeyTooWide") or \
             "out of memory" in str(exc).lower()
         print(f"    skip {op} at this shape: {type(exc).__name__}: "
               f"{str(exc).strip().splitlines()[0][:160]}", flush=True)

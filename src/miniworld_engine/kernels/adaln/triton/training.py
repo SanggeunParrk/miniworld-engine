@@ -73,7 +73,10 @@ def _mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # shape_key's value is L -- the atom count (this family is level=atom in kernels/registry.csv) --
 # not the flattened row count M = B*A the kernels iterate. The three launchers below are INNER
 # launchers that only see the (M, D) matrices, so each takes the key from the caller that still
-# holds the pre-flatten shape; the default covers a caller that hands in a genuinely 2-D activation
+# holds the pre-flatten shape. `shape_key=None` is NOT a working fallback: `length_of` refuses a rank-2 shape, so the
+# branch raises with a message saying to compute the key at the caller. The default stays only
+# because the `@opaque` fakes share the signature.
+# (This used to say the default covered a caller handing in a genuinely 2-D activation
 # (nothing folded into the rows, so shape[-2] IS L), which is what the drivers and checkers do.
 from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack, rows_of
 # `both_key` is only for the borrowed layernorm_linear helpers (`_ln_materialize`/`_ln_bwd`):
@@ -179,7 +182,13 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
     """
     M, N = x.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     y = torch.empty(M, N, device=x.device, dtype=x.dtype)
     gate = torch.empty(M, N, device=x.device, dtype=x.dtype)
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
@@ -300,7 +309,13 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
     D's (2N,M) layout is chosen so the wgrad D@cond_aff is a contiguous-K GEMM (see kernel note)."""
     M, N = dy.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(dy.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     D = torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype)   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731

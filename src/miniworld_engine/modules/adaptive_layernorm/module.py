@@ -54,8 +54,19 @@ class AdaptiveLayerNorm(nn.Module):
 
         if self._backend == KernelBackend.TRITON:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
-            # (The legacy single fused `triton_adaptive_layer_norm` compile-fails at d≥384.)
-            fn = adaln_train if (self.training or x.requires_grad) else adaln_inference
+            #
+            # EVERY tensor that can carry a gradient decides this, not just `x`. `adaln_inference`
+            # bottoms out in `@opaque` custom ops, and an opaque op is opaque to AUTOGRAD as well as
+            # to Dynamo (see kernels/_compile.py): its output has no `grad_fn`, so the numbers are
+            # right and nothing learns through it. Testing `x.requires_grad` alone sent a module in
+            # `.eval()` with a detached `x` but a conditioning tensor -- or a weight -- that still
+            # requires grad down the inference path, and the gradient vanished with no error. The
+            # projections are parameters, so they are the common case, not the exotic one.
+            needs_grad = (self.training
+                          or x.requires_grad
+                          or cond.requires_grad
+                          or any(p.requires_grad for p in self.parameters()))
+            fn = adaln_train if needs_grad else adaln_inference
             return fn(
                 x,
                 cond,

@@ -26,6 +26,14 @@ dgrad GEMMs: fused-elementwise triton (TF32), the mirrored CUTLASS-able structur
 wgrad GEMMs (dWs, dWsc, dWa, dWb): cuBLAS (reductions over M — cuBLAS's domain).
 Forward saves ab, out, scale (NOT h: recompute h=silu(a)*b from ab in backward, avoiding the
 [M,ND] h write). Works uniformly for atom (d=128) and token (d=768).
+
+
+CANNOT RUN AS WRITTEN, and this is the notice rather than a deletion because the structure is the
+point of the file. Neither Function takes a `length`, so every inner launch reaches the
+`shape_key=None` branch, and that branch raises: `length_of` refuses a rank-2 shape, because M alone
+cannot say whether it is L or L*L. Nothing selects this path either -- `training.py` is the
+production default and `train_fused.py`'s own H100 measurement (fused dgrad losing to
+cuBLAS+elementwise by 1.6-7.1x) is why. Thread a `length` through both Functions before calling it.
 """
 
 from __future__ import annotations

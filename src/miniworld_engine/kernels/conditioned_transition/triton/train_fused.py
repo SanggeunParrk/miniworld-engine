@@ -193,7 +193,13 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     """
     M, K = x.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(x.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     ab = torch.empty(M, 2 * ND, device=x.device, dtype=x.dtype)
@@ -223,7 +229,13 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
     """
     M, ND = h.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(h.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     D = ws.shape[0]
     DC = cond.shape[1]
     y = torch.empty(M, D, device=h.device, dtype=h.dtype)
@@ -335,7 +347,13 @@ def _dgemm(a: torch.Tensor, w: torch.Tensor, M: int, N: int, K: int, swk: int, s
            shape_key: int | None = None) -> torch.Tensor:
     """C = a(M,K) @ W(K,N) via TF32 triton. swk,swn = W strides for the (K,N) logical view."""
     if shape_key is None:
-        shape_key = atom_key(length_of(a.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     c = torch.empty(M, N, device=a.device, dtype=a.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(N, meta["BLOCK_N"]),)  # noqa: E731
     # GROUP_M stays a CSV tile knob for this kernel; only shape_key's VALUE changes here.
@@ -411,7 +429,13 @@ def _dx_fused(dh: torch.Tensor, ab: torch.Tensor, wa: torch.Tensor, wb: torch.Te
     """
     M, ND = dh.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(dh.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     K = wa.shape[1]
     dx = torch.empty(M, K, device=dh.device, dtype=dh.dtype)
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(K, meta["BLOCK_N"]))  # noqa: E731
@@ -491,7 +515,13 @@ def _dh_gatebwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor, ws: to
     """dh = (sigmoid(scale)*dy) @ Ws ; also returns materialized dout, dscale for wgrad."""
     M, D = out.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(out.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     dh = torch.empty(M, ND, device=out.device, dtype=out.dtype)
     dout = torch.empty(M, D, device=out.device, dtype=out.dtype)
     dscale = torch.empty(M, D, device=out.device, dtype=out.dtype)
@@ -571,7 +601,13 @@ def _dx_swiglubwd(dh: torch.Tensor, ab: torch.Tensor, wcat: torch.Tensor,
     """dx = dab @ Wcat (one GEMM), dab formed in-register from (dh, ab); emits dab for wgrad."""
     M, ND = dh.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(dh.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     ND2 = 2 * ND
     K = wcat.shape[1]
     dx = torch.empty(M, K, device=dh.device, dtype=dh.dtype)
@@ -636,7 +672,13 @@ def _swiglu_bwd_pack(dh: torch.Tensor, ab: torch.Tensor, shape_key: int | None =
     """
     M, ND = dh.shape
     if shape_key is None:
-        shape_key = atom_key(length_of(dh.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     dab = torch.empty(M, 2 * ND, device=dh.device, dtype=dh.dtype)
     grid = lambda meta: (  # noqa: E731
         triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]),
@@ -696,7 +738,13 @@ def _wgrad(g: torch.Tensor, x: torch.Tensor, N: int, K: int, shape_key: int | No
     """dW(N,K) = g(M,N)^T @ x(M,K) via TF32 triton (reduce over M)."""
     M = g.shape[0]
     if shape_key is None:
-        shape_key = atom_key(length_of(g.shape))
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
+            "not a working fallback: length_of refuses a rank-2 shape."
+        )
     dw = torch.empty(N, K, device=g.device, dtype=g.dtype)
     grid = lambda meta: (triton.cdiv(N, meta["BLOCK_N_ROW"]), triton.cdiv(K, meta["BLOCK_N_COL"]))  # noqa: E731
     _wgrad_kernel[grid](g, x, dw, M, N, K, g.stride(0), g.stride(1),
