@@ -1,4 +1,4 @@
-"""Every driver's lazy imports have to name something that exists.
+"""Every driver and checker's lazy imports have to name something that exists.
 
 A driver reaches its kernel through an import inside the function body -- `from
 miniworld_engine.kernels.<family>.triton.<file> import <launcher>` -- so that importing the driver
@@ -24,15 +24,22 @@ REG = ROOT / "src/miniworld_engine/kernels/registry.csv"
 
 
 def _driver_specs() -> list[tuple[str, str, str]]:
-    """(kernel, module, function) for every registry row that names a driver."""
+    """(kernel, module, function) for every registry entry point -- driver AND check.
+
+    Both columns name `module:function` and both reach their kernel through an import in the
+    function body, so both rot the same way and neither is exercised without a GPU. The
+    train_fused split broke one of each for the same two kernels: the driver built no cache
+    entries, and the checker failed its numerics test with the same ModuleNotFoundError.
+    """
     with REG.open(newline="") as fh:
         rows = list(csv.DictReader(fh))
     out = []
     for r in rows:
-        spec = (r.get("driver") or "").strip()
-        if spec:
-            mod, _, fn = spec.partition(":")
-            out.append((r["kernel"], mod, fn))
+        for column in ("driver", "check"):
+            spec = (r.get(column) or "").strip()
+            if spec:
+                mod, _, fn = spec.partition(":")
+                out.append((f"{r['kernel']} ({column})", mod, fn))
     return out
 
 

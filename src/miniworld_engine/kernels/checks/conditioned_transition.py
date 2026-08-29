@@ -149,8 +149,8 @@ def cond_transition_expand_swiglu():
 
 
 def cond_transition_expand_swiglu_saveact():
-    """train_fused._fwd_expand_swiglu_kernel: same h, plus the packed pre-activations ab=[a|b]."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+    """fwd_saveact._fwd_expand_swiglu_kernel: same h, plus the packed pre-activations ab=[a|b]."""
+    from miniworld_engine.kernels.conditioned_transition.triton.fwd_saveact import (
         _fwd_expand_swiglu,
     )
 
@@ -184,8 +184,8 @@ def cond_transition_squeeze_gate():
 
 
 def cond_transition_squeeze_gate_saveact():
-    """train_fused._fwd_squeeze_gate_kernel: same y, plus the saved out and scale."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
+    """fwd_saveact._fwd_squeeze_gate_kernel: same y, plus the saved out and scale."""
+    from miniworld_engine.kernels.conditioned_transition.triton.fwd_saveact import (
         _fwd_squeeze_gate,
     )
 
