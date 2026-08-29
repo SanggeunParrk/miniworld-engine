@@ -37,7 +37,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 OUT = REPO / ".bench/_shapekey_sweep"
 PY = str(REPO / ".pixi/envs/default/bin/python")
-CONFIG_DIR = str(REPO / ".bench/onecfg")
+#: One config per op, for tools that want a kernel to RUN rather than to be tuned. It used to be
+#: `.bench/onecfg`, which is untracked scratch: it exists on the machine that made it and nowhere
+#: else, and on this one it had gone stale -- written before the tile visit order became an axis,
+#: so its files declare no GROUP_M and every kernel that now takes one fails to launch under it.
+#: `blk64` is the same thing, tracked: one row per op, and it moves when the kernels move.
+ONE_CONFIG_PER_OP = REPO / "src/miniworld_engine/autotune/configs/blk64"
+
+CONFIG_DIR = str(ONE_CONFIG_PER_OP)
 
 # The child runs ONE driver at ONE length and dumps the cache buckets every autotuner recorded.
 # MINIWORLD_CONFIG_DIR is already in the environment before this text is executed, which is what

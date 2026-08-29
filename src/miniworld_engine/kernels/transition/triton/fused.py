@@ -32,7 +32,7 @@ from miniworld_engine import settings
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 from jaxtyping import Float
 
@@ -520,6 +520,7 @@ def transition_b2b(
         rstd, c1 = stats if stats is not None else stats_triton(x2, eps, shape_key=shape_key)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else out
+    check_tile_axes("transition_fwd_b2b_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _transition_b2b_kernel[grid](
         x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
@@ -686,6 +687,7 @@ def transition_b2b_ktiled(
     D = ws.shape[0]
     rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
+    check_tile_axes("transition_fwd_b2b_ktiled_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _transition_b2b_ktiled_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),

@@ -9,9 +9,9 @@ helpers from ``checks/__init__.py``.
 from __future__ import annotations
 
 import torch
-import triton
 
 from miniworld_engine.autotune.shape_key import token_key
+from miniworld_engine.kernels._tiles import tile_grid
 from miniworld_engine.kernels.checks import _exact_fp32_matmul, _f
 from miniworld_engine.kernels.drivers.trimul_inproj import D, L, M, _rows, _w, _x
 
@@ -58,7 +58,7 @@ def trimul_outproj_bwd_gate_recompute_triton():
     Wg, Wo = _w(), _w()
     grad_out = _rows()
     dA, dB = torch.empty_like(x), torch.empty_like(x)
-    grid = lambda meta: [triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(D, meta["BLOCK_N"])]
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])
     fused_sigmoid_gate2_bwd_kernel[grid](x, y, Wg, Wo, grad_out, dA, dB, M, D,
                                         shape_key=token_key(L, N=D))
     g = torch.sigmoid(_f(x) @ _f(Wg))

@@ -35,7 +35,12 @@ def test_the_column_exists_and_every_value_parses() -> None:
     assert rows, "registry.csv is empty"
     assert "rtol" in rows[0], "registry.csv has no rtol column"
     for row in rows:
-        declared_rtol(row)          # raises with the kernel's name if unparseable
+        # At each precision the ROW declares. A per-precision band cannot be read without one --
+        # deliberately, since handing an fp32 run a bf16 band is the hole that spelling closes --
+        # so "does it parse" is a question per declared precision, not per row.
+        for dt in (a.strip() for a in (row.get("dtypes") or "bf16").split("|")):
+            if dt:
+                declared_rtol(row, dt)   # raises with the kernel's name if unparseable
 
 
 def test_a_blank_band_means_the_default() -> None:
@@ -134,42 +139,48 @@ def test_a_declared_band_is_above_what_that_kernel_measured() -> None:
     from miniworld_engine.autotune.run_all import DEFAULT_RTOL, RTOL_MARGIN
 
     manifests = REGISTRY.parent.parent / "autotune" / "manifests"
-    measured: dict[str, list[float]] = collections.defaultdict(list)
+    # (kernel, precision) -> the worst rel each run recorded. Keyed by BOTH, because the same
+    # kernel measures four orders apart in the two: `layernorm_fwd_saveact_triton` is 2.8e-03 in
+    # bf16 and 1.7e-07 in fp32. Comparing a band against the wrong precision's rows is how a bf16
+    # band gets called "far above what the kernel measures" -- or, worse, how an fp32 band gets
+    # derived from bf16 rounding and passes anything.
+    measured: dict[tuple[str, str], list[float]] = collections.defaultdict(list)
     for f in sorted(manifests.glob("*.csv")):
         with f.open(newline="") as fh:
             for row in csv.DictReader(fh):
                 if row["status"] != "ok":
                     continue
+                # A row written before the column existed is bf16: it was the only precision the
+                # drivers ever ran. `devices.load_manifest` fills the same default.
+                dt = (row.get("dtype") or "").strip() or "bf16"
                 vals = [float(v) for v in re.findall(r"=([0-9.e+-]+)", row["detail"] or "")
                         if "e" in v or "." in v]
                 if vals:
-                    measured[row["kernel"]].append(max(vals))
+                    measured[(row["kernel"], dt)].append(max(vals))
     assert measured, f"no measurements in {manifests}; the check below would pass vacuously"
 
     too_tight, too_loose = [], []
     with REGISTRY.open(newline="") as fh:
         for row in csv.DictReader(fh):
             band = (row.get("rtol") or "").strip()
-            worst = max(measured.get(row["kernel"], [0.0]) or [0.0])
-            if not band or not worst:
+            if not band:
                 continue
-            # The manifests carry no dtype column: run_all writes them at drivers.DTYPE_MODE,
-            # which is bf16 unless someone exports otherwise, so a per-precision band is compared
-            # on its bf16 rung. A row that prices only fp32 has no bf16 rung and is skipped -- its
-            # measurement would have to come from an fp32 manifest run, which nothing writes yet.
-            if "=" in band:
-                if "bf16=" not in band:
+            # Every precision the ROW declares, against that precision's own rows. A precision the
+            # manifests have not measured yet is skipped -- absence of evidence is not a band
+            # error -- and one the row does not declare is not checked at all.
+            for dt in (a.strip() for a in (row.get("dtypes") or "bf16").split("|")):
+                worst = max(measured.get((row["kernel"], dt), [0.0]) or [0.0])
+                if not dt or not worst:
                     continue
-                b = declared_rtol(row, "bf16")
-            else:
-                b = float(band)
-            if b < worst:
-                too_tight.append(f"{row['kernel']}: band {b:.1e} < measured {worst:.1e}")
-            elif b >= DEFAULT_RTOL:
-                continue                      # capped at the default, deliberately
-            elif b > worst * RTOL_MARGIN * 1.5:
-                too_loose.append(f"{row['kernel']}: band {b:.1e} vs measured {worst:.1e} "
-                                 f"({b / worst:.0f}x, margin is {RTOL_MARGIN:.0f}x)")
+                b = declared_rtol(row, dt) if "=" in band else float(band)
+                where = f"{row['kernel']} [{dt}]"
+                if b < worst:
+                    too_tight.append(f"{where}: band {b:.1e} < measured {worst:.1e}")
+                elif b >= DEFAULT_RTOL:
+                    continue                  # capped at the default, deliberately
+                elif b > worst * RTOL_MARGIN * 1.5:
+                    too_loose.append(f"{where}: band {b:.1e} vs measured {worst:.1e} "
+                                     f"({b / worst:.0f}x, margin is {RTOL_MARGIN:.0f}x)")
     assert not too_tight, (
         "declared band below the kernel's own measured error -- a correct run would fail:\n  "
         + "\n  ".join(too_tight))

@@ -21,6 +21,13 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
+#: One config per op, for tools that want a kernel to RUN rather than to be tuned. It used to be
+#: `.bench/onecfg`, which is untracked scratch: it exists on the machine that made it and nowhere
+#: else, and on this one it had gone stale -- written before the tile visit order became an axis,
+#: so its files declare no GROUP_M and every kernel that now takes one fails to launch under it.
+#: `blk64` is the same thing, tracked: one row per op, and it moves when the kernels move.
+ONE_CONFIG_PER_OP = REPO / "src/miniworld_engine/autotune/configs/blk64"
+
 CHILD = r"""
 import json, sys
 sys.path.insert(0, "src")
@@ -41,7 +48,7 @@ json.dump({"ran": ran, "buckets": buckets}, open(out, "w"))
 def probe(op: str, length: int, tmp: Path) -> dict:
     out = tmp / f"{op}-{length}.json"
     env = {**os.environ, "PYTHONPATH": "src",
-           "MINIWORLD_CONFIG_DIR": str(REPO / ".bench/onecfg"),
+           "MINIWORLD_CONFIG_DIR": str(ONE_CONFIG_PER_OP),
            "MINIWORLD_DRIVER_LENGTH": str(length)}
     r = subprocess.run([".pixi/envs/default/bin/python", "-c", CHILD, op, str(out)],
                        cwd=REPO, env=env, capture_output=True, text=True, timeout=900)

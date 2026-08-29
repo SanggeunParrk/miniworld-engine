@@ -42,7 +42,8 @@ def tile_order(pid, n_m, n_n, GROUP_M: tl.constexpr):
     ``pid`` comes from a 1-D grid of ``n_m * n_n`` programs -- the launcher multiplies where it
     used to pass a tuple, and the kernel derives both indices here.
     """
-    # Clamp to n_m so a ladder's top rung ALWAYS means column-first. Without it the guarantee is
+    # Clamp to n_m so a ladder's top rung ALWAYS means row-first -- the 2-D grid's own order, the
+    # one every kernel here had before the axis existed. Without it the guarantee is
     # arithmetic luck: a pair kernel has M = L*L, so at BLOCK_M1=16 and L=1536 n_m is 147,456 and
     # a rung of 65536 would group rather than reproduce the old schedule -- unreachable at exactly
     # the largest shapes. Clamped, any rung >= n_m collapses to first_m=0, size_m=n_m, which is
@@ -59,3 +60,26 @@ def tile_order(pid, n_m, n_n, GROUP_M: tl.constexpr):
 def tile_grid(m, n, block_m, block_n):
     """The 1-D grid ``tile_order`` expects, from the two extents and their block sizes."""
     return (triton.cdiv(m, block_m) * triton.cdiv(n, block_n),)
+
+
+def check_tile_axes(kernel: str, grid_n: int, kernel_n: int, grid_name: str, kernel_name: str) -> None:
+    """Refuse a launch whose grid counts column tiles over a different extent than the kernel does.
+
+    Four launchers size the grid on ``D`` (the output width) while the kernel derives its column
+    count from ``K`` (the input width). They are equal for every transition the model runs -- in
+    and out widths match -- so the two names have never disagreed, and with the old 2-D grid a
+    disagreement would have been half-hidden anyway: extra programs write masked-off columns.
+
+    With a 1-D grid it is neither hidden nor harmless. ``tile_order`` divides ``pid`` by
+    ``n_n = cdiv(kernel_n, BLOCK)``, so a grid built from a different extent hands every program
+    the WRONG (row, column) pair -- silently wrong output, not a masked no-op -- and ``kernel_n = 0``
+    divides by zero, which is undefined behaviour inside the kernel rather than an exception.
+
+    Cheap: two ints on the host, once per launch, next to the shape reads the launcher already does.
+    """
+    if grid_n != kernel_n:
+        msg = (f"{kernel}: the grid counts column tiles over {grid_name}={grid_n} but the kernel "
+               f"divides by {kernel_name}={kernel_n}. tile_order would map every program to the "
+               f"wrong tile. These are the input and output widths and this kernel requires them "
+               f"equal.")
+        raise ValueError(msg)

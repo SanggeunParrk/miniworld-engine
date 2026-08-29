@@ -652,6 +652,39 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     return _merge_built_shards(args, results)
 
 
+def _refuse_rebuilding_finished_units(units: list, shard_dir: Path, resume: bool) -> int:
+    """0 if this sweep has nothing already on disk, 2 (having said so) if it does and --resume is off.
+
+    `trunk` and `diffusion` are not disjoint. A kernel either side launches carries `stack=both` in
+    registry.csv and both sweeps include it -- measured on the shipped registry: trunk 1269 units,
+    diffusion 1353, union 1713, so 909 units are in BOTH. A unit's identity (its shard stem) is
+    (op, dtype, side, length, width) and carries no stack, so those 909 write the same shard file
+    whichever sweep produced them: running the second half with --resume costs nothing for them,
+    and running it WITHOUT --resume re-benches 909 units that are already done -- 53% more work for
+    an identical result, with no message saying so.
+
+    Nothing here decides that the units are stale; that is the operator's call and --resume is how
+    it is spelled. What this refuses is making that call by forgetting a flag.
+    """
+    from miniworld_engine.autotune.builder import _shard_has_entries
+
+    if resume or not shard_dir.is_dir():
+        return 0
+    done = [u for u in units if _shard_has_entries(shard_dir / f"{u.stem}.json")]
+    if not done:
+        return 0
+    print(f"{len(done)} of {len(units)} unit(s) in this sweep already have measurements under "
+          f"{shard_dir} (e.g. {', '.join(u.stem for u in done[:3])}).\n"
+          f"Pass --resume to skip them, or point --shards somewhere else to rebuild them "
+          f"deliberately.", file=sys.stderr)
+    return 2
+
+
+def _op_names(case: str) -> list[str]:
+    """`--per-op`'s positional, as the list of kernels it names. One name is a list of one."""
+    return [n for n in (part.strip() for part in case.split(",")) if n]
+
+
 def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     """0 if `build`'s positional names something real, 2 (having said what is real) if not.
 
@@ -667,10 +700,16 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     if args.per_op:
         rows = (repo / "src" / "miniworld_engine" / "kernels" / "registry.csv").read_text()
         ops = {line.split(",", 1)[0] for line in rows.splitlines()[1:] if line.strip()}
-        if args.case in ops:
+        # A COMMA LIST is one sweep over several kernels, and it is not a convenience. `--per-op`
+        # took one name, so tuning a related set meant one command per kernel -- and each command
+        # re-imports every kernel module before it can build its work list, which is minutes of
+        # triton compilation paid once per name, plus a GPU pool that drains and refills between
+        # them. Named together they are one pool over one interleaved work list.
+        unknown = sorted(set(_op_names(args.case)) - ops)
+        if not unknown:
             return 0
-        print(f"unknown op {args.case!r}; --per-op takes a kernel from registry.csv "
-              f"({len(ops)} of them), or 'all'", file=sys.stderr)
+        print(f"unknown op(s) {unknown}; --per-op takes kernels from registry.csv "
+              f"({len(ops)} of them) as a comma list, or 'all'", file=sys.stderr)
         return 2
     if args.case in CASE_NAMES:
         return 0
@@ -728,10 +767,18 @@ def cmd_build(args: argparse.Namespace) -> int:
         # model launches -- so a trunk-first build tunes the Pairformer / MSA / template stack and
         # nothing else, and the DiT stack can follow later.
         stack = args.case if args.case in STACKS else None
-        only = None if args.case == "all" or stack else {args.case}
+        only = None if args.case == "all" or stack else set(_op_names(args.case))
         units = builder.op_units(only, config_dir=directory, stack=stack)
         if not units:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
+            return None
+        if only and len(only) > len({u.op for u in units}):
+            # Named and not built is not the same as not named. A kernel with no driver, or none
+            # this config set has a grid for, is silently dropped by op_units -- and asking for
+            # twenty and getting nineteen must not read as success.
+            missing = sorted(only - {u.op for u in units})
+            print(f"named but not built: {missing} -- no driver, marked developed=no, or this "
+                  f"config set declares no grid for them", file=sys.stderr)
             return None
         what = f"stack {stack!r}" if stack else ("all ops" if only is None else args.case)
         print(f"per-op sweep: {len(units)} (op, shape, width) items — {what}", flush=True)
@@ -753,6 +800,14 @@ def cmd_build(args: argparse.Namespace) -> int:
     selected = (_module_pass if module_pass else _op_pass)()
     if selected is None:
         return 2
+
+    # Op units only: a Case has no shard of its own (build_all decomposes it into Units first), so
+    # there is nothing to compare until that happens, and `--resume` already filters there.
+    if not module_pass:
+        rc = _refuse_rebuilding_finished_units(
+            selected, Path(args.shards).expanduser(), args.resume)
+        if rc:
+            return rc
 
     # `fill_gaps=False`: this is one pass and it searches the whole grid. The flag exists for a pass
     # that runs AFTER another has already tuned a key -- it re-ranks 3 configs instead of sweeping --
@@ -1165,7 +1220,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="work item = (op, shape bucket) driven through its registry driver, "
                           "instead of (case, dims, length, mode) driving a whole module. No "
                           "redundancy: each (op, bucket) is tuned exactly once. This is the "
-                          "DEFAULT for `build all`.")
+                          "DEFAULT for `build all`. The positional takes one kernel name or a "
+                          "comma list of them, and a list is ONE sweep -- one import, one GPU "
+                          "pool, one interleaved work list.")
     bld.add_argument("--per-module", action="store_true",
                      help="force the module-unit decomposition for `build all`. Reaches only the "
                           "kernels a module dispatches to, so it does not produce a complete "

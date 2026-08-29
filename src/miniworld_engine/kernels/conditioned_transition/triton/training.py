@@ -34,7 +34,7 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 
 
@@ -316,7 +316,13 @@ def _b2b_fwd_train_kernel(
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
             b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
-        h = a * tl.sigmoid(a) * b
+        # Cast before the squeeze dot: `a` and `b` are fp32 accumulators and `ws_t` carries the
+        # weight's own dtype, and `tl.dot` requires one dtype for both operands. Without it this
+        # kernel does not COMPILE at bf16 -- "Both operands must be same dtype. Got fp32 and bf16"
+        # -- while its inference twin (inference.py) and the transition b2b (fused.py) both cast
+        # here and compile. registry.csv declares this family fp32, where the cast is a no-op, so
+        # nothing had ever asked it to build in the precision that fails.
+        h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)
         ws_t = tl.load(ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
                        mask=col_mask[:, None] & d_mask[None, :], other=0.0)
         out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
@@ -380,6 +386,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
     scale = torch.empty(M, D, device=x.device, dtype=x.dtype)
+    check_tile_axes("cond_transition_fwd_b2b_saveact_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _b2b_fwd_train_kernel[grid](
         x, cond, wa, wb, ws, wsc, bsc, y, ab, h, out, scale, M, ND, K, DC,

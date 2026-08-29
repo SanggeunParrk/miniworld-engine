@@ -30,6 +30,13 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 PY = str(REPO / ".pixi/envs/default/bin/python")
+#: One config per op, for tools that want a kernel to RUN rather than to be tuned. It used to be
+#: `.bench/onecfg`, which is untracked scratch: it exists on the machine that made it and nowhere
+#: else, and on this one it had gone stale -- written before the tile visit order became an axis,
+#: so its files declare no GROUP_M and every kernel that now takes one fails to launch under it.
+#: `blk64` is the same thing, tracked: one row per op, and it moves when the kernels move.
+ONE_CONFIG_PER_OP = REPO / "src/miniworld_engine/autotune/configs/blk64"
+
 REGISTRY = REPO / "src/miniworld_engine/kernels/registry.csv"
 
 CHILD = r"""
@@ -124,7 +131,7 @@ def main() -> int:
     ap.add_argument("--families", default="")
     ap.add_argument("--observed", default="", help="capture-hook mode: write op -> dtype seen here")
     args = ap.parse_args()
-    cfg = os.environ.get("MINIWORLD_CONFIG_DIR") or str(REPO / ".bench/onecfg")
+    cfg = os.environ.get("MINIWORLD_CONFIG_DIR") or str(ONE_CONFIG_PER_OP)
 
     want = {f for f in args.families.split(",") if f}
     todo = [r for r in rows() if "fp32" in r["dtypes"] and r["driver"].strip()

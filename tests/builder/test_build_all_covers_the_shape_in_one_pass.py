@@ -42,9 +42,15 @@ def spy(monkeypatch, tmp_path):
     return calls
 
 
-def _args(*extra, case="all"):
-    """Parsed by the REAL parser, so the test cannot drift from the command it is about."""
-    return cli.build_parser().parse_args(["build", case, *extra])
+def _args(shards, *extra, case="all"):
+    """Parsed by the REAL parser, so the test cannot drift from the command it is about.
+
+    ``shards`` is always the test's own tmp dir. It defaults to ``~/.cache/miniworld-build``, and
+    `cmd_build` now refuses to re-bench units that directory already holds -- so a developer with a
+    real half-finished build on the machine made these tests fail for a reason that had nothing to
+    do with them.
+    """
+    return cli.build_parser().parse_args(["build", case, "--shards", str(shards), *extra])
 
 
 def _run(args):
@@ -52,8 +58,8 @@ def _run(args):
     assert rc == 0, rc
 
 
-def test_the_default_is_the_op_sweep_alone(spy) -> None:
-    _run(_args())
+def test_the_default_is_the_op_sweep_alone(spy, tmp_path) -> None:
+    _run(_args(tmp_path))
     assert len(spy) == 1, f"`build all` ran {len(spy)} pass(es); the op sweep now covers the shape"
     assert spy[0]["kind"] == "OpUnit", spy
     assert spy[0]["fill_gaps"] is False, "the declared sweep must bench the full grid"
@@ -80,21 +86,21 @@ def test_the_op_sweep_drives_more_than_one_width(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(("flag", "kind"), [("--per-op", "OpUnit"), ("--per-module", "Case")])
-def test_an_explicit_flag_still_asks_for_one_pass(spy, flag, kind) -> None:
-    _run(_args(flag))
+def test_an_explicit_flag_still_asks_for_one_pass(spy, tmp_path, flag, kind) -> None:
+    _run(_args(tmp_path, flag))
     assert len(spy) == 1, spy
     assert spy[0]["kind"] == kind, spy
     assert spy[0]["fill_gaps"] is False, "an explicit single pass is the unmodified old behaviour"
 
 
-def test_a_named_case_still_gets_its_single_module_pass(spy) -> None:
+def test_a_named_case_still_gets_its_single_module_pass(spy, tmp_path) -> None:
     """Two passes are what `build all` means, not what `build` means.
 
     `build <case>` names a module; `--per-op <kernel>` names a kernel. Running the op pass for a
     case name filters `op_units` by a name no kernel has, so it finds nothing and the command exits
     2 -- which is what `build gated_projection grid` did for one commit, having worked before it.
     """
-    _run(_args(case="gated_projection"))
+    _run(_args(tmp_path, case="gated_projection"))
     assert len(spy) == 1, f"a named case ran {len(spy)} passes: {spy}"
     assert spy[0]["kind"] == "Case", spy
     assert spy[0]["fill_gaps"] is False, spy

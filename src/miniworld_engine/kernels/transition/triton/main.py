@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tiles import tile_order
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 from jaxtyping import Float
 
@@ -115,9 +115,7 @@ def _expand_swiglu(
     """
     M, N = x.shape
     expand = torch.empty(M, n * N, dtype=x.dtype, device=x.device)
-    grid = lambda META: [
-        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(n * N, META["BLOCK_N"]),
-    ]
+    grid = lambda META: tile_grid(M, n * N, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     transition_fwd_kernel[grid](
         x,
         expand_a_weight,

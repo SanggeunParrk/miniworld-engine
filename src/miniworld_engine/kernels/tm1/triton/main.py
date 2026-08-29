@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tiles import tile_order
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 from einops import rearrange
 from jaxtyping import Float
@@ -260,9 +260,7 @@ def _tm1_fwd(
     M, N = x.shape
     left = torch.empty_like(x)
     right = torch.empty_like(x)
-    grid = lambda META: [
-        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
-    ]
+    grid = lambda META: tile_grid(M, N, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     fused_sigmoid_gate_fwd_kernel[grid](
         x,
         left_gate_weight,
@@ -306,9 +304,7 @@ def _tm1_bwd(
     dLB = torch.empty_like(x)
     dRA = torch.empty_like(x)
     dRB = torch.empty_like(x)
-    grid = lambda META: [
-        triton.cdiv(M, META["BLOCK_M1"]) * triton.cdiv(N, META["BLOCK_N"]),
-    ]
+    grid = lambda META: tile_grid(M, N, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     fused_sigmoid_gate_bwd_kernel[grid](
         x,
         left_gate_weight,

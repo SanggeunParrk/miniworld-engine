@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 def main() -> int:
     from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
+
     from miniworld_engine.kernels.drivers import SHAPE_MODE
     from miniworld_engine.kernels.drivers.adaln import _EPS, _adaln_args
     from miniworld_engine.kernels.drivers.conditioned_transition import _D, _DC

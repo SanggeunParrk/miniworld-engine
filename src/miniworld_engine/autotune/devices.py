@@ -32,7 +32,18 @@ _REGISTRY = _PKG / "kernels" / "registry.csv"
 #: wrote its record nowhere.
 _DEVICES = _PKG / "autotune" / "manifests"
 
-_FIELDS = ["kernel", "backend", "family", "file", "status", "detail"]
+#: `dtype` is part of a row's IDENTITY, not a note on it. A manifest row says what a kernel
+#: measured, and what it measures depends on the precision it ran at: `layernorm_fwd_saveact_triton`
+#: is 2.8e-03 in bf16 and 1.7e-07 in fp32, four orders apart. The file used to hold one row per
+#: kernel, so a run at the other precision REPLACED the first one's number and left nothing saying
+#: which precision was in the file -- and the bands are calibrated from these numbers
+#: (`test_a_declared_band_is_above_what_that_kernel_measured`), so a single fp32 run would have
+#: silently re-priced every bf16 band four orders too tight. Every row written before this column
+#: existed was bf16: it was the only precision the drivers ever ran (see the driver dtype fix).
+_FIELDS = ["kernel", "backend", "family", "file", "status", "detail", "dtype"]
+
+#: What a row with no `dtype` cell means. See `_FIELDS`.
+_LEGACY_DTYPE = "bf16"
 
 #: Written as the first row, kernel `#provenance`. A manifest is the only evidence that any kernel
 #: has ever run on a given card, and without this it does not say WHEN or against WHICH code -- so
@@ -66,6 +77,9 @@ def _provenance_row() -> dict:
         "file": "dirty" if _git("status", "--porcelain") else "clean",
         "status": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "detail": _git("describe", "--tags", "--always"),
+        # The provenance row is about the FILE, not about one measurement, so it names no
+        # precision. Present because DictWriter refuses a row missing a declared field.
+        "dtype": "",
     }
 
 
@@ -83,7 +97,8 @@ def manifest_path(gpu_key: str) -> Path:
     return _DEVICES / f"{gpu_key}.csv"
 
 
-def record(gpu_key: str, results: dict[str, tuple[bool, str]]) -> Path:
+def record(gpu_key: str, results: dict[str, tuple[bool, str]],
+           dtype: str | None = None) -> Path:
     """Merge what a run observed -- ``kernel -> (ran, detail)`` -- into this GPU's manifest.
 
     MERGE, not overwrite. Every caller is a PARTIAL run: `bench_kernel all` reaches 29 of the 103
@@ -96,21 +111,33 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]]) -> Path:
     A kernel this run did not touch keeps whatever the manifest already said about it; one that
     has never been seen is `untested`. A run that DID touch a kernel always wins, so a kernel that
     starts failing is recorded as failing.
+
+    ``dtype`` is the precision this run measured at, defaulting to the drivers' own. A run merges
+    into ITS precision's rows and leaves the other precision's alone -- the two are different
+    measurements of the same kernel, not competing answers, and before the column existed the
+    second one overwrote the first.
     """
-    prior = {r["kernel"]: r for r in load_manifest(gpu_key)}
+    if dtype is None:
+        from miniworld_engine.kernels.drivers import DTYPE_MODE
+        dtype = DTYPE_MODE
+    prior = load_manifest(gpu_key)
+    mine = {r["kernel"]: r for r in prior if r["dtype"] == dtype}
     rows = []
     for entry in registry():
         ran, detail = results.get(entry["kernel"], (None, ""))
         if ran is None:
-            was = prior.get(entry["kernel"], {})
+            was = mine.get(entry["kernel"], {})
             status, detail = was.get("status", "untested"), was.get("detail", "")
         else:
             status = "ok" if ran else "failed"
         rows.append({
             "kernel": entry["kernel"], "backend": entry["backend"],
             "family": entry["family"], "file": entry["file"],
-            "status": status, "detail": detail,
+            "status": status, "detail": detail, "dtype": dtype,
         })
+    # Every OTHER precision's rows, carried through untouched. Sorted after this run's, so the
+    # file reads as one block per precision rather than interleaved.
+    rows += [r for r in prior if r["dtype"] != dtype]
     _DEVICES.mkdir(parents=True, exist_ok=True)
     path = manifest_path(gpu_key)
     # BEFORE opening the file. `_provenance_row` shells out to `git status`, and opening the
@@ -126,12 +153,21 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]]) -> Path:
     return path
 
 
-def load_manifest(gpu_key: str) -> list[dict]:
+def load_manifest(gpu_key: str, dtype: str | None = None) -> list[dict]:
+    """This card's rows, optionally only those measured at ``dtype``.
+
+    A row with no `dtype` cell is bf16 -- it was written before the column existed, when bf16 was
+    the only precision the drivers ran. Filled in here rather than in the file so an old manifest
+    stays readable.
+    """
     path = manifest_path(gpu_key)
     if not path.is_file():
         return []
     with path.open(newline="") as handle:
-        return [r for r in csv.DictReader(handle) if r["kernel"] != _PROVENANCE]
+        rows = [r for r in csv.DictReader(handle) if r["kernel"] != _PROVENANCE]
+    for r in rows:
+        r["dtype"] = (r.get("dtype") or "").strip() or _LEGACY_DTYPE
+    return [r for r in rows if dtype is None or r["dtype"] == dtype]
 
 
 def provenance(gpu_key: str) -> dict | None:
@@ -160,5 +196,10 @@ def untested_kernels(gpu_key: str) -> frozenset[str]:
 
 
 def kernels_for(gpu_key: str, family: str) -> tuple[str, ...]:
-    return tuple(r["kernel"] for r in load_manifest(gpu_key)
-                 if r["family"] == family and r["status"] == "ok")
+    """This family's kernels that ran here, once each. A kernel measured at both precisions has a
+    row per precision, and callers want the kernel list, not the measurement list."""
+    out: list[str] = []
+    for r in load_manifest(gpu_key):
+        if r["family"] == family and r["status"] == "ok" and r["kernel"] not in out:
+            out.append(r["kernel"])
+    return tuple(out)

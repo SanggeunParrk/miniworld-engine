@@ -29,7 +29,7 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 
 
@@ -178,6 +178,7 @@ def cond_transition_inference(
     D = ws.shape[0]
     DC = cond.shape[1]
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
+    check_tile_axes("cond_transition_fwd_b2b_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _cond_transition_inference_kernel[grid](
         x, cond, wa.contiguous(), wb.contiguous(), ws.contiguous(),
