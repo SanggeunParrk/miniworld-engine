@@ -37,8 +37,6 @@ TF32 tensor cores" and ``bench_kernel_cond_transition_tail`` is fp32-only. The o
 """
 from __future__ import annotations
 
-import torch
-
 from miniworld_engine.autotune.shape_key import atom_key
 from miniworld_engine.kernels.drivers import (
     FP32,
@@ -193,65 +191,3 @@ def cond_transition_squeeze_gate_saveact():
 
 
 
-def cond_transition_bwd_gemm():
-    """train_fused._dgemm_kernel as the backward calls it: dcond = dscale(M,D) @ Wsc(D,DC)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
-        _dgemm,
-    )
-
-    wsc = _rand(_D, _DC, dtype=FP32)
-    _dgemm(_rand(_M, _D, dtype=FP32), wsc, _M, _DC, _D, wsc.stride(0), wsc.stride(1),
-           shape_key=_SHAPE_KEY)
-
-
-def cond_transition_bwd_swiglu_dx():
-    """train_fused._dx_fused_kernel: dx = da@Wa + db@Wb, da/db recomputed from (dh, ab)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
-        _dx_fused,
-    )
-
-    _, _, wa, wb, *_ = _ct_args()
-    _dx_fused(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32), wa, wb,
-              shape_key=_SHAPE_KEY)
-
-
-def cond_transition_bwd_gate_squeeze_dx():
-    """train_fused._dh_gatebwd_kernel: dh = (sigmoid(scale)*dy) @ Ws, out/scale/dy (M, D)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
-        _dh_gatebwd,
-    )
-
-    _, _, _, _, ws, *_ = _ct_args()
-    _dh_gatebwd(_rand(_M, _D, dtype=FP32), _rand(_M, _D, dtype=FP32), _rand(_M, _D, dtype=FP32),
-                ws, _ND, shape_key=_SHAPE_KEY)
-
-
-def cond_transition_bwd_swiglu_dx_packed():
-    """train_fused._dx_swiglubwd_kernel: dx = dab @ Wcat, Wcat = cat([Wa, Wb]) (2ND, K)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
-        _dx_swiglubwd,
-    )
-
-    _, _, wa, wb, *_ = _ct_args()
-    _dx_swiglubwd(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32),
-                  torch.cat([wa, wb], dim=0), shape_key=_SHAPE_KEY)
-
-
-def cond_transition_bwd_swiglu_packed():
-    """train_fused._swiglu_bwd_pack_kernel: dab = [da|db] from (dh (M,ND), ab (M,2ND))."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
-        _swiglu_bwd_pack,
-    )
-
-    _swiglu_bwd_pack(_rand(_M, _ND, dtype=FP32), _rand(_M, 2 * _ND, dtype=FP32),
-                     shape_key=_SHAPE_KEY)
-
-
-def cond_transition_bwd_dw():
-    """train_fused._wgrad_kernel as the backward's dWs would use it: dWs(D,ND) = dout(M,D)ᵀ @ h(M,ND)."""
-    from miniworld_engine.kernels.conditioned_transition.triton.train_fused import (
-        _wgrad,
-    )
-
-    _wgrad(_rand(_M, _D, dtype=FP32), _rand(_M, _ND, dtype=FP32), _D, _ND,
-           shape_key=_SHAPE_KEY)

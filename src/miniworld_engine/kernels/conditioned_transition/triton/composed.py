@@ -242,23 +242,3 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=Non
     return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)
 
 
-def cond_transition_fwd_12_345(x, cond, wa, wb, ws, wsc, bsc, length=None):
-    """The 1+2 | 3+4+5 two-triton-kernel forward — UNIFORM for atom (d=128) and token (d=768).
-
-    Numbering the post-AdaLN ops: 1=expand(a=x@Wa^T,b=x@Wb^T) 2=SwiGLU(h=silu(a)*b)
-    3=squeeze(out=h@Ws^T) 4=to_scale(scale=cond@Wsc^T+b_sc) 5=gate(y=sigmoid(scale)*out).
-
-    Exactly TWO kernels, h:(M,ND) round-trips HBM between them (no register-resident squeeze,
-    no b2b, no spill — works for any d):
-      - Kernel 1 (1+2): expand + SwiGLU -> h          (``_expand_swiglu``, K-tiled, tl.dot tf32)
-      - Kernel 2 (3+4+5): squeeze + to_scale + gate -> y  (``_squeeze_gate``, ND- & DC-tiled, fused)
-    fp32 io, TF32 tensor cores. This is the structure to ship (simpler than the b2b/CUTLASS paths).
-
-    ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
-    modules/conditioned_transition/module.py. None raises: M alone cannot say whether it is L or L*L.
-    """
-    wa = wa.contiguous(); wb = wb.contiguous(); ws = ws.contiguous()
-    wsc = wsc.contiguous(); bsc = bsc.contiguous()
-    shape_key = atom_key(length if length is not None else length_of(x.shape))
-    h = _expand_swiglu(x, wa, wb, shape_key=shape_key)            # 1+2
-    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)  # 3+4+5

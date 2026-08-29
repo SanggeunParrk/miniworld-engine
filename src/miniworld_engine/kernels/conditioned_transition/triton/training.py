@@ -387,7 +387,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
 # --- token (d>=256): composed 2-kernel forward emitting ab,h,out,scale -----------------
 def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
     """token fused composed training forward -> (y, ab=[a|b], h, out, scale)."""
-    from .train_fused import _fwd_expand_swiglu, _fwd_squeeze_gate
+    from .fwd_saveact import _fwd_expand_swiglu, _fwd_squeeze_gate
 
     # One key for both kernels: they are two halves of one call at one L, and `h` between them is
     # (M, ND), so kernel B could not re-derive the same L from its own input anyway.
