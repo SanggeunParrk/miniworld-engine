@@ -345,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exc()
 
     key = gpu_key()
-    path = devices.record(key, results)
+    path = devices.record(key, results, skipped=skipped)
     have = sum(1 for v in results.values() if v[0])
     checked = sum(1 for r in rows if (r.get("check") or "").strip()
                   and results.get(r["kernel"], (False,))[0])

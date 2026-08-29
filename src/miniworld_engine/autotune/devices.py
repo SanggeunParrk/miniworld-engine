@@ -74,7 +74,14 @@ def _provenance_row() -> dict:
     return {
         "kernel": _PROVENANCE, "backend": version,
         "family": _git("rev-parse", "HEAD")[:12],
-        "file": "dirty" if _git("status", "--porcelain") else "clean",
+        # The tree state of the CODE, with this directory excluded. The provenance answers "against
+        # which source was this produced", and the manifests are the evidence, not the source. A
+        # run at the second precision would otherwise always say `dirty`: the run at the first one
+        # has just rewritten the file it is standing in. (Same failure as computing this row after
+        # opening the manifest for writing, which truncates it -- fixed once already, one line up.)
+        "file": "dirty" if _git("status", "--porcelain", "--",
+                                ".", ":(exclude)src/miniworld_engine/autotune/manifests")
+        else "clean",
         "status": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "detail": _git("describe", "--tags", "--always"),
         # The provenance row is about the FILE, not about one measurement, so it names no
@@ -103,7 +110,7 @@ def _declares(entry: dict) -> frozenset[str]:
 
 
 def record(gpu_key: str, results: dict[str, tuple[bool, str]],
-           dtype: str | None = None) -> Path:
+           dtype: str | None = None, skipped: dict[str, str] | None = None) -> Path:
     """Merge what a run observed -- ``kernel -> (ran, detail)`` -- into this GPU's manifest.
 
     MERGE, not overwrite. Every caller is a PARTIAL run: `bench_kernel all` reaches 29 of the 103
@@ -136,11 +143,18 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
         if dtype not in _declares(entry):
             continue
         ran, detail = results.get(entry["kernel"], (None, ""))
-        if ran is None:
+        if ran is not None:
+            status = "ok" if ran else "failed"
+        elif entry["kernel"] in (skipped or {}):
+            # A THIRD status, because there are three answers and "failed" is not one of them for a
+            # kernel this card cannot run. Six arch-gated kernels sat at `failed` in the committed
+            # manifest -- recorded before the arch gate existed, then carried forward untouched by
+            # every run since, because a skipped kernel never reached `results` and so never
+            # updated its own row. The verdict outlived the run that produced it.
+            status, detail = "skipped", skipped[entry["kernel"]]
+        else:
             was = mine.get(entry["kernel"], {})
             status, detail = was.get("status", "untested"), was.get("detail", "")
-        else:
-            status = "ok" if ran else "failed"
         rows.append({
             "kernel": entry["kernel"], "backend": entry["backend"],
             "family": entry["family"], "file": entry["file"],
@@ -209,6 +223,8 @@ def runnable_kernels(gpu_key: str) -> frozenset[str]:
 
 def untested_kernels(gpu_key: str) -> frozenset[str]:
     """Declared but never exercised here. These are the holes."""
+    # `skipped` counts as tested: the card was asked and gave a definite answer. A hole is a
+    # kernel nothing has ever tried here, not one this card is known not to run.
     tested = {r["kernel"] for r in load_manifest(gpu_key) if r["status"] != "untested"}
     return frozenset(registered_kernels() - tested)
 

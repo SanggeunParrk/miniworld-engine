@@ -142,3 +142,60 @@ def test_a_row_for_a_precision_the_kernel_no_longer_declares_is_dropped(rows, mo
     assert (a, "fp32") in got
     assert (a, "bf16") not in got, "a bf16 row survived for a kernel that no longer declares bf16"
     assert (b, "bf16") in got, "an unrelated kernel's bf16 row was dropped too"
+
+
+def test_a_skipped_kernel_says_skipped_rather_than_keeping_an_old_verdict(rows):
+    """"Wrong card" and "wrong answer" are different, and the file has to keep them apart.
+
+    Six arch-gated kernels sat at `failed` in the committed A6000 manifest -- recorded before the
+    arch gate existed, and carried forward untouched by every run since, because a skipped kernel
+    never reaches `results` and so never updates its own row. `docs/supported.md` cites this file
+    as its evidence, so six kernels were documented as broken on a card that simply cannot run
+    them.
+    """
+    a, b = _two_kernels()
+    devices.record(GPU, {a: (False, "OutOfResources")}, dtype="bf16")
+    assert {r["kernel"]: r["status"] for r in rows()}[a] == "failed"
+
+    devices.record(GPU, {b: (True, "ok")}, dtype="bf16", skipped={a: "needs sm90, this card is sm86"})
+    got = {r["kernel"]: (r["status"], r["detail"]) for r in rows()}
+    assert got[a][0] == "skipped", "the stale `failed` verdict outlived the run that produced it"
+    assert "sm90" in got[a][1], got[a]
+    assert got[b][0] == "ok"
+
+
+def test_a_skip_is_not_a_hole(rows):
+    """`untested_kernels` is the list of things nobody has tried here. A kernel this card is known
+    not to run has been tried and answered; leaving it in that list makes the holes unclosable."""
+    a, _ = _two_kernels()
+    devices.record(GPU, {}, dtype="bf16", skipped={a: "needs sm100, this card is sm86"})
+    assert a not in devices.untested_kernels(GPU)
+
+
+def test_writing_the_manifest_does_not_make_the_tree_look_dirty(monkeypatch):
+    """The provenance says what SOURCE produced the evidence, so the evidence cannot be the dirt.
+
+    Running both precisions in one job always reported `dirty`: the bf16 run rewrites the manifest,
+    and the fp32 run that follows sees it modified. Same shape as the bug one line above it in
+    `record` -- computing the row after opening the file for writing, which truncates it, so the
+    act of recording made the record say the tree was unclean.
+    """
+    import subprocess
+
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    # `_provenance_row` imports subprocess inside the function, so it resolves the module object
+    # at call time and patching the module reaches it.
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    devices._provenance_row()
+    status = next((c for c in seen if c[:2] == ["git", "status"]), None)
+    assert status is not None, f"no `git status` call: {seen}"
+    joined = " ".join(status)
+    assert "autotune/manifests" in joined, (
+        f"`git status` does not exclude the manifests, so writing one makes the next run report a "
+        f"dirty tree: {status}")
+    assert ":(exclude)" in joined, status
