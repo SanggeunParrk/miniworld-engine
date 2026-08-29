@@ -29,6 +29,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+
 
 
 
@@ -80,10 +82,15 @@ def _cond_transition_inference_kernel(
     stride_om, stride_od,
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr,
     BLOCK_K_D: tl.constexpr, BLOCK_K_DC: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. The fused b2b holds h in registers, so the only
+    # operands read are x and the weights. `K` is the output width here -- this kernel drops D as a
+    # separate argument because D == K (see the note above the signature).
+    pid_m, pid_d = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(K, BLOCK_K_ND), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
 
@@ -171,9 +178,7 @@ def cond_transition_inference(
     D = ws.shape[0]
     DC = cond.shape[1]
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
-    grid = lambda meta: (  # noqa: E731
-        triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_K_ND"]),
-    )
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _cond_transition_inference_kernel[grid](
         x, cond, wa.contiguous(), wb.contiguous(), ws.contiguous(),
         wsc.contiguous(), bsc.contiguous(), out,

@@ -34,6 +34,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+
 
 
 # autograd Functions cannot be @typecheck'd cleanly; keep precision policy explicit.
@@ -281,10 +283,18 @@ def _b2b_fwd_train_kernel(
     stride_sm, stride_sc,     # scale:(M, D)
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr,
     BLOCK_K_D: tl.constexpr, BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. This is the b2b, so ND is looped INSIDE the
+    # program and every program reads the whole of Wa and Wb -- the weights are what gets re-read
+    # here, not x, which is the opposite of the composed expand GEMM. So the row-first walk this
+    # kernel has always done may well be the right one; the ladder carries 65536 for exactly that,
+    # and the tuner decides per card and shape instead of the grid shape deciding for it.
+    # `K` is the output width: this kernel drops D as an argument because D == K.
+    pid_m, pid_d = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(K, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
     dcols = pid_d * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -370,8 +380,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
     scale = torch.empty(M, D, device=x.device, dtype=x.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),  # noqa: E731
-                         triton.cdiv(D, meta["BLOCK_N"]))
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _b2b_fwd_train_kernel[grid](
         x, cond, wa, wb, ws, wsc, bsc, y, ab, h, out, scale, M, ND, K, DC,
         x.stride(0), x.stride(1), cond.stride(0), cond.stride(1),

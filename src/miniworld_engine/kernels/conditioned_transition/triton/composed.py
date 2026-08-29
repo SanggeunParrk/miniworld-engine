@@ -44,6 +44,7 @@ import triton.language as tl
 # anything: `length_of` refuses a rank-2 shape, so that path raises with a message saying to compute
 # the key at the caller. Every live caller passes `length`; the drivers and checkers pass
 # `shape_key=` directly.
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
 
 
@@ -59,48 +60,11 @@ def _expand_swiglu_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
 ):
-    # GROUP_M is the tile VISIT ORDER, and the order is what decides whether x stays in L2.
-    # One program computes one (row-tile, col-tile) of h; it reads a row strip of x and a column
-    # strip of W. Programs run roughly in launch order, so consecutive ids decide what is reused:
-    #
-    #   GROUP_M = 1          walk the columns first -- one x strip serves all n_n programs
-    #   GROUP_M >= n_m       walk the rows first    -- one W strip serves all n_m programs
-    #   in between           blocks of GROUP_M rows, balancing the two
-    #
-    # This kernel used a 2-D grid, which fixes the order: CUDA varies axis 0 fastest, so
-    # `pid_m = program_id(0)` walked the ROWS first and protected W. W is the small operand -- 4.5
-    # MB at d=768, inside an A6000's 6 MB L2 whatever the order -- while x is 96 MB and was
-    # re-read once per column tile. Measured on an A6000 at M=32768, d=768, tile 64x64 fp32:
-    #
-    #   2-D grid  4.675 ms      GROUP_M=512 (= n_m)  4.675 ms      <- the same point on this axis
-    #   GROUP_M=1 3.806 ms      GROUP_M=8            3.569 ms      <- 1.31x
-    #
-    # It is ONE axis and the 2-D grid sat at the end of it, so the ladder in the config CSV carries
-    # a value larger than any n_m: the tuner can always choose the old behaviour, which it should
-    # on a card whose L2 holds x (an H100's 50 MB, a B200's 126 MB) -- there the re-read never
-    # happens and this ordering buys nothing. The benefit appeared between x/L2 = 2 and 4 and
-    # plateaued by 4; below 2 it was within noise.
-    #
-    # TUNED AGAINST TUNED, which is the number that decides whether the axis earns its cost: over
-    # 455 configs (tile 32..256 square-ish, warps 4/8, stages 2/3/4, both arms free to pick any of
-    # them), the best this kernel can do WITHOUT the axis is 64x128 w4 s2 at 3.431 ms and WITH it
-    # 256x64 w8 s2 GROUP_M=4 at 3.116 ms -- 1.10x, not the 1.33x a single fixed tile suggests. A
-    # fixed tile flatters the axis because the warp/stage pair that suits row-first order is not
-    # the one that suits column-first, and holding those fixed hands the old order a bad config.
-    #
-    # 1.10x is why the ladder is three values and not seven: the axis multiplies this kernel's grid,
-    # and 4/16 straddle the measured optimum while 65536 keeps today's behaviour reachable. The
-    # other 13 GEMMs on the same 2-D pattern are NOT converted on this evidence -- 10% on one card,
-    # from a search that could not run a third of its configs, does not pay for 3x the tuning of
-    # each of them.
-    pid = tl.program_id(0).to(tl.int64)
-    n_m = tl.cdiv(M, BLOCK_M1)
-    n_n = tl.cdiv(ND, BLOCK_N)
-    per_group = GROUP_M * n_n
-    first_m = (pid // per_group) * GROUP_M
-    size_m = min(n_m - first_m, GROUP_M)
-    pid_m = first_m + ((pid % per_group) % size_m)
-    pid_n = (pid % per_group) // size_m
+    # Visit order, tuned: see kernels/_tiles.py. This kernel is where it was measured -- the
+    # 2-D grid it used to launch with is the GROUP_M >= n_m end of the same axis, 4.675 ms against
+    # 3.569 at GROUP_M=8 (A6000, M=32768, d=768, tile 64x64 fp32), and 1.10x tuned against tuned.
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(M, BLOCK_M1), tl.cdiv(ND, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
@@ -153,10 +117,13 @@ def _squeeze_gate_kernel(
     stride_om, stride_od,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. Squeeze half of the composed pair.
+    pid_m, pid_d = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(D, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     dcols = pid_d * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
@@ -221,8 +188,7 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         )
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
-    # 1-D: the kernel derives both tile indices, so GROUP_M can order them (see the kernel).
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(ND, meta["BLOCK_N"]),)  # noqa: E731
+    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _expand_swiglu_kernel[grid](
         x, wa, wb, h,
         M, ND, K,
@@ -255,7 +221,7 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
     D = ws.shape[0]
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _squeeze_gate_kernel[grid](
         h, cond, ws, wsc, bsc, out,
         M, ND, D, DC,

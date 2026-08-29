@@ -28,6 +28,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+
 
 
 # Flat elementwise stages tile ONE axis (the linear element index) — canonical 1-D sweep,
@@ -67,10 +69,13 @@ def _fwd_expand_swiglu_kernel(
     stride_hm, stride_hn,    # h:  (M, ND)
     stride_abm, stride_abn,  # ab: (M, 2*ND) packed [a | b]
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_n = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. Same GEMM as composed.py's, saving [a|b] as well.
+    pid_m, pid_n = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(ND, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
@@ -119,10 +124,13 @@ def _fwd_squeeze_gate_kernel(
     stride_sm, stride_sc,     # scale:(M, D)
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
+    GROUP_M: tl.constexpr,
     shape_key,
 ):
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. Squeeze: the (M, ND) h is the big operand, Ws (D, ND) the small one.
+    pid_m, pid_d = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(D, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     dcols = pid_d * BLOCK_N + tl.arange(0, BLOCK_N)
     row_mask = rows < M
@@ -180,7 +188,7 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     ab = torch.empty(M, 2 * ND, device=x.device, dtype=x.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _fwd_expand_swiglu_kernel[grid](
         x, wa, wb, h, ab, M, ND, K, 2 * ND,
         x.stride(0), x.stride(1), wa.stride(0), wa.stride(1),
@@ -218,7 +226,7 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
     y = torch.empty(M, D, device=h.device, dtype=h.dtype)
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
     scale = torch.empty(M, D, device=h.device, dtype=h.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _fwd_squeeze_gate_kernel[grid](
         h, cond, ws, wsc, bsc, y, out, scale, M, ND, D, DC,
         h.stride(0), h.stride(1), cond.stride(0), cond.stride(1),

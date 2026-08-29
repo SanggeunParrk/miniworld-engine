@@ -1,2 +1,2 @@
-BLOCK_K_D,BLOCK_K_ND,BLOCK_M1,BLOCK_N,num_warps,num_stages
-16,16,16,16,2,1
+BLOCK_K_D,BLOCK_K_ND,BLOCK_M1,BLOCK_N,GROUP_M,num_warps,num_stages
+16,16,16,16,65536,2,1
