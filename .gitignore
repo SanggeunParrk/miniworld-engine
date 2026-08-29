@@ -96,3 +96,11 @@ benchmarks/*/*/results/*/plots/
 # scratch: one-off sbatch scripts and their logs (they belong in a scratchpad, not here)
 *.sbatch
 *.log
+
+# and the two shapes of scratch that are NOT a .sbatch or a .log, both of which have been swept
+# into a commit by `git add -A` before. Probe OUTPUT (`bands_bf16_1.json` and friends: per-kernel
+# relative errors, the input to a band re-derivation) and .scratch/, which holds probe SCRIPTS.
+# The latter lives in the repo rather than a temp dir on purpose: a compute node cannot see the
+# login node's scratchpad, so a script srun has to read must sit on a shared path.
+bands_*.json
+.scratch/
