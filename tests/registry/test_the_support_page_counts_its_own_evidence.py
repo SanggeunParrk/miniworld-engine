@@ -87,7 +87,7 @@ def test_the_arch_counts_match_the_registry() -> None:
             (r.get("arch") or "").strip() or "sm80", 0) + 1
     text = PAGE.read_text()
     for arch, n in sorted(want.items()):
-        row = re.search(rf"^\| {re.escape(arch)} \| (\d+) \|", text, re.M)
+        row = re.search(rf"^\| {re.escape(arch)} \| (\d+) \|", text, re.MULTILINE)
         assert row, f"{PAGE.name} has no row for declared arch {arch} ({n} kernels)"
         assert int(row.group(1)) == n, (
             f"{PAGE.name} says {arch} has {row.group(1)} kernels; registry.csv declares {n}")

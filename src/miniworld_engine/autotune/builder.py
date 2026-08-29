@@ -847,10 +847,29 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: c_atom, c_s and c_token. It used to also carry 256 and 512, which no config presents.
     #: The PAIR ladder keeps 128/256/512: d_pair is 128 in every config, and 256/512 are the
     #: headroom to sweep it.
-    LADDER = {"atom": (ATOM_WIDTH,),
-              "pair": (128, 256, 512),
-              "single": (128, 384, 768),
-              "both": (128, 256, 384, 512, 768)}
+    #
+    #: The two halves are named separately because the headroom is not free and nothing said what
+    #: it costs. PRESENTED are the widths the model actually runs -- AlphaFold-3's c_atom (128),
+    #: c_s (384) and c_token (768), with d_pair at 128. HEADROOM is 256 and 512 on the pair side,
+    #: kept so a config that widens d_pair finds a tuned cache instead of a miss.
+    #
+    #: Measured on the shipped registry: of 1,827 (op, dtype, side, length, width) units in
+    #: `build all`, **674 -- 37% -- are at 256 or 512**, widths no model config presents. That is
+    #: 37% of every full build's GPU time spent on shapes nothing asks for today. Whether to keep
+    #: paying it is a decision about the future, not a fact about the code, so it is written here
+    #: as a decision rather than buried in a literal. Dropping HEADROOM_PAIR makes `build all`
+    #: 1,153 units; the cost of being wrong is a cache miss (a warning and a heuristic subset,
+    #: `cache._miss`), not a failure.
+    #: Literal, not `(ATOM_WIDTH,)`: a test reads these two declarations straight out of the
+    #: source so the split cannot be folded away, and it can only read literals.
+    PRESENTED = {"atom": (128,), "pair": (128,), "single": (128, 384, 768)}
+    HEADROOM_PAIR = (256, 512)
+    assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
+    LADDER = {"atom": PRESENTED["atom"],
+              "pair": tuple(sorted(PRESENTED["pair"] + HEADROOM_PAIR)),
+              "single": PRESENTED["single"],
+              "both": tuple(sorted(set(PRESENTED["pair"] + HEADROOM_PAIR
+                                       + PRESENTED["single"])))}
     out = []
     for r in csv.DictReader(reg.open()):
         if r["backend"] != "triton" or not (r["driver"] or "").strip():
