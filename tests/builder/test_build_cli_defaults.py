@@ -272,4 +272,9 @@ def test_capture_argv_names_the_target_and_its_level() -> None:
     # the atom ladder comes from SHAPES, not the token default
     assert "max_seq_len=384" in atom, atom
     cond = next(j for j in jobs if j.target == "conditioned_transition").bench_args("miniworld")
-    assert {"precision=32", "d_single_token=384"} <= set(cond), cond
+    # fp32 is this family's declared io dtype, so the target still pins it. d_single_token is NOT
+    # pinned any more: the bench builds ConditionedTransition(768, 384) -- krystal's `token_dit`,
+    # AlphaFold-3's c_token conditioned on c_s -- and `d_single_token=384` forced that to 384/384,
+    # a square combination no model config declares.
+    assert "precision=32" in cond, cond
+    assert not [a for a in cond if a.startswith("d_single_token=")], cond

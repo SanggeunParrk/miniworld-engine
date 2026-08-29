@@ -89,8 +89,13 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     "triangle_attention": ModuleTarget(
         ("triangle_attention_bidirectional", "triangle_attention_heads")),
     "attention_pair_bias": ModuleTarget(("attention_pair_bias",)),
-    "conditioned_transition": ModuleTarget(("conditioned_transition",),
-                                           "precision=32 d_single_token=384"),
+    # fp32 stays -- every file in this kernel family states "fp32 io with TF32 tensor cores".
+    # `d_single_token=384` does NOT: the bench builds ConditionedTransition(d_hidden=768,
+    # d_cond=384), krystal's `token_dit`, and pinning d_single_token to 384 made it 384/384 --
+    # square, and a combination the model never builds. It was written when the bench had the two
+    # roles swapped (d_hidden=d_pair, d_cond=d_single_token) and 384 was the only way to get a
+    # sane d_cond out of it.
+    "conditioned_transition": ModuleTarget(("conditioned_transition",), "precision=32"),
     "adaptive_layernorm": ModuleTarget(("adaptive_layernorm",)),
     "augmented_attention_token": ModuleTarget(("augmented_attention",)),
     "augmented_attention_atom": ModuleTarget(("augmented_attention",)),
