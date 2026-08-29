@@ -27,6 +27,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+
 
 from miniworld_engine.autotune.shape_key import both_key, length_of, pack, rows_of, token_key
 
@@ -71,9 +73,12 @@ def _gate_out_fwd(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     shape_key,
+    GROUP_M: tl.constexpr,
 ):
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_n = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. The gated output projection: N wide.
+    pid_m, pid_n = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N), GROUP_M)
     offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
@@ -127,6 +132,7 @@ def _dgrad_epi(
     s_dom, s_don, s_won, s_woh, s_gm, s_gh, s_rm, s_rh, s_om, s_oh,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr,
     shape_key,
+    GROUP_M: tl.constexpr,
 ):
     """Fuses the dgrad GEMM d_a = grad_out @ wo with the gate-backward epilogue:
     d_a is never materialized, gate/out_r are read once. One kernel replaces the
@@ -137,8 +143,10 @@ def _dgrad_epi(
     ``wo[N, DH]`` load needed ~N*DH*2 bytes of smem (e.g. 128 KB at N=DH=256), which fits
     A100/H100 but exceeds the ~100 KB/SM of sm_86 (RTX A5000/A6000); tiling makes it
     launchable on any GPU. Math is unchanged (same GEMM + epilogue)."""
-    pid = tl.program_id(0).to(tl.int64)
-    pid_h = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. Fused dgrad + gate epilogue; DH is the output width and N the contraction, tiled inside.
+    pid, pid_h = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(DH, BLOCK_N), GROUP_M)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rh = pid_h * BLOCK_N + tl.arange(0, BLOCK_N)
     mm = rm[:, None] < M
@@ -182,7 +190,7 @@ def _dgrad_epilogue(do2: torch.Tensor, wo: torch.Tensor, g2: torch.Tensor, r2: t
     dr = torch.empty_like(g2)
     dg = torch.empty_like(g2)
     a = torch.empty_like(g2)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]), triton.cdiv(DH, META["BLOCK_N"]))
+    grid = lambda META: tile_grid(M, DH, META["BLOCK_M1"], META["BLOCK_N"])
     _dgrad_epi[grid](
         do2, wo, g2, r2, dr, dg, a, M, N, DH,
         do2.stride(0), do2.stride(1), wo.stride(0), wo.stride(1),
@@ -205,7 +213,7 @@ def _fwd(gate2d: torch.Tensor, outr2d: torch.Tensor, wo: torch.Tensor,
     M, DH = gate2d.shape
     N = wo.shape[0]
     out = torch.empty((M, N), device=gate2d.device, dtype=gate2d.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]), triton.cdiv(N, META["BLOCK_N"]))
+    grid = lambda META: tile_grid(M, N, META["BLOCK_M1"], META["BLOCK_N"])
     _gate_out_fwd[grid](
         gate2d, outr2d, wo, out,
         M, N, DH,
