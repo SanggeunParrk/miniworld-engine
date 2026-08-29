@@ -1,19 +1,19 @@
 kernel,reason
 adaln_bwd_dx_dlnw_triton,"1-D grid over M alone; NC/K2 are looped in-kernel, so one program owns a whole row block across every column and there is no column-tile axis to order"
 adaln_fwd_triton,"1-D grid over M alone; NC is looped in-kernel, so there is no column-tile axis to order"
-layernorm_linear_bwd_fp32_triton,"1-D grid over M alone; N and NH are looped in-kernel"
-layernorm_linear_fwd_fp32_triton,"1-D grid over M alone; N and NH are looped in-kernel"
-layernorm_linear_fwd_triton,"1-D grid over M alone; the launcher says so in its own comment (1-D: N looped in-kernel)"
-transition_layernorm_expand_swiglu_triton,"1-D grid over M alone; the launcher says so in its own comment (N looped in-kernel)"
-trimul_gemm_gate_mmajor_triton,"1-D grid over M alone; H2 and K are looped in-kernel"
-trimul_outproj_layernorm_gemm_gate_triton,"1-D grid over M alone; K is looped in-kernel"
-augmented_attention_fwd_triton,"attention: the grid is (query blocks, batch*heads, d) and the key/value axis is looped in-kernel, so there are no column tiles to group. Axis 0 varies fastest, so consecutive programs already share one head's K/V"
-augmented_attention_bwd_split_triton,"attention: grid axes are (tile, a, batch*head), not (row tile, column tile)"
-augmented_attention_bwd_atomic_triton,"attention: grid axes are (tile, a, batch*head), not (row tile, column tile)"
-bias_only_attention_fwd_triton,"attention: grid is (query blocks, batch*heads, t); the key/value axis is looped in-kernel"
-bias_only_attention_bwd_triton,"attention: grid axes are (tile, batch*head); the key/value axis is looped in-kernel"
-triangle_attention_fwd_triton,"attention: grid is (query blocks, batch*heads, triangle row) = cdiv(L,BLOCK_M1) x B*H x L; N_CTX is looped in-kernel"
-triangle_attention_fwd_contig_triton,"attention: same grid as triangle_attention_fwd_triton"
-triangle_attention_bwd_dq_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel"
-triangle_attention_bwd_dkdv_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel"
-triangle_attention_bwd_atomic_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel"
+layernorm_linear_bwd_fp32_triton,1-D grid over M alone; N and NH are looped in-kernel
+layernorm_linear_fwd_fp32_triton,1-D grid over M alone; N and NH are looped in-kernel
+layernorm_linear_fwd_triton,1-D grid over M alone; the launcher says so in its own comment (1-D: N looped in-kernel)
+transition_layernorm_expand_swiglu_triton,1-D grid over M alone; the launcher says so in its own comment (N looped in-kernel)
+trimul_gemm_gate_mmajor_triton,1-D grid over M alone; H2 and K are looped in-kernel
+trimul_outproj_layernorm_gemm_gate_triton,1-D grid over M alone; K is looped in-kernel
+augmented_attention_fwd_triton,"attention: the grid is (query blocks, batch*heads, d) and the key/value axis is looped in-kernel, so there are no column tiles to group. Axis 0 varies fastest, so consecutive programs already share one head's K/V. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+augmented_attention_bwd_split_triton,"attention: grid axes are (tile, a, batch*head), not (row tile, column tile). The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+augmented_attention_bwd_atomic_triton,"attention: grid axes are (tile, a, batch*head), not (row tile, column tile). The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+bias_only_attention_fwd_triton,"attention: grid is (query blocks, batch*heads, t); the key/value axis is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+bias_only_attention_bwd_triton,"attention: grid axes are (tile, batch*head); the key/value axis is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+triangle_attention_fwd_triton,"attention: grid is (query blocks, batch*heads, triangle row) = cdiv(L,BLOCK_M1) x B*H x L; N_CTX is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+triangle_attention_fwd_contig_triton,"attention: same grid as triangle_attention_fwd_triton. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+triangle_attention_bwd_dq_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+triangle_attention_bwd_dkdv_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
+triangle_attention_bwd_atomic_triton,"attention: grid axes are (tile, batch*head*row); N_CTX is looped in-kernel. The dots live in a @triton.jit helper the registry symbol calls (_attn_fwd_inner / _attn_bwd_dqdkdv / _attn_bwd_dvdbias), so the registry function itself holds no tl.dot -- the contraction is that helper's loop, not a grid axis."
