@@ -33,11 +33,15 @@ GPU: NVIDIA RTX A6000
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_bwd_swiglu_flat_triton' on 'NVIDIA RTX A6000 (sm86)' (float32). Falling back to a heuristic 24 of 240 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
   OK  cond_transition_bwd_swiglu_flat_triton
-  BAD cond_transition_expand_swiglu_saveact_triton: ModuleNotFoundError: No module named 'miniworld_engine.kernels.conditioned_transition.triton.train_fused'
+/home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_expand_swiglu_saveact_triton' on 'NVIDIA RTX A6000 (sm86)' (float32). Falling back to a heuristic 24 of 2592 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  hit = _cached_subset(self, cfgs, nargs, meta)
+  OK  cond_transition_expand_swiglu_saveact_triton
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_expand_swiglu_triton' on 'NVIDIA RTX A6000 (sm86)' (float32). Falling back to a heuristic 24 of 2592 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
   OK  cond_transition_expand_swiglu_triton
-  BAD cond_transition_squeeze_gate_saveact_triton: ModuleNotFoundError: No module named 'miniworld_engine.kernels.conditioned_transition.triton.train_fused'
+/home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_squeeze_gate_saveact_triton' on 'NVIDIA RTX A6000 (sm86)' (float32). Falling back to a heuristic 24 of 7776 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  hit = _cached_subset(self, cfgs, nargs, meta)
+  OK  cond_transition_squeeze_gate_saveact_triton
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_squeeze_gate_triton' on 'NVIDIA RTX A6000 (sm86)' (float32). Falling back to a heuristic 24 of 7776 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
   OK  cond_transition_squeeze_gate_triton
@@ -55,30 +59,30 @@ GPU: NVIDIA RTX A6000
   OK  AdaptiveLayerNorm token_dit 768/384 training fwd     max|diff|=1.562e-02 tol=3e-02
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'layernorm_bwd_atomic_strided_triton' on 'NVIDIA RTX A6000 (sm86)' (bfloat16+float32). Falling back to a heuristic 24 of 288 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
-  OK  AdaptiveLayerNorm token_dit 768/384 training dx      max|diff|=6.298e-08 tol=3e-02
+  OK  AdaptiveLayerNorm token_dit 768/384 training dx      max|diff|=3.516e-08 tol=3e-02
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_expand_swiglu_triton' on 'NVIDIA RTX A6000 (sm86)' (bfloat16). Falling back to a heuristic 24 of 2592 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_squeeze_gate_triton' on 'NVIDIA RTX A6000 (sm86)' (bfloat16). Falling back to a heuristic 24 of 7776 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
-  OK  ConditionedTransition token_dit 768/384 inference    max|diff|=0.000e+00 tol=3e-02
+  OK  ConditionedTransition token_dit 768/384 inference    max|diff|=9.766e-04 tol=3e-02
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_swiglu_triton' on 'NVIDIA RTX A6000 (sm86)' (bfloat16). Falling back to a heuristic 24 of 240 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
-  OK  ConditionedTransition token_dit 768/384 training fwd max|diff|=0.000e+00 tol=3e-02
+  OK  ConditionedTransition token_dit 768/384 training fwd max|diff|=9.766e-04 tol=3e-02
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_bwd_swiglu_flat_triton' on 'NVIDIA RTX A6000 (sm86)' (bfloat16). Falling back to a heuristic 24 of 240 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
-  OK  ConditionedTransition token_dit 768/384 training dx  max|diff|=0.000e+00 tol=3e-02
+  OK  ConditionedTransition token_dit 768/384 training dx  max|diff|=1.455e-10 tol=3e-02
   OK  AdaptiveLayerNorm atom_dit  128/128 inference        max|diff|=1.562e-02 tol=3e-02
   OK  AdaptiveLayerNorm atom_dit  128/128 training fwd     max|diff|=1.562e-02 tol=3e-02
-  OK  AdaptiveLayerNorm atom_dit  128/128 training dx      max|diff|=2.573e-07 tol=3e-02
+  OK  AdaptiveLayerNorm atom_dit  128/128 training dx      max|diff|=1.639e-07 tol=3e-02
 /home/psk6950/practice/miniworld-engine/src/miniworld_engine/autotune/cache.py:698: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'cond_transition_fwd_b2b_triton' on 'NVIDIA RTX A6000 (sm86)' (bfloat16). Falling back to a heuristic 24 of 5832 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
   hit = _cached_subset(self, cfgs, nargs, meta)
-  OK  ConditionedTransition atom_dit  128/128 inference    max|diff|=0.000e+00 tol=3e-02
-  OK  ConditionedTransition atom_dit  128/128 training fwd max|diff|=0.000e+00 tol=3e-02
-  OK  ConditionedTransition atom_dit  128/128 training dx  max|diff|=0.000e+00 tol=3e-02
+  OK  ConditionedTransition atom_dit  128/128 inference    max|diff|=4.578e-05 tol=3e-02
+  OK  ConditionedTransition atom_dit  128/128 training fwd max|diff|=4.578e-05 tol=3e-02
+  OK  ConditionedTransition atom_dit  128/128 training dx  max|diff|=2.501e-12 tol=3e-02
 
 3/3. 768에서 Triton 경로를 실제로 타는가
   d_hidden= 128 -> b2b(atom)
   d_hidden= 768 -> composed(token)
 
 ======================================================================
-실패 2건: driver:cond_transition_expand_swiglu_saveact_triton, driver:cond_transition_squeeze_gate_saveact_triton
+실패 0건 — 전부 통과

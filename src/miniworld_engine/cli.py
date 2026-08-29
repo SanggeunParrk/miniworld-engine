@@ -73,6 +73,20 @@ class ModuleTarget:
     bench_args: str = ""
 
 
+#: The two halves of the model, as `build` selectors. A kernel declares which one launches it in
+#: registry.csv's `stack` column, and `build trunk` / `build diffusion` run the same per-op sweep
+#: `build all` runs over just that half -- the trunk being krystal's Pairformer / MSA / template
+#: stack and the diffusion being token_dit / atom_dit / the SWA atom transformer. A kernel both
+#: sides launch is `both` and is built by EITHER: it has to be tuned for whichever half is built
+#: first, and building one kernel twice costs build time where missing one costs a production
+#: cache miss.
+#:
+#: A THIRD name space, alongside the cases `build <case>` takes and the kernels `--per-op` takes.
+#: It has to be: a case names a module and an op names a kernel, and neither can say "half the
+#: model" -- the trunk is 33 kernels across 7 families, and no module or kernel name spells that.
+STACKS: tuple[str, ...] = ("trunk", "diffusion")
+
+
 #: Every module-level bench target. `bench_module <name>` and `dev capture <name>` take these.
 #:
 #: A module target is named after the production MODULE it benches, spelled the way the engine
@@ -648,7 +662,7 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     """
     from miniworld_engine.autotune.builder import CASE_NAMES  # literal, no imports
 
-    if args.case == "all":
+    if args.case in ("all", *STACKS):
         return 0
     if args.per_op:
         rows = (repo / "src" / "miniworld_engine" / "kernels" / "registry.csv").read_text()
@@ -709,12 +723,18 @@ def cmd_build(args: argparse.Namespace) -> int:
     # --per-module still asks for the module matrix, and it is still the honest way to exercise real
     # dispatch paths. What it is no longer is a REQUIREMENT for coverage.
     def _op_pass():
-        only = None if args.case == "all" else {args.case}
-        units = builder.op_units(only, config_dir=directory)
+        # `all`, a STACK (`trunk` / `diffusion`), or one kernel name. A stack is the same sweep
+        # `all` runs, narrowed by registry.csv's `stack` column to the kernels one half of the
+        # model launches -- so a trunk-first build tunes the Pairformer / MSA / template stack and
+        # nothing else, and the DiT stack can follow later.
+        stack = args.case if args.case in STACKS else None
+        only = None if args.case == "all" or stack else {args.case}
+        units = builder.op_units(only, config_dir=directory, stack=stack)
         if not units:
             print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
             return None
-        print(f"per-op sweep: {len(units)} (op, shape, width) items", flush=True)
+        what = f"stack {stack!r}" if stack else ("all ops" if only is None else args.case)
+        print(f"per-op sweep: {len(units)} (op, shape, width) items — {what}", flush=True)
         return units
 
     def _module_pass():
@@ -729,7 +749,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     # module and `--per-op <kernel>` names a kernel -- so running the op sweep for a case name
     # filters `op_units` by a name no kernel has and returns "no triton op with a driver matched".
     # Which is what this did for one commit, turning `build gated_projection grid` into exit 2.
-    module_pass = args.per_module or (args.case != "all" and not args.per_op)
+    module_pass = args.per_module or (args.case not in ("all", *STACKS) and not args.per_op)
     selected = (_module_pass if module_pass else _op_pass)()
     if selected is None:
         return 2
@@ -1100,7 +1120,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     bld = sub.add_parser("build", help="build the cache by driving the production modules")
     bld.add_argument("case", nargs="?", default="all",
-                     help="build case, or 'all' (the default). With --per-op it is a kernel name "
+                     help="build case, a stack (trunk / diffusion -- half the model, the same "
+                          "per-op sweep `all` runs narrowed to the kernels that half launches), "
+                          "or 'all' (the default). With --per-op it is a kernel name "
                           "from registry.csv instead -- two name spaces, because a case drives a "
                           "module and an op is one kernel. Neither is a BENCH target; see "
                           "`bench_kernel` / `bench_module`.")

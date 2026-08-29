@@ -750,7 +750,8 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
     return problems
 
 
-def op_units(only: set[str] | None = None, config_dir: Path | None = None, driver_widths=None) -> list[OpUnit]:
+def op_units(only: set[str] | None = None, config_dir: Path | None = None, driver_widths=None,
+             stack: str | None = None) -> list[OpUnit]:
     """One item per (triton op with a driver, DECLARED dtype, shape bucket of its declared level).
 
     The level comes from registry.csv and decides the bucket set, so a token kernel is never
@@ -767,6 +768,14 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     be `registered_ops()`: that reflects which kernel modules THIS process happened to import, and
     the parent imports far fewer than the children do -- filtering on it silently dropped 8 more
     ops that have config files and drivers.
+
+    ``stack`` narrows the sweep to one half of the model. registry.csv's ``stack`` column says
+    which side of krystal each kernel is launched from -- ``trunk`` for the Pairformer / MSA /
+    template stack, ``diffusion`` for the DiT stack (token_dit, atom_dit and the SWA atom
+    transformer), ``both`` for a kernel each side launches. Asking for one INCLUDES ``both``: a
+    kernel the trunk launches has to be tuned for a trunk build whether or not the diffusion side
+    launches it too, and building one extra kernel costs time while missing one costs a cache miss
+    in production.
 
     dtype is declared too, in registry.csv's ``dtypes`` column: token kernels are bf16, atom and
     both are bf16|fp32. This used to emit bfloat16 for everything, so the fp32 half of 66 kernels
@@ -826,6 +835,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         if (r.get("developed") or "yes").strip() == "no":
             continue
         if only and r["kernel"] not in only:
+            continue
+        if stack and r.get("stack") not in (stack, "both"):
             continue
         if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
             continue          # this config set declares no grid for it
