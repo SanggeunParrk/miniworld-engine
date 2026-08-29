@@ -260,7 +260,7 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 85 | triton 79, cuda 6 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 80 | triton 74, cuda 6 |
 | **sm90+** | H100 | 2 | cute 2 |
 | **sm100+** | B200 | 4 | cute 4 |
 <!-- END GENERATED: hardware-support -->

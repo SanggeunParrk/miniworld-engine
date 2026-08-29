@@ -10,8 +10,6 @@ transition_fwd_b2b_triton,EPS,"numeric tolerance: only use is rstd = rsqrt(var +
 transition_fwd_b2b_ktiled_triton,D,"D == K (both d_hidden), K already keyed"
 cond_transition_fwd_b2b_triton,D,"D == K == d_hidden, stated in modules/conditioned_transition/module.py; K already keyed"
 cond_transition_fwd_b2b_saveact_triton,D,D == K == d_hidden; K already keyed
-trimul_gemm_gate_packed_mmajor_triton,K,sole launch site (trimul_front_triton) passes K=D and D=D -- the in-proj is square; D already keyed
-trimul_outproj_gemm_sigmoid_triton,K,sole launch site passes K=D and D=D; D already keyed
 trimul_outproj_layernorm_gemm_gate_triton,N,"sole launch site (trimul_back_triton) passes K=D and N=D since Wp/Wg are (D,D), so N == K and K is keyed"
 trimul_gemm_gate_saveact_triton,N,"N == 2*K, proved at the launch site in _input_gemm_fwd; K already keyed"
 trimul_outproj_gemm_gate_saveact_triton,N,"N == K, proved at the launch site in _output_gemm_fwd; K already keyed"

@@ -73,14 +73,13 @@ gated_projection_gate_gemm_triton,_gate_out_fwd,miniworld_engine/kernels/bias_on
 gated_projection_gate_gemm_triton,_gate_out_fwd,miniworld_engine/kernels/bias_only_attention/triton/gate_out.py,61,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
 gated_projection_gate_inplace_flat_triton,_gate_mul_kernel,miniworld_engine/kernels/tm1/cute/launch.py,55,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 gated_projection_gate_packed_flat_triton,_glu_wide_kernel,miniworld_engine/kernels/tm1/cute/launch.py,75,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
-gated_projection_gate_packed_mmajor_triton,_glu_bdll_kernel,miniworld_engine/kernels/trimul_inproj/cute/front_train_sm100.py,119,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 gated_projection_gate_triton,sigmoid_gate_fwd_kernel,miniworld_engine/kernels/gated_projection/triton/main.py,38,BLOCK_K,64,128,16,32,64,16 32 64 128 256,128,16,64,64,0,1,R,1
 gated_projection_gate_triton,sigmoid_gate_fwd_kernel,miniworld_engine/kernels/gated_projection/triton/main.py,38,BLOCK_M1,64,128,16,32,64,16 32 64 128 256,64,32,64,64,1,0,,
 layernorm_bwd_atomic_strided_triton,_ln_bwd_kernel,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,204,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,128,16,64,64,0,0,,
 layernorm_bwd_atomic_triton,layer_norm_bwd_dx_fused,miniworld_engine/kernels/layernorm/triton/main.py,158,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,N,1
 layernorm_bwd_atomic_triton,layer_norm_bwd_dx_fused,miniworld_engine/kernels/layernorm/triton/main.py,158,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
-layernorm_bwd_foldstats_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,986,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,K,1
-layernorm_bwd_foldstats_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,986,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
+layernorm_bwd_foldstats_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,988,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,K,1
+layernorm_bwd_foldstats_triton,_transition_ln_bwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,988,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
 layernorm_bwd_split_mmajor_triton,_ln_bwd_mmajor_kernel,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,59,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,1,1,N,1
 layernorm_bwd_split_mmajor_triton,_ln_bwd_mmajor_kernel,miniworld_engine/kernels/layernorm_linear/triton/mmajor_bwd.py,59,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,0,0,,
 layernorm_bwd_split_triton,_ln_bwd_persistent,miniworld_engine/kernels/layernorm/triton/persistent.py,57,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,1,1,N,1
@@ -113,10 +112,10 @@ layernorm_linear_fwd_triton,_lnl_fwd_kernel,miniworld_engine/kernels/layernorm_l
 layernorm_stats_triton,_stats_kernel,miniworld_engine/kernels/layernorm_linear/triton/stats.py,46,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,K,1
 layernorm_stats_triton,_stats_kernel,miniworld_engine/kernels/layernorm_linear/triton/stats.py,46,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
 transition_bwd_epilogue_triton,_grad_mul_kernel,miniworld_engine/kernels/transition/cute/gatebwd_sm100.py,760,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
-transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,728,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
-transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,728,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
-transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,728,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
-transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,728,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
+transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,730,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
+transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,730,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
+transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,730,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
+transition_bwd_swiglu_recompute_triton,_transition_expand_gatebwd_kernel,miniworld_engine/kernels/transition/triton/fused.py,730,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
 transition_bwd_transpose_packed_triton,_cdup_interleave_kernel,miniworld_engine/kernels/transition/cute/backward_gatebwd.py,78,BLOCK_M1,64,128,16,32,64,16 32 64 128 256,128,16,64,64,1,0,,
 transition_bwd_transpose_packed_triton,_cdup_interleave_kernel,miniworld_engine/kernels/transition/cute/backward_gatebwd.py,78,BLOCK_N,64,128,16,32,64,16 32 64 128 256,64,32,64,64,1,0,,
 transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/transition/triton/main.py,34,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
@@ -125,10 +124,10 @@ transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/t
 transition_expand_swiglu_triton,transition_fwd_kernel,miniworld_engine/kernels/transition/triton/main.py,34,GROUP_M,1,1,1,1,1,1 4 16 65536,1,1,1,1,0,0,,
 transition_fold_triton,_fold_kernel,miniworld_engine/kernels/transition/triton/fold.py,34,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,K,1
 transition_fold_triton,_fold_kernel,miniworld_engine/kernels/transition/triton/fold.py,34,BLOCK_N,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
-transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,565,BLOCK_K_D,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
-transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,565,BLOCK_K_ND,64,128,16,32,64,16 32 64,64,32,64,64,1,1,ND,1
-transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,565,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
-transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,565,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
+transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,566,BLOCK_K_D,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
+transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,566,BLOCK_K_ND,64,128,16,32,64,16 32 64,64,32,64,64,1,1,ND,1
+transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,566,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
+transition_fwd_b2b_ktiled_triton,_transition_b2b_ktiled_kernel,miniworld_engine/kernels/transition/triton/fused.py,566,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
 transition_fwd_b2b_triton,_transition_b2b_kernel,miniworld_engine/kernels/transition/triton/fused.py,294,BLOCK_K_D,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
 transition_fwd_b2b_triton,_transition_b2b_kernel,miniworld_engine/kernels/transition/triton/fused.py,294,BLOCK_K_ND,64,128,16,32,64,16 32 64,64,32,64,64,1,1,ND,1
 transition_fwd_b2b_triton,_transition_b2b_kernel,miniworld_engine/kernels/transition/triton/fused.py,294,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
@@ -148,20 +147,15 @@ triangle_attention_fwd_contig_triton,_attn_fwd,miniworld_engine/kernels/triangle
 triangle_attention_fwd_contig_triton,_attn_fwd,miniworld_engine/kernels/triangle_attention/triton/atomic.py,100,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,0,0,,
 triangle_attention_fwd_triton,_attn_fwd,miniworld_engine/kernels/triangle_attention/triton/main.py,33,BLOCK_M1,64,128,16,32,64,32 64 128 256,128,16,64,64,1,0,,
 triangle_attention_fwd_triton,_attn_fwd,miniworld_engine/kernels/triangle_attention/triton/main.py,33,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,0,1,N_CTX,1
-trimul_bwd_gate_packed_recompute_triton,_dconcat_sig_kernel,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,224,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
+trimul_bwd_gate_packed_recompute_triton,_dconcat_sig_kernel,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,143,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 trimul_bwd_gate_packed_triton,_dconcat_kernel,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,38,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 trimul_bwd_gate_recompute_triton,fused_sigmoid_gate_bwd_kernel,miniworld_engine/kernels/tm1/triton/main.py,131,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,N,1
 trimul_bwd_gate_recompute_triton,fused_sigmoid_gate_bwd_kernel,miniworld_engine/kernels/tm1/triton/main.py,131,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 trimul_bwd_gate_recompute_triton,fused_sigmoid_gate_bwd_kernel,miniworld_engine/kernels/tm1/triton/main.py,131,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
 trimul_bwd_gate_recompute_triton,fused_sigmoid_gate_bwd_kernel,miniworld_engine/kernels/tm1/triton/main.py,131,GROUP_M,1,1,1,1,1,1 4 16 65536,1,1,1,1,0,0,,
-trimul_bwd_gate_transpose_packed_triton,_dconcat5_kernel,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,72,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 trimul_gemm_gate_mmajor_triton,_bidir_front_kernel,miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py,66,BLOCK_K_D,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
 trimul_gemm_gate_mmajor_triton,_bidir_front_kernel,miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py,66,BLOCK_K_H2,64,128,16,32,64,16 32 64,64,32,64,64,0,1,H2,1
 trimul_gemm_gate_mmajor_triton,_bidir_front_kernel,miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py,66,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
-trimul_gemm_gate_packed_mmajor_triton,_lr_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,61,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
-trimul_gemm_gate_packed_mmajor_triton,_lr_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,61,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
-trimul_gemm_gate_packed_mmajor_triton,_lr_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,61,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
-trimul_gemm_gate_packed_mmajor_triton,_lr_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,61,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
 trimul_gemm_gate_saveact_triton,_input_gated_gemm_kernel,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,239,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,0
 trimul_gemm_gate_saveact_triton,_input_gated_gemm_kernel,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,239,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 trimul_gemm_gate_saveact_triton,_input_gated_gemm_kernel,miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py,239,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
@@ -182,12 +176,6 @@ trimul_outproj_gemm_gate_triton,fused_sigmoid_gate2_fwd_kernel,miniworld_engine/
 trimul_outproj_gemm_gate_triton,fused_sigmoid_gate2_fwd_kernel,miniworld_engine/kernels/tm2/triton/main.py,32,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 trimul_outproj_gemm_gate_triton,fused_sigmoid_gate2_fwd_kernel,miniworld_engine/kernels/tm2/triton/main.py,32,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
 trimul_outproj_gemm_gate_triton,fused_sigmoid_gate2_fwd_kernel,miniworld_engine/kernels/tm2/triton/main.py,32,GROUP_M,1,1,1,1,1,1 4 16 65536,1,1,1,1,0,0,,
-trimul_outproj_gemm_sigmoid_triton,_gate_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,124,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
-trimul_outproj_gemm_sigmoid_triton,_gate_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,124,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
-trimul_outproj_gemm_sigmoid_triton,_gate_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,124,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
-trimul_outproj_gemm_sigmoid_triton,_gate_kernel,miniworld_engine/kernels/trimul_inproj/triton/front.py,124,GROUP_M,65536,65536,65536,65536,65536,1 4 16 65536,65536,65536,65536,65536,0,0,,
 trimul_outproj_layernorm_gemm_gate_triton,_back_kernel,miniworld_engine/kernels/trimul_inproj/triton/back.py,62,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
 trimul_outproj_layernorm_gemm_gate_triton,_back_kernel,miniworld_engine/kernels/trimul_inproj/triton/back.py,62,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 trimul_outproj_layernorm_gemm_gate_triton,_back_kernel,miniworld_engine/kernels/trimul_inproj/triton/back.py,62,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,0,1,N,1
-trimul_transpose_triton,_transpose_kernel,miniworld_engine/kernels/trimul_inproj/cute/front_sm100.py,40,BLOCK_M1,64,128,16,32,64,16 32 64 128 256,128,16,64,64,1,0,,
-trimul_transpose_triton,_transpose_kernel,miniworld_engine/kernels/trimul_inproj/cute/front_sm100.py,40,BLOCK_N,64,128,16,32,64,16 32 64 128 256,64,32,64,64,1,0,,

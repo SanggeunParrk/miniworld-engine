@@ -79,7 +79,10 @@ def _fault(name: str) -> str | None:
 
 
 def test_there_are_names_to_check() -> None:
-    assert len(_names()) >= 90, f"only {len(_names())} rows in registry.csv"
+    """Guard the guard. The floor is well under the registry's size (86 rows) on purpose: it is
+    here to catch a parse that returned nothing, not to pin a count. It was 90, which turned the
+    removal of five superseded kernels into a failure of the naming rules."""
+    assert len(_names()) >= 50, f"only {len(_names())} rows in registry.csv"
 
 
 def test_every_name_parses_into_declared_tokens() -> None:

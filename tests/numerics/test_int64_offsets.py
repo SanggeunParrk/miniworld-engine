@@ -24,7 +24,8 @@ _SRC = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml"
 # literal that names the axis fails on a rename and passes on a file that merely spells the axis
 # the old way without promoting it -- wrong in both directions.
 _HARDENED = [
-    ("trimul_inproj/triton/front.py", r"\.to\(tl\.int64\)"),
+    # `trimul_inproj/triton/front.py` was here and the file is gone: nothing reached its two
+    # kernels, and they were removed with the other superseded fronts (notes/superseded-fronts.md).
     ("trimul_inproj/triton/back_fused.py", r"\.to\(tl\.int64\)"),
     ("trimul_inproj/triton/gate_elem.py", r"\.to\(tl\.int64\)"),
     ("tm1/triton/main.py", r"tl\.arange\(0, BLOCK_M\w*\)\.to\(tl\.int64\)"),

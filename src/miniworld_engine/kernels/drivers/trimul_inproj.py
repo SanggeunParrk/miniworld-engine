@@ -28,9 +28,7 @@ make one missing dependency take down all 25 drivers instead of the one it belon
 from __future__ import annotations
 
 import torch
-import triton
 
-from miniworld_engine.autotune.shape_key import token_key
 from miniworld_engine.kernels.drivers import (
     BF16,
     both_level_is_pair,
@@ -87,20 +85,6 @@ def _bdll(c: int = D) -> torch.Tensor:
 
 
 # ── trimul_inproj: front / back (triton) ─────────────────────────────────────────────────────
-
-def trimul_gemm_gate_packed_mmajor_triton() -> None:
-    """front.py _lr_kernel, via trimul_front_triton."""
-    from miniworld_engine.kernels.trimul_inproj.triton.front import trimul_front_triton
-
-    trimul_front_triton(_x(), _w(), _w(), _w(), _w(), _w())
-
-
-def trimul_outproj_gemm_sigmoid_triton() -> None:
-    """front.py _gate_kernel -- the second launch of the same trimul_front_triton front."""
-    from miniworld_engine.kernels.trimul_inproj.triton.front import trimul_front_triton
-
-    trimul_front_triton(_x(), _w(), _w(), _w(), _w(), _w())
-
 
 def trimul_outproj_layernorm_gemm_gate_triton() -> None:
     """back.py _back_kernel, via trimul_back_triton (LN_out + proj + gate, no residual)."""
@@ -162,47 +146,7 @@ def trimul_bwd_gate_packed_recompute_triton() -> None:
                      _w(), _w(), _w(), _w())
 
 
-def trimul_bwd_gate_transpose_packed_triton() -> None:
-    """back_fused.py _dconcat5_kernel, via front_bwd_dW_glogit (the NEGATIVE-RESULT launcher)."""
-    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
-        front_bwd_dW_glogit,
-    )
-
-    front_bwd_dW_glogit(_bdll(), _bdll(), _bdll(4 * D), _x(),
-                        _w(), _w(), _w(), _w(), _rows(), _w())
-
-
 # ── trimul_inproj/cute: the two @triton.jit kernels living under cute/ ───────────────────────
-
-def trimul_transpose_triton() -> None:
-    """front_sm100.py _transpose_kernel, via _transpose_blld_to_bdll ((M,2D) -> (2D,M))."""
-    from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import (
-        _transpose_blld_to_bdll,
-    )
-
-    # seq_len=L as trimul_front_sm100 passes it: both arguments are already flattened (M rows),
-    # so ``seq_len`` is the only place L can come from; without it the launcher keys on
-    # ``token_key(0)`` -> the smallest bucket (128) at every length.
-    out = torch.empty(2 * D, M, device=dev(), dtype=BF16)
-    _transpose_blld_to_bdll(_rows(2 * D), out, seq_len=L)
-
-
-def gated_projection_gate_packed_mmajor_triton() -> None:
-    """front_train_sm100.py _glu_bdll_kernel: preact (4H,M) -> lr (2H,M).
-
-    Launched as the v13 fallback in trimul_front_sm100_train launches it; that launcher is not
-    used because its other half is the quack/sm100 front GEMM, which is not this kernel.
-    """
-    from miniworld_engine.kernels.trimul_inproj.cute.front_train_sm100 import (
-        _glu_bdll_kernel,
-    )
-
-    h = D
-    preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
-    lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
-    grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)
-    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L, H=h))
-
 
 def fused_preact_gemm_kernel() -> None:
     """FusedPreactGemmKernel.kernel, via fused_front_gemm (A (M,K); Bp/Bg (2H,K) -> lr, preact)."""

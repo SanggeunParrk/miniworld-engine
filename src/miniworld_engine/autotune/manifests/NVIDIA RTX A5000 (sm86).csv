@@ -81,12 +81,7 @@ trimul_outproj_gemm_gate_saveact_triton,triton,triangle_multiplication,miniworld
 trimul_gemm_gate_packed_sm100_cute,cute,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_fused_gemm_sm100.py,skipped,"needs sm100, this card is sm86 -- OpError: OpError: expects arch to be one of [Arch.sm_100a, Arch.sm_100f, Arch.sm_101a, Arch.sm_101f, Arch.sm_103a, Arch.sm_103f],",bf16
 gated_projection_bwd_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel d_proj=2.17e-03 d_glogit=2.92e-03 d_proj_drop=2.35e-03 d_glogit_drop=3.09e-03 d_proj_preact=2.17e-03 d_glogit_preact=2.85e-03,bf16
 gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py,ok,rel y=2.45e-03 gate=2.73e-03 y_dropres=3.00e-03,bf16
-gated_projection_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_train_sm100.py,ok,rel lr_left=2.27e-03 lr_right=1.97e-03,bf16
 trimul_bwd_gate_packed_recompute_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=1.79e-03 d_pL=2.13e-03 d_gRlog=1.85e-03 d_pR=2.22e-03,bf16
 trimul_bwd_gate_packed_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=2.71e-03 d_pL=2.07e-03 d_gRlog=2.23e-03 d_pR=2.13e-03,bf16
-trimul_bwd_gate_transpose_packed_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=2.21e-03 d_pL=2.02e-03 d_gRlog=3.11e-03 d_pR=2.18e-03 d_glogit=0.00e+00,bf16
 trimul_gemm_gate_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py,ok,rel left=1.96e-03 right=3.41e-03 preact_left=2.87e-03 preact_right=3.01e-03,bf16
-trimul_gemm_gate_packed_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/front.py,ok,rel left=2.11e-03 right=1.98e-03,bf16
-trimul_outproj_gemm_sigmoid_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/front.py,ok,rel out=1.97e-03,bf16
 trimul_outproj_layernorm_gemm_gate_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back.py,ok,rel y=2.78e-03 y_residual=2.28e-03,bf16
-trimul_transpose_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/cute/front_sm100.py,ok,rel out=0.00e+00,bf16

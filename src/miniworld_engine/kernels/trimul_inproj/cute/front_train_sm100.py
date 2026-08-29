@@ -78,15 +78,6 @@ _FRONT_GEMM_SPEC = {
 }
 
 
-def _front_gemm_config(M: int, device) -> "GemmConfig | None":
-    if torch.cuda.get_device_capability(device)[0] not in (10, 11):
-        return None
-    spec = _FRONT_GEMM_SPEC.get(M)
-    if spec is None:
-        return None
-    return GemmConfig(**_FRONT_GEMM_BASE, **spec)
-
-
 def _interleave(Wg: torch.Tensor, Wp: torch.Tensor) -> torch.Tensor:
     """(D,H),(D,H) -> (D,2H): GLU wants (gate, proj) adjacent so preact plane order is
     [g0,p0,g1,p1,...] per side (matches front_bwd_dW's 2d / 2d+1 indexing)."""
@@ -114,28 +105,6 @@ def get_seq_group(rows) -> int:
     return _bucket(rows)
 
 
-@triton.autotune(configs=configs_for("gated_projection_gate_packed_mmajor_triton"), key=['shape_key'])
-@triton.jit
-def _glu_bdll_kernel(preact, lr, H: tl.constexpr, M, BLOCK_E: tl.constexpr, shape_key):
-    """preact (4H,M) channel-major -> lr (2H,M). Per side: even plane=gate, odd=proj.
-    Grid over the (H,M) per-side positions; each program emits left plane d AND right plane d.
-    int64 offsets (4*H*M can exceed int32 at L=1024, H=128)."""
-    Mi = M.to(tl.int64)
-    idx = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E).to(tl.int64)
-    HM = H * Mi
-    mask = idx < HM
-    d = idx // Mi
-    m = idx - d * Mi
-    D2 = 2 * H
-    gL = tl.load(preact + (2 * d) * Mi + m, mask=mask, other=0.0).to(tl.float32)
-    pL = tl.load(preact + (2 * d + 1) * Mi + m, mask=mask, other=0.0).to(tl.float32)
-    gR = tl.load(preact + (D2 + 2 * d) * Mi + m, mask=mask, other=0.0).to(tl.float32)
-    pR = tl.load(preact + (D2 + 2 * d + 1) * Mi + m, mask=mask, other=0.0).to(tl.float32)
-    et = lr.dtype.element_ty
-    tl.store(lr + idx, (tl.sigmoid(gL) * pL).to(et), mask=mask)        # left plane d
-    tl.store(lr + HM + idx, (tl.sigmoid(gR) * pR).to(et), mask=mask)   # right plane d
-
-
 def trimul_front_sm100_train_sig(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     """σ(gate) front: returns (left_bdll, right_bdll, sg_bdll) where sg = σ(gate) [B,2H,L,L].
     Same left/right as trimul_front_sm100_train, but the backward-only tensor is sg[2H] (σ(gate))
@@ -159,59 +128,3 @@ def trimul_front_sm100_train_sig(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
     return lr[:, :H], lr[:, H:], sg
 
 
-def _glu_bdll_fake(preact_2d, lr_2d, H, M, shape_key):
-    """Writes the GLU result into `lr_2d` (2H, M); returns nothing."""
-
-
-@opaque(fake=_glu_bdll_fake, name="trimul_glu_bdll", mutates_args=("lr_2d",))
-def _glu_bdll(preact_2d: torch.Tensor, lr_2d: torch.Tensor, H: int, M: int,
-              shape_key: int) -> None:
-    """The GLU pass of the v13 fallback front: writes lr from the raw preact planes, in place.
-
-    Only the launch is wrapped -- ``trimul_front_sm100_train`` itself stays a plain function so
-    its left/right split stays a free view (an op's outputs may not alias each other).
-    """
-    grid = lambda meta: (triton.cdiv(H * M, meta["BLOCK_E"]),)  # noqa: E731
-    _glu_bdll_kernel[grid](preact_2d, lr_2d, H=H, M=M, shape_key=pack(shape_key, H=H))
-
-
-def trimul_front_sm100_train(x_n: torch.Tensor, b_lr: torch.Tensor, H: int):
-    """SM100 v6-faithful front. Returns (left_bdll, right_bdll, preact_bdll):
-      left/right : (B, H, L, L) contiguous  (== left.reshape(H,L,L) is a free view)
-      preact     : (B, 4H, L, L)            ([g,p] interleaved per side, left|right)
-    x_n : (B, L, L, D) contiguous bf16 ; b_lr : (D, 4H) from prepack_lr_operand_sm100.
-    """
-    assert x_n.dim() == 4 and x_n.is_cuda and x_n.is_contiguous()
-    B, L, L2, D = x_n.shape
-    assert B == 1 and L == L2
-    M = L * L
-    x_flat = x_n.reshape(M, D)
-    preact = torch.empty(B, 4 * H, L, L, device=x_n.device, dtype=x_n.dtype)
-
-    if _fused_available(x_n.device):
-        # (v14) ONE fused persistent GEMM: its epilogue emits BOTH left/right[2H,L,L] (GLU)
-        # AND the raw preact[4H,L,L] (interleaved [g,p] planes) straight from the in-TMEM
-        # proj/gate accumulators — no preact HBM re-read, no separate GLU launch. Bp/Bg are
-        # the proj / gate columns of the interleaved b_lr operand.
-        from miniworld_engine.kernels.trimul_inproj.cute.front_fused_gemm_sm100 import (
-            fused_front_gemm,
-        )
-        Bg = b_lr[:, 0::2].t().contiguous()   # (2H, D) = [WLg | WRg]  (gate weights)
-        Bp = b_lr[:, 1::2].t().contiguous()   # (2H, D) = [WL  | WR ]  (proj weights)
-        lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
-        fused_front_gemm(x_flat, Bp, Bg, lr.view(2 * H, M), preact.view(4 * H, M))
-        return lr[:, :H], lr[:, H:], preact
-
-    # (v13 fallback) non-gated m-major GEMM into the bdll preact buffer + a Triton GLU pass.
-    preact_view = preact.view(4 * H, M).T  # (M,4H) strides (1,M) -> m-major store
-    _cfg = _front_gemm_config(M, x_n.device)
-    if _cfg is None:
-        gemm_act(A=x_flat, B=b_lr, activation=None, store_preact=False, postact_out=preact_view)
-    else:
-        # Explicit config injection = bypass @autotune, same as gemm_act_out's
-        # partial(gemm_act_tuned.fn, config=None) idiom. CUDA-graph safe (no bench).
-        gemm_act_tuned.fn(x_flat, b_lr, None, preact_view, None, None, None,
-                          None, None, False, config=_cfg)
-    lr = torch.empty(B, 2 * H, L, L, device=x_n.device, dtype=x_n.dtype)
-    _glu_bdll(preact.view(4 * H, M), lr.view(2 * H, M), H, M, token_key(L))
-    return lr[:, :H], lr[:, H:], preact

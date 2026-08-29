@@ -330,7 +330,10 @@ def test_no_launch_omits_a_required_kernel_parameter() -> None:
     from miniworld_engine.tools.launch_bind import audit
 
     findings, _skipped, checked = audit()[:3]
-    assert checked > 100, f"only {checked} launches were resolved; the audit stopped resolving"
+    # A floor on "the audit still resolves launches", not a count of them: 94 resolve today and the
+    # number moves whenever a kernel is added or removed. It was 100, which the removal of five
+    # superseded kernels tripped.
+    assert checked > 60, f"only {checked} launches were resolved; the audit stopped resolving"
     assert not findings, "kernel launch(es) missing a required parameter:\n  " + "\n  ".join(
         f"{f}:{ln} {n} omits {miss}" for f, ln, n, miss in findings)
 

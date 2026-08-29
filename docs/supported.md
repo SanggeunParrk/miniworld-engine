@@ -11,14 +11,14 @@ Every row here is backed by an artifact in the repo: a device manifest under
 ## GPU
 
 A kernel is run at the PRECISIONS it declares (`registry.csv`'s `dtypes`), so a card has a result
-per precision and the manifest has a row per (kernel, precision). 89 of the 91 declared kernels
+per precision and the manifest has a row per (kernel, precision). 84 of the 86 declared kernels
 declare bf16 and 42 declare fp32; the two sets overlap, which is why they do not add to 91.
 
 | card | precision | torch | CUDA | triton | Python | result | evidence |
 |---|---|---|---|---|---|---|---|
-| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 83, ok 83, failed 0, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
+| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 78, ok 78, failed 0, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
 | RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 40, ok 40, failed 0, skipped 2` | same file, `dtype` column |
-| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `ok 85, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
+| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `ok 80, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
 | RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | the node is drained |
 
 Every skip is a kernel whose declared `arch` is above sm86. It is not launched, so it costs nothing
@@ -36,7 +36,7 @@ the manifest it cites, so this table cannot age past its evidence again.
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 85 | yes, on sm86 (which satisfies sm80) |
+| sm80 | 80 | yes, on sm86 (which satisfies sm80) |
 | sm90 | 2 | **no** |
 | sm100 | 4 | **no** |
 

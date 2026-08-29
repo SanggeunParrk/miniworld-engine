@@ -38,10 +38,8 @@ dependency fail every checker in the file instead of the one it belongs to.
 from __future__ import annotations
 
 import torch
-import triton
 
-from miniworld_engine.autotune.shape_key import token_key
-from miniworld_engine.kernels.checks import _exact_fp32_matmul, _f
+from miniworld_engine.kernels.checks import _f
 from miniworld_engine.kernels.drivers import BF16, dev
 from miniworld_engine.kernels.drivers.trimul_inproj import D, L, M, _bdll, _rows, _w, _x
 
@@ -136,65 +134,6 @@ def gated_projection_bwd_gate_dropres_triton():
             "d_glogit_drop": (d_glogit_dr, dg_dr_ref * sig_prime),
             "d_proj_preact": (d_proj_pa, pp.grad),
             "d_glogit_preact": (d_glogit_pa, pa.grad)}
-
-
-def trimul_gemm_gate_packed_mmajor_triton():
-    """front.py _lr_kernel: the gated in-projection halves, written CHANNEL-MAJOR.
-
-        left  = sigmoid(x @ WLg) * (x @ WL)   -> (B, D, L, L)
-        right = sigmoid(x @ WRg) * (x @ WR)   -> (B, D, L, L)
-
-    Three things this kernel can get wrong, and how the comparison catches each:
-
-    * **The K loop.** ``K = D`` is the contraction extent, and the loop is
-      ``for k0 in range(0, K, BLOCK_K)`` with ``rk = k0 + arange(BLOCK_K)``. At a ragged D the
-      last iteration is a PARTIAL tile, so any column of ``x``/``Wlr`` past ``K`` that reaches
-      the accumulator adds a product of two out-of-range values. The reference contracts exactly
-      ``D`` columns, so such a term shows up as a large ``rel`` -- this is the same failure mode
-      that took the three fixed kernels from 2e-03 to 6e-01, and the reason
-      ``_bidir_front_kernel`` (same loop shape) was found reading past its weight at K=125.
-    * **The packed weight.** The launcher interleaves each side's (gate, proj) columns into ONE
-      (D, 4D) operand and the kernel recovers them with ``reshape(...,2)`` + ``tl.split``. A
-      swapped g/p or a mis-set right-half base offset (``+ 2*D``) changes which weight each
-      output used; ``left`` and ``right`` are separate dict entries and the reference builds the
-      pair from the *unpacked* WL/WLg/WR/WRg, so it cannot agree with the kernel about the
-      packing by construction.
-    * **The transposing store.** The result is (M, D) in registers and (D, M) in memory
-      (``rd[:, None] * LL + rm[None, :]``). The reference is the reference module's ``bdll``
-      output, so a missing/extra transpose is a shape or a large-rel failure, not a wash.
-
-    ``gate`` (the other kernel this launcher runs) is deliberately NOT returned here; it is
-    ``_gate_kernel``'s output and has its own checker. Same launch as the driver.
-    """
-    from miniworld_engine.kernels.trimul_inproj.reference import trimul_inproj_pytorch
-    from miniworld_engine.kernels.trimul_inproj.triton.front import trimul_front_triton
-
-    _exact_fp32_matmul()
-    x = _x()
-    WL, WLg, WR, WRg, Wg = _w(), _w(), _w(), _w(), _w()
-    left, right, _ = trimul_front_triton(x, WL, WLg, WR, WRg, Wg)
-    ref_l, ref_r, _ = trimul_inproj_pytorch(_f(x), _f(WL), _f(WLg), _f(WR), _f(WRg), _f(Wg))
-    return {"left": (left, ref_l), "right": (right, ref_r)}
-
-
-def trimul_outproj_gemm_sigmoid_triton():
-    """front.py _gate_kernel: gate = sigmoid(x @ Wg), (M, D) row-major, viewed (B, L, L, D).
-
-    The second, lighter launch of the same ``trimul_front_triton`` front: one (BLOCK_M1, BLOCK_N)
-    accumulator over the same partial-tile K loop as ``_lr_kernel``, a plain unary sigmoid, and a
-    fully contiguous store. Checked against the reference module's ``gate`` (which keeps blld),
-    so the K-loop tail and the (K, D) row-major weight read are both measured; ``left``/``right``
-    belong to ``_lr_kernel`` and are dropped here. Same launch as the driver.
-    """
-    from miniworld_engine.kernels.trimul_inproj.reference import trimul_inproj_pytorch
-    from miniworld_engine.kernels.trimul_inproj.triton.front import trimul_front_triton
-
-    _exact_fp32_matmul()
-    x = _x()
-    WL, WLg, WR, WRg, Wg = _w(), _w(), _w(), _w(), _w()
-    gate = trimul_front_triton(x, WL, WLg, WR, WRg, Wg)[2]
-    ref_gate = trimul_inproj_pytorch(_f(x), _f(WL), _f(WLg), _f(WR), _f(WRg), _f(Wg))[2]
-    return gate, ref_gate
 
 
 def trimul_gemm_gate_mmajor_triton():
@@ -333,80 +272,5 @@ def trimul_bwd_gate_packed_recompute_triton():
             "d_pR": (dconc[3 * D:], dR * sgR)}
 
 
-def trimul_bwd_gate_transpose_packed_triton():
-    """back_fused.py _dconcat5_kernel: 5 blocks stacked into one (5D, M) buffer.
-
-    Block order, read off the stores: [d_gLlog ; d_pL ; d_gRlog ; d_pR ; d_glogit], each D rows.
-    The first four come from the interleaved ``preact`` (row 2d = gate logit, row 2d+1 = proj,
-    with the right side offset by 2D) exactly as ``_dconcat_kernel``; the fifth is the TRANSPOSE
-    that names this kernel -- d_glogit arrives (M, D) row-major and is relaid channel-major (D, M)
-    via the strided read ``dglog_ptr + m*D + d``.
-
-    The kernel is launched at ``front_bwd_dW_glogit``'s launch site (same argument prep as the
-    driver) rather than through it: that launcher returns only its cuBLAS products (dxn and five
-    dW), which would check each block through a GEMM instead of elementwise.
-    """
-    from miniworld_engine.kernels.trimul_inproj.triton.back_fused import (
-        _dconcat5_kernel,
-    )
-
-    d_left, d_right, preact, x_n = _bdll(), _bdll(), _bdll(4 * D), _x()
-    d_glogit = _rows()
-    H, DM = D, D * M                            # square single-dir: gate width == hidden width
-    dconc5 = torch.empty(5 * H, M, device=dev(), dtype=x_n.dtype)
-    _dconcat5_kernel[lambda meta: (triton.cdiv(DM, meta["BLOCK_E"]),)](
-        d_left.reshape(H * M), d_right.reshape(H * M), preact.reshape(4 * H, M),
-        d_glogit.reshape(M, H), dconc5, M, DM, D=H, shape_key=token_key(L, D=H))
-
-    dL, dR = _f(d_left).reshape(H, M), _f(d_right).reshape(H, M)
-    p = _f(preact).reshape(4 * H, M)
-    gL = torch.sigmoid(p[0:2 * H:2])
-    pL = p[1:2 * H:2]
-    gR = torch.sigmoid(p[2 * H:4 * H:2])
-    pR = p[2 * H + 1:4 * H:2]
-    return {"d_gLlog": (dconc5[:H], dL * pL * gL * (1.0 - gL)),
-            "d_pL": (dconc5[H:2 * H], dL * gL),
-            "d_gRlog": (dconc5[2 * H:3 * H], dR * pR * gR * (1.0 - gR)),
-            "d_pR": (dconc5[3 * H:4 * H], dR * gR),
-            "d_glogit": (dconc5[4 * H:], _f(d_glogit).reshape(M, H).t())}
-
-
 # ── trimul_inproj/cute: the two @triton.jit kernels living under cute/ ───────────────────────
 
-def trimul_transpose_triton():
-    """front_sm100.py _transpose_kernel: a pure transpose, (M, 2D) row-major -> (2D, M)."""
-    from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import (
-        _transpose_blld_to_bdll,
-    )
-
-    src = _rows(2 * D)
-    out = torch.empty(2 * D, M, device=dev(), dtype=BF16)
-    _transpose_blld_to_bdll(src, out)
-    return out, _f(src).t()
-
-
-def gated_projection_gate_packed_mmajor_triton():
-    """front_train_sm100.py _glu_bdll_kernel: preact (4H, M) -> lr (2H, M), channel-major GLU.
-
-    ONE buffer holds both sides and both operands: within a side, even plane 2d is the gate logit
-    of channel d and odd plane 2d+1 is its proj; the right side starts at plane 2H. Output ``lr``
-    is left planes [0:H) then right planes [H:2H). Strided slices reproduce that de-interleave.
-
-    Same launch as ``drivers_trimul.gated_projection_gate_packed_mmajor_triton`` (the enclosing
-    ``trimul_front_sm100_train`` fallback also runs a quack/sm100 front GEMM, which is a
-    different kernel).
-    """
-    from miniworld_engine.kernels.trimul_inproj.cute.front_train_sm100 import (
-        _glu_bdll_kernel,
-    )
-
-    h = D
-    preact = torch.randn(4 * h, M, device=dev(), dtype=BF16)
-    lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
-    grid = lambda meta: (triton.cdiv(h * M, meta["BLOCK_E"]),)
-    _glu_bdll_kernel[grid](preact, lr, H=h, M=M, shape_key=token_key(L, H=h))
-
-    p = _f(preact)
-    ref_l = torch.sigmoid(p[0:2 * h:2]) * p[1:2 * h:2]
-    ref_r = torch.sigmoid(p[2 * h:4 * h:2]) * p[2 * h + 1:4 * h:2]
-    return {"lr_left": (lr[:h], ref_l), "lr_right": (lr[h:], ref_r)}
