@@ -49,7 +49,17 @@ def test_kernel_matches_its_reference(kernel, checker, row):
     """
     from miniworld_engine.autotune.run_all import check_one, declared_rtol
 
-    ok, detail = check_one(checker, declared_rtol(row))
+    # A kernel is checked at a precision IT DECLARES, and at the band declared for that precision.
+    # The drivers read MINIWORLD_DRIVER_DTYPE once, at import, so a process runs one precision and
+    # this suite covers the other by running again with it set -- the alternative, checking every
+    # kernel at the process default, holds an fp32-only kernel to a bf16 run and calls the rounding
+    # a failure. That is what three conditioned_transition kernels were doing.
+    from miniworld_engine.kernels.drivers import DTYPE_MODE
+
+    declared = {a.strip() for a in (row.get("dtypes") or "bf16").split("|") if a.strip()}
+    if DTYPE_MODE not in declared:
+        pytest.skip(f"{kernel} declares {sorted(declared)}; this process is {DTYPE_MODE}")
+    ok, detail = check_one(checker, declared_rtol(row, DTYPE_MODE))
     if not ok and _is_arch_gated(detail):
         pytest.skip(f"not runnable on this device: {detail}")
     assert ok, f"{kernel}: {detail}"

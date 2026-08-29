@@ -171,24 +171,64 @@ def _sm(arch: str) -> int:
     return int(digits) if digits.isdigit() else -1
 
 
-def declared_rtol(row: dict) -> float | None:
-    """The band this registry row declares, or None for :data:`DEFAULT_RTOL`.
+def _running_dtype() -> str:
+    """The precision the drivers and checkers are building at, for pricing the band."""
+    from miniworld_engine.kernels.drivers import DTYPE_MODE
+
+    return DTYPE_MODE
+
+
+def declared_rtol(row: dict, dtype: str | None = None) -> float | None:
+    """The band this registry row declares for ``dtype``, or None for :data:`DEFAULT_RTOL`.
 
     Blank means "the default applies", not "no band": every kernel with a checker is held to
     something. A malformed value is an error rather than a silent fall back to the default -- a
     typo that widens a kernel's tolerance is exactly what this column exists to prevent.
+
+    TWO SPELLINGS. A bare float is one band for every precision the kernel declares. That is only
+    honest when the kernel runs at one precision: bf16 carries ~3.9e-3 of machine epsilon against
+    an fp32 reference and fp32 carries ~1e-7, so a single number is either four orders too tight
+    for bf16 or four orders too loose for fp32. `bf16=5e-3|fp32=4e-7` gives each its own, and is
+    what a kernel declaring `dtypes=bf16|fp32` needs -- before this, those rows carried the bf16
+    band alone and their fp32 runs were being checked against a tolerance a real regression could
+    hide inside. (Nothing had noticed because no fp32 unit was ever built; see the driver dtype
+    fix.) An unknown key, or a dtype the row does not price, is an error rather than a fallback.
     """
     raw = (row.get("rtol") or "").strip()
     if not raw:
         return None
+    kernel = row.get("kernel")
+    if "=" in raw:
+        bands: dict[str, float] = {}
+        for part in raw.split("|"):
+            key, _, value = part.partition("=")
+            key = key.strip()
+            if key not in ("bf16", "fp32", "fp16"):
+                msg = (f"{kernel}: rtol names precision {key!r}, which is not one of "
+                       f"bf16/fp32/fp16")
+                raise ValueError(msg)
+            bands[key] = _band(kernel, value)
+        if dtype is None:
+            return max(bands.values())      # no precision asked for: the widest it ever allows
+        short = {"bfloat16": "bf16", "float32": "fp32", "float16": "fp16"}.get(dtype, dtype)
+        if short not in bands:
+            msg = (f"{kernel}: rtol prices {sorted(bands)} but the run is {short}. Add it, or drop "
+                   f"{short} from the dtypes column.")
+            raise ValueError(msg)
+        return bands[short]
+    return _band(kernel, raw)
+
+
+def _band(kernel: str | None, raw: str) -> float:
     try:
         band = float(raw)
     except ValueError:
-        msg = (f"{row.get('kernel')}: rtol={raw!r} in registry.csv is not a number. Leave it blank "
-               f"for the default ({DEFAULT_RTOL:.0e}) or give a float, e.g. 1e-3.")
+        msg = (f"{kernel}: rtol={raw!r} in registry.csv is not a number. Leave it blank for the "
+               f"default ({DEFAULT_RTOL:.0e}), give a float, or price each precision as "
+               f"'bf16=5e-3|fp32=4e-7'.")
         raise ValueError(msg) from None
     if band < 0:
-        msg = f"{row.get('kernel')}: rtol={band} is negative"
+        msg = f"{kernel}: rtol={band} is negative"
         raise ValueError(msg)
     return band
 
@@ -255,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         ok, detail = run_one(drv)
         chk = (r.get("check") or "").strip()
         if ok and chk:
-            ok, cdetail = check_one(chk, declared_rtol(r))
+            ok, cdetail = check_one(chk, declared_rtol(r, _running_dtype()))
             detail = cdetail if ok else f"WRONG NUMBERS: {cdetail}"
         elif ok:
             detail = "launched (no reference -- numbers unverified)"

@@ -153,7 +153,16 @@ def test_a_declared_band_is_above_what_that_kernel_measured() -> None:
             worst = max(measured.get(row["kernel"], [0.0]) or [0.0])
             if not band or not worst:
                 continue
-            b = float(band)
+            # The manifests carry no dtype column: run_all writes them at drivers.DTYPE_MODE,
+            # which is bf16 unless someone exports otherwise, so a per-precision band is compared
+            # on its bf16 rung. A row that prices only fp32 has no bf16 rung and is skipped -- its
+            # measurement would have to come from an fp32 manifest run, which nothing writes yet.
+            if "=" in band:
+                if "bf16=" not in band:
+                    continue
+                b = declared_rtol(row, "bf16")
+            else:
+                b = float(band)
             if b < worst:
                 too_tight.append(f"{row['kernel']}: band {b:.1e} < measured {worst:.1e}")
             elif b >= DEFAULT_RTOL:
