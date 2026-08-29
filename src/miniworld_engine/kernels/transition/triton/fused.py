@@ -32,6 +32,8 @@ from miniworld_engine import settings
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
@@ -300,14 +302,20 @@ def _transition_b2b_kernel(
     stride_nm, stride_nk,    # xn out: (M, K) row-major (only used when SAVE_XN)
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
     SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     # Back-to-back: a program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. It builds
     # the gated h tile-by-tile and ACCUMULATES the squeeze out[BM, BN] += h_chunk @ Ws[:, chunk]^T,
     # so the (M, ND) intermediate h never touches HBM. BLOCK_K_D tiles the d contraction and BLOCK_K_ND
     # tiles both the ND chunk and the squeeze output; at BLOCK_K_D >= K and BLOCK_K_ND >= D the grid is
     # 1-D over M and every k-loop is a single iteration, i.e. exactly the original schedule.
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. b2b: ND is looped inside, so every program reads all of Wa/Wb -- the WEIGHTS are what gets
+    # re-read here, not x, and the row-first walk this had may already be right. `K` is the
+    # output width (D == K here). The `pid_d == 0` guards below test the VALUE, not the launch
+    # order, so reordering leaves exactly one program doing the stats write.
+    pid_m, pid_d = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(K, BLOCK_K_ND), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
     dcols = pid_d * BLOCK_K_ND + tl.arange(0, BLOCK_K_ND)   # squeeze output tile: BLOCK_K_ND-wide
@@ -512,9 +520,7 @@ def transition_b2b(
         rstd, c1 = stats if stats is not None else stats_triton(x2, eps, shape_key=shape_key)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
     xn = torch.empty(M, K, device=x2.device, dtype=x2.dtype) if save_xn else out
-    grid = lambda meta: (  # noqa: E731
-        triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_K_ND"]),
-    )
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _transition_b2b_kernel[grid](
         x2, rstd, c1, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out, xn,
@@ -567,12 +573,15 @@ def _transition_b2b_ktiled_kernel(
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
     stride_om, stride_od,
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     # One program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. Inner k-loop keeps
     # weight tiles [BLOCK_K_D, BLOCK_K_ND] (bounded smem at any d); squeeze accumulated in out_acc
     # across the N-chunk loop; h never leaves regs. No atomics.
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_d = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. The K-tiled b2b: same operand story as the plain one above.
+    pid_m, pid_d = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(K, BLOCK_K_ND), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     row_mask = rows < M
     rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
@@ -677,9 +686,7 @@ def transition_b2b_ktiled(
     D = ws.shape[0]
     rstd, c1 = stats_triton(x2, eps, shape_key=shape_key)
     out = torch.empty(M, D, device=x2.device, dtype=x2.dtype)
-    grid = lambda meta: (  # noqa: E731
-        triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_K_ND"]),
-    )
+    grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_K_ND"])  # noqa: E731
     _transition_b2b_ktiled_kernel[grid](
         x2, rstd, c1, ln_weight.contiguous(), ln_bias.contiguous(),
         wa.contiguous(), wb.contiguous(), ws.contiguous(), out,
@@ -729,6 +736,7 @@ def _transition_expand_gatebwd_kernel(
     stride_nm, stride_nk,    # xn out: (M, K) row-major
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     NORMALIZE: tl.constexpr, STORE_H: tl.constexpr, STACK_DAB: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     # Recompute a=xn@Wa, b=xn@Wb ONCE (tile M,ND; loop K). Emits:
     #   h  = silu(a)*b                  (for dWs = go^T @ h)
@@ -740,8 +748,10 @@ def _transition_expand_gatebwd_kernel(
     #     wgrad GEMMs. No separate normalize pass, no saved xn needed.
     #   NORMALIZE=False (Version B): x_ptr is ALREADY the saved xn; load it directly, skip
     #     the normalize math AND the xn emit (the caller already holds xn).
-    pid_m = tl.program_id(0).to(tl.int64)
-    pid_n = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. Expand+gate backward. Launched from three sites, all with the same 2-D grid.
+    pid_m, pid_n = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(ND, BLOCK_N), GROUP_M)
     rows = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rmask = rows < M
@@ -823,7 +833,7 @@ def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.T
     dA = torch.empty_like(grad_expand)
     dB = torch.empty_like(grad_expand)
     xn = torch.empty_like(x2)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -854,7 +864,7 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
     h = torch.empty_like(grad_expand)
     dAB = torch.empty(M, ND * 2, device=x2.device, dtype=grad_expand.dtype)
     xn = torch.empty_like(x2)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -885,7 +895,7 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool
     h = torch.empty_like(grad_expand) if store_h else grad_expand
     dA = torch.empty_like(grad_expand)
     dB = torch.empty_like(grad_expand)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
         wa.contiguous(), wb.contiguous(), grad_expand,
@@ -925,7 +935,7 @@ def _transition_expand_gatebwd_savedxn_stacked(
     ND = wa.shape[0]
     h = torch.empty_like(grad_expand)
     dAB = torch.empty(M, ND * 2, device=xn.device, dtype=grad_expand.dtype)
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]), triton.cdiv(ND, meta["BLOCK_N"]))  # noqa: E731
+    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,
         wa.contiguous(), wb.contiguous(), grad_expand,
