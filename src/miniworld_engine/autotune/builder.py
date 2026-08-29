@@ -33,6 +33,7 @@ from collections.abc import Callable
 from itertools import zip_longest
 from pathlib import Path
 from queue import Empty, Queue
+from typing import ClassVar
 
 import torch
 
@@ -669,8 +670,12 @@ class OpUnit:
             args += ["--width", str(self.width)]
         return args + (["--side", self.side] if self.side else [])
 
+    #: registry.csv's dtype names -> the driver env's. `MINIWORLD_DRIVER_DTYPE` takes the short
+    #: spelling because that is what the drivers' own docstrings and `drivers.DTYPE_MODE` use.
+    _DRIVER_DTYPE: ClassVar[dict[str, str]] = {"bfloat16": "bf16", "float32": "fp32"}
+
     def env(self) -> dict[str, str]:
-        # The drivers read this at IMPORT time, like MINIWORLD_SHAPE_MODE -- their shape constants
+        # The drivers read these at IMPORT time, like MINIWORLD_SHAPE_MODE -- their shape constants
         # are module-level and the kernels reach them through helpers that close over them, so a
         # per-call override would have to reach inside every driver module. Per-process does not.
         env = {"MINIWORLD_DRIVER_LENGTH": str(self.length)}
@@ -678,6 +683,14 @@ class OpUnit:
             env["MINIWORLD_DRIVER_WIDTH"] = str(self.width)
         if self.side:
             env["MINIWORLD_DRIVER_SIDE"] = self.side
+        # THE DTYPE, which used to be missing. registry.csv's `dtypes` column splits an op into one
+        # unit per declared precision, and `--dtype` is on the child's command line so the unit is
+        # reproducible from it -- but the op path never read that argument, and this never set the
+        # variable the drivers actually consult. So every unit built at `drivers.DTYPE_MODE`'s
+        # default, bf16, and the fp32 half of the sweep was 360 of `build trunk`'s 1,269 units
+        # doing exactly what the bf16 half had already done. No fp32 entry has ever been built for
+        # any kernel, on any card.
+        env["MINIWORLD_DRIVER_DTYPE"] = self._DRIVER_DTYPE[self.dtype]
         return env
 
 

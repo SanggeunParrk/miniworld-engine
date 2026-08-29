@@ -30,16 +30,20 @@ launcher reached from here is an INNER one: it unpacks ``M, N = t.shape`` and th
 given the flat matrix, so per ``length_of``'s docstring ("its caller must compute the key and pass
 it down") this file computes ``_SHAPE_KEY`` once and passes it as ``shape_key=``.
 
-dtypes. adaLN runs bf16 (``drivers.BF16``, and ``bench_kernel_adaln`` uses bf16 unless the sweep
-asks for fp32). The conditioned_transition family runs fp32: every file in it states "fp32 io with
-TF32 tensor cores" and ``bench_kernel_cond_transition_tail`` is fp32-only. The one exception is
-``gated_projection_bwd_gate_flat_lowp_triton``, whose registry name says ``lowp`` -- bf16 there.
+dtypes. Every activation here is built at ``drivers.BF16``, which is the name
+``MINIWORLD_DRIVER_DTYPE`` switches -- so a unit declared bf16 and a unit declared fp32 build
+different tensors, which is the whole point of declaring two. It used to be the fixed
+``drivers.FP32`` at every site, matching "fp32 io with TF32 tensor cores" in the family's files;
+that made fp32 the only precision this family COULD be built at, and registry.csv declared fp32
+alone to match. Both halves were true and together they meant the model's own precision was never
+tuned: krystal runs bf16. The one kernel that must stay fp32 says so at its own call site
+(``cond_transition_fwd_b2b_saveact``), by naming torch.float32 rather than by pinning the family.
 """
 from __future__ import annotations
 
 from miniworld_engine.autotune.shape_key import atom_key
 from miniworld_engine.kernels.drivers import (
-    FP32,
+    BF16,
     _rand,
     driver_length,
     driver_width,
@@ -105,7 +109,7 @@ _SHAPE_KEY = atom_key(_M)
 # drivers keep them as two axes.  ND is _ND, its own axis.  See the constant block above.
 
 
-def _ct_args(dtype=FP32):
+def _ct_args(dtype=BF16):
     """(x, cond, wa, wb, ws, wsc, bsc) -- the signature every tail entry point takes."""
     return (_rand(_M, _D, dtype=dtype), _rand(_M, _DC, dtype=dtype),
             _rand(_ND, _D, dtype=dtype), _rand(_ND, _D, dtype=dtype),
@@ -139,14 +143,14 @@ def cond_transition_squeeze_gate():
     )
 
     _, cond, _, _, ws, wsc, bsc = _ct_args()
-    _squeeze_gate(_rand(_M, _ND, dtype=FP32), cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
+    _squeeze_gate(_rand(_M, _ND, dtype=BF16), cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
 
 
 def cond_transition_swiglu():
     """training._swiglu_fwd_kernel: h = silu(a)*b, a/b the (M, ND) expand halves."""
     from miniworld_engine.kernels.conditioned_transition.triton.training import _swiglu
 
-    _swiglu(_rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32), shape_key=_SHAPE_KEY)
+    _swiglu(_rand(_M, _ND, dtype=BF16), _rand(_M, _ND, dtype=BF16), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_bwd_swiglu_flat():
@@ -155,22 +159,25 @@ def cond_transition_bwd_swiglu_flat():
         _swiglu_bwd_packed,
     )
 
-    _swiglu_bwd_packed(_rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32),
-                       _rand(_M, _ND, dtype=FP32), shape_key=_SHAPE_KEY)
+    _swiglu_bwd_packed(_rand(_M, _ND, dtype=BF16), _rand(_M, _ND, dtype=BF16),
+                       _rand(_M, _ND, dtype=BF16), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_fwd_b2b_saveact():
     """training._b2b_fwd_train_kernel (atom fused b2b training forward).
 
-    fp32: the ConditionedTransitionTailFunction forward reroutes bf16 away from this kernel with
-    the comment "bf16 fused b2b train kernel is broken (dtype/spill)", so bf16 would only measure
-    that known break.
+    fp32 OUTRIGHT, not through the overridable `BF16` name: the ConditionedTransitionTailFunction
+    forward reroutes bf16 away from this kernel with the comment "bf16 fused b2b train kernel is
+    broken (dtype/spill)", so a bf16 unit here would only measure that known break. registry.csv
+    declares this one fp32-only to match, and it is the only kernel in the family that does.
     """
+    import torch
+
     from miniworld_engine.kernels.conditioned_transition.triton.training import (
         _b2b_fwd_train,
     )
 
-    _b2b_fwd_train(*_ct_args(), shape_key=_SHAPE_KEY)
+    _b2b_fwd_train(*_ct_args(dtype=torch.float32), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_expand_swiglu_saveact():
@@ -190,7 +197,7 @@ def cond_transition_squeeze_gate_saveact():
     )
 
     _, cond, _, _, ws, wsc, bsc = _ct_args()
-    _fwd_squeeze_gate(_rand(_M, _ND, dtype=FP32), cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
+    _fwd_squeeze_gate(_rand(_M, _ND, dtype=BF16), cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
 
 
 

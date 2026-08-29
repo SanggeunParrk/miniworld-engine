@@ -5,8 +5,10 @@ those pairs when the kernel writes more than one buffer. ``autotune/run_all.py::
 it and reports ``max|a-e| / max|e|`` per pair. A driver only proves the kernel *runs*; these say
 whether the number it wrote is the number the op is defined to produce.
 
-Shapes and launcher calls are lifted verbatim from ``drivers_adaln.py`` (aligned mode: M=512,
-D=128, DC=128, ND=512, eps=1e-5) -- the checker must hit the same compiled kernel the driver does,
+Shapes, dtypes and launcher calls are lifted verbatim from the drivers (aligned mode: M=512,
+D=128, DC=128, ND=256, eps=1e-5) -- ``BF16`` included, which is the name
+``MINIWORLD_DRIVER_DTYPE`` switches, so ``MINIWORLD_DRIVER_DTYPE=fp32`` checks the same kernel
+in the other precision instead of a second set of numbers written out here -- the checker must hit the same compiled kernel the driver does,
 so the shape constants are imported rather than re-chosen here, and that is also what carries
 ``MINIWORLD_SHAPE_MODE=ragged``'s partial tail tiles into these references without restating a
 single extent. Nothing below writes a shape literal: the two derived widths are ``2 * _D``
@@ -72,7 +74,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels.checks import _fixed, _no_tf32
-from miniworld_engine.kernels.drivers import FP32, _rand
+from miniworld_engine.kernels.drivers import BF16, _rand
 from miniworld_engine.kernels.drivers.conditioned_transition import (
     _M,
     _ND,
@@ -166,7 +168,7 @@ def cond_transition_swiglu():
     from miniworld_engine.kernels.conditioned_transition.triton.training import _swiglu
 
     _fixed()
-    a, b = _rand(_M, _ND, dtype=FP32), _rand(_M, _ND, dtype=FP32)
+    a, b = _rand(_M, _ND, dtype=BF16), _rand(_M, _ND, dtype=BF16)
     return _swiglu(a, b, shape_key=_SHAPE_KEY), F.silu(a) * b
 
 
@@ -178,7 +180,7 @@ def cond_transition_squeeze_gate():
 
     _fixed()
     _, cond, _, _, ws, wsc, bsc = _ct_args()
-    h = _rand(_M, _ND, dtype=FP32)
+    h = _rand(_M, _ND, dtype=BF16)
     y = _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
     return y, _squeeze_gate_ref(h, cond, ws, wsc, bsc)[2]
 
@@ -191,7 +193,7 @@ def cond_transition_squeeze_gate_saveact():
 
     _fixed()
     _, cond, _, _, ws, wsc, bsc = _ct_args()
-    h = _rand(_M, _ND, dtype=FP32)
+    h = _rand(_M, _ND, dtype=BF16)
     y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc, shape_key=_SHAPE_KEY)
     exp_out, exp_scale, exp_y = _squeeze_gate_ref(h, cond, ws, wsc, bsc)
     return {"Y": (y, exp_y), "Out": (out, exp_out), "Scale": (scale, exp_scale)}
@@ -228,9 +230,9 @@ def cond_transition_bwd_swiglu_flat():
     )
 
     _fixed()
-    a = _rand(_M, _ND, dtype=FP32)
-    b = _rand(_M, _ND, dtype=FP32)
-    dh = _rand(_M, _ND, dtype=FP32)
+    a = _rand(_M, _ND, dtype=BF16)
+    b = _rand(_M, _ND, dtype=BF16)
+    dh = _rand(_M, _ND, dtype=BF16)
     dab = _swiglu_bwd_packed(a, b, dh, shape_key=_SHAPE_KEY)
     da, db = _swiglu_bwd(a, b, dh)
     return dab, torch.cat([da, db], dim=1)
