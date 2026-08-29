@@ -1186,6 +1186,8 @@ def bench_module_conditioned_transition(
     }:
         return as_bench_result(float("nan"))
 
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+
     class MultiConditionedTransition(nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -1199,6 +1201,7 @@ def bench_module_conditioned_transition(
                         d_hidden=conf.d_single_token,
                         d_cond=conf.d_single,
                         implementation=spec.impl,
+                        dtype=dtype,
                     )
                     for _ in range(conf.n_layers)
                 ],
@@ -1209,7 +1212,7 @@ def bench_module_conditioned_transition(
                 x = layer(x, cond)
             return x
 
-    model = MultiConditionedTransition().to(DEVICE)
+    model = MultiConditionedTransition().to(device=DEVICE, dtype=dtype)
     if conf.compile:
         model.compile()
     model = fabric.setup_module(model)
@@ -1220,6 +1223,10 @@ def bench_module_conditioned_transition(
     # activations for a backward that never runs. The smoke run showed it: `mode=inference` launched
     # adaln_epilogue_saveact_triton and layernorm_fwd_saveact_strided_triton, both save-activation
     # kernels. Training keeps it: these are mid-network blocks, so dx is real work the model does.
+    # `conf.precision`, like every other module bench. This one ignored it twice over: it never
+    # passed `dtype` to the constructor, whose default is fp32, and it built its inputs with no
+    # dtype at all -- so `precision=bf16-mixed` still measured fp32 end to end. The model runs
+    # bf16, and this family's kernels run either.
     wants_grad = not is_inference_mode(conf.mode)
     x = torch.randn(
         conf.n_augment,
@@ -1227,6 +1234,7 @@ def bench_module_conditioned_transition(
         seq_len,
         conf.d_single_token,
         device=DEVICE,
+        dtype=dtype,
         requires_grad=wants_grad,
     )
     cond = torch.randn(
@@ -1235,6 +1243,7 @@ def bench_module_conditioned_transition(
         seq_len,
         conf.d_single,
         device=DEVICE,
+        dtype=dtype,
         requires_grad=wants_grad,
     )
     dy = torch.randn_like(x)
