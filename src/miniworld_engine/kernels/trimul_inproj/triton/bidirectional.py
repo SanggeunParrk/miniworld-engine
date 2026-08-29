@@ -278,7 +278,8 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
             d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
-        d_tri = d_view.t().reshape(H, L, L)
+        d_tri = d_view.t().reshape(H, L, L)   # .t().reshape copies, so d_view is dead here
+        del d_view, d_proj, view
 
         # contraction bwd (split outgoing/incoming), cuBLAS bmm
         d_o_out, d_o_in = d_tri[:h], d_tri[h:]
@@ -289,6 +290,13 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         d_ri = torch.bmm(li, d_o_in)
         d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
         d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
+        # `del` after last use. autograd frees an intermediate when its consumer node has run; a
+        # plain Python backward holds every local to the end, and here that is measured waste: the
+        # peak of this function is `front_bwd_dW` allocating dconc (4D, M) -- 1,152 MiB at
+        # B=1 L=768 d=128 bf16 -- and at that instant the four bmm results the cats above already
+        # consumed were still live, 144 MiB each. The views go too: d_o_out/d_o_in are slices of
+        # d_tri, so d_tri's own 288 MiB is only freed once no view of it is named.
+        del d_lo, d_li, d_ro, d_ri, d_o_out, d_o_in, d_tri, lo, ro, li, ri
         # chain back through the elementwise mask (left_masked = left*mm)
         if ctx.mm is not None:
             d_left = d_left * ctx.mm
