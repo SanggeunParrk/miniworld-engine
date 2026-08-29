@@ -1808,8 +1808,14 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     # assumed impossible -- it was the bench, not the model, that made one.
     def _xc():
         torch.manual_seed(1)
-        return (torch.randn(1, L, D, device=DEVICE, dtype=dtype),
-                torch.randn(1, L, D, device=DEVICE, dtype=dtype))
+        # `(A, 1, L, D)`, the shape production hands adaln: augmented_attention/module.py:166
+        # passes `single`, which carries the augmentation axis. NOT `(1, L, L, D)` -- that was a
+        # pair activation nothing constructs -- and not `(1, L, D)` either, which is the same L at
+        # 1/A the rows. `length_of` is `shape[-2]` and reads L from all three, so all three land in
+        # one atom bucket at wildly different row counts; only this one is the row count the model
+        # actually launches. bench_module_adaptive_layernorm builds the same shape.
+        return (torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype),
+                torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype))
 
     if implementation == "pytorch":
         kfn, path = (lambda x, c: ref_mod(x, c)), "module.reference.torch"
@@ -2053,11 +2059,11 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
 
     def _xc():
         torch.manual_seed(1)
-        # SINGLE. This built a pair activation -- M = L*L -- and then passed `length=L` into an
-        # atom-level family, so at L=512 it asked for the config tuned at 512 rows to run 262,144.
-        # modules/conditioned_transition/module.py:123 hands this family `(B, L, D)`.
-        return (torch.randn(1, L, D, device=DEVICE, dtype=torch.float32),
-                torch.randn(1, L, D, device=DEVICE, dtype=torch.float32))
+        # `(A, 1, L, D)`, the shape the module hands this family -- see bench_kernel_adaln. This
+        # built `(1, L, L, D)`, a pair activation with M = L*L, and passed `length=L` into an
+        # atom-level family: at L=512 it asked for the config tuned at 512 rows to run 262,144.
+        return (torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=torch.float32),
+                torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=torch.float32))
 
     # The kernel is the POST-AdaLN tail: ConditionedTransition.forward runs `ada_ln_in` first and
     # only then calls it. Normalize once here so both sides see the same input.
@@ -2071,7 +2077,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
         # `length_of` on a 2-D shape, which the guard refuses.
         kfn = lambda x, c: raw(
             ref_mod.ada_ln_in(x, c).reshape(-1, D), c.reshape(-1, D),
-            wa, wb, ws, wsc, bsc, length=L).reshape(1, L, D)
+            wa, wb, ws, wsc, bsc, length=L).reshape(conf.n_augment, 1, L, D)
         path = "kernels.conditioned_transition.triton"
     else:
         return as_bench_result(float("nan"))
@@ -2254,11 +2260,10 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     sw, sb, bw = ref_mod.to_scale.weight, ref_mod.to_scale.bias, ref_mod.to_bias.weight
     ex, ec = ref_mod.ln_in.eps, ref_mod.ln_cond.eps
     torch.manual_seed(1)
-    # SINGLE, not pair -- see bench_kernel_adaln for why. adaln has no 4-D caller in src/, and a
-    # pair activation here shares an atom bucket with the module bench at 12x the rows.
-    x0 = torch.randn(1, L, D, device=DEVICE, dtype=dtype)
-    c0 = torch.randn(1, L, D, device=DEVICE, dtype=dtype)
-    dy = torch.randn(1, L, D, device=DEVICE, dtype=dtype)
+    # `(A, 1, L, D)` -- the production shape, see bench_kernel_adaln.
+    x0 = torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype)
+    c0 = torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype)
+    dy = torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype)
     xr, cr = x0.clone().requires_grad_(True), c0.clone().requires_grad_(True)
     ref_mod(xr, cr).backward(dy)
     ref_dx = xr.grad
