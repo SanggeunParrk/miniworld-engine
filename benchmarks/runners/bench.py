@@ -1191,9 +1191,13 @@ def bench_module_conditioned_transition(
             super().__init__()
             self.layers = nn.ModuleList(
                 [
+                    # The token side: `d_single_token` (768) conditioned on `d_single` (384), which
+                    # is what krystal's `token_dit` builds and what AlphaFold-3 calls c_token and
+                    # c_s. This read `d_hidden=d_pair(128), d_cond=d_single_token(768)` -- the two
+                    # roles swapped and the wrong widths, a combination the model never builds.
                     ConditionedTransition(
-                        d_hidden=conf.d_pair,
-                        d_cond=conf.d_single_token,
+                        d_hidden=conf.d_single_token,
+                        d_cond=conf.d_single,
                         implementation=spec.impl,
                     )
                     for _ in range(conf.n_layers)
@@ -1214,7 +1218,7 @@ def bench_module_conditioned_transition(
         conf.n_augment,
         1,
         seq_len,
-        conf.d_pair,
+        conf.d_single_token,
         device=DEVICE,
         requires_grad=True,
     )
@@ -1222,7 +1226,7 @@ def bench_module_conditioned_transition(
         conf.n_augment,
         1,
         seq_len,
-        conf.d_single_token,
+        conf.d_single,
         device=DEVICE,
         requires_grad=True,
     )
@@ -1282,9 +1286,14 @@ def bench_module_adaptive_layernorm(
             super().__init__()
             self.layers = nn.ModuleList(
                 [
+                    # The token side, like the ConditionedTransition bench: AdaptiveLayerNorm is
+                    # constructed inside ConditionedTransition and AugmentedAttentionPairBias with
+                    # the block's own (d_single, d_cond), so the model builds it at 768/384 and at
+                    # 128/128 and at nothing else. `d_pair` (128) for BOTH was the pair width, which
+                    # this module never sees -- adaln normalises the SINGLE representation.
                     AdaptiveLayerNorm(
-                        d_hidden=conf.d_pair,
-                        d_cond=conf.d_pair,
+                        d_hidden=conf.d_single_token,
+                        d_cond=conf.d_single,
                         implementation=implementation_type,
                     )
                     for _ in range(conf.n_layers)
@@ -1305,7 +1314,7 @@ def bench_module_adaptive_layernorm(
         conf.n_augment,
         1,
         seq_len,
-        conf.d_pair,
+        conf.d_single_token,
         device=DEVICE,
         dtype=dtype,
         requires_grad=True,
@@ -1314,7 +1323,7 @@ def bench_module_adaptive_layernorm(
         conf.n_augment,
         1,
         seq_len,
-        conf.d_pair,
+        conf.d_single,
         device=DEVICE,
         dtype=dtype,
         requires_grad=True,
@@ -1777,11 +1786,16 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
 
 def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     """Adaptive LayerNorm forward: y = sigma(scale)*LN(x) + bias, scale/bias = Linear(LN(cond)).
-    Rows: pytorch, adaln_inference, triton_adaln, adaln_fused3."""
+    Rows: pytorch, adaln_inference, adaln_lnfold. `triton_adaln` and `adaln_fused3` are
+    gone: no module dispatched to either, so they were deleted with main.py and fused3.py."""
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    D, L = conf.d_pair, seq_len
+    # The ATOM side: krystal's `atom_dit` builds both adaln and ConditionedTransition at
+    # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
+    # was not -- `d_pair` is the PAIR width, which neither module ever sees. The TOKEN side
+    # (768/384) is covered by the module benches.
+    D, L = conf.d_single_atom, seq_len
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
     torch.manual_seed(0)
@@ -1834,14 +1848,6 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
         kfn = lambda x, c: adaln_inference_lnfold(
             x, c, clw, sw, sb, bw, ex, ec, weight_cat=_wcat, bias_cat=_bcat, prefolded=_pf)
         path = "kernels.adaln.triton.inference.lnfold"
-    elif implementation == "triton_adaln":
-        from miniworld_engine.kernels import triton_adaptive_layer_norm
-        kfn = lambda x, c: triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)
-        path = "kernels.adaln.triton.main"
-    elif implementation == "adaln_fused3":
-        from miniworld_engine.kernels.adaln.triton.fused3 import adaln_fused3
-        kfn = lambda x, c: adaln_fused3(x, c, clw, sw, sb, bw, ex, ec)
-        path = "kernels.adaln.triton.fused3"
     else:
         return as_bench_result(float("nan"))
 
@@ -2049,7 +2055,10 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
     )
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    D, L, n = conf.d_pair, seq_len, 4
+    # The atom side, as in the adaln kernel benches. n is the transition's expansion factor:
+    # krystal sets `condition.transition_n: 2`, so 4 measured a shape twice as wide as the
+    # one the model launches, and the driver tunes for n=2.
+    D, L, n = conf.d_single_atom, seq_len, 2
     torch.manual_seed(0)
     ref_mod = ConditionedTransition(D, D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).float()
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
@@ -2242,12 +2251,17 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
 
 # ---- BACKWARD operations (autograd; backward-only timing via autograd.grad) -------------------
 def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
-    """adaLN backward (autograd, backward-only). Rows: pytorch, adaln_train, triton_adaln,
-    adaln_fused3. Cosine on dx vs pytorch autograd."""
+    """adaLN backward (autograd, backward-only). Rows: pytorch, adaln_train.
+    Cosine on dx vs pytorch autograd. `triton_adaln` / `adaln_fused3` are gone -- no module
+    reached them."""
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    D, L = conf.d_pair, seq_len
+    # The ATOM side: krystal's `atom_dit` builds both adaln and ConditionedTransition at
+    # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
+    # was not -- `d_pair` is the PAIR width, which neither module ever sees. The TOKEN side
+    # (768/384) is covered by the module benches.
+    D, L = conf.d_single_atom, seq_len
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
     torch.manual_seed(0)
@@ -2275,14 +2289,6 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels.adaln.triton.training import adaln_train
         out = adaln_train(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.training"
-    elif implementation == "triton_adaln":
-        from miniworld_engine.kernels import triton_adaptive_layer_norm
-        out = triton_adaptive_layer_norm(x, c, clw, sw, sb, bw, ex, ec)
-        path = "kernels.adaln.triton.main"
-    elif implementation == "adaln_fused3":
-        from miniworld_engine.kernels.adaln.triton.fused3 import adaln_fused3_train
-        out = adaln_fused3_train(x, c, clw, sw, sb, bw, ex, ec)
-        path = "kernels.adaln.triton.fused3"
     else:
         return as_bench_result(float("nan"))
     return _bwd_autograd_result(conf, out, [x, c], dy, ref_dx, path=path,

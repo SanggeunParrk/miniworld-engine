@@ -404,15 +404,28 @@ def cases() -> list[Case]:
              lambda dims, p, i, dt: AdaptiveLayerNorm(**dims, implementation=IT(i)).cuda().to(dt),
              lambda b, l, dims, dt: (_single(b, l, dims["d_hidden"], dt),
                                      _single(b, l, dims["d_cond"], dt)),
-             dims=({"d_hidden": 384, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128},
-                   {"d_hidden": 768, "d_cond": 768}), dtypes=BOTH),
+             # Same two the model builds -- AdaptiveLayerNorm is constructed inside
+             # ConditionedTransition and AugmentedAttentionPairBias with the block's own
+             # (d_single, d_cond), so it sees 768/384 and 128/128 and nothing else.
+             dims=({"d_hidden": 768, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128}),
+             dtypes=BOTH),
+        # The two combinations the model builds, and only those. `krystal`'s config gives the
+        # DiffusionTransformer its `(d_single, d_cond)` and the block passes them straight through
+        # as `ConditionedTransition(d_hidden=d_single, d_cond=d_cond)`:
+        #
+        #     token_dit   d_single = d_single_token 768   d_cond = d_single 384    24 blocks
+        #     atom_dit    d_single = d_single_atom  128   d_cond = d_single_atom 128   3 blocks
+        #
+        # Those are AlphaFold-3's own widths -- c_token 768, c_s 384, c_atom 128 -- so the token
+        # side is NOT square, and a sweep of square pairs (384/384) tunes a shape the model never
+        # builds while leaving 768/384, the 24-block half, with no entry at all.
         Case("conditioned_transition",
              lambda dims, p, i, dt: ConditionedTransition(**dims, implementation=IT(i)).cuda().to(dt),
              lambda b, l, dims, dt: (_single(b, l, dims["d_hidden"], dt),
                                      _single(b, l, dims["d_cond"], dt)),
              # bf16 is reachable now that the module takes its dtype at construction instead of
              # pinning the four Linears to fp32; fp32 stays because the bench still runs it there.
-             dims=({"d_hidden": 384, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128}),
+             dims=({"d_hidden": 768, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128}),
              dtypes=BOTH),
         Case("msa_pair_weighted_averaging",
              lambda dims, p, i, dt: MSAPairWeightedAveraging(
@@ -788,11 +801,19 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     # attention_pair_bias and augmented_attention at d_single 384 and 768).
     #
     # A kernel used on BOTH sides gets the union, because it meets both.
-    #: An atom activation is (B, A, ATOM_D_MAX): the channel width is fixed, so an atom-side unit
-    #: has exactly one width and sweeping more of them tunes shapes production never presents.
+    #: An atom activation is (B, A, ATOM_D_MAX): the channel width is fixed, so a unit driving the
+    #: atom STREAM has exactly one width and sweeping more of them tunes shapes production never
+    #: presents. `width=atom` is how a row says it only ever sees that stream.
     ATOM_WIDTH = 128
-    LADDER = {"pair": (128, 256, 512),
-              "single": (128, 256, 384, 512, 768),
+    #: The SINGLE ladder is the three widths the model declares and no others: all four krystal
+    #: model configs (debug/small/medium/large) set d_single_atom=128, d_single=384,
+    #: d_single_token=768 -- they differ in block counts, not widths -- and those are AlphaFold-3's
+    #: c_atom, c_s and c_token. It used to also carry 256 and 512, which no config presents.
+    #: The PAIR ladder keeps 128/256/512: d_pair is 128 in every config, and 256/512 are the
+    #: headroom to sweep it.
+    LADDER = {"atom": (ATOM_WIDTH,),
+              "pair": (128, 256, 512),
+              "single": (128, 384, 768),
               "both": (128, 256, 384, 512, 768)}
     out = []
     for r in csv.DictReader(reg.open()):
@@ -831,13 +852,32 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # -- so sweeping 384 or 768 there builds a shape the model never presents. A token/pair
         # activation's width is exactly what varies. A `level=both` kernel therefore splits inside
         # one op: its pair units walk the ladder, its atom units are 128 and only 128.
+        # The width comes from the `width` COLUMN, never from `level`. The two say different things:
+        # `level` picks the key function (which length ladder a bucket is drawn from), while `width`
+        # says which stream's channel width the kernel sees. This used to read
+        # `atom_only = level == "atom"` -> one width, 128, and that silently capped three families
+        # that key on `atom_key` but run on BOTH sides of the model. krystal builds one
+        # DiffusionTransformer block class 24 times at d_single=768/d_cond=384 (`token_dit`) and 3
+        # times at 128/128 (`atom_dit`), and adaln, ConditionedTransition and
+        # AugmentedAttentionPairBias are all constructed inside it -- adaln has no width guard at
+        # all. So 768 was 24 of the model's 27 blocks and no unit ever built it: production opened a
+        # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
+        # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
         klass = r.get("width") or "both"
-        atom_only = r["level"] == "atom"
 
-        def _widths(side: str, _k=klass, _a=atom_only) -> tuple:
+        def _widths(side: str, _k=klass) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
-            return (ATOM_WIDTH,) if (_a or side == "atom") else LADDER.get(_k, LADDER["both"])
+            # A `level=both` row is driven once per SIDE, and the side names the stream outright,
+            # so it decides the ladder: its atom units are a real atom activation (128 and only
+            # 128) and its pair units a real pair one, whatever the row's own class says. The
+            # class ladder is for rows with no side -- `level=token`/`atom` -- where the column is
+            # the only thing that knows which stream the kernel sees.
+            if side == "atom":
+                return (ATOM_WIDTH,)
+            if side == "pair":
+                return LADDER["pair"]
+            return LADDER.get(_k, LADDER["both"])
 
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)
                     for dt in dtypes for side, length in sided for w in _widths(side)])

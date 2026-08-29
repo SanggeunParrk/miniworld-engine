@@ -75,11 +75,14 @@ _D_BASE = driver_width(128)  # BenchConfig.d_pair default / interface.ATOM_D_MAX
 # A driver's extents are a claim about what the model runs; when they are copied from a bench
 # instead, the cache is tuned for the bench.
 _N_EXPAND = 2
-#: d_cond is its OWN axis and its own default (384), not d_hidden. The two are separately tiled
-#: (NC / DC) and the module is built with them unequal -- bench_module_conditioned_transition runs
-#: d_hidden=128 with d_cond=768 -- so pinning DC to d_hidden tuned a square case production does
-#: not present.
-_DC_BASE = 384
+#: d_cond FOLLOWS d_hidden the way the model pairs them, instead of being a constant. krystal
+#: builds exactly two combinations and every model config (debug/small/medium/large) declares the
+#: same widths for them: `token_dit` is d_single=768 conditioned on d_cond=384 (AlphaFold-3's
+#: c_token and c_s) and `atom_dit` is 128 conditioned on 128 (c_atom for both). So d_cond is 384
+#: whenever d_hidden is a token width and 128 on the atom side, and a driver that pinned it to one
+#: number tuned a d_cond the other side never presents. The two stay SEPARATE axes -- separately
+#: tiled as NC / DC -- because on the token side they are unequal.
+_DC_BASE = 384 if _D_BASE > 128 else 128
 
 _M = ragged(driver_length(512))       # drivers.rows2d default row count
 _D = ragged(_D_BASE)                  # d_hidden (NX) / the tail's K and D
