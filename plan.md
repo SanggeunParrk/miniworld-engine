@@ -514,6 +514,15 @@ and all 24 candidates land in the largest-tile corner. Measured on an A5000 with
 no launchable config in the subset. Fixed in 72c131b by reserving a quarter of the cap for the
 smallest tiles, chosen from the same industry centre so the existing test still holds.
 
+*Half closed.* `tests/autotune/test_the_miss_fallback_is_launchable_on_a_real_grid.py` now walks
+the fixed path on a REAL grid against REAL measurements -- `capture` logs the shared bytes of every
+config it compiles, and one such log is a fixture (2,324 configs of `trimul_gemm_gate_triton` on an
+A6000). Against sm86's 101,376 B: 51% of that grid cannot launch, the MEDIAN config is 104,448 B so
+the middle does not fit, and the fallback offers 24 of which 22 measured configs do. The reserved
+quarter reaches 5,120 B where ranking alone reaches 20,480 B, against a grid floor of 4,096 --
+1.25x versus 5x. One kernel, because it is the only fixture with shared-memory readings; the kernel
+the bug was found on is no longer in the registry.
+
 *What is still open:* the fix makes the subset launchable; it does not say what it costs. The
 docstring's claim -- warps=4/stages=2 lands within 5% of the full-grid winner in 83% of buckets --
 was measured for the old subset, over this repo's 374-bucket sweep. Giving a quarter of the cap to
@@ -523,9 +532,9 @@ The measurement is cheap and the data already exists: for each bucket in a built
 full-grid winner against the best of `heuristic_subset(grid)` under both rules. It needs a cache
 built on the current keys, which is the same prerequisite as everything else here.
 
-Worth doing at the same time: the three kernels found this by dying, which means no test walks the
-fallback path. `tests/autotune` exercises `heuristic_subset` on synthetic configs, not on a real
-grid against a real shared-memory limit.
+Done at the same time: the three kernels found this by dying, and no test walked the fallback path.
+One does now -- see above. What it does NOT measure is the cost: launchable is not the same as
+close to the full-grid winner, and that still needs a cache built on the current keys.
 
 
 ---
