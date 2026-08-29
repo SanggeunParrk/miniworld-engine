@@ -46,6 +46,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+
 
 from miniworld_engine.autotune.shape_key import pack, token_key
 
@@ -63,9 +65,12 @@ def _lr_kernel(
     K: tl.constexpr, D: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key,
+    GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0).to(tl.int64)
-    pid_n = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. The interleaved [g|p] axis: 2*D wide, BLOCK_N covering two channels.
+    pid, pid_n = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(2 * D, BLOCK_N), GROUP_M)
     # int64 M-index: bdll store offset is (D+rd)*LL + m with LL=L*L, so at large L
     # (e.g. L>=4096 at D=128, or d_pair=512 sooner) the flat offset exceeds int32.
     # Promote the row index and LL to int64 — mirrors the hardened backward
@@ -123,9 +128,12 @@ def _gate_kernel(
     K: tl.constexpr, D: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key,
+    GROUP_M: tl.constexpr,
 ):
-    pid = tl.program_id(0).to(tl.int64)
-    pid_n = tl.program_id(1).to(tl.int64)
+    # Visit order, tuned: see kernels/_tiles.py. The gate half, D wide.
+    pid, pid_n = tile_order(
+        tl.program_id(0).to(tl.int64),
+        tl.cdiv(M, BLOCK_M1), tl.cdiv(D, BLOCK_N), GROUP_M)
     # int64 M-index (gate store is m*D+d, M=L*L): matches _lr_kernel hardening.
     rm = pid.to(tl.int64) * BLOCK_M1 + tl.arange(0, BLOCK_M1).to(tl.int64)
     rd = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -185,8 +193,8 @@ def _front_launch(x_flat: torch.Tensor, Wlr: torch.Tensor, Wg: torch.Tensor, L: 
     m = L * L
     lr = torch.empty(1, 2 * D, L, L, device=x_flat.device, dtype=x_flat.dtype)  # bdll storage
     gate = torch.empty(m, D, device=x_flat.device, dtype=x_flat.dtype)          # blld
-    lr_grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]), triton.cdiv(2 * D, meta["BLOCK_N"]))  # noqa: E731
-    g_grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]), triton.cdiv(D, meta["BLOCK_N"]))       # noqa: E731
+    lr_grid = lambda meta: tile_grid(m, 2 * D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
+    g_grid = lambda meta: tile_grid(m, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _lr_kernel[lr_grid](x_flat, Wlr, lr, m, m, K=D, D=D, shape_key=pack(shape_key, D=D))
     _gate_kernel[g_grid](x_flat, Wg, gate, m, K=D, D=D, shape_key=pack(shape_key, D=D))
     return lr, gate
