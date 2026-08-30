@@ -84,7 +84,12 @@ ATOM_SHAPES: tuple[int, ...] = (1024, 2048, 4096, 8192)
 #: floor-clamp key both sides. `level=both` needs `both_key`'s row-count indirection precisely
 #: because a pair L and an atom A of the same value are different launches; here no length can
 #: have come from either side, so length is unambiguous and stays the key.
-DIT_TOKEN_LENGTHS: tuple[int, ...] = (256, 384, 512, 768)
+#: 128 is here because `_floor_clamp` clamps UP at the bottom -- anything at or below the smallest
+#: rung returns that rung. Without it a 128-token DiT launch keys to the 256 bucket and runs a
+#: config tuned for twice the tile count, which is the one direction this module's own docstring
+#: says never to round. 128 is a declared token count for every other token kernel (TOKEN_SHAPES),
+#: so it is one here too.
+DIT_TOKEN_LENGTHS: tuple[int, ...] = (128, 256, 384, 512, 768)
 DIT_ATOM_LENGTHS: tuple[int, ...] = (1024, 2048, 4096, 8192)
 
 #: What `atom_key` floor-clamps into: the atom work list plus the token lengths above. Widening the
