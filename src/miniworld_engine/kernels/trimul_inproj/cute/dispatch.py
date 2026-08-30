@@ -24,7 +24,7 @@ from miniworld_engine import settings
 
 _CACHE: dict[str, dict] = {}
 _ENABLED = settings.current().trimul_cute_dispatch
-_LOG = settings.current().trimul_dispatch_log
+_LOG = False  # was settings.trimul_dispatch_log: a print toggle nothing set
 
 
 def pick(name, key, candidates):

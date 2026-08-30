@@ -647,11 +647,14 @@ def gate_gemm(A: torch.Tensor, Bp: torch.Tensor, Bg: torch.Tensor,
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        op.proj_only = settings.current().sm100_proj_only
-        op.epi_gate = settings.current().sm100_gate_epi
-        op.no_exp = settings.current().sm100_no_exp
-        op.sig_mode = settings.current().sm100_sig_mode
-        op.epi_depth = settings.current().sm100_epi_depth or 3
+        # These five were per-run bring-up switches, read here and nowhere else, and set by
+        # nothing in the repo -- no test, no bench, no build. Folded to the values they always
+        # had. The op still takes them, so a bisect is an edit here rather than an environment.
+        op.proj_only = False
+        op.epi_gate = True
+        op.no_exp = False
+        op.sig_mode = "rsqrt"
+        op.epi_depth = 3
         _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm, options="--enable-tvm-ffi")
     _CACHE[key](mA, mBp, mBg, mC)
     if M != _M_orig:

@@ -37,6 +37,13 @@ REGISTRY = PKG / "kernels" / "registry.csv"
 #: They are read per kernel, since a kernel declares only the tile axes its own grid has.
 AXES = ("num_warps", "num_stages")
 TILE_PREFIX = "BLOCK_"
+#: Axes that live in `kwargs` but are not tiles. GROUP_M was invisible here for as long as it has
+#: existed: `_winners` collected AXES plus anything starting with `BLOCK_`, so the one axis that
+#: doubles eighteen grids -- 19.8% of the whole build -- was the one axis no guard could price. It
+#: is still unmeasured (no cache entry records it, because every committed entry predates the
+#: axis), so this changes nothing today; it means the first build that records it is also the
+#: first that can be checked.
+EXTRA_KWARG_AXES = ("GROUP_M",)
 
 #: Every set a build can be pointed at. `grid` is the one `build all` uses; the others pin whole
 #: configs (one row = one config) and are not ladders at all, so they are checked for the same
@@ -63,7 +70,7 @@ def _winners() -> dict[str, dict[str, collections.Counter]]:
                     for ax in AXES:
                         out[d.name][ax][ranked[0][ax]] += 1
                     for ax, val in (ranked[0].get("kwargs") or {}).items():
-                        if ax.startswith(TILE_PREFIX):
+                        if ax.startswith(TILE_PREFIX) or ax in EXTRA_KWARG_AXES:
                             out[d.name][ax][int(val)] += 1
     return out
 
@@ -148,7 +155,7 @@ def test_no_ladder_omits_a_value_that_is_worth_keeping(setname: str, won) -> Non
     for f in sorted((CONFIGS / setname).glob("*.csv")):
         ax = _ladders(f)
         for a in ax:
-            if a not in AXES and not a.startswith(TILE_PREFIX):
+            if a not in AXES and a not in EXTRA_KWARG_AXES and not a.startswith(TILE_PREFIX):
                 continue
             for v in sorted(set(won.get(f.stem, {}).get(a, {})) - set(ax[a])):
                 cost, blind = _omission_cost(f.stem, a, v)

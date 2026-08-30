@@ -184,8 +184,9 @@ def swiglu_expand_gemm(xn: torch.Tensor, wb: torch.Tensor, wa: torch.Tensor) -> 
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        op.sig_mode = settings.current().sm100_sig_mode
-        op.epi_depth = settings.current().sm100_epi_depth or 3
+        # See tm1/cute/sm100_gate_gemm_collective.py: bring-up switches, folded to their defaults.
+        op.sig_mode = "rsqrt"
+        op.epi_depth = 3
         _CACHE[key] = cute.compile(op, mA, mBp, mBg, mC, mac, strm, options="--enable-tvm-ffi")
     _CACHE[key](mA, mBp, mBg, mC)
     return h

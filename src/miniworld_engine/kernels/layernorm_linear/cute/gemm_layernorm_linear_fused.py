@@ -56,8 +56,10 @@ from quack.gemm_tvm_ffi_utils import (
 import os
 
 from miniworld_engine import settings
-_DEBUG_MODE = settings.current().lnl_debug
-_WS_DEBUG = settings.current().lnl_ws_debug  # warp-specialized stats bring-up
+# Bring-up printouts, read at import and set by nothing in the repo. `_WS` below stays a knob
+# because it selects a real code path; these two only decided whether to print.
+_DEBUG_MODE = 0
+_WS_DEBUG = 0  # warp-specialized stats bring-up
 _WS = settings.current().lnl_ws  # warp-specialized stats PRODUCTION path
 
 

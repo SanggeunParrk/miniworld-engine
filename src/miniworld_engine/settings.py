@@ -50,15 +50,12 @@ class Settings:
     """One run's configuration. Frozen: change it through :func:`configure`, not by mutation."""
 
     #: Bench the full config grid instead of the cached top-K. Formerly MINIWORLD_RUN_AUTOTUNE.
+    #: Kernel groups the autotune build unlocks; read by `autotunes()` below.
+    autotune_kernels: frozenset[AutotuneKernel] = frozenset()
     run_autotune: bool = False
     #: Record every benched (config -> ms) for an autotune-cache build. Formerly
     #: MINIWORLD_AUTOTUNE_CAPTURE.
     capture: bool = False
-    #: Kernels with their full grid unlocked. Formerly TRITON_AUTOTUNE. Typed against
-    #: :data:`AutotuneKernel`, and `configure` rejects a name outside it: an unknown name used to
-    #: be accepted and unlock nothing, so `autotune_kernels={"triangle_attention"}` -- the family's
-    #: CURRENT name, not this vocabulary's -- was a silent no-op.
-    autotune_kernels: frozenset[AutotuneKernel] = frozenset()
     #: During a build, leave a key the cache ALREADY holds alone instead of re-benching its grid.
     #:
     #: `build all` had to choose between two work lists, and neither is complete on its own. The
@@ -234,8 +231,6 @@ class Settings:
     trimul_out_layout: str | None = None
     #: Engage the cute in-projection dispatch at all. Formerly TRIMUL_DISPATCH.
     trimul_cute_dispatch: bool = True
-    #: Log each cute in-projection dispatch decision. Formerly TRIMUL_DISPATCH_LOG.
-    trimul_dispatch_log: bool = False
     #: Fused training front for the sm100 in-projection. Formerly MINIWORLD_TRAIN_FRONT_FUSED.
     trimul_train_front_fused: bool = True
 
@@ -244,29 +239,6 @@ class Settings:
     # variables. These were migrated mechanically: sm_100 has no execution path on the Ampere
     # cards available here, so only import and lint are verified — the kernels' use of these
     # values is not.
-    #: Sigmoid formulation in the sm100 epilogues. Formerly MW_SIG.
-    sm100_sig_mode: str = "rsqrt"
-    #: Epilogue depth. None keeps each kernel's own default (b2b forward 3, gate-backward 1), which
-    #: differed per site under the single MW_EPI_DEPTH variable.
-    sm100_epi_depth: int | None = None
-    #: Split (non-fused) gate backward. Formerly MW_SPLIT.
-    sm100_split: bool = False
-    #: Skip the gradient computation in the gate backward. Formerly MW_NOGRAD.
-    sm100_no_grad: bool = False
-    #: Single-output variant of the gate backward. Formerly MW_ONEOUT.
-    sm100_one_out: bool = False
-    #: Projection only, no gate. Formerly MW_PROJONLY.
-    sm100_proj_only: bool = False
-    #: Gate in the epilogue. Formerly MW_NOGATE_EPI (inverted).
-    sm100_gate_epi: bool = True
-    #: Drop the exp in the gate. Formerly MW_NOEXP.
-    sm100_no_exp: bool = False
-    #: Print kernel setup during bring-up. Formerly MW_SETUP_DBG.
-    sm100_setup_debug: bool = False
-    #: layernorm_linear cute debug level. Formerly LNL_DEBUG.
-    lnl_debug: int = 0
-    #: Warp-specialised stats bring-up debug level. Formerly LNL_WS_DEBUG.
-    lnl_ws_debug: int = 0
     #: Warp-specialised stats production path. Formerly LNL_WS.
     lnl_ws: int = 0
 

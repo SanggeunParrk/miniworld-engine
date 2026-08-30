@@ -116,15 +116,6 @@ class SwiGLUGateBwdKernel(GatedPersistentGemmKernel):
             + mbar_bytes + grad_bytes + n_out * c_bytes_ps * self.num_c_stage
         )
         self.num_c_stage += (self.smem_capacity - used) // (n_out * c_bytes_ps)
-
-        if settings.current().sm100_setup_debug:
-            print(f"[SETUP] epi_tile={self.epi_tile} cta={self.cta_tile_shape_mnk} "
-                  f"epi_m={epi_m} epi_n={epi_n} logical_per_sub={epi_m*epi_n*2} "
-                  f"c_bytes_ps={c_bytes_ps} epi_subtile_cnt={self.epi_subtile_cnt} "
-                  f"grad_tx_total={self.grad_tx_total} expect_logical={self.epi_subtile_cnt*epi_m*epi_n*2} "
-                  f"num_ab={self.num_ab_stage} num_c={self.num_c_stage} num_acc={self.num_acc_stage} "
-                  f"ge_smem_bytes={cute.size_in_bytes(self.c_dtype, self.ge_smem_layout_staged)}",
-                  flush=True)
         self.a_smem_layout_staged = utils.sm100.make_smem_layout_a(
             tiled_mma, self.mma_tiler, self.a_dtype, self.num_ab_stage
         )
@@ -819,16 +810,17 @@ def transition_expand_gatebwd_sm100(xn, wa, wb, grad_expand, *, shape_key: int |
             mma_tiler_mn=(128, 128), cluster_shape_mn=(1, 1), use_tma_store=True,
         )
         op.K = int(K)
-        op.sig_mode = settings.current().sm100_sig_mode
-        op.epi_depth = settings.current().sm100_epi_depth or 1
+        op.sig_mode = "rsqrt"
+        op.epi_depth = 1
         # FUSED path (DEFAULT): the grad is TMA-warp-loaded COALESCED into a staged smem
         # buffer (PipelineTmaAsync producer=TMA warp, consumer=epilogue warps) and s2r-read
         # in the epilogue, so dA/dB are emitted directly (no extra elementwise pass). This
         # beats the old SPLIT fallback (~1.45x -> ~2.1x standalone). Set MW_SPLIT=1 to fall
         # back to the split path (kernel no_grad + coalesced elementwise grad-multiply).
-        _fused = not settings.current().sm100_split
-        op.no_grad = (not _fused) or settings.current().sm100_no_grad
-        op.one_out = settings.current().sm100_one_out
+        # See the note in tm1/cute/sm100_gate_gemm_collective.py: bring-up switches, folded.
+        _fused = True
+        op.no_grad = False
+        op.one_out = False
         _CACHE[key] = (cute.compile(op, mA, mBp, mBg, mGe, mH, mDA, mDB, mac, strm, options="--enable-tvm-ffi"), op.no_grad)
     compiled, _split = _CACHE[key]
     compiled(mA, mBp, mBg, mGe, mH, mDA, mDB)
