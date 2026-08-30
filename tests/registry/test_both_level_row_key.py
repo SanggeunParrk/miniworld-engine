@@ -105,6 +105,44 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
         f"driven but not in BOTH_ROWS: {sorted(union - set(BOTH_ROWS))}")
 
 
+def test_every_both_level_family_names_all_three_streams_it_runs_on():
+    """`sides` has to be traced from the model, not defaulted, and the default was wrong for all.
+
+    Traced in krystal (team-gm):
+
+      transition           pair (pairformer.py:116), single at token granularity
+                           (pairformer.py:123, `transition_single = Transition(d_single)`), MSA
+                           (msa_module.py:106). No atom use -- the atom blocks build
+                           ConditionedTransition, a separate family.
+      layernorm            all of them. `attention_pair_bias.py:49  ln_single =
+      layernorm_linear     nn.LayerNorm(d_single)` and `outer_product.py:33` are the token stream;
+                           `ln_pair` / `ln_msa` the others; AdaLN normalises atoms in the DiT.
+      gated_projection     pair through triangle_multiplication, and token+atom through
+                           conditioned_transition, which imports `_sigmul_fwd` / `_sigmul_bwd`
+                           from it (`conditioned_transition/triton/training.py:28`).
+
+    So every one of these runs on the token stream and not one was built there. This test names the
+    expectation per family so the next kernel added to one inherits a traced answer rather than a
+    default.
+    """
+    expect = {"transition": {"pair", "token"},
+              "layernorm": {"pair", "token", "atom"},
+              "layernorm_linear": {"pair", "token", "atom"},
+              "gated_projection": {"pair", "token", "atom"}}
+    bad = []
+    for r in csv.DictReader(REG.open()):
+        if r["level"] != "both":
+            continue
+        want = expect.get(r["family"])
+        got = {x for x in (r.get("sides") or "").split("|") if x}
+        if want is None:
+            bad.append(f"{r['kernel']}: family {r['family']!r} is level=both and this test has no "
+                       f"traced answer for it -- trace it in the model and add one")
+        elif got != want:
+            bad.append(f"{r['kernel']}: sides={sorted(got)}, traced {sorted(want)}")
+    assert not bad, "\n  ".join(["a level=both row disagrees with the model:", *bad])
+
+
 def test_a_transition_kernel_is_not_built_on_atoms():
     """The finding that produced the `sides` column, pinned so it cannot quietly come back.
 
