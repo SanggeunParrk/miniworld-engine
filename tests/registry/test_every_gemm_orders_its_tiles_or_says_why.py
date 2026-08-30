@@ -117,11 +117,23 @@ def test_the_ladder_keeps_the_end_that_wins() -> None:
     dropped) are within 0.5% of each other. So 16 is not a rung the tuner needs when 4 is there.
 
     The ladder `1 4` costs 1.0000x median and 1.0500x worst, and four of 130 buckets lose more than
-    1%. That worst case is one bucket where 16 and 65536 tie and both 1 and 4 sit 5% back -- still
-    inside the noise floor, and the price of it is 23% of the whole build (171 -> 132 GPU-hours at
-    0.24 s a config). Two of the five worst buckets for this ladder belonged to
-    trimul_outproj_gemm_sigmoid, a kernel since removed for being unreachable, which is why the
-    live-kernel figure is the one quoted.
+    1%. Two of the five worst belonged to trimul_outproj_gemm_sigmoid, a kernel since removed for
+    being unreachable, which is why the live-kernel figure is the one quoted.
+
+    The remaining worst case is worth naming, because 5% sounds like a reason to keep the rung and
+    it is not one. It is cond_transition_squeeze_gate_triton at one shape, where 16 and 65536 tie
+    and 1 and 4 sit 5% back. That kernel's other five buckets say the opposite:
+
+        sk=17598631642817    1:1.000   4:1.033   16:1.000      4 is 3.3% slower
+        sk=17598634788545    1:1.002   4:1.000   16:1.034     16 is 3.4% slower
+        sk=35190817687233    1:1.050   4:1.050   16:1.000      the 5% bucket, best 20.5 us
+        three others         all 1.000 across the ladder
+
+    Within one kernel, 16 is 3.4% slower at one shape and 5.0% faster at another -- the sign flips.
+    Its sibling cond_transition_expand_swiglu_saveact, at the SAME shape, has 16 4.3% slower. A real
+    preference points one way; this does not, and the best time in that bucket is 20.5 microseconds,
+    so the 5% is one microsecond. It is the noise floor showing through, which is why the rung goes
+    and the build gets 23% shorter (171 -> 132 GPU-hours at 0.24 s a config).
     """
     cfg = ROOT / "src/miniworld_engine/autotune/configs"
     live = {r["kernel"] for r in _gemms()}
