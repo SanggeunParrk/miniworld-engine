@@ -88,11 +88,14 @@ def test_a_single_precision_kernel_declares_exactly_that_precision():
 def test_the_two_families_the_bug_was_found_in_are_single_precision():
     """Named, because both are documented in the source and neither had reached the registry."""
     declared = _declared()
-    #: The one conditioned_transition kernel that really is fp32-only, and why: the training
-    #: autograd Function reroutes bf16 away from it ("use cuBLAS split"), so no bf16 unit would
-    #: measure the kernel -- it would measure a path nothing takes. Its driver names
-    #: torch.float32 outright rather than the overridable BF16 name, for the same reason.
-    FP32_ONLY = {"cond_transition_fwd_b2b_saveact_triton"}
+    #: The whole family. "fp32 io with TF32 tensor cores" is what every file in it says, the
+    #: module is `dtype: torch.dtype = torch.float32`, and every bucket the shipped cache holds
+    #: for it is float32. The column carried bf16 as well for a while, on the argument that
+    #: krystal reaches these kernels through `miniworld_engine.ops` with the model's own bf16
+    #: tensors. That was true and beside the point: the path is being removed, and MiniWorld runs
+    #: this family in fp32. A declared precision nobody runs is a duplicate of the entire work
+    #: list -- here, half of the two kernels that were a quarter of the sweep.
+    FP32_ONLY = {op for op in declared if op.startswith("cond_transition_")}
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
             # The family used to be fp32 EVERYWHERE, in the driver and in this column together --
@@ -100,20 +103,11 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
             # bf16. The driver was fixed to build at the overridable `BF16` name; this column was
             # the half left behind, so all eight rows still said fp32 and the build made fp32
             # units for kernels the model only ever calls in bf16.
-            # And then the fp32 half went too. The column said both because miniworld's OWN
-            # ConditionedTransition module defaults to `dtype=torch.float32`; krystal never
-            # constructs it -- team-gm's layer calls `miniworld_engine.ops` directly
-            # (modules/layers/conditioned_transition.py, `from miniworld_engine import ops`),
-            # with no dtype argument, so the tensors are the model's, which are bf16. The fp32
-            # path is being removed, and a declaration that survives its only caller is a second
-            # copy of the work list: 16 of the 32 units on each squeeze_gate kernel, and those two
-            # alone were a quarter of the sweep.
-            expect = {"float32"} if op in FP32_ONLY else {"bfloat16"}
-            assert want == expect, (
-                f"{op}: krystal reaches this family through miniworld_engine.ops with bf16 "
-                f"tensors, so the row declares bf16 -- except {sorted(FP32_ONLY)}, whose bf16 "
-                f"calls are rerouted to the cuBLAS split before they reach the kernel "
-                f"(conditioned_transition/triton/training.py:479)")
+            assert want == {"float32"}, (
+                f"{op}: this family is fp32 io with TF32 tensor cores, its module is "
+                f"dtype=torch.float32, and every cached bucket it has is float32. A bf16 "
+                f"declaration here builds a second copy of the work list for a precision "
+                f"MiniWorld does not run it at")
         if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
             if op.endswith("lowp_triton"):
                 continue

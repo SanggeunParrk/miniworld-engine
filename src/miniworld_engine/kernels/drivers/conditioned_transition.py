@@ -30,14 +30,20 @@ launcher reached from here is an INNER one: it unpacks ``M, N = t.shape`` and th
 given the flat matrix, so per ``length_of``'s docstring ("its caller must compute the key and pass
 it down") this file computes ``_SHAPE_KEY`` once and passes it as ``shape_key=``.
 
-dtypes. Every activation here is built at ``drivers.BF16``, which is the name
-``MINIWORLD_DRIVER_DTYPE`` switches -- so a unit declared bf16 and a unit declared fp32 build
-different tensors, which is the whole point of declaring two. It used to be the fixed
-``drivers.FP32`` at every site, matching "fp32 io with TF32 tensor cores" in the family's files;
-that made fp32 the only precision this family COULD be built at, and registry.csv declared fp32
-alone to match. Both halves were true and together they meant the model's own precision was never
-tuned: krystal runs bf16. The one kernel that must stay fp32 says so at its own call site
-(``cond_transition_fwd_b2b_saveact``), by naming torch.float32 rather than by pinning the family.
+dtypes. Every activation here is built at ``drivers.BF16``, which is the NAME
+``MINIWORLD_DRIVER_DTYPE`` switches, not a pin -- a unit declared fp32 builds fp32 tensors here.
+The name is left alone on purpose: it used to be a fixed ``drivers.FP32`` at every site, and that
+made fp32 the only precision this family COULD be built at whatever the registry said. Switchable
+is the property worth having; which precision to switch it to is registry.csv's to say.
+
+It says fp32, for the whole family. These files are "fp32 io with TF32 tensor cores"
+(``composed.py``: ``tl.dot(..., input_precision="tf32")``) and miniworld's own
+ConditionedTransition module is ``dtype: torch.dtype = torch.float32``. The column briefly said
+bf16 as well, on the argument that krystal reaches these kernels through ``miniworld_engine.ops``
+with the model's own bf16 tensors -- true, and beside the point, because that path is being
+removed. A precision is declared here because MiniWorld runs it, not because some consumer once
+did, and declaring one nothing runs is a second copy of the whole work list: the two
+``squeeze_gate`` kernels alone were a quarter of the sweep at two precisions.
 """
 from __future__ import annotations
 
