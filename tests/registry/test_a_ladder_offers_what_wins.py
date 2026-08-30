@@ -144,11 +144,48 @@ def _covered() -> set[str]:
 
 
 def _derive(won_axis: collections.Counter, rungs: tuple[int, ...]) -> list[int]:
-    """The declared rule: every value that wins, plus one rung either side."""
+    """Every value that wins, plus one rung either side -- and then the top trimmed, on evidence.
+
+    The two directions are not symmetric, and treating them as if they were is what put
+    `num_warps=16` in ladders for kernels that top out at 8. Going one rung DOWN is cheap
+    insurance: 910 of the 1,042 measured buckets win at 1, 2 or 4, so the low end is dense and a
+    neighbouring rung is a plausible winner for a shape nobody has run yet. Going one rung UP into
+    16 or 32 is neither cheap nor plausible on the same evidence. 16 wins 42 of 1,042 buckets and
+    32 wins 5, and they are not spread: 16 belongs to seventeen named kernels (the layernorm and
+    gated_projection families, plus three others) and 32 to three. A kernel outside those lists has
+    said, over every bucket it has, that it does not want them, and those two rungs are where the
+    build cost is -- 16 and 32 together are a third of the ladder's width for a value that wins 4%
+    of the time.
+
+    The obvious counter-argument is that the untested half is the WIDE half, and wider rows are
+    where more warps should start to pay. It is checkable and it does not hold up: of the 22
+    (kernel, card, precision, length) points in the cache where only the channel width differs, the
+    winning warp count rises twice (1 -> 4 and 1 -> 2, both in layernorm_stats), falls twice and is
+    unchanged eighteen times, and NONE of the wider halves wins at 16 or above.
+
+    So: the top rung of the ladder is the kernel's largest winner, for any kernel with at least
+    eight measured buckets and no win at 16 or 32. Below eight buckets there is not enough to say
+    so, and the full ladder stands.
+
+    Being wrong here is caught, not silent. `test_no_ladder_omits_a_winner` reads the cache after
+    every build and fails the moment a trimmed rung records a win, and the runtime cost in the
+    meantime is a cache miss -- a warning and a heuristic subset (`cache._miss`) -- not a failure.
+    """
     out: set[int] = set()
     for v in won_axis:
         i = rungs.index(v)
         out |= {rungs[j] for j in (i - 1, i, i + 1) if 0 <= j < len(rungs)}
+    # Warps only. Everything above is an argument about 16 and 32 -- how rarely they win, which
+    # kernels they belong to, and that width does not push a winner into them. `num_stages` has no
+    # such rungs and no such measurement, so trimming it here would be borrowing a conclusion from
+    # the other axis. `16 in rungs` is what says which axis this is.
+    top_heavy = 16 in rungs and 32 in rungs
+    if top_heavy and sum(won_axis.values()) >= 8 and not (won_axis.get(16) or won_axis.get(32)):
+        out = {v for v in out if v <= max(won_axis)}
+    if len(out) < 2:
+        # A one-value axis is a constant wearing a column. Open the next rung up rather than let
+        # the trim turn a search into a pin.
+        out |= {rungs[rungs.index(max(out)) + 1]}
     return sorted(out)
 
 

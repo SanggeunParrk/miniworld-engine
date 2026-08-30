@@ -3,5 +3,5 @@ BLOCK_K,16 32 64
 BLOCK_M1,32 64 128 256
 BLOCK_N,32 64 128 256
 GROUP_M,1 4 16
-num_warps,1 2 4 8 16 32
+num_warps,1 2 4
 num_stages,1 2 3 4 5 6 8 10 12
