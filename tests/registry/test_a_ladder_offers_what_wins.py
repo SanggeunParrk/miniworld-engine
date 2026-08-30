@@ -94,7 +94,18 @@ def _omission_cost(op: str, axis: str, value: int) -> tuple[float, int]:
     five configs per bucket, so where all five carry the value there is no second-best to fall back
     to and the cost is UNKNOWN -- not zero. Those count against the omission, because "the tuner
     liked nothing else well enough to rank" is the opposite of evidence that nothing else is close.
+
+    An entry stores the two scalar axes at the TOP level and the tile axes inside ``kwargs``, which
+    is how this function was silently inert on exactly the axes it was written for: reading only
+    ``kwargs`` made ``num_warps`` and ``num_stages`` match nothing, so every omission on them priced
+    at 1.0000x and the guard could not fail. layernorm_bwd_atomic's ``num_warps=16`` is worth
+    1.8333x -- the number this module's own docstring quotes -- and it scored clean.
     """
+
+    def axis_of(c: dict) -> int:
+        got = c.get(axis, (c.get("kwargs") or {}).get(axis, -1))
+        return int(got)
+
     worst, blind = 1.0, 0
     d = DATA / op
     if not d.is_dir():
@@ -107,10 +118,9 @@ def _omission_cost(op: str, axis: str, value: int) -> tuple[float, int]:
         for ranked in (data.get("entries") or {}).values():
             if not (isinstance(ranked, list) and ranked):
                 continue
-            if int((ranked[0].get("kwargs") or {}).get(axis, -1)) != value:
+            if axis_of(ranked[0]) != value:
                 continue
-            alt = [c["ms"] for c in ranked
-                   if int((c.get("kwargs") or {}).get(axis, -1)) != value]
+            alt = [c["ms"] for c in ranked if axis_of(c) != value]
             if alt:
                 worst = max(worst, min(alt) / ranked[0]["ms"])
             else:
