@@ -811,6 +811,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         DIT_ATOM_LENGTHS,
         DIT_TOKEN_LENGTHS,
         SHAPES_BY_LEVEL,
+        TOKEN_SHAPES,
     )
 
     if stack is not None and stack not in ("trunk", "diffusion"):
@@ -902,8 +903,20 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # which is the exact failure test_width_column_selects_a_ladder exists to stop.
         klass = (r.get("width") or "both").strip() or "both"
         if r["level"] == "both":
-            sided = ([("pair", L) for L in BOTH_PAIR_LENGTHS]
-                     + [("atom", A) for A in ATOM_SHAPES])
+            # WHICH sides comes from the row, not from the level. `level=both` says the kernel is
+            # keyed on rows and driven per side; it does not say which streams the model runs it
+            # on, and assuming pair+atom was wrong in both directions for the transition family.
+            # AlphaFold-3's Transition is applied to the pair representation, to the single
+            # representation at token granularity (`pairformer.transition_single`, d_single) and to
+            # the MSA stack -- and never to atoms. So it was built at six atom lengths it never
+            # sees and at none of the token shapes it does. Rows with no `sides` cell keep the old
+            # pair+atom pair, which is right for layernorm (the DiT normalises atoms) and for
+            # gated_projection until someone traces it.
+            want = [x for x in (r.get("sides") or "pair|atom").split("|") if x]
+            per = {"pair": [("pair", L) for L in BOTH_PAIR_LENGTHS],
+                   "atom": [("atom", A) for A in ATOM_SHAPES],
+                   "token": [("token", N) for N in TOKEN_SHAPES]}
+            sided = [u for side in want for u in per[side]]
         elif r["level"] == "atom" and klass == "single":
             # Also two work lists -- see shape_key.DIT_TOKEN_LENGTHS. `level=atom` says which key
             # function; it does not say the kernel only ever sees atoms, and `width=single` is the

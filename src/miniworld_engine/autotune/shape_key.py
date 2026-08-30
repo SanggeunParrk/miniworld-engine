@@ -139,8 +139,11 @@ BOTH_SHAPES: tuple[int, ...] = tuple(sorted(set(TOKEN_SHAPES) | set(ATOM_SHAPES)
 #: a miss.
 BOTH_PAIR_LENGTHS: tuple[int, ...] = TOKEN_SHAPES
 
+#: Rows, from every side a `level=both` kernel is driven from. The token side was missing: 128 and
+#: 384 rows had no bucket and floored into someone else's, which is the same hole the DiT families
+#: had on `atom_key` before they were split.
 BOTH_ROWS: tuple[int, ...] = tuple(sorted(
-    set(ATOM_SHAPES) | {length * length for length in BOTH_PAIR_LENGTHS}))
+    set(ATOM_SHAPES) | set(TOKEN_SHAPES) | {length * length for length in BOTH_PAIR_LENGTHS}))
 
 #: The LENGTH axis per level. `both` is here for completeness, but nothing keys on it any more:
 #: a both-level kernel is driven as two sided lists (`BOTH_PAIR_LENGTHS` + `ATOM_SHAPES`) and

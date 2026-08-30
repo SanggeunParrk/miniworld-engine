@@ -26,7 +26,8 @@ import pytest
 from miniworld_engine.autotune import cache
 
 DATA = Path(cache.__file__).parent / "data"
-REG = Path(cache.__file__).resolve().parents[1] / "kernels" / "registry.csv"
+PKG = Path(cache.__file__).resolve().parents[1]
+REG = PKG / "kernels" / "registry.csv"
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 #: The card whose build is complete and committed; the completeness half is scoped to it.
 COMPLETE_GPU = "NVIDIA RTX A6000 (sm86)"
@@ -110,3 +111,45 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
             assert want == {"bfloat16"}, (
                 f"{op}: gated_projection/triton/main.py casts its operands with "
                 f".to(torch.bfloat16) before the launch")
+
+
+def test_a_dtype_guarded_module_declares_only_bf16():
+    """A kernel behind `guard_dtype` cannot be reached at fp32, so it must not declare fp32.
+
+    `dispatch._FAST_KERNEL_DTYPES` is `{torch.bfloat16}` and `guard_dtype` sends anything else to
+    the pytorch reference before a kernel is chosen. So for a family whose module calls it, an
+    `fp32` cell is not a capability claim -- it is a second copy of the whole work list for a
+    precision production cannot hand it. transition_bwd_swiglu_recompute was built at both and its
+    cache records only `bfloat16+float32`, the mixed-operand label of the BF16 run: bf16
+    activations against the fp32-pinned norm affine params (`modules/primitives.py`, "Pin this
+    module's floating-point params/buffers to fp32"). One launch, labelled with both operand types,
+    not two precisions -- which is why test_a_single_precision_kernel_declares_exactly_that_precision
+    excludes mixed keys and could never catch this. The dispatch source can.
+
+    Scoped to the modules that actually call the guard. layernorm, adaln and augmented_attention do
+    NOT -- they are reached from inside the diffusion blocks, which have their own precision -- so
+    their fp32 declarations are not settled by this argument and are left alone.
+    """
+    import re
+
+    guarded = set()
+    for f in (PKG / "modules").rglob("*.py"):
+        if "guard_dtype(" not in f.read_text() or f.name == "dispatch.py":
+            continue
+        guarded.add(f.parent.name)
+    assert guarded, "no module calls guard_dtype; this test has lost its subject"
+
+    src = (PKG / "modules" / "dispatch.py").read_text()
+    m = re.search(r"_FAST_KERNEL_DTYPES\s*=\s*frozenset\(\{([^}]*)\}\)", src)
+    assert m and m.group(1).strip() == "torch.bfloat16", (
+        "dispatch._FAST_KERNEL_DTYPES is no longer bf16-only, so a guarded module CAN be handed "
+        f"another precision and this test's premise is gone: {m.group(1) if m else '?'}")
+
+    bad = []
+    for r in csv.DictReader(REG.open()):
+        if r["family"] not in guarded or r["backend"] != "triton":
+            continue
+        if "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]:
+            bad.append(f"{r['kernel']} ({r['family']}) declares {r['dtypes']}")
+    assert not bad, ("kernels behind guard_dtype declaring a precision it never lets through -- "
+                     "each one doubles its share of every build:\n  " + "\n  ".join(bad))

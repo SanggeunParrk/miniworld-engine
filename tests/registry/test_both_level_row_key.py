@@ -29,6 +29,7 @@ from miniworld_engine.autotune.shape_key import (
     rows_of,
 )
 
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'pyproject.toml').is_file())
 REG = Path(cache.__file__).resolve().parents[1] / "kernels" / "registry.csv"
 
 
@@ -57,21 +58,69 @@ def test_rows_of_refuses_a_flattened_shape():
 
 
 def test_the_bucket_set_is_exactly_what_the_work_list_drives():
-    """Every BOTH_ROWS bucket has a unit, and every unit lands on one. Neither had been true.
+    """Every BOTH_ROWS bucket has a unit somewhere, and every unit lands on one.
 
-    The old list drove one length axis and picked a side per length, so it built 8 of the 10
-    buckets and two of those 8 were the other side's.
+    This used to take a single op and demand its buckets BE the whole set, which held only while
+    every `level=both` row was driven from the same two sides. They are not: the row now says which
+    streams it runs on, because `level=both` was never a claim about that. AlphaFold-3's Transition
+    is applied to the pair representation, to the single representation at token granularity
+    (`pairformer.transition_single`) and to the MSA stack, and never to atoms -- so those fourteen
+    kernels were built at six atom lengths they never see and at none of the token shapes they do.
+
+    So the invariant splits in two: no bucket in the set is unreachable (the union covers it), and
+    no unit lands outside the set (nothing floors into a neighbour's bucket).
     """
-    both_ops = {r["kernel"] for r in csv.DictReader(REG.open())
-                if r["level"] == "both" and r["backend"] == "triton" and (r["driver"] or "").strip()}
-    assert both_ops, "no level=both triton kernels in the registry"
-    op = sorted(both_ops)[0]
-    units = [u for u in op_units(only={op}) if u.dtype == "bfloat16"]
-    got = set()
-    for u in units:
-        assert u.side in ("pair", "atom"), f"{u.stem}: a both-level unit must name its side"
-        got.add(u.bucket)
-    assert got == set(BOTH_ROWS), f"missing {sorted(set(BOTH_ROWS) - got)}, extra {sorted(got - set(BOTH_ROWS))}"
+    rows = [r for r in csv.DictReader(REG.open())
+            if r["level"] == "both" and r["backend"] == "triton" and (r["driver"] or "").strip()]
+    assert rows, "no level=both triton kernels in the registry"
+    union, outside = set(), []
+    for r in rows:
+        want = {x for x in (r.get("sides") or "pair|atom").split("|") if x}
+        assert want <= {"pair", "atom", "token"}, f"{r['kernel']}: unknown side in {want}"
+        seen = set()
+        for u in op_units(only={r["kernel"]}):
+            assert u.side in want, (
+                f"{u.stem}: driven from {u.side!r}, which the row does not claim ({sorted(want)})")
+            seen.add(u.side)
+            union.add(u.bucket)
+            if u.bucket not in set(BOTH_ROWS):
+                outside.append(f"{u.stem} -> bucket {u.bucket}")
+        # A kernel that does not key on shape_key has ONE bucket, so the builder drives it once
+        # and the sides it claims describe where it is USED, not how many units it needs.
+        # transition_fold is the only one: it reads the weights (Wa, Wb, gamma, beta) and never
+        # touches the activation.
+        from miniworld_engine.autotune.builder import _keys_on_shape
+
+        keyed = _keys_on_shape(ROOT / "src" / r["file"], r["symbol"])
+        if keyed:
+            assert seen == want, (
+                f"{r['kernel']}: claims {sorted(want)}, driven from {sorted(seen)}")
+        else:
+            assert len(seen) == 1 and seen <= want, (
+                f"{r['kernel']} does not key on shape_key, so it should be driven from exactly one "
+                f"of {sorted(want)}; got {sorted(seen)}")
+    assert not outside, "units landing outside BOTH_ROWS:\n  " + "\n  ".join(outside)
+    assert union == set(BOTH_ROWS), (
+        f"buckets no unit reaches: {sorted(set(BOTH_ROWS) - union)}; "
+        f"driven but not in BOTH_ROWS: {sorted(union - set(BOTH_ROWS))}")
+
+
+def test_a_transition_kernel_is_not_built_on_atoms():
+    """The finding that produced the `sides` column, pinned so it cannot quietly come back.
+
+    `Transition` in krystal is constructed in pairformer (pair and single), msa_module (msa and
+    pair), template (pair) and the mini_ variants. There is no atom-level use: the atom blocks use
+    ConditionedTransition, which is a different family with its own rows. A `transition` kernel
+    driven at ATOM_SHAPES is six units per precision spent on a stream it never sees.
+    """
+    bad = []
+    for r in csv.DictReader(REG.open()):
+        if r["family"] != "transition" or r["level"] != "both":
+            continue
+        if "atom" in (r.get("sides") or "pair|atom").split("|"):
+            bad.append(r["kernel"])
+    assert not bad, ("transition kernels claiming an atom side, which the model never gives them:"
+                     "\n  " + "\n  ".join(bad))
 
 
 def test_a_units_side_reaches_the_driver():
