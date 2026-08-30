@@ -79,7 +79,13 @@ def test_dtypes_stay_within_what_the_level_permits() -> None:
     bad = []
     for r in _rows():
         got = {x for x in (r["dtypes"] or "").split("|") if x}
-        if not got or not got <= permitted[r["level"]]:
+        # LayerNorm is fp32 wherever it runs, including inside a bf16 stream. The two facts are
+        # about different things: the token/pair stream carries bf16 activations, and the
+        # normalisation over them is accumulated and applied in fp32 because bf16 layernorm
+        # destabilises training. So a `layernorm_*` row at token level declares fp32 and that is
+        # not a contradiction of the line above -- it is the reason the line is about STREAMS.
+        allow = permitted[r["level"]] | ({"fp32"} if r["kernel"].startswith("layernorm_") else set())
+        if not got or not got <= allow:
             bad.append((r["kernel"], r["level"], r["dtypes"]))
     assert not bad, f"dtypes must be a non-empty subset of {permitted}; offending rows: {bad}"
 
