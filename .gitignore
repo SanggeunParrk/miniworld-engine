@@ -78,7 +78,13 @@ outputs/
 # secrets / local agent worktrees / scratch (added by checkpoint)
 notion_token
 _fold_t.py
-.claude/
+# Everything under .claude/ is per-user state -- settings.local.json, session scratch -- EXCEPT
+# agent definitions, which are project config. An agent is a written-down method; leaving it
+# untracked means the next person re-derives it by hand. A directory ignored with a trailing slash
+# cannot be reopened from inside, so this ignores the CONTENTS and un-ignores the one subtree.
+.claude/*
+!.claude/agents/
+!.claude/agents/*.md
 
 # job logs (SLURM .out etc.) — sibling of artifacts/
 benchmarks/**/logs/
