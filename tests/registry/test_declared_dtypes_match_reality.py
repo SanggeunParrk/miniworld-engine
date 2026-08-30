@@ -100,11 +100,20 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
             # bf16. The driver was fixed to build at the overridable `BF16` name; this column was
             # the half left behind, so all eight rows still said fp32 and the build made fp32
             # units for kernels the model only ever calls in bf16.
-            expect = {"float32"} if op in FP32_ONLY else {"bfloat16", "float32"}
+            # And then the fp32 half went too. The column said both because miniworld's OWN
+            # ConditionedTransition module defaults to `dtype=torch.float32`; krystal never
+            # constructs it -- team-gm's layer calls `miniworld_engine.ops` directly
+            # (modules/layers/conditioned_transition.py, `from miniworld_engine import ops`),
+            # with no dtype argument, so the tensors are the model's, which are bf16. The fp32
+            # path is being removed, and a declaration that survives its only caller is a second
+            # copy of the work list: 16 of the 32 units on each squeeze_gate kernel, and those two
+            # alone were a quarter of the sweep.
+            expect = {"float32"} if op in FP32_ONLY else {"bfloat16"}
             assert want == expect, (
-                f"{op}: conditioned_transition builds at drivers.BF16 and krystal runs bf16, so "
-                f"the row declares both -- except {sorted(FP32_ONLY)}, whose bf16 calls are "
-                f"rerouted before they reach the kernel")
+                f"{op}: krystal reaches this family through miniworld_engine.ops with bf16 "
+                f"tensors, so the row declares bf16 -- except {sorted(FP32_ONLY)}, whose bf16 "
+                f"calls are rerouted to the cuBLAS split before they reach the kernel "
+                f"(conditioned_transition/triton/training.py:479)")
         if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
             if op.endswith("lowp_triton"):
                 continue
