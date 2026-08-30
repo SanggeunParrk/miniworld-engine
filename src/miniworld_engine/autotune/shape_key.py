@@ -68,6 +68,32 @@ TOKEN_SHAPES: tuple[int, ...] = (128, 256, 384, 512)
 #: Atom-level counts.
 ATOM_SHAPES: tuple[int, ...] = (256, 512, 1024, 2048, 4096, 8192)
 
+#: The DiT families -- adaln, conditioned_transition, augmented_attention, the seventeen rows that
+#: are `level=atom` with `width=single` -- key on the atom ladder but run on BOTH streams: krystal
+#: builds one DiffusionTransformer block class 24 times at d_single=768/d_cond=384 (the token side)
+#: and 3 times at 128/128 (the atom side). Driving them as ONE list got both halves wrong. It built
+#: shapes the model never presents -- an atom count of 8192 at a token width, eight of the eighteen
+#: units -- and it gave the token side no bucket of its own: `atom_key` starts at 256, so a token
+#: count of 128 and one of 384 both floored into 256, and 24 of the model's 27 blocks are
+#: token-side.
+#:
+#: So: two lists, per side, with the widths that side actually has. The ranges are disjoint ON
+#: PURPOSE -- atom counts start at 1024, token counts stop at 768 -- and that is what lets one
+#: floor-clamp key both sides. `level=both` needs `both_key`'s row-count indirection precisely
+#: because a pair L and an atom A of the same value are different launches; here no length can
+#: have come from either side, so length is unambiguous and stays the key.
+DIT_TOKEN_LENGTHS: tuple[int, ...] = (256, 384, 512, 768)
+DIT_ATOM_LENGTHS: tuple[int, ...] = (1024, 2048, 4096, 8192)
+
+#: What `atom_key` floor-clamps into: the atom work list plus the token lengths above. Widening the
+#: KEY set costs no units. What a build DRIVES is the work list, and no atom-only kernel is driven
+#: at 384 or 768; the extra rungs exist so a token-side launch lands in a bucket of its own rather
+#: than in one tuned for a different stream. Same distinction as BOTH_SHAPES against BOTH_ROWS.
+ATOM_KEY_BUCKETS: tuple[int, ...] = tuple(sorted(set(ATOM_SHAPES) | set(DIT_TOKEN_LENGTHS)))
+assert set(DIT_ATOM_LENGTHS) <= set(ATOM_SHAPES), "the atom work list is a slice of ATOM_SHAPES"
+assert not (set(DIT_ATOM_LENGTHS) & set(DIT_TOKEN_LENGTHS)), (
+    "the two sides must not share a length, or one floor-clamp cannot tell them apart")
+
 #: Kernels used at both levels bucket against the union, so a call from either side lands where it
 #: would have landed in its own set (a token 192 still floors to 128, an atom 300 still to 256).
 #: This is the WORK-LIST axis -- which shapes a build drives -- not the cache key; see BOTH_ROWS.
@@ -286,8 +312,12 @@ def token_key(length: int, **axes: int) -> int:
 
 
 def atom_key(length: int, **axes: int) -> int:
-    """Shape key for an atom-level kernel (`level=atom`). ``**axes``: see :func:`pack`."""
-    return pack(_floor_clamp(int(length), ATOM_SHAPES), **axes)
+    """Shape key for an atom-level kernel (`level=atom`). ``**axes``: see :func:`pack`.
+
+    Buckets are :data:`ATOM_KEY_BUCKETS`, not :data:`ATOM_SHAPES`: the three DiT families on this
+    key run token-side too, and 384 and 768 are token counts that need their own bucket.
+    """
+    return pack(_floor_clamp(int(length), ATOM_KEY_BUCKETS), **axes)
 
 
 def both_key(rows: int, **axes: int) -> int:

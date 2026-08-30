@@ -45,13 +45,17 @@ SCHEMA = 1
 #:
 #: An entry written under an older scheme is a miss, not a wrong answer: the reader falls back to
 #: the bounded heuristic subset and warns, and the next build overwrites it.
-KEY_SCHEME = 2
+KEY_SCHEME = 3
 
 #: Which levels each scheme bump actually changed. Scheme 2 re-based only `level=both` kernels;
 #: a token or atom kernel's bucket means exactly what it did before, so invalidating its entries
 #: would discard a finished build to fix something that was never wrong. 68 of the 103 declared
 #: kernels are in that position.
-_SCHEME_AFFECTS = {2: frozenset({"both"})}
+#: Which levels a scheme bump re-buckets. 2: `level=both` moved from length to ROW COUNT.
+#: 3: `atom_key` gained the token rungs 384 and 768 (shape_key.ATOM_KEY_BUCKETS), so a length that
+#: used to floor into 256 or 512 now has its own bucket -- every `level=atom` entry is against the
+#: old boundaries.
+_SCHEME_AFFECTS = {2: frozenset({"both"}), 3: frozenset({"atom"})}
 
 
 @functools.lru_cache(maxsize=1)

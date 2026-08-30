@@ -77,7 +77,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
 def test_a_units_side_reaches_the_driver():
     units = [u for u in op_units() if u.side]
     assert units
-    assert units[0].env()["MINIWORLD_DRIVER_SIDE"] in ("pair", "atom")
+    assert units[0].env()["MINIWORLD_DRIVER_SIDE"] in ("pair", "atom", "token")
     assert "--side" in units[0].cmd_args()
 
 

@@ -808,6 +808,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     from miniworld_engine.autotune.shape_key import (
         ATOM_SHAPES,
         BOTH_PAIR_LENGTHS,
+        DIT_ATOM_LENGTHS,
+        DIT_TOKEN_LENGTHS,
         SHAPES_BY_LEVEL,
     )
 
@@ -864,6 +866,11 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: source so the split cannot be folded away, and it can only read literals.
     PRESENTED = {"atom": (128,), "pair": (128,), "single": (128, 384, 768)}
     HEADROOM_PAIR = (256, 512)
+    #: The token side of a DiT family. 128 is NOT here: it is d_single_atom, the atom side's width,
+    #: and pairing it with a token count builds a shape no config presents. 384 (d_cond, AF3's c_s)
+    #: and 768 (d_single_token, c_token) are what the token blocks run; 512 is headroom between
+    #: them, on the same argument as HEADROOM_PAIR -- a widened config finds a cache, not a miss.
+    DIT_TOKEN_WIDTHS = (384, 512, 768)
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
               "pair": tuple(sorted(PRESENTED["pair"] + HEADROOM_PAIR)),
@@ -891,9 +898,18 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # 65,536 rows, atom A=256 is 256 -- and driving one length list picks a side per length
         # and never builds the other. 4 pair + 6 atom = 10 buckets, which is exactly BOTH_ROWS.
         # Before this, 8 units covered 8 of the 10 and two of those 8 were the wrong side.
+        # stripped: an unstripped "single " matches no ladder key and falls through to the union,
+        # which is the exact failure test_width_column_selects_a_ladder exists to stop.
+        klass = (r.get("width") or "both").strip() or "both"
         if r["level"] == "both":
             sided = ([("pair", L) for L in BOTH_PAIR_LENGTHS]
                      + [("atom", A) for A in ATOM_SHAPES])
+        elif r["level"] == "atom" and klass == "single":
+            # Also two work lists -- see shape_key.DIT_TOKEN_LENGTHS. `level=atom` says which key
+            # function; it does not say the kernel only ever sees atoms, and `width=single` is the
+            # column that gives it away: 384 and 768 are widths only the token stream has.
+            sided = ([("token", L) for L in DIT_TOKEN_LENGTHS]
+                     + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
             sided = [("", L) for L in SHAPES_BY_LEVEL[r["level"]]]
         if not _keys_on_shape(Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
@@ -920,10 +936,6 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # all. So 768 was 24 of the model's 27 blocks and no unit ever built it: production opened a
         # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
         # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
-        # stripped: an unstripped "pair " matches no LADDER key and falls through to the
-        # union, which is the exact failure test_width_column_selects_a_ladder exists to stop
-        klass = (r.get("width") or "both").strip() or "both"
-
         def _widths(side: str, _k=klass) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
@@ -940,6 +952,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 return (ATOM_WIDTH,)
             if side == "pair":
                 return LADDER["pair"]
+            if side == "token":
+                return DIT_TOKEN_WIDTHS
             return LADDER.get(_k, LADDER["both"])
 
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)
