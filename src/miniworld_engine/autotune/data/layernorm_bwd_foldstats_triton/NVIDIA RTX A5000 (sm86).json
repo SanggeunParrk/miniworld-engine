@@ -12,53 +12,6 @@
         "num_warps": 1
       }
     ],
-    "bfloat16+float32|K=128,PRIVATIZE_DGDB=1,shape_key=1048576": [
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.3819519877433777,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.3819519877433777,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.3819519877433777,
-        "num_stages": 3,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.3819519877433777,
-        "num_stages": 4,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 0.3819519877433777,
-        "num_stages": 5,
-        "num_warps": 2
-      }
-    ],
     "bfloat16+float32|K=128,PRIVATIZE_DGDB=1,shape_key=147456": [
       {
         "kwargs": {

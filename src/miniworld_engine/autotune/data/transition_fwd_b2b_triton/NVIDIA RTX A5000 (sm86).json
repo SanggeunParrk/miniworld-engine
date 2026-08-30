@@ -53,58 +53,6 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=1048576": [
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_ND": 64,
-          "BLOCK_M1": 128
-        },
-        "ms": 13.095935821533203,
-        "num_stages": 4,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_ND": 64,
-          "BLOCK_M1": 128
-        },
-        "ms": 13.775872230529785,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_ND": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 13.782015800476074,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 32,
-          "BLOCK_K_ND": 64,
-          "BLOCK_M1": 128
-        },
-        "ms": 13.882368087768555,
-        "num_stages": 5,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_K_D": 64,
-          "BLOCK_K_ND": 64,
-          "BLOCK_M1": 64
-        },
-        "ms": 13.921792030334473,
-        "num_stages": 2,
-        "num_warps": 4
-      }
-    ],
     "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=147456": [
       {
         "kwargs": {
