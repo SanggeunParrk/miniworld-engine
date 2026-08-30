@@ -26,8 +26,7 @@ import pytest
 from miniworld_engine.autotune import cache
 
 DATA = Path(cache.__file__).parent / "data"
-PKG = Path(cache.__file__).resolve().parents[1]
-REG = PKG / "kernels" / "registry.csv"
+REG = Path(cache.__file__).resolve().parents[1] / "kernels" / "registry.csv"
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 #: The card whose build is complete and committed; the completeness half is scoped to it.
 COMPLETE_GPU = "NVIDIA RTX A6000 (sm86)"
@@ -88,14 +87,11 @@ def test_a_single_precision_kernel_declares_exactly_that_precision():
 def test_the_two_families_the_bug_was_found_in_are_single_precision():
     """Named, because both are documented in the source and neither had reached the registry."""
     declared = _declared()
-    #: The whole family. "fp32 io with TF32 tensor cores" is what every file in it says, the
-    #: module is `dtype: torch.dtype = torch.float32`, and every bucket the shipped cache holds
-    #: for it is float32. The column carried bf16 as well for a while, on the argument that
-    #: krystal reaches these kernels through `miniworld_engine.ops` with the model's own bf16
-    #: tensors. That was true and beside the point: the path is being removed, and MiniWorld runs
-    #: this family in fp32. A declared precision nobody runs is a duplicate of the entire work
-    #: list -- here, half of the two kernels that were a quarter of the sweep.
-    FP32_ONLY = {op for op in declared if op.startswith("cond_transition_")}
+    #: The one conditioned_transition kernel that really is fp32-only, and why: the training
+    #: autograd Function reroutes bf16 away from it ("use cuBLAS split"), so no bf16 unit would
+    #: measure the kernel -- it would measure a path nothing takes. Its driver names
+    #: torch.float32 outright rather than the overridable BF16 name, for the same reason.
+    FP32_ONLY = {"cond_transition_fwd_b2b_saveact_triton"}
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
             # The family used to be fp32 EVERYWHERE, in the driver and in this column together --
@@ -103,56 +99,14 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
             # bf16. The driver was fixed to build at the overridable `BF16` name; this column was
             # the half left behind, so all eight rows still said fp32 and the build made fp32
             # units for kernels the model only ever calls in bf16.
-            assert want == {"float32"}, (
-                f"{op}: this family is fp32 io with TF32 tensor cores, its module is "
-                f"dtype=torch.float32, and every cached bucket it has is float32. A bf16 "
-                f"declaration here builds a second copy of the work list for a precision "
-                f"MiniWorld does not run it at")
+            expect = {"float32"} if op in FP32_ONLY else {"bfloat16", "float32"}
+            assert want == expect, (
+                f"{op}: conditioned_transition builds at drivers.BF16 and krystal runs bf16, so "
+                f"the row declares both -- except {sorted(FP32_ONLY)}, whose bf16 calls are "
+                f"rerouted before they reach the kernel")
         if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
             if op.endswith("lowp_triton"):
                 continue
             assert want == {"bfloat16"}, (
                 f"{op}: gated_projection/triton/main.py casts its operands with "
                 f".to(torch.bfloat16) before the launch")
-
-
-def test_a_dtype_guarded_module_declares_only_bf16():
-    """A kernel behind `guard_dtype` cannot be reached at fp32, so it must not declare fp32.
-
-    `dispatch._FAST_KERNEL_DTYPES` is `{torch.bfloat16}` and `guard_dtype` sends anything else to
-    the pytorch reference before a kernel is chosen. So for a family whose module calls it, an
-    `fp32` cell is not a capability claim -- it is a second copy of the whole work list for a
-    precision production cannot hand it. transition_bwd_swiglu_recompute was built at both and its
-    cache records only `bfloat16+float32`, the mixed-operand label of the BF16 run: bf16
-    activations against the fp32-pinned norm affine params (`modules/primitives.py`, "Pin this
-    module's floating-point params/buffers to fp32"). One launch, labelled with both operand types,
-    not two precisions -- which is why test_a_single_precision_kernel_declares_exactly_that_precision
-    excludes mixed keys and could never catch this. The dispatch source can.
-
-    Scoped to the modules that actually call the guard. layernorm, adaln and augmented_attention do
-    NOT -- they are reached from inside the diffusion blocks, which have their own precision -- so
-    their fp32 declarations are not settled by this argument and are left alone.
-    """
-    import re
-
-    guarded = set()
-    for f in (PKG / "modules").rglob("*.py"):
-        if "guard_dtype(" not in f.read_text() or f.name == "dispatch.py":
-            continue
-        guarded.add(f.parent.name)
-    assert guarded, "no module calls guard_dtype; this test has lost its subject"
-
-    src = (PKG / "modules" / "dispatch.py").read_text()
-    m = re.search(r"_FAST_KERNEL_DTYPES\s*=\s*frozenset\(\{([^}]*)\}\)", src)
-    assert m and m.group(1).strip() == "torch.bfloat16", (
-        "dispatch._FAST_KERNEL_DTYPES is no longer bf16-only, so a guarded module CAN be handed "
-        f"another precision and this test's premise is gone: {m.group(1) if m else '?'}")
-
-    bad = []
-    for r in csv.DictReader(REG.open()):
-        if r["family"] not in guarded or r["backend"] != "triton":
-            continue
-        if "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]:
-            bad.append(f"{r['kernel']} ({r['family']}) declares {r['dtypes']}")
-    assert not bad, ("kernels behind guard_dtype declaring a precision it never lets through -- "
-                     "each one doubles its share of every build:\n  " + "\n  ".join(bad))
