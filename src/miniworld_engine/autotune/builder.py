@@ -111,8 +111,7 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     # backend-selection setting below is the same kind of switch and was leaving its far side
     # uncaptured. Each entry names the OFF-DEFAULT value only -- the default side is already
     # covered by the unpinned unit, so pinning both would double the build for nothing.
-    "ln_partial_reduction": ((True, False), ("eval", "train")),
-    "ln_bwd_path": (("persistent", "partial", "atomic"), ("train",)),
+    "ln_bwd_path": (("persistent", "atomic"), ("train",)),
     "ln_out_bwd_path": (("split", "fused"), ("train",)),
     "transition_force_split": ((True,), ("eval", "train")),
     "transition_cuda_b2b": ((False,), ("eval",)),
@@ -130,7 +129,6 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
 SWITCH_SETTINGS: dict[str, tuple[str, Callable[[str], object]]] = {
     "gate_backend": ("pin_gate_backend", str),
     "infer_concat": ("pin_infer_concat", lambda v: v == "True"),
-    "ln_partial_reduction": ("pin_ln_partial_reduction", lambda v: v == "True"),
     "ln_bwd_path": ("layernorm_bwd_path", str),
     "ln_out_bwd_path": ("layernorm_out_bwd_path", str),
     "transition_force_split": ("transition_force_split", lambda v: v == "True"),
@@ -351,13 +349,13 @@ def cases() -> list[Case]:
              switches=("transition_force_split", "transition_cuda_b2b",
                        "transition_fuse_stats", "transition_savedxn_split_bwd",
                        "transition_dab_lnbwd", "transition_lnbwd_privatize",
-                       "ln_bwd_path", "ln_partial_reduction")),
+                       "ln_bwd_path")),
         Case("triangle_multiplication",
              lambda dims, p, i, dt: TriangleMultiplication(
                  **dims, implementation=IT(i), p_drop=p).cuda().to(dt),
              lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
              dims=PAIR_HID, dtypes=BOTH,
-             switches=("p_drop", "trimul_impl", "ln_out_bwd_path", "ln_partial_reduction"),
+             switches=("p_drop", "trimul_impl", "ln_out_bwd_path"),
              impls=("miniworld", "triton", "cute")),
         Case("triangle_multiplication_bidirectional",
              lambda dims, p, i, dt: BidirectionalTriangleMultiplication(

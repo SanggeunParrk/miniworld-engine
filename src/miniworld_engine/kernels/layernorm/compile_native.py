@@ -14,33 +14,26 @@ from miniworld_engine.kernels.layernorm.triton.main import (
     layer_norm_bwd_dx_fused,
     layer_norm_fwd_fused,
 )
-from miniworld_engine.kernels.layernorm.triton.partial import _bwd_block_m
 from miniworld_engine.kernels.layernorm.triton.persistent import (
     _ln_bwd_persistent,
     _persistent_grid,
 )
 
 
-def _use_partial_reduction(m: int, n: int) -> bool:
-    if n < 256:
-        return False
-    if n >= 768:
-        return True
-    return m >= 262144
-
 
 # --- Backward path selection --------------------------------------------------
-# The three backward impls are all correct + autotuned on ANY CUDA arch (plain
+# The backward impls are all correct + autotuned on ANY CUDA arch (plain
 # triton; the persistent kernel reads the live SM count and uses no Hopper-only
 # features). Only the *crossover thresholds* in `_static_bwd_path` were MEASURED on
 # H100 (sm_90). On other GPUs we don't guess: `_resolve_bwd_path` times the three
 # paths once per (d, M-bucket) on the real tensors and caches the winner per GPU
+# (see notes/removed-partial-path.md for the third path that used to be here)
 # (see dispatch_cache). Escape hatch: env `settings.layernorm_bwd_path
 # atomic` forces one path (debug / manual override), bypassing cache + heuristic.
 def _ln_bwd_override() -> str | None:
     """Read at call time: a module-level constant would freeze whatever was set at import."""
     return settings.current().layernorm_bwd_path
-_VALID_BWD_PATHS = {"persistent", "partial", "atomic", "cuda"}
+_VALID_BWD_PATHS = {"persistent", "atomic", "cuda"}
 _HOPPER = (9, 0)
 
 
@@ -52,8 +45,6 @@ def _static_bwd_path(m: int, n: int, is_bf16: bool = False) -> str:
         return "cuda"
     if n >= 384:
         return "persistent"
-    if _use_partial_reduction(m, n):
-        return "partial"
     return "atomic"
 
 
@@ -95,8 +86,8 @@ def _resolve_bwd_path(
     if torch.cuda.is_current_stream_capturing():
         return _static_bwd_path(m, n, is_bf16)
 
-    # Calibrate: time the three correct paths on the real tensors, cache the winner.
-    impls = {"atomic": _bwd_atomic_impl, "partial": _bwd_partial_impl, "persistent": _bwd_persistent_impl}
+    # Calibrate: time the correct paths on the real tensors, cache the winner.
+    impls = {"atomic": _bwd_atomic_impl, "persistent": _bwd_persistent_impl}
     if is_bf16 and 128 <= n <= 512:
         impls["cuda"] = _bwd_cuda_impl
     times = {name: _time_bwd_path(fn, dy, x, weight, mean, rstd) for name, fn in impls.items()}
@@ -165,38 +156,6 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
     )
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
 
-
-def _bwd_partial_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    x_2d = x.reshape(-1, x.shape[-1]).contiguous()
-    dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
-    m, n = x_2d.shape
-    # _bwd_block_m now sizes the PARTIAL BUFFER only; BLOCK_M1/BLOCK_N/num_warps are tuned
-    # (see triton/partial.py). Grid axis 1 is the feature tile.
-    num_partials = triton.cdiv(m, _bwd_block_m(n))
-
-    dx_2d = torch.empty_like(dy_2d)
-    partial_dw = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
-    partial_db = torch.empty((num_partials, n), dtype=torch.float32, device=x.device)
-    grid = lambda meta: (num_partials, triton.cdiv(n, meta["BLOCK_K"]))
-    _ln_bwd_persistent[grid](
-        dx_2d,
-        partial_dw,
-        partial_db,
-        dy_2d,
-        x_2d,
-        weight,
-        mean,
-        rstd,
-        partial_dw.stride(0),
-        x_2d.stride(0),
-        x_2d.stride(1),
-        m,
-        N=n,
-        shape_key=both_key(rows_of(x.shape), N=n),
-    )
-    dw = partial_dw.sum(dim=0).to(weight.dtype)
-    db = partial_db.sum(dim=0).to(weight.dtype)
-    return dx_2d.view_as(x), dw, db
 
 
 def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -269,8 +228,6 @@ def _dispatch_bwd(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor,
         return _bwd_cuda_impl(dy, x, weight, mean, rstd)
     if path == "persistent":
         return _bwd_persistent_impl(dy, x, weight, mean, rstd)
-    if path == "partial":
-        return _bwd_partial_impl(dy, x, weight, mean, rstd)
     return _bwd_atomic_impl(dy, x, weight, mean, rstd)
 
 
