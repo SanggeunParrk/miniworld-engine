@@ -31,7 +31,12 @@ PKG = ROOT / "src" / "miniworld_engine"
 DATA = PKG / "autotune" / "data"
 CONFIGS = PKG / "autotune" / "configs"
 REGISTRY = PKG / "kernels" / "registry.csv"
+#: Every axis a ladder narrows. The two named axes were the first to be derived from the cache;
+#: the BLOCK_* tiles are narrowed the same way and need the same guard, because the failure mode is
+#: identical -- a dropped rung that turns out to win makes a slower cache and nothing says so.
+#: They are read per kernel, since a kernel declares only the tile axes its own grid has.
 AXES = ("num_warps", "num_stages")
+TILE_PREFIX = "BLOCK_"
 
 #: Every set a build can be pointed at. `grid` is the one `build all` uses; the others pin whole
 #: configs (one row = one config) and are not ladders at all, so they are checked for the same
@@ -57,6 +62,9 @@ def _winners() -> dict[str, dict[str, collections.Counter]]:
                 if isinstance(ranked, list) and ranked:
                     for ax in AXES:
                         out[d.name][ax][ranked[0][ax]] += 1
+                    for ax, val in (ranked[0].get("kwargs") or {}).items():
+                        if ax.startswith(TILE_PREFIX):
+                            out[d.name][ax][int(val)] += 1
     return out
 
 
@@ -73,19 +81,74 @@ def won():
     return got
 
 
+#: Run-to-run noise on the same config measured twice, at p99, over 42,758 configs measured twice.
+#: Median is 1.012x and p90 1.033x. A gap under this is not distinguishable from measuring the
+#: same thing again.
+NOISE = 1.059
+
+
+def _omission_cost(op: str, axis: str, value: int) -> tuple[float, int]:
+    """How much slower the buckets this value wins get if the ladder no longer offers it.
+
+    Returns (worst ratio, count of buckets where the cache cannot say). The cache keeps the top
+    five configs per bucket, so where all five carry the value there is no second-best to fall back
+    to and the cost is UNKNOWN -- not zero. Those count against the omission, because "the tuner
+    liked nothing else well enough to rank" is the opposite of evidence that nothing else is close.
+    """
+    worst, blind = 1.0, 0
+    d = DATA / op
+    if not d.is_dir():
+        return worst, blind
+    for f in sorted(d.glob("*.json")):
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        for ranked in (data.get("entries") or {}).values():
+            if not (isinstance(ranked, list) and ranked):
+                continue
+            if int((ranked[0].get("kwargs") or {}).get(axis, -1)) != value:
+                continue
+            alt = [c["ms"] for c in ranked
+                   if int((c.get("kwargs") or {}).get(axis, -1)) != value]
+            if alt:
+                worst = max(worst, min(alt) / ranked[0]["ms"])
+            else:
+                blind += 1
+    return worst, blind
+
+
 @pytest.mark.parametrize("setname", LADDER_SETS)
-def test_no_ladder_omits_a_winner(setname: str, won) -> None:
+def test_no_ladder_omits_a_value_that_is_worth_keeping(setname: str, won) -> None:
+    """A dropped rung has to be cheap to drop, and cheap is a MEASUREMENT, not a count.
+
+    This used to refuse any omission of a value that had ever won a bucket. That is the safe rule
+    while nothing is narrowed and the wrong one once things are: it counts wins and never looks at
+    their size, so it treats a rung worth 1% the same as one worth 55%. The GROUP_M ladder is the
+    worked example -- 16 "won alone in 12 buckets", which sounds decisive until the head-to-head
+    says it never beats 4 by more than the noise floor and 4 beats it by 1.134x.
+
+    So the rule is: a value may be left out when the cache can say what leaving it out costs and
+    that cost is under the noise floor. It may not be left out when the cost is above the floor
+    (BLOCK_K=256 is 1.51x, BLOCK_E=256 is 1.33x -- both stay), nor when the cache CANNOT say,
+    which happens when all five ranked configs for a bucket carry the value and there is no
+    second-best recorded. Unknown is not free.
+    """
     bad = []
     for f in sorted((CONFIGS / setname).glob("*.csv")):
         ax = _ladders(f)
-        for a in AXES:
-            if a not in ax:
+        for a in ax:
+            if a not in AXES and not a.startswith(TILE_PREFIX):
                 continue
-            missing = sorted(set(won.get(f.stem, {}).get(a, {})) - set(ax[a]))
-            if missing:
-                bad.append(f"{f.stem}: {a}={ax[a]} omits {missing}, which win buckets in "
-                           f"autotune/data/.")
-    assert not bad, "\n  ".join(["a narrowed ladder dropped a value that wins:", *bad])
+            for v in sorted(set(won.get(f.stem, {}).get(a, {})) - set(ax[a])):
+                cost, blind = _omission_cost(f.stem, a, v)
+                if blind:
+                    bad.append(f"{f.stem}: {a}={ax[a]} omits {v}, and {blind} bucket(s) rank it "
+                               f"in all five slots, so the cache cannot say what dropping it costs")
+                elif cost > NOISE:
+                    bad.append(f"{f.stem}: {a}={ax[a]} omits {v}, which costs {cost:.4f}x -- above "
+                               f"the {NOISE}x noise floor, so the gap is real")
+    assert not bad, "\n  ".join(["a narrowed ladder dropped a value worth keeping:", *bad])
 
 
 @pytest.mark.parametrize("setname", LADDER_SETS)
