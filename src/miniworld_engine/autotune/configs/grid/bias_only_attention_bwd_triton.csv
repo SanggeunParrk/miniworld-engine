@@ -2,4 +2,4 @@ axis,values
 BLOCK_M1,32 64 128 256
 BLOCK_M2,32 64 128 256
 num_warps,1 2 4
-num_stages,1 2 3 4 5 6 8 10 12
+num_stages,1 2 3 4

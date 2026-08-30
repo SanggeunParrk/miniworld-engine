@@ -175,13 +175,28 @@ def _derive(won_axis: collections.Counter, rungs: tuple[int, ...]) -> list[int]:
     for v in won_axis:
         i = rungs.index(v)
         out |= {rungs[j] for j in (i - 1, i, i + 1) if 0 <= j < len(rungs)}
-    # Warps only. Everything above is an argument about 16 and 32 -- how rarely they win, which
-    # kernels they belong to, and that width does not push a winner into them. `num_stages` has no
-    # such rungs and no such measurement, so trimming it here would be borrowing a conclusion from
-    # the other axis. `16 in rungs` is what says which axis this is.
-    top_heavy = 16 in rungs and 32 in rungs
-    if top_heavy and sum(won_axis.values()) >= 8 and not (won_axis.get(16) or won_axis.get(32)):
-        out = {v for v in out if v <= max(won_axis)}
+    if sum(won_axis.values()) >= 8:
+        if 16 in rungs:                       # num_warps
+            if not (won_axis.get(16) or won_axis.get(32)):
+                out = {v for v in out if v <= max(won_axis)}
+        else:                                 # num_stages
+            # Same shape of argument, its own numbers, and one difference that matters. 8, 10 and
+            # 12 win 29 of 1,042 buckets -- 2.8% -- and this axis has a predictor readable from
+            # the source that `num_warps` does not: deep pipelines belong to kernels with TWO
+            # `BLOCK_K*` axes, a nested loop whose inner load can overlap the outer compute. By K
+            # axis count, the share of buckets won at 8 or more is 1.3% (none), 0.7% (one), 11.8%
+            # (two) and 0% (three), and all five kernels that ever win at 10 or 12 have exactly
+            # two. Nothing needs to encode that: a kernel's own winners already carry it, and the
+            # cap keeps 12 for adaln_bwd_dx_dlnw and 10 for trimul_gemm_gate_mmajor.
+            #
+            # The difference is the floor. The same 22 width-pairs that showed no upward drift for
+            # warps DO show one here: the winner moves 1 -> 4 three times (and never to 8 or
+            # above). So a kernel whose every measured bucket wins at 1 is not evidence for a
+            # two-rung ladder -- it is evidence for stopping at 4, which is as far as widening has
+            # ever moved it. Below 4 the ladder is filled in solid rather than left with the holes
+            # the +/- 1 rule would leave.
+            top = max(max(won_axis), 4)
+            out = {v for v in out if v <= top} | {v for v in rungs if v <= top}
     if len(out) < 2:
         # A one-value axis is a constant wearing a column. Open the next rung up rather than let
         # the trim turn a search into a pin.
