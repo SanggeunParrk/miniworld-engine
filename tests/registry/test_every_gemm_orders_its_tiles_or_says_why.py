@@ -102,6 +102,17 @@ def test_the_ladder_keeps_the_end_that_wins() -> None:
     activation up to about L=718. What it does not do is reverse: the weights are small on every
     card, so there is no card on which keeping them resident is the scarce thing. That is why this
     is a removal and not an A6000 tuning choice.
+
+    The other end of that question -- whether a rung BETWEEN 1 and 16 helps -- was benched
+    separately, because 2 and 8 had never been measured at all: 18 units over four GEMMs at
+    4,608 configs each, with the other axes narrowed to values both sweeps show winning. Across all
+    154 buckets that carry more than one GROUP_M, 2 wins alone once and 8 wins alone never, and
+    keeping only 1/4/16 costs 1.0000x median and 1.0064x worst. So the ladder is three rungs
+    because three is what the measurement supports, not because nobody looked between them.
+
+    For the record, since it is the obvious next cut: dropping 16 as well costs 1.0000x median and
+    1.0500x worst -- under the 1.059x p99 noise floor, but eight times the tail of keeping it, and
+    16 wins alone in 12 of the 154. It is left in.
     """
     cfg = ROOT / "src/miniworld_engine/autotune/configs"
     live = {r["kernel"] for r in _gemms()}
