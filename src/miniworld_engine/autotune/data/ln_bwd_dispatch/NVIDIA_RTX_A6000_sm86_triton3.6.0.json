@@ -2,7 +2,6 @@
   "128|1024": {
     "ms": {
       "atomic": 0.018139,
-      "partial": 0.023815,
       "persistent": 0.026996
     },
     "path": "atomic"
@@ -10,7 +9,6 @@
   "128|1048576": {
     "ms": {
       "atomic": 1.120352,
-      "partial": 1.627546,
       "persistent": 1.138738
     },
     "path": "atomic"
@@ -18,7 +16,6 @@
   "128|131072": {
     "ms": {
       "atomic": 0.16907,
-      "partial": 0.280803,
       "persistent": 0.175927
     },
     "path": "atomic"
@@ -26,7 +23,6 @@
   "128|2048": {
     "ms": {
       "atomic": 0.016371,
-      "partial": 0.021297,
       "persistent": 0.023473
     },
     "path": "atomic"
@@ -34,7 +30,6 @@
   "128|256": {
     "ms": {
       "atomic": 0.017084,
-      "partial": 0.022738,
       "persistent": 0.026198
     },
     "path": "atomic"
@@ -42,7 +37,6 @@
   "128|262144": {
     "ms": {
       "atomic": 0.290035,
-      "partial": 0.450781,
       "persistent": 0.299053
     },
     "path": "atomic"
@@ -50,7 +44,6 @@
   "128|4096": {
     "ms": {
       "atomic": 0.017075,
-      "partial": 0.023578,
       "persistent": 0.023211
     },
     "path": "atomic"
@@ -58,7 +51,6 @@
   "128|524288": {
     "ms": {
       "atomic": 0.63601,
-      "partial": 0.931975,
       "persistent": 0.647698
     },
     "path": "atomic"
@@ -66,7 +58,6 @@
   "128|65536": {
     "ms": {
       "atomic": 0.082761,
-      "partial": 0.14848,
       "persistent": 0.089134
     },
     "path": "atomic"
@@ -74,7 +65,6 @@
   "256|1048576": {
     "ms": {
       "atomic": 2.230644,
-      "partial": 2.356966,
       "persistent": 2.295343
     },
     "path": "atomic"
@@ -82,7 +72,6 @@
   "256|131072": {
     "ms": {
       "atomic": 0.32768,
-      "partial": 0.401538,
       "persistent": 0.345941
     },
     "path": "atomic"
@@ -90,7 +79,6 @@
   "256|262144": {
     "ms": {
       "atomic": 0.569949,
-      "partial": 0.655435,
       "persistent": 0.589665
     },
     "path": "atomic"
@@ -98,7 +86,6 @@
   "256|524288": {
     "ms": {
       "atomic": 1.261739,
-      "partial": 1.337705,
       "persistent": 1.298999
     },
     "path": "atomic"
@@ -106,7 +93,6 @@
   "256|65536": {
     "ms": {
       "atomic": 0.155736,
-      "partial": 0.177375,
       "persistent": 0.163535
     },
     "path": "atomic"
@@ -114,7 +100,6 @@
   "384|1048576": {
     "ms": {
       "atomic": 3.551232,
-      "partial": 3.608718,
       "persistent": 5.284045
     },
     "path": "atomic"
@@ -122,7 +107,6 @@
   "384|131072": {
     "ms": {
       "atomic": 0.508444,
-      "partial": 0.548026,
       "persistent": 0.752207
     },
     "path": "atomic"
@@ -130,7 +114,6 @@
   "384|262144": {
     "ms": {
       "atomic": 1.393178,
-      "partial": 4.114944,
       "persistent": 3.442981
     },
     "path": "atomic"
@@ -138,7 +121,6 @@
   "384|524288": {
     "ms": {
       "atomic": 3.096832,
-      "partial": 9.242624,
       "persistent": 7.590912
     },
     "path": "atomic"
@@ -146,7 +128,6 @@
   "384|65536": {
     "ms": {
       "atomic": 0.368134,
-      "partial": 1.037167,
       "persistent": 0.828292
     },
     "path": "atomic"
@@ -154,7 +135,6 @@
   "512|1048576": {
     "ms": {
       "atomic": 7.309995,
-      "partial": 27.96032,
       "persistent": 24.547392
     },
     "path": "atomic"
@@ -162,7 +142,6 @@
   "512|131072": {
     "ms": {
       "atomic": 1.053702,
-      "partial": 3.922066,
       "persistent": 3.452635
     },
     "path": "atomic"
@@ -170,7 +149,6 @@
   "512|262144": {
     "ms": {
       "atomic": 1.856197,
-      "partial": 6.983168,
       "persistent": 6.177024
     },
     "path": "atomic"
@@ -178,7 +156,6 @@
   "512|524288": {
     "ms": {
       "atomic": 4.128939,
-      "partial": 15.705088,
       "persistent": 13.599232
     },
     "path": "atomic"
@@ -186,7 +163,6 @@
   "512|65536": {
     "ms": {
       "atomic": 0.489326,
-      "partial": 1.744533,
       "persistent": 1.4928
     },
     "path": "atomic"
@@ -194,7 +170,6 @@
   "64|2048": {
     "ms": {
       "atomic": 0.011682,
-      "partial": 0.017719,
       "persistent": 0.017525
     },
     "path": "atomic"
@@ -202,7 +177,6 @@
   "64|4096": {
     "ms": {
       "atomic": 0.013171,
-      "partial": 0.01873,
       "persistent": 0.018017
     },
     "path": "atomic"
