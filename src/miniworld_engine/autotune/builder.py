@@ -1463,7 +1463,11 @@ def _child_main(argv: list[str] | None = None) -> int:
                     help="base channel width for this unit. Reaches the drivers through "
                          "MINIWORLD_DRIVER_WIDTH before they import, like --length; it is on the "
                          "command line so the unit is reproducible from it.")
-    ap.add_argument("--side", default="", choices=("", "pair", "atom"),
+    # Every side `op_units` can emit. "token" was added when the DiT families and the level=both
+    # rows were split by stream, and this list was not -- so every token unit died in argparse
+    # before it reached a kernel, 3 seconds and 0 ops each. The parent process and the child have
+    # to agree on the vocabulary; keeping the tuple here in step with `_widths` is the whole job.
+    ap.add_argument("--side", default="", choices=("", "pair", "atom", "token"),
                     help="which side of a `level=both` kernel to drive. It keys on rows, so pair "
                          "L and atom A of the same value are different buckets and the side "
                          "cannot be inferred from --length. Reaches the drivers as "
