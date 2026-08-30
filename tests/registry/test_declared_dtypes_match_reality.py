@@ -147,19 +147,9 @@ def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():
     assert "_FAST_KERNEL_DTYPES = frozenset({torch.bfloat16})" in src, (
         "dispatch._FAST_KERNEL_DTYPES is no longer bf16-only, so a guarded module CAN be handed "
         "another precision and this test's premise is gone")
-    # `layernorm_*` is exempt, and the exemption is a KNOWN CONFLICT rather than a carve-out.
-    # LayerNorm is declared fp32 everywhere because bf16 layernorm destabilises training, and
-    # layernorm_bwd_foldstats / layernorm_fwd_recompute_foldstats are folded into Transition, whose
-    # forward calls guard_dtype. So today those two cannot be reached at the precision they are
-    # declared at: an fp32 Transition input goes to the pytorch reference and never gets near them.
-    # Resolving it means either admitting fp32 for these kernels in _FAST_KERNEL_DTYPES or not
-    # fusing a normalisation into a bf16-only dispatch, and both are decisions, not test changes.
-    # The declaration stays as the operator set it; this comment is where the conflict lives until
-    # then.
     bad = [f"{r['kernel']} ({r['family']}) declares {r['dtypes']}"
            for r in csv.DictReader(REG.open())
            if r["family"] in guarded and r["backend"] == "triton"
-           and "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]
-           and not r["kernel"].startswith("layernorm_")]
+           and "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]]
     assert not bad, ("kernels behind guard_dtype declaring a precision it never lets through -- "
                      "each doubles its share of every build:\n  " + "\n  ".join(bad))

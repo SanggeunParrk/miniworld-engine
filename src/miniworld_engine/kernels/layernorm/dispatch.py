@@ -1,6 +1,6 @@
 """Per-GPU cache of the best LayerNorm backward path.
 
-The three backward impls (atomic / partial / persistent) are all correct on any
+The backward impls (atomic / persistent) are all correct on any
 CUDA arch, but *which* is fastest at a given (d, M) was only measured on H100. For
 any other GPU we don't want to guess: instead, the first time a shape is seen on an
 uncalibrated GPU we time the three paths on the real tensors, pick the winner, and
@@ -20,7 +20,7 @@ until settings.py replaced every MINIWORLD_* switch with a field):
   layernorm_dispatch = "auto" (default) | "off" | "force"
       off   -> never calibrate, always static heuristic
       force -> calibrate even on known archs (H100), ignoring the static fast-path
-  layernorm_bwd_path = "persistent" | "partial" | "atomic" | "cuda" | None
+  layernorm_bwd_path = "persistent" | "atomic" | "cuda" | None
       a hard pin that bypasses both the cache and the heuristic
 """
 

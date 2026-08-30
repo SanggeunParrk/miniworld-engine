@@ -6,8 +6,16 @@ everywhere, and reintroducing bf16 has to fail rather than pass quietly.
 
 Three places could put it back, and each has its own check below:
 
-  * `registry.csv` -- a `layernorm_*` row declaring bf16 makes the build produce bf16 units, and a
-    tuned bf16 config is an invitation to run one.
+NOT in the list: `registry.csv`'s `dtypes` cell. That column says which OPERAND MIX the build
+drives, and a bf16 cell there does not mean the normalisation is computed in bf16 -- it means the
+ACTIVATION is bf16, which is what production presents and what the kernel is supposed to be tuned
+for. `cache.dtype_of_args` keys an entry on every distinct float operand dtype, so a real launch
+records `bfloat16+float32`: bf16 activation, fp32 gamma/beta/stats. Declaring these rows fp32-only
+made the drivers build an all-fp32 activation and record `float32`, a key production never looks
+up -- and the only eight cache files in the repo whose config_space_hash still matches are
+layernorm files keyed `bfloat16+float32`. It would have overwritten the one live cache there is
+with misses.
+
   * the drivers -- a bf16 activation at a layernorm site would tune the kernel at a precision the
     registry does not declare, which is how the column and the driver drifted apart before.
   * the kernels -- `main.py` used to save x for the backward as `x_2d.to(torch.bfloat16)`, halving
@@ -44,13 +52,6 @@ PINNED = re.compile(r"torch\.bfloat16")
 def _rows() -> list[dict]:
     with REG.open(newline="") as fh:
         return list(csv.DictReader(fh))
-
-
-def test_no_layernorm_row_declares_bf16() -> None:
-    bad = [f"{r['kernel']} declares {r['dtypes']}" for r in _rows()
-           if r["kernel"].startswith("layernorm_") and "bf16" in (r["dtypes"] or "").split("|")]
-    assert not bad, ("a layernorm kernel declaring bf16 -- the build would tune it there and a "
-                     "tuned config is an invitation to run one:\n  " + "\n  ".join(bad))
 
 
 def test_no_layernorm_driver_builds_a_bf16_activation() -> None:

@@ -181,8 +181,6 @@ class Settings:
     pin_gate_backend: Literal["fused", "split"] | None = None
     #: Inference LN+proj concat fusion (layernorm_linear).
     pin_infer_concat: bool | None = None
-    #: layernorm partial-reduction variant.
-    pin_ln_partial_reduction: bool | None = None
 
     # ---- transition backend selection ------------------------------------------------------ #
     #: Force the split path (ln_in + non-fused triton_transition) over the fused kernels. An
@@ -219,7 +217,11 @@ class Settings:
 
     # ---- layernorm backend selection ------------------------------------------------------- #
     #: Force one layernorm backward path, bypassing cache + heuristic. Formerly MINIWORLD_LN_BWD.
-    layernorm_bwd_path: Literal["persistent", "partial", "atomic", "cuda"] | None = None
+    #: "partial" was removed with the path itself (see kernels/layernorm/notes/
+    #: removed-partial-path.md). It is not accepted here rather than silently ignored:
+    #: `_resolve_bwd_path` only honours an override that is in `_VALID_BWD_PATHS`, so a
+    #: still-declared "partial" would have fallen through to calibration with no warning.
+    layernorm_bwd_path: Literal["persistent", "atomic", "cuda"] | None = None
     #: Use the hand-CUDA layernorm backward. Formerly MINIWORLD_LN_IN_CUDA.
     layernorm_cuda_bwd: bool = False
     #: Force one layernorm_linear out-backward path. Formerly MINIWORLD_LNOUT_BWD.
