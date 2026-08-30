@@ -316,7 +316,14 @@ class TritonLayerNormFunction(torch.autograd.Function):
         )
 
         ctx.save_for_backward(
-            x_2d.to(torch.bfloat16),
+            # x at its OWN dtype. This used to be `.to(torch.bfloat16)`, halving the saved
+            # activation -- and a layernorm backward recomputed from a bf16 copy of x is the
+            # narrowest precision in the whole normalisation. Every load in these kernels already
+            # widens with `.to(tl.float32)` and mean/rstd are stored fp32; saving x narrow put the
+            # one value that cannot be recovered back at bf16. The cast is also a no-op when x
+            # really is bf16, so removing it costs nothing there and keeps fp32 where it is asked
+            # for.
+            x_2d,
             weight,
             mean,
             rstd,
