@@ -88,11 +88,18 @@ def test_a_single_precision_kernel_declares_exactly_that_precision():
 def test_the_two_families_the_bug_was_found_in_are_single_precision():
     """Named, because both are documented in the source and neither had reached the registry."""
     declared = _declared()
-    #: The one conditioned_transition kernel that really is fp32-only, and why: the training
-    #: autograd Function reroutes bf16 away from it ("use cuBLAS split"), so no bf16 unit would
-    #: measure the kernel -- it would measure a path nothing takes. Its driver names
-    #: torch.float32 outright rather than the overridable BF16 name, for the same reason.
-    FP32_ONLY = {"cond_transition_fwd_b2b_saveact_triton"}
+    #: Empty, and it took a measurement to get here. cond_transition_fwd_b2b_saveact used to be
+    #: the exception: ConditionedTransitionTailFunction reroutes its bf16 calls to the cuBLAS
+    #: split, so the argument ran that a bf16 unit would measure a path nothing takes, and its
+    #: driver named torch.float32 to match. But the driver calls `_b2b_fwd_train` BELOW the
+    #: autograd Function, where the reroute does not apply -- so a bf16 unit measures the kernel,
+    #: which is exactly the number `training.py` asks for when it says lifting the reroute "needs
+    #: a measurement, not an argument". The pin was what made that number impossible to take: the
+    #: reroute justified the pin and the pin protected the reroute. Both halves of the original
+    #: break are now accounted for -- the dtype half is fixed (3.13e-03 at bf16, the same as the
+    #: inference twin the model already runs there) and the spill half is what the build will
+    #: report. The reroute stays in production until it does.
+    FP32_ONLY: set[str] = set()
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
             # The family used to be fp32 EVERYWHERE, in the driver and in this column together --

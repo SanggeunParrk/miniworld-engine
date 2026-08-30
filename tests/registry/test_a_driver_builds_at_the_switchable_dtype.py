@@ -28,11 +28,6 @@ DRIVERS = ROOT / "src" / "miniworld_engine" / "kernels" / "drivers"
 ALLOWED = {
     "adaln.py:FP32": "a LayerNorm statistic (mean/rstd) is fp32 whatever the activation is",
     "triangle_multiplication.py:torch.float32": "sigma is fp32 by definition, not an activation",
-    "conditioned_transition.py:torch.float32":
-        "the ONE activation site that is deliberately pinned: _b2b_fwd_train's bf16 calls are "
-        "rerouted before they reach the kernel (training.py, 'use cuBLAS split'), so a bf16 unit "
-        "would measure a path nothing takes. registry.csv declares that kernel fp32 to match, and "
-        "tests/registry/test_declared_dtypes_match_reality.py names it.",
 }
 
 #: The import line and the docstrings that DISCUSS the names are not uses of them.

@@ -166,18 +166,27 @@ def cond_transition_bwd_swiglu_flat():
 def cond_transition_fwd_b2b_saveact():
     """training._b2b_fwd_train_kernel (atom fused b2b training forward).
 
-    fp32 OUTRIGHT, not through the overridable `BF16` name: the ConditionedTransitionTailFunction
-    forward reroutes bf16 away from this kernel with the comment "bf16 fused b2b train kernel is
-    broken (dtype/spill)", so a bf16 unit here would only measure that known break. registry.csv
-    declares this one fp32-only to match, and it is the only kernel in the family that does.
-    """
-    import torch
+    Built at the switchable `BF16` name like the rest of the family, and it was not always.
 
+    It used to name `torch.float32` outright, because ConditionedTransitionTailFunction reroutes
+    bf16 away from this kernel and a bf16 unit "would only measure that known break". Half of that
+    break is gone: the reroute read "broken (dtype/spill)", the dtype half was `tl.dot` handed an
+    fp32 accumulator beside a bf16 weight so the kernel did not COMPILE at bf16, and that is fixed
+    -- the checker measures 3.13e-03 at bf16, the same as the inference twin the model already runs
+    there. What is left is the SPILL half, and `training.py` says outright that lifting the reroute
+    "needs a measurement, not an argument".
+
+    A pinned driver is what made that measurement impossible to take. This function calls
+    `_b2b_fwd_train` directly, below the autograd Function, so the reroute does not apply here and
+    a bf16 unit measures the kernel rather than the detour. Pinning it to fp32 meant the one thing
+    that could settle the question could never be produced -- the reroute justified the pin and the
+    pin protected the reroute. The reroute itself stays in production until the numbers are in.
+    """
     from miniworld_engine.kernels.conditioned_transition.triton.training import (
         _b2b_fwd_train,
     )
 
-    _b2b_fwd_train(*_ct_args(dtype=torch.float32), shape_key=_SHAPE_KEY)
+    _b2b_fwd_train(*_ct_args(dtype=BF16), shape_key=_SHAPE_KEY)
 
 
 def cond_transition_expand_swiglu_saveact():
