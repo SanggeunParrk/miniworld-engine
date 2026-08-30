@@ -110,9 +110,18 @@ def test_the_ladder_keeps_the_end_that_wins() -> None:
     keeping only 1/4/16 costs 1.0000x median and 1.0064x worst. So the ladder is three rungs
     because three is what the measurement supports, not because nobody looked between them.
 
-    For the record, since it is the obvious next cut: dropping 16 as well costs 1.0000x median and
-    1.0500x worst -- under the 1.059x p99 noise floor, but eight times the tail of keeping it, and
-    16 wins alone in 12 of the 154. It is left in.
+    16 came out too, and the head-to-head is why. "16 wins alone in 12 buckets" is a count, not a
+    size: over the 130 buckets that belong to kernels still in the registry and carry more than one
+    GROUP_M, 16 beats 4 by more than the 1.059x noise floor ZERO times, while 4 beats 16 above it
+    three times, by up to 1.134x. More than half the buckets (83 of 154 before the dead kernels are
+    dropped) are within 0.5% of each other. So 16 is not a rung the tuner needs when 4 is there.
+
+    The ladder `1 4` costs 1.0000x median and 1.0500x worst, and four of 130 buckets lose more than
+    1%. That worst case is one bucket where 16 and 65536 tie and both 1 and 4 sit 5% back -- still
+    inside the noise floor, and the price of it is 23% of the whole build (171 -> 132 GPU-hours at
+    0.24 s a config). Two of the five worst buckets for this ladder belonged to
+    trimul_outproj_gemm_sigmoid, a kernel since removed for being unreachable, which is why the
+    live-kernel figure is the one quoted.
     """
     cfg = ROOT / "src/miniworld_engine/autotune/configs"
     live = {r["kernel"] for r in _gemms()}
