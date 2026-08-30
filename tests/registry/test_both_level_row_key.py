@@ -14,6 +14,7 @@ configuration had measured 5.50 ms a month earlier.
 """
 from __future__ import annotations
 
+import collections
 import csv
 from pathlib import Path
 
@@ -169,13 +170,24 @@ def test_a_units_side_reaches_the_driver():
 
 
 def test_the_two_sides_get_different_shards():
-    """Same op, same length, both sides -- they must not overwrite one another."""
-    units = {u.stem for u in op_units() if u.side and u.length == 256 and u.dtype == "bfloat16"}
-    pair = {s for s in units if "-pair-" in s}
-    atom = {s for s in units if "-atom-" in s}
-    assert pair
-    assert atom
-    assert not (pair & atom)
+    """Same op, same length, two sides -- they must not overwrite one another.
+
+    This used to name pair and atom at L=256, which stopped being a pair of sides when the atom
+    ladder moved to 1024 and up. The sides that now share a length are pair and token: a pair L is
+    a token count too (the activation is (B, L, L, D)), so both walk TOKEN_SHAPES and every length
+    collides unless the stem separates them.
+    """
+    by = collections.defaultdict(lambda: collections.defaultdict(set))
+    for u in op_units():
+        if u.side:
+            by[(u.op, u.dtype, u.length)][u.side].add(u.stem)
+    shared = {k: v for k, v in by.items() if len(v) > 1}
+    assert shared, "no op is driven from two sides at the same length; this test has no subject"
+    for (op, dtype, length), sides in sorted(shared.items()):
+        stems = [s for group in sides.values() for s in group]
+        assert len(stems) == len(set(stems)), (
+            f"{op} [{dtype}] at length {length}: sides {sorted(sides)} share a shard stem, so one "
+            f"overwrites the other -- {stems}")
 
 
 def test_an_entry_from_the_old_scheme_is_not_served_to_a_both_level_kernel():

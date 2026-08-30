@@ -26,7 +26,8 @@ import pytest
 from miniworld_engine.autotune import cache
 
 DATA = Path(cache.__file__).parent / "data"
-REG = Path(cache.__file__).resolve().parents[1] / "kernels" / "registry.csv"
+PKG = Path(cache.__file__).resolve().parents[1]
+REG = PKG / "kernels" / "registry.csv"
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 #: The card whose build is complete and committed; the completeness half is scoped to it.
 COMPLETE_GPU = "NVIDIA RTX A6000 (sm86)"
@@ -110,3 +111,38 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
             assert want == {"bfloat16"}, (
                 f"{op}: gated_projection/triton/main.py casts its operands with "
                 f".to(torch.bfloat16) before the launch")
+
+
+def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():
+    """`guard_dtype` is bf16-only, so an fp32 cell behind it is a duplicate work list.
+
+    `dispatch._FAST_KERNEL_DTYPES` is `frozenset({torch.bfloat16})` and `guard_dtype` sends
+    anything else to the pytorch reference BEFORE a backend is chosen
+    (`modules/transition/module.py:141`). A kernel reached only through a module that calls it
+    therefore never sees fp32, whatever the column says, and every unit built at that precision
+    measures a path production cannot take.
+
+    The cache says the same thing in its own words: transition_fwd_b2b_ktiled records
+    `bfloat16+float32` in all 22 of its buckets and plain `float32` in none. That key is the
+    MIXED-OPERAND label of the bf16 run -- bf16 activations against the fp32-pinned norm affine
+    params (`modules/primitives.py`, "Pin this module's floating-point params/buffers to fp32") --
+    one launch wearing both operand types. `test_a_single_precision_kernel_declares_exactly_that_precision`
+    excludes mixed keys for exactly that reason and so cannot catch this; the dispatch source can.
+
+    Scoped to families whose module calls the guard, and to triton rows, which are the ones a build
+    spends units on. conditioned_transition is NOT one of them -- krystal reaches it through
+    `miniworld_engine.ops` rather than through a module -- and it declares both precisions.
+    """
+    guarded = {f.parent.name for f in (PKG / "modules").rglob("*.py")
+               if f.name != "dispatch.py" and "guard_dtype(" in f.read_text()}
+    assert guarded, "no module calls guard_dtype; this test has lost its subject"
+    src = (PKG / "modules" / "dispatch.py").read_text()
+    assert "_FAST_KERNEL_DTYPES = frozenset({torch.bfloat16})" in src, (
+        "dispatch._FAST_KERNEL_DTYPES is no longer bf16-only, so a guarded module CAN be handed "
+        "another precision and this test's premise is gone")
+    bad = [f"{r['kernel']} ({r['family']}) declares {r['dtypes']}"
+           for r in csv.DictReader(REG.open())
+           if r["family"] in guarded and r["backend"] == "triton"
+           and "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]]
+    assert not bad, ("kernels behind guard_dtype declaring a precision it never lets through -- "
+                     "each doubles its share of every build:\n  " + "\n  ".join(bad))
