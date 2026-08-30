@@ -79,24 +79,36 @@ def test_every_reason_says_something() -> None:
     assert not thin, f"exemptions whose reason is too short to be one: {thin}"
 
 
-def test_the_ladder_reaches_both_ends() -> None:
-    """Whatever a kernel did BEFORE the axis existed has to stay reachable.
+def test_the_ladder_keeps_the_end_that_wins() -> None:
+    """`GROUP_M = 1` -- columns first -- must stay in every ladder, because it is what wins.
 
-    The two ends are the two things a kernel could already have been doing, and the repo had both:
-    a 2-D grid walks the ROWS of the tile grid first (CUDA varies axis 0 fastest), which is any
-    GROUP_M >= n_m; a hand-written `pid_m = pid // num_pid_n` walks the COLUMNS first, which is
-    GROUP_M = 1. See kernels/_tiles.py, which is where these names are defined. Seven of the twenty converted
-    kernels were the second kind, and the first ladder written for them held 4, 16 and 65536 -- so
-    the claim that "the tuner can always choose today's behaviour" was false for those seven, in
-    the direction that matters: if 1 was already their best, tuning could only make them worse.
+    This test used to demand BOTH ends: 1, and a rung at or above 65536 that `tile_order` clamps to
+    n_m, which is the row-first order every kernel had before the axis existed. Keeping the old
+    behaviour reachable was the right instinct and the measurement retired the row-first half of it.
+
+    Across 144 tuned units on an A6000 -- every unit of the visit-order sweep plus the 2/8 probe --
+    `GROUP_M = 65536` won ALONE zero times. It tied for first in 35, always with 1, 4 or 16 tying
+    too, and removing it costs 1.0000x: in all 144 some smaller rung is at least as fast.
+
+    Why it loses is a property of the operands, not of the card. Row-first makes consecutive
+    programs share a WEIGHT column strip; column-first makes them share an ACTIVATION row strip.
+    Here the weights are (K, N) with K and N at most 1536, so 128 KB at a typical shape and never
+    more than a few MB -- they sit in L2 whatever the order. The activation is (M, K) with M = L*L
+    on the pair side: 4 MB at L=128 and 64 MB at L=512, against an A6000's 6 MB of L2. So row-first
+    optimises reuse of the operand that is cached anyway and evicts the one that is not, and
+    column-first does the reverse.
+
+    That argument is about the RATIO, so it moves with the card -- a B200's 126 MB L2 holds the
+    activation up to about L=718. What it does not do is reverse: the weights are small on every
+    card, so there is no card on which keeping them resident is the scarce thing. That is why this
+    is a removal and not an A6000 tuning choice.
     """
-
     cfg = ROOT / "src/miniworld_engine/autotune/configs"
     live = {r["kernel"] for r in _gemms()}
     bad = []
     for f in sorted(cfg.rglob("*.csv")):
         if f.stem not in live:
-            continue          # a config file for a kernel the registry no longer declares
+            continue
         with f.open(newline="") as fh:
             if not fh.readline().startswith("axis,"):
                 continue
@@ -105,19 +117,20 @@ def test_the_ladder_reaches_both_ends() -> None:
                 continue
             values = {int(v) for v in line.split(",", 1)[1].split()}
             if 1 not in values:
-                bad.append(f"{f.parent.name}/{f.name}: no 1 (columns first)")
-            # 65536, matching what the ladders carry and what the materialised sets
-            # pin. `tile_order` clamps to n_m, so any rung this large is the row-first
-            # end whatever M is -- a lower threshold would accept a ladder that stops
-            # short of n_m at pair shapes (M = L*L).
-            if not any(v >= 65536 for v in values):
-                bad.append(f"{f.parent.name}/{f.name}: no rung that reaches n_m (rows first)")
-    assert not bad, ("GROUP_M ladders that cannot reproduce a kernel's pre-axis behaviour:\n  "
+                bad.append(f"{f.parent.name}/{f.name}: no 1 (columns first) -- the end that wins")
+            if any(v >= 65536 for v in values):
+                bad.append(f"{f.parent.name}/{f.name}: still carries a row-first rung, which won "
+                           f"alone in 0 of 144 units and costs 1.0000x to drop")
+    assert not bad, ("GROUP_M ladders that no longer say what the measurement says:\n  "
                      + "\n  ".join(bad))
 
 
 def test_the_materialised_sets_pin_one_value() -> None:
-    """A set that lists whole configs is not searching this axis; it must state which end it is at."""
+    """A set that lists whole configs is not searching this axis, so its one value has to be one
+    the tuner would have picked. 1 and 4 are those: over 144 units, pinning to 1 costs 1.000x
+    median and 1.067x worst, pinning to 4 costs 1.000x and 1.050x. 16 is worse at the tail (1.134x)
+    and 65536 is gone from the ladder entirely -- the thirteen sets that pinned it were repointed
+    to 4, which ties or beats it in every unit measured."""
     import csv as _csv
 
     cfg = ROOT / "src/miniworld_engine/autotune/configs"
@@ -134,7 +147,8 @@ def test_the_materialised_sets_pin_one_value() -> None:
         with f.open(newline="") as fh:
             rows = list(_csv.reader(fh))[1:]
         seen = {r[i] for r in rows if r}
-        if seen - {"1", "65536"}:
+        if seen - {"1", "4"}:
             bad.append(f"{f.parent.name}/{f.name}: {sorted(seen)}")
-    assert not bad, ("materialised sets whose GROUP_M is neither end -- they do not tune it, so it "
-                     "should say which behaviour they mean:\n  " + "\n  ".join(bad))
+    assert not bad, ("materialised sets pinning a GROUP_M the measurement does not support -- they "
+                     "do not tune it, so the one value has to be one that wins:\n  "
+                     + "\n  ".join(bad))

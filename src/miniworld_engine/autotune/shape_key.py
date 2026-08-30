@@ -90,12 +90,28 @@ BOTH_SHAPES: tuple[int, ...] = tuple(sorted(set(TOKEN_SHAPES) | set(ATOM_SHAPES)
 #: atom launch of M rows have the same launch geometry, so the same tile is right for both, and
 #: nothing about "which side it came from" changes that. (Length is still right for ``token`` and
 #: ``atom`` kernels, where it is unambiguous.)
-#: The pair lengths a both-level kernel is tuned at. TOKEN_SHAPES plus 1024, because 1024 is what
-#: the module benches actually sweep to (bench.yaml: max_seq_len 1024) and production pairformer
-#: runs there -- tuning to 512 and extrapolating is the same "close enough" this bucket set exists
-#: to stop. It stops at 1024: pair L=2048 is 4.2M rows and L=8192 is 67M, which is what OOM'd 20
-#: probes, and nothing in this repo measures either.
-BOTH_PAIR_LENGTHS: tuple[int, ...] = (*TOKEN_SHAPES, 1024)
+#: The pair lengths a both-level kernel is tuned at. It used to carry 1024 as well, on the argument
+#: that the module benches sweep there and production pairformer runs there, so tuning to 512 and
+#: extrapolating was "close enough" of the kind this bucket set exists to stop.
+#:
+#: MEASURED, and the argument does not hold. Two both-level GEMMs swept at all five pair lengths
+#: (bf16, three widths, full grid): taking the L=512 winner and running it at L=1024 costs
+#: 1.003x-1.036x, and taking the L=1024 winner back to L=512 costs 1.000x-1.018x. Run-to-run noise
+#: on the same config measured twice is 1.012x median and 1.059x at p99, so those numbers are not
+#: distinguishable from measuring the same thing again. Of 52 length pairs compared, three exceed
+#: the noise floor and all three are L=128 against a larger length -- 128 is the only pair bucket
+#: that is really its own.
+#:
+#: Why it saturates: the two things that make a config depend on M both stop mattering above L=128
+#: on this card. The activation stops fitting in L2 between 128 and 256 (4 MB against 6), and past
+#: that it never fits again however much larger it gets; and wave quantization is under the noise
+#: floor by L=256 (195 waves over 84 SMs, a tail bounded by 0.5%). Both thresholds MOVE WITH THE
+#: CARD -- a B200's 126 MB L2 holds the activation until L~718, so on that card the boundary sits
+#: between 512 and 1024 instead. This ladder is card-independent, so dropping 1024 rests on the
+#: measurement above being about saturation rather than about A6000: anything past the largest
+#: bucket floor-clamps into it, which is the mechanism that makes a missing rung a clamp and not
+#: a miss.
+BOTH_PAIR_LENGTHS: tuple[int, ...] = TOKEN_SHAPES
 
 BOTH_ROWS: tuple[int, ...] = tuple(sorted(
     set(ATOM_SHAPES) | {length * length for length in BOTH_PAIR_LENGTHS}))

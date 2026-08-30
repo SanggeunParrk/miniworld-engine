@@ -20,9 +20,24 @@ Which value wins is a property of the SHAPE AND THE CARD, which is why it belong
 CSV rather than in a kernel. The benefit comes from the big operand not fitting in L2, so it tracks
 its size against L2: measured across M, within noise up to activation/L2 = 2, appearing at 4 and
 flat past it. An A6000 holds 6 MB and a B200 126 MB, so the same kernel at the same shape wants
-different orders on different cards. Every ladder therefore carries both ends -- 1, and a rung
-`tile_order` clamps to n_m -- so whatever a kernel did before the axis existed stays reachable and
-a card that gains nothing loses nothing.
+different orders on different cards.
+
+THE LADDER IS `1 4 16`. It used to end in 65536 -- a rung `tile_order` clamps to n_m, i.e. the
+row-first order every kernel had before this axis existed -- on the argument that whatever a kernel
+already did must stay reachable, so a card that gains nothing loses nothing. Measured over 144
+tuned units on an A6000, that rung won ALONE zero times; it tied for first in 35, always with 1, 4
+or 16 tying too, and dropping it costs 1.0000x.
+
+It loses for a reason that is about the operands rather than the card. Row-first makes consecutive
+programs share a WEIGHT column strip; column-first makes them share an ACTIVATION row strip. The
+weights here are (K, N) with both at most 1536 -- 128 KB at a typical shape, a few MB at the very
+largest -- so they are L2-resident whatever the order. The activation is (M, K), and on the pair
+side M = L*L: 4 MB at L=128, 64 MB at L=512. Row-first therefore optimises reuse of the operand
+that is cached anyway and evicts the one that is not.
+
+That ratio moves with the card, and the removal survives the move: a bigger L2 holds MORE of the
+activation, which makes the order matter less, not more. There is no card on which the weights
+become the scarce resident -- they are small everywhere.
 
 Tuned against tuned, with both arms free to choose tile, warps and stages, the axis was worth 1.10x
 on that kernel. A fixed tile makes it look like 1.33x: the warp/stage pair that suits a row-first
