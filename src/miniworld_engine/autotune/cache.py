@@ -1179,10 +1179,18 @@ def heuristic_subset(configs: list, cap: int = 24) -> list:
                 if k in axes and isinstance(x, int) and x > 0:
                     v *= x
             return v * max(1, c.num_stages)
-        # Still inside the industry centre: warps in {4,8}, stages in {2,3,4}. The floor is about
-        # TILE SIZE, not about widening the warps/stages search, and
-        # test_the_fallback_prefers_the_industry_centre_of_the_space pins that.
-        centre = [c for c in configs if c.num_warps in (4, 8) and c.num_stages in (2, 3, 4)]
+        # The WARPS centre is kept -- test_the_fallback_prefers_the_industry_centre_of_the_space
+        # pins it -- and the stages constraint reaches down to the ladder's own minimum. It used to
+        # be {2, 3, 4} here as well, and that left the floor with nothing to offer a kernel whose
+        # only fitting rung is one stage: `num_stages` is the pipeline depth and multiplies the
+        # shared-memory requirement outright, so no tile is small enough to rescue a grid that is
+        # only searched at two stages and up. Measured: mpnn_edge_tail's replay and dX asked for
+        # 104,448 B against a 101,376 B limit at every one of the 24, the floor's smallest
+        # included, while their ladders offer stages=1 and their own file records that a
+        # stages-2 floor had already hidden the node message's winner once.
+        stages_floor = min((c.num_stages for c in configs), default=1)
+        centre = [c for c in configs
+                  if c.num_warps in (4, 8) and c.num_stages in (2, 3, 4, stages_floor)]
         smallest = sorted(centre or configs, key=volume)[:floor]
         keep, seen = [], set()
         for c in smallest + ranked:

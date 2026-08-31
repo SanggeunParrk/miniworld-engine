@@ -286,6 +286,26 @@ def test_the_fallback_prefers_the_industry_centre_of_the_space():
     assert all(c.num_warps in (4, 8) for c in got), [c.num_warps for c in got]
 
 
+def test_the_fallback_keeps_a_rung_at_the_ladder_s_minimum_stage_count() -> None:
+    """A grid whose only launchable rung is one stage must keep one, or the subset is dead.
+
+    `num_stages` is the pipeline depth and multiplies the shared-memory requirement outright, so no
+    tile is small enough to rescue a subset drawn only from {2, 3, 4}. The floor reserved for small
+    tiles was drawn from that window too, which is how mpnn_edge_tail's replay and dX came to ask
+    for 104,448 B against a 101,376 B limit at every one of the 24 candidates -- the full grid had
+    survivors at stages=1 and the narrowed one had none.
+    """
+    import triton
+
+    grid = [triton.Config({"BLOCK_M": m}, num_warps=w, num_stages=s)
+            for m in (16, 32, 64, 128) for w in (4, 8, 16) for s in (1, 2, 3)]
+    got = cache.heuristic_subset(grid, cap=24)
+    assert len(got) < len(grid), "the grid was not narrowed, so this proves nothing"
+    assert any(c.num_stages == 1 for c in got), (
+        "no config at the ladder's minimum stage count survived; a kernel that only fits there "
+        f"cannot launch at all. got stages {sorted({c.num_stages for c in got})}")
+
+
 def test_the_fallback_never_invents_a_config():
     got = cache.heuristic_subset(BIG, cap=8)
     sigs = {cache._sig(c) for c in BIG}
