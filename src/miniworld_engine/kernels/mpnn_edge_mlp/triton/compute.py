@@ -17,6 +17,9 @@ from __future__ import annotations
 import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
 import triton.language as tl
 
 from miniworld_engine.kernels.mpnn_message.triton.main import _projection_dx_op
@@ -30,6 +33,10 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_edge_mlp_fwd_gemm_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _compute_stage_fwd_kernel(
     input_ptr,
@@ -37,18 +44,22 @@ def _compute_stage_fwd_kernel(
     bias_ptr,
     output_ptr,
     rows,
+    shape_key,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
-    row_block = tl.program_id(0)
-    output_block = tl.program_id(1)
-    row_indices = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so the
+    # two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
+    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64),
+                                         tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
     row_valid = row_indices < rows
     output_valid = output_columns < WIDTH
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    accumulator = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
 
     for hidden_start in range(0, WIDTH, BLOCK_K):
         hidden_columns = hidden_start + tl.arange(0, BLOCK_K)
@@ -88,21 +99,20 @@ def _launch_compute_stage(
     bias: torch.Tensor,
 ) -> torch.Tensor:
     original_shape = inputs.shape
-    values = inputs.reshape(-1, _WIDTH)
+    width = inputs.shape[-1]
+    values = inputs.reshape(-1, width)
     rows = values.shape[0]
     output = torch.empty_like(values)
-    _compute_stage_fwd_kernel[(triton.cdiv(rows, 128), 1)](
+    _compute_stage_fwd_kernel[
+        lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])
+    ](
         values,
         weight,
         bias,
         output,
         rows,
-        WIDTH=_WIDTH,
-        BLOCK_M=128,
-        BLOCK_N=128,
-        BLOCK_K=16,
-        num_warps=4,
-        num_stages=3,
+        _shape_key(rows),
+        WIDTH=width,
     )
     return output.reshape(original_shape)
 

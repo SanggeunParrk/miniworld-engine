@@ -19,6 +19,8 @@ import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tiles import tile_grid
+from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
 import triton.language as tl
 
 
@@ -30,6 +32,10 @@ def _gelu(x):
     return 0.5 * x * (1.0 + tl.erf(x * 0.7071067811865476))
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_edge_mlp_fwd_gemm_b2b_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _edge_mlp_fwd_kernel(
     preactivation_ptr,
@@ -39,13 +45,14 @@ def _edge_mlp_fwd_kernel(
     output_bias_ptr,
     update_ptr,
     rows,
+    shape_key,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
     row_block = tl.program_id(0)
     output_block = tl.program_id(1)
-    row_indices = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     hidden_columns = tl.arange(0, WIDTH)
     output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
     row_valid = row_indices < rows
@@ -96,14 +103,11 @@ def _forward_impl(
     output_bias: torch.Tensor,
 ) -> torch.Tensor:
     original_shape = preactivation.shape
-    values = preactivation.reshape(-1, _WIDTH)
+    width = preactivation.shape[-1]
+    values = preactivation.reshape(-1, width)
     rows = values.shape[0]
     update = torch.empty_like(values)
-    grid = (
-        triton.cdiv(rows, 128),
-        1,
-    )
-    _edge_mlp_fwd_kernel[grid](
+    _edge_mlp_fwd_kernel[lambda meta: (triton.cdiv(rows, meta["BLOCK_M1"]),)](
         values,
         hidden_weight,
         hidden_bias,
@@ -111,11 +115,12 @@ def _forward_impl(
         output_bias,
         update,
         rows,
-        WIDTH=_WIDTH,
-        BLOCK_M=128,
-        BLOCK_N=128,
-        num_warps=8,
-        num_stages=2,
+        _shape_key(rows),
+        WIDTH=width,
+        # BLOCK_N is the WHOLE width and is not tuned: this kernel chains two GEMMs, and the second
+        # contracts the full width of the first's output. A column tile of the intermediate cannot
+        # produce any column of the result, so the only way to tile it is to stop fusing.
+        BLOCK_N=width,
     )
     return update.reshape(original_shape)
 

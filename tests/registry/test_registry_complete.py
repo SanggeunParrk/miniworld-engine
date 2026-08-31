@@ -423,11 +423,10 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     """
     #: kernel -> why it launches with a pinned config. The mpnn families arrived from a branch that
     #: predates the autotune machinery; porting them is in progress and this is the checklist.
-    NOT_TUNED = {
-        "_pack_bool_kernel", "_packed_dropout_backward_kernel",
-        "_compute_stage_fwd_kernel", "_edge_mlp_fwd_kernel",
-        "_zero_bias_grad_kernel",
-    }
+    #: One kernel, and it is not a decision deferred: `_zero_bias_grad_kernel` fills a buffer with
+    #: zeros in a single program. One block, one warp, one stage is the only shape the work has.
+    #: The other nine that used to be here are registered and tuned.
+    NOT_TUNED = {"_zero_bias_grad_kernel"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:

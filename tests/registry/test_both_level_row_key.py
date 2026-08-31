@@ -154,7 +154,9 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
               "mpnn_edge_tail": {"edge"},
               "mpnn_node_message": {"edge"},
               "mpnn_relative_position": {"edge"},
-              "mpnn_message": {"edge"}}
+              "mpnn_message": {"edge"},
+              "mpnn_edge_mlp": {"edge"},
+              "mpnn_edge_dropout": {"edge"}}
     bad = []
     for r in registry_rows():
         if r["level"] != "both":

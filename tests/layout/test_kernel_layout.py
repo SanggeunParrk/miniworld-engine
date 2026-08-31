@@ -68,6 +68,8 @@ DRIVER_SHAPE_OWNERS = {
     "mpnn_node_message": "mpnn_edge_tail",
     "mpnn_relative_position": "mpnn_edge_tail",
     "mpnn_message": "mpnn_edge_tail",
+    "mpnn_edge_mlp": "mpnn_edge_tail",
+    "mpnn_edge_dropout": "mpnn_edge_tail",
 }
 
 

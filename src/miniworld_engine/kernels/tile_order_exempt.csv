@@ -28,3 +28,4 @@ mpnn_node_message_fwd_gemm_triton,"1-D grid over the row axis alone; the 128-cha
 mpnn_node_message_bwd_recompute_triton,"1-D grid over the row axis alone; the 128-channel output is one tile per program and the contraction is looped in-kernel, so there is no column-tile axis to order"
 mpnn_node_message_bwd_dx_triton,"1-D grid over the row axis alone; the 128-channel output is one tile per program and the contraction is looped in-kernel, so there is no column-tile axis to order"
 mpnn_relative_position_bwd_reduce_triton,"1-D grid over PROGRAMS, a grid-stride loop over rows; the whole bucket table is privatised per program, so there is no column tile and nothing to order"
+mpnn_edge_mlp_fwd_gemm_b2b_triton,"chained GEMMs in one kernel: the second contracts the full width of the first's output, so a column tile of the intermediate produces no column of the result. BLOCK_N is the width, pinned by the chaining, and there is no second axis to order"

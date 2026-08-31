@@ -5,7 +5,9 @@ from __future__ import annotations
 import torch
 import triton
 
+from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
 import triton.language as tl
 
 
@@ -13,11 +15,16 @@ _PACK_BLOCK_BYTES = 256
 _BACKWARD_BLOCK_ELEMENTS = 256
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_edge_dropout_fwd_packed_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _pack_bool_kernel(
     mask_ptr,
     packed_ptr,
     n_elements,
+    shape_key,
     BLOCK_BYTES: tl.constexpr,
 ):
     byte_offsets = tl.program_id(0) * BLOCK_BYTES + tl.arange(0, BLOCK_BYTES)
@@ -38,6 +45,10 @@ def _pack_bool_kernel(
     )
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_edge_dropout_bwd_packed_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _packed_dropout_backward_kernel(
     grad_output_ptr,
@@ -45,6 +56,7 @@ def _packed_dropout_backward_kernel(
     grad_input_ptr,
     n_elements,
     scale,
+    shape_key,
     BLOCK_ELEMENTS: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_ELEMENTS + tl.arange(0, BLOCK_ELEMENTS)
@@ -83,12 +95,11 @@ def _pack_op(mask: torch.Tensor) -> torch.Tensor:
         device=mask.device,
         dtype=torch.uint8,
     )
-    _pack_bool_kernel[(triton.cdiv(packed.numel(), _PACK_BLOCK_BYTES),)](
+    _pack_bool_kernel[lambda meta: (triton.cdiv(packed.numel(), meta["BLOCK_BYTES"]),)](
         mask,
         packed,
         mask.numel(),
-        BLOCK_BYTES=_PACK_BLOCK_BYTES,
-        num_warps=4,
+        _shape_key(mask.numel()),
     )
     return packed
 
@@ -121,15 +132,14 @@ def _backward_op(
         raise ValueError("edge dropout backward received an invalid packed mask")
     grad_input = torch.empty_like(grad_output)
     _packed_dropout_backward_kernel[
-        (triton.cdiv(grad_output.numel(), _BACKWARD_BLOCK_ELEMENTS),)
+        lambda meta: (triton.cdiv(grad_output.numel(), meta["BLOCK_ELEMENTS"]),)
     ](
         grad_output,
         packed,
         grad_input,
         grad_output.numel(),
         scale,
-        BLOCK_ELEMENTS=_BACKWARD_BLOCK_ELEMENTS,
-        num_warps=4,
+        _shape_key(grad_output.numel()),
     )
     return grad_input
 
