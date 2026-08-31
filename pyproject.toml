@@ -213,6 +213,11 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
+# The multiplication sign is the page's own column label ("units x grid" reads worse and the
+# test has to match the rendered string byte for byte), so RUF001 is off for the generator and the
+# test that checks its output.
+"src/miniworld_engine/viz/sweep_page.py" = ["RUF001"]
+"tests/layout/test_the_sweep_page_matches_the_repo.py" = ["RUF001"]
 # `PT` is flake8-pytest-style: it is about how tests are written, and it has no business in
 # library code. Selected globally it fires PT018 on ordinary `assert a and b` in `src/` and
 # `benchmarks/`, which is a pytest-report-readability rule applied where there is no report.
