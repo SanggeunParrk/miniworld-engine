@@ -19,7 +19,11 @@ from miniworld_engine.kernels.layernorm.compile_native import (
 )
 
 
-_WIDTH = 128
+#: NOT used to size anything -- every launch below reads the width from the tensor it was
+#: handed, and the LayerNorm this delegates to is width-generic. What remains is the width the
+#: MEMORY POLICY was measured at: the bf16 copy this saves instead of the fp32 original is a
+#: judgement about how much an edge activation costs, and that is 128 channels wide.
+_MEASURED_WIDTH = 128
 
 
 def _backward_op_fake(
@@ -75,10 +79,11 @@ def _backward_op(
     # and `rows_of` refuses a flat shape on purpose, because a caller holding only (M, D) cannot
     # know whether its M is the whole launch or one slice. This caller does know: every edge row is
     # in this launch.
-    rows = saved_input.numel() // _WIDTH
+    width = saved_input.shape[-1]
+    rows = saved_input.numel() // width
     grad_input, grad_weight, grad_bias = backward_impl(
         grad_output,
-        saved_input.reshape(-1, _WIDTH),
+        saved_input.reshape(-1, width),
         weight,
         mean.reshape(-1),
         rstd.reshape(-1),
@@ -102,7 +107,7 @@ class _MemoryLayerNorm(torch.autograd.Function):
         # the operation used by nn.LayerNorm/F.layer_norm in this model.
         output, mean, rstd = torch.native_layer_norm(
             values,
-            (_WIDTH,),
+            (values.shape[-1],),
             weight,
             bias,
             eps,

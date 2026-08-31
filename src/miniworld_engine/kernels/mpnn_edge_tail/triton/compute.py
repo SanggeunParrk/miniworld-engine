@@ -297,10 +297,14 @@ def _project_output(
     row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
+    # This kernel keeps the whole row -- LayerNorm's reduction needs it -- so its column block IS
+    # the width and every column is live. `_row_gemm` takes both explicitly rather than defaulting
+    # them, so a caller that forgets is a compile error and not a silently narrower tile.
+    col_valid = columns < WIDTH
     accumulator = _row_gemm(
-        activated_hidden_ptr, w3_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
-        W_ROW_STRIDE=WIDTH,
+        activated_hidden_ptr, w3_ptr, row_block, valid, columns, col_valid,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=WIDTH, BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=False, W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]

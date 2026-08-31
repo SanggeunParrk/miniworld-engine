@@ -37,7 +37,12 @@ from miniworld_engine.autotune.configs import configs_for
 import triton.language as tl
 
 
-_WIDTH = 128
+#: NOT used to size a launch any more -- every function below reads the width from the tensor
+#: it was handed. It is the width this family's kernels are BUILT for: they load a whole
+#: [width, width] weight into registers and hold it across the row tiles, which is what makes
+#: them fast and what makes a wider one fail to compile rather than run slowly. `interface.py`
+#: asserts it on the way in; this is the number that assertion is about.
+_BUILT_FOR_WIDTH = 128
 # One chunk of the buffered preactivation gradient is 262144 x 128 x 2 bytes =
 # 64 MiB, a fixed cost that replaces a full edge tensor at any batch size.
 _WEIGHT_CHUNK_ROWS = 262_144
@@ -91,7 +96,7 @@ def _shape_key(groups: int, **axes: int) -> int:
     one shared nothing. Floor-clamping into the shared rung set is the whole point of the key.
 
     `NEIGHBORS` folds in because it changes the work per row and the compiled kernel both -- k is
-    a real shape axis here, not a flag. `WIDTH` is 128 and only 128 (`_WIDTH`), so it is not folded
+    a real shape axis here, not a flag. `WIDTH` is 128 and only 128 (`width`), so it is not folded
     in: an axis with one value adds a digit that never varies.
 
     Axes are passed BY NAME, like the edge tail's helper. A positional `neighbors` produced the
@@ -99,6 +104,7 @@ def _shape_key(groups: int, **axes: int) -> int:
     launch site -- so a positional one is invisible to it, and `NEIGHBORS` was reported as a
     constexpr outside the key when it had been inside it all along.
     """
+    width = groups.shape[-1]
     return both_key(groups, **axes)
 
 
@@ -397,10 +403,11 @@ def _forward_op_fake(
     FP32 whatever the edge states' dtype -- it is a sum over k terms, and the cast back happens
     at the autograd boundary rather than in the kernel.
     """
+    width = edge_states.shape[-1]
     del edge_states, neighbor_projection, flat_neighbor_indices
     del edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale
     return query_projection.new_empty(
-        *query_projection.shape[:-1], _WIDTH, dtype=torch.float32
+        *query_projection.shape[:-1], width, dtype=torch.float32
     )
 
 
@@ -417,10 +424,11 @@ def _forward_op(
     neighbor_scale: int,
 ) -> torch.Tensor:
     """Project the edge states, GELU them, and reduce over the k neighbours in one launch."""
+    width = edge_states.shape[-1]
     neighbors = edge_states.shape[-2]
-    groups = edge_states.numel() // (neighbors * _WIDTH)
+    groups = edge_states.numel() // (neighbors * width)
     reduced = query_projection.new_empty(
-        *query_projection.shape[:-1], _WIDTH, dtype=torch.float32
+        *query_projection.shape[:-1], width, dtype=torch.float32
     )
     _node_message_fwd_kernel[lambda meta: (triton.cdiv(groups, meta["GROUPS"]),)](
         edge_states,
@@ -437,7 +445,7 @@ def _forward_op(
         neighbor_scale,
         EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
         NEIGHBORS=neighbors,
-        WIDTH=_WIDTH,
+        WIDTH=width,
         BLOCK_M1=_block_rows(neighbors),
     )
     return reduced
@@ -461,6 +469,7 @@ def _backward_op_fake(
     a reduction down the row axis and is rounded back at the autograd boundary. The two weights
     are `(WIDTH, WIDTH)` and the bias `(WIDTH,)`, none of which any input's shape carries.
     """
+    width = grad_reduced.shape[-1]
     del grad_reduced, flat_neighbor_indices, hidden_bias, edge_mask, neighbor_scale
     del edge_weight, hidden_weight
     float32 = torch.float32
@@ -468,9 +477,9 @@ def _backward_op_fake(
         torch.empty_like(edge_states),
         torch.empty_like(query_projection, dtype=float32),
         torch.empty_like(neighbor_projection, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
+        edge_states.new_empty(width, width, dtype=float32),
+        edge_states.new_empty(width, width, dtype=float32),
+        edge_states.new_empty(width, dtype=float32),
     ]
 
 
@@ -492,29 +501,30 @@ def _backward_op(
     Nothing from the forward is saved, so the projection and its GELU are recomputed here; the
     row blocking exists so a single reusable activation buffer stands in for a full-size one.
     """
+    width = grad_reduced.shape[-1]
     neighbors = edge_states.shape[-2]
-    rows = edge_states.numel() // _WIDTH
+    rows = edge_states.numel() // width
     groups = rows // neighbors
-    nodes = neighbor_projection.numel() // _WIDTH
+    nodes = neighbor_projection.numel() // width
     device = edge_states.device
     float32 = torch.float32
 
     grad_edge = torch.empty_like(edge_states)
-    grad_query = torch.empty(groups, _WIDTH, device=device, dtype=float32)
-    grad_neighbor = torch.zeros(nodes, _WIDTH, device=device, dtype=float32)
-    grad_hidden_weight = torch.zeros(_WIDTH, _WIDTH, device=device, dtype=float32)
-    grad_hidden_bias = torch.zeros(_WIDTH, device=device, dtype=float32)
-    grad_edge_weight = torch.zeros(_WIDTH, _WIDTH, device=device, dtype=float32)
+    grad_query = torch.empty(groups, width, device=device, dtype=float32)
+    grad_neighbor = torch.zeros(nodes, width, device=device, dtype=float32)
+    grad_hidden_weight = torch.zeros(width, width, device=device, dtype=float32)
+    grad_hidden_bias = torch.zeros(width, device=device, dtype=float32)
+    grad_edge_weight = torch.zeros(width, width, device=device, dtype=float32)
 
     chunk_groups = max(1, min(_WEIGHT_CHUNK_ROWS // neighbors, groups))
     buffer_rows = chunk_groups * neighbors
     preactivation = torch.empty(
-        buffer_rows, _WIDTH, device=device, dtype=torch.bfloat16
+        buffer_rows, width, device=device, dtype=torch.bfloat16
     )
     activated = torch.empty_like(preactivation)
     grad_hidden = torch.empty_like(preactivation)
     grad_preactivation = torch.empty_like(preactivation)
-    flat_edge = edge_states.reshape(rows, _WIDTH)
+    flat_edge = edge_states.reshape(rows, width)
 
     for start in range(0, groups, chunk_groups):
         span = min(chunk_groups, groups - start)
@@ -543,7 +553,7 @@ def _backward_op(
             neighbor_scale,
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
             NEIGHBORS=neighbors,
-            WIDTH=_WIDTH,
+            WIDTH=width,
             BLOCK_M1=_block_rows(neighbors),
         )
         _node_message_dx_kernel[chunk_grid](
@@ -562,7 +572,7 @@ def _backward_op(
             span,
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
             NEIGHBORS=neighbors,
-            WIDTH=_WIDTH,
+            WIDTH=width,
             BLOCK_M1=_block_rows(neighbors),
         )
         # Both weight gradients reduce over every row.  cuBLAS owns this shape: see the

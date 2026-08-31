@@ -59,17 +59,26 @@ NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: Narrowings that are NOT a normalisation's input, with the reason each is not. The rule is about
 #: "a saved or cast ACTIVATION the backward cannot recover"; once the family list stopped being two
 #: hardcoded directories, the regex started reaching casts that are neither.
+#:
+#: Keyed by (file, the line's own source), NOT by line number. The first version used the number and
+#: broke the moment anything above it moved -- which was the very next commit, when two launchers in
+#: that file learned to read their width from a tensor. A key that a reformat invalidates is a key
+#: that gets bulk-updated without anyone rereading the judgement.
 NOT_A_NORMALISATION = {
-    "adaln/triton/inference.py:273":
+    ("adaln/triton/inference.py",
+     "sb = torch.matmul(cond_aff.to(torch.bfloat16), weight_cat.t().to(torch.bfloat16))"):
         "GEMM operands: the conditioning matmul that PRODUCES scale and bias, cast the way every "
         "other GEMM in the package casts its operands. The normalisation it feeds is fp32.",
-    "adaln/triton/training.py:63":
+    ("adaln/triton/training.py",
+     "return torch.matmul(a.to(torch.bfloat16), b.to(torch.bfloat16)).float()"):
         "the same matmul on the training path, and it widens the result back with .float() on the "
         "same line.",
-    "mpnn_edge_tail/triton/main.py:1108":
+    ("mpnn_edge_tail/triton/main.py",
+     "grad_hidden_bias.to(torch.bfloat16).to(hidden_bias_dtype),"):
         "autocast's own boundary: Linear rounds a BIAS GRADIENT to bf16 before the fp32 parameter "
         "gradient, and this reproduces it deliberately. Not an activation, and not an input.",
-    "mpnn_edge_tail/triton/main.py:1110":
+    ("mpnn_edge_tail/triton/main.py",
+     "grad_output_bias.to(torch.bfloat16).to(output_bias_dtype),"):
         "the second of that pair, for the output bias.",
 }
 
@@ -119,7 +128,7 @@ def test_no_layernorm_kernel_narrows_an_activation_to_bf16() -> None:
                 stripped = line.strip()
                 if stripped.startswith("#"):
                     continue
-                if NARROW.search(line) and (f"{f.relative_to(KERNELS)}:{i}") not in NOT_A_NORMALISATION:
+                if NARROW.search(line) and (str(f.relative_to(KERNELS)), stripped) not in NOT_A_NORMALISATION:
                     bad.append(f"{f.relative_to(KERNELS)}:{i}: {stripped}")
     assert not bad, ("a layernorm kernel narrowing to bf16:\n  " + "\n  ".join(bad))
 

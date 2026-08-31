@@ -12,7 +12,11 @@ from miniworld_engine.kernels.mpnn_edge_layernorm.reference import (
 
 EdgeNormBackend = Literal["auto", "pytorch", "memory"]
 
-_WIDTH = 128
+#: The one width this policy is measured for, asserted rather than assumed. It is not a kernel
+#: limit -- the LayerNorm underneath is width-generic and the launcher reads the width from its
+#: argument -- it is the shape the memory judgement was made at, so a different one silently
+#: inherits a trade nobody checked. Widen it by measuring, not by deleting the check.
+_SUPPORTED_WIDTH = 128
 _INT32_MAX = 2**31 - 1
 
 
@@ -41,15 +45,15 @@ def _memory_supported(
         and values.numel() > 0
         and values.numel() <= _INT32_MAX
         and values.ndim > 0
-        and values.shape[-1] == _WIDTH
+        and values.shape[-1] == _SUPPORTED_WIDTH
         and values.is_contiguous()
         and bf16_math
         and weight.is_cuda
         and bias.is_cuda
         and weight.device == values.device
         and bias.device == values.device
-        and weight.shape == (_WIDTH,)
-        and bias.shape == (_WIDTH,)
+        and weight.shape == (_SUPPORTED_WIDTH,)
+        and bias.shape == (_SUPPORTED_WIDTH,)
         and weight.is_contiguous()
         and bias.is_contiguous()
     )

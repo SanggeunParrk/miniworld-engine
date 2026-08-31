@@ -43,7 +43,12 @@ from miniworld_engine.autotune.configs import configs_for
 import triton.language as tl
 
 
-_WIDTH = 128
+#: NOT used to size a launch any more -- every function below reads the width from the tensor
+#: it was handed. It is the width this family's kernels are BUILT for: they load a whole
+#: [width, width] weight into registers and hold it across the row tiles, which is what makes
+#: them fast and what makes a wider one fail to compile rather than run slowly. `interface.py`
+#: asserts it on the way in; this is the number that assertion is about.
+_BUILT_FOR_WIDTH = 128
 # Backward stages its per-row operands so the weight-gradient pass can reduce them
 # without keeping anything edge-sized alive.  One chunk of 262144 rows is 64 MiB per
 # buffer, so the eight of them are a fixed 576 MiB regardless of batch size.
@@ -730,8 +735,9 @@ def _forward_op(
     The dropout mask is redrawn from `seed` in backward rather than saved, which is why the seed
     is an input here and not a value the kernel picks.
     """
+    width = edge_states.shape[-1]
     neighbors = edge_states.shape[-2]
-    rows = edge_states.numel() // _WIDTH
+    rows = edge_states.numel() // width
     out = torch.empty_like(edge_states)
     dropout = dropout_probability > 0.0
 
@@ -755,7 +761,7 @@ def _forward_op(
         _shape_key(rows, NEIGHBORS=neighbors),
         EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
         NEIGHBORS=neighbors,
-        WIDTH=_WIDTH,
+        WIDTH=width,
     )
     _edge_tail_norm_kernel[grid](
         hidden,
@@ -771,7 +777,7 @@ def _forward_op(
         1.0 - dropout_probability,
         1.0 / (1.0 - dropout_probability) if dropout else 1.0,
         eps,
-        WIDTH=_WIDTH,
+        WIDTH=width,
         DROPOUT=dropout,
     )
     return out
@@ -799,6 +805,7 @@ def _backward_op_fake(
     axis, three `(WIDTH, WIDTH)` weights and four `(WIDTH,)` biases and norm parameters, and none
     of those extents comes from an input's shape.
     """
+    width = grad_out.shape[-1]
     del grad_out, flat_neighbor_indices, seed, eps, dropout_probability
     del hidden_bias, output_bias
     float32 = torch.float32
@@ -806,13 +813,13 @@ def _backward_op_fake(
         torch.empty_like(edge_states),
         torch.empty_like(query_projection, dtype=float32),
         torch.empty_like(neighbor_projection, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
+        edge_states.new_empty(width, width, dtype=float32),
+        edge_states.new_empty(width, width, dtype=float32),
+        edge_states.new_empty(width, width, dtype=float32),
+        edge_states.new_empty(width, dtype=float32),
+        edge_states.new_empty(width, dtype=float32),
+        edge_states.new_empty(width, dtype=float32),
+        edge_states.new_empty(width, dtype=float32),
     ]
 
 
@@ -846,34 +853,35 @@ def _backward_op(
     The eight chunk buffers are a fixed 576 MiB at 262144 rows, independent of batch
     size, and they replace what would otherwise be eight full edge tensors.
     """
+    width = grad_out.shape[-1]
     neighbors = edge_states.shape[-2]
-    rows = edge_states.numel() // _WIDTH
-    nodes = neighbor_projection.numel() // _WIDTH
-    groups = query_projection.numel() // _WIDTH
+    rows = edge_states.numel() // width
+    nodes = neighbor_projection.numel() // width
+    groups = query_projection.numel() // width
     device = edge_states.device
     float32 = torch.float32
 
     grad_edge = torch.empty_like(edge_states)
-    grad_query = torch.zeros(groups, _WIDTH, device=device, dtype=float32)
-    grad_neighbor = torch.zeros(nodes, _WIDTH, device=device, dtype=float32)
-    grad_edge_weight = torch.zeros(_WIDTH, _WIDTH, device=device, dtype=float32)
-    grad_hidden_weight = torch.zeros(_WIDTH, _WIDTH, device=device, dtype=float32)
-    grad_output_weight = torch.zeros(_WIDTH, _WIDTH, device=device, dtype=float32)
-    grad_hidden_bias = torch.zeros(_WIDTH, device=device, dtype=float32)
-    grad_output_bias = torch.zeros(_WIDTH, device=device, dtype=float32)
-    grad_norm_weight = torch.zeros(_WIDTH, device=device, dtype=float32)
-    grad_norm_bias = torch.zeros(_WIDTH, device=device, dtype=float32)
+    grad_query = torch.zeros(groups, width, device=device, dtype=float32)
+    grad_neighbor = torch.zeros(nodes, width, device=device, dtype=float32)
+    grad_edge_weight = torch.zeros(width, width, device=device, dtype=float32)
+    grad_hidden_weight = torch.zeros(width, width, device=device, dtype=float32)
+    grad_output_weight = torch.zeros(width, width, device=device, dtype=float32)
+    grad_hidden_bias = torch.zeros(width, device=device, dtype=float32)
+    grad_output_bias = torch.zeros(width, device=device, dtype=float32)
+    grad_norm_weight = torch.zeros(width, device=device, dtype=float32)
+    grad_norm_bias = torch.zeros(width, device=device, dtype=float32)
 
     chunk_rows = min(_WEIGHT_CHUNK_ROWS, rows)
-    preactivation = torch.empty(chunk_rows, _WIDTH, device=device, dtype=torch.bfloat16)
+    preactivation = torch.empty(chunk_rows, width, device=device, dtype=torch.bfloat16)
     hidden = torch.empty_like(preactivation)
     chunk_grad_update = torch.empty_like(preactivation)
     chunk_grad_hidden = torch.empty_like(preactivation)
     chunk_grad_preactivation = torch.empty_like(preactivation)
     chunk_activated = torch.empty_like(preactivation)
     chunk_activated_hidden = torch.empty_like(preactivation)
-    chunk_grad_values = torch.empty(chunk_rows, _WIDTH, device=device, dtype=float32)
-    flat_edge = edge_states.reshape(rows, _WIDTH)
+    chunk_grad_values = torch.empty(chunk_rows, width, device=device, dtype=float32)
+    flat_edge = edge_states.reshape(rows, width)
 
     dropout = dropout_probability > 0.0
     keep_probability = 1.0 - dropout_probability
@@ -915,7 +923,7 @@ def _backward_op(
             eps,
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
             NEIGHBORS=neighbors,
-            WIDTH=_WIDTH,
+            WIDTH=width,
             DROPOUT=dropout,
         )
         _edge_tail_dx_kernel[chunk_grid(span)](
@@ -942,7 +950,7 @@ def _backward_op(
             span,
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
             NEIGHBORS=neighbors,
-            WIDTH=_WIDTH,
+            WIDTH=width,
         )
         # Each weight gradient reduces over every row.  cuBLAS owns these: see the note
         # above the dX pass for the sweep that put a Triton replacement at 0.230 ms
