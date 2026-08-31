@@ -48,7 +48,7 @@ were algorithmic: a BF16 residual-gradient buffer, and handing the neighbour sca
 ATen's sort-and-segment reduction, which beats one atomic per element by more than four
 times at this width.
 
-Six kernels, three each way, and every one of them is the same shape: a [BLOCK_M, WIDTH]
+Six kernels, three each way, and every one of them is the same shape: a [BLOCK_M1, WIDTH]
 row tile, one GEMM against a [WIDTH, WIDTH] weight, elementwise work in the prologue and
 the epilogue.  :func:`_row_gemm` is that GEMM; the kernels below are its prologues and
 epilogues.
@@ -107,10 +107,10 @@ def _gelu(x):
 @triton.jit
 def _row_gemm(
     x_ptr, w_ptr, row_block, valid, columns,
-    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     CONTRACT_OUT: tl.constexpr, W_ROW_STRIDE: tl.constexpr,
 ):
-    """FP32 [BLOCK_M, WIDTH] accumulator for ``x @ w``, contracted in BLOCK_K chunks.
+    """FP32 [BLOCK_M1, WIDTH] accumulator for ``x @ w``, contracted in BLOCK_K chunks.
 
     ``w`` is always stored [out, in], the orientation ``nn.Linear`` keeps.  Forward
     contracts over ``in`` and backward over ``out``, so the two directions differ only
@@ -123,7 +123,7 @@ def _row_gemm(
     Hardcoding WIDTH here read a packed slice at the wrong stride and produced 19-59%
     relative error in the model while every test on contiguous weights passed.
     """
-    accumulator = tl.zeros((BLOCK_M, WIDTH), tl.float32)
+    accumulator = tl.zeros((BLOCK_M1, WIDTH), tl.float32)
     for start in range(0, WIDTH, BLOCK_K):
         contraction = start + tl.arange(0, BLOCK_K)
         left = tl.load(
@@ -149,14 +149,14 @@ def _row_gemm(
 # the full grid, so the cache can only ever cost time, never correctness.
 #
 # Buckets exclude ``rows`` deliberately, following the same reasoning: the row count is
-# what BLOCK_M exists to absorb, and bucketing on it would mean one entry per batch size.
+# what BLOCK_M1 exists to absorb, and bucketing on it would mean one entry per batch size.
 # ``W1_ROW_STRIDE`` is in the two buckets that have it because a packed slice and a
 # standalone weight address memory differently, which is exactly the kind of thing a
 # tuned tile choice can depend on.
 
 def _configs():
     return [
-        triton.Config({"BLOCK_M": m, "BLOCK_K": k}, num_warps=w, num_stages=s)
+        triton.Config({"BLOCK_M1": m, "BLOCK_K": k}, num_warps=w, num_stages=s)
         for m in (64, 128, 256)
         for k in (32, 64, 128)
         for w in (4, 8)
@@ -166,7 +166,7 @@ def _configs():
 
 def _elementwise_configs():
     return [
-        triton.Config({"BLOCK_M": m}, num_warps=w, num_stages=s)
+        triton.Config({"BLOCK_M1": m}, num_warps=w, num_stages=s)
         for m in (64, 128, 256, 512)
         for w in (4, 8)
         for s in (1, 2, 3)
@@ -184,19 +184,19 @@ def _project_edge(
     preactivation_ptr, activated_ptr,
     rows, shape_key,
     W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """``edge @ W1 + query[group] + table[index]``, then GELU.
 
     The two gathers are the prologue's whole job: one broadcast over the neighbour axis,
     one indexed, both folded in rather than materialised as separate tensors.
     """
-    row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     accumulator = _row_gemm(
         edge_ptr, w1_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
         W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
@@ -231,15 +231,15 @@ def _project_edge(
 def _project_hidden(
     activated_ptr, w2_ptr, b2_ptr, hidden_ptr, activated_hidden_ptr,
     rows, shape_key,
-    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """``gelu(preactivation) @ W2 + b2``, then GELU."""
-    row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     accumulator = _row_gemm(
         activated_ptr, w2_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
         W_ROW_STRIDE=WIDTH,
     )
 
@@ -262,16 +262,16 @@ def _project_output(
     activated_hidden_ptr, w3_ptr, b3_ptr, edge_ptr, gamma_ptr, beta_ptr, seed_ptr,
     out_ptr, values_ptr, keep_ptr,
     rows, shape_key, keep_probability, dropout_scale, eps,
-    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     DROPOUT: tl.constexpr,
 ):
     """``gelu(hidden) @ W3 + b3``, then dropout, the residual add, and LayerNorm."""
-    row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     accumulator = _row_gemm(
         activated_hidden_ptr, w3_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
         W_ROW_STRIDE=WIDTH,
     )
 
@@ -314,7 +314,7 @@ def _norm_backward(
     grad_values_ptr, grad_update_ptr,
     grad_norm_weight_ptr, grad_norm_bias_ptr, grad_output_bias_ptr,
     rows, shape_key, dropout_scale, eps,
-    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, DROPOUT: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, DROPOUT: tl.constexpr,
 ):
     """LayerNorm and dropout backward, statistics recomputed from the saved values.
 
@@ -323,7 +323,7 @@ def _norm_backward(
     get their own accumulator -- see the note in :func:`_launch_backward` for why they
     cannot share one.
     """
-    row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     offsets = row_block[:, None] * WIDTH + columns[None, :]
@@ -381,7 +381,7 @@ def _project_backward(
     grad_out_ptr, weight_ptr, preactivation_ptr, grad_in_ptr, activated_ptr,
     grad_bias_ptr,
     rows, shape_key,
-    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     EMIT_BIAS: tl.constexpr,
 ):
     """One dX GEMM with the GELU derivative and the cuBLAS operand in the epilogue.
@@ -395,12 +395,12 @@ def _project_backward(
     ``EMIT_BIAS`` belongs to the call that PRODUCES a bias gradient -- the third
     projection's dX, which yields ``grad_b2`` -- not the second's.
     """
-    row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     accumulator = _row_gemm(
         grad_out_ptr, weight_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
         W_ROW_STRIDE=WIDTH,
     )
 
@@ -434,7 +434,7 @@ def _edge_backward(
     grad_edge_ptr, grad_query_ptr,
     rows, groups_total, shape_key,
     W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """The last dX GEMM, the residual add, and the query gradient.
 
@@ -448,13 +448,13 @@ def _edge_backward(
     neighbour axis, so the tile reduces it to a handful of atomics before touching
     memory.  Same data, seven times cheaper.
     """
-    row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
     columns = tl.arange(0, WIDTH)
     offsets = row_block[:, None] * WIDTH + columns[None, :]
     accumulator = _row_gemm(
         grad_preactivation_ptr, w1_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
         W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
@@ -472,8 +472,8 @@ def _edge_backward(
         grad_preactivation_ptr + offsets, mask=valid[:, None], other=0.0
     ).to(tl.float32)
     groups = row_block // NEIGHBORS
-    first_group = (tl.program_id(0) * BLOCK_M) // NEIGHBORS
-    for span in tl.static_range((BLOCK_M + NEIGHBORS - 1) // NEIGHBORS + 1):
+    first_group = (tl.program_id(0) * BLOCK_M1) // NEIGHBORS
+    for span in tl.static_range((BLOCK_M1 + NEIGHBORS - 1) // NEIGHBORS + 1):
         group = first_group + span
         selected = valid & (groups == group)
         tl.atomic_add(
@@ -491,7 +491,7 @@ def _neighbors_of(rows: int, nodes: int) -> int:
 
 
 def _grid(rows):
-    return lambda meta: (triton.cdiv(rows, meta["BLOCK_M"]),)
+    return lambda meta: (triton.cdiv(rows, meta["BLOCK_M1"]),)
 
 
 # The saved activations leave here as four separate returns rather than the tuple they used to

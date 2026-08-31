@@ -1,36 +1,38 @@
-"""Two questions in one job: does the seeded checker reproduce, and is the OOR the narrowed set?"""
-import torch, triton
-from miniworld_engine.autotune.cache import heuristic_subset
-from miniworld_engine.autotune.configs import configs_for
-
-print("=== how much of each mpnn ladder fits on this card ===")
-import miniworld_engine.kernels.mpnn_edge_tail.triton.main as m
-for name in ("_edge_tail_replay_kernel", "_edge_tail_dx_kernel"):
-    k = getattr(m, name)
-    full = list(k.configs)
-    sub = heuristic_subset(full, 24)
-    print(f"  {name}: grid {len(full)}, heuristic subset {len(sub)}")
-    print("    subset:", sorted({(c.kwargs.get('BLOCK_M'), c.kwargs.get('TILES'),
-                                  c.num_warps, c.num_stages) for c in sub})[:8])
-
-print("\n=== the seeded checkers, twice, in one process ===")
+"""Two answers: what band do the seeded checkers actually need, and why is the OOR still there."""
+import torch, traceback
+from miniworld_engine.autotune import cache
 from miniworld_engine.kernels.checks import mpnn_edge_tail as et, mpnn_node_message as nm
-for run in (1, 2):
-    for label, fn in (("edge_tail_bwd_dx_saveact", et.mpnn_edge_tail_bwd_dx_saveact_triton),
-                      ("node_message_bwd_dx", nm.mpnn_node_message_bwd_dx_triton)):
-        try:
-            got = fn()
-            worst = max((a.float()-e.float()).norm().item()/max(e.float().norm().item(), 1e-30)
-                        for a, e in got.values())
-            print(f"  run{run} {label:28s} worst rel {worst:.3e}")
-        except Exception as exc:
-            print(f"  run{run} {label:28s} RAISED {type(exc).__name__}: {str(exc)[:90]}")
 
-print("\n=== the two OOR kernels, through their drivers ===")
+print("=== worst relative error per checker, across five seeds ===")
+CHECKS = [("edge_tail_bwd_layernorm_saveact", et.mpnn_edge_tail_bwd_layernorm_saveact_triton),
+          ("edge_tail_bwd_dx_saveact",        et.mpnn_edge_tail_bwd_dx_saveact_triton),
+          ("edge_tail_bwd_dx_gather_saveact", et.mpnn_edge_tail_bwd_dx_gather_saveact_triton),
+          ("edge_tail_fwd_gemm_gather_saveact", et.mpnn_edge_tail_fwd_gemm_gather_saveact_triton),
+          ("node_message_bwd_dx",             nm.mpnn_node_message_bwd_dx_triton),
+          ("node_message_fwd_gemm",           nm.mpnn_node_message_fwd_gemm_triton)]
+for label, fn in CHECKS:
+    worst = {}
+    for seed in range(5):
+        torch.manual_seed(seed)
+        got = fn()
+        pairs = got if isinstance(got, dict) else {"out": got}
+        for k, (a, e) in pairs.items():
+            r = (a.float()-e.float()).norm().item()/max(e.float().norm().item(), 1e-30)
+            worst[k] = max(worst.get(k, 0.0), r)
+    print(f"  {label:34s} " + "  ".join(f"{k}={v:.2e}" for k, v in sorted(worst.items(), key=lambda x: -x[1])[:4]))
+
+print("\n=== the OOR: what does the reader actually hand back now ===")
+import miniworld_engine.kernels.mpnn_edge_tail.triton.main as m
+k = m._edge_tail_replay_kernel
+full = list(k.configs)
+sub = cache.heuristic_subset(full, 24)
+print(f"  grid {len(full)}, subset {len(sub)}, stages in subset {sorted({c.num_stages for c in sub})}")
+print(f"  smallest 4: {sorted({(c.kwargs.get('BLOCK_M'), c.kwargs.get('TILES'), c.num_warps, c.num_stages) for c in sub})[:4]}")
+print(f"  cache reader installed: {cache._reader_installed}")
+print(f"  autotuner prune hook: {getattr(k, 'early_config_prune', None) is not None}")
 from miniworld_engine.kernels.drivers import mpnn_edge_tail as d
-for label, fn in (("bwd_recompute", d.mpnn_edge_tail_bwd_recompute_triton),
-                  ("bwd_dx_recompute", d.mpnn_edge_tail_bwd_dx_recompute_triton)):
-    try:
-        fn(); print(f"  {label}: ok")
-    except Exception as exc:
-        print(f"  {label}: {type(exc).__name__}: {str(exc)[:110]}")
+try:
+    d.mpnn_edge_tail_bwd_recompute_triton(); print("  driver: ok")
+except Exception as exc:
+    print(f"  driver: {type(exc).__name__}: {str(exc)[:120]}")
+    traceback.print_exc()

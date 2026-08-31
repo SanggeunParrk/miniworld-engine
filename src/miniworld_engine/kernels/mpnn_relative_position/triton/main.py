@@ -84,7 +84,7 @@ def _configs() -> list[triton.Config]:
     """
     return [
         triton.Config(
-            {"BLOCK_M": block_m, "PROGRAMS": programs},
+            {"BLOCK_M1": block_m, "PROGRAMS": programs},
             num_warps=warps,
             num_stages=stages,
         )
@@ -133,7 +133,7 @@ def _bucket_reduce_kernel(
     shape_key,
     BUCKET_BLOCK: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     PROGRAMS: tl.constexpr,
 ):
     """Reduce one row per edge into the table, and the same rows into the bias.
@@ -162,10 +162,10 @@ def _bucket_reduce_kernel(
     table_accumulator = tl.zeros((BUCKET_BLOCK, WIDTH), tl.float32)
     bias_accumulator = tl.zeros((WIDTH,), tl.float32)
 
-    start = tl.program_id(0) * BLOCK_M
-    stride = PROGRAMS * BLOCK_M
+    start = tl.program_id(0) * BLOCK_M1
+    stride = PROGRAMS * BLOCK_M1
     for base in range(start, rows, stride):
-        offsets = base + tl.arange(0, BLOCK_M)
+        offsets = base + tl.arange(0, BLOCK_M1)
         valid = offsets < rows
         # ``other=-1`` so a masked-off row matches no bucket and contributes nothing,
         # which keeps the one-hot correct without a second mask on the product.

@@ -1,5 +1,5 @@
 axis,values
-BLOCK_M,64 128 256
+BLOCK_M1,64 128 256
 BLOCK_K,32 64 128
 num_warps,4 8
 num_stages,1 2 3

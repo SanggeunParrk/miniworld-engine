@@ -123,11 +123,11 @@ def _node_message_fwd_kernel(
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     GROUPS: tl.constexpr,
 ):
     columns = tl.arange(0, WIDTH)
-    window = tl.arange(0, BLOCK_M)
+    window = tl.arange(0, BLOCK_M1)
     window_valid = window < NEIGHBORS
     edge_weight = tl.load(
         edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
@@ -205,7 +205,7 @@ def _node_message_replay_kernel(
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     GROUPS: tl.constexpr,
 ):
     """Replay the message forward, then differentiate the masked reduction.
@@ -219,7 +219,7 @@ def _node_message_replay_kernel(
     weight loads were never amortized at all.
     """
     columns = tl.arange(0, WIDTH)
-    window = tl.arange(0, BLOCK_M)
+    window = tl.arange(0, BLOCK_M1)
     window_valid = window < NEIGHBORS
     edge_weight = tl.load(
         edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
@@ -307,7 +307,7 @@ def _node_message_dx_kernel(
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     GROUPS: tl.constexpr,
 ):
     """Both projections backwards, plus the two node-side gradients.
@@ -318,7 +318,7 @@ def _node_message_dx_kernel(
     which is what ``F.embedding``'s backward does too.
     """
     columns = tl.arange(0, WIDTH)
-    window = tl.arange(0, BLOCK_M)
+    window = tl.arange(0, BLOCK_M1)
     window_valid = window < NEIGHBORS
     edge_weight_rows = tl.load(
         edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
@@ -438,7 +438,7 @@ def _forward_op(
         EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
         NEIGHBORS=neighbors,
         WIDTH=_WIDTH,
-        BLOCK_M=_block_rows(neighbors),
+        BLOCK_M1=_block_rows(neighbors),
     )
     return reduced
 
@@ -544,7 +544,7 @@ def _backward_op(
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
             NEIGHBORS=neighbors,
             WIDTH=_WIDTH,
-            BLOCK_M=_block_rows(neighbors),
+            BLOCK_M1=_block_rows(neighbors),
         )
         _node_message_dx_kernel[chunk_grid](
             preactivation,
@@ -563,7 +563,7 @@ def _backward_op(
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
             NEIGHBORS=neighbors,
             WIDTH=_WIDTH,
-            BLOCK_M=_block_rows(neighbors),
+            BLOCK_M1=_block_rows(neighbors),
         )
         # Both weight gradients reduce over every row.  cuBLAS owns this shape: see the
         # kernel docstring for the sweep that put a Triton replacement at 0.230 ms

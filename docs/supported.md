@@ -16,10 +16,17 @@ declare bf16 and 42 declare fp32; the two sets overlap, which is why they do not
 
 | card | precision | torch | CUDA | triton | Python | result | evidence |
 |---|---|---|---|---|---|---|---|
-| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 78, ok 78, failed 0, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
-| RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 40, ok 40, failed 0, skipped 2` | same file, `dtype` column |
+| RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 92, ok 85, failed 7, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
+| RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 33, ok 33, failed 0, skipped 2` | same file, `dtype` column |
 | RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `ok 80, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
 | RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | the node is drained |
+
+The seven bf16 failures are the newly registered mpnn kernels, and neither cause is the kernel being
+wrong: five are outside the default 5e-02 band with no `rtol` declared, and two would not launch
+because every config the untuned reader offered exceeded this card's shared memory. The fp32 count
+fell from 40 because seven kernels stopped declaring fp32 — `layernorm_*_foldstats` and five
+`transition_*` rows are `bf16` only now, so their fp32 records were a precision nothing claims and
+`devices.record` dropped them.
 
 Every skip is a kernel whose declared `arch` is above sm86. It is not launched, so it costs nothing
 and is not a failure — the manifest says `skipped` with the reason, in its own column, rather than

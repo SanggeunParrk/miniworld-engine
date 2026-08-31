@@ -116,7 +116,7 @@ def _configs(
     history a knob was fixed on the strength of one measurement, and all three times it
     hid the winner from the autotuner, which can only choose from the list it is given:
 
-    * a ``BLOCK_M * TILES >= 64`` floor hid the backward winner -- 9.73 against 19.21 ms
+    * a ``BLOCK_M1 * TILES >= 64`` floor hid the backward winner -- 9.73 against 19.21 ms
     * ``triton.Config``'s default of three stages hid the weight-gradient winner --
       1.13 against 7.15 ms
     * ``num_stages=2`` hid the node message's winner, because at two stages every
@@ -128,7 +128,7 @@ def _configs(
     """
     return [
         triton.Config(
-            {"BLOCK_M": block_m, "TILES": tiles}
+            {"BLOCK_M1": block_m, "TILES": tiles}
             | ({} if block_k is None else {"BLOCK_K": block_k}),
             num_warps=warps,
             num_stages=stages,
@@ -192,7 +192,7 @@ def _backward_configs() -> list[triton.Config]:
 # every candidate computes the same arithmetic -- so a missing or wrong cache can only
 # ever be slower, never incorrect.
 #
-# Buckets deliberately exclude ``rows``: the row count is what BLOCK_M/TILES exist to
+# Buckets deliberately exclude ``rows``: the row count is what BLOCK_M1/TILES exist to
 # absorb, and bucketing on it would mean a separate cache entry per batch size.
 
 def _shape_key(rows: int, **axes: int) -> int:
@@ -229,7 +229,7 @@ def _edge_tail_project_kernel(
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     TILES: tl.constexpr,
 ):
     """Packed W1 edge block, first GELU, and the hidden projection.
@@ -251,7 +251,7 @@ def _edge_tail_project_kernel(
 
     first_tile = tl.program_id(0) * TILES
     for tile in range(TILES):
-        row_indices = (first_tile + tile) * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_indices = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_valid = row_indices < rows
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
         edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(
@@ -302,7 +302,7 @@ def _edge_tail_norm_kernel(
     dropout_scale,
     eps,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     TILES: tl.constexpr,
     BLOCK_K: tl.constexpr,
     DROPOUT: tl.constexpr,
@@ -321,7 +321,7 @@ def _edge_tail_norm_kernel(
 
     first_tile = tl.program_id(0) * TILES
     for tile in range(TILES):
-        row_indices = (first_tile + tile) * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_indices = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_valid = row_indices < rows
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
         edge = tl.load(edge_ptr + offsets, mask=row_valid[:, None], other=0.0).to(
@@ -332,7 +332,7 @@ def _edge_tail_norm_kernel(
         # unlooped kernel exactly; below that it stages a smaller operand and buys
         # occupancy.  The accumulation is FP32 throughout either way, so the split does
         # not change the result the way a BF16 partial sum would.
-        accumulator = tl.zeros((BLOCK_M, WIDTH), tl.float32)
+        accumulator = tl.zeros((BLOCK_M1, WIDTH), tl.float32)
         for contraction in range(0, WIDTH, BLOCK_K):
             slice_columns = contraction + tl.arange(0, BLOCK_K)
             hidden_slice = tl.load(
@@ -419,7 +419,7 @@ def _edge_tail_replay_kernel(
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     TILES: tl.constexpr,
     DROPOUT: tl.constexpr,
 ):
@@ -450,7 +450,7 @@ def _edge_tail_replay_kernel(
 
     first_tile = tl.program_id(0) * TILES
     for tile in range(TILES):
-        local_rows = (first_tile + tile) * BLOCK_M + tl.arange(0, BLOCK_M)
+        local_rows = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_indices = local_rows + row_offset
         row_valid = (local_rows < chunk_rows) & (row_indices < rows)
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
@@ -568,7 +568,7 @@ def _edge_tail_dx_kernel(
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     TILES: tl.constexpr,
 ):
     """Walk the chain backwards from ``grad_update`` to ``grad_edge``.
@@ -592,7 +592,7 @@ def _edge_tail_dx_kernel(
 
     first_tile = tl.program_id(0) * TILES
     for tile in range(TILES):
-        local_rows = (first_tile + tile) * BLOCK_M + tl.arange(0, BLOCK_M)
+        local_rows = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_indices = local_rows + row_offset
         row_valid = (local_rows < chunk_rows) & (row_indices < rows)
         offsets = row_indices[:, None] * WIDTH + columns[None, :]
@@ -619,7 +619,7 @@ def _edge_tail_dx_kernel(
         # stores; making cuBLAS's operands any other way costs a separate elementwise
         # pass over the same rows.  Each is stored the moment its argument's erf is in
         # hand rather than together at the end of the body: the pass is register bound,
-        # and keeping two [BLOCK_M, WIDTH] erf blocks live at once is how a saving this
+        # and keeping two [BLOCK_M1, WIDTH] erf blocks live at once is how a saving this
         # size gets paid straight back in spill.
         tl.store(
             activated_hidden_ptr + local_offsets,
@@ -672,8 +672,8 @@ def _edge_tail_dx_kernel(
         # per-group row sum.  A row tile touches only a handful of groups; reducing
         # inside the tile turns one atomic per row into a few per tile.
         groups = row_indices // NEIGHBORS
-        first_group = ((first_tile + tile) * BLOCK_M + row_offset) // NEIGHBORS
-        for span in tl.static_range((BLOCK_M + NEIGHBORS - 1) // NEIGHBORS + 1):
+        first_group = ((first_tile + tile) * BLOCK_M1 + row_offset) // NEIGHBORS
+        for span in tl.static_range((BLOCK_M1 + NEIGHBORS - 1) // NEIGHBORS + 1):
             group = first_group + span
             selected = row_valid & (groups == group)
             tl.atomic_add(
@@ -736,7 +736,7 @@ def _forward_op(
     dropout = dropout_probability > 0.0
 
     def grid(meta):
-        return (triton.cdiv(triton.cdiv(rows, meta["BLOCK_M"]), meta["TILES"]),)
+        return (triton.cdiv(triton.cdiv(rows, meta["BLOCK_M1"]), meta["TILES"]),)
 
     # A full-size intermediate rather than a chunk buffer: the compiled peak is in
     # backward, so a transient that only exists during forward is free.  Backward does
@@ -881,7 +881,7 @@ def _backward_op(
 
     def chunk_grid(span):
         return lambda meta: (
-            triton.cdiv(triton.cdiv(span, meta["BLOCK_M"]), meta["TILES"]),
+            triton.cdiv(triton.cdiv(span, meta["BLOCK_M1"]), meta["TILES"]),
         )
 
     for start in range(0, rows, chunk_rows):
