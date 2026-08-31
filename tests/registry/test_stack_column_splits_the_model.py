@@ -17,7 +17,7 @@ from collections import defaultdict
 
 from paths import registry_rows
 
-KNOWN = {"trunk", "diffusion", "both"}
+KNOWN = {"trunk", "diffusion", "both", "mpnn"}
 
 
 def _rows() -> list[dict]:
@@ -30,7 +30,7 @@ def test_every_row_declares_a_known_stack() -> None:
     assert not bad, f"rows whose stack is blank or unknown (they fall out of every build): {bad}"
 
 
-def test_the_cli_offers_exactly_the_two_halves() -> None:
+def test_the_cli_offers_exactly_the_declared_halves() -> None:
     from miniworld_engine.cli import STACKS
 
     declared = {r["stack"] for r in _rows()}
@@ -59,11 +59,15 @@ def test_asking_for_a_half_includes_the_shared_kernels() -> None:
     rows = {r["kernel"]: r for r in _rows()}
     trunk = {u.op for u in op_units(stack="trunk")}
     diffusion = {u.op for u in op_units(stack="diffusion")}
+    # ProteinMPNN is a third half and shares nothing with the other two -- a different model, not a
+    # part of krystal -- so the union has to include it or every mpnn row reads as unbuilt.
+    mpnn = {u.op for u in op_units(stack="mpnn")}
     assert trunk
     assert diffusion
+    assert mpnn
     assert not [k for k in trunk if rows[k]["stack"] == "diffusion"]
     assert not [k for k in diffusion if rows[k]["stack"] == "trunk"]
     shared = {k for k, r in rows.items() if r["stack"] == "both" and r["backend"] == "triton"}
     built = {u.op for u in op_units()}
     assert shared & built <= trunk & diffusion, "a `both` kernel is missing from one of the halves"
-    assert trunk | diffusion == built, "every built op belongs to at least one half"
+    assert trunk | diffusion | mpnn == built, "every built op belongs to at least one half"

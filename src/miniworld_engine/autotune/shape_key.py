@@ -209,9 +209,26 @@ BOTH_SHAPES: tuple[int, ...] = tuple(sorted(set(TOKEN_SHAPES) | set(ATOM_SHAPES)
 #: a miss.
 BOTH_PAIR_LENGTHS: tuple[int, ...] = TOKEN_SHAPES
 
+#: Node counts for the EDGE side -- ProteinMPNN's residues, one graph node each.
+#:
+#: The same numbers as `ATOM_SHAPES`, and for a related reason (a crop of 2048 residues is the
+#: shipped training configuration, and packing eight of them reaches 16,384), but they are not the
+#: same axis and the buckets they produce are not the atom ones: an edge launch is N*K ROWS, so
+#: N=2048 at k=48 is 98,304 rows, not 2,048. `BOTH_ROWS` already spreads these across five of its
+#: rungs without a new one, which is why this ladder adds nothing to it.
+#:
+#: 512 is deliberately absent. 512*48 = 24,576 and 1024*48 = 49,152 both floor into 16,384, so the
+#: two would build one bucket twice and report it as two.
+MPNN_NODE_SHAPES: tuple[int, ...] = (1024, 2048, 4096, 8192)
+
 #: Rows, from every side a `level=both` kernel is driven from. The token side was missing: 128 and
 #: 384 rows had no bucket and floored into someone else's, which is the same hole the DiT families
 #: had on `atom_key` before they were split.
+#:
+#: The edge side contributes nothing here ON PURPOSE. Its row counts (N*k, k=48) land on five
+#: distinct existing rungs -- 8192 / 16384 / 65536 / 147456 / 262144 -- so adding N*48 as rungs of
+#: its own would change every OTHER level=both kernel's buckets to give the edge side nothing it
+#: does not already have, and a ladder edit resets the tuned cache for every op that reads it.
 BOTH_ROWS: tuple[int, ...] = tuple(sorted(
     set(ATOM_SHAPES) | set(TOKEN_SHAPES) | {length * length for length in BOTH_PAIR_LENGTHS}))
 

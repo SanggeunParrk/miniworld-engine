@@ -29,6 +29,18 @@
     rmsnorm              RMSNorm 계열 (평균을 빼지 않는 LayerNorm; 변조 포함)
     rmsnorm_adamod       RMSNorm + adaLN-Zero 변조 + 조건부 투영 GEMM 을 한 커널에서
 
+ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이고, 아래 3개는 다른 모델의
+연산이다. `mpnn_` 접두는 `fused_` 와 달리 정보가 있다 — 어느 모델의 연산인지가 곧 어떤 형상을
+보는지이고, 이 커널들은 노드 x 이웃 엣지 위에서 돌지 토큰이나 원자 위에서 돌지 않는다.
+
+    mpnn_edge_tail          엣지 꼬리 전체 (투영 -> GELU -> 투영 -> dropout -> residual -> LN)
+    mpnn_node_message       노드 메시지 (W1 블록, GELU 둘, W2, 마스크 리덕션)
+    mpnn_relative_position  상대위치 임베딩의 backward — 버킷 리덕션
+
+`mpnn_message` 와 `mpnn_edge_mlp`, `mpnn_edge_dropout`, `mpnn_edge_layernorm` 은 여기 없다.
+그 계열의 커널들은 autotune 을 타지 않아 등록 대상이 아니다 (registry.csv 에 행이 없다).
+등록될 때 func 토큰을 얻는다.
+
 버린 이름과 이유:
 
     tm1              코드는 in-projection이고 outgoing이 아니다 -> trimul
@@ -70,7 +82,7 @@
 `dlnw`가 `dw`와 따로 있는 이유: adaln 에는 가중치 계열이 둘(LN gamma, Linear W_scale/W_bias)이고
 서로 다른 텐서를 계산하는 별개 커널이라, 둘 다 `dw`가 되면 "같은 알고리즘"이라는 거짓 주장이 된다.
 
-## 3. `<detail>` — 알고리즘·계약 변종 (17개)
+## 3. `<detail>` — 알고리즘·계약 변종 (18개)
 
 **같은 `<func>_<role>` 커널이 2개 이상 실존해 구분이 필요할 때만 붙인다.** 하나뿐이면 안 붙인다.
 detail 은 "런치 인자로 표현되는 차이"가 아니라 **호환되지 않는 계약**을 가리킨다. 판정 기준은 실측이다:
@@ -83,6 +95,9 @@ detail 은 "런치 인자로 표현되는 차이"가 아니라 **호환되지 �
     atomic       최종 누산기에 tl.atomic_add
     b2b          back-to-back GEMM (중간 텐서 미저장)
     ktiled       가중치 K 방향 타일링
+    gather       인덱스로 모은 오퍼랜드를 프롤로그에서 접어 넣는다 (별도 gather 텐서를 만들지
+                 않는다), 또는 backward 에서 그 인덱스로 되흩는다. 계약인 이유: 인덱스 텐서가
+                 필수 오퍼랜드이고, 무표시형에 주면 인자 수가 맞지 않는다
     packed       여러 오퍼랜드/출력을 한 버퍼에 인터리브·연접
     inplace      입력 버퍼에 되쓴다, 출력 버퍼가 없다 (autotune restore_value 필요)
     res          residual add 를 게이트 에필로그에 융합 (dropout 없음 = 추론 커널)

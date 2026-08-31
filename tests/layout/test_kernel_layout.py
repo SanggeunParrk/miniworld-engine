@@ -63,6 +63,10 @@ DRIVER_SHAPE_OWNERS = {
     "rmsnorm_adamod": "rmsnorm",
     "tm1": "trimul_inproj",
     "tm2": "trimul_inproj",
+    # The three mpnn families share one graph shape -- N nodes, k neighbours, 128 channels -- and
+    # mpnn_edge_tail is where it is defined, being the family whose kernels take all of it.
+    "mpnn_node_message": "mpnn_edge_tail",
+    "mpnn_relative_position": "mpnn_edge_tail",
 }
 
 

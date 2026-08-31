@@ -59,7 +59,7 @@ program, and at that width ``index_add_`` loses to ``F.embedding``'s sort by 2.5
 from __future__ import annotations
 
 # The per-kernel cache-prune objects that used to sit here are gone with the API that made
-# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_pruning` now narrows EVERY
+# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_reader` now narrows EVERY
 # autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
 # kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
@@ -68,6 +68,7 @@ import triton
 
 from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
 import triton.language as tl
 
 
@@ -118,7 +119,7 @@ def _shape_key(rows: int, buckets: int, width: int) -> int:
 
 
 @triton.autotune(
-    configs=_configs(),
+    configs=configs_for("mpnn_relative_position_bwd_reduce_triton"),
     key=["shape_key"],
 )
 @triton.jit

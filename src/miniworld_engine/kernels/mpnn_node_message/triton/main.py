@@ -24,7 +24,7 @@ is what ``F.embedding``'s backward does too.
 from __future__ import annotations
 
 # The per-kernel cache-prune objects that used to sit here are gone with the API that made
-# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_pruning` now narrows EVERY
+# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_reader` now narrows EVERY
 # autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
 # kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
@@ -33,6 +33,7 @@ import triton
 
 from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
 import triton.language as tl
 
 
@@ -81,7 +82,7 @@ def _configs() -> list[triton.Config]:
 # change invalidates the entry via config_space_hash.  See the same block in the edge
 # tail kernel for why the grids are deliberately this wide.
 
-def _shape_key(groups: int, neighbors: int) -> int:
+def _shape_key(groups: int, **axes: int) -> int:
     """The packed bucket for a node-message launch.
 
     `both_key` because the launch is `groups` ROWS -- one per node -- and that is what
@@ -92,12 +93,17 @@ def _shape_key(groups: int, neighbors: int) -> int:
     `NEIGHBORS` folds in because it changes the work per row and the compiled kernel both -- k is
     a real shape axis here, not a flag. `WIDTH` is 128 and only 128 (`_WIDTH`), so it is not folded
     in: an axis with one value adds a digit that never varies.
+
+    Axes are passed BY NAME, like the edge tail's helper. A positional `neighbors` produced the
+    same key, but the key-gap audit reads the fold off the `both_key(...)` call's keywords at the
+    launch site -- so a positional one is invisible to it, and `NEIGHBORS` was reported as a
+    constexpr outside the key when it had been inside it all along.
     """
-    return both_key(groups, NEIGHBORS=neighbors)
+    return both_key(groups, **axes)
 
 
 @triton.autotune(
-    configs=_configs(),
+    configs=configs_for("mpnn_node_message_fwd_gemm_triton"),
     key=["shape_key"],
 )
 @triton.jit
@@ -172,7 +178,7 @@ def _node_message_fwd_kernel(
 
 
 @triton.autotune(
-    configs=_configs(),
+    configs=configs_for("mpnn_node_message_bwd_recompute_triton"),
     key=["shape_key"],
     reset_to_zero=["grad_hidden_bias_ptr"],
 )
@@ -279,7 +285,7 @@ def _node_message_replay_kernel(
 
 
 @triton.autotune(
-    configs=_configs(),
+    configs=configs_for("mpnn_node_message_bwd_dx_triton"),
     key=["shape_key"],
     reset_to_zero=["grad_neighbor_ptr"],
 )
@@ -427,7 +433,7 @@ def _forward_op(
         edge_mask,
         reduced,
         groups,
-        _shape_key(groups, neighbors),
+        _shape_key(groups, NEIGHBORS=neighbors),
         neighbor_scale,
         EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
         NEIGHBORS=neighbors,
@@ -531,7 +537,7 @@ def _backward_op(
             grad_hidden,
             grad_hidden_bias,
             groups,
-            _shape_key(groups, neighbors),
+            _shape_key(groups, NEIGHBORS=neighbors),
             start,
             span,
             neighbor_scale,
@@ -551,7 +557,7 @@ def _backward_op(
             grad_neighbor,
             grad_preactivation,
             groups,
-            _shape_key(groups, neighbors),
+            _shape_key(groups, NEIGHBORS=neighbors),
             start,
             span,
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),

@@ -78,7 +78,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
     union, outside = set(), []
     for r in rows:
         want = {x for x in (r.get("sides") or "pair|atom").split("|") if x}
-        assert want <= {"pair", "atom", "token"}, f"{r['kernel']}: unknown side in {want}"
+        assert want <= {"pair", "atom", "token", "edge"}, f"{r['kernel']}: unknown side in {want}"
         seen = set()
         for u in op_units(only={r["kernel"]}):
             assert u.side in want, (
@@ -145,7 +145,15 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
               "gated_projection": {"pair", "token", "atom"},
               # Q/K RMSNorm+RoPE is called by SWAAtomAttention only. Its tuning
               # axis is flattened head rows; the model stream remains atom-only.
-              "rope": {"atom"}}
+              "rope": {"atom"},
+              # ProteinMPNN has one stream and it is neither of krystal's. Every launch in these
+              # three families iterates edge rows -- N nodes x k neighbours -- so `edge` is the
+              # whole traced answer, not a default: mpnn_relative_position's bucket reduce reads
+              # one row per EDGE (the docstring's 6,291,456 at B=16, T=8192, K=48), and both
+              # mpnn_edge_tail policies and the node message take (B, N, K, 128) outright.
+              "mpnn_edge_tail": {"edge"},
+              "mpnn_node_message": {"edge"},
+              "mpnn_relative_position": {"edge"}}
     bad = []
     for r in registry_rows():
         if r["level"] != "both":
@@ -184,7 +192,7 @@ def test_a_transition_kernel_is_not_built_on_atoms():
 def test_a_units_side_reaches_the_driver():
     units = [u for u in op_units() if u.side]
     assert units
-    assert units[0].env()["MINIWORLD_DRIVER_SIDE"] in ("pair", "atom", "token")
+    assert units[0].env()["MINIWORLD_DRIVER_SIDE"] in ("pair", "atom", "token", "edge")
     assert "--side" in units[0].cmd_args()
 
 

@@ -30,7 +30,7 @@ Two consequences are deliberate and each has a dedicated test:
 from __future__ import annotations
 
 # The per-kernel cache-prune objects that used to sit here are gone with the API that made
-# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_pruning` now narrows EVERY
+# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_reader` now narrows EVERY
 # autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
 # kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
@@ -39,6 +39,7 @@ import triton
 
 from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
 import triton.language as tl
 
 
@@ -210,7 +211,7 @@ def _shape_key(rows: int, **axes: int) -> int:
 
 
 @triton.autotune(
-    configs=_project_configs(),
+    configs=configs_for("mpnn_edge_tail_fwd_gemm_recompute_triton"),
     key=["shape_key"],
 )
 @triton.jit
@@ -282,7 +283,7 @@ def _edge_tail_project_kernel(
 
 
 @triton.autotune(
-    configs=_norm_configs(),
+    configs=configs_for("mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton"),
     key=["shape_key", "DROPOUT"],
 )
 @triton.jit
@@ -379,7 +380,7 @@ def _edge_tail_norm_kernel(
 
 
 @triton.autotune(
-    configs=_backward_configs(),
+    configs=configs_for("mpnn_edge_tail_bwd_recompute_triton"),
     key=["shape_key", "DROPOUT"],
     reset_to_zero=[
         "grad_output_bias_ptr",
@@ -537,7 +538,7 @@ def _edge_tail_replay_kernel(
 
 
 @triton.autotune(
-    configs=_backward_configs(),
+    configs=configs_for("mpnn_edge_tail_bwd_dx_recompute_triton"),
     key=["shape_key"],
     reset_to_zero=["grad_query_ptr", "grad_neighbor_ptr", "grad_hidden_bias_ptr"],
 )

@@ -57,12 +57,13 @@ epilogues.
 from __future__ import annotations
 
 # The per-kernel cache-prune objects that used to sit here are gone with the API that made
-# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_pruning` now narrows EVERY
+# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_reader` now narrows EVERY
 # autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
 # kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
 import torch
 import triton
+from miniworld_engine.autotune.configs import configs_for
 import triton.language as tl
 
 # One helper for the whole family: the sibling module's is generic over the axes, and a
@@ -174,7 +175,8 @@ def _elementwise_configs():
 
 # ---- forward -------------------------------------------------------------------------
 @triton.autotune(
-    configs=_configs(), key=["shape_key"],
+    configs=configs_for("mpnn_edge_tail_fwd_gemm_gather_saveact_triton"),
+    key=["shape_key"],
 )
 @triton.jit
 def _project_edge(
@@ -222,7 +224,8 @@ def _project_edge(
 
 
 @triton.autotune(
-    configs=_configs(), key=["shape_key"],
+    configs=configs_for("mpnn_edge_tail_fwd_gemm_b2b_saveact_triton"),
+    key=["shape_key"],
 )
 @triton.jit
 def _project_hidden(
@@ -251,7 +254,8 @@ def _project_hidden(
 
 
 @triton.autotune(
-    configs=_configs(), key=["shape_key", "DROPOUT"],
+    configs=configs_for("mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton"),
+    key=["shape_key", "DROPOUT"],
 )
 @triton.jit
 def _project_output(
@@ -298,7 +302,7 @@ def _project_output(
 
 # ---- backward ------------------------------------------------------------------------
 @triton.autotune(
-    configs=_elementwise_configs(),
+    configs=configs_for("mpnn_edge_tail_bwd_layernorm_saveact_triton"),
     key=["shape_key", "DROPOUT"],
     reset_to_zero=[
         "grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"
@@ -368,7 +372,8 @@ def _norm_backward(
 
 
 @triton.autotune(
-    configs=_configs(), key=["shape_key", "EMIT_BIAS"],
+    configs=configs_for("mpnn_edge_tail_bwd_dx_saveact_triton"),
+    key=["shape_key", "EMIT_BIAS"],
     reset_to_zero=["grad_bias_ptr"],
 )
 @triton.jit
@@ -419,7 +424,8 @@ def _project_backward(
 
 
 @triton.autotune(
-    configs=_configs(), key=["shape_key"],
+    configs=configs_for("mpnn_edge_tail_bwd_dx_gather_saveact_triton"),
+    key=["shape_key"],
     reset_to_zero=["grad_query_ptr"],
 )
 @triton.jit

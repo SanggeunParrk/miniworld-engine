@@ -52,9 +52,14 @@ def test_the_two_stacks_really_do_share_most_of_their_units() -> None:
     trunk = {u.stem for u in builder.op_units(config_dir=cd, stack="trunk")}
     diff = {u.stem for u in builder.op_units(config_dir=cd, stack="diffusion")}
     both = {u.stem for u in builder.op_units(config_dir=cd)}
+    # `mpnn` is a third half. It is NOT disjoint from the other two: a `stack=both` row is built by
+    # every half on purpose, so asking for one model's half still returns krystal's shared kernels.
+    # What is disjoint is the rows that name a model outright, and that is what the union needs.
+    mpnn = {u.stem for u in builder.op_units(stack="mpnn", config_dir=cd)}
     assert trunk & diff, "the stacks no longer overlap; this whole file is about the overlap"
-    assert trunk | diff == both, (
-        "trunk + diffusion is no longer the same work as `all`; one half now reaches a unit the "
+    assert mpnn - (trunk | diff), "the mpnn half reaches no unit of its own"
+    assert trunk | diff | mpnn == both, (
+        "the halves are no longer the same work as `all`; one half now reaches a unit the "
         "full sweep does not, or the reverse")
     # Not a threshold on a number that may drift -- the claim is that the overlap is a big fraction
     # of either sweep, which is what makes re-benching it expensive rather than untidy.
