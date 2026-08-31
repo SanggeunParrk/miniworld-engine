@@ -257,7 +257,7 @@ def test_mpnn_edge_layernorm_deterministic_mode_uses_native_fallback() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_mpnn_edge_layernorm_deterministic_toggle_uses_partial_backward(
+def test_mpnn_edge_layernorm_deterministic_toggle_avoids_the_atomic_backward(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from miniworld_engine.kernels.mpnn_edge_layernorm.triton import main

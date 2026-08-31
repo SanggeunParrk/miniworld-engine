@@ -49,7 +49,7 @@ def test_mpnn_message_auto_policy_uses_supported_triton_path() -> None:
 
 
 def test_mpnn_message_int32_guard_accounts_for_padded_dx_tile() -> None:
-    from miniworld_engine.kernels.mpnn_message._policy import (
+    from miniworld_engine.kernels.mpnn_message.triton._policy import (
         _DX_TILE_ELEMENTS,
         _INT32_MAX,
         _requires_i64_indexing,
@@ -61,7 +61,7 @@ def test_mpnn_message_int32_guard_accounts_for_padded_dx_tile() -> None:
 
 
 def test_mpnn_message_inference_int32_guard_accounts_for_odd_group_tail() -> None:
-    from miniworld_engine.kernels.mpnn_message._policy import (
+    from miniworld_engine.kernels.mpnn_message.triton._policy import (
         _INFERENCE_PADDED_TAIL_ELEMENTS,
         _INT32_MAX,
         _inference_int32_elements_supported,
@@ -78,7 +78,7 @@ def test_mpnn_message_policy_has_no_shape_keyed_dispatch() -> None:
     A shape-keyed dX policy (``groups in {8192}``) previously changed both the
     gradient rounding and the launch sequence at one calibrated batch size.
     """
-    from miniworld_engine.kernels.mpnn_message import _policy
+    from miniworld_engine.kernels.mpnn_message.triton import _policy
 
     assert not hasattr(_policy, "_should_use_pytorch_dx")
     assert not hasattr(_policy, "_PYTORCH_DX_GROUPS")
@@ -172,21 +172,28 @@ def test_mpnn_message_triton_matches_bf16_reference(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_mpnn_message_auxiliary_is_non_differentiable() -> None:
-    from miniworld_engine.kernels.mpnn_message.triton.main import _forward_op
+def test_mpnn_message_auxiliary_is_never_exposed() -> None:
+    """The saved projection must not reach the caller, so nothing can differentiate it.
 
+    It used to be a second output of the op, marked `mark_non_differentiable` so autograd would not
+    materialise a full-size zero gradient for a tensor nobody differentiates, and this asserted
+    that flag held. The autograd boundary is a `Function` now: it saves the projection in `ctx` and
+    returns the one public tensor, so the property is structural rather than a flag that could be
+    dropped. Assert the structure -- one output, and it carries a gradient.
+    """
     preactivation, weight, bias, edge_mask, _ = _cuda_inputs(3)
-    reduced, projected = _forward_op(
-        preactivation,
-        weight,
-        bias,
-        edge_mask,
-        48,
-    )
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        reduced = message_hidden_reduce(
+            preactivation,
+            weight,
+            bias,
+            edge_mask,
+            48,
+            backend="triton",
+        )
 
+    assert isinstance(reduced, torch.Tensor)
     assert reduced.requires_grad
-    assert not projected.requires_grad
-    assert projected.grad_fn is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")

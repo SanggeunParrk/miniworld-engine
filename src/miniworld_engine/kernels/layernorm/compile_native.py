@@ -7,7 +7,7 @@ import triton
 from torch import Tensor
 
 from miniworld_engine import settings
-from miniworld_engine.autotune.shape_key import both_key, rows_of
+from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.layernorm import dispatch as dispatch_cache
 from miniworld_engine.kernels.layernorm.triton.main import (
@@ -128,7 +128,16 @@ def _fwd_impl(x: Tensor, weight: Tensor, bias: Tensor, eps: float) -> tuple[Tens
     return y_2d.view_as(x), mean, rstd
 
 
-def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor,
+                     row_bucket: int | None = None) -> tuple[Tensor, Tensor, Tensor]:
+    """Atomic-reduction LayerNorm backward.
+
+    `row_bucket` is the ROW BUCKET, not a finished key, and it is for a caller whose activation is
+    genuinely flat -- mpnn's edge LayerNorm runs on (edge rows, 128) and has no (B, L, D) to hand
+    over, so `rows_of` refuses its shape by design. `N` is folded on BOTH paths, which is the point
+    of taking a bucket rather than a key: a launcher that folds an axis on one path and not the
+    other writes two different keys for one shape, and that is what the key-gap audit catches.
+    """
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()
     dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
     m, n = x_2d.shape
@@ -152,16 +161,24 @@ def _bwd_atomic_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: 
         x_2d.stride(1),
         m,
         n,
-        shape_key=both_key(rows_of(x.shape), N=n),
+        shape_key=both_key(rows_of(x.shape), N=n) if row_bucket is None else pack(row_bucket, N=n),
         HAS_ROWSCALE=False,
     )
     return dx_2d.view_as(x), dw.to(weight.dtype), db.to(weight.dtype)
 
 
 
-def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor,
+                         row_bucket: int | None = None) -> tuple[Tensor, Tensor, Tensor]:
     """Persistent grid-stride backward: ~NUM_SM*waves partial rows, vectorized 2D
-    tiles (see triton/persistent.py). Wins at d >= 384, matches quack cute at d=768."""
+    tiles (see triton/persistent.py). Wins at d >= 384, matches quack cute at d=768.
+
+    `row_bucket` is the ROW BUCKET, not a finished key, and it is for a caller whose activation is
+    genuinely flat -- mpnn's edge LayerNorm runs on (edge rows, 128) and has no (B, L, D) to hand
+    over, so `rows_of` refuses its shape by design. `N` is folded on BOTH paths, which is the point
+    of taking a bucket rather than a key: a launcher that folds an axis on one path and not the
+    other writes two different keys for one shape, and that is what the key-gap audit catches.
+    """
     x_2d = x.reshape(-1, x.shape[-1]).contiguous()
     dy_2d = dy.reshape(-1, dy.shape[-1]).contiguous()
     m, n = x_2d.shape
@@ -186,7 +203,7 @@ def _bwd_persistent_impl(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
         x_2d.stride(1),
         m,
         N=n,
-        shape_key=both_key(rows_of(x.shape), N=n),
+        shape_key=both_key(rows_of(x.shape), N=n) if row_bucket is None else pack(row_bucket, N=n),
     )
     dw = partial_dw.sum(dim=0).to(weight.dtype)
     db = partial_db.sum(dim=0).to(weight.dtype)

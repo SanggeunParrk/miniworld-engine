@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 
+from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.layernorm.compile_native import (
     _bwd_atomic_impl,
@@ -69,12 +70,19 @@ def _backward_op(
         if torch.are_deterministic_algorithms_enabled()
         else _bwd_atomic_impl
     )
+    # The ROW BUCKET is computed here and passed down; the callee folds the width in, on both of
+    # its paths. An edge activation is genuinely (rows, 128) -- there is no (B, L, D) behind it --
+    # and `rows_of` refuses a flat shape on purpose, because a caller holding only (M, D) cannot
+    # know whether its M is the whole launch or one slice. This caller does know: every edge row is
+    # in this launch.
+    rows = saved_input.numel() // _WIDTH
     grad_input, grad_weight, grad_bias = backward_impl(
         grad_output,
         saved_input.reshape(-1, _WIDTH),
         weight,
         mean.reshape(-1),
         rstd.reshape(-1),
+        row_bucket=both_key(rows),
     )
     # The generic kernel returns a two-dimensional dX. Keep this custom op's
     # real output contract identical to its fake registration.

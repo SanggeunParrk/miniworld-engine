@@ -9,13 +9,22 @@ from __future__ import annotations
 
 import triton
 
+from miniworld_engine.kernels.mpnn_edge_tail.triton import compute as edge_tail_compute
 from miniworld_engine.kernels.mpnn_edge_tail.triton import main as edge_tail
 from miniworld_engine.kernels.mpnn_node_message.triton import main as node_message
 from miniworld_engine.kernels.mpnn_relative_position.triton import (
     main as relative_position,
 )
 
-_MODULES = (edge_tail, node_message, relative_position)
+#: `edge_tail_compute` was missing, and with it six of the fourteen autotuned kernels -- so every
+#: check in this file ran on eight. The exemption list one of them carried named those six by hand,
+#: which made the omission look deliberate: the names were there, the kernels were not, and nothing
+#: reached them either way.
+_MODULES = (edge_tail, edge_tail_compute, node_message, relative_position)
+
+#: The number this file must see. A module dropped from `_MODULES` silently narrows every check
+#: here to whatever is left, which is exactly what happened.
+_AUTOTUNED_KERNELS = 14
 
 
 def _autotuned_kernels() -> list[tuple[str, triton.runtime.Autotuner]]:
@@ -36,7 +45,10 @@ def test_every_autotune_key_is_declared_by_its_kernel() -> None:
     built from it and fails only on the ones that never declared it.
     """
     kernels = _autotuned_kernels()
-    assert kernels, "no autotuned kernels found -- the discovery above went stale"
+    assert len(kernels) == _AUTOTUNED_KERNELS, (
+        f"discovery found {len(kernels)} autotuned kernels, expected {_AUTOTUNED_KERNELS} -- "
+        f"a module missing from _MODULES narrows every check in this file: "
+        f"{sorted(n for n, _ in kernels)}")
 
     for name, kernel in kernels:
         declared = set(kernel.fn.arg_names)
@@ -115,3 +127,30 @@ def test_cache_buckets_do_not_depend_on_the_row_count() -> None:
     assert not bad, (
         "kernels keyed on a row count, which needs one cache entry per batch size:\n  "
         + "\n  ".join(bad))
+
+
+def test_a_constexpr_flag_is_in_the_key_and_not_in_the_shape() -> None:
+    """A flag belongs BESIDE `shape_key`, never packed into it.
+
+    Both are true at once and they pull opposite ways. A flag has to be in `key=[...]` -- each
+    value compiles a different kernel, so the config that wins with dropout on is not the one that
+    wins with it off, and a shared bucket averages them. And it cannot be packed INTO `shape_key`,
+    because `pack` is for widths and refuses a zero: a zero digit is indistinguishable from an
+    absent axis, so two shapes would share a key. A flag that is OFF is exactly that zero.
+
+    Folding `DROPOUT` in raised `ShapeKeyTooWide` on every launch with dropout disabled -- every
+    inference launch, and every training launch at p=0. Nothing on CPU caught it: these kernels
+    only run on a card, so eleven GPU tests were the first thing to say so. This check is static.
+    """
+    FLAGS = ("DROPOUT", "EMIT_BIAS")
+    missing = []
+    for name, kernel in _autotuned_kernels():
+        fn = getattr(kernel, "fn", kernel)
+        params = set(getattr(getattr(fn, "fn", fn), "__annotations__", {}))
+        params |= set(getattr(fn, "arg_names", []) or [])
+        keys = set(getattr(kernel, "keys", []) or [])
+        missing.extend(f"{name}: has {flag} but key={sorted(keys)}"
+                       for flag in FLAGS if flag in params and flag not in keys)
+    assert not missing, (
+        "constexpr flags that change the compiled kernel but do not appear in its autotune key:"
+        "\n  " + "\n  ".join(missing))

@@ -201,9 +201,10 @@ def _shape_key(rows: int, **axes: int) -> int:
     kernels used to key on `rows` directly -- a raw count, so every distinct edge count was its own
     cache entry and nothing was ever reused between two proteins of different length.
 
-    The `tl.constexpr` flags fold in as axes rather than sitting beside the key: `DROPOUT` and
-    `EMIT_BIAS` change the compiled kernel and its register pressure, so the config that wins with
-    one is not the config that wins with the other, and a shared bucket would average them.
+    Only real widths fold in. `NEIGHBORS` is one: k changes the work per row and the compiled
+    kernel both. The `tl.constexpr` FLAGS are not, and they stay beside `shape_key` in `key=[...]`
+    -- see the note at the head of the compute module for the ShapeKeyTooWide that folding
+    `DROPOUT` in cost on every launch with dropout off.
     """
     return both_key(rows, **axes)
 
@@ -282,7 +283,7 @@ def _edge_tail_project_kernel(
 
 @triton.autotune(
     configs=_norm_configs(),
-    key=["shape_key"],
+    key=["shape_key", "DROPOUT"],
 )
 @triton.jit
 def _edge_tail_norm_kernel(
@@ -379,7 +380,7 @@ def _edge_tail_norm_kernel(
 
 @triton.autotune(
     configs=_backward_configs(),
-    key=["shape_key"],
+    key=["shape_key", "DROPOUT"],
     reset_to_zero=[
         "grad_output_bias_ptr",
         "grad_norm_weight_ptr",
@@ -765,7 +766,7 @@ def _forward_op(
         out,
         seed,
         rows,
-        _shape_key(rows, DROPOUT=dropout),
+        _shape_key(rows),
         1.0 - dropout_probability,
         1.0 / (1.0 - dropout_probability) if dropout else 1.0,
         eps,
@@ -905,7 +906,7 @@ def _backward_op(
             grad_norm_bias,
             seed,
             rows,
-            _shape_key(rows, NEIGHBORS=neighbors, DROPOUT=dropout),
+            _shape_key(rows, NEIGHBORS=neighbors),
             start,
             span,
             keep_probability,

@@ -67,6 +67,12 @@ import triton.language as tl
 
 # One helper for the whole family: the sibling module's is generic over the axes, and a
 # second copy here could only drift from it into keys that miss each other.
+#: The `tl.constexpr` FLAGS stay beside `shape_key` in `key=[...]` rather than folding into it.
+#: They belong in the key -- each compiles a different kernel, so the config that wins with one
+#: does not win with the other -- but `pack` is for WIDTHS and refuses a zero, because a zero digit
+#: is indistinguishable from an absent axis and two shapes would share a key. A flag that is OFF is
+#: exactly that zero: folding `DROPOUT` in raised ShapeKeyTooWide on every launch with dropout
+#: disabled, which is every inference launch and every training launch at p=0.
 from ..._compile import opaque
 from .main import _shape_key
 
@@ -245,7 +251,7 @@ def _project_hidden(
 
 
 @triton.autotune(
-    configs=_configs(), key=["shape_key"],
+    configs=_configs(), key=["shape_key", "DROPOUT"],
 )
 @triton.jit
 def _project_output(
@@ -293,7 +299,7 @@ def _project_output(
 # ---- backward ------------------------------------------------------------------------
 @triton.autotune(
     configs=_elementwise_configs(),
-    key=["shape_key"],
+    key=["shape_key", "DROPOUT"],
     reset_to_zero=[
         "grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"
     ],
@@ -362,7 +368,7 @@ def _norm_backward(
 
 
 @triton.autotune(
-    configs=_configs(), key=["shape_key"],
+    configs=_configs(), key=["shape_key", "EMIT_BIAS"],
     reset_to_zero=["grad_bias_ptr"],
 )
 @triton.jit
@@ -541,7 +547,7 @@ def _launch_forward(
     )
     _project_output[grid](
         activated_hidden, w3, b3, edge, gamma, beta, seed,
-        out, values, keep, rows, _shape_key(rows, DROPOUT=dropout),
+        out, values, keep, rows, _shape_key(rows),
         1.0 - dropout_probability,
         1.0 / (1.0 - dropout_probability) if dropout else 1.0, eps,
         WIDTH=WIDTH, DROPOUT=dropout,
@@ -626,17 +632,17 @@ def _launch_backward(
     _norm_backward[grid](
         grad_out, values, keep, gamma, grad_values, grad_update,
         grad_norm_weight, grad_norm_bias, grad_output_bias,
-        rows, _shape_key(rows, DROPOUT=dropout), scale, eps,
+        rows, _shape_key(rows), scale, eps,
         WIDTH=WIDTH, DROPOUT=dropout,
     )
     _project_backward[grid](
         grad_update, w3, hidden, grad_hidden, activated_hidden,
-        grad_hidden_bias, rows, _shape_key(rows, EMIT_BIAS=True),
+        grad_hidden_bias, rows, _shape_key(rows),
         WIDTH=WIDTH, EMIT_BIAS=True,
     )
     _project_backward[grid](
         grad_hidden, w2, preactivation, grad_preactivation, activated,
-        grad_bias_scratch, rows, _shape_key(rows, EMIT_BIAS=False),
+        grad_bias_scratch, rows, _shape_key(rows),
         WIDTH=WIDTH, EMIT_BIAS=False,
     )
     _edge_backward[grid](
