@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
 
 from miniworld_engine.kernels.mpnn_message.triton.main import _projection_dx_op
@@ -106,10 +107,23 @@ def _launch_compute_stage(
     return output.reshape(original_shape)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_edge_mlp_compute_save_projected_fwd_v1",
-    mutates_args=(),
-)
+def _forward_op_fake(
+    preactivation: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    output_weight: torch.Tensor,
+    output_bias: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The update and the intermediate projection, both shaped and typed like `preactivation`.
+
+    The second return is not a public output -- :class:`_EdgeMLPUpdateCompute` saves it for
+    backward -- but a schema has no notion of that, so it is declared like any other.
+    """
+    del hidden_weight, hidden_bias, output_weight, output_bias
+    return torch.empty_like(preactivation), torch.empty_like(preactivation)
+
+
+@opaque(fake=_forward_op_fake, name="mpnn_edge_mlp_compute_save_projected_fwd_v1")
 def _forward_op(
     preactivation: torch.Tensor,
     hidden_weight: torch.Tensor,
@@ -117,6 +131,11 @@ def _forward_op(
     output_weight: torch.Tensor,
     output_bias: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Two projection launches, returning the intermediate so backward need not recompute it.
+
+    The compute-efficient half of the pair: it holds one extra full-size edge tensor across the
+    step and saves the recompute the memory variant pays instead.
+    """
     projected = _launch_compute_stage(
         preactivation,
         hidden_weight,
@@ -130,82 +149,86 @@ def _forward_op(
     return update, projected
 
 
-@_forward_op.register_fake
-def _(
-    preactivation: torch.Tensor,
-    hidden_weight: torch.Tensor,
-    hidden_bias: torch.Tensor,
-    output_weight: torch.Tensor,
-    output_bias: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del hidden_weight, hidden_bias, output_weight, output_bias
-    return torch.empty_like(preactivation), torch.empty_like(preactivation)
+class _EdgeMLPUpdateCompute(torch.autograd.Function):
+    """The autograd boundary over the two projection launches.
 
+    ``projected`` is saved rather than returned. It used to be a second output of the op, marked
+    non-differentiable so autograd would not materialise a full-size zero gradient for a tensor
+    nobody differentiates; a ``Function`` keeps it in ``ctx`` and returns the one public tensor,
+    which is what the ``mark_non_differentiable``/``set_materialize_grads`` pair was arranging.
+    """
 
-def _setup_context(ctx, inputs, output) -> None:
-    preactivation, hidden_weight, hidden_bias, output_weight, output_bias = inputs
-    _update, projected = output
-    # ``projected`` is an implementation detail, not a second differentiable
-    # public output.  Suppress its otherwise full-size materialized zero grad.
-    ctx.mark_non_differentiable(projected)
-    ctx.set_materialize_grads(False)
-    ctx.save_for_backward(
-        preactivation,
-        hidden_weight,
-        output_weight,
-        projected,
-    )
-    ctx.hidden_bias_dtype = hidden_bias.dtype
-    ctx.output_bias_dtype = output_bias.dtype
-
-
-def _backward(ctx, grad_update, _grad_projected):
-    preactivation, hidden_weight, output_weight, projected = ctx.saved_tensors
-    grad_update = grad_update.contiguous()
-
-    # Each dX launch also emits exact GELU(input), which is the right operand
-    # required by the following cuBLAS weight-gradient GEMM.
-    grad_projected, hidden_2 = _projection_dx_op(
-        grad_update,
-        output_weight,
-        projected,
-    )
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        grad_output_weight = grad_update.reshape(-1, _WIDTH).T @ hidden_2.reshape(
-            -1, _WIDTH
+    @staticmethod
+    def forward(
+        ctx,
+        preactivation: torch.Tensor,
+        hidden_weight: torch.Tensor,
+        hidden_bias: torch.Tensor,
+        output_weight: torch.Tensor,
+        output_bias: torch.Tensor,
+    ) -> torch.Tensor:
+        update, projected = _forward_op(
+            preactivation,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
         )
-    del projected, hidden_2
-
-    grad_preactivation, hidden_1 = _projection_dx_op(
-        grad_projected,
-        hidden_weight,
-        preactivation,
-    )
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        grad_hidden_weight = grad_projected.reshape(-1, _WIDTH).T @ hidden_1.reshape(
-            -1, _WIDTH
+        ctx.save_for_backward(
+            preactivation,
+            hidden_weight,
+            output_weight,
+            projected,
         )
+        ctx.hidden_bias_dtype = hidden_bias.dtype
+        ctx.output_bias_dtype = output_bias.dtype
+        return update
 
-    # Preserve CUDA-autocast Linear's BF16 bias-backward rounding boundary
-    # before converting the result to the original FP32 parameter dtype.
-    grad_hidden_bias = grad_projected.reshape(-1, _WIDTH).sum(
-        dim=0,
-        dtype=grad_projected.dtype,
-    )
-    grad_output_bias = grad_update.reshape(-1, _WIDTH).sum(
-        dim=0,
-        dtype=grad_update.dtype,
-    )
-    return (
-        grad_preactivation,
-        grad_hidden_weight.to(hidden_weight.dtype),
-        grad_hidden_bias.to(ctx.hidden_bias_dtype),
-        grad_output_weight.to(output_weight.dtype),
-        grad_output_bias.to(ctx.output_bias_dtype),
-    )
+    @staticmethod
+    def backward(ctx, grad_update):
+        preactivation, hidden_weight, output_weight, projected = ctx.saved_tensors
+        grad_update = grad_update.contiguous()
 
+        # Each dX launch also emits exact GELU(input), which is the right operand
+        # required by the following cuBLAS weight-gradient GEMM.
+        grad_projected, hidden_2 = _projection_dx_op(
+            grad_update,
+            output_weight,
+            projected,
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            grad_output_weight = grad_update.reshape(-1, _WIDTH).T @ hidden_2.reshape(
+                -1, _WIDTH
+            )
+        del projected, hidden_2
 
-_forward_op.register_autograd(_backward, setup_context=_setup_context)
+        grad_preactivation, hidden_1 = _projection_dx_op(
+            grad_projected,
+            hidden_weight,
+            preactivation,
+        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            grad_hidden_weight = grad_projected.reshape(-1, _WIDTH).T @ hidden_1.reshape(
+                -1, _WIDTH
+            )
+
+        # Preserve CUDA-autocast Linear's BF16 bias-backward rounding boundary
+        # before converting the result to the original FP32 parameter dtype.
+        grad_hidden_bias = grad_projected.reshape(-1, _WIDTH).sum(
+            dim=0,
+            dtype=grad_projected.dtype,
+        )
+        grad_output_bias = grad_update.reshape(-1, _WIDTH).sum(
+            dim=0,
+            dtype=grad_update.dtype,
+        )
+        return (
+            grad_preactivation,
+            grad_hidden_weight.to(hidden_weight.dtype),
+            grad_hidden_bias.to(ctx.hidden_bias_dtype),
+            grad_output_weight.to(output_weight.dtype),
+            grad_output_bias.to(ctx.output_bias_dtype),
+        )
 
 
 def triton_edge_mlp_update_compute(
@@ -216,14 +239,13 @@ def triton_edge_mlp_update_compute(
     output_bias: torch.Tensor,
 ) -> torch.Tensor:
     """Run the projected-save, compute-efficient edge MLP."""
-    update, _projected = _forward_op(
+    return _EdgeMLPUpdateCompute.apply(
         preactivation,
         hidden_weight,
         hidden_bias,
         output_weight,
         output_bias,
     )
-    return update
 
 
 __all__ = ["triton_edge_mlp_update_compute"]

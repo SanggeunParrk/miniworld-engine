@@ -38,8 +38,8 @@ import torch
 import triton
 
 from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
-
 
 
 _WIDTH = 128
@@ -683,7 +683,30 @@ def _edge_tail_dx_kernel(
     tl.atomic_add(grad_hidden_bias_ptr + columns, grad_hidden_bias)
 
 
-@torch.library.custom_op("miniworld_engine::mpnn_edge_tail_fwd_v1", mutates_args=())
+def _forward_op_fake(
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    output_weight: torch.Tensor,
+    output_bias: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    seed: torch.Tensor,
+    eps: float,
+    dropout_probability: float,
+) -> torch.Tensor:
+    """Shaped and typed like `edge_states`: the tail is a residual update, so it returns its input's shape."""
+    del query_projection, neighbor_projection, flat_neighbor_indices
+    del edge_weight, hidden_weight, hidden_bias, output_weight, output_bias
+    del norm_weight, norm_bias, seed, eps, dropout_probability
+    return torch.empty_like(edge_states)
+
+
+@opaque(fake=_forward_op_fake, name="mpnn_edge_tail_fwd_v1")
 def _forward_op(
     edge_states: torch.Tensor,
     query_projection: torch.Tensor,
@@ -700,6 +723,11 @@ def _forward_op(
     eps: float,
     dropout_probability: float,
 ) -> torch.Tensor:
+    """The whole encoder edge tail in one launch: project, GELU, project, dropout, residual, LayerNorm.
+
+    The dropout mask is redrawn from `seed` in backward rather than saved, which is why the seed
+    is an input here and not a value the kernel picks.
+    """
     neighbors = edge_states.shape[-2]
     rows = edge_states.numel() // _WIDTH
     out = torch.empty_like(edge_states)
@@ -747,8 +775,8 @@ def _forward_op(
     return out
 
 
-@_forward_op.register_fake
-def _(
+def _backward_op_fake(
+    grad_out: torch.Tensor,
     edge_states: torch.Tensor,
     query_projection: torch.Tensor,
     neighbor_projection: torch.Tensor,
@@ -759,18 +787,34 @@ def _(
     output_weight: torch.Tensor,
     output_bias: torch.Tensor,
     norm_weight: torch.Tensor,
-    norm_bias: torch.Tensor,
     seed: torch.Tensor,
     eps: float,
     dropout_probability: float,
-) -> torch.Tensor:
-    del query_projection, neighbor_projection, flat_neighbor_indices
-    del edge_weight, hidden_weight, hidden_bias, output_weight, output_bias
-    del norm_weight, norm_bias, seed, eps, dropout_probability
-    return torch.empty_like(edge_states)
+) -> list[torch.Tensor]:
+    """The ten gradients backward unpacks, in order.
+
+    The edge-state gradient keeps the activation dtype; the rest are FP32 reductions down the row
+    axis, three `(WIDTH, WIDTH)` weights and four `(WIDTH,)` biases and norm parameters, and none
+    of those extents comes from an input's shape.
+    """
+    del grad_out, flat_neighbor_indices, seed, eps, dropout_probability
+    del hidden_bias, output_bias
+    float32 = torch.float32
+    return [
+        torch.empty_like(edge_states),
+        torch.empty_like(query_projection, dtype=float32),
+        torch.empty_like(neighbor_projection, dtype=float32),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, dtype=float32),
+    ]
 
 
-@torch.library.custom_op("miniworld_engine::mpnn_edge_tail_bwd_v1", mutates_args=())
+@opaque(fake=_backward_op_fake, name="mpnn_edge_tail_bwd_v1")
 def _backward_op(
     grad_out: torch.Tensor,
     edge_states: torch.Tensor,
@@ -926,159 +970,148 @@ def _backward_op(
     ]
 
 
-@_backward_op.register_fake
-def _(
-    grad_out: torch.Tensor,
-    edge_states: torch.Tensor,
-    query_projection: torch.Tensor,
-    neighbor_projection: torch.Tensor,
-    flat_neighbor_indices: torch.Tensor,
-    edge_weight: torch.Tensor,
-    hidden_weight: torch.Tensor,
-    hidden_bias: torch.Tensor,
-    output_weight: torch.Tensor,
-    output_bias: torch.Tensor,
-    norm_weight: torch.Tensor,
-    seed: torch.Tensor,
-    eps: float,
-    dropout_probability: float,
-) -> list[torch.Tensor]:
-    del grad_out, flat_neighbor_indices, seed, eps, dropout_probability
-    del hidden_bias, output_bias
-    float32 = torch.float32
-    return [
-        torch.empty_like(edge_states),
-        torch.empty_like(query_projection, dtype=float32),
-        torch.empty_like(neighbor_projection, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-    ]
+class _EdgeTailUpdate(torch.autograd.Function):
+    """The autograd boundary for the fused encoder edge tail.
 
+    Both launches are opaque ops and this is the ``Function`` over them, which is the one shape
+    the whole kernel tree uses. It replaces a ``register_autograd`` on the forward op: that form
+    works, and everything its backward needs is a forward input, but two ways of saying the same
+    thing cost more than the tidiness of the second one was worth.
+    """
 
-def _setup_context(ctx, inputs, output) -> None:
-    del output
-    (
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        output_weight,
-        output_bias,
-        norm_weight,
-        norm_bias,
-        seed,
-        eps,
-        dropout_probability,
-    ) = inputs
-    ctx.save_for_backward(
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        output_weight,
-        output_bias,
-        norm_weight,
-        seed,
-    )
-    ctx.eps = eps
-    ctx.dropout_probability = dropout_probability
-    ctx.dtypes = (
-        query_projection.dtype,
-        neighbor_projection.dtype,
-        edge_weight.dtype,
-        hidden_weight.dtype,
-        hidden_bias.dtype,
-        output_weight.dtype,
-        output_bias.dtype,
-        norm_weight.dtype,
-        norm_bias.dtype,
-    )
+    @staticmethod
+    def forward(
+        ctx,
+        edge_states: torch.Tensor,
+        query_projection: torch.Tensor,
+        neighbor_projection: torch.Tensor,
+        flat_neighbor_indices: torch.Tensor,
+        edge_weight: torch.Tensor,
+        hidden_weight: torch.Tensor,
+        hidden_bias: torch.Tensor,
+        output_weight: torch.Tensor,
+        output_bias: torch.Tensor,
+        norm_weight: torch.Tensor,
+        norm_bias: torch.Tensor,
+        seed: torch.Tensor,
+        eps: float,
+        dropout_probability: float,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+            norm_weight,
+            seed,
+        )
+        ctx.eps = eps
+        ctx.dropout_probability = dropout_probability
+        ctx.dtypes = (
+            query_projection.dtype,
+            neighbor_projection.dtype,
+            edge_weight.dtype,
+            hidden_weight.dtype,
+            hidden_bias.dtype,
+            output_weight.dtype,
+            output_bias.dtype,
+            norm_weight.dtype,
+            norm_bias.dtype,
+        )
 
+        return _forward_op(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+            norm_weight,
+            norm_bias,
+            seed,
+            eps,
+            dropout_probability,
+        )
 
-def _backward(ctx, grad_out):
-    (
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        output_weight,
-        output_bias,
-        norm_weight,
-        seed,
-    ) = ctx.saved_tensors
-    (
-        query_dtype,
-        neighbor_dtype,
-        edge_weight_dtype,
-        hidden_weight_dtype,
-        hidden_bias_dtype,
-        output_weight_dtype,
-        output_bias_dtype,
-        norm_weight_dtype,
-        norm_bias_dtype,
-    ) = ctx.dtypes
-    (
-        grad_edge,
-        grad_query,
-        grad_neighbor,
-        grad_edge_weight,
-        grad_hidden_weight,
-        grad_output_weight,
-        grad_hidden_bias,
-        grad_output_bias,
-        grad_norm_weight,
-        grad_norm_bias,
-    ) = _backward_op(
-        grad_out.contiguous(),
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        output_weight,
-        output_bias,
-        norm_weight,
-        seed,
-        ctx.eps,
-        ctx.dropout_probability,
-    )
-    # Autocast's Linear rounds a bias gradient to BF16 before the FP32 parameter
-    # gradient; keep that boundary rather than returning the FP32 partial sum.
-    return (
-        grad_edge,
-        grad_query.to(query_dtype),
-        grad_neighbor.to(neighbor_dtype),
-        None,
-        grad_edge_weight.to(edge_weight_dtype),
-        grad_hidden_weight.to(hidden_weight_dtype),
-        grad_hidden_bias.to(torch.bfloat16).to(hidden_bias_dtype),
-        grad_output_weight.to(output_weight_dtype),
-        grad_output_bias.to(torch.bfloat16).to(output_bias_dtype),
-        grad_norm_weight.to(norm_weight_dtype),
-        grad_norm_bias.to(norm_bias_dtype),
-        None,
-        None,
-        None,
-    )
-
-
-_forward_op.register_autograd(_backward, setup_context=_setup_context)
+    @staticmethod
+    def backward(ctx, grad_out):
+        (
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+            norm_weight,
+            seed,
+        ) = ctx.saved_tensors
+        (
+            query_dtype,
+            neighbor_dtype,
+            edge_weight_dtype,
+            hidden_weight_dtype,
+            hidden_bias_dtype,
+            output_weight_dtype,
+            output_bias_dtype,
+            norm_weight_dtype,
+            norm_bias_dtype,
+        ) = ctx.dtypes
+        (
+            grad_edge,
+            grad_query,
+            grad_neighbor,
+            grad_edge_weight,
+            grad_hidden_weight,
+            grad_output_weight,
+            grad_hidden_bias,
+            grad_output_bias,
+            grad_norm_weight,
+            grad_norm_bias,
+        ) = _backward_op(
+            grad_out.contiguous(),
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+            norm_weight,
+            seed,
+            ctx.eps,
+            ctx.dropout_probability,
+        )
+        # Autocast's Linear rounds a bias gradient to BF16 before the FP32 parameter
+        # gradient; keep that boundary rather than returning the FP32 partial sum.
+        return (
+            grad_edge,
+            grad_query.to(query_dtype),
+            grad_neighbor.to(neighbor_dtype),
+            None,
+            grad_edge_weight.to(edge_weight_dtype),
+            grad_hidden_weight.to(hidden_weight_dtype),
+            grad_hidden_bias.to(torch.bfloat16).to(hidden_bias_dtype),
+            grad_output_weight.to(output_weight_dtype),
+            grad_output_bias.to(torch.bfloat16).to(output_bias_dtype),
+            grad_norm_weight.to(norm_weight_dtype),
+            grad_norm_bias.to(norm_bias_dtype),
+            None,
+            None,
+            None,
+        )
 
 
 def triton_edge_tail_update(
@@ -1098,7 +1131,7 @@ def triton_edge_tail_update(
     dropout_probability: float,
 ) -> torch.Tensor:
     """Run the whole encoder edge tail as one fused, fully replayed op."""
-    return _forward_op(
+    return _EdgeTailUpdate.apply(
         edge_states,
         query_projection,
         neighbor_projection,

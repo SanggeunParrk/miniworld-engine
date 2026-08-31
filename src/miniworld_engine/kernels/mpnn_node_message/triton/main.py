@@ -32,8 +32,8 @@ import torch
 import triton
 
 from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
-
 
 
 _WIDTH = 128
@@ -374,7 +374,31 @@ def _block_rows(neighbors: int) -> int:
     return block
 
 
-@torch.library.custom_op("miniworld_engine::mpnn_node_message_fwd_v1", mutates_args=())
+def _forward_op_fake(
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
+    """One FP32 row per node: the query projection's leading shape with `WIDTH` channels.
+
+    The neighbour axis is gone because it is what the kernel reduces over, and the result is
+    FP32 whatever the edge states' dtype -- it is a sum over k terms, and the cast back happens
+    at the autograd boundary rather than in the kernel.
+    """
+    del edge_states, neighbor_projection, flat_neighbor_indices
+    del edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale
+    return query_projection.new_empty(
+        *query_projection.shape[:-1], _WIDTH, dtype=torch.float32
+    )
+
+
+@opaque(fake=_forward_op_fake, name="mpnn_node_message_fwd_v1")
 def _forward_op(
     edge_states: torch.Tensor,
     query_projection: torch.Tensor,
@@ -386,6 +410,7 @@ def _forward_op(
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> torch.Tensor:
+    """Project the edge states, GELU them, and reduce over the k neighbours in one launch."""
     neighbors = edge_states.shape[-2]
     groups = edge_states.numel() // (neighbors * _WIDTH)
     reduced = query_projection.new_empty(
@@ -412,8 +437,8 @@ def _forward_op(
     return reduced
 
 
-@_forward_op.register_fake
-def _(
+def _backward_op_fake(
+    grad_reduced: torch.Tensor,
     edge_states: torch.Tensor,
     query_projection: torch.Tensor,
     neighbor_projection: torch.Tensor,
@@ -423,15 +448,27 @@ def _(
     hidden_bias: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
-) -> torch.Tensor:
-    del edge_states, neighbor_projection, flat_neighbor_indices
-    del edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale
-    return query_projection.new_empty(
-        *query_projection.shape[:-1], _WIDTH, dtype=torch.float32
-    )
+) -> list[torch.Tensor]:
+    """The six gradients backward unpacks, in order.
+
+    The edge-state gradient keeps the activation dtype; the other five are FP32 because each is
+    a reduction down the row axis and is rounded back at the autograd boundary. The two weights
+    are `(WIDTH, WIDTH)` and the bias `(WIDTH,)`, none of which any input's shape carries.
+    """
+    del grad_reduced, flat_neighbor_indices, hidden_bias, edge_mask, neighbor_scale
+    del edge_weight, hidden_weight
+    float32 = torch.float32
+    return [
+        torch.empty_like(edge_states),
+        torch.empty_like(query_projection, dtype=float32),
+        torch.empty_like(neighbor_projection, dtype=float32),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
+        edge_states.new_empty(_WIDTH, dtype=float32),
+    ]
 
 
-@torch.library.custom_op("miniworld_engine::mpnn_node_message_bwd_v1", mutates_args=())
+@opaque(fake=_backward_op_fake, name="mpnn_node_message_bwd_v1")
 def _backward_op(
     grad_reduced: torch.Tensor,
     edge_states: torch.Tensor,
@@ -444,6 +481,11 @@ def _backward_op(
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> list[torch.Tensor]:
+    """Replay the forward and differentiate it, in blocks down the row axis.
+
+    Nothing from the forward is saved, so the projection and its GELU are recomputed here; the
+    row blocking exists so a single reusable activation buffer stands in for a full-size one.
+    """
     neighbors = edge_states.shape[-2]
     rows = edge_states.numel() // _WIDTH
     groups = rows // neighbors
@@ -540,112 +582,103 @@ def _backward_op(
     ]
 
 
-@_backward_op.register_fake
-def _(
-    grad_reduced: torch.Tensor,
-    edge_states: torch.Tensor,
-    query_projection: torch.Tensor,
-    neighbor_projection: torch.Tensor,
-    flat_neighbor_indices: torch.Tensor,
-    edge_weight: torch.Tensor,
-    hidden_weight: torch.Tensor,
-    hidden_bias: torch.Tensor,
-    edge_mask: torch.Tensor,
-    neighbor_scale: int,
-) -> list[torch.Tensor]:
-    del grad_reduced, flat_neighbor_indices, hidden_bias, edge_mask, neighbor_scale
-    del edge_weight, hidden_weight
-    float32 = torch.float32
-    return [
-        torch.empty_like(edge_states),
-        torch.empty_like(query_projection, dtype=float32),
-        torch.empty_like(neighbor_projection, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, _WIDTH, dtype=float32),
-        edge_states.new_empty(_WIDTH, dtype=float32),
-    ]
+class _NodeMessageReduce(torch.autograd.Function):
+    """The autograd boundary for the fused node message.
 
+    Both launches are opaque ops and this is the ``Function`` over them, which is the one shape
+    the whole kernel tree uses. It replaces a ``register_autograd`` on the forward op: that form
+    works, and everything its backward needs is a forward input, but two ways of saying the same
+    thing cost more than the tidiness of the second one was worth.
+    """
 
-def _setup_context(ctx, inputs, output) -> None:
-    del output
-    (
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        edge_mask,
-        neighbor_scale,
-    ) = inputs
-    ctx.save_for_backward(
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        edge_mask,
-    )
-    ctx.neighbor_scale = neighbor_scale
-    ctx.dtypes = (
-        query_projection.dtype,
-        neighbor_projection.dtype,
-        edge_weight.dtype,
-        hidden_weight.dtype,
-        hidden_bias.dtype,
-    )
+    @staticmethod
+    def forward(
+        ctx,
+        edge_states: torch.Tensor,
+        query_projection: torch.Tensor,
+        neighbor_projection: torch.Tensor,
+        flat_neighbor_indices: torch.Tensor,
+        edge_weight: torch.Tensor,
+        hidden_weight: torch.Tensor,
+        hidden_bias: torch.Tensor,
+        edge_mask: torch.Tensor,
+        neighbor_scale: int,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+        )
+        ctx.neighbor_scale = neighbor_scale
+        ctx.dtypes = (
+            query_projection.dtype,
+            neighbor_projection.dtype,
+            edge_weight.dtype,
+            hidden_weight.dtype,
+            hidden_bias.dtype,
+        )
+        return _forward_op(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+            neighbor_scale,
+        )
 
-
-def _backward(ctx, grad_reduced):
-    (
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        edge_mask,
-    ) = ctx.saved_tensors
-    query_dtype, neighbor_dtype, edge_dtype, hidden_dtype, bias_dtype = ctx.dtypes
-    (
-        grad_edge,
-        grad_query,
-        grad_neighbor,
-        grad_edge_weight,
-        grad_hidden_weight,
-        grad_hidden_bias,
-    ) = _backward_op(
-        grad_reduced.contiguous(),
-        edge_states,
-        query_projection,
-        neighbor_projection,
-        flat_neighbor_indices,
-        edge_weight,
-        hidden_weight,
-        hidden_bias,
-        edge_mask,
-        ctx.neighbor_scale,
-    )
-    return (
-        grad_edge,
-        grad_query.to(query_dtype),
-        grad_neighbor.to(neighbor_dtype),
-        None,
-        grad_edge_weight.to(edge_dtype),
-        grad_hidden_weight.to(hidden_dtype),
-        # Autocast's Linear rounds a bias gradient to BF16 before the FP32
-        # parameter gradient; keep that boundary.
-        grad_hidden_bias.to(torch.bfloat16).to(bias_dtype),
-        None,
-        None,
-    )
-
-
-_forward_op.register_autograd(_backward, setup_context=_setup_context)
+    @staticmethod
+    def backward(ctx, grad_reduced):
+        (
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+        ) = ctx.saved_tensors
+        query_dtype, neighbor_dtype, edge_dtype, hidden_dtype, bias_dtype = ctx.dtypes
+        (
+            grad_edge,
+            grad_query,
+            grad_neighbor,
+            grad_edge_weight,
+            grad_hidden_weight,
+            grad_hidden_bias,
+        ) = _backward_op(
+            grad_reduced.contiguous(),
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+            ctx.neighbor_scale,
+        )
+        return (
+            grad_edge,
+            grad_query.to(query_dtype),
+            grad_neighbor.to(neighbor_dtype),
+            None,
+            grad_edge_weight.to(edge_dtype),
+            grad_hidden_weight.to(hidden_dtype),
+            # Autocast's Linear rounds a bias gradient to BF16 before the FP32
+            # parameter gradient; keep that boundary.
+            grad_hidden_bias.to(torch.bfloat16).to(bias_dtype),
+            None,
+            None,
+        )
 
 
 def triton_node_message_reduce(
@@ -660,7 +693,7 @@ def triton_node_message_reduce(
     neighbor_scale: int,
 ) -> torch.Tensor:
     """Run the whole node message as one fused, fully replayed op."""
-    return _forward_op(
+    return _NodeMessageReduce.apply(
         edge_states,
         query_projection,
         neighbor_projection,

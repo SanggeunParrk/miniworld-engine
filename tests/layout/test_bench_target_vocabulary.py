@@ -21,14 +21,14 @@ out of its source with `ast`, the same way tests/compile/test_compiled_flag_is_w
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 import pytest
+from paths import ROOT, tracked_subdirectories
 
 from miniworld_engine import cli
 from miniworld_engine.autotune.builder import CASE_NAMES
 
-REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+REPO = ROOT
 BENCH = REPO / "benchmarks" / "runners" / "bench.py"
 TREE = ast.parse(BENCH.read_text())
 
@@ -49,35 +49,6 @@ BENCH_KERNEL = _target_table("KERNEL_TARGETS")
 BENCH_MODULE = _target_table("MODULE_TARGETS")
 LEVELS = {"kernel": (BENCH_KERNEL, cli.KERNEL_TARGETS),
           "module": (BENCH_MODULE, cli.MODULE_TARGETS)}
-
-
-
-def tracked_subdirectories(root: Path) -> set[str]:
-    """Subdirectories holding source files tracked or not ignored by git.
-
-    `benchmarks/` results are gitignored, so a working checkout accumulates output under target
-    names that no longer exist and `iterdir()` sees them. That happened: fourteen directories under
-    the retired short vocabulary, plus 257 MB of another branch's `mpnn` output, turned this test
-    red locally while CI -- a fresh clone with only tracked files -- stayed green. A check that
-    depends on what a previous experiment left on disk is not checking the repository.
-
-    Raises rather than falling back to `iterdir()`: a silent fallback restores the behaviour this
-    replaces, and an empty result would make the caller pass vacuously.
-    """
-    import subprocess
-
-    rel = root.relative_to(REPO)
-    # Include new source files in a working checkout without requiring git staging.
-    # Generated artifacts remain excluded by the repository ignore rules.
-    proc = subprocess.run(["git", "ls-files", "--cached", "--others",
-                           "--exclude-standard", "-z", "--", str(rel)],
-                          cwd=REPO, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(f"git ls-files failed for {rel}: {proc.stderr.strip()}")
-    names = {Path(e).relative_to(rel).parts[0]
-             for e in proc.stdout.split("\0") if e and len(Path(e).relative_to(rel).parts) > 1}
-    assert names, f"no tracked files under {rel}; this check would pass vacuously"
-    return names
 
 
 @pytest.mark.parametrize("level", sorted(LEVELS))

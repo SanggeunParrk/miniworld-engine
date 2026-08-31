@@ -63,13 +63,11 @@ from __future__ import annotations
 # autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
 # kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
-# The per-kernel cache-prune objects that used to sit here are gone with the API that made
-# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_pruning` now narrows EVERY
-# autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
-# kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
-# wiring of its own, and a hand-written `bucket_of` could only disagree with it.
 import torch
 import triton
+
+from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
 
 
@@ -105,9 +103,23 @@ _MAX_PROGRAMS = 1024
 # idempotent under the tuner's repeated benchmark runs, and the caller reads back only
 # the slots the chosen configuration wrote rather than trusting a hook to have cleared
 # the rest.  Depending on that hook instead measured a relative error of 1.42.
+def _shape_key(rows: int, buckets: int, width: int) -> int:
+    """The packed bucket for one reduction of `rows` edge rows into `buckets` table rows.
+
+    `both_key` because the launch is a row count, and that is what `BOTH_ROWS` buckets. The
+    kernel used to key on `rows` directly -- a raw count, so `B=16, T=8192, K=48` and the same
+    batch one residue longer were two cache entries with nothing shared between them.
+
+    Both widths fold in as axes rather than standing beside the key: the table height decides how
+    much of the privatised copy a program holds in registers, and the channel count decides the
+    row it reduces, so neither is a flag and the config that wins at one does not win at the other.
+    """
+    return both_key(rows, BUCKETS=buckets, WIDTH=width)
+
+
 @triton.autotune(
     configs=_configs(),
-    key=["rows", "buckets", "WIDTH"],
+    key=["shape_key"],
 )
 @triton.jit
 def _bucket_reduce_kernel(
@@ -117,6 +129,7 @@ def _bucket_reduce_kernel(
     partial_bias_ptr,
     rows,
     buckets,
+    shape_key,
     BUCKET_BLOCK: tl.constexpr,
     WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -184,6 +197,24 @@ def _bucket_reduce_kernel(
     tl.store(partial_bias_ptr + tl.program_id(0) * WIDTH + columns, bias_accumulator)
 
 
+def _triton_bucket_reduce_fake(
+    grad_output: torch.Tensor,
+    bucket: torch.Tensor,
+    buckets: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(buckets, WIDTH)`` and ``(WIDTH,)``, both FP32 whatever the gradient's dtype.
+
+    The table height comes from the non-tensor `buckets`, not from any input's shape, and the
+    accumulation is FP32 because the reduction is over roughly 95,000 rows per destination.
+    """
+    width = grad_output.shape[-1]
+    return (
+        grad_output.new_empty((buckets, width), dtype=torch.float32),
+        grad_output.new_empty((width,), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_triton_bucket_reduce_fake, name="mpnn_relative_position_bucket_reduce_v1")
 def triton_bucket_reduce(
     grad_output: torch.Tensor,
     bucket: torch.Tensor,
@@ -214,6 +245,7 @@ def triton_bucket_reduce(
         partial_bias,
         rows,
         buckets,
+        _shape_key(rows, buckets, width),
         BUCKET_BLOCK=padded,
         WIDTH=width,
     )

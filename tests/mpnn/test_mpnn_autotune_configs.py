@@ -80,33 +80,13 @@ def test_every_kernel_is_wired_to_the_committed_autotune_cache() -> None:
     # `key=[...]`. So the thing to check is no longer a hook per kernel, it is that each kernel
     # keys on the shape at all -- without `shape_key` in `key`, one bucket serves every shape and
     # the cache is back to `any|any` by another route.
-    #: NO mpnn kernel keys on `shape_key` yet -- they key on their own dimension names
-    #: (`rows`, `NEIGHBORS`, `buckets`, `groups_total`). Both work: triton re-tunes per distinct
-    #: key tuple either way. What the mpnn families do not get is the PACKED key the rest of the
-    #: package shares. `shape_key` folds the widths into one int, so a bucket is comparable across
-    #: kernels and the cache reader, the builder, the coverage checks and the sweep page all speak
-    #: one vocabulary -- which is also why none of those can see an mpnn kernel today.
-    #:
-    #: Porting one: give it a `shape_key` parameter, compute the key at the caller that still
-    #: holds the pre-flatten shape (`token_key`/`atom_key`/`both_key` per its level), drop the
-    #: dimension names from `key=[...]`, and add the registry row and ladder that follow from it.
-    #: This set shrinks as that happens; it is the checklist, not an exemption.
-    #: Shrinks as the port lands. 7 of 14 are on `shape_key` (mpnn_node_message's three and
-    #: mpnn_edge_tail/triton/main's four); what is left is edge_tail's compute pass and
-    #: relative_position's bucket reduce.
-    NOT_ON_SHAPE_KEY = frozenset({
-        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_edge",
-        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_hidden",
-        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_output",
-        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._norm_backward",
-        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_backward",
-        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._edge_backward",
-        "miniworld_engine.kernels.mpnn_relative_position.triton.main._bucket_reduce_kernel",
-    })
+    # The mpnn kernels used to key on their own dimension names (`rows`, `NEIGHBORS`, `buckets`,
+    # `groups_total`) and this test carried a fourteen-name exemption list while they were ported.
+    # Both forms work -- triton re-tunes per distinct key tuple either way -- but only the packed
+    # key is comparable across kernels, and the cache reader, the builder, the coverage checks and
+    # the sweep page all speak that one vocabulary. The list is empty now, so there is none.
     keyless = []
     for name, kernel in _autotuned_kernels():
-        if name in NOT_ON_SHAPE_KEY:
-            continue
         keys = list(getattr(kernel, "keys", []) or [])
         if "shape_key" not in keys:
             keyless.append(f"{name}: key={keys}")
@@ -123,15 +103,12 @@ def test_cache_buckets_do_not_depend_on_the_row_count() -> None:
     `key=[...]` through `bucket_of_autotuner`. So the check reads the key list instead, which is
     the thing that decides it.
 
-    The mpnn kernels DO key on `rows` / `groups_total` today -- that is the same finding the test
-    above records, and porting them to `shape_key` is what fixes both. This holds the line for
-    everything else: no kernel outside that checklist may key on a row count.
+    The mpnn families were exempt here while they keyed on `rows` / `groups_total`; they are on
+    `shape_key` now, so the rule covers every autotuned kernel in the package with no exceptions.
     """
     ROW_LIKE = {"rows", "groups_total", "M", "m", "numel", "n_elements"}
     bad = []
     for name, kernel in _autotuned_kernels():
-        if ".mpnn_" in name:
-            continue
         keys = set(getattr(kernel, "keys", []) or [])
         if keys & ROW_LIKE:
             bad.append(f"{name}: key={sorted(keys)}")

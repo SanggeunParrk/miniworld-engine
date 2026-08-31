@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
 
 
@@ -118,10 +119,17 @@ def _forward_impl(
     return update.reshape(original_shape)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_edge_mlp_recompute_projected_v1",
-    mutates_args=(),
-)
+def _recompute_projected_op_fake(
+    preactivation: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+) -> torch.Tensor:
+    """Shaped and typed like `preactivation`: the projection is square in the channel axis."""
+    del hidden_weight, hidden_bias
+    return torch.empty_like(preactivation)
+
+
+@opaque(fake=_recompute_projected_op_fake, name="mpnn_edge_mlp_recompute_projected_v1")
 def _recompute_projected_op(
     preactivation: torch.Tensor,
     hidden_weight: torch.Tensor,
@@ -170,20 +178,19 @@ def _recompute_projected_op(
     return projected
 
 
-@_recompute_projected_op.register_fake
-def _(
+def _forward_op_fake(
     preactivation: torch.Tensor,
     hidden_weight: torch.Tensor,
     hidden_bias: torch.Tensor,
+    output_weight: torch.Tensor,
+    output_bias: torch.Tensor,
 ) -> torch.Tensor:
-    del hidden_weight, hidden_bias
+    """Shaped and typed like `preactivation`: both projections are square, and the MLP returns an update."""
+    del hidden_weight, hidden_bias, output_weight, output_bias
     return torch.empty_like(preactivation)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_edge_mlp_memory_fwd_v2",
-    mutates_args=(),
-)
+@opaque(fake=_forward_op_fake, name="mpnn_edge_mlp_memory_fwd_v2")
 def _forward_op(
     preactivation: torch.Tensor,
     hidden_weight: torch.Tensor,
@@ -191,6 +198,11 @@ def _forward_op(
     output_weight: torch.Tensor,
     output_bias: torch.Tensor,
 ) -> torch.Tensor:
+    """Both edge-MLP projections in one launch, saving neither GELU.
+
+    Backward recomputes the first projection from the weights it keeps -- see
+    :func:`_recompute_projected_op` for what that costs in exactness and why it is worth it.
+    """
     return _forward_impl(
         preactivation,
         hidden_weight,
@@ -200,78 +212,83 @@ def _forward_op(
     )
 
 
-@_forward_op.register_fake
-def _(
-    preactivation: torch.Tensor,
-    hidden_weight: torch.Tensor,
-    hidden_bias: torch.Tensor,
-    output_weight: torch.Tensor,
-    output_bias: torch.Tensor,
-) -> torch.Tensor:
-    del hidden_weight, hidden_bias, output_weight, output_bias
-    return torch.empty_like(preactivation)
+class _EdgeMLPUpdate(torch.autograd.Function):
+    """The autograd boundary over the fused forward and the recompute backward.
 
+    It saves `hidden_bias` where the compute variant saves `projected`: a `(128,)` vector
+    instead of a full edge tensor, and backward recomputes the projection from it.
+    """
 
-def _setup_context(ctx, inputs, output) -> None:
-    del output
-    preactivation, hidden_weight, hidden_bias, output_weight, output_bias = inputs
-    ctx.save_for_backward(
-        preactivation,
-        hidden_weight,
-        hidden_bias,
-        output_weight,
-    )
-    ctx.hidden_bias_dtype = hidden_bias.dtype
-    ctx.output_bias_dtype = output_bias.dtype
+    @staticmethod
+    def forward(
+        ctx,
+        preactivation: torch.Tensor,
+        hidden_weight: torch.Tensor,
+        hidden_bias: torch.Tensor,
+        output_weight: torch.Tensor,
+        output_bias: torch.Tensor,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(
+            preactivation,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+        )
+        ctx.hidden_bias_dtype = hidden_bias.dtype
+        ctx.output_bias_dtype = output_bias.dtype
+        return _forward_op(
+            preactivation,
+            hidden_weight,
+            hidden_bias,
+            output_weight,
+            output_bias,
+        )
 
+    @staticmethod
+    def backward(ctx, grad_output):
+        preactivation, hidden_weight, hidden_bias, output_weight = ctx.saved_tensors
+        grad_output = grad_output.contiguous()
 
-def _backward(ctx, grad_output):
-    preactivation, hidden_weight, hidden_bias, output_weight = ctx.saved_tensors
-    grad_output = grad_output.contiguous()
+        # Recompute one projection, then reuse the message dX kernel twice.  Each
+        # dX launch emits GELU(input) for the following PyTorch weight-gradient
+        # GEMM.  At most three full edge tensors are temporary at a time, and none
+        # remain live from forward.
+        from miniworld_engine.kernels.mpnn_message.triton.main import (
+            _projection_dx_weight_op,
+        )
 
-    # Recompute one projection, then reuse the message dX kernel twice.  Each
-    # dX launch emits GELU(input) for the following PyTorch weight-gradient
-    # GEMM.  At most three full edge tensors are temporary at a time, and none
-    # remain live from forward.
-    from miniworld_engine.kernels.mpnn_message.triton.main import (
-        _projection_dx_weight_op,
-    )
+        projected = _recompute_projected_op(
+            preactivation,
+            hidden_weight,
+            hidden_bias,
+        )
+        # Both dX launches fold their own weight gradient in as they go, so neither
+        # GELU activation is ever materialised at full size. The allocator snapshot
+        # put three such activations at the backward peak before this change.
+        grad_projected, grad_output_weight = _projection_dx_weight_op(
+            grad_output,
+            output_weight,
+            projected,
+        )
+        # Flattening also covers the public rank-one ``[128]`` input contract.
+        # Keep the reduction in the incoming BF16 dtype: CUDA autocast Linear's
+        # bias backward has that rounding boundary before the FP32 parameter grad.
+        grad_output_bias = grad_output.reshape(-1, _WIDTH).sum(0)
+        del projected, grad_output
 
-    projected = _recompute_projected_op(
-        preactivation,
-        hidden_weight,
-        hidden_bias,
-    )
-    # Both dX launches fold their own weight gradient in as they go, so neither
-    # GELU activation is ever materialised at full size. The allocator snapshot
-    # put three such activations at the backward peak before this change.
-    grad_projected, grad_output_weight = _projection_dx_weight_op(
-        grad_output,
-        output_weight,
-        projected,
-    )
-    # Flattening also covers the public rank-one ``[128]`` input contract.
-    # Keep the reduction in the incoming BF16 dtype: CUDA autocast Linear's
-    # bias backward has that rounding boundary before the FP32 parameter grad.
-    grad_output_bias = grad_output.reshape(-1, _WIDTH).sum(0)
-    del projected, grad_output
-
-    grad_preactivation, grad_hidden_weight = _projection_dx_weight_op(
-        grad_projected,
-        hidden_weight,
-        preactivation,
-    )
-    grad_hidden_bias = grad_projected.reshape(-1, _WIDTH).sum(0)
-    return (
-        grad_preactivation,
-        grad_hidden_weight.to(hidden_weight.dtype),
-        grad_hidden_bias.to(ctx.hidden_bias_dtype),
-        grad_output_weight.to(output_weight.dtype),
-        grad_output_bias.to(ctx.output_bias_dtype),
-    )
-
-
-_forward_op.register_autograd(_backward, setup_context=_setup_context)
+        grad_preactivation, grad_hidden_weight = _projection_dx_weight_op(
+            grad_projected,
+            hidden_weight,
+            preactivation,
+        )
+        grad_hidden_bias = grad_projected.reshape(-1, _WIDTH).sum(0)
+        return (
+            grad_preactivation,
+            grad_hidden_weight.to(hidden_weight.dtype),
+            grad_hidden_bias.to(ctx.hidden_bias_dtype),
+            grad_output_weight.to(output_weight.dtype),
+            grad_output_bias.to(ctx.output_bias_dtype),
+        )
 
 
 def triton_edge_mlp_update(
@@ -282,7 +299,7 @@ def triton_edge_mlp_update(
     output_bias: torch.Tensor,
 ) -> torch.Tensor:
     """Run the one-kernel, activation-recompute edge MLP."""
-    return _forward_op(
+    return _EdgeMLPUpdate.apply(
         preactivation,
         hidden_weight,
         hidden_bias,

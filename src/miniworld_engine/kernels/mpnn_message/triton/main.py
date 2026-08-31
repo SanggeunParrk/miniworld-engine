@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import torch
 import triton
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
 
 from miniworld_engine.kernels.mpnn_message.triton._policy import _requires_i64_indexing
@@ -385,9 +386,27 @@ def _forward_impl(
     return reduced.reshape(*preactivation.shape[:-2], 128), projected
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_training_fwd_v4", mutates_args=()
-)
+def _forward_op_fake(
+    preactivation: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The FP32 reduction over the 48 neighbours, and the full-size projection beside it.
+
+    The reduction drops the neighbour axis and is FP32 whatever the input dtype; the projection
+    is shaped and typed like `preactivation` and exists only for backward.
+    """
+    reduced = preactivation.new_empty(
+        *preactivation.shape[:-2],
+        128,
+        dtype=torch.float32,
+    )
+    return reduced, torch.empty_like(preactivation)
+
+
+@opaque(fake=_forward_op_fake, name="mpnn_message_training_fwd_v4")
 def _forward_op(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
@@ -395,6 +414,7 @@ def _forward_op(
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Project, GELU, and reduce over the 48 neighbours, keeping the projection for backward."""
     return _forward_impl(
         preactivation,
         weight,
@@ -404,31 +424,30 @@ def _forward_op(
     )
 
 
-@_forward_op.register_fake
-def _(
-    preactivation: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
+def _reduce_backward_op_fake(
+    grad_reduced: torch.Tensor,
+    projected: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    reduced = preactivation.new_empty(
-        *preactivation.shape[:-2],
-        128,
-        dtype=torch.float32,
-    )
-    return reduced, torch.empty_like(preactivation)
+    """The projection's gradient, and the bias gradient as one FP32 partial row per group.
+
+    The caller sums the partials, which is what makes this the deterministic branch: the atomic
+    variant below returns the same bias gradient already reduced, in an order the hardware picks.
+    """
+    groups = projected.numel() // (48 * 128)
+    grad_bias_partial = projected.new_empty(groups, 128, dtype=torch.float32)
+    return torch.empty_like(projected), grad_bias_partial
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_gelu_reduce_db_bwd_v2", mutates_args=()
-)
+@opaque(fake=_reduce_backward_op_fake, name="mpnn_message_gelu_reduce_db_bwd_v2")
 def _reduce_backward_op(
     grad_reduced: torch.Tensor,
     projected: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """The reduction's backward with the bias gradient left as per-group partials, for a fixed sum order."""
     grad_reduced = grad_reduced.contiguous()
     grad_projected = torch.empty_like(projected)
     elements = projected.numel()
@@ -458,28 +477,33 @@ def _reduce_backward_op(
     return grad_projected, grad_bias_partial
 
 
-@_reduce_backward_op.register_fake
-def _(
+def _reduce_backward_atomic_op_fake(
     grad_reduced: torch.Tensor,
     projected: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    groups = projected.numel() // (48 * 128)
-    grad_bias_partial = projected.new_empty(groups, 128, dtype=torch.float32)
-    return torch.empty_like(projected), grad_bias_partial
+    """The projection's gradient, and a single `(128,)` FP32 bias gradient.
+
+    Already reduced, unlike the partial-row form above -- the kernel accumulates it atomically,
+    so its summation order is whatever the hardware runs.
+    """
+    grad_bias = projected.new_empty(128, dtype=torch.float32)
+    return torch.empty_like(projected), grad_bias
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_gelu_reduce_db_atomic_bwd_v1",
-    mutates_args=(),
-)
+@opaque(fake=_reduce_backward_atomic_op_fake, name="mpnn_message_gelu_reduce_db_atomic_bwd_v1")
 def _reduce_backward_atomic_op(
     grad_reduced: torch.Tensor,
     projected: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """The reduction's backward with the bias gradient accumulated atomically in one buffer.
+
+    Zeroed by its own launch rather than by ``reset_to_zero``, so the pass owns its own
+    precondition instead of depending on a tuner hook having fired.
+    """
     grad_reduced = grad_reduced.contiguous()
     grad_projected = torch.empty_like(projected)
     grad_bias = torch.empty(128, device=projected.device, dtype=torch.float32)
@@ -511,25 +535,26 @@ def _reduce_backward_atomic_op(
     return grad_projected, grad_bias
 
 
-@_reduce_backward_atomic_op.register_fake
-def _(
-    grad_reduced: torch.Tensor,
-    projected: torch.Tensor,
-    edge_mask: torch.Tensor,
-    neighbor_scale: int,
+def _projection_dx_op_fake(
+    grad_projected: torch.Tensor,
+    weight: torch.Tensor,
+    preactivation: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    grad_bias = projected.new_empty(128, dtype=torch.float32)
-    return torch.empty_like(projected), grad_bias
+    """dX and the GELU that follows it, both shaped and typed like `preactivation`.
+
+    The activation is a second output rather than a recompute: the weight-gradient GEMM
+    downstream contracts against exactly it, and the kernel already has it in registers.
+    """
+    return torch.empty_like(preactivation), torch.empty_like(preactivation)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_projection_dx_activation_v2", mutates_args=()
-)
+@opaque(fake=_projection_dx_op_fake, name="mpnn_message_projection_dx_activation_v2")
 def _projection_dx_op(
     grad_projected: torch.Tensor,
     weight: torch.Tensor,
     preactivation: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """One dX GEMM that also emits the GELU the following weight-gradient GEMM contracts against."""
     rows = preactivation.numel() // 128
     grad_preactivation = torch.empty_like(preactivation)
     activated = torch.empty_like(preactivation)
@@ -554,9 +579,24 @@ def _projection_dx_op(
 _DX_CHUNK_ROWS = 262_144
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_projection_dx_weight_v1", mutates_args=()
-)
+def _projection_dx_weight_op_fake(
+    grad_projected: torch.Tensor,
+    weight: torch.Tensor,
+    preactivation: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """dX shaped like `preactivation`, and a `(128, 128)` FP32 weight gradient.
+
+    FP32 because the weight gradient accumulates across row blocks -- see the op for why the
+    row axis is walked in blocks at all.
+    """
+    del grad_projected
+    return (
+        torch.empty_like(preactivation),
+        weight.new_empty(128, 128, dtype=torch.float32),
+    )
+
+
+@opaque(fake=_projection_dx_weight_op_fake, name="mpnn_message_projection_dx_weight_v1")
 def _projection_dx_weight_op(
     grad_projected: torch.Tensor,
     weight: torch.Tensor,
@@ -617,41 +657,6 @@ def _projection_dx_weight_op(
     return grad_preactivation, grad_weight
 
 
-@_projection_dx_weight_op.register_fake
-def _(
-    grad_projected: torch.Tensor,
-    weight: torch.Tensor,
-    preactivation: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    del grad_projected
-    return (
-        torch.empty_like(preactivation),
-        weight.new_empty(128, 128, dtype=torch.float32),
-    )
-
-
-@_projection_dx_op.register_fake
-def _(
-    grad_projected: torch.Tensor,
-    weight: torch.Tensor,
-    preactivation: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(preactivation), torch.empty_like(preactivation)
-
-
-def _setup_context(ctx, inputs, output) -> None:
-    preactivation, weight, bias, edge_mask, neighbor_scale = inputs
-    _reduced, projected = output
-    # ``projected`` is an implementation detail saved only for our backward.
-    # Marking it non-differentiable prevents autograd from materializing a
-    # full-size zero gradient for the discarded auxiliary output.
-    ctx.mark_non_differentiable(projected)
-    ctx.set_materialize_grads(False)
-    ctx.save_for_backward(preactivation, weight, projected, edge_mask)
-    ctx.neighbor_scale = neighbor_scale
-    ctx.bias_dtype = bias.dtype
-
-
 def _backward_from_projected(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
@@ -702,25 +707,71 @@ def _backward_from_projected(
     )
 
 
-def _backward(ctx, grad_reduced, _grad_projected):
-    preactivation, weight, projected, edge_mask = ctx.saved_tensors
-    return _backward_from_projected(
-        preactivation,
-        weight,
-        projected,
-        edge_mask,
-        grad_reduced,
-        ctx.neighbor_scale,
-        ctx.bias_dtype,
+class _MessageHiddenReduce(torch.autograd.Function):
+    """The autograd boundary over the saved-activation forward.
+
+    ``projected`` never leaves this class. It used to be a second output of the op, marked
+    non-differentiable so autograd would not materialise a full-size zero gradient for it; a
+    ``Function`` can simply save it and return the one tensor the caller wants, so the
+    ``mark_non_differentiable``/``set_materialize_grads`` pair that made that safe is gone.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        preactivation: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        edge_mask: torch.Tensor,
+        neighbor_scale: int,
+    ) -> torch.Tensor:
+        reduced, projected = _forward_op(
+            preactivation,
+            weight,
+            bias,
+            edge_mask,
+            neighbor_scale,
+        )
+        ctx.save_for_backward(preactivation, weight, projected, edge_mask)
+        ctx.neighbor_scale = neighbor_scale
+        ctx.bias_dtype = bias.dtype
+        return reduced
+
+    @staticmethod
+    def backward(ctx, grad_reduced):
+        preactivation, weight, projected, edge_mask = ctx.saved_tensors
+        return _backward_from_projected(
+            preactivation,
+            weight,
+            projected,
+            edge_mask,
+            grad_reduced,
+            ctx.neighbor_scale,
+            ctx.bias_dtype,
+        )
+
+
+def _memory_forward_op_fake(
+    preactivation: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
+    """Only the reduction: the leading shape with 128 FP32 channels.
+
+    The projection the saved-activation forward returns beside it is absent by design -- this
+    variant keeps nothing and recomputes it in backward.
+    """
+    del weight, bias, edge_mask, neighbor_scale
+    return preactivation.new_empty(
+        *preactivation.shape[:-2],
+        128,
+        dtype=torch.float32,
     )
 
 
-_forward_op.register_autograd(_backward, setup_context=_setup_context)
-
-
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_memory_fwd_v1", mutates_args=()
-)
+@opaque(fake=_memory_forward_op_fake, name="mpnn_message_memory_fwd_v1")
 def _memory_forward_op(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
@@ -728,6 +779,7 @@ def _memory_forward_op(
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> torch.Tensor:
+    """The same forward as :func:`_forward_op` with the projection dropped instead of saved."""
     reduced, _projected = _forward_impl(
         preactivation,
         weight,
@@ -738,30 +790,23 @@ def _memory_forward_op(
     return reduced
 
 
-@_memory_forward_op.register_fake
-def _(
+def _recompute_projected_op_fake(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
-    edge_mask: torch.Tensor,
-    neighbor_scale: int,
 ) -> torch.Tensor:
-    del weight, bias, edge_mask, neighbor_scale
-    return preactivation.new_empty(
-        *preactivation.shape[:-2],
-        128,
-        dtype=torch.float32,
-    )
+    """Shaped and typed like `preactivation`: the projection is square in the channel axis."""
+    del weight, bias
+    return torch.empty_like(preactivation)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_message_recompute_projected_v1", mutates_args=()
-)
+@opaque(fake=_recompute_projected_op_fake, name="mpnn_message_recompute_projected_v1")
 def _recompute_projected_op(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
 ) -> torch.Tensor:
+    """Recompute the projection backward needs, from the three tensors the memory variant saved."""
     rows = preactivation.numel() // 128
     projected = torch.empty_like(preactivation)
     _projection_fwd_kernel[(triton.cdiv(rows, 128), 1)](
@@ -780,42 +825,46 @@ def _recompute_projected_op(
     return projected
 
 
-@_recompute_projected_op.register_fake
-def _(
-    preactivation: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-) -> torch.Tensor:
-    del weight, bias
-    return torch.empty_like(preactivation)
+class _MessageHiddenReduceMemory(torch.autograd.Function):
+    """The same boundary for the variant that saves nothing and recomputes.
 
+    It saves `bias` where the other saves `projected`: one `(128,)` vector instead of a full edge
+    tensor, and the projection is recomputed in backward from the three it keeps.
+    """
 
-def _setup_memory_context(ctx, inputs, output) -> None:
-    del output
-    preactivation, weight, bias, edge_mask, neighbor_scale = inputs
-    ctx.save_for_backward(preactivation, weight, bias, edge_mask)
-    ctx.neighbor_scale = neighbor_scale
-    ctx.bias_dtype = bias.dtype
+    @staticmethod
+    def forward(
+        ctx,
+        preactivation: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        edge_mask: torch.Tensor,
+        neighbor_scale: int,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(preactivation, weight, bias, edge_mask)
+        ctx.neighbor_scale = neighbor_scale
+        ctx.bias_dtype = bias.dtype
+        return _memory_forward_op(
+            preactivation,
+            weight,
+            bias,
+            edge_mask,
+            neighbor_scale,
+        )
 
-
-def _memory_backward(ctx, grad_reduced):
-    preactivation, weight, bias, edge_mask = ctx.saved_tensors
-    projected = _recompute_projected_op(preactivation, weight, bias)
-    return _backward_from_projected(
-        preactivation,
-        weight,
-        projected,
-        edge_mask,
-        grad_reduced,
-        ctx.neighbor_scale,
-        ctx.bias_dtype,
-    )
-
-
-_memory_forward_op.register_autograd(
-    _memory_backward,
-    setup_context=_setup_memory_context,
-)
+    @staticmethod
+    def backward(ctx, grad_reduced):
+        preactivation, weight, bias, edge_mask = ctx.saved_tensors
+        projected = _recompute_projected_op(preactivation, weight, bias)
+        return _backward_from_projected(
+            preactivation,
+            weight,
+            projected,
+            edge_mask,
+            grad_reduced,
+            ctx.neighbor_scale,
+            ctx.bias_dtype,
+        )
 
 
 def triton_message_hidden_reduce(
@@ -826,14 +875,13 @@ def triton_message_hidden_reduce(
     neighbor_scale: int,
 ) -> torch.Tensor:
     """Fuse the first four hidden-message lines into two physical kernels."""
-    reduced, _projected = _forward_op(
+    return _MessageHiddenReduce.apply(
         preactivation,
         weight,
         bias,
         edge_mask,
         neighbor_scale,
     )
-    return reduced
 
 
 def triton_message_hidden_reduce_memory(
@@ -844,7 +892,7 @@ def triton_message_hidden_reduce_memory(
     neighbor_scale: int,
 ) -> torch.Tensor:
     """Save no projected activation and recompute it once in backward."""
-    return _memory_forward_op(
+    return _MessageHiddenReduceMemory.apply(
         preactivation,
         weight,
         bias,

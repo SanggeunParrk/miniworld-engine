@@ -61,14 +61,14 @@ from __future__ import annotations
 # autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
 # kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
-# The per-kernel cache-prune objects that used to sit here are gone with the API that made
-# them (`make_cache_prune`, deleted in fcd3c7a). `install_cache_pruning` now narrows EVERY
-# autotuner to the cached top-K, and `bucket_of_autotuner` reads the bucket from the
-# kernel's own `key=[...]` -- so a kernel that keys on `shape_key` is cached without any
-# wiring of its own, and a hand-written `bucket_of` could only disagree with it.
 import torch
 import triton
 import triton.language as tl
+
+# One helper for the whole family: the sibling module's is generic over the axes, and a
+# second copy here could only drift from it into keys that miss each other.
+from ..._compile import opaque
+from .main import _shape_key
 
 
 WIDTH = 128
@@ -168,13 +168,14 @@ def _elementwise_configs():
 
 # ---- forward -------------------------------------------------------------------------
 @triton.autotune(
-    configs=_configs(), key=["rows"],
+    configs=_configs(), key=["shape_key"],
 )
 @triton.jit
 def _project_edge(
     edge_ptr, query_ptr, table_ptr, index_ptr, w1_ptr,
     preactivation_ptr, activated_ptr,
-    rows, W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
+    rows, shape_key,
+    W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """``edge @ W1 + query[group] + table[index]``, then GELU.
@@ -215,12 +216,13 @@ def _project_edge(
 
 
 @triton.autotune(
-    configs=_configs(), key=["rows"],
+    configs=_configs(), key=["shape_key"],
 )
 @triton.jit
 def _project_hidden(
     activated_ptr, w2_ptr, b2_ptr, hidden_ptr, activated_hidden_ptr,
-    rows, WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    rows, shape_key,
+    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
     """``gelu(preactivation) @ W2 + b2``, then GELU."""
     row_block = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -243,13 +245,13 @@ def _project_hidden(
 
 
 @triton.autotune(
-    configs=_configs(), key=["rows", "DROPOUT"],
+    configs=_configs(), key=["shape_key"],
 )
 @triton.jit
 def _project_output(
     activated_hidden_ptr, w3_ptr, b3_ptr, edge_ptr, gamma_ptr, beta_ptr, seed_ptr,
     out_ptr, values_ptr, keep_ptr,
-    rows, keep_probability, dropout_scale, eps,
+    rows, shape_key, keep_probability, dropout_scale, eps,
     WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
     DROPOUT: tl.constexpr,
 ):
@@ -291,7 +293,7 @@ def _project_output(
 # ---- backward ------------------------------------------------------------------------
 @triton.autotune(
     configs=_elementwise_configs(),
-    key=["rows", "DROPOUT"],
+    key=["shape_key"],
     reset_to_zero=[
         "grad_norm_weight_ptr", "grad_norm_bias_ptr", "grad_output_bias_ptr"
     ],
@@ -301,7 +303,7 @@ def _norm_backward(
     grad_out_ptr, values_ptr, keep_ptr, gamma_ptr,
     grad_values_ptr, grad_update_ptr,
     grad_norm_weight_ptr, grad_norm_bias_ptr, grad_output_bias_ptr,
-    rows, dropout_scale, eps,
+    rows, shape_key, dropout_scale, eps,
     WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, DROPOUT: tl.constexpr,
 ):
     """LayerNorm and dropout backward, statistics recomputed from the saved values.
@@ -360,14 +362,15 @@ def _norm_backward(
 
 
 @triton.autotune(
-    configs=_configs(), key=["rows", "EMIT_BIAS"],
+    configs=_configs(), key=["shape_key"],
     reset_to_zero=["grad_bias_ptr"],
 )
 @triton.jit
 def _project_backward(
     grad_out_ptr, weight_ptr, preactivation_ptr, grad_in_ptr, activated_ptr,
     grad_bias_ptr,
-    rows, WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    rows, shape_key,
+    WIDTH: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
     EMIT_BIAS: tl.constexpr,
 ):
     """One dX GEMM with the GELU derivative and the cuBLAS operand in the epilogue.
@@ -410,14 +413,14 @@ def _project_backward(
 
 
 @triton.autotune(
-    configs=_configs(), key=["rows"],
+    configs=_configs(), key=["shape_key"],
     reset_to_zero=["grad_query_ptr"],
 )
 @triton.jit
 def _edge_backward(
     grad_preactivation_ptr, w1_ptr, grad_values_ptr,
     grad_edge_ptr, grad_query_ptr,
-    rows, groups_total,
+    rows, groups_total, shape_key,
     W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
 ):
@@ -479,9 +482,39 @@ def _grid(rows):
     return lambda meta: (triton.cdiv(rows, meta["BLOCK_M"]),)
 
 
-def _launch_forward(edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
-                    seed, eps, dropout_probability, w1_row_stride):
-    """Returns ``(out, saved)``, where ``saved`` is exactly what backward reads back."""
+# The saved activations leave here as four separate returns rather than the tuple they used to
+# be packed into.  An op's schema is flat -- `(Tensor, Tensor, Tensor, Tensor, Tensor)` is a
+# signature, `(Tensor, Tensor[])` where the second is a tuple is not -- and the autograd boundary
+# below re-packs them into `save_for_backward` in the same breath, which is where they were going.
+def _launch_forward_fake(
+    edge: torch.Tensor, query: torch.Tensor, table: torch.Tensor, index: torch.Tensor,
+    w1: torch.Tensor, w2: torch.Tensor, b2: torch.Tensor, w3: torch.Tensor, b3: torch.Tensor,
+    gamma: torch.Tensor, beta: torch.Tensor, seed: torch.Tensor,
+    eps: float, dropout_probability: float, w1_row_stride: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``out`` and three saved activations shaped like ``edge``, then the keep mask.
+
+    The mask is INT8 and its extent comes from `dropout_probability`, not from a tensor: with
+    dropout off it is a one-element placeholder, because nothing behind the `DROPOUT` constexpr
+    reads it and 0.4 GiB of untouched memory is the alternative.
+    """
+    rows = edge.shape[0]
+    empty = lambda: torch.empty_like(edge)
+    keep_elements = rows * WIDTH if dropout_probability > 0.0 else 1
+    return (
+        empty(), empty(), empty(), empty(),
+        edge.new_empty((keep_elements,), dtype=torch.int8),
+    )
+
+
+@opaque(fake=_launch_forward_fake, name="mpnn_edge_tail_compute_fwd_v1")
+def _launch_forward(
+    edge: torch.Tensor, query: torch.Tensor, table: torch.Tensor, index: torch.Tensor,
+    w1: torch.Tensor, w2: torch.Tensor, b2: torch.Tensor, w3: torch.Tensor, b3: torch.Tensor,
+    gamma: torch.Tensor, beta: torch.Tensor, seed: torch.Tensor,
+    eps: float, dropout_probability: float, w1_row_stride: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Returns ``out`` and the four tensors backward reads back, in that order."""
     rows = edge.shape[0]
     dropout = dropout_probability > 0.0
     empty = lambda: torch.empty_like(edge)
@@ -495,18 +528,20 @@ def _launch_forward(edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
         rows * WIDTH if dropout else 1, device=edge.device, dtype=torch.int8
     )
 
+    neighbors = _neighbors_of(rows, query.shape[0])
     grid = _grid(rows)
     _project_edge[grid](
         edge, query, table, index, w1, preactivation, activated,
-        rows, W1_ROW_STRIDE=w1_row_stride,
-        NEIGHBORS=_neighbors_of(rows, query.shape[0]), WIDTH=WIDTH,
+        rows, _shape_key(rows, NEIGHBORS=neighbors),
+        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=WIDTH,
     )
     _project_hidden[grid](
-        activated, w2, b2, hidden, activated_hidden, rows, WIDTH=WIDTH,
+        activated, w2, b2, hidden, activated_hidden,
+        rows, _shape_key(rows), WIDTH=WIDTH,
     )
     _project_output[grid](
         activated_hidden, w3, b3, edge, gamma, beta, seed,
-        out, values, keep, rows,
+        out, values, keep, rows, _shape_key(rows, DROPOUT=dropout),
         1.0 - dropout_probability,
         1.0 / (1.0 - dropout_probability) if dropout else 1.0, eps,
         WIDTH=WIDTH, DROPOUT=dropout,
@@ -514,12 +549,54 @@ def _launch_forward(edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta,
     # activated and activated_hidden are not saved: backward recomputes both GELUs from
     # the GEMM outputs above, which is the cheap direction and drops 1.6 GiB of live
     # tensors across the step.
-    return out, (preactivation, hidden, values, keep)
+    return out, preactivation, hidden, values, keep
 
 
-def _launch_backward(grad_out, saved, edge, index, w1, w2, w3, gamma, nodes,
-                     eps, dropout_probability, w1_row_stride):
-    preactivation, hidden, values, keep = saved
+#: The order the ten gradients leave `_launch_backward` in.  A dict said which was which and a
+#: schema cannot carry one, so the names live here and the caller unpacks against them -- one
+#: place to read, rather than a positional return that has to be counted at both ends.
+_GRADIENTS = (
+    "grad_edge", "grad_query", "grad_neighbor",
+    "grad_w1", "grad_w2", "grad_w3", "grad_b2", "grad_b3", "grad_gamma", "grad_beta",
+)
+
+
+def _launch_backward_fake(
+    grad_out: torch.Tensor, preactivation: torch.Tensor, hidden: torch.Tensor,
+    values: torch.Tensor, keep: torch.Tensor, edge: torch.Tensor, index: torch.Tensor,
+    w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor, gamma: torch.Tensor,
+    nodes: int, eps: float, dropout_probability: float, w1_row_stride: int,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+]:
+    """The ten gradients of :data:`_GRADIENTS`, in that order.
+
+    Activation-shaped and in the activation's dtype for the three input gradients and the three
+    weights; FP32 and `(WIDTH,)` for the four accumulated ones, because they are reductions down
+    the row axis and are cast back at the autograd boundary rather than in the kernel. The node
+    count comes from `nodes`, which no input tensor carries.
+    """
+    like = lambda *shape: edge.new_empty(shape)
+    fp32 = lambda *shape: edge.new_empty(shape, dtype=torch.float32)
+    return (
+        torch.empty_like(edge), fp32(nodes, WIDTH), like(nodes, WIDTH),
+        like(WIDTH, edge.shape[1]), like(WIDTH, WIDTH), like(WIDTH, WIDTH),
+        fp32(WIDTH), fp32(WIDTH), fp32(WIDTH), fp32(WIDTH),
+    )
+
+
+@opaque(fake=_launch_backward_fake, name="mpnn_edge_tail_compute_bwd_v1")
+def _launch_backward(
+    grad_out: torch.Tensor, preactivation: torch.Tensor, hidden: torch.Tensor,
+    values: torch.Tensor, keep: torch.Tensor, edge: torch.Tensor, index: torch.Tensor,
+    w1: torch.Tensor, w2: torch.Tensor, w3: torch.Tensor, gamma: torch.Tensor,
+    nodes: int, eps: float, dropout_probability: float, w1_row_stride: int,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+]:
+    """The ten gradients of :data:`_GRADIENTS`, in that order."""
     rows = edge.shape[0]
     dropout = dropout_probability > 0.0
     scale = 1.0 / (1.0 - dropout_probability) if dropout else 1.0
@@ -544,24 +621,28 @@ def _launch_backward(grad_out, saved, edge, index, w1, w2, w3, gamma, nodes,
     grad_bias_scratch = zeros(WIDTH)
     grad_query = zeros(nodes * WIDTH).view(nodes, WIDTH)
 
+    neighbors = _neighbors_of(rows, nodes)
     grid = _grid(rows)
     _norm_backward[grid](
         grad_out, values, keep, gamma, grad_values, grad_update,
-        grad_norm_weight, grad_norm_bias, grad_output_bias, rows, scale, eps,
+        grad_norm_weight, grad_norm_bias, grad_output_bias,
+        rows, _shape_key(rows, DROPOUT=dropout), scale, eps,
         WIDTH=WIDTH, DROPOUT=dropout,
     )
     _project_backward[grid](
         grad_update, w3, hidden, grad_hidden, activated_hidden,
-        grad_hidden_bias, rows, WIDTH=WIDTH, EMIT_BIAS=True,
+        grad_hidden_bias, rows, _shape_key(rows, EMIT_BIAS=True),
+        WIDTH=WIDTH, EMIT_BIAS=True,
     )
     _project_backward[grid](
         grad_hidden, w2, preactivation, grad_preactivation, activated,
-        grad_bias_scratch, rows, WIDTH=WIDTH, EMIT_BIAS=False,
+        grad_bias_scratch, rows, _shape_key(rows, EMIT_BIAS=False),
+        WIDTH=WIDTH, EMIT_BIAS=False,
     )
     _edge_backward[grid](
-        grad_preactivation, w1, grad_values, grad_edge, grad_query, rows, nodes,
-        W1_ROW_STRIDE=w1_row_stride,
-        NEIGHBORS=_neighbors_of(rows, nodes), WIDTH=WIDTH,
+        grad_preactivation, w1, grad_values, grad_edge, grad_query,
+        rows, nodes, _shape_key(rows, NEIGHBORS=neighbors),
+        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=WIDTH,
     )
     # ATen's sort-and-segment reduction rather than an in-kernel scatter: a row tile
     # holds one query's k nearest and those are distinct by construction, so there is
@@ -572,19 +653,19 @@ def _launch_backward(grad_out, saved, edge, index, w1, w2, w3, gamma, nodes,
     )
     # Weight gradients on cuBLAS: a direct sweep put the best reachable Triton
     # reduction at 0.230 ms against cuBLAS's 0.197 for the same contraction.
-    return dict(
-        grad_edge=grad_edge,
-        grad_query=grad_query,
-        grad_neighbor=grad_neighbor,
+    return (
+        grad_edge,
+        grad_query,
+        grad_neighbor,
         # Dense [out, in] regardless of how w1 was laid out: autograd routes it
         # back through the slice's own view, which owns the striding.
-        grad_w1=grad_preactivation.t() @ edge,
-        grad_w2=grad_hidden.t() @ activated,
-        grad_w3=grad_update.t() @ activated_hidden,
-        grad_b2=grad_hidden_bias,
-        grad_b3=grad_output_bias,
-        grad_gamma=grad_norm_weight,
-        grad_beta=grad_norm_bias,
+        grad_preactivation.t() @ edge,
+        grad_hidden.t() @ activated,
+        grad_update.t() @ activated_hidden,
+        grad_hidden_bias,
+        grad_output_bias,
+        grad_norm_weight,
+        grad_norm_bias,
     )
 
 
@@ -602,7 +683,7 @@ class _EdgeTailCompute(torch.autograd.Function):
         # A slice of a packed projection is a legal weight here; only its LAST stride has
         # to be 1. Read the row stride once and specialise on it.
         w1_row_stride = w1.stride(0)
-        out, saved = _launch_forward(
+        out, *saved = _launch_forward(
             edge, query, table, index, w1, w2, b2, w3, b3, gamma, beta, seed, eps,
             dropout_probability, w1_row_stride,
         )
@@ -619,21 +700,22 @@ class _EdgeTailCompute(torch.autograd.Function):
         edge, index, w1, w2, w3, gamma, *saved = ctx.saved_tensors
         weight_dtype, bias_dtype, norm_dtype = ctx.dtypes
         grads = _launch_backward(
-            grad_out.contiguous(), saved, edge, index, w1, w2, w3, gamma,
+            grad_out.contiguous(), *saved, edge, index, w1, w2, w3, gamma,
             ctx.nodes, ctx.eps, ctx.dropout_probability, ctx.w1_row_stride,
         )
+        grad = dict(zip(_GRADIENTS, grads, strict=True))
         return (
-            grads["grad_edge"],
-            grads["grad_query"].to(edge.dtype),
-            grads["grad_neighbor"].to(edge.dtype),
+            grad["grad_edge"],
+            grad["grad_query"].to(edge.dtype),
+            grad["grad_neighbor"].to(edge.dtype),
             None,
-            grads["grad_w1"].to(weight_dtype),
-            grads["grad_w2"].to(weight_dtype),
-            grads["grad_b2"].to(bias_dtype),
-            grads["grad_w3"].to(weight_dtype),
-            grads["grad_b3"].to(bias_dtype),
-            grads["grad_gamma"].to(norm_dtype),
-            grads["grad_beta"].to(norm_dtype),
+            grad["grad_w1"].to(weight_dtype),
+            grad["grad_w2"].to(weight_dtype),
+            grad["grad_b2"].to(bias_dtype),
+            grad["grad_w3"].to(weight_dtype),
+            grad["grad_b3"].to(bias_dtype),
+            grad["grad_gamma"].to(norm_dtype),
+            grad["grad_beta"].to(norm_dtype),
             None, None, None,
         )
 
