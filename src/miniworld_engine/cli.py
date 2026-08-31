@@ -1198,22 +1198,31 @@ def build_parser() -> argparse.ArgumentParser:
                      help="let triton keep every IR level in its cache. Off, the build writes "
                           "only the cubin and metadata a launch needs: 71 KB an entry instead of "
                           "187, which was 40 GB over one rebuild.")
-    bld.add_argument("--predict-unusable", action="store_true",
+    # The three below default ON. They were opt-in while they were being trusted, and every build
+    # that has run since has passed all three -- so the flag that had to be remembered was the one
+    # that made the build correct and cheap, and forgetting it was silent. Off is now the thing you
+    # ask for, which is the right way round for a default nobody has reason to change.
+    bld.add_argument("--predict-unusable", action=argparse.BooleanOptionalAction, default=True,
                      help="probe a slice of each round first and skip the configs the probes "
                           "prove cannot pay off -- over the card's shared memory, or past the "
                           "compile budget. Fitted and validated per kernel; a kernel neither "
-                          "model describes compiles its whole grid.")
+                          "model describes compiles its whole grid. 9-29%% of a searched space "
+                          "could not run on the card it was searched for. Default on; "
+                          "--no-predict-unusable compiles everything.")
     bld.add_argument("--bench-clear-mb", type=int, default=0,
                      help="MB zeroed before each timed iteration (0 = triton's 256, which is 40x "
                           "an A6000's L2 and 97%% of a bench iteration). Set with --bench-rep-ms: "
                           "alone it buys more iterations, not less time.")
-    bld.add_argument("--bench-rep-ms", type=int, default=0,
+    bld.add_argument("--bench-rep-ms", type=int, default=25,
                      help="ms of measurement per config (0 = triton's 100). 16 MB at 10 ms was "
-                          "7x cheaper than the default with 30%% more samples, on one kernel.")
-    bld.add_argument("--pin-cores", action="store_true",
+                          "7x cheaper than the default with 30%% more samples, on one kernel. "
+                          "Default 25: bench is 97%% of a unit's wall time, so this number is "
+                          "most of what a build costs.")
+    bld.add_argument("--pin-cores", action=argparse.BooleanOptionalAction, default=True,
                      help="give each unit slot its own cores instead of pooling the node's. A "
                           "unit that is MEASURING otherwise competes with every other unit's "
-                          "compile workers, and the measurement is what a build produces.")
+                          "compile workers, and the measurement is what a build produces. "
+                          "Default on; --no-pin-cores pools them.")
     bld.add_argument("--prune-cache", action="store_true",
                      help="after a successful merge, empty $TRITON_CACHE_DIR. It is a build "
                           "artifact -- what ships is the JSON under autotune/data/.")
