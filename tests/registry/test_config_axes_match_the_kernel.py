@@ -15,8 +15,9 @@ import ast
 import csv
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-REG = ROOT / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY as REG
+from paths import ROOT
+
 CFG = ROOT / "src/miniworld_engine/autotune/configs"
 
 #: Set by `triton.Config`, never by the kernel signature.

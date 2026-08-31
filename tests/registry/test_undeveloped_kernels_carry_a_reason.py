@@ -12,7 +12,8 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-REG = Path(__file__).resolve().parents[2] / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY as REG
+
 UNDEV = REG.parent / "undeveloped.csv"
 
 

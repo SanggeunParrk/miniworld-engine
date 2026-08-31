@@ -19,6 +19,7 @@ import csv
 from pathlib import Path
 
 import pytest
+from paths import ROOT
 
 from miniworld_engine.autotune import cache
 from miniworld_engine.autotune.builder import op_units
@@ -30,7 +31,6 @@ from miniworld_engine.autotune.shape_key import (
     rows_of,
 )
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'pyproject.toml').is_file())
 REG = Path(cache.__file__).resolve().parents[1] / "kernels" / "registry.csv"
 
 
@@ -97,9 +97,12 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
             assert seen == want, (
                 f"{r['kernel']}: claims {sorted(want)}, driven from {sorted(seen)}")
         else:
-            assert len(seen) == 1 and seen <= want, (
-                f"{r['kernel']} does not key on shape_key, so it should be driven from exactly one "
-                f"of {sorted(want)}; got {sorted(seen)}")
+            assert len(seen) == 1, (
+                f"{r['kernel']} does not key on shape_key, so it has ONE bucket and should be "
+                f"driven once; got {sorted(seen)}")
+            assert seen <= want, (
+                f"{r['kernel']} is driven from {sorted(seen)}, which the row does not claim "
+                f"({sorted(want)})")
     assert not outside, "units landing outside BOTH_ROWS:\n  " + "\n  ".join(outside)
     assert union == set(BOTH_ROWS), (
         f"buckets no unit reaches: {sorted(set(BOTH_ROWS) - union)}; "

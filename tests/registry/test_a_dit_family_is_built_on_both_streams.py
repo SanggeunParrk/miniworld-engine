@@ -20,7 +20,8 @@ atom A of the same value are different launches.
 from __future__ import annotations
 
 import csv
-from pathlib import Path
+
+from paths import REGISTRY as REG
 
 from miniworld_engine.autotune.builder import op_units
 from miniworld_engine.autotune.shape_key import (
@@ -31,8 +32,6 @@ from miniworld_engine.autotune.shape_key import (
     unpack_base,
 )
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
-REG = ROOT / "src/miniworld_engine/kernels/registry.csv"
 ATOM_WIDTH = 128
 TOKEN_WIDTHS = (384, 512, 768)
 

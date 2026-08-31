@@ -25,8 +25,8 @@ import json
 from pathlib import Path
 
 import pytest
+from paths import ROOT
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 PKG = ROOT / "src" / "miniworld_engine"
 DATA = PKG / "autotune" / "data"
 CONFIGS = PKG / "autotune" / "configs"
@@ -333,4 +333,5 @@ def test_the_narrowing_is_not_silently_stalled() -> None:
                     if not any(dt in planned.get(k, {}) for (_c, dt) in measured.get(k, {})))
     print(f"\nladder coverage: {len(covered & grid)}/{len(grid)} kernels fully measured, "
           f"{len(absent)} with no cache at their declared precision")
-    assert planned and measured, "coverage cannot be computed at all"
+    assert planned, "op_units planned nothing, so coverage cannot be computed"
+    assert measured, "the cache holds nothing, so coverage cannot be computed"

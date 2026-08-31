@@ -24,12 +24,11 @@ a token added to the document and never used -- is not an error, so it is not ch
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 
 import pytest
+from paths import REGISTRY as REG
+from paths import ROOT
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
-REG = ROOT / "src/miniworld_engine/kernels/registry.csv"
 SPEC = ROOT / "docs/kernels/naming.md"
 
 #: Declared here rather than parsed out of the prose, and pinned to the prose by

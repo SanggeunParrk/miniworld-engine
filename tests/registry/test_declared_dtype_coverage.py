@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import collections
 import csv
-from pathlib import Path
 
 import pytest
+from paths import REGISTRY as REG
 
-REG = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 
 

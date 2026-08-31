@@ -11,6 +11,14 @@ Collection is untouched: the items are still collected and still counted, so
 """
 from __future__ import annotations
 
+# `tests/paths.py` holds the repo paths and the two file readers that 27 test modules used to
+# spell out for themselves. pytest puts each test's OWN directory on sys.path (there are no
+# __init__.py files here), not this one, so it goes on explicitly.
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
 import pytest
 
 

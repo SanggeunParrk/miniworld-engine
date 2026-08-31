@@ -17,8 +17,7 @@ import csv
 from pathlib import Path
 
 import pytest
-
-REG = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY as REG
 
 pytestmark = pytest.mark.gpu
 

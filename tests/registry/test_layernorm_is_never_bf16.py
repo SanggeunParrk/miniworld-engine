@@ -30,9 +30,9 @@ from __future__ import annotations
 
 import csv
 import re
-from pathlib import Path
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+from paths import ROOT
+
 PKG = ROOT / "src" / "miniworld_engine"
 REG = PKG / "kernels" / "registry.csv"
 KERNELS = PKG / "kernels"

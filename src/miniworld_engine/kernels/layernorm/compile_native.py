@@ -20,7 +20,6 @@ from miniworld_engine.kernels.layernorm.triton.persistent import (
 )
 
 
-
 # --- Backward path selection --------------------------------------------------
 # The backward impls are all correct + autotuned on ANY CUDA arch (plain
 # triton; the persistent kernel reads the live SM count and uses no Hopper-only

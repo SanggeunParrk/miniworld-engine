@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import ast
 import csv
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-REG = ROOT / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY as REG
+from paths import ROOT
+
 EXEMPT = ROOT / "src/miniworld_engine/kernels/tile_order_exempt.csv"
 
 

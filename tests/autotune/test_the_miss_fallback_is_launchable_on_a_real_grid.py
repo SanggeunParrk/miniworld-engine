@@ -20,11 +20,10 @@ found on is not in the registry any more, so its numbers cannot be re-recorded h
 from __future__ import annotations
 
 import gzip
-from pathlib import Path
 
 import pytest
+from paths import ROOT
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 FIXTURE = ROOT / "tests/autotune/compile_budget/a6000_one_grid/trimul_gemm_gate_a6000.smem.gz"
 
 #: Shared memory per block on sm86 (A5000 / A6000), the cards this repo has manifests for. The

@@ -20,9 +20,9 @@ from __future__ import annotations
 import ast
 import csv
 import sys
-from pathlib import Path
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+from paths import ROOT
+
 SRC = ROOT / "src"
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 KERNELS = SRC / "miniworld_engine/kernels"

@@ -12,11 +12,11 @@ Nothing else catches this: the parser lives in `__main__` and no test had run a 
 from __future__ import annotations
 
 import ast
-from pathlib import Path
+
+from paths import ROOT
 
 from miniworld_engine.autotune.builder import op_units
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 BUILDER = ROOT / "src" / "miniworld_engine" / "autotune" / "builder.py"
 
 

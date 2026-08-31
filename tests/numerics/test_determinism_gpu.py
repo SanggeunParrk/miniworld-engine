@@ -45,13 +45,12 @@ whole suite twice.
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.gpu
 
-REGISTRY = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY
 
 #: Kernels that are NOT bitwise reproducible, with what makes them so, as
 #: `kernel -> {precision: reason}`. An exception list nothing verifies becomes a place to put

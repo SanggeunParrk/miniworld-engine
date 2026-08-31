@@ -16,13 +16,12 @@ pair the kernel does.
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 import pytest
+from paths import ROOT
 
 from miniworld_engine.kernels._tiles import check_tile_axes
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 KERNELS = ROOT / "src" / "miniworld_engine" / "kernels"
 
 #: Launcher file -> how many launches in it build the grid from an extent the kernel does not

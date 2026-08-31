@@ -18,9 +18,9 @@ new one has to be classified rather than added silently.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+from paths import ROOT
+
 DRIVERS = ROOT / "src" / "miniworld_engine" / "kernels" / "drivers"
 
 #: `file:symbol` -> why this site names a fixed precision. An ACTIVATION here is a bug unless the

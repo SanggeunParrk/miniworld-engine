@@ -14,13 +14,11 @@ the per-kernel values is a separate step and needs a device (plan.md P2b).
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 
 import pytest
+from paths import REGISTRY
 
 from miniworld_engine.autotune.run_all import DEFAULT_RTOL, check_one, declared_rtol
-
-REGISTRY = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src/miniworld_engine/kernels/registry.csv"
 
 
 def _rows() -> list[dict]:

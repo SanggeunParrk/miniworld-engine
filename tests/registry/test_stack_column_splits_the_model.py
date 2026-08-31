@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
-from pathlib import Path
 
-REG = Path(__file__).resolve().parents[2] / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY as REG
+
 KNOWN = {"trunk", "diffusion", "both"}
 
 

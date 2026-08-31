@@ -19,8 +19,7 @@ import csv
 import importlib.util
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-REG = ROOT / "src/miniworld_engine/kernels/registry.csv"
+from paths import REGISTRY as REG
 
 
 def _driver_specs() -> list[tuple[str, str, str]]:

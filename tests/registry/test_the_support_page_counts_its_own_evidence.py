@@ -15,8 +15,8 @@ import re
 from pathlib import Path
 
 import pytest
+from paths import ROOT
 
-ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 PAGE = ROOT / "docs" / "supported.md"
 MANIFESTS = ROOT / "src" / "miniworld_engine" / "autotune" / "manifests"
 
