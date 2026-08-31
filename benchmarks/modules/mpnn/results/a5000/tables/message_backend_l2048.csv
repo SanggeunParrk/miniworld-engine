@@ -1,0 +1,9 @@
+measured_date,device,torch_version,cuda_version,mode,objective,step_scope,precision,seq_len,batch_size,k_neighbors,hidden_dim,encoder_layers,decoder_layers,message_backend,latency_runs_ms,latency_median_ms,peak_allocated_mib,peak_reserved_mib,compiled,cudagraph_time,cudagraph_memory
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,1,48,128,3,3,pytorch,16.465920;16.466944;16.466432,16.466432,1198.562,1268.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,1,48,128,3,3,triton,16.306176;16.241152;16.227839,16.241152,1087.724,1162.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,4,48,128,3,3,pytorch,59.835392;60.108799;60.060673,60.060673,4691.265,4892.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,training,item_ce,forward+item_ce+backward,bf16-mixed,2048,4,48,128,3,3,triton,59.247616;59.000832;59.396095,59.247616,4340.349,4562.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,inference,none,forward,bf16-mixed,2048,1,48,128,3,3,pytorch,6.176768;6.173696;6.163456,6.173696,244.391,280.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,inference,none,forward,bf16-mixed,2048,1,48,128,3,3,triton,5.827072;5.841920;5.817856,5.827072,244.391,280.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,inference,none,forward,bf16-mixed,2048,4,48,128,3,3,pytorch,23.058944;23.062016;23.070209,23.062016,931.086,1026.0,True,manual,disabled
+2026-07-25,NVIDIA RTX A5000,2.10.0+cu128,12.8,inference,none,forward,bf16-mixed,2048,4,48,128,3,3,triton,21.863935;21.890560;21.930496,21.890560,931.086,1026.0,True,manual,disabled

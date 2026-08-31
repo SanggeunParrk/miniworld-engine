@@ -1,0 +1,7 @@
+device,mode,precision,implementation,compiled,cudagraph_time,cudagraph_memory,seq_len,physical_batch_size,k_neighbors,hidden_dim,encoder_layers,decoder_layers,coordinate_grad,time_ms,peak_allocated_mib,peak_reserved_mib
+NVIDIA RTX A5000,training,bf16-mixed,pytorch,True,manual,disabled,2048,1,48,128,3,3,False,27.517952,2111.473633,2620.0
+NVIDIA RTX A5000,training,bf16-mixed,miniworld,True,manual,disabled,2048,1,48,128,3,3,False,16.355840,1197.101074,1266.0
+NVIDIA RTX A5000,training,32,pytorch,True,manual,disabled,2048,1,48,128,3,3,False,71.581696,3812.312012,4354.0
+NVIDIA RTX A5000,training,32,miniworld,True,manual,disabled,2048,1,48,128,3,3,False,38.932500,2193.033691,2216.0
+NVIDIA RTX A5000,inference,bf16-mixed,pytorch,True,manual,disabled,2048,1,48,128,3,3,False,11.828224,554.365723,952.0
+NVIDIA RTX A5000,inference,bf16-mixed,miniworld,True,manual,disabled,2048,1,48,128,3,3,False,5.976060,244.473145,278.0

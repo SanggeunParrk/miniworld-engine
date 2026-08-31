@@ -157,6 +157,16 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
 #: and one name carrying a capital from maths notation (``trimul_front_bwd_dW_glogit``).
 OP_FAMILIES = (
     "adaln",
+    # The seven mpnn families, ported from a branch that predates this file. Their kernels are
+    # NOT yet opaque ops -- see MPNN_NOT_OPAQUE below -- but their op names are family-prefixed
+    # like everything else, so the naming half of the contract holds today.
+    "mpnn_edge_dropout",
+    "mpnn_edge_layernorm",
+    "mpnn_edge_mlp",
+    "mpnn_edge_tail",
+    "mpnn_message",
+    "mpnn_node_message",
+    "mpnn_relative_position",
     "augmented_attention",
     "bias_only_attention",
     "conditioned_transition",

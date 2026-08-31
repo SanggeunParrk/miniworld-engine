@@ -36,21 +36,46 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[2]
 PKG = "miniworld_engine"
-#: The autotuner injects these; a caller never passes them.
+#: Names the autotuner injects, so a caller never passes them. This was a PREFIX guess --
+#: ("BLOCK", "GROUP") -- which held only while every tuned constexpr in the package happened to be
+#: called BLOCK_something or GROUP_M. The mpnn families tune `TILES` (tiles per program) and
+#: `PROGRAMS` (persistent grid width), and a prefix list cannot know that without being edited
+#: once per kernel family. `_tuned_names` reads the real answer instead: every key of every
+#: `triton.Config({...})` the file builds, plus the axes of the kernel's config set if it has one.
 INJECTED = ("BLOCK", "GROUP")
+
+
+def _tuned_names(tree: ast.AST) -> set[str]:
+    """Every constexpr this file's `triton.Config({...})` literals set."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", getattr(node.func, "id", "")) != "Config":
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Dict):
+                out |= {k.value for k in arg.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            elif isinstance(arg, ast.BinOp) and isinstance(arg.left, ast.Dict):
+                out |= {k.value for k in arg.left.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    return out
 
 
 def _is_kernel(fn: ast.FunctionDef) -> bool:
     return any("jit" in ast.dump(d) or "autotune" in ast.dump(d) for d in fn.decorator_list)
 
 
-def _signature(fn: ast.FunctionDef) -> tuple[list[str], set[str]]:
+def _signature(fn: ast.FunctionDef, tuned: frozenset[str] = frozenset()
+               ) -> tuple[list[str], set[str]]:
     a = fn.args
     ordered = [p.arg for p in a.posonlyargs + a.args]
     ndef = len(a.defaults)
     required = set(ordered[:-ndef] if ndef else ordered)
     required |= {k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=False) if d is None}
-    return ordered, {r for r in required if not r.startswith(INJECTED)}
+    return ordered, {r for r in required
+                     if not r.startswith(INJECTED) and r not in tuned}
 
 
 def _module_of(path: Path) -> str:
@@ -84,9 +109,12 @@ def collect() -> tuple[dict, list]:
             continue
         mod = _module_of(path)
         trees.append((path, mod, tree))
+        # Per FILE: a kernel's tuned constexprs are the keys of the triton.Config literals built
+        # beside it. Reading them beats guessing from a name prefix -- see INJECTED.
+        tuned = frozenset(_tuned_names(tree))
         for fn in ast.walk(tree):
             if isinstance(fn, ast.FunctionDef) and _is_kernel(fn):
-                kernels[(mod, fn.name)] = _signature(fn)
+                kernels[(mod, fn.name)] = _signature(fn, tuned)
     return kernels, trees
 
 

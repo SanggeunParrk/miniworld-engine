@@ -1,0 +1,32 @@
+# ProteinMPNN encoder edge tail, forward and backward.
+#
+# rows = batch_size * seq_len * k_neighbors, so 8 x 8192 x 48 = 3,145,728 edge rows at
+# the sweep point.  d_pair is the channel width and stays 128, the width the model runs.
+d_pair: 128
+k_neighbors: 48
+batch_size: 8
+
+n_layers: 1
+min_seq_len: 8192
+max_seq_len: 8192
+seq_len_step: 8192
+seq_len_values:
+  - 8192
+min_d_pair: 128
+max_d_pair: 128
+d_pair_step: 128
+sweep_axis: seq_len
+sweep_seq_len: 8192
+
+kernel: mpnn_edge_tail
+implementations:
+  - pytorch
+  - triton_compute
+mode: training
+metric: time
+compile: true
+cudagraph: disabled
+allow_tf32: true
+check_correctness: true
+precision: "bf16-mixed"
+name_suffix: "compiled_cg_disabled"

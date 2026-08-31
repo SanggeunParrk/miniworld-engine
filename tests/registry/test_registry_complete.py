@@ -258,6 +258,12 @@ def test_launch_keywords_match_the_kernel_signature() -> None:
     a different function from the package's `_fwd`, and resolving by bare name cannot tell them
     apart. Without that exclusion this reported three false positives.
     """
+    #: Triton's own launch-time meta-parameters. They are legal keywords on any `kernel[grid](...)`
+    #: and appear in no signature, so comparing them against one says nothing. What they DO say is
+    #: that the kernel is not autotuned -- a launch site cannot set them on an autotuned kernel,
+    #: because the tuner owns them. `test_a_launch_site_does_not_pin_what_the_tuner_owns` below is
+    #: where that fact is checked; here they are simply not signature keywords.
+    TRITON_META = {"num_warps", "num_stages", "num_ctas", "maxnreg"}
     params: dict[str, set[str]] = {}
     starstar: set[str] = set()
     for path in sorted(SRC.rglob("*.py")):
@@ -302,6 +308,8 @@ def test_launch_keywords_match_the_kernel_signature() -> None:
                 continue
             for kw in node.keywords:
                 if kw.arg is None:                    # **kwargs forward
+                    continue
+                if kw.arg in TRITON_META:
                     continue
                 if kw.arg not in params[name]:
                     bad.append(f"{path.relative_to(SRC)}:{node.lineno} "
@@ -396,3 +404,52 @@ def test_length_of_refuses_an_already_flattened_shape() -> None:
         length_of((147456, 128))                      # the real defect: L=384 pair, flattened
     with pytest.raises(ValueError, match="already flattened"):
         length_of((4096, 128))
+
+
+def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
+    """`num_warps`/`num_stages` at a launch site means the kernel is not autotuned.
+
+    They are triton meta-parameters, legal on any launch and present in no signature -- which is
+    why the check above skips them. But an autotuned kernel cannot take them from its caller: the
+    tuner picks them per shape bucket, from `configs_for(<kernel>)`. A launch site that sets them
+    is therefore a kernel outside the autotune machinery, running one hand-chosen config on every
+    card and every shape.
+
+    That is a decision, not a bug, and it is recorded here rather than assumed. A kernel listed in
+    NOT_TUNED has no registry row, no ladder under `autotune/configs/grid/`, and no driver -- so a
+    build never reaches it and its config is whatever someone measured once. Moving one OUT of this
+    list is the port: give it a registry row, a driver, a checker and a ladder, and drop the pinned
+    keywords from the launch.
+    """
+    #: kernel -> why it launches with a pinned config. The mpnn families arrived from a branch that
+    #: predates the autotune machinery; porting them is in progress and this is the checklist.
+    NOT_TUNED = {
+        "_pack_bool_kernel", "_packed_dropout_backward_kernel",
+        "_compute_stage_fwd_kernel", "_edge_mlp_fwd_kernel",
+        "_projection_fwd_kernel", "_gelu_reduce_fwd_kernel",
+        "_zero_bias_grad_kernel", "_gelu_reduce_db_bwd_kernel", "_projection_dx_kernel",
+    }
+    pinned: dict[str, str] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Subscript):
+                continue
+            name = getattr(node.func.value, "id", getattr(node.func.value, "attr", None))
+            if not name:
+                continue
+            if any(kw.arg in ("num_warps", "num_stages") for kw in node.keywords):
+                pinned[name] = f"{path.relative_to(SRC)}:{node.lineno}"
+    surprising = {k: v for k, v in pinned.items() if k not in NOT_TUNED}
+    assert not surprising, (
+        "launch sites pinning num_warps/num_stages on a kernel not listed as untuned -- either it "
+        "gained an autotune ladder and the launch should stop pinning, or it is a new untuned "
+        f"kernel and belongs in NOT_TUNED with a reason: {surprising}")
+    gone = sorted(NOT_TUNED - set(pinned))
+    assert not gone, (
+        f"NOT_TUNED names kernels that no longer pin a config: {gone}. If they were ported to the "
+        f"autotune machinery, take them off the list -- an exemption that outlives its subject "
+        f"reads as work still to do.")
