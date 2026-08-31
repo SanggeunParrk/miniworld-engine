@@ -9,7 +9,7 @@ plotting paths import from here:
 
 Design philosophy (so figures read as one coherent set, paper-ready):
 
-- **MiniWorld / cute family → dark gold.** The thing we built is always the same
+- **This repo's kernels / cute family → dark gold.** The thing we built is always the same
   blackened-gold series so it is immediately recognisable.
 - **NVIDIA family (cuequivariance / dtv1 / Transformer Engine) → greens & teal.**
   NVIDIA's brand green, kept together so "the NVIDIA kernels" are visually a group.
@@ -75,9 +75,12 @@ DISPLAY: dict[str, str] = {
     "dtv1": "NVIDIA dtv1",
     "layernorm-dispatch": "Auto dispatch",
     "layernorm-dispatch-compile": "Auto dispatch compile",
-    "miniworld": "MiniWorld",
-    "miniworld-alt": "MiniWorld (alt)",
-    "miniworld-alt2": "MiniWorld (alt₂)",
+    # The KEY is the backend as the bench CSVs record it and cannot change; the display name is
+    # what a reader sees, and it names what the series IS -- this repo's kernels -- rather than
+    # the model they were built for.
+    "miniworld": "Engine",
+    "miniworld-alt": "Engine (alt)",
+    "miniworld-alt2": "Engine (alt₂)",
 }
 
 # Canonical colour per identity. Hex strings (no matplotlib needed to read them).
@@ -98,7 +101,7 @@ PALETTE: dict[str, str] = {
     "cuda": "#9CCC3C",           # light green (generic CUDA path)
     "layernorm-dispatch": "#E8412B",  # hero red-orange for the shipped dispatch path
     "layernorm-dispatch-compile": "#A8281A",  # darker compiled dispatch path
-    # MiniWorld (ours) — gold, fixed across every figure.
+    # This repo's kernels (ours) — gold, fixed across every figure.
     "miniworld": "#D4AF37",
     "miniworld-alt": "#F2C94C",
     "miniworld-alt2": "#8A6A14",

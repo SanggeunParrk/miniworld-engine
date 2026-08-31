@@ -146,7 +146,7 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
               # Q/K RMSNorm+RoPE is called by SWAAtomAttention only. Its tuning
               # axis is flattened head rows; the model stream remains atom-only.
               "rope": {"atom"},
-              # ProteinMPNN has one stream and it is neither of krystal's. Every launch in these
+              # ProteinMPNN has one stream and it is neither of the structure model's. Every launch in these
               # three families iterates edge rows -- N nodes x k neighbours -- so `edge` is the
               # whole traced answer, not a default: mpnn_relative_position's bucket reduce reads
               # one row per EDGE (the docstring's 6,291,456 at B=16, T=8192, K=48), and both

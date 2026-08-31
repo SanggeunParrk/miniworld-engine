@@ -89,7 +89,7 @@ class ModuleTarget:
 #: model" -- the trunk is 33 kernels across 7 families, and no module or kernel name spells that.
 #: `mpnn` is a THIRD half and not a third value of the trunk/diffusion split: ProteinMPNN is a
 #: different model, so `build mpnn` is "build the other model's kernels", not "build part of
-#: krystal". Its rows are `stack=mpnn` and no row is `both` across the two models -- nothing is
+#: the structure model". Its rows are `stack=mpnn` and no row is `both` across the two models -- nothing is
 #: shared between them at the kernel level.
 STACKS: tuple[str, ...] = ("trunk", "diffusion", "mpnn")
 

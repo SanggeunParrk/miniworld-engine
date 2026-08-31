@@ -60,7 +60,7 @@ def test_asking_for_a_half_includes_the_shared_kernels() -> None:
     trunk = {u.op for u in op_units(stack="trunk")}
     diffusion = {u.op for u in op_units(stack="diffusion")}
     # ProteinMPNN is a third half and shares nothing with the other two -- a different model, not a
-    # part of krystal -- so the union has to include it or every mpnn row reads as unbuilt.
+    # part of the structure model -- so the union has to include it or every mpnn row reads as unbuilt.
     mpnn = {u.op for u in op_units(stack="mpnn")}
     assert trunk
     assert diffusion

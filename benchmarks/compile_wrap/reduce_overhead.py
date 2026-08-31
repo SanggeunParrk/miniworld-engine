@@ -1,6 +1,6 @@
 """Does torch.compile(mode="reduce-overhead") work now that there are no graph breaks?
 
-MiniWorld's scripts/cudagraph_trainer.py says it does not, and says WHY:
+The model's scripts/cudagraph_trainer.py says it does not, and says WHY:
 
     the trunk's custom `@torch.compiler.disable()` cute/quack kernels are captured fine by the
     standard CUDA-graph API but make inductor's cudagraph-trees (reduce-overhead) silently

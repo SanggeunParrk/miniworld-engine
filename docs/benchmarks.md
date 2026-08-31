@@ -197,7 +197,7 @@ Rules baked into the module:
   one canonical identity → one fixed colour. Unknown names get a deterministic
   hash colour (stable across figures, never index-dependent). Never hand-assign
   colours in a kernel-local bench — call `color_for` / `style_for`.
-  - **MiniWorld / cute family → gold** — the repo's kernels are
+  - **This repo's kernels / cute family → gold** — the repo's kernels are
     visually fixed across every figure.
   - **NVIDIA family (cuequivariance / dtv1 / TE) → greens & teal.**
   - **baselines (pytorch / torch.compile / triton) → grey & blue** (recede).
@@ -251,7 +251,7 @@ Before treating a benchmark artifact as final, check every item below.
   `grad_max_abs`, `grad_rel_frob`, and `grad_cosine` when the runner has a
   reference path wired.
 - [ ] **Inference/training separation:** implementation rows identify the
-  `execution_path`, and MiniWorld-style kernels must use distinct inference and
+  `execution_path`, and this repo's kernels must use distinct inference and
   training paths when the kernel design has separate save/no-save behavior.
 - [ ] **Both modes:** final artifacts include both inference and training CSVs
   and SVGs for training-relevant ops.
@@ -287,9 +287,9 @@ the matrix below is the remaining repo-developed module kernels, one
 | `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |
 | `augmented_attention_atom` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | atom path; L sweep still includes `L=384`; unsupported/OOM points stay as failed CSV rows. |
 
-Final plots must show a single `MiniWorld` series. If a diagnostic CSV includes
+Final plots must show a single `Engine` series. If a diagnostic CSV includes
 component aliases such as `cute` plus `miniworld`, the shared plotter collapses
-them to the canonical `MiniWorld` backend before drawing.
+them to the canonical `miniworld` backend before drawing.
 
 ## Runtime Dispatch Caches
 

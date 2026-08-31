@@ -681,7 +681,7 @@ def _miniworld_inference(
     )
 
 
-class MiniWorldTriangleMultiplicationInference(nn.Module):
+class FusedTriangleMultiplicationInference(nn.Module):
     def __init__(self, base: TriangleMultiplication) -> None:
         super().__init__()
         from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch
@@ -740,7 +740,7 @@ class MiniWorldTriangleMultiplicationInference(nn.Module):
         )
 
 
-class MiniWorldTriangleMultiplicationTraining(nn.Module):
+class FusedTriangleMultiplicationTraining(nn.Module):
     def __init__(self, base: TriangleMultiplication) -> None:
         super().__init__()
         from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (
@@ -847,7 +847,7 @@ def bench_module_triangle_multiplication(
                 # Use the real production module (implementation=MINIWORLD): its per-GPU
                 # dispatch runs the sm100-native cute path on B200 (tcgen05 front + split
                 # sm100 out-projection), correct at every d. The prior hand-wired wrappers
-                # (MiniWorld*Inference/Training, BidirV6TriMul) called the H100 quack /
+                # (Fused*Inference/Training, BidirV6TriMul) called the H100 quack /
                 # back_split kernels, which are numerically WRONG on sm_100 (out-cosine
                 # ~0.05-0.7 vs pytorch) and assert "SM90 only" at d>=256.
                 # cute path is bf16-only (asserts on fp32 weights); pin bf16 like the

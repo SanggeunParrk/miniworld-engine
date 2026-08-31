@@ -6,7 +6,7 @@ where there is no neighbouring op to fuse with. The 5% is supposed to come from 
 residual adds, dropouts and reshapes BETWEEN modules that only exist when modules follow one
 another. If a single module also showed 5%, the block explanation would be wrong.
 
-Same harness as block_ab.py (torch.compile, no CUDA graph = MiniWorld's main regime).
+Same harness as block_ab.py (torch.compile, no CUDA graph = the model's main regime).
 """
 from __future__ import annotations
 

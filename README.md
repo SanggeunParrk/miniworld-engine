@@ -1,6 +1,6 @@
 # miniworld-engine
 
-Dedicated GPU kernel-development repo for MiniWorld / AF3-style ops. The idea is
+Dedicated GPU kernel-development repo for AF3-style structure-prediction ops. The idea is
 to **cut one op out of the full model and optimize it in isolation**:
 
 > **Where this fits.** miniworld-engine is the bottom layer of a three-layer

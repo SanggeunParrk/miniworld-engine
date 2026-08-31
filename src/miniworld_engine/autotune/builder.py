@@ -927,7 +927,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # Returning the `both` rows for an unrecognised name -- a third of the sweep -- and having
         # the CLI report it as a build is worse than not running.
         msg = (f"op_units(stack={stack!r}): the halves are 'trunk', 'diffusion' and 'mpnn' "
-               f"-- the first two are krystal's, the third is the other model's")
+               f"-- the first two are the structure model's, the third is the other model's")
         raise ValueError(msg)
 
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
@@ -1156,7 +1156,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             continue
         if only and r["kernel"] not in only:
             continue
-        # `both` is both KRYSTAL halves, not all three stacks. A kernel the trunk and the
+        # `both` is both halves of the STRUCTURE model, not all three stacks. A kernel the trunk and the
         # diffusion side share is launched by neither ProteinMPNN nor anything else, so asking for
         # the mpnn half must not drag it in: `build mpnn` did exactly that and spent its first
         # minute on gated_projection and layernorm, at pair shapes, into a shard directory the

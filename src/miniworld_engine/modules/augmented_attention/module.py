@@ -74,7 +74,7 @@ class AugmentedAttentionPairBias(nn.Module):
         # constant added to every attention logit, and softmax(z + c) == softmax(z) exactly. Its
         # gradient is therefore identically zero -- measured, not assumed: perturbing it in fp64
         # moves the loss by ~1e-9 regardless of step size, while the same probe on the weight
-        # gives a directional derivative that converges to 4 digits. Matches MiniWorld upstream
+        # gives a directional derivative that converges to 4 digits. Matches the upstream model
         # (`nn.LayerNorm(d_pair, bias=False)`) and AlphaFold3 (`create_offset=False` on the
         # pair_input_layer_norm).
         self.ln_pair = LayerNorm(d_pair, bias=False)
