@@ -22,7 +22,7 @@ def _pair():
         out = message_hidden_reduce(
             preactivation, weight, bias, mask, _NEIGHBORS, backend="triton")
     ref = message_hidden_reduce_pytorch(
-        preactivation.float(), weight.float(), bias.float(), mask.float(), _NEIGHBORS)
+        preactivation.float(), weight.float(), bias.float(), mask, _NEIGHBORS)
     return out, ref
 
 
@@ -41,7 +41,7 @@ def _gradients():
             return message_hidden_reduce(*a, mask, _NEIGHBORS, backend="triton")
 
     def reference(*a):
-        return message_hidden_reduce_pytorch(*a, mask.float(), _NEIGHBORS)
+        return message_hidden_reduce_pytorch(*a, mask, _NEIGHBORS)
 
     return _grads(kernel, [preactivation, weight, bias], reference, names)
 

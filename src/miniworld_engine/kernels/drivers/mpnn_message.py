@@ -14,13 +14,17 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import BF16, dev
+from miniworld_engine.kernels.drivers import dev
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import _NEIGHBORS, _graph, _nodes
 
 
 def _inputs(*, grad: bool):
+    # The mask is FP32 and the contract says so: `interface._triton_contract_supported` requires it,
+    # because the reduction multiplies by it in fp32 and a bf16 mask would round the weight before
+    # the sum rather than after. Built at the dtype the kernel is entitled to, not at the
+    # activation's.
     t = _graph(grad=grad)
-    mask = (torch.rand(1, _nodes(), _NEIGHBORS, device=dev()) > 0.2).to(BF16)
+    mask = (torch.rand(1, _nodes(), _NEIGHBORS, device=dev()) > 0.2).float()
     return t["edge_states"], t["edge_weight"], t["hidden_bias"], mask
 
 

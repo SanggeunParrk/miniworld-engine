@@ -1,13 +1,13 @@
 kernel,backend,family,file,status,detail,dtype
+#provenance,1.0.0,827dd04b3d89,dirty,2026-08-31,v1.0.0-198-g827dd04,
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=3.31e-03 DLnW=2.45e-03,bf16
 adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=8.13e-04 DX=3.13e-03,bf16
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=3.13e-03 Mean=1.61e-08 Rstd=2.02e-07 Gate=1.96e-03,bf16
 adaln_epilogue_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,ok,rel out=3.22e-03,bf16
 adaln_fwd_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/inference.py,ok,rel out=3.32e-03,bf16
-layernorm_fwd_strided_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/fused3.py,ok,rel out=2.35e-03,bf16
+layernorm_fwd_strided_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/ln_strided.py,ok,rel out=2.35e-03,bf16
 augmented_attention_bwd_atomic_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,ok,rel dq=3.85e-03 dk=3.24e-03 dv=2.59e-03 dbias=4.42e-03,bf16
 augmented_attention_bwd_pre_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel out=8.79e-08,bf16
-augmented_attention_bwd_reduce_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel out=0.00e+00,bf16
 augmented_attention_bwd_split_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel dq=2.55e-03 dk=2.85e-03 dv=3.69e-03 dbias=2.50e-03,bf16
 augmented_attention_fwd_triton,triton,augmented_attention,miniworld_engine/kernels/augmented_attention/triton/main.py,ok,rel out=2.51e-03 m=9.66e-08,bf16
 bias_only_attention_bwd_pre_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/main.py,ok,rel out=7.28e-08,bf16
@@ -85,3 +85,25 @@ trimul_bwd_gate_packed_recompute_triton,triton,trimul_inproj,miniworld_engine/ke
 trimul_bwd_gate_packed_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back_fused.py,ok,rel d_gLlog=2.71e-03 d_pL=2.07e-03 d_gRlog=2.23e-03 d_pR=2.13e-03,bf16
 trimul_gemm_gate_mmajor_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/bidirectional.py,ok,rel left=1.96e-03 right=3.41e-03 preact_left=2.87e-03 preact_right=3.01e-03,bf16
 trimul_outproj_layernorm_gemm_gate_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/back.py,ok,rel y=2.78e-03 y_residual=2.28e-03,bf16
+mpnn_edge_tail_fwd_gemm_gather_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=5.47e-03 (band 5e-02),bf16
+mpnn_edge_tail_fwd_gemm_b2b_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=5.47e-03 (band 5e-02),bf16
+mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=5.47e-03 (band 5e-02),bf16
+mpnn_edge_tail_bwd_layernorm_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,failed,WRONG NUMBERS: rel edge_states=5.34e-02 query_projection=1.71e-02 neighbor_projection=1.74e-02 edge_weight=1.36e-02 hidden_weight=1.30e-02 hidden_bias=1.64e-02 output_weight=3.96e-03 output_bias=2.43e-03 norm_weight=3.56e-03 norm_bias=2.15e-03 (band 5e-02),bf16
+mpnn_edge_tail_bwd_dx_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,failed,WRONG NUMBERS: rel edge_states=5.34e-02 query_projection=1.71e-02 neighbor_projection=1.74e-02 edge_weight=1.36e-02 hidden_weight=1.30e-02 hidden_bias=1.64e-02 output_weight=3.96e-03 output_bias=2.43e-03 norm_weight=3.56e-03 norm_bias=2.15e-03 (band 5e-02),bf16
+mpnn_edge_tail_bwd_dx_gather_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,failed,WRONG NUMBERS: rel edge_states=5.34e-02 query_projection=1.71e-02 neighbor_projection=1.74e-02 edge_weight=1.36e-02 hidden_weight=1.30e-02 hidden_bias=1.64e-02 output_weight=3.96e-03 output_bias=2.43e-03 norm_weight=3.56e-03 norm_bias=2.15e-03 (band 5e-02),bf16
+mpnn_edge_tail_fwd_gemm_recompute_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/main.py,ok,rel out=5.50e-03 (band 5e-02),bf16
+mpnn_edge_tail_fwd_gemm_layernorm_recompute_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/main.py,ok,rel out=5.50e-03 (band 5e-02),bf16
+mpnn_edge_tail_bwd_recompute_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/main.py,failed,"OutOfResources: out of resource: shared memory, Required: 104448, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.",bf16
+mpnn_edge_tail_bwd_dx_recompute_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/main.py,failed,"OutOfResources: out of resource: shared memory, Required: 104448, Hardware limit: 101376. Reducing block sizes or `num_stages` may help.",bf16
+mpnn_node_message_fwd_gemm_triton,triton,mpnn_node_message,miniworld_engine/kernels/mpnn_node_message/triton/main.py,ok,rel out=1.58e-03 (band 5e-02),bf16
+mpnn_node_message_bwd_recompute_triton,triton,mpnn_node_message,miniworld_engine/kernels/mpnn_node_message/triton/main.py,failed,WRONG NUMBERS: rel edge_states=1.16e-01 query_projection=7.70e-03 neighbor_projection=3.91e-02 edge_weight=1.87e-02 hidden_weight=7.05e-03 hidden_bias=2.90e-03 (band 5e-02),bf16
+mpnn_node_message_bwd_dx_triton,triton,mpnn_node_message,miniworld_engine/kernels/mpnn_node_message/triton/main.py,failed,WRONG NUMBERS: rel edge_states=1.16e-01 query_projection=7.70e-03 neighbor_projection=3.91e-02 edge_weight=1.87e-02 hidden_weight=7.05e-03 hidden_bias=2.90e-03 (band 5e-02),bf16
+mpnn_relative_position_bwd_reduce_triton,triton,mpnn_relative_position,miniworld_engine/kernels/mpnn_relative_position/triton/main.py,ok,rel grad_table=8.98e-08 grad_bias=8.29e-08 (band 5e-02),bf16
+mpnn_message_fwd_gemm_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel out=1.04e-03 (band 5e-02),bf16
+mpnn_message_fwd_gelu_reduce_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel out=1.04e-03 (band 5e-02),bf16
+mpnn_message_bwd_dx_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel preactivation=9.60e-03 weight=2.70e-03 bias=2.06e-03 (band 5e-02),bf16
+mpnn_message_bwd_reduce_dbias_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel preactivation=9.60e-03 weight=2.70e-03 bias=2.06e-03 (band 5e-02),bf16
+mpnn_edge_mlp_fwd_gemm_b2b_triton,triton,mpnn_edge_mlp,miniworld_engine/kernels/mpnn_edge_mlp/triton/main.py,ok,rel out=4.28e-03 (band 5e-02),bf16
+mpnn_edge_mlp_fwd_gemm_triton,triton,mpnn_edge_mlp,miniworld_engine/kernels/mpnn_edge_mlp/triton/compute.py,ok,rel out=4.28e-03 (band 5e-02),bf16
+mpnn_edge_dropout_fwd_packed_triton,triton,mpnn_edge_dropout,miniworld_engine/kernels/mpnn_edge_dropout/triton/main.py,ok,rel out=0.00e+00 (band 5e-02),bf16
+mpnn_edge_dropout_bwd_packed_triton,triton,mpnn_edge_dropout,miniworld_engine/kernels/mpnn_edge_dropout/triton/main.py,ok,rel out=2.37e-03 (band 5e-02),bf16
