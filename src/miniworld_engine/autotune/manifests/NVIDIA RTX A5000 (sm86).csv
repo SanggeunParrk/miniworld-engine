@@ -1,5 +1,5 @@
 kernel,backend,family,file,status,detail,dtype
-#provenance,1.0.0,827dd04b3d89,dirty,2026-08-31,v1.0.0-198-g827dd04,
+#provenance,1.0.0,2419918ef4b6,clean,2026-08-31,v1.0.0-200-g2419918,
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=3.31e-03 DLnW=2.45e-03,bf16
 adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=8.13e-04 DX=3.13e-03,bf16
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=3.13e-03 Mean=1.61e-08 Rstd=2.02e-07 Gate=1.96e-03,bf16
