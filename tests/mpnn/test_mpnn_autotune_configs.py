@@ -91,8 +91,18 @@ def test_every_kernel_is_wired_to_the_committed_autotune_cache() -> None:
     #: holds the pre-flatten shape (`token_key`/`atom_key`/`both_key` per its level), drop the
     #: dimension names from `key=[...]`, and add the registry row and ladder that follow from it.
     #: This set shrinks as that happens; it is the checklist, not an exemption.
-    NOT_ON_SHAPE_KEY = frozenset(
-        name for name, _ in _autotuned_kernels() if ".mpnn_" in name)
+    #: Shrinks as the port lands. 7 of 14 are on `shape_key` (mpnn_node_message's three and
+    #: mpnn_edge_tail/triton/main's four); what is left is edge_tail's compute pass and
+    #: relative_position's bucket reduce.
+    NOT_ON_SHAPE_KEY = frozenset({
+        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_edge",
+        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_hidden",
+        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_output",
+        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._norm_backward",
+        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._project_backward",
+        "miniworld_engine.kernels.mpnn_edge_tail.triton.compute._edge_backward",
+        "miniworld_engine.kernels.mpnn_relative_position.triton.main._bucket_reduce_kernel",
+    })
     keyless = []
     for name, kernel in _autotuned_kernels():
         if name in NOT_ON_SHAPE_KEY:

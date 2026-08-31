@@ -30,6 +30,8 @@ from __future__ import annotations
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
 import torch
 import triton
+
+from miniworld_engine.autotune.shape_key import both_key
 import triton.language as tl
 
 
@@ -79,9 +81,24 @@ def _configs() -> list[triton.Config]:
 # change invalidates the entry via config_space_hash.  See the same block in the edge
 # tail kernel for why the grids are deliberately this wide.
 
+def _shape_key(groups: int, neighbors: int) -> int:
+    """The packed bucket for a node-message launch.
+
+    `both_key` because the launch is `groups` ROWS -- one per node -- and that is what
+    `BOTH_ROWS` buckets. The kernels used to key on `groups_total` directly, which is a raw count:
+    every distinct node count was its own cache entry, so a 257-residue protein and a 258-residue
+    one shared nothing. Floor-clamping into the shared rung set is the whole point of the key.
+
+    `NEIGHBORS` folds in because it changes the work per row and the compiled kernel both -- k is
+    a real shape axis here, not a flag. `WIDTH` is 128 and only 128 (`_WIDTH`), so it is not folded
+    in: an axis with one value adds a digit that never varies.
+    """
+    return both_key(groups, NEIGHBORS=neighbors)
+
+
 @triton.autotune(
     configs=_configs(),
-    key=["groups_total", "NEIGHBORS"],
+    key=["shape_key"],
 )
 @triton.jit
 def _node_message_fwd_kernel(
@@ -95,6 +112,7 @@ def _node_message_fwd_kernel(
     mask_ptr,
     reduced_ptr,
     groups_total,
+    shape_key,
     neighbor_scale,
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
@@ -155,7 +173,7 @@ def _node_message_fwd_kernel(
 
 @triton.autotune(
     configs=_configs(),
-    key=["groups_total", "NEIGHBORS"],
+    key=["shape_key"],
     reset_to_zero=["grad_hidden_bias_ptr"],
 )
 @triton.jit
@@ -174,6 +192,7 @@ def _node_message_replay_kernel(
     grad_hidden_ptr,
     grad_hidden_bias_ptr,
     groups_total,
+    shape_key,
     group_offset,
     chunk_groups,
     neighbor_scale,
@@ -261,7 +280,7 @@ def _node_message_replay_kernel(
 
 @triton.autotune(
     configs=_configs(),
-    key=["groups_total", "NEIGHBORS"],
+    key=["shape_key"],
     reset_to_zero=["grad_neighbor_ptr"],
 )
 @triton.jit
@@ -276,6 +295,7 @@ def _node_message_dx_kernel(
     grad_neighbor_ptr,
     grad_preactivation_ptr,
     groups_total,
+    shape_key,
     group_offset,
     chunk_groups,
     EDGE_WEIGHT_STRIDE: tl.constexpr,
@@ -382,6 +402,7 @@ def _forward_op(
         edge_mask,
         reduced,
         groups,
+        _shape_key(groups, neighbors),
         neighbor_scale,
         EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
         NEIGHBORS=neighbors,
@@ -468,6 +489,7 @@ def _backward_op(
             grad_hidden,
             grad_hidden_bias,
             groups,
+            _shape_key(groups, neighbors),
             start,
             span,
             neighbor_scale,
@@ -487,6 +509,7 @@ def _backward_op(
             grad_neighbor,
             grad_preactivation,
             groups,
+            _shape_key(groups, neighbors),
             start,
             span,
             EDGE_WEIGHT_STRIDE=edge_weight.stride(0),

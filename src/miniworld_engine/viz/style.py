@@ -198,10 +198,6 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "tm1cute": ("tm1-cute", "cute tm1", "#F2C94C"),
     "trimulfrontsm100": ("trimul-front-sm100", "cute SM100 (dep)", "#8A6A14"),
     "layernormlineartriton": ("layernorm-linear-triton", "Triton LN+linear", "#2E6FDB"),
-    # mpnn_edge_tail's fused compute pass: project + GELU + hidden in one tile, benched
-    # against the unfused chain. Same blue family as plain "triton", one step darker, so a
-    # plot carrying both reads as two variants of one backend rather than two backends.
-    "tritoncompute": ("triton-compute", "Triton compute", "#1F4FA0"),
     "layernormlinearcute": ("layernorm-linear-cute", "cute LN+linear M1", "#D4AF37"),
     "layernormlinearcutefused": ("layernorm-linear-cute-fused", "cute LN+linear M2", "#F2C94C"),
     "layernormlinearte": ("layernorm-linear-te", "TE-style", "#3F6B1B"),

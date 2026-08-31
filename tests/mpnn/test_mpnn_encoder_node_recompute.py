@@ -252,11 +252,7 @@ def test_encoder_node_w1_checkpoint_gpu_contract_fallback(
     monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", unexpected_checkpoint)
     # The fallback must be audible: a silent no-op would let a configured memory
     # policy be benchmarked as if it had engaged.
-    # One `with`: the warning is asserted around exactly the block that must raise it, and
-    # ruff is not asked to choose between PT031 and SIM117, which want opposite shapes.
-    with torch.autocast("cuda", dtype=torch.bfloat16), pytest.warns(
-        RuntimeWarning, match="encoder_node_w1_recompute"
-    ):
+    with torch.autocast("cuda", dtype=torch.bfloat16):
         expected = reference(
             node_states,
             edge_states,
@@ -264,6 +260,12 @@ def test_encoder_node_w1_checkpoint_gpu_contract_fallback(
             residue_mask,
             neighbor_mask,
         )
+    # Only the recompute call is inside `warns`. The reference is not supposed to warn, so a block
+    # holding both would have passed on a warning from either -- and the point of the test is that
+    # this ONE call is audible when it falls back.
+    with torch.autocast("cuda", dtype=torch.bfloat16), pytest.warns(
+        RuntimeWarning, match="encoder_node_w1_recompute"
+    ):
         actual = layer.forward_node_recompute(
             node_states,
             edge_states,

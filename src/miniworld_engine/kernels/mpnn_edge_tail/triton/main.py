@@ -36,6 +36,8 @@ from __future__ import annotations
 # wiring of its own, and a hand-written `bucket_of` could only disagree with it.
 import torch
 import triton
+
+from miniworld_engine.autotune.shape_key import both_key
 import triton.language as tl
 
 
@@ -192,9 +194,23 @@ def _backward_configs() -> list[triton.Config]:
 # Buckets deliberately exclude ``rows``: the row count is what BLOCK_M/TILES exist to
 # absorb, and bucketing on it would mean a separate cache entry per batch size.
 
+def _shape_key(rows: int, **axes: int) -> int:
+    """The packed bucket for a launch of `rows` rows.
+
+    `both_key` because these launches are row counts and that is what `BOTH_ROWS` buckets. The
+    kernels used to key on `rows` directly -- a raw count, so every distinct edge count was its own
+    cache entry and nothing was ever reused between two proteins of different length.
+
+    The `tl.constexpr` flags fold in as axes rather than sitting beside the key: `DROPOUT` and
+    `EMIT_BIAS` change the compiled kernel and its register pressure, so the config that wins with
+    one is not the config that wins with the other, and a shared bucket would average them.
+    """
+    return both_key(rows, **axes)
+
+
 @triton.autotune(
     configs=_project_configs(),
-    key=["rows", "NEIGHBORS"],
+    key=["shape_key"],
 )
 @triton.jit
 def _edge_tail_project_kernel(
@@ -207,6 +223,7 @@ def _edge_tail_project_kernel(
     hidden_bias_ptr,
     hidden_ptr,
     rows,
+    shape_key,
     EDGE_WEIGHT_STRIDE: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     WIDTH: tl.constexpr,
@@ -265,7 +282,7 @@ def _edge_tail_project_kernel(
 
 @triton.autotune(
     configs=_norm_configs(),
-    key=["rows", "DROPOUT"],
+    key=["shape_key"],
 )
 @triton.jit
 def _edge_tail_norm_kernel(
@@ -278,6 +295,7 @@ def _edge_tail_norm_kernel(
     out_ptr,
     seed_ptr,
     rows,
+    shape_key,
     keep_probability,
     dropout_scale,
     eps,
@@ -361,7 +379,7 @@ def _edge_tail_norm_kernel(
 
 @triton.autotune(
     configs=_backward_configs(),
-    key=["rows", "NEIGHBORS", "DROPOUT"],
+    key=["shape_key"],
     reset_to_zero=[
         "grad_output_bias_ptr",
         "grad_norm_weight_ptr",
@@ -390,6 +408,7 @@ def _edge_tail_replay_kernel(
     grad_norm_bias_ptr,
     seed_ptr,
     rows,
+    shape_key,
     row_offset,
     chunk_rows,
     keep_probability,
@@ -518,7 +537,7 @@ def _edge_tail_replay_kernel(
 
 @triton.autotune(
     configs=_backward_configs(),
-    key=["rows", "NEIGHBORS"],
+    key=["shape_key"],
     reset_to_zero=["grad_query_ptr", "grad_neighbor_ptr", "grad_hidden_bias_ptr"],
 )
 @triton.jit
@@ -540,6 +559,7 @@ def _edge_tail_dx_kernel(
     grad_neighbor_ptr,
     grad_hidden_bias_ptr,
     rows,
+    shape_key,
     groups_total,
     row_offset,
     chunk_rows,
@@ -702,6 +722,7 @@ def _forward_op(
         hidden_bias,
         hidden,
         rows,
+        _shape_key(rows, NEIGHBORS=neighbors),
         EDGE_WEIGHT_STRIDE=edge_weight.stride(0),
         NEIGHBORS=neighbors,
         WIDTH=_WIDTH,
@@ -716,6 +737,7 @@ def _forward_op(
         out,
         seed,
         rows,
+        _shape_key(rows, DROPOUT=dropout),
         1.0 - dropout_probability,
         1.0 / (1.0 - dropout_probability) if dropout else 1.0,
         eps,
@@ -839,6 +861,7 @@ def _backward_op(
             grad_norm_bias,
             seed,
             rows,
+            _shape_key(rows, NEIGHBORS=neighbors, DROPOUT=dropout),
             start,
             span,
             keep_probability,
@@ -867,6 +890,7 @@ def _backward_op(
             grad_neighbor,
             grad_hidden_bias,
             rows,
+            _shape_key(rows, NEIGHBORS=neighbors),
             groups,
             start,
             span,
