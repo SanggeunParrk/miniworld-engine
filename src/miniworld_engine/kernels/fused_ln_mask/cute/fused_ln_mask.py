@@ -33,7 +33,7 @@ import triton.language as tl
 
 
 from miniworld_engine.autotune.buckets import bucket_mixed as _bucket
-from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of
+from miniworld_engine.autotune.shape_key import length_of, token_key
 
 
 def get_seq_group(rows) -> int:
@@ -162,7 +162,15 @@ def fused_ln_mask(
         M,
         D,
         EPS=eps,
-        # L = x.shape[-2] of the (B, L, L, D) pair activation, not M = B*L*L.
-        shape_key=both_key(rows_of(x.shape), D=D),
+        # `token_key`, because registry.csv declares this kernel level=token -- and token_key's
+        # own docstring is "the key for a token/pair-level kernel". This used to call
+        # `both_key(rows_of(...))`, the level=both function, which buckets the ROW count: a pair
+        # of side L has L*L rows, so the cache recorded 16384/65536/147456/262144 where every
+        # other level=token kernel records 128/256/384/512. No launch was served the wrong config
+        # -- this wrapper is the only caller and it keyed reads the same way it keyed writes --
+        # but `dev audit` compares the cache against the DECLARED bucket, which for level=token
+        # is L, and reported all four missing on a cache that was complete.
+        # `length_of` reads shape[-2], which is L for the (B, L, L, D) pair activation.
+        shape_key=token_key(length_of(x.shape), D=D),
     )
     return out.view(B, L1, L2, D)
