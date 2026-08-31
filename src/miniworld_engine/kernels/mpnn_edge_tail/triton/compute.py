@@ -74,11 +74,15 @@ import triton.language as tl
 #: is indistinguishable from an absent axis and two shapes would share a key. A flag that is OFF is
 #: exactly that zero: folding `DROPOUT` in raised ShapeKeyTooWide on every launch with dropout
 #: disabled, which is every inference launch and every training launch at p=0.
+from ..._tiles import tile_grid, tile_order
 from ..._compile import opaque
 from .main import _shape_key
 
 
-WIDTH = 128
+#: NOT a width any more -- every launcher reads it from the activation it was handed, and the
+#: kernels take it as a `tl.constexpr`. What is left here is the ONE place the family's own
+#: reference shape is written down, for the module docstring above to point at.
+_REFERENCE_WIDTH = 128
 
 
 # ---- GELU, split so the derivative can borrow the forward's transcendental ------------
@@ -106,11 +110,15 @@ def _gelu(x):
 # ---- the tile every kernel in this file is built around ------------------------------
 @triton.jit
 def _row_gemm(
-    x_ptr, w_ptr, row_block, valid, columns,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    CONTRACT_OUT: tl.constexpr, W_ROW_STRIDE: tl.constexpr,
+    x_ptr, w_ptr, row_block, valid, columns, col_valid,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr, CONTRACT_OUT: tl.constexpr, W_ROW_STRIDE: tl.constexpr,
 ):
-    """FP32 [BLOCK_M1, WIDTH] accumulator for ``x @ w``, contracted in BLOCK_K chunks.
+    """FP32 [BLOCK_M1, BLOCK_N] accumulator for ``x @ w``, contracted in BLOCK_K chunks.
+
+    The accumulator used to span the whole width, which is why every kernel built on it had a 1-D
+    grid: one program owned every output column of its rows, so there was no column tile and no
+    visit order to tune. It owns BLOCK_N of them now, and the callers pair that with `tile_order`.
 
     ``w`` is always stored [out, in], the orientation ``nn.Linear`` keeps.  Forward
     contracts over ``in`` and backward over ``out``, so the two directions differ only
@@ -123,20 +131,27 @@ def _row_gemm(
     Hardcoding WIDTH here read a packed slice at the wrong stride and produced 19-59%
     relative error in the model while every test on contiguous weights passed.
     """
-    accumulator = tl.zeros((BLOCK_M1, WIDTH), tl.float32)
+    accumulator = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
     for start in range(0, WIDTH, BLOCK_K):
         contraction = start + tl.arange(0, BLOCK_K)
+        contract_valid = contraction < WIDTH
         left = tl.load(
             x_ptr + row_block[:, None] * WIDTH + contraction[None, :],
-            mask=valid[:, None], other=0.0,
+            mask=valid[:, None] & contract_valid[None, :], other=0.0,
         )
+        # The weight load is masked on BOTH axes now. It was unmasked because the column block was
+        # the whole width and the contraction divided it exactly; neither holds once BLOCK_N and
+        # BLOCK_K are tuned independently of a width that is no longer a literal.
+        w_mask = contract_valid[:, None] & col_valid[None, :]
         if CONTRACT_OUT:
             right = tl.load(
-                w_ptr + contraction[:, None] * W_ROW_STRIDE + columns[None, :]
+                w_ptr + contraction[:, None] * W_ROW_STRIDE + columns[None, :],
+                mask=w_mask, other=0.0,
             )
         else:
             right = tl.load(
-                w_ptr + contraction[:, None] + columns[None, :] * W_ROW_STRIDE
+                w_ptr + contraction[:, None] + columns[None, :] * W_ROW_STRIDE,
+                mask=w_mask, other=0.0,
             )
         accumulator += tl.dot(left, right.to(tl.bfloat16))
     return accumulator
@@ -184,42 +199,49 @@ def _project_edge(
     preactivation_ptr, activated_ptr,
     rows, shape_key,
     W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     """``edge @ W1 + query[group] + table[index]``, then GELU.
 
     The two gathers are the prologue's whole job: one broadcast over the neighbour axis,
-    one indexed, both folded in rather than materialised as separate tensors.
+    one indexed, both folded in rather than materialised as separate tensors. Both read one
+    value per COLUMN, so a column tile reads its own slice of each and nothing is shared
+    across the n axis -- which is what lets this kernel take BLOCK_N at all.
     """
-    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
-    columns = tl.arange(0, WIDTH)
+    columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    col_valid = columns < WIDTH
     accumulator = _row_gemm(
-        edge_ptr, w1_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
-        W_ROW_STRIDE=W1_ROW_STRIDE,
+        edge_ptr, w1_ptr, row_block, valid, columns, col_valid,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=False, W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
+    live = valid[:, None] & col_valid[None, :]
     offsets = row_block[:, None] * WIDTH + columns[None, :]
     groups = row_block // NEIGHBORS
     query = tl.load(
         query_ptr + groups[:, None] * WIDTH + columns[None, :],
-        mask=valid[:, None], other=0.0,
+        mask=live, other=0.0,
     ).to(tl.float32)
     neighbor_rows = tl.load(index_ptr + row_block, mask=valid, other=0)
     neighbor = tl.load(
         table_ptr + neighbor_rows[:, None] * WIDTH + columns[None, :],
-        mask=valid[:, None], other=0.0,
+        mask=live, other=0.0,
     ).to(tl.float32)
     preactivation = (accumulator + query + neighbor).to(tl.bfloat16)
-    tl.store(preactivation_ptr + offsets, preactivation, mask=valid[:, None])
+    tl.store(preactivation_ptr + offsets, preactivation, mask=live)
     # Stored rather than recomputed in the next stage: applying the GELU on load puts a
     # tl.erf between the load and the dot, Triton stops pipelining the loop, and the
     # 3.2 GB it saves costs 4.2 ms.
     tl.store(
         activated_ptr + offsets,
         _gelu(preactivation.to(tl.float32)).to(tl.bfloat16),
-        mask=valid[:, None],
+        mask=live,
     )
 
 
@@ -231,25 +253,31 @@ def _project_edge(
 def _project_hidden(
     activated_ptr, w2_ptr, b2_ptr, hidden_ptr, activated_hidden_ptr,
     rows, shape_key,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     """``gelu(preactivation) @ W2 + b2``, then GELU."""
-    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
-    columns = tl.arange(0, WIDTH)
+    columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    col_valid = columns < WIDTH
+    live = valid[:, None] & col_valid[None, :]
     accumulator = _row_gemm(
-        activated_ptr, w2_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=False,
-        W_ROW_STRIDE=WIDTH,
+        activated_ptr, w2_ptr, row_block, valid, columns, col_valid,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=False, W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
-    hidden = (accumulator + tl.load(b2_ptr + columns)[None, :]).to(tl.bfloat16)
-    tl.store(hidden_ptr + offsets, hidden, mask=valid[:, None])
+    bias = tl.load(b2_ptr + columns, mask=col_valid, other=0.0)
+    hidden = (accumulator + bias[None, :]).to(tl.bfloat16)
+    tl.store(hidden_ptr + offsets, hidden, mask=live)
     tl.store(
         activated_hidden_ptr + offsets,
         _gelu(hidden.to(tl.float32)).to(tl.bfloat16),
-        mask=valid[:, None],
+        mask=live,
     )
 
 
@@ -381,8 +409,8 @@ def _project_backward(
     grad_out_ptr, weight_ptr, preactivation_ptr, grad_in_ptr, activated_ptr,
     grad_bias_ptr,
     rows, shape_key,
-    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    EMIT_BIAS: tl.constexpr,
+    WIDTH: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, EMIT_BIAS: tl.constexpr,
 ):
     """One dX GEMM with the GELU derivative and the cuBLAS operand in the epilogue.
 
@@ -395,31 +423,37 @@ def _project_backward(
     ``EMIT_BIAS`` belongs to the call that PRODUCES a bias gradient -- the third
     projection's dX, which yields ``grad_b2`` -- not the second's.
     """
-    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
-    columns = tl.arange(0, WIDTH)
+    columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    col_valid = columns < WIDTH
+    live = valid[:, None] & col_valid[None, :]
     accumulator = _row_gemm(
-        grad_out_ptr, weight_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
-        W_ROW_STRIDE=WIDTH,
+        grad_out_ptr, weight_ptr, row_block, valid, columns, col_valid,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=True, W_ROW_STRIDE=WIDTH,
     )
 
     offsets = row_block[:, None] * WIDTH + columns[None, :]
-    preactivation = tl.load(
-        preactivation_ptr + offsets, mask=valid[:, None], other=0.0
-    ).to(tl.float32)
+    preactivation = tl.load(preactivation_ptr + offsets, mask=live, other=0.0).to(tl.float32)
     erf_term = _gelu_erf(preactivation)
     grad_in = accumulator * _gelu_grad_from_erf(preactivation, erf_term)
-    tl.store(grad_in_ptr + offsets, grad_in.to(tl.bfloat16), mask=valid[:, None])
+    tl.store(grad_in_ptr + offsets, grad_in.to(tl.bfloat16), mask=live)
     tl.store(
         activated_ptr + offsets,
         _gelu_from_erf(preactivation, erf_term).to(tl.bfloat16),
-        mask=valid[:, None],
+        mask=live,
     )
     if EMIT_BIAS:
+        # One column tile's own slice of the bias gradient. The reduction is down the ROW axis, so
+        # splitting the columns splits the destination too and no two programs contend for a slot
+        # they both own -- which is why this survives the column tile the row reductions did not.
         tl.atomic_add(
             grad_bias_ptr + columns,
-            tl.sum(tl.where(valid[:, None], grad_in, 0.0), axis=0),
+            tl.sum(tl.where(live, grad_in, 0.0), axis=0),
+            mask=col_valid,
         )
 
 
@@ -434,7 +468,8 @@ def _edge_backward(
     grad_edge_ptr, grad_query_ptr,
     rows, groups_total, shape_key,
     W1_ROW_STRIDE: tl.constexpr, NEIGHBORS: tl.constexpr, WIDTH: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
     """The last dX GEMM, the residual add, and the query gradient.
 
@@ -448,38 +483,40 @@ def _edge_backward(
     neighbour axis, so the tile reduces it to a handful of atomics before touching
     memory.  Same data, seven times cheaper.
     """
-    row_block = tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
+                              tl.cdiv(rows, BLOCK_M1), tl.cdiv(WIDTH, BLOCK_N), GROUP_M)
+    row_block = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     valid = row_block < rows
-    columns = tl.arange(0, WIDTH)
+    columns = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    col_valid = columns < WIDTH
+    live = valid[:, None] & col_valid[None, :]
     offsets = row_block[:, None] * WIDTH + columns[None, :]
     accumulator = _row_gemm(
-        grad_preactivation_ptr, w1_ptr, row_block, valid, columns,
-        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_K=BLOCK_K, CONTRACT_OUT=True,
-        W_ROW_STRIDE=W1_ROW_STRIDE,
+        grad_preactivation_ptr, w1_ptr, row_block, valid, columns, col_valid,
+        WIDTH=WIDTH, BLOCK_M1=BLOCK_M1, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        CONTRACT_OUT=True, W_ROW_STRIDE=W1_ROW_STRIDE,
     )
 
-    residual = tl.load(
-        grad_values_ptr + offsets, mask=valid[:, None], other=0.0
-    ).to(tl.float32)
+    residual = tl.load(grad_values_ptr + offsets, mask=live, other=0.0).to(tl.float32)
     tl.store(
         grad_edge_ptr + offsets, (residual + accumulator).to(tl.bfloat16),
-        mask=valid[:, None],
+        mask=live,
     )
 
     # Re-read rather than reuse the contraction's operand: the loop slices it into
     # BLOCK_K chunks and the scatter below wants the whole row.
     grad_preactivation = tl.load(
-        grad_preactivation_ptr + offsets, mask=valid[:, None], other=0.0
+        grad_preactivation_ptr + offsets, mask=live, other=0.0
     ).to(tl.float32)
     groups = row_block // NEIGHBORS
-    first_group = (tl.program_id(0) * BLOCK_M1) // NEIGHBORS
+    first_group = (pid_m * BLOCK_M1) // NEIGHBORS
     for span in tl.static_range((BLOCK_M1 + NEIGHBORS - 1) // NEIGHBORS + 1):
         group = first_group + span
         selected = valid & (groups == group)
         tl.atomic_add(
             grad_query_ptr + group * WIDTH + columns,
             tl.sum(tl.where(selected[:, None], grad_preactivation, 0.0), axis=0),
-            mask=group < groups_total,
+            mask=col_valid & (group < groups_total),
         )
 
 
@@ -490,8 +527,19 @@ def _neighbors_of(rows: int, nodes: int) -> int:
     return rows // nodes
 
 
-def _grid(rows):
+def _rows_grid(rows):
+    """The 1-D grid the LayerNorm stages keep: one program owns a whole row.
+
+    `_project_output` and `_norm_backward` reduce ACROSS the width -- mean, rstd, and the three
+    parameter gradients -- so a column tile would split a reduction that has to see the row. They
+    are the two kernels here without BLOCK_N, and the reason is the reduction, not the shape.
+    """
     return lambda meta: (triton.cdiv(rows, meta["BLOCK_M1"]),)
+
+
+def _tile_grid(rows, width):
+    """The 1-D grid `tile_order` expects for the four kernels that DO take a column tile."""
+    return lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])
 
 
 # The saved activations leave here as four separate returns rather than the tuple they used to
@@ -510,9 +558,9 @@ def _launch_forward_fake(
     dropout off it is a one-element placeholder, because nothing behind the `DROPOUT` constexpr
     reads it and 0.4 GiB of untouched memory is the alternative.
     """
-    rows = edge.shape[0]
+    rows, width = edge.shape
     empty = lambda: torch.empty_like(edge)
-    keep_elements = rows * WIDTH if dropout_probability > 0.0 else 1
+    keep_elements = rows * width if dropout_probability > 0.0 else 1
     return (
         empty(), empty(), empty(), empty(),
         edge.new_empty((keep_elements,), dtype=torch.int8),
@@ -527,7 +575,7 @@ def _launch_forward(
     eps: float, dropout_probability: float, w1_row_stride: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns ``out`` and the four tensors backward reads back, in that order."""
-    rows = edge.shape[0]
+    rows, width = edge.shape
     dropout = dropout_probability > 0.0
     empty = lambda: torch.empty_like(edge)
     out, preactivation, activated = empty(), empty(), empty()
@@ -537,26 +585,26 @@ def _launch_forward(
     # touches it -- both accesses sit behind the DROPOUT constexpr -- so it shrinks to a
     # placeholder instead of 0.4 GiB of untouched memory at the sweep point.
     keep = torch.empty(
-        rows * WIDTH if dropout else 1, device=edge.device, dtype=torch.int8
+        rows * width if dropout else 1, device=edge.device, dtype=torch.int8
     )
 
     neighbors = _neighbors_of(rows, query.shape[0])
-    grid = _grid(rows)
-    _project_edge[grid](
+    tiles, whole_rows = _tile_grid(rows, width), _rows_grid(rows)
+    _project_edge[tiles](
         edge, query, table, index, w1, preactivation, activated,
         rows, _shape_key(rows, NEIGHBORS=neighbors),
-        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=WIDTH,
+        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=width,
     )
-    _project_hidden[grid](
+    _project_hidden[tiles](
         activated, w2, b2, hidden, activated_hidden,
-        rows, _shape_key(rows), WIDTH=WIDTH,
+        rows, _shape_key(rows), WIDTH=width,
     )
-    _project_output[grid](
+    _project_output[whole_rows](
         activated_hidden, w3, b3, edge, gamma, beta, seed,
         out, values, keep, rows, _shape_key(rows),
         1.0 - dropout_probability,
         1.0 / (1.0 - dropout_probability) if dropout else 1.0, eps,
-        WIDTH=WIDTH, DROPOUT=dropout,
+        WIDTH=width, DROPOUT=dropout,
     )
     # activated and activated_hidden are not saved: backward recomputes both GELUs from
     # the GEMM outputs above, which is the cheap direction and drops 1.6 GiB of live
@@ -589,12 +637,13 @@ def _launch_backward_fake(
     the row axis and are cast back at the autograd boundary rather than in the kernel. The node
     count comes from `nodes`, which no input tensor carries.
     """
+    width = edge.shape[1]
     like = lambda *shape: edge.new_empty(shape)
     fp32 = lambda *shape: edge.new_empty(shape, dtype=torch.float32)
     return (
-        torch.empty_like(edge), fp32(nodes, WIDTH), like(nodes, WIDTH),
-        like(WIDTH, edge.shape[1]), like(WIDTH, WIDTH), like(WIDTH, WIDTH),
-        fp32(WIDTH), fp32(WIDTH), fp32(WIDTH), fp32(WIDTH),
+        torch.empty_like(edge), fp32(nodes, width), like(nodes, width),
+        like(width, width), like(width, width), like(width, width),
+        fp32(width), fp32(width), fp32(width), fp32(width),
     )
 
 
@@ -609,7 +658,7 @@ def _launch_backward(
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
 ]:
     """The ten gradients of :data:`_GRADIENTS`, in that order."""
-    rows = edge.shape[0]
+    rows, width = edge.shape
     dropout = dropout_probability > 0.0
     scale = 1.0 / (1.0 - dropout_probability) if dropout else 1.0
     empty = lambda: torch.empty_like(edge)
@@ -617,7 +666,7 @@ def _launch_backward(
 
     # BF16, not FP32: this is written by the norm pass and read by the edge pass, and
     # its value is rounded into a BF16 grad_edge one instruction later.  5.6 ms cheaper.
-    grad_values = torch.empty(rows, WIDTH, device=edge.device, dtype=torch.bfloat16)
+    grad_values = torch.empty(rows, width, device=edge.device, dtype=torch.bfloat16)
     grad_update, grad_hidden, grad_preactivation = empty(), empty(), empty()
     activated, activated_hidden, grad_edge = empty(), empty(), empty()
     # One accumulator per LAUNCH -- not per kernel, and not per gradient.  reset_to_zero
@@ -628,33 +677,33 @@ def _launch_backward(
     # stopped hitting the first one's cache entry, started tuning, and reset the buffer
     # the first had just filled.  It emits no bias gradient, so it gets its own scratch
     # and the sharing cannot come back.
-    grad_norm_weight, grad_norm_bias = zeros(WIDTH), zeros(WIDTH)
-    grad_output_bias, grad_hidden_bias = zeros(WIDTH), zeros(WIDTH)
-    grad_bias_scratch = zeros(WIDTH)
-    grad_query = zeros(nodes * WIDTH).view(nodes, WIDTH)
+    grad_norm_weight, grad_norm_bias = zeros(width), zeros(width)
+    grad_output_bias, grad_hidden_bias = zeros(width), zeros(width)
+    grad_bias_scratch = zeros(width)
+    grad_query = zeros(nodes * width).view(nodes, width)
 
     neighbors = _neighbors_of(rows, nodes)
-    grid = _grid(rows)
-    _norm_backward[grid](
+    tiles, whole_rows = _tile_grid(rows, width), _rows_grid(rows)
+    _norm_backward[whole_rows](
         grad_out, values, keep, gamma, grad_values, grad_update,
         grad_norm_weight, grad_norm_bias, grad_output_bias,
         rows, _shape_key(rows), scale, eps,
-        WIDTH=WIDTH, DROPOUT=dropout,
+        WIDTH=width, DROPOUT=dropout,
     )
-    _project_backward[grid](
+    _project_backward[tiles](
         grad_update, w3, hidden, grad_hidden, activated_hidden,
         grad_hidden_bias, rows, _shape_key(rows),
-        WIDTH=WIDTH, EMIT_BIAS=True,
+        WIDTH=width, EMIT_BIAS=True,
     )
-    _project_backward[grid](
+    _project_backward[tiles](
         grad_hidden, w2, preactivation, grad_preactivation, activated,
         grad_bias_scratch, rows, _shape_key(rows),
-        WIDTH=WIDTH, EMIT_BIAS=False,
+        WIDTH=width, EMIT_BIAS=False,
     )
-    _edge_backward[grid](
+    _edge_backward[tiles](
         grad_preactivation, w1, grad_values, grad_edge, grad_query,
         rows, nodes, _shape_key(rows, NEIGHBORS=neighbors),
-        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=WIDTH,
+        W1_ROW_STRIDE=w1_row_stride, NEIGHBORS=neighbors, WIDTH=width,
     )
     # ATen's sort-and-segment reduction rather than an in-kernel scatter: a row tile
     # holds one query's k nearest and those are distinct by construction, so there is
