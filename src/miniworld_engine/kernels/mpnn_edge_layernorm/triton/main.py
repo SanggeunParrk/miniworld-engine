@@ -11,19 +11,37 @@ from __future__ import annotations
 
 import torch
 
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.layernorm.compile_native import (
     _bwd_atomic_impl,
-    _bwd_partial_impl,
+    _bwd_persistent_impl,
 )
 
 
 _WIDTH = 128
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_edge_layernorm_memory_bwd_v1",
-    mutates_args=(),
-)
+def _backward_op_fake(
+    grad_output: torch.Tensor,
+    saved_input: torch.Tensor,
+    weight: torch.Tensor,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(dX, dW, dB). dX takes grad_output's shape from saved_input and its DTYPE from
+    grad_output -- `_bwd_atomic_impl` writes it that way, and AOTAutograd needs the fake to agree
+    or a fullgraph compile disagrees with the real op about a dtype."""
+    del mean, rstd
+    # dX follows grad_output's dtype in _bwd_atomic_impl, not saved_input's BF16
+    # dtype. This distinction is required for AOTAutograd/fullgraph correctness.
+    return (
+        grad_output.new_empty(saved_input.shape),
+        weight.new_empty(weight.shape),
+        weight.new_empty(weight.shape),
+    )
+
+
+@opaque(fake=_backward_op_fake, name="mpnn_edge_layernorm_memory_bwd_v1")
 def _backward_op(
     grad_output: torch.Tensor,
     saved_input: torch.Tensor,
@@ -31,12 +49,23 @@ def _backward_op(
     mean: torch.Tensor,
     rstd: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Forward dispatch normally keeps deterministic steps on native PyTorch.
-    # Retain the contract even if the global flag is enabled between forward
-    # and backward by switching this already-created autograd node to the
-    # non-atomic partial reduction.
+    """LayerNorm backward from a BF16 copy of the input rather than the fp32 original.
+
+    The memory backend keeps the native forward bit-for-bit and saves only that copy; this is
+    what reads it back. Deterministic mode picks the non-atomic reduction below.
+    """
+    # Forward dispatch normally keeps deterministic steps on native PyTorch. Retain the contract
+    # even if the global flag is enabled between forward and backward by switching this
+    # already-created autograd node to a non-atomic reduction.
+    #
+    # `_bwd_persistent_impl`, not the `_bwd_partial_impl` this used to name: that path was deleted
+    # with the rest of the `partial` backward, which won zero of the 49 measured (d, M) buckets and
+    # cost 1.5-2.0x median. Persistent has the property that matters here for the same reason
+    # partial did -- each program writes its own slot of a (programs, N) buffer and the reduction
+    # is a plain sum over it, so the order is fixed and the result is reproducible. Atomics are
+    # what determinism rules out, and neither of these uses one.
     backward_impl = (
-        _bwd_partial_impl
+        _bwd_persistent_impl
         if torch.are_deterministic_algorithms_enabled()
         else _bwd_atomic_impl
     )
@@ -50,24 +79,6 @@ def _backward_op(
     # The generic kernel returns a two-dimensional dX. Keep this custom op's
     # real output contract identical to its fake registration.
     return grad_input.view_as(saved_input), grad_weight, grad_bias
-
-
-@_backward_op.register_fake
-def _(
-    grad_output: torch.Tensor,
-    saved_input: torch.Tensor,
-    weight: torch.Tensor,
-    mean: torch.Tensor,
-    rstd: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    del mean, rstd
-    # dX follows grad_output's dtype in _bwd_atomic_impl, not saved_input's BF16
-    # dtype. This distinction is required for AOTAutograd/fullgraph correctness.
-    return (
-        grad_output.new_empty(saved_input.shape),
-        weight.new_empty(weight.shape),
-        weight.new_empty(weight.shape),
-    )
 
 
 class _MemoryLayerNorm(torch.autograd.Function):

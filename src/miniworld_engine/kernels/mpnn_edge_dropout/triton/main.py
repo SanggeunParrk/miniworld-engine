@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 import triton
+
+from miniworld_engine.kernels._compile import opaque
 import triton.language as tl
 
 
@@ -62,11 +64,18 @@ def _packed_dropout_backward_kernel(
     tl.store(grad_input_ptr + offsets, grad_input, mask=valid)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_edge_dropout_pack_v1",
-    mutates_args=(),
-)
+def _pack_op_fake(mask: torch.Tensor) -> torch.Tensor:
+    """(ceil(numel/8),) uint8 -- one bit per element of the boolean mask."""
+    return torch.empty(((mask.numel() + 7) // 8,), device=mask.device, dtype=torch.uint8)
+
+
+@opaque(fake=_pack_op_fake, name="mpnn_edge_dropout_pack_v1")
 def _pack_op(mask: torch.Tensor) -> torch.Tensor:
+    """Pack ATen's boolean dropout mask to one bit per element for the backward.
+
+    The forward is native dropout unchanged; only the mask it retains is packed, which is where
+    the memory goes -- a byte per element of an edge tensor against a bit.
+    """
     if not mask.is_cuda or mask.dtype != torch.bool or not mask.is_contiguous():
         raise ValueError("edge dropout packing requires a contiguous CUDA bool mask")
     packed = torch.empty(
@@ -84,24 +93,22 @@ def _pack_op(mask: torch.Tensor) -> torch.Tensor:
     return packed
 
 
-@_pack_op.register_fake
-def _(mask: torch.Tensor) -> torch.Tensor:
-    return torch.empty(
-        ((mask.numel() + 7) // 8,),
-        device=mask.device,
-        dtype=torch.uint8,
-    )
+def _backward_op_fake(
+    grad_output: torch.Tensor,
+    packed: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Same shape and dtype as the incoming gradient: dropout is elementwise."""
+    return torch.empty_like(grad_output)
 
 
-@torch.library.custom_op(
-    "miniworld_engine::mpnn_edge_dropout_backward_v1",
-    mutates_args=(),
-)
+@opaque(fake=_backward_op_fake, name="mpnn_edge_dropout_backward_v1")
 def _backward_op(
     grad_output: torch.Tensor,
     packed: torch.Tensor,
     scale: float,
 ) -> torch.Tensor:
+    """Dropout backward straight off the packed mask: no unpack pass, one read per bit."""
     if not grad_output.is_cuda or not grad_output.is_contiguous():
         raise ValueError("edge dropout backward requires a contiguous CUDA gradient")
     if (
@@ -125,16 +132,6 @@ def _backward_op(
         num_warps=4,
     )
     return grad_input
-
-
-@_backward_op.register_fake
-def _(
-    grad_output: torch.Tensor,
-    packed: torch.Tensor,
-    scale: float,
-) -> torch.Tensor:
-    del packed, scale
-    return torch.empty_like(grad_output)
 
 
 class _BitpackDropout(torch.autograd.Function):

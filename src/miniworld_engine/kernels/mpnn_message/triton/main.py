@@ -555,7 +555,7 @@ _DX_CHUNK_ROWS = 262_144
 
 
 @torch.library.custom_op(
-    "miniworld_engine::mpnn_projection_dx_weight_v1", mutates_args=()
+    "miniworld_engine::mpnn_message_projection_dx_weight_v1", mutates_args=()
 )
 def _projection_dx_weight_op(
     grad_projected: torch.Tensor,
