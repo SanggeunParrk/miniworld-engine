@@ -1156,7 +1156,13 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             continue
         if only and r["kernel"] not in only:
             continue
-        if stack and r.get("stack") not in (stack, "both"):
+        # `both` is both KRYSTAL halves, not all three stacks. A kernel the trunk and the
+        # diffusion side share is launched by neither ProteinMPNN nor anything else, so asking for
+        # the mpnn half must not drag it in: `build mpnn` did exactly that and spent its first
+        # minute on gated_projection and layernorm, at pair shapes, into a shard directory the
+        # A6000 build on another node was already filling with the same units.
+        shared = "both" if stack in ("trunk", "diffusion") else None
+        if stack and r.get("stack") not in (stack, shared):
             continue
         if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
             continue          # this config set declares no grid for it

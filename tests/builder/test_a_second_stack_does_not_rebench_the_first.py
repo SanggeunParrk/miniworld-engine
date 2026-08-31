@@ -52,12 +52,16 @@ def test_the_two_stacks_really_do_share_most_of_their_units() -> None:
     trunk = {u.stem for u in builder.op_units(config_dir=cd, stack="trunk")}
     diff = {u.stem for u in builder.op_units(config_dir=cd, stack="diffusion")}
     both = {u.stem for u in builder.op_units(config_dir=cd)}
-    # `mpnn` is a third half. It is NOT disjoint from the other two: a `stack=both` row is built by
-    # every half on purpose, so asking for one model's half still returns krystal's shared kernels.
-    # What is disjoint is the rows that name a model outright, and that is what the union needs.
+    # `mpnn` is a third stack and it IS disjoint from the other two. `both` means both KRYSTAL
+    # halves -- a kernel those two share is launched by neither ProteinMPNN nor anything else --
+    # so the sharing rule stops at the model boundary. It did not, and `build mpnn` spent its first
+    # minute building gated_projection and layernorm at pair shapes.
     mpnn = {u.stem for u in builder.op_units(stack="mpnn", config_dir=cd)}
     assert trunk & diff, "the stacks no longer overlap; this whole file is about the overlap"
-    assert mpnn - (trunk | diff), "the mpnn half reaches no unit of its own"
+    assert mpnn, "the mpnn stack reaches no unit at all"
+    assert not (mpnn & (trunk | diff)), (
+        "an mpnn unit is reachable from a krystal half; the two models share no kernel, and a "
+        "`both` row belongs to krystal's two halves only")
     assert trunk | diff | mpnn == both, (
         "the halves are no longer the same work as `all`; one half now reaches a unit the "
         "full sweep does not, or the reverse")

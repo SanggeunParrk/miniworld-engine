@@ -393,7 +393,12 @@ def main(argv: list[str] | None = None) -> int:
         }
         pathlib.Path(args.json).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         print(f"  wrote {args.json}")
-    return 0
+    # NON-ZERO when a kernel this card was supposed to run produced the wrong numbers or would not
+    # launch. It returned 0 unconditionally, and that is not a cosmetic slip: a Slurm chain gated on
+    # this with `--dependency=afterok` read "7 of 14 FAIL" as success and started a four-hour build
+    # on a harness that had just been shown broken. A skip is not a failure and does not count --
+    # a kernel this card cannot run, or one not declared at this precision, is absent, not wrong.
+    return 1 if len(results) != have else 0
 
 
 if __name__ == "__main__":

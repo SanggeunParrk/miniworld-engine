@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.checks import _grads
+from miniworld_engine.kernels.checks import _fixed, _grads
 from miniworld_engine.kernels.drivers import BF16, dev
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import _NEIGHBORS, _graph, _nodes
 
 
 def _node_message_inputs():
+    _fixed()
     t = _graph(grad=True)
     mask = (torch.rand(1, _nodes(), _NEIGHBORS, device=dev()) > 0.2).to(BF16)
     names = ("edge_states", "query_projection", "neighbor_projection", "edge_weight",

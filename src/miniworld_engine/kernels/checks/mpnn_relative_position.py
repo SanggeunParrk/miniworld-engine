@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import torch
 
+from miniworld_engine.kernels.checks import _fixed
 from miniworld_engine.kernels.drivers import BF16, dev
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import (
     _BUCKET_WIDTH,
@@ -23,6 +24,7 @@ def mpnn_relative_position_bwd_reduce_triton():
     to do the reduction, so comparing against it would compare two orderings rather than the
     arithmetic. `index_add_` on an fp32 copy is the same sum in the obvious order.
     """
+    _fixed()
     from miniworld_engine.kernels.mpnn_relative_position.triton.main import (
         triton_bucket_reduce,
     )

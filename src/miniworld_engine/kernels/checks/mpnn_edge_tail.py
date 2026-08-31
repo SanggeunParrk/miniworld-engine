@@ -16,12 +16,13 @@ forward stored rather than drawing a new one.
 """
 from __future__ import annotations
 
-from miniworld_engine.kernels.checks import _EPS, _grads
+from miniworld_engine.kernels.checks import _EPS, _fixed, _grads
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import _graph
 
 
 def _edge_tail_pair(backend: str):
     """(kernel output, fp32 reference) for one encoder edge tail at `backend`'s policy."""
+    _fixed()
     from miniworld_engine.kernels.mpnn_edge_tail.interface import edge_tail_update
     from miniworld_engine.kernels.mpnn_edge_tail.reference import (
         edge_tail_update_pytorch,
@@ -42,6 +43,7 @@ def _edge_tail_pair(backend: str):
 
 def _edge_tail_grads(backend: str):
     """Every gradient of one encoder edge tail against fp32 autograd on the same values."""
+    _fixed()
     from miniworld_engine.kernels.mpnn_edge_tail.interface import edge_tail_update
     from miniworld_engine.kernels.mpnn_edge_tail.reference import (
         edge_tail_update_pytorch,
