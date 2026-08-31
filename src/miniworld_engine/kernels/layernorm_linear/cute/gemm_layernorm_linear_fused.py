@@ -576,7 +576,13 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 k_tile_cnt = cute.ceil_div(len_k, self.cta_tile_shape_mnk[2])
                 len_k_f = Float32(len_k)
                 m_tile = tile_coord_mnkl[0]
-                do_reduce = Boolean(True)  # TODO reuse disabled (was buggy at BLK_N>128)
+                # Always reduce. The tile-reuse path that would let a tile skip its own
+                # reduction was wrong above BLK_N=128, and it is not being left as a note for
+                # someone to pick up: it saves
+                # a reduction the epilogue needs anyway, and the failure it caused was silent
+                # (wrong stats, right shape). Reducing every tile is the correct-by-construction
+                # version, and this line is where to start if someone measures that it costs.
+                do_reduce = Boolean(True)
                 if const_expr(_WS):
                     # WARP-SPECIALIZED: stats are produced by the idle load-WG warps and
                     # land in s_rstd/s_c1[wg half] via the Full[g] mbarrier. The math WG

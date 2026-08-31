@@ -1279,7 +1279,8 @@ class PersistentDenseGemmKernel:
         :raises testing.CantImplementError: If the tensor alignment is invalid
         """
 
-        # TODO: move to utils
+        # Local on purpose: it reads `a_dtype`/`a_major`/`m, k, l` from this frame and is the
+        # only caller. Hoisting it would need all of that passed in, for one use.
         def check_contiguous_16B_alignment(dtype, is_mode0_major, tensor_shape):
             major_mode_idx = 0 if is_mode0_major else 1
             num_major_elements = tensor_shape[major_mode_idx]
