@@ -1,6 +1,6 @@
 axis,values
 BLOCK_M1,32 64 128 256
-TILES,1 2 4
 BLOCK_K,32 64 128
-num_warps,4 8 16
-num_stages,1 2 3
+TILES,1 2 4
+num_warps,1 2 4 8 16 32
+num_stages,1 2 3 4 5 6 8

@@ -18,8 +18,8 @@ declare bf16 and 42 declare fp32; the two sets overlap, which is why they do not
 |---|---|---|---|---|---|---|---|
 | RTX A6000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 92, ok 85, failed 7, skipped 6` | `manifests/NVIDIA RTX A6000 (sm86).csv` |
 | RTX A6000 (sm86) | fp32 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 33, ok 33, failed 0, skipped 2` | same file, `dtype` column |
-| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `ok 80, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
-| RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | the node is drained |
+| RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 101, ok 94, failed 7, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
+| RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | no fp32 pass has been made on this card |
 
 The seven bf16 failures are the newly registered mpnn kernels, and neither cause is the kernel being
 wrong: five are outside the default 5e-02 band with no `rtol` declared, and two would not launch
@@ -32,9 +32,10 @@ Every skip is a kernel whose declared `arch` is above sm86. It is not launched, 
 and is not a failure — the manifest says `skipped` with the reason, in its own column, rather than
 carrying a stale verdict from before the arch gate existed.
 
-The A5000 rows predate the two-precision scheme: its six arch-gated kernels were relabelled from
-`failed` to `skipped` from the refusal message they already carried, and its fp32 half has never
-been run because the only A5000 node is drained. Read it as bf16 evidence and nothing more.
+The A5000's seven failures are the same seven the A6000 has, and for the same two reasons -- five
+mpnn kernels outside a band nothing declares, two that will not launch on an untuned card. Its six
+arch-gated kernels were relabelled from `failed` to `skipped` from the refusal message they already
+carried. Its fp32 half has never been run, so read the row as bf16 evidence and nothing more.
 
 `tests/registry/test_the_support_page_counts_its_own_evidence.py` checks every number above against
 the manifest it cites, so this table cannot age past its evidence again.
