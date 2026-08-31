@@ -28,13 +28,12 @@ activations are bf16 and stay bf16. The normalisation over them is what has to b
 """
 from __future__ import annotations
 
-import csv
 import re
 
-from paths import ROOT
+from paths import ROOT, registry_rows
 
 PKG = ROOT / "src" / "miniworld_engine"
-REG = PKG / "kernels" / "registry.csv"
+
 KERNELS = PKG / "kernels"
 #: Where a LayerNorm actually lives. `notes/` is scratch and reference.py is the fp64/bf16 oracle
 #: a checker compares against, so neither is a path production takes.
@@ -50,8 +49,7 @@ PINNED = re.compile(r"torch\.bfloat16")
 
 
 def _rows() -> list[dict]:
-    with REG.open(newline="") as fh:
-        return list(csv.DictReader(fh))
+    return registry_rows()
 
 
 def test_no_layernorm_driver_builds_a_bf16_activation() -> None:

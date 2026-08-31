@@ -33,7 +33,7 @@ import pytest
 from paths import ROOT
 
 PKG = ROOT / "src" / "miniworld_engine"
-REG = PKG / "kernels" / "registry.csv"
+from paths import REGISTRY as REG
 
 #: The ways in from outside the kernel package. A path under any of these is a seed.
 ENTRY = ("/modules/", "/ops/")

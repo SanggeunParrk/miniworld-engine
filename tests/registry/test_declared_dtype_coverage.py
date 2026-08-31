@@ -9,17 +9,16 @@ the same blind spot: the builder did not do the work and the check could not see
 from __future__ import annotations
 
 import collections
-import csv
 
 import pytest
-from paths import REGISTRY as REG
+from paths import registry_rows
 
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 
 
 def _declared():
     out = {}
-    for r in csv.DictReader(REG.open()):
+    for r in registry_rows():
         if r["backend"] == "triton" and (r["driver"] or "").strip():
             out[r["kernel"]] = {ALIAS.get(x, x) for x in r["dtypes"].split("|") if x}
     return out

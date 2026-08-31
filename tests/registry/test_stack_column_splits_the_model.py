@@ -13,17 +13,15 @@ disagreeing with its eleven siblings.
 """
 from __future__ import annotations
 
-import csv
 from collections import defaultdict
 
-from paths import REGISTRY as REG
+from paths import registry_rows
 
 KNOWN = {"trunk", "diffusion", "both"}
 
 
 def _rows() -> list[dict]:
-    with REG.open(newline="") as fh:
-        return list(csv.DictReader(fh))
+    return registry_rows()
 
 
 def test_every_row_declares_a_known_stack() -> None:

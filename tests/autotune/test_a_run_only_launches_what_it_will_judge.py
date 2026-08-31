@@ -15,10 +15,10 @@ One predicate now answers "does this run launch this kernel", and it answers bef
 """
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 
 import pytest
+from paths import registry_rows
 
 from miniworld_engine.autotune.run_all import declines_this_run
 
@@ -68,7 +68,7 @@ def test_the_card_is_checked_before_the_precision():
 def test_the_real_registry_leaves_nothing_unclassified(dtype):
     """The accounting the fp32 run failed: every row with a driver is launched or declined, and
     the two sets must cover it. This is the check that would have named the 44."""
-    rows = [r for r in csv.DictReader(REGISTRY.open(newline="")) if (r.get("driver") or "").strip()]
+    rows = [r for r in registry_rows() if (r.get("driver") or "").strip()]
     assert rows, "no rows with drivers; this would pass vacuously"
     launched = [r for r in rows if declines_this_run(r, "sm86", dtype) is None]
     declined = [r for r in rows if declines_this_run(r, "sm86", dtype) is not None]
@@ -79,6 +79,6 @@ def test_the_real_registry_leaves_nothing_unclassified(dtype):
 def test_every_declared_precision_is_one_the_drivers_can_build():
     """`declines_this_run` compares against `drivers.DTYPE_MODE`, which is bf16 or fp32 and
     nothing else. A row declaring a third name would be declined by every run, silently."""
-    for r in csv.DictReader(REGISTRY.open(newline="")):
+    for r in registry_rows():
         for dt in (a.strip() for a in (r.get("dtypes") or "bf16").split("|")):
             assert dt in ("bf16", "fp32"), f"{r['kernel']}: dtypes names {dt!r}"

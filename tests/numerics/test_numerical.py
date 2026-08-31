@@ -17,13 +17,13 @@ import csv
 from pathlib import Path
 
 import pytest
-from paths import REGISTRY as REG
+from paths import registry_rows
 
 pytestmark = pytest.mark.gpu
 
 
 def _rows():
-    return list(csv.DictReader(REG.open()))
+    return list(registry_rows())
 
 
 def _declared():

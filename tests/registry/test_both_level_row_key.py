@@ -15,11 +15,9 @@ configuration had measured 5.50 ms a month earlier.
 from __future__ import annotations
 
 import collections
-import csv
-from pathlib import Path
 
 import pytest
-from paths import ROOT
+from paths import ROOT, registry_rows
 
 from miniworld_engine.autotune import cache
 from miniworld_engine.autotune.builder import op_units
@@ -30,8 +28,6 @@ from miniworld_engine.autotune.shape_key import (
     both_key,
     rows_of,
 )
-
-REG = Path(cache.__file__).resolve().parents[1] / "kernels" / "registry.csv"
 
 
 def test_a_pair_and_an_atom_of_the_same_length_are_different_buckets():
@@ -71,7 +67,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
     So the invariant splits in two: no bucket in the set is unreachable (the union covers it), and
     no unit lands outside the set (nothing floors into a neighbour's bucket).
     """
-    rows = [r for r in csv.DictReader(REG.open())
+    rows = [r for r in registry_rows()
             if r["level"] == "both" and r["backend"] == "triton" and (r["driver"] or "").strip()]
     assert rows, "no level=both triton kernels in the registry"
     union, outside = set(), []
@@ -134,7 +130,7 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
               "layernorm_linear": {"pair", "token", "atom"},
               "gated_projection": {"pair", "token", "atom"}}
     bad = []
-    for r in csv.DictReader(REG.open()):
+    for r in registry_rows():
         if r["level"] != "both":
             continue
         want = expect.get(r["family"])
@@ -156,7 +152,7 @@ def test_a_transition_kernel_is_not_built_on_atoms():
     driven at ATOM_SHAPES is six units per precision spent on a stream it never sees.
     """
     bad = []
-    for r in csv.DictReader(REG.open()):
+    for r in registry_rows():
         if r["family"] != "transition" or r["level"] != "both":
             continue
         if "atom" in (r.get("sides") or "pair|atom").split("|"):
@@ -200,7 +196,7 @@ def test_an_entry_from_the_old_scheme_is_not_served_to_a_both_level_kernel():
 
 def test_a_token_level_kernel_keeps_its_entries():
     """Scheme 2 re-based only both-level keys; invalidating the rest would discard a good build."""
-    token = next(r["kernel"] for r in csv.DictReader(REG.open()) if r["level"] == "token")
+    token = next(r["kernel"] for r in registry_rows() if r["level"] == "token")
     assert cache._scheme_stale(token, None) is False
 
 
@@ -288,5 +284,5 @@ def test_the_merge_keeps_an_old_shard_for_an_op_the_bump_did_not_touch():
     """Scheme 2 re-based both-level keys only; a token op's shard is still good."""
     from miniworld_engine.autotune import cache as c
 
-    token = next(r["kernel"] for r in csv.DictReader(REG.open()) if r["level"] == "token")
+    token = next(r["kernel"] for r in registry_rows() if r["level"] == "token")
     assert c._scheme_stale(token, None) is False

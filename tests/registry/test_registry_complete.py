@@ -18,13 +18,12 @@ question for a human (did the kernel change, or was the row wrong?), not somethi
 from __future__ import annotations
 
 import ast
-import csv
 import sys
 
-from paths import ROOT
+from paths import ROOT, registry_rows
 
 SRC = ROOT / "src"
-REG = SRC / "miniworld_engine/kernels/registry.csv"
+
 KERNELS = SRC / "miniworld_engine/kernels"
 
 KINDS = {"gemm", "reduce", "elem"}
@@ -32,8 +31,7 @@ LEVELS = {"atom", "token", "both"}
 
 
 def _rows() -> list[dict]:
-    with REG.open(newline="") as fh:
-        return list(csv.DictReader(fh))
+    return registry_rows()
 
 
 def test_every_column_is_filled() -> None:

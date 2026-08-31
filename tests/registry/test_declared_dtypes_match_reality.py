@@ -17,7 +17,6 @@ for the other. Neither fact had reached the registry.
 """
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 
@@ -27,7 +26,8 @@ from miniworld_engine.autotune import cache
 
 DATA = Path(cache.__file__).parent / "data"
 PKG = Path(cache.__file__).resolve().parents[1]
-REG = PKG / "kernels" / "registry.csv"
+from paths import registry_rows
+
 ALIAS = {"bf16": "bfloat16", "fp32": "float32", "fp16": "float16"}
 #: The card whose build is complete and committed; the completeness half is scoped to it.
 COMPLETE_GPU = "NVIDIA RTX A6000 (sm86)"
@@ -36,7 +36,7 @@ DISPATCH_DIRS = {"ln_bwd_dispatch", "bias_only_dispatch"}
 
 def _declared() -> dict[str, set[str]]:
     out = {}
-    for r in csv.DictReader(REG.open()):
+    for r in registry_rows():
         if r["backend"] == "triton" and (r["driver"] or "").strip():
             out[r["kernel"]] = {ALIAS.get(x, x) for x in (r["dtypes"] or "").split("|") if x}
     return out
@@ -148,7 +148,7 @@ def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():
         "dispatch._FAST_KERNEL_DTYPES is no longer bf16-only, so a guarded module CAN be handed "
         "another precision and this test's premise is gone")
     bad = [f"{r['kernel']} ({r['family']}) declares {r['dtypes']}"
-           for r in csv.DictReader(REG.open())
+           for r in registry_rows()
            if r["family"] in guarded and r["backend"] == "triton"
            and "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]]
     assert not bad, ("kernels behind guard_dtype declaring a precision it never lets through -- "

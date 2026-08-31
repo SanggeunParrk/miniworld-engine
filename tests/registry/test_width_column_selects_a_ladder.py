@@ -12,9 +12,8 @@ all key on `atom_key` and all run at d_single_token=768 in krystal's 24 `token_d
 """
 from __future__ import annotations
 
-import csv
-
 from paths import REGISTRY as REG
+from paths import registry_rows
 
 #: The four the builder's LADDER defines. `atom` is the fixed atom-stream width (128); `pair` and
 #: `single` are the two streams' ladders; `both` is the union, for a kernel that meets both.
@@ -22,8 +21,7 @@ KNOWN = {"atom", "pair", "single", "both"}
 
 
 def _rows() -> list[dict]:
-    with REG.open(newline="") as fh:
-        return list(csv.DictReader(fh))
+    return registry_rows()
 
 
 def test_every_width_value_names_a_known_ladder() -> None:

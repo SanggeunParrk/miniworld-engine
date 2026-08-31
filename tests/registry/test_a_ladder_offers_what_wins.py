@@ -30,7 +30,8 @@ from paths import ROOT
 PKG = ROOT / "src" / "miniworld_engine"
 DATA = PKG / "autotune" / "data"
 CONFIGS = PKG / "autotune" / "configs"
-REGISTRY = PKG / "kernels" / "registry.csv"
+from paths import REGISTRY
+
 #: Every axis a ladder narrows. The two named axes were the first to be derived from the cache;
 #: the BLOCK_* tiles are narrowed the same way and need the same guard, because the failure mode is
 #: identical -- a dropped rung that turns out to win makes a slower cache and nothing says so.

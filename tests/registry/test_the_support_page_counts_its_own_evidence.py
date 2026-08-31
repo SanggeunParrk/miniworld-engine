@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 import pytest
-from paths import ROOT
+from paths import ROOT, registry_rows
 
 PAGE = ROOT / "docs" / "supported.md"
 MANIFESTS = ROOT / "src" / "miniworld_engine" / "autotune" / "manifests"
@@ -80,7 +80,7 @@ def test_each_stated_count_matches_the_manifest(card: str, precision: str,
 def test_the_arch_counts_match_the_registry() -> None:
     """The "GPU that has NOT been run" table counts declared archs. It said sm100 7 when the
     registry declares 4 -- counted before nine rows left the registry, and never recounted."""
-    reg = list(csv.DictReader((ROOT / "src/miniworld_engine/kernels/registry.csv").open(newline="")))
+    reg = list(registry_rows())
     want = {}
     for r in reg:
         want[(r.get("arch") or "").strip() or "sm80"] = want.get(
