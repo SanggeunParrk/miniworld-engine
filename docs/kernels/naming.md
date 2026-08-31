@@ -36,6 +36,9 @@ ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이�
     mpnn_edge_tail          엣지 꼬리 전체 (투영 -> GELU -> 투영 -> dropout -> residual -> LN)
     mpnn_node_message       노드 메시지 (W1 블록, GELU 둘, W2, 마스크 리덕션)
     mpnn_relative_position  상대위치 임베딩의 backward — 버킷 리덕션
+    mpnn_message            은닉 투영 + 이웃 리덕션
+    mpnn_edge_mlp           엣지 메시지 MLP
+    mpnn_edge_dropout       dropout 마스크를 원소당 1비트로 압축
 
 `mpnn_message` 와 `mpnn_edge_mlp`, `mpnn_edge_dropout`, `mpnn_edge_layernorm` 은 여기 없다.
 그 계열의 커널들은 autotune 을 타지 않아 등록 대상이 아니다 (registry.csv 에 행이 없다).
@@ -54,6 +57,10 @@ ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이�
 `fused_` 접두는 정보가 없으므로 func에 쓰지 않는다.
 
 ## 2. `<role>` — 이 커널이 담당하는 계산 단계. 조각을 **실행 순서대로** 이어 쓴다
+
+    gelu     GELU 활성. `swiglu` 와 같은 축의 다른 활성이고, 같은 이유로 role 이다
+    reduce   축 하나를 접는다. `bwd_reduce` 가 복합어였던 이유가 이것이 없어서였다 —
+             backward 전용이 아니라 forward 에도 있다 (이웃 축 리덕션)
 
     fwd bwd            순/역전파 전체 (한 커널이 다 함)
     bwd_pre            역전파 전처리 (delta/rowsum/dscale 버퍼 생성)

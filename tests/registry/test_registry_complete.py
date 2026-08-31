@@ -426,8 +426,7 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     NOT_TUNED = {
         "_pack_bool_kernel", "_packed_dropout_backward_kernel",
         "_compute_stage_fwd_kernel", "_edge_mlp_fwd_kernel",
-        "_projection_fwd_kernel", "_gelu_reduce_fwd_kernel",
-        "_zero_bias_grad_kernel", "_gelu_reduce_db_bwd_kernel", "_projection_dx_kernel",
+        "_zero_bias_grad_kernel",
     }
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):

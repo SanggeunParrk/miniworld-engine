@@ -18,6 +18,7 @@ from __future__ import annotations
 import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._tiles import tile_grid
 import triton.language as tl
 
 
@@ -160,20 +161,22 @@ def _recompute_projected_op(
         _projection_fwd_kernel,
     )
 
-    rows = preactivation.numel() // _WIDTH
+    width = preactivation.shape[-1]
+    rows = preactivation.numel() // width
     projected = torch.empty_like(preactivation)
-    _projection_fwd_kernel[(triton.cdiv(rows, 128), 1)](
+    # Borrowed from mpnn_message, which tunes it. This launch takes the same key so the two share
+    # one cache entry per shape rather than each teaching the tuner the same thing.
+    from miniworld_engine.kernels.mpnn_message.triton.main import _shape_key
+    _projection_fwd_kernel[
+        lambda meta: tile_grid(rows, width, meta["BLOCK_M1"], meta["BLOCK_N"])
+    ](
         preactivation,
         hidden_weight,
         hidden_bias,
         projected,
         rows,
-        HIDDEN=_WIDTH,
-        BLOCK_M=128,
-        BLOCK_N=128,
-        BLOCK_K=16,
-        num_warps=4,
-        num_stages=3,
+        _shape_key(rows),
+        HIDDEN=width,
     )
     return projected
 

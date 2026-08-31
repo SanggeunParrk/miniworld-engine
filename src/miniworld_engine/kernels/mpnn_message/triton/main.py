@@ -16,6 +16,9 @@ from __future__ import annotations
 import torch
 import triton
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.autotune.shape_key import both_key
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
 import triton.language as tl
 
 from miniworld_engine.kernels.mpnn_message.triton._policy import _requires_i64_indexing
@@ -33,6 +36,10 @@ def _gelu_grad(x):
     return cdf + pdf_term
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_message_fwd_gemm_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _projection_fwd_kernel(
     preactivation_ptr,
@@ -40,18 +47,22 @@ def _projection_fwd_kernel(
     bias_ptr,
     projected_ptr,
     rows,
+    shape_key,
     HIDDEN: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
-    row_block = tl.program_id(0).to(tl.int64)
-    output_block = tl.program_id(1).to(tl.int64)
-    row_indices = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
+    # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
+    row_block, output_block = tile_order(tl.program_id(0).to(tl.int64),
+                          tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
+    row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
     row_valid = row_indices < rows
     output_valid = output_columns < HIDDEN
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    accumulator = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
 
     for hidden_start in range(0, HIDDEN, BLOCK_K):
         hidden_columns = hidden_start + tl.arange(0, BLOCK_K)
@@ -78,6 +89,10 @@ def _projection_fwd_kernel(
     )
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_message_fwd_gelu_reduce_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _gelu_reduce_fwd_kernel(
     projected_ptr,
@@ -85,13 +100,17 @@ def _gelu_reduce_fwd_kernel(
     reduced_ptr,
     groups,
     neighbor_scale,
+    shape_key,
     USE_I64: tl.constexpr,
     HIDDEN: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
-    group = tl.program_id(0)
-    output_block = tl.program_id(1)
+    # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
+    # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
+    group, output_block = tile_order(tl.program_id(0).to(tl.int64),
+                          groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         group = group.to(tl.int64)
         output_block = output_block.to(tl.int64)
@@ -130,61 +149,12 @@ def _gelu_reduce_fwd_kernel(
 # the comparison point for the benchmark forensics under
 # `benchmarks/modules/mpnn/profiles/`, which measure the fused versus separate
 # bias reduction. It is not reachable from the library's own dispatch.
-@triton.jit
-def _gelu_reduce_bwd_kernel(
-    grad_ptr,
-    projected_ptr,
-    mask_ptr,
-    grad_projected_ptr,
-    groups,
-    neighbor_scale,
-    USE_I64: tl.constexpr,
-    HIDDEN: tl.constexpr,
-    NEIGHBORS: tl.constexpr,
-    GROUPS_PER_CTA: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-):
-    group_block = tl.program_id(0)
-    output_block = tl.program_id(1)
-    if USE_I64:
-        group_block = group_block.to(tl.int64)
-        output_block = output_block.to(tl.int64)
-    output_columns = output_block * BLOCK_N + tl.arange(0, BLOCK_N)
-    output_valid = output_columns < HIDDEN
-
-    for segment in tl.static_range(GROUPS_PER_CTA):
-        group = group_block * GROUPS_PER_CTA + segment
-        group_valid = group < groups
-        grad = tl.load(
-            grad_ptr + group * HIDDEN + output_columns,
-            mask=group_valid & output_valid,
-            other=0.0,
-        ).to(tl.float32)
-        for neighbor_start in tl.static_range(0, NEIGHBORS, 16):
-            neighbors = neighbor_start + tl.arange(0, 16)
-            rows = group * NEIGHBORS + neighbors
-            offsets = rows[:, None] * HIDDEN + output_columns[None, :]
-            edge_weight = tl.load(
-                mask_ptr + rows,
-                mask=group_valid,
-                other=0.0,
-            ).to(tl.float32)
-            grad_hidden = (grad[None, :] * edge_weight[:, None] / neighbor_scale).to(
-                tl.bfloat16
-            )
-            projected = tl.load(
-                projected_ptr + offsets,
-                mask=group_valid & output_valid[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            grad_projected = grad_hidden.to(tl.float32) * _gelu_grad(projected)
-            tl.store(
-                grad_projected_ptr + offsets,
-                grad_projected,
-                mask=group_valid & output_valid[None, :],
-            )
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_message_bwd_reduce_dbias_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _gelu_reduce_db_bwd_kernel(
     grad_ptr,
@@ -194,14 +164,18 @@ def _gelu_reduce_db_bwd_kernel(
     grad_bias_output_ptr,
     groups,
     neighbor_scale,
+    shape_key,
     USE_I64: tl.constexpr,
     HIDDEN: tl.constexpr,
     NEIGHBORS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
     ATOMIC_BIAS: tl.constexpr = False,
 ):
-    group = tl.program_id(0)
-    output_block = tl.program_id(1)
+    # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
+    # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
+    group, output_block = tile_order(tl.program_id(0).to(tl.int64),
+                          groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         group = group.to(tl.int64)
         output_block = output_block.to(tl.int64)
@@ -269,6 +243,10 @@ def _zero_bias_grad_kernel(
     tl.store(grad_bias_ptr + columns, 0.0, mask=columns < HIDDEN)
 
 
+@triton.autotune(
+    configs=configs_for("mpnn_message_bwd_dx_triton"),
+    key=["shape_key"],
+)
 @triton.jit
 def _projection_dx_kernel(
     grad_projected_ptr,
@@ -277,22 +255,26 @@ def _projection_dx_kernel(
     grad_preactivation_ptr,
     activated_ptr,
     rows,
+    shape_key,
     USE_I64: tl.constexpr,
     HIDDEN: tl.constexpr,
-    BLOCK_M: tl.constexpr,
+    BLOCK_M1: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
-    row_block = tl.program_id(0)
-    input_block = tl.program_id(1)
+    # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
+    # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
+    row_block, input_block = tile_order(tl.program_id(0).to(tl.int64),
+                          tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         row_block = row_block.to(tl.int64)
         input_block = input_block.to(tl.int64)
-    row_indices = row_block * BLOCK_M + tl.arange(0, BLOCK_M)
+    row_indices = row_block * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     input_columns = input_block * BLOCK_N + tl.arange(0, BLOCK_N)
     row_valid = row_indices < rows
     input_valid = input_columns < HIDDEN
-    grad_activated = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    grad_activated = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
 
     for output_start in range(0, HIDDEN, BLOCK_K):
         output_columns = output_start + tl.arange(0, BLOCK_K)
@@ -342,6 +324,16 @@ def _projection_dx_kernel(
     )
 
 
+def _shape_key(rows: int, **axes: int) -> int:
+    """The packed bucket for a launch of `rows` rows.
+
+    `both_key` because these launches are row counts and that is what `BOTH_ROWS` buckets. These
+    kernels were not tuned at all before -- every knob was written at the launch site -- so this is
+    the key their first cache is written under.
+    """
+    return both_key(rows, **axes)
+
+
 def _forward_impl(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
@@ -349,41 +341,36 @@ def _forward_impl(
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    groups = preactivation.numel() // (48 * 128)
-    rows = groups * 48
+    neighbors, hidden = preactivation.shape[-2:]
+    groups = preactivation.numel() // (neighbors * hidden)
+    rows = groups * neighbors
     projected = torch.empty_like(preactivation)
-    _projection_fwd_kernel[(triton.cdiv(rows, 128), 1)](
+    _projection_fwd_kernel[lambda meta: tile_grid(rows, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])](
         preactivation,
         weight,
         bias,
         projected,
         rows,
-        HIDDEN=128,
-        BLOCK_M=128,
-        BLOCK_N=128,
-        BLOCK_K=16,
-        num_warps=4,
-        num_stages=3,
+        _shape_key(rows),
+        HIDDEN=hidden,
     )
-    reduced = torch.empty(groups, 128, device=preactivation.device, dtype=torch.float32)
-    # The exact-K tail is bandwidth/register limited rather than latency
-    # limited.  BN64/one warp wins consistently for B=1,2,4,8 on A5000 and
-    # avoids a shape bucket whose best-case benefit was below measurement noise.
-    tail_block_n = 64
-    _gelu_reduce_fwd_kernel[(groups, triton.cdiv(128, tail_block_n))](
+    reduced = torch.empty(groups, hidden, device=preactivation.device, dtype=torch.float32)
+    # BLOCK_N=64 and one warp used to be written here, from a measurement on an A5000 at
+    # B=1,2,4,8. It is a ladder now: the note that came with it said a shape bucket's best-case
+    # benefit was below noise, which is an argument for ONE BUCKET, not for one config on every
+    # card the repository ships to.
+    _gelu_reduce_fwd_kernel[lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])](
         projected,
         edge_mask,
         reduced,
         groups,
         neighbor_scale,
+        _shape_key(groups, NEIGHBORS=neighbors),
         USE_I64=_requires_i64_indexing(preactivation.numel()),
-        HIDDEN=128,
-        NEIGHBORS=48,
-        BLOCK_N=tail_block_n,
-        num_warps=1,
-        num_stages=1,
+        HIDDEN=hidden,
+        NEIGHBORS=neighbors,
     )
-    return reduced.reshape(*preactivation.shape[:-2], 128), projected
+    return reduced.reshape(*preactivation.shape[:-2], hidden), projected
 
 
 def _forward_op_fake(
@@ -435,8 +422,9 @@ def _reduce_backward_op_fake(
     The caller sums the partials, which is what makes this the deterministic branch: the atomic
     variant below returns the same bias gradient already reduced, in an order the hardware picks.
     """
-    groups = projected.numel() // (48 * 128)
-    grad_bias_partial = projected.new_empty(groups, 128, dtype=torch.float32)
+    neighbors, hidden = projected.shape[-2:]
+    groups = projected.numel() // (neighbors * hidden)
+    grad_bias_partial = projected.new_empty(groups, hidden, dtype=torch.float32)
     return torch.empty_like(projected), grad_bias_partial
 
 
@@ -451,14 +439,17 @@ def _reduce_backward_op(
     grad_reduced = grad_reduced.contiguous()
     grad_projected = torch.empty_like(projected)
     elements = projected.numel()
-    groups = elements // (48 * 128)
+    neighbors, hidden = projected.shape[-2:]
+    groups = elements // (neighbors * hidden)
     grad_bias_partial = torch.empty(
         groups,
-        128,
+        hidden,
         device=projected.device,
         dtype=torch.float32,
     )
-    _gelu_reduce_db_bwd_kernel[(groups, 2)](
+    _gelu_reduce_db_bwd_kernel[
+        lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])
+    ](
         grad_reduced,
         projected,
         edge_mask,
@@ -466,13 +457,11 @@ def _reduce_backward_op(
         grad_bias_partial,
         groups,
         neighbor_scale,
+        _shape_key(groups, NEIGHBORS=neighbors, ATOMIC_BIAS=1),
         USE_I64=_requires_i64_indexing(elements),
-        HIDDEN=128,
-        NEIGHBORS=48,
-        BLOCK_N=64,
+        HIDDEN=hidden,
+        NEIGHBORS=neighbors,
         ATOMIC_BIAS=False,
-        num_warps=2,
-        num_stages=1,
     )
     return grad_projected, grad_bias_partial
 
@@ -488,7 +477,7 @@ def _reduce_backward_atomic_op_fake(
     Already reduced, unlike the partial-row form above -- the kernel accumulates it atomically,
     so its summation order is whatever the hardware runs.
     """
-    grad_bias = projected.new_empty(128, dtype=torch.float32)
+    grad_bias = projected.new_empty(projected.shape[-1], dtype=torch.float32)
     return torch.empty_like(projected), grad_bias
 
 
@@ -506,17 +495,23 @@ def _reduce_backward_atomic_op(
     """
     grad_reduced = grad_reduced.contiguous()
     grad_projected = torch.empty_like(projected)
-    grad_bias = torch.empty(128, device=projected.device, dtype=torch.float32)
+    neighbors, hidden = projected.shape[-2:]
+    grad_bias = torch.empty(hidden, device=projected.device, dtype=torch.float32)
     elements = projected.numel()
-    groups = elements // (48 * 128)
+    groups = elements // (neighbors * hidden)
+    # The one launch here that stays written out, because there is nothing to search: it fills a
+    # `hidden`-element buffer with zeros in a single program. One block, one warp, one stage is
+    # not a config that won a measurement -- it is the only shape the work has.
     _zero_bias_grad_kernel[(1,)](
         grad_bias,
-        HIDDEN=128,
-        BLOCK=128,
+        HIDDEN=hidden,
+        BLOCK=triton.next_power_of_2(hidden),
         num_warps=1,
         num_stages=1,
     )
-    _gelu_reduce_db_bwd_kernel[(groups, 2)](
+    _gelu_reduce_db_bwd_kernel[
+        lambda meta: tile_grid(groups, hidden, 1, meta["BLOCK_N"])
+    ](
         grad_reduced,
         projected,
         edge_mask,
@@ -524,13 +519,11 @@ def _reduce_backward_atomic_op(
         grad_bias,
         groups,
         neighbor_scale,
+        _shape_key(groups, NEIGHBORS=neighbors, ATOMIC_BIAS=2),
         USE_I64=_requires_i64_indexing(elements),
-        HIDDEN=128,
-        NEIGHBORS=48,
-        BLOCK_N=64,
+        HIDDEN=hidden,
+        NEIGHBORS=neighbors,
         ATOMIC_BIAS=True,
-        num_warps=2,
-        num_stages=1,
     )
     return grad_projected, grad_bias
 
@@ -555,23 +548,22 @@ def _projection_dx_op(
     preactivation: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """One dX GEMM that also emits the GELU the following weight-gradient GEMM contracts against."""
-    rows = preactivation.numel() // 128
+    hidden = preactivation.shape[-1]
+    rows = preactivation.numel() // hidden
     grad_preactivation = torch.empty_like(preactivation)
     activated = torch.empty_like(preactivation)
-    _projection_dx_kernel[(triton.cdiv(rows, 64), 1)](
+    _projection_dx_kernel[
+        lambda meta: tile_grid(rows, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])
+    ](
         grad_projected,
         weight,
         preactivation,
         grad_preactivation,
         activated,
         rows,
+        _shape_key(rows),
         USE_I64=_requires_i64_indexing(preactivation.numel()),
-        HIDDEN=128,
-        BLOCK_M=64,
-        BLOCK_N=128,
-        BLOCK_K=32,
-        num_warps=8,
-        num_stages=3,
+        HIDDEN=hidden,
     )
     return grad_preactivation, activated
 
@@ -619,33 +611,32 @@ def _projection_dx_weight_op(
     strictly better conditioned, in the same way the atomic bias reduction already
     trades exact reproduction for a smaller footprint.
     """
-    rows = preactivation.numel() // 128
+    hidden = preactivation.shape[-1]
+    rows = preactivation.numel() // hidden
     grad_preactivation = torch.empty_like(preactivation)
-    grad_weight = torch.zeros(128, 128, device=weight.device, dtype=torch.float32)
-    flat_grad_projected = grad_projected.reshape(rows, 128)
-    flat_preactivation = preactivation.reshape(rows, 128)
-    flat_grad_preactivation = grad_preactivation.reshape(rows, 128)
+    grad_weight = torch.zeros(hidden, hidden, device=weight.device, dtype=torch.float32)
+    flat_grad_projected = grad_projected.reshape(rows, hidden)
+    flat_preactivation = preactivation.reshape(rows, hidden)
+    flat_grad_preactivation = grad_preactivation.reshape(rows, hidden)
     block_rows = min(_DX_CHUNK_ROWS, rows)
     activated = torch.empty(
-        block_rows, 128, device=preactivation.device, dtype=preactivation.dtype
+        block_rows, hidden, device=preactivation.device, dtype=preactivation.dtype
     )
     for start in range(0, rows, block_rows):
         stop = min(start + block_rows, rows)
         span = stop - start
-        _projection_dx_kernel[(triton.cdiv(span, 64), 1)](
+        _projection_dx_kernel[
+            lambda meta: tile_grid(span, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])
+        ](
             flat_grad_projected[start:stop],
             weight,
             flat_preactivation[start:stop],
             flat_grad_preactivation[start:stop],
             activated,
             span,
-            USE_I64=_requires_i64_indexing(span * 128),
-            HIDDEN=128,
-            BLOCK_M=64,
-            BLOCK_N=128,
-            BLOCK_K=32,
-            num_warps=8,
-            num_stages=3,
+            _shape_key(span),
+            USE_I64=_requires_i64_indexing(span * hidden),
+            HIDDEN=hidden,
         )
         # Keep the per-block GEMM in BF16 -- the same precision the unchunked
         # matmul produced -- and accumulate the small [128, 128] partials in FP32.
@@ -807,20 +798,17 @@ def _recompute_projected_op(
     bias: torch.Tensor,
 ) -> torch.Tensor:
     """Recompute the projection backward needs, from the three tensors the memory variant saved."""
-    rows = preactivation.numel() // 128
+    hidden = preactivation.shape[-1]
+    rows = preactivation.numel() // hidden
     projected = torch.empty_like(preactivation)
-    _projection_fwd_kernel[(triton.cdiv(rows, 128), 1)](
+    _projection_fwd_kernel[lambda meta: tile_grid(rows, hidden, meta["BLOCK_M1"], meta["BLOCK_N"])](
         preactivation,
         weight,
         bias,
         projected,
         rows,
-        HIDDEN=128,
-        BLOCK_M=128,
-        BLOCK_N=128,
-        BLOCK_K=16,
-        num_warps=4,
-        num_stages=3,
+        _shape_key(rows),
+        HIDDEN=hidden,
     )
     return projected
 

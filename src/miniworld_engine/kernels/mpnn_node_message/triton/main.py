@@ -96,7 +96,7 @@ def _shape_key(groups: int, **axes: int) -> int:
     one shared nothing. Floor-clamping into the shared rung set is the whole point of the key.
 
     `NEIGHBORS` folds in because it changes the work per row and the compiled kernel both -- k is
-    a real shape axis here, not a flag. `WIDTH` is 128 and only 128 (`width`), so it is not folded
+    a real shape axis here, not a flag. `WIDTH` is 128 and only 128 (`_BUILT_FOR_WIDTH`), so it is not folded
     in: an axis with one value adds a digit that never varies.
 
     Axes are passed BY NAME, like the edge tail's helper. A positional `neighbors` produced the
@@ -104,7 +104,6 @@ def _shape_key(groups: int, **axes: int) -> int:
     launch site -- so a positional one is invisible to it, and `NEIGHBORS` was reported as a
     constexpr outside the key when it had been inside it all along.
     """
-    width = groups.shape[-1]
     return both_key(groups, **axes)
 
 

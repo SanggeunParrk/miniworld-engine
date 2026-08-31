@@ -67,6 +67,7 @@ DRIVER_SHAPE_OWNERS = {
     # mpnn_edge_tail is where it is defined, being the family whose kernels take all of it.
     "mpnn_node_message": "mpnn_edge_tail",
     "mpnn_relative_position": "mpnn_edge_tail",
+    "mpnn_message": "mpnn_edge_tail",
 }
 
 
