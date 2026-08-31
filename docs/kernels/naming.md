@@ -248,11 +248,11 @@ cute collective 클래스가 통째로 빠진다(현재 최소 6개 CUDA 커널�
 * **`configs_for("op")`를 호출하는데 행이 없는 op** — 잊은 커널을 실제로 잡는 방향이다. config는
   있고 행은 없는 커널은 프로덕션에서 돌면서 어떤 스윕에도 나타나지 않는다
 * `driver`/`check`가 가리키는 함수가 그 모듈에 정의돼 있는지
-* **손으로 넣은 `kind`가 소스와 맞는지** — `src/miniworld_engine/tools/classify.py`가 커널이 인라인하는
+* **손으로 넣은 `kind`가 소스와 맞는지** — `src/miniworld_engine/build/classify.py`가 커널이 인라인하는
   호출의 전이 폐쇄를 따라가 판정한다. 불일치는 자동으로 행의 잘못이 아니다(`tl.dot`이 생겼으면
   커널의 kind가 실제로 바뀐 것이다). 그래서 테스트는 양쪽을 다 출력하고 판단은 사람에게 남긴다.
   손으로 선언하고 기계가 검증한다.
 
-`src/miniworld_engine/tools/classify.py`는 본문만 보지 않는다. flash-attention forward는 `tl.dot`을
+`src/miniworld_engine/build/classify.py`는 본문만 보지 않는다. flash-attention forward는 `tl.dot`을
 인라인되는 `@triton.jit` 헬퍼에 두고, CUDA LayerNorm은 감축을 `__device__` 헬퍼에 둔다 — 본문만
 읽으면 둘 다 `elem`으로 잡힌다.

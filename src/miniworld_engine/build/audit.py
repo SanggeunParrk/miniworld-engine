@@ -69,7 +69,7 @@ def _folded_axes(op: str) -> frozenset:
     it -- and then `unpack_base` is the identity, i.e. the pre-G5 behaviour."""
     import csv as _csv
 
-    from miniworld_engine.tools.key_gaps import REG, _folds_for
+    from miniworld_engine.build.key_gaps import REG, _folds_for
     for r in _csv.DictReader(REG.open()):
         if r["kernel"] == op and r["backend"] == "triton":
             try:

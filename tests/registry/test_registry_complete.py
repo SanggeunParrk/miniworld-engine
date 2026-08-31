@@ -200,17 +200,17 @@ def test_every_family_has_a_harness_module() -> None:
 
 
 def test_kind_matches_the_source() -> None:
-    """The hand-entered `kind` against what the source does, via src/miniworld_engine/tools/classify.py.
+    """The hand-entered `kind` against what the source does, via src/miniworld_engine/build/classify.py.
 
     A mismatch is not automatically the row's fault -- a kernel that gained a `tl.dot` really did
     change kind -- so the failure names both sides and leaves the decision to a person.
     """
-    tool = ROOT / "src/miniworld_engine/tools/classify.py"
+    tool = ROOT / "src/miniworld_engine/build/classify.py"
     if not tool.is_file():                       # absent from a wheel-only install
         return
     sys.path.insert(0, str(tool.parent))
     try:
-        from miniworld_engine.tools.classify import classify
+        from miniworld_engine.build.classify import classify
     finally:
         sys.path.pop(0)
     bad = []
@@ -319,7 +319,7 @@ def test_no_launch_omits_a_required_kernel_parameter() -> None:
     d_hidden > 128. The build recorded it as a one-line "skip", so it read as an unsupported
     shape rather than a defect.
 
-    The analysis lives in ``miniworld_engine.tools.launch_bind`` and is shared rather than
+    The analysis lives in ``miniworld_engine.build.launch_bind`` and is shared rather than
     reimplemented here: it took three corrections to become sound (resolve imports instead of
     matching bare names, skip starred calls, do not count dict subscripts as launches), and two
     copies would have drifted apart at the first of them. That module also reports what it CANNOT
@@ -327,7 +327,7 @@ def test_no_launch_omits_a_required_kernel_parameter() -> None:
     knowable statically -- and those are covered by actually launching them (``run_all`` over the
     drivers, ``bucket_count`` over the build matrix).
     """
-    from miniworld_engine.tools.launch_bind import audit
+    from miniworld_engine.build.launch_bind import audit
 
     findings, _skipped, checked = audit()[:3]
     # A floor on "the audit still resolves launches", not a count of them: 94 resolve today and the
@@ -345,7 +345,7 @@ def test_no_constexpr_is_invisible_to_the_autotune_cache() -> None:
     which is why these lasted.
 
     Judgement is not automatable and is therefore RECORDED, in
-    ``miniworld_engine/tools/key_gaps_allowed.csv``, one row per (op, param) with the reason: ``eps``
+    ``miniworld_engine/build/key_gaps_allowed.csv``, one row per (op, param) with the reason: ``eps``
     is a tolerance, ``D == K`` is a launch-site identity, ``stride_m == H*HEAD_DIM`` is a product
     of two already-keyed dims. Without that file the check reports the same ~19 findings forever
     and a NEW gap hides among them; with it, the signal is zero.
@@ -357,13 +357,13 @@ def test_no_constexpr_is_invisible_to_the_autotune_cache() -> None:
     named kernel does not have, while missing two ops in ``modules/`` entirely.
     """
     from miniworld_engine.autotune.configs import config_set
-    from miniworld_engine.tools.key_gaps import audit
+    from miniworld_engine.build.key_gaps import audit
 
     findings, checked = audit(config_set("accuracy"))
     assert checked > 70, f"only {checked} kernels resolved; the audit stopped resolving"
     assert not findings, (
         "constexpr(s) invisible to the autotune cache -- add to the kernel's key=[...], or record "
-        "the judgement in miniworld_engine/tools/key_gaps_allowed.csv:\n  "
+        "the judgement in miniworld_engine/build/key_gaps_allowed.csv:\n  "
         + "\n  ".join(f"{op} ({f}) not-in-key={gap}" for f, op, _k, gap in findings))
 
 

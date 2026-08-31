@@ -131,7 +131,6 @@ docs/                             # pages written for a consumer: cache policy, 
 benchmarks/runners/bench.py       # active bench runner
 benchmarks/modules/triangle_multiplication/configs/bench.yaml
 pyproject.toml                    # [tool.pixi] = the unified env (triton+TE+cute+cuequiv); .pixi/ gitignored
-src/miniworld_engine/tools/               # one-off probes + their .sbatch launchers (not shipped in a wheel)
 ```
 
 Every kernel family has the same shape, and `tests/layout/test_kernel_layout.py` enforces it:

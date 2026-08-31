@@ -1,0 +1,2719 @@
+BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=1
+BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=2
+BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=4
+BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=8
+BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=16
+BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=32
+BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=1
+BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=2
+BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=4
+BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=8
+BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=16
+BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=32
+BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=1
+BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=2
+BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=4
+BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=8
+BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=16
+BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=32
+BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=1
+BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=2
+BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=4
+BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=8
+BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=16
+BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=32
+BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=1
+BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=2
+BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=4
+BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=8
+BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=16
+BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=32
+BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=1
+BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=2
+BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=4
+BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=8
+BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=16
+BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=32
+BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=1
+BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=2
+BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=4
+BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=8
+BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=16
+BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=32
+BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=1
+BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=2
+BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=4
+BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=8
+BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=16
+BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=32
+BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=1
+BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=2
+BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=4
+BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=8
+BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=16
+BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=32
+BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=1
+BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=2
+BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=4
+BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=8
+BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=16
+BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=32
+BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=1
+BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=2
+BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=4
+BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=8
+BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=16
+BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=32
+BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=1
+BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=2
+BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=4
+BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=8
+BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=16
+BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=32
+BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=1
+BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=2
+BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=4
+BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=8
+BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=16
+BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=32
+BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=1
+BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=2
+BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=4
+BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=8
+BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=16
+BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=32
+BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=1
+BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=2
+BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=4
+BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=8
+BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=16
+BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=32
+BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=1
+BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=2
+BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=4
+BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=8
+BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=16
+BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=32
+BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=32,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=32,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=32
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=1
+-_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_fwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=32
+BLOCK_M1=1,num_stages=1,num_warps=1
+BLOCK_M1=1,num_stages=2,num_warps=1
+BLOCK_M1=1,num_stages=3,num_warps=1
+BLOCK_M1=1,num_stages=4,num_warps=1
+BLOCK_M1=1,num_stages=5,num_warps=1
+BLOCK_M1=1,num_stages=6,num_warps=1
+BLOCK_M1=1,num_stages=1,num_warps=2
+BLOCK_M1=1,num_stages=2,num_warps=2
+BLOCK_M1=1,num_stages=3,num_warps=2
+BLOCK_M1=1,num_stages=4,num_warps=2
+BLOCK_M1=1,num_stages=5,num_warps=2
+BLOCK_M1=1,num_stages=6,num_warps=2
+BLOCK_M1=1,num_stages=1,num_warps=4
+BLOCK_M1=1,num_stages=2,num_warps=4
+BLOCK_M1=1,num_stages=3,num_warps=4
+BLOCK_M1=1,num_stages=4,num_warps=4
+BLOCK_M1=1,num_stages=5,num_warps=4
+BLOCK_M1=1,num_stages=6,num_warps=4
+BLOCK_M1=1,num_stages=1,num_warps=8
+BLOCK_M1=1,num_stages=2,num_warps=8
+BLOCK_M1=1,num_stages=3,num_warps=8
+BLOCK_M1=1,num_stages=4,num_warps=8
+BLOCK_M1=1,num_stages=5,num_warps=8
+BLOCK_M1=1,num_stages=6,num_warps=8
+BLOCK_M1=1,num_stages=1,num_warps=16
+BLOCK_M1=1,num_stages=2,num_warps=16
+BLOCK_M1=1,num_stages=3,num_warps=16
+BLOCK_M1=1,num_stages=4,num_warps=16
+BLOCK_M1=1,num_stages=5,num_warps=16
+BLOCK_M1=1,num_stages=6,num_warps=16
+BLOCK_M1=1,num_stages=1,num_warps=32
+BLOCK_M1=1,num_stages=2,num_warps=32
+BLOCK_M1=1,num_stages=3,num_warps=32
+BLOCK_M1=1,num_stages=4,num_warps=32
+BLOCK_M1=1,num_stages=5,num_warps=32
+BLOCK_M1=1,num_stages=6,num_warps=32
+BLOCK_M1=2,num_stages=1,num_warps=1
+BLOCK_M1=2,num_stages=2,num_warps=1
+BLOCK_M1=2,num_stages=3,num_warps=1
+BLOCK_M1=2,num_stages=4,num_warps=1
+BLOCK_M1=2,num_stages=5,num_warps=1
+BLOCK_M1=2,num_stages=6,num_warps=1
+BLOCK_M1=2,num_stages=1,num_warps=2
+BLOCK_M1=2,num_stages=2,num_warps=2
+BLOCK_M1=2,num_stages=3,num_warps=2
+BLOCK_M1=2,num_stages=4,num_warps=2
+BLOCK_M1=2,num_stages=5,num_warps=2
+BLOCK_M1=2,num_stages=6,num_warps=2
+BLOCK_M1=2,num_stages=1,num_warps=4
+BLOCK_M1=2,num_stages=2,num_warps=4
+BLOCK_M1=2,num_stages=3,num_warps=4
+BLOCK_M1=2,num_stages=4,num_warps=4
+BLOCK_M1=2,num_stages=5,num_warps=4
+BLOCK_M1=2,num_stages=6,num_warps=4
+BLOCK_M1=2,num_stages=1,num_warps=8
+BLOCK_M1=2,num_stages=2,num_warps=8
+BLOCK_M1=2,num_stages=3,num_warps=8
+BLOCK_M1=2,num_stages=4,num_warps=8
+BLOCK_M1=2,num_stages=5,num_warps=8
+BLOCK_M1=2,num_stages=6,num_warps=8
+BLOCK_M1=2,num_stages=1,num_warps=16
+BLOCK_M1=2,num_stages=2,num_warps=16
+BLOCK_M1=2,num_stages=3,num_warps=16
+BLOCK_M1=2,num_stages=4,num_warps=16
+BLOCK_M1=2,num_stages=5,num_warps=16
+BLOCK_M1=2,num_stages=6,num_warps=16
+BLOCK_M1=2,num_stages=1,num_warps=32
+BLOCK_M1=2,num_stages=2,num_warps=32
+BLOCK_M1=2,num_stages=3,num_warps=32
+BLOCK_M1=2,num_stages=4,num_warps=32
+BLOCK_M1=2,num_stages=5,num_warps=32
+BLOCK_M1=2,num_stages=6,num_warps=32
+BLOCK_M1=4,num_stages=1,num_warps=1
+BLOCK_M1=4,num_stages=2,num_warps=1
+BLOCK_M1=4,num_stages=3,num_warps=1
+BLOCK_M1=4,num_stages=4,num_warps=1
+BLOCK_M1=4,num_stages=5,num_warps=1
+BLOCK_M1=4,num_stages=6,num_warps=1
+BLOCK_M1=4,num_stages=1,num_warps=2
+BLOCK_M1=4,num_stages=2,num_warps=2
+BLOCK_M1=4,num_stages=3,num_warps=2
+BLOCK_M1=4,num_stages=4,num_warps=2
+BLOCK_M1=4,num_stages=5,num_warps=2
+BLOCK_M1=4,num_stages=6,num_warps=2
+BLOCK_M1=4,num_stages=1,num_warps=4
+BLOCK_M1=4,num_stages=2,num_warps=4
+BLOCK_M1=4,num_stages=3,num_warps=4
+BLOCK_M1=4,num_stages=4,num_warps=4
+BLOCK_M1=4,num_stages=5,num_warps=4
+BLOCK_M1=4,num_stages=6,num_warps=4
+BLOCK_M1=4,num_stages=1,num_warps=8
+BLOCK_M1=4,num_stages=2,num_warps=8
+BLOCK_M1=4,num_stages=3,num_warps=8
+BLOCK_M1=4,num_stages=4,num_warps=8
+BLOCK_M1=4,num_stages=5,num_warps=8
+BLOCK_M1=4,num_stages=6,num_warps=8
+BLOCK_M1=4,num_stages=1,num_warps=16
+BLOCK_M1=4,num_stages=2,num_warps=16
+BLOCK_M1=4,num_stages=3,num_warps=16
+BLOCK_M1=4,num_stages=4,num_warps=16
+BLOCK_M1=4,num_stages=5,num_warps=16
+BLOCK_M1=4,num_stages=6,num_warps=16
+BLOCK_M1=4,num_stages=1,num_warps=32
+BLOCK_M1=4,num_stages=2,num_warps=32
+BLOCK_M1=4,num_stages=3,num_warps=32
+BLOCK_M1=4,num_stages=4,num_warps=32
+BLOCK_M1=4,num_stages=5,num_warps=32
+BLOCK_M1=4,num_stages=6,num_warps=32
+BLOCK_M1=8,num_stages=1,num_warps=1
+BLOCK_M1=8,num_stages=2,num_warps=1
+BLOCK_M1=8,num_stages=3,num_warps=1
+BLOCK_M1=8,num_stages=4,num_warps=1
+BLOCK_M1=8,num_stages=5,num_warps=1
+BLOCK_M1=8,num_stages=6,num_warps=1
+BLOCK_M1=8,num_stages=1,num_warps=2
+BLOCK_M1=8,num_stages=2,num_warps=2
+BLOCK_M1=8,num_stages=3,num_warps=2
+BLOCK_M1=8,num_stages=4,num_warps=2
+BLOCK_M1=8,num_stages=5,num_warps=2
+BLOCK_M1=8,num_stages=6,num_warps=2
+BLOCK_M1=8,num_stages=1,num_warps=4
+BLOCK_M1=8,num_stages=2,num_warps=4
+BLOCK_M1=8,num_stages=3,num_warps=4
+BLOCK_M1=8,num_stages=4,num_warps=4
+BLOCK_M1=8,num_stages=5,num_warps=4
+BLOCK_M1=8,num_stages=6,num_warps=4
+BLOCK_M1=8,num_stages=1,num_warps=8
+BLOCK_M1=8,num_stages=2,num_warps=8
+BLOCK_M1=8,num_stages=3,num_warps=8
+BLOCK_M1=8,num_stages=4,num_warps=8
+BLOCK_M1=8,num_stages=5,num_warps=8
+BLOCK_M1=8,num_stages=6,num_warps=8
+BLOCK_M1=8,num_stages=1,num_warps=16
+BLOCK_M1=8,num_stages=2,num_warps=16
+BLOCK_M1=8,num_stages=3,num_warps=16
+BLOCK_M1=8,num_stages=4,num_warps=16
+BLOCK_M1=8,num_stages=5,num_warps=16
+BLOCK_M1=8,num_stages=6,num_warps=16
+BLOCK_M1=8,num_stages=1,num_warps=32
+BLOCK_M1=8,num_stages=2,num_warps=32
+BLOCK_M1=8,num_stages=3,num_warps=32
+BLOCK_M1=8,num_stages=4,num_warps=32
+BLOCK_M1=8,num_stages=5,num_warps=32
+BLOCK_M1=8,num_stages=6,num_warps=32
+BLOCK_M1=16,num_stages=1,num_warps=1
+BLOCK_M1=16,num_stages=2,num_warps=1
+BLOCK_M1=16,num_stages=3,num_warps=1
+BLOCK_M1=16,num_stages=4,num_warps=1
+BLOCK_M1=16,num_stages=5,num_warps=1
+BLOCK_M1=16,num_stages=6,num_warps=1
+BLOCK_M1=16,num_stages=1,num_warps=2
+BLOCK_M1=16,num_stages=2,num_warps=2
+BLOCK_M1=16,num_stages=3,num_warps=2
+BLOCK_M1=16,num_stages=4,num_warps=2
+BLOCK_M1=16,num_stages=5,num_warps=2
+BLOCK_M1=16,num_stages=6,num_warps=2
+BLOCK_M1=16,num_stages=1,num_warps=4
+BLOCK_M1=16,num_stages=2,num_warps=4
+BLOCK_M1=16,num_stages=3,num_warps=4
+BLOCK_M1=16,num_stages=4,num_warps=4
+BLOCK_M1=16,num_stages=5,num_warps=4
+BLOCK_M1=16,num_stages=6,num_warps=4
+BLOCK_M1=16,num_stages=1,num_warps=8
+BLOCK_M1=16,num_stages=2,num_warps=8
+BLOCK_M1=16,num_stages=3,num_warps=8
+BLOCK_M1=16,num_stages=4,num_warps=8
+BLOCK_M1=16,num_stages=5,num_warps=8
+BLOCK_M1=16,num_stages=6,num_warps=8
+BLOCK_M1=16,num_stages=1,num_warps=16
+BLOCK_M1=16,num_stages=2,num_warps=16
+BLOCK_M1=16,num_stages=3,num_warps=16
+BLOCK_M1=16,num_stages=4,num_warps=16
+BLOCK_M1=16,num_stages=5,num_warps=16
+BLOCK_M1=16,num_stages=6,num_warps=16
+BLOCK_M1=16,num_stages=1,num_warps=32
+BLOCK_M1=16,num_stages=2,num_warps=32
+BLOCK_M1=16,num_stages=3,num_warps=32
+BLOCK_M1=16,num_stages=4,num_warps=32
+BLOCK_M1=16,num_stages=5,num_warps=32
+BLOCK_M1=16,num_stages=6,num_warps=32
+BLOCK_M1=32,num_stages=1,num_warps=1
+BLOCK_M1=32,num_stages=2,num_warps=1
+BLOCK_M1=32,num_stages=3,num_warps=1
+BLOCK_M1=32,num_stages=4,num_warps=1
+BLOCK_M1=32,num_stages=5,num_warps=1
+BLOCK_M1=32,num_stages=6,num_warps=1
+BLOCK_M1=32,num_stages=1,num_warps=2
+BLOCK_M1=32,num_stages=2,num_warps=2
+BLOCK_M1=32,num_stages=3,num_warps=2
+BLOCK_M1=32,num_stages=4,num_warps=2
+BLOCK_M1=32,num_stages=5,num_warps=2
+BLOCK_M1=32,num_stages=6,num_warps=2
+BLOCK_M1=32,num_stages=1,num_warps=4
+BLOCK_M1=32,num_stages=2,num_warps=4
+BLOCK_M1=32,num_stages=3,num_warps=4
+BLOCK_M1=32,num_stages=4,num_warps=4
+BLOCK_M1=32,num_stages=5,num_warps=4
+BLOCK_M1=32,num_stages=6,num_warps=4
+BLOCK_M1=32,num_stages=1,num_warps=8
+BLOCK_M1=32,num_stages=2,num_warps=8
+BLOCK_M1=32,num_stages=3,num_warps=8
+BLOCK_M1=32,num_stages=4,num_warps=8
+BLOCK_M1=32,num_stages=5,num_warps=8
+BLOCK_M1=32,num_stages=6,num_warps=8
+BLOCK_M1=32,num_stages=1,num_warps=16
+BLOCK_M1=32,num_stages=2,num_warps=16
+BLOCK_M1=32,num_stages=3,num_warps=16
+BLOCK_M1=32,num_stages=4,num_warps=16
+BLOCK_M1=32,num_stages=5,num_warps=16
+BLOCK_M1=32,num_stages=6,num_warps=16
+BLOCK_M1=32,num_stages=1,num_warps=32
+BLOCK_M1=32,num_stages=2,num_warps=32
+BLOCK_M1=32,num_stages=3,num_warps=32
+BLOCK_M1=32,num_stages=4,num_warps=32
+BLOCK_M1=32,num_stages=5,num_warps=32
+BLOCK_M1=32,num_stages=6,num_warps=32
+BLOCK_M1=64,num_stages=1,num_warps=1
+BLOCK_M1=64,num_stages=2,num_warps=1
+BLOCK_M1=64,num_stages=3,num_warps=1
+BLOCK_M1=64,num_stages=4,num_warps=1
+BLOCK_M1=64,num_stages=5,num_warps=1
+BLOCK_M1=64,num_stages=6,num_warps=1
+BLOCK_M1=64,num_stages=1,num_warps=2
+BLOCK_M1=64,num_stages=2,num_warps=2
+BLOCK_M1=64,num_stages=3,num_warps=2
+BLOCK_M1=64,num_stages=4,num_warps=2
+BLOCK_M1=64,num_stages=5,num_warps=2
+BLOCK_M1=64,num_stages=6,num_warps=2
+BLOCK_M1=64,num_stages=1,num_warps=4
+BLOCK_M1=64,num_stages=2,num_warps=4
+BLOCK_M1=64,num_stages=3,num_warps=4
+BLOCK_M1=64,num_stages=4,num_warps=4
+BLOCK_M1=64,num_stages=5,num_warps=4
+BLOCK_M1=64,num_stages=6,num_warps=4
+BLOCK_M1=64,num_stages=1,num_warps=8
+BLOCK_M1=64,num_stages=2,num_warps=8
+BLOCK_M1=64,num_stages=3,num_warps=8
+BLOCK_M1=64,num_stages=4,num_warps=8
+BLOCK_M1=64,num_stages=5,num_warps=8
+BLOCK_M1=64,num_stages=6,num_warps=8
+BLOCK_M1=64,num_stages=1,num_warps=16
+BLOCK_M1=64,num_stages=2,num_warps=16
+BLOCK_M1=64,num_stages=3,num_warps=16
+BLOCK_M1=64,num_stages=4,num_warps=16
+BLOCK_M1=64,num_stages=5,num_warps=16
+BLOCK_M1=64,num_stages=6,num_warps=16
+BLOCK_M1=64,num_stages=1,num_warps=32
+BLOCK_M1=64,num_stages=2,num_warps=32
+BLOCK_M1=64,num_stages=3,num_warps=32
+BLOCK_M1=64,num_stages=4,num_warps=32
+BLOCK_M1=64,num_stages=5,num_warps=32
+BLOCK_M1=64,num_stages=6,num_warps=32
+BLOCK_M1=128,num_stages=1,num_warps=1
+BLOCK_M1=128,num_stages=2,num_warps=1
+BLOCK_M1=128,num_stages=3,num_warps=1
+BLOCK_M1=128,num_stages=4,num_warps=1
+BLOCK_M1=128,num_stages=5,num_warps=1
+BLOCK_M1=128,num_stages=6,num_warps=1
+BLOCK_M1=128,num_stages=1,num_warps=2
+BLOCK_M1=128,num_stages=2,num_warps=2
+BLOCK_M1=128,num_stages=3,num_warps=2
+BLOCK_M1=128,num_stages=4,num_warps=2
+BLOCK_M1=128,num_stages=5,num_warps=2
+BLOCK_M1=128,num_stages=6,num_warps=2
+BLOCK_M1=128,num_stages=1,num_warps=4
+BLOCK_M1=128,num_stages=2,num_warps=4
+BLOCK_M1=128,num_stages=3,num_warps=4
+BLOCK_M1=128,num_stages=4,num_warps=4
+BLOCK_M1=128,num_stages=5,num_warps=4
+BLOCK_M1=128,num_stages=6,num_warps=4
+BLOCK_M1=128,num_stages=1,num_warps=8
+BLOCK_M1=128,num_stages=2,num_warps=8
+BLOCK_M1=128,num_stages=3,num_warps=8
+BLOCK_M1=128,num_stages=4,num_warps=8
+BLOCK_M1=128,num_stages=5,num_warps=8
+BLOCK_M1=128,num_stages=6,num_warps=8
+BLOCK_M1=128,num_stages=1,num_warps=16
+BLOCK_M1=128,num_stages=2,num_warps=16
+BLOCK_M1=128,num_stages=3,num_warps=16
+BLOCK_M1=128,num_stages=4,num_warps=16
+BLOCK_M1=128,num_stages=5,num_warps=16
+BLOCK_M1=128,num_stages=6,num_warps=16
+BLOCK_M1=128,num_stages=1,num_warps=32
+BLOCK_M1=128,num_stages=2,num_warps=32
+BLOCK_M1=128,num_stages=3,num_warps=32
+BLOCK_M1=128,num_stages=4,num_warps=32
+BLOCK_M1=128,num_stages=5,num_warps=32
+BLOCK_M1=128,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=1,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=2,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=4,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=8,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=16,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=32,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=64,num_stages=6,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=1,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=2,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=3,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=4,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=5,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=6,num_warps=1
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=1,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=2,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=3,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=4,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=5,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=6,num_warps=2
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=1,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=2,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=3,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=4,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=5,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=6,num_warps=4
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=1,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=2,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=3,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=4,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=5,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=6,num_warps=8
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=1,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=2,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=3,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=4,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=5,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=6,num_warps=16
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=1,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=2,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=3,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=4,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=5,num_warps=32
++_attn_bwd_preprocess	BLOCK_M1=128,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=32,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=64,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=32,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=3,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=2,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=128,BLOCK_M2=256,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=32,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=3,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=64,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=1
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=2,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=3,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=128,num_stages=12,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=2
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=4
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=8
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=16
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=1,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=2,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=3,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=4,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=5,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=6,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=8,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=10,num_warps=32
++_attn_bwd	BLOCK_M1=256,BLOCK_M2=256,num_stages=12,num_warps=32

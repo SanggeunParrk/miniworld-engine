@@ -1,0 +1,17 @@
+  [precompile-worker] 144 chunks x 6 | child time 931 worker-s -> 58s of the round
+  [precompile] round 1: 864 configs (0 already compiled) on 16 workers -> 855 compiled, 9 failed, 390s
+  [precompile-worker] 144 chunks x 2 | child time 225 worker-s -> 14s of the round
+  [precompile] round 2: 288 configs (0 already compiled) on 16 workers -> 288 compiled, 0 failed, 15s
+  [precompile] round skipped: all 864 configs already compiled on an earlier attempt
+  [precompile] jobs=16 rounds=2 configs=1152 -> compiled=1143 failed=9 in 405s
+  [bench-budget] 1370/1378 abandoned | warm 439s + probe 0s + full-bench 1s = 440s host | device 0.4s (of which abandoned kernels 0.4s) | fixed overhead 440s
+  [compile-guard] forkless 1143 x -> 5s (pool-settled) | known-bad 9 x -> 0s
+  [compile-guard] 425 forked compile() calls | fork 19s + wait 33s (32235 polls x 50ms) + parent-recompile 2s = 55s
+  [first-launch] fn.run 4155 calls 1009s | CompiledKernel.__init__ 1559 x -> 5s | init_handles 1559 x -> 1s | pre_hook 0 x -> 0s
+  bias_only_attention_bwd_pre_triton: grid=288 buckets=1
+    bfloat16+float32|HEAD_DIM=32,shape_key=128: 4 configs, best 0.0246ms {'BLOCK_M1': 2}
+  bias_only_attention_bwd_triton: grid=864 buckets=1
+    bfloat16+float32|HEAD_DIM=32,shape_key=128: 2 configs, best 0.0256ms {'BLOCK_M1': 32, 'BLOCK_M2': 128}
+  bias_only_attention_fwd_triton: grid=864 buckets=1
+    bfloat16+float32|H=4,HEAD_DIM=32,shape_key=128: 2 configs, best 0.0256ms {'BLOCK_M1': 32, 'BLOCK_M2': 128}
+unit ran=1 ops=3

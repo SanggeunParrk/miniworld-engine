@@ -23,5 +23,7 @@ stored entry against the live config list, so a narrower default would resolve e
 to nothing and silently re-tune on every call. `tests/autotune/test_default_config_set.py` asserts exactly
 that against the committed caches, and also that there is only one copy of `grid`.
 
-The generator writes here too: `src/miniworld_engine/tools/gen_shards.py --out
-src/miniworld_engine/autotune/configs/grid`.
+These files are hand-maintained. They were generated once, by a `gen_shards` script that has
+since been deleted along with the rest of `tools/`: the ladders are now derived from measurement
+and edited in place, and a generator that regenerates them from a template would overwrite the
+evidence. `tests/registry/test_a_ladder_offers_what_wins.py` is what holds them honest instead.

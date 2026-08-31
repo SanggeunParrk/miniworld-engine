@@ -1,0 +1,10 @@
+  [precompile-worker] 130 chunks x 15 | child time 1237 worker-s -> 77s of the round
+  [precompile] round 1: 1944 configs (0 already compiled) on 16 workers -> 1934 compiled, 10 failed, 572s
+  [precompile] jobs=16 rounds=1 configs=1944 -> compiled=1934 failed=10 in 572s
+  [bench-budget] 1300/1455 abandoned | warm 579s + probe 0s + full-bench 16s = 596s host | device 0.2s (of which abandoned kernels 0.2s) | fixed overhead 595s
+  [compile-guard] forkless 1934 x -> 7s (pool-settled) | known-bad 10 x -> 0s
+  [compile-guard] 0 forked compile() calls | fork 0s + wait 0s (0 polls x 50ms) + parent-recompile 0s = 0s
+  [first-launch] fn.run 44062 calls 582s | CompiledKernel.__init__ 1934 x -> 5s | init_handles 1934 x -> 1s | pre_hook 0 x -> 0s
+  layernorm_linear_fwd_fp32_triton: grid=1944 buckets=1
+    bfloat16+float32|N=128,NH=4,shape_key=128: 155 configs, best 0.0276ms {'BLOCK_K_D': 16, 'BLOCK_K_NH': 16, 'BLOCK_M1': 128}
+unit ran=1 ops=1
