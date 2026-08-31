@@ -1460,7 +1460,14 @@ def _fused_bwd(
     dWs = go.t() @ h                          # (3) [D, ND]
     w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)
     dWab = dAB.t() @ xn                        # (4) fuses dWa,dWb -> [2*ND, K]
-    dWa = dWab[: expand_a_weight.shape[0]]
+    # Both halves are returned, and a torch.library custom operator may not have one output alias
+    # another ("may not alias any inputs to this custom operator OR OTHER RETURNS"). As slices of
+    # one dWab they shared a storage, so every training backward raised RuntimeError under
+    # settings.compile_wrap="custom_op" -- the default since 1e4c24b -- and the transition rows of
+    # a bench run failed with it. Cloning ONE half is enough: it is what makes the two storages
+    # distinct, and it keeps the fused [2*ND, K] wgrad GEMM that (4) exists for. `.contiguous()`
+    # would not do it -- a dim-0 slice of a 2-D tensor already is contiguous and returns self.
+    dWa = dWab[: expand_a_weight.shape[0]].clone()
     dWb = dWab[expand_a_weight.shape[0] :]
     if (
         settings.current().transition_dab_lnbwd

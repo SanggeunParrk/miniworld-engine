@@ -1588,8 +1588,12 @@ def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
 # ---- FORWARD operations -----------------------------------------------------------------------
 def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
     """Gated dual-GEMM in-projection (trimul front): left=(x@WL)*sigma(x@WLg), right=..., gate=sigma(x@Wg).
-    Rows: pytorch, trimul_front_triton, trimul_inproj_cute, tm1_cute, triton_tm1,
-    trimul_front_sm100(dep). Variants without a gate compare left|right only."""
+    Rows: pytorch, trimul_inproj_cute, tm1_cute, triton_tm1. Variants without a gate compare
+    left|right only.
+
+    `trimul_front_triton` and `trimul_front_sm100` are gone: 38575f1a deleted the five fronts
+    nothing reaches, and their modules with them, so both rows raised ModuleNotFoundError on every
+    shape of every sweep -- 18 rows a run, reported as ordinary bench failures."""
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
 
@@ -1617,15 +1621,6 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
             left, right = ref_lr(x)
             return left, right, ref_gate(x)
         path = "pytorch"
-    elif implementation == "trimul_front_triton":
-        from miniworld_engine.kernels.trimul_inproj.triton.front import (
-            trimul_front_triton,
-        )
-
-        def run(x):
-            left, right, gate = trimul_front_triton(x, wl, wlg, wr, wrg, wg)
-            return bdll_to_md(left), bdll_to_md(right), gate.reshape(L * L, D)
-        path = "kernels.trimul_inproj.triton.front"
     elif implementation == "trimul_inproj_cute":
         from miniworld_engine.kernels.trimul_inproj.cute.launch import (
             trimul_inproj_cute_forward,
@@ -1653,15 +1648,6 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
             left, right = triton_tm1(x, wl, wlg, wr, wrg)
             return left.reshape(L * L, D), right.reshape(L * L, D)
         path = "kernels.tm1.triton.main"
-    elif implementation == "trimul_front_sm100":
-        from miniworld_engine.kernels.trimul_inproj.cute.front_sm100 import (
-            trimul_front_sm100,
-        )
-
-        def run(x):
-            left, right = trimul_front_sm100(x, wl, wlg, wr, wrg)
-            return bdll_to_md(left), bdll_to_md(right)
-        path = "kernels.trimul_inproj.cute.front_sm100"
     else:
         return as_bench_result(float("nan"))
 
@@ -2150,7 +2136,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
 # ---- BACKWARD operations (pure-function launchers; cudagraph-safe) ----------------------------
 def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     """LayerNorm backward: (dy,x,w,mean,rstd)->(dx,dw,db). Rows: pytorch(pure), triton_atomic,
-    triton_partial, triton_persistent. Cosine on dx vs the pure-torch LN backward."""
+    triton_persistent. Cosine on dx vs the pure-torch LN backward."""
     D, L = conf.d_pair, seq_len
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
     tname = str(dtype).replace("torch.", "")
@@ -2180,13 +2166,15 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
 
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
-    elif implementation in {"triton_atomic", "triton_partial", "triton_persistent"}:
+    elif implementation in {"triton_atomic", "triton_persistent"}:
+        # No `triton_partial`: 3d5a0a2c deleted the partial backward path and `_bwd_partial_impl`
+        # with it -- `_VALID_BWD_PATHS` is {"persistent", "atomic", "cuda"}. The import named it
+        # anyway, so all three rows died on the import, not just the one that no longer exists.
         from miniworld_engine.kernels.layernorm.compile_native import (
             _bwd_atomic_impl,
-            _bwd_partial_impl,
             _bwd_persistent_impl,
         )
-        impl_fn = {"triton_atomic": _bwd_atomic_impl, "triton_partial": _bwd_partial_impl,
+        impl_fn = {"triton_atomic": _bwd_atomic_impl,
                    "triton_persistent": _bwd_persistent_impl}[implementation]
         kfn = lambda: impl_fn(dy, x, w, mean, rstd)
         path = f"kernels.layernorm.compile_native.{implementation}"
