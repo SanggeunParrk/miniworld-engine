@@ -1,81 +1,148 @@
 """Drivers for the ``rmsnorm`` family.
 
-The width is the HEAD dim, not the model width: both callers normalize per attention head
-(``modules/swa_atom_attention`` at head_dim, ``kernels/triangle_attention/whole_op.py`` at
-``d_head``), so the rows are ``N*S*H`` and the normalized axis is small. That is why the ladders
-in ``configs/grid/rmsnorm_*.csv`` start their BLOCK_K at 32 rather than at layernorm's 64.
+THREE entry points, and they do not share a width. ``triton_rmsnorm`` normalizes per attention
+HEAD -- ``modules/swa_atom_attention`` over ``head_dim = d_model // n_heads`` (module.py:457) and
+``kernels/triangle_attention/whole_op.py`` over its own ``d_head`` -- so its normalized axis is
+small and the ladders in ``configs/grid/rmsnorm_*.csv`` start their BLOCK_K at 32 rather than at
+layernorm's 64. ``triton_rmsnorm_modulate`` and ``triton_rmsnorm_adamod`` are DiT-block ops and
+act on the whole ``d_model`` vector. A driver that used one width for all three would tune a
+shape two of them never present.
 
-Both driven with a weight AND without: ``HAS_WEIGHT`` is a constexpr, so the two are separate
-compiled kernels and a cache built for one says nothing about the other.
+Every constexpr combination production actually reaches is driven here, because ``HAS_WEIGHT``
+and ``HAS_MODULATION`` are in the kernels' autotune ``key``: each combination is a separate
+compiled kernel AND a separate cache bucket, so one driven combination says nothing about the
+others. Both values of ``HAS_WEIGHT`` are real -- SWA's q/k normalization is non-affine
+(module.py:433) and triangle_attention passes a weight -- and so the weighted and unweighted
+forms are both launched below rather than one standing in for the other.
 """
 from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import BF16, dev, vec
+from miniworld_engine.kernels.drivers import (
+    BF16,
+    both_level_is_pair,
+    dev,
+    driver_length,
+    driver_width,
+    ragged,
+    vec,
+)
 
-#: head_dim, the axis these kernels normalize. 32 is the SWA atom side (d_model 128 / 4 heads).
-_D = 32
-#: Rows a driven launch reduces over. `_rows` below builds the (M, D) the launcher flattens to.
-_M = 4096
+_L = driver_length(128)
+#: ``level=both``: the token side hands over a 4-D pair activation, so its rows are ``L*L``; the
+#: atom side hands over a 3-D single one and its rows are ``L``. The same split
+#: ``drivers/layernorm_linear.py`` makes, for the same reason -- one length, two row counts.
+_M = ragged(_L) ** 2 if both_level_is_pair(_L) else ragged(_L)
+
+#: d_model. The base every other width here derives from, per :func:`driver_width` -- overriding
+#: it moves the whole family the way changing the model's width would.
+_D_BASE = driver_width(128)
+#: head_dim, the axis ``triton_rmsnorm`` reduces. The SWA atom block runs d_model 128 over 4
+#: heads; the ratio, not the 32, is what follows the base.
+_D = ragged(_D_BASE // 4)
+#: d_model itself, for the two DiT-block entry points.
+_DM = ragged(_D_BASE)
+#: d_cond FOLLOWS d_model the way the model pairs them -- 384 conditioning a token width, 128 on
+#: the atom side -- for the reason ``drivers/conditioned_transition.py`` spells out at length.
+#: ``by=5`` so that in ragged mode d_cond and d_model are DIFFERENT non-aligned values: a mask bug
+#: on the conditioning axis, or a launcher reading one width where it means the other, is
+#: invisible while the two are equal.
+_DC = ragged(384 if _D_BASE > 128 else 128, by=5)
 _EPS = 1e-5
 
 
-def _rows(m: int = _M, d: int = _D) -> torch.Tensor:
-    """The PRE-flatten activation, as the real callers hand it over.
+def _rows(d: int) -> torch.Tensor:
+    """The PRE-flatten activation at width ``d``, as the real callers hand it over.
 
-    3-D, not (M, D): `rows_of` refuses an already-flattened shape on purpose -- a caller holding
+    3-D, not (M, D): ``rows_of`` refuses an already-flattened shape on purpose -- a caller holding
     only (M, D) cannot say whether its M is the whole launch or one slice of it. SWA passes
     [N, S, H, D] and triangle_attention its own 4-D; either way the launcher flattens.
     """
-    return torch.randn(1, m, d, device=dev(), dtype=BF16, requires_grad=True)
+    return torch.randn(1, _M, d, device=dev(), dtype=BF16, requires_grad=True)
+
+
+def _cond() -> torch.Tensor:
+    return torch.randn(1, _M, _DC, device=dev(), dtype=BF16, requires_grad=True)
+
+
+def _proj() -> torch.Tensor:
+    """One (d_model, d_cond) slice of the block's adaLN projection. bias=False at the call site."""
+    return (torch.randn(_DM, _DC, device=dev(), dtype=BF16) * (0.1 / _DC**0.5)).requires_grad_()
+
+
+# ── rmsnorm ──────────────────────────────────────────────────────────────────────────────────
 
 
 def rmsnorm_fwd_triton() -> None:
-    """rmsnorm_fwd_kernel, weighted."""
+    """rmsnorm_fwd_kernel, at BOTH values of HAS_WEIGHT (two compiled kernels, two buckets)."""
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
 
-    triton_rmsnorm(_rows(), vec(_D), _EPS)
+    triton_rmsnorm(_rows(_D), vec(_D), _EPS)   # triangle_attention: affine
+    triton_rmsnorm(_rows(_D), None, _EPS)      # SWA q/k: non-affine
 
 
 def rmsnorm_bwd_triton() -> None:
-    """rmsnorm_bwd_kernel, via _RMSNorm.backward."""
+    """rmsnorm_bwd_kernel, via _RMSNorm.backward, at both values of HAS_WEIGHT."""
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
 
-    x = _rows()
-    triton_rmsnorm(x, vec(_D), _EPS).sum().backward()
+    triton_rmsnorm(_rows(_D), vec(_D), _EPS).sum().backward()
+    triton_rmsnorm(_rows(_D), None, _EPS).sum().backward()
 
 
-#: The adaLN pair is driven at the DiT block's width, not `_D`: the modulate acts on the whole
-#: d_model vector, only the q/k normalization is per head. 128/384 is the atom block.
-_DM = 128
-_DC = 384
+# ── rmsnorm_modulate ─────────────────────────────────────────────────────────────────────────
+# HAS_MODULATION=True. A separate registry row and not a mode of the two above: it is keyed on a
+# different width (d_model, not head_dim) and it is a different compiled kernel.
 
 
-def _adamod_args() -> tuple[torch.Tensor, ...]:
-    """``(q, c, w_scale, w_shift)`` at the atom-DiT block shape, q differentiable."""
-    q = torch.randn(1, _M, _DM, device=dev(), dtype=BF16, requires_grad=True)
-    c = torch.randn(1, _M, _DC, device=dev(), dtype=BF16, requires_grad=True)
-    w = lambda: (torch.randn(_DM, _DC, device=dev(), dtype=BF16)
-                 * (0.1 / _DC**0.5)).requires_grad_()
-    return q, c, w(), w()
+def _mod_args() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(x, scale, shift)``. scale/shift are per-ELEMENT -- chunks of a projection of the
+    conditioning vector -- so they carry x's shape, not a per-channel one."""
+    return _rows(_DM), _rows(_DM), _rows(_DM)
+
+
+def rmsnorm_modulate_fwd_triton() -> None:
+    """rmsnorm_fwd_kernel at HAS_MODULATION=True, both values of HAS_WEIGHT."""
+    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_modulate
+
+    x, sc, sh = _mod_args()
+    triton_rmsnorm_modulate(x, sc, sh, vec(_DM), _EPS)
+    x, sc, sh = _mod_args()
+    triton_rmsnorm_modulate(x, sc, sh, None, _EPS)
+
+
+def rmsnorm_modulate_bwd_triton() -> None:
+    """rmsnorm_bwd_kernel at HAS_MODULATION=True, both values of HAS_WEIGHT."""
+    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_modulate
+
+    x, sc, sh = _mod_args()
+    triton_rmsnorm_modulate(x, sc, sh, vec(_DM), _EPS).sum().backward()
+    x, sc, sh = _mod_args()
+    triton_rmsnorm_modulate(x, sc, sh, None, _EPS).sum().backward()
+
+
+# ── rmsnorm_adamod ───────────────────────────────────────────────────────────────────────────
 
 
 def rmsnorm_adamod_fwd_triton() -> None:
-    """rmsnorm_adamod_fwd_kernel, weighted."""
+    """rmsnorm_adamod_fwd_kernel, both values of HAS_WEIGHT.
+
+    Unweighted is the production case -- adaLN supplies the scale, so the norm under it is
+    non-affine -- but the affine form is a declared argument and is tuned too.
+    """
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_adamod
 
-    q, c, wsc, wsh = _adamod_args()
-    triton_rmsnorm_adamod(q, c, wsc, wsh, vec(_DM), _EPS)
+    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), None, _EPS)
+    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), vec(_DM), _EPS)
 
 
 def rmsnorm_adamod_bwd_triton() -> None:
-    """rmsnorm_adamod_bwd_kernel, via _RMSNormAdaMod.backward.
+    """rmsnorm_adamod_bwd_kernel, via _RMSNormAdaMod.backward, both values of HAS_WEIGHT.
 
     The three GEMMs the backward chains onto this kernel are cuBLAS, not tuned here; what the
     autotuner sees is the recompute-plus-elementwise kernel that feeds them.
     """
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_adamod
 
-    q, c, wsc, wsh = _adamod_args()
-    triton_rmsnorm_adamod(q, c, wsc, wsh, vec(_DM), _EPS).sum().backward()
+    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), None, _EPS).sum().backward()
+    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), vec(_DM), _EPS).sum().backward()

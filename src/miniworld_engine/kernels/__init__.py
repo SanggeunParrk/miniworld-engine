@@ -68,6 +68,8 @@ _LAZY_EXPORTS = {
     "layernorm_kernel": (".layernorm.interface", "layernorm_kernel"),
     "sigmoid_gate_fused": (".gated_projection.interface", "sigmoid_gate_fused"),
     "triton_rmsnorm": (".rmsnorm.interface", "triton_rmsnorm"),
+    "triton_rmsnorm_adamod": (".rmsnorm.interface", "triton_rmsnorm_adamod"),
+    "triton_rmsnorm_modulate": (".rmsnorm.interface", "triton_rmsnorm_modulate"),
     "triton_augmented_attention_pair_bias": (
         ".augmented_attention.interface",
         "triton_augmented_attention_pair_bias",
@@ -160,6 +162,8 @@ __all__ = [
     "triton_bias_only_attention",
     "triton_layernorm",
     "triton_rmsnorm",
+    "triton_rmsnorm_adamod",
+    "triton_rmsnorm_modulate",
     "triton_tm1",
     "triton_tm2",
     "triton_transition",

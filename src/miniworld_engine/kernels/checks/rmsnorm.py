@@ -2,30 +2,45 @@
 
 The reference is `rmsnorm/reference.py`, not `F.rms_norm`: comparing one implementation against
 another checks that they agree, not that either is right.
+
+Widths come from `drivers/rmsnorm.py` rather than being written again here, so a ragged-mode run
+checks the same partial tiles it builds, and so the two files cannot drift into checking a shape
+nothing tunes. Each checker covers BOTH values of `HAS_WEIGHT` for the same reason the drivers
+launch both: they are separate compiled kernels.
 """
 from __future__ import annotations
 
 import torch
 
 from miniworld_engine.kernels.drivers import BF16, dev, vec
-
-_D = 32
-_M = 4096
-_EPS = 1e-5
+from miniworld_engine.kernels.drivers.rmsnorm import _D, _DC, _DM, _EPS, _M
 
 
-def _x() -> torch.Tensor:
+def _x(d: int) -> torch.Tensor:
     """PRE-flatten, for the reason `drivers/rmsnorm.py::_rows` gives."""
-    return torch.randn(1, _M, _D, device=dev(), dtype=BF16)
+    return torch.randn(1, _M, d, device=dev(), dtype=BF16)
+
+
+def _grads(fn, tensors, da):
+    """`fn` applied to clones of `tensors`, backward through `da`, gradients in order."""
+    ts = [t.clone().requires_grad_() for t in tensors]
+    fn(*ts).backward(da)
+    return [t.grad for t in ts]
+
+
+# ── rmsnorm ──────────────────────────────────────────────────────────────────────────────────
 
 
 def rmsnorm_fwd_triton():
-    """rmsnorm_fwd_kernel: y = x * rstd * w."""
+    """rmsnorm_fwd_kernel: y = x * rstd (* w), affine and non-affine."""
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_reference
 
-    x, w = _x(), vec(_D)
-    return {"y": (triton_rmsnorm(x, w, _EPS), rmsnorm_reference(x, w, _EPS))}
+    out = {}
+    x = _x(_D)
+    for tag, w in (("aff", vec(_D)), ("plain", None)):
+        out[f"y_{tag}"] = (triton_rmsnorm(x, w, _EPS), rmsnorm_reference(x, w, _EPS))
+    return out
 
 
 def rmsnorm_bwd_triton():
@@ -33,34 +48,77 @@ def rmsnorm_bwd_triton():
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_reference
 
-    x0, w0 = _x(), vec(_D)
+    out = {}
+    x0 = _x(_D)
     da = torch.randn_like(x0)
+    for tag, w0 in (("aff", vec(_D)), ("plain", None)):
+        ins = [x0] if w0 is None else [x0, w0]
+        # The None has to be PASSED, not omitted: `weight` is positional, so dropping it hands
+        # `eps` over as the weight.
+        pad = (lambda x: (x, None)) if w0 is None else (lambda x, w: (x, w))
+        got = _grads(lambda *t, _p=pad: triton_rmsnorm(*_p(*t), _EPS), ins, da)
+        ref = _grads(lambda *t, _p=pad: rmsnorm_reference(*_p(*t), _EPS), ins, da)
+        names = ["dx"] if w0 is None else ["dx", "dweight"]
+        for n, g, r in zip(names, got, ref, strict=True):
+            out[f"{n}_{tag}"] = (g, r)
+    return out
 
-    x = x0.clone().requires_grad_()
-    w = w0.clone().requires_grad_()
-    triton_rmsnorm(x, w, _EPS).backward(da)
 
-    xr = x0.clone().requires_grad_()
-    wr = w0.clone().requires_grad_()
-    rmsnorm_reference(xr, wr, _EPS).backward(da)
-    return {"dx": (x.grad, xr.grad), "dweight": (w.grad, wr.grad)}
+# ── rmsnorm_modulate ─────────────────────────────────────────────────────────────────────────
 
 
-_DM = 128
-_DC = 384
+def rmsnorm_modulate_fwd_triton():
+    """rmsnorm_fwd_kernel at HAS_MODULATION=True: rmsnorm(x)*(1+scale)+shift."""
+    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_modulate
+    from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_modulate_reference
+
+    x, sc, sh = _x(_DM), _x(_DM), _x(_DM)
+    out = {}
+    for tag, w in (("aff", vec(_DM)), ("plain", None)):
+        out[f"y_{tag}"] = (triton_rmsnorm_modulate(x, sc, sh, w, _EPS),
+                           rmsnorm_modulate_reference(x, sc, sh, w, _EPS))
+    return out
+
+
+def rmsnorm_modulate_bwd_triton():
+    """rmsnorm_bwd_kernel at HAS_MODULATION=True: dx, dscale, dshift and dweight.
+
+    dshift is checked even though the kernel never computes it -- it IS dy, returned by reshaping,
+    and a reshape that lost a stride would show up here and nowhere else.
+    """
+    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_modulate
+    from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_modulate_reference
+
+    x0, sc0, sh0 = _x(_DM), _x(_DM), _x(_DM)
+    da = torch.randn_like(x0)
+    out = {}
+    for tag, w0 in (("aff", vec(_DM)), ("plain", None)):
+        base = [x0, sc0, sh0]
+        ins = base if w0 is None else [*base, w0]
+        order = (lambda x, s, h: (x, s, h, None)) if w0 is None else (lambda x, s, h, w: (x, s, h, w))
+        got = _grads(lambda *t, _o=order: triton_rmsnorm_modulate(*_o(*t), _EPS), ins, da)
+        ref = _grads(lambda *t, _o=order: rmsnorm_modulate_reference(*_o(*t), _EPS),
+                     ins, da)
+        names = ["dx", "dscale", "dshift"] + ([] if w0 is None else ["dweight"])
+        for n, g, r in zip(names, got, ref, strict=True):
+            out[f"{n}_{tag}"] = (g, r)
+    return out
+
+
+# ── rmsnorm_adamod ───────────────────────────────────────────────────────────────────────────
 
 
 def _adamod_inputs():
-    """``(q, c, w_scale, w_shift, weight)`` at the atom-DiT block shape, all leaf-ready."""
-    q = torch.randn(1, _M, _DM, device=dev(), dtype=BF16)
-    c = torch.randn(1, _M, _DC, device=dev(), dtype=BF16)
-    # 1/sqrt(d_cond) * 0.1: adaLN-Zero starts this projection AT zero and a trained block
-    # keeps it small, so `scale` lands near 0.1 and `1 + scale` stays far from its zero
-    # crossing. At the 0.05 a naive init would give, `scale` has unit variance, `1 + scale`
-    # cancels on some elements, and the relative error this check reports measures that
-    # cancellation rather than the kernel.
+    """``(q, c, w_scale, w_shift)`` at the DiT block shape.
+
+    The projection weights are scaled 1/sqrt(d_cond) * 0.1: adaLN-Zero starts this projection AT
+    zero and a trained block keeps it small, so `scale` lands near 0.1 and `1 + scale` stays far
+    from its zero crossing. At the 0.05 a naive init would give, `scale` has unit variance,
+    `1 + scale` cancels on some elements, and the relative error this check reports measures that
+    cancellation rather than the kernel.
+    """
     w = lambda: torch.randn(_DM, _DC, device=dev(), dtype=BF16) * (0.1 / _DC**0.5)
-    return q, c, w(), w(), vec(_DM)
+    return _x(_DM), _x(_DC), w(), w()
 
 
 def rmsnorm_adamod_fwd_triton():
@@ -68,27 +126,34 @@ def rmsnorm_adamod_fwd_triton():
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_adamod
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
 
-    q, c, wsc, wsh, w = _adamod_inputs()
-    return {"y": (triton_rmsnorm_adamod(q, c, wsc, wsh, w, _EPS),
-                  rmsnorm_adamod_reference(q, c, wsc, wsh, w, _EPS))}
+    q, c, wsc, wsh = _adamod_inputs()
+    out = {}
+    for tag, w in (("plain", None), ("aff", vec(_DM))):
+        out[f"y_{tag}"] = (triton_rmsnorm_adamod(q, c, wsc, wsh, w, _EPS),
+                           rmsnorm_adamod_reference(q, c, wsc, wsh, w, _EPS))
+    return out
 
 
 def rmsnorm_adamod_bwd_triton():
     """rmsnorm_adamod_bwd_kernel: every gradient, against autograd over the reference.
 
-    ``dWsc``/``dWsh``/``dc`` come from cuBLAS calls the kernel feeds rather than from the kernel,
-    but they are checked here too -- a wrong ``dscale`` shows up in them and nowhere else.
+    dWsc/dWsh/dc come from cuBLAS calls the kernel feeds rather than from the kernel, but they are
+    checked here too -- a wrong dscale shows up in them and nowhere else.
     """
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_adamod
     from miniworld_engine.kernels.rmsnorm.reference import rmsnorm_adamod_reference
 
-    q0, c0, wsc0, wsh0, w0 = _adamod_inputs()
+    q0, c0, wsc0, wsh0 = _adamod_inputs()
     da = torch.randn_like(q0)
-    names = ("dq", "dc", "dWsc", "dWsh", "dweight")
-    out: dict[str, list[torch.Tensor]] = {n: [] for n in names}
-    for fn in (triton_rmsnorm_adamod, rmsnorm_adamod_reference):
-        ts = [t.clone().requires_grad_() for t in (q0, c0, wsc0, wsh0, w0)]
-        fn(*ts, _EPS).backward(da)
-        for name, t in zip(names, ts, strict=True):
-            out[name].append(t.grad)
-    return {k: (v[0], v[1]) for k, v in out.items()}
+    out = {}
+    for tag, w0 in (("plain", None), ("aff", vec(_DM))):
+        base = [q0, c0, wsc0, wsh0]
+        ins = base if w0 is None else [*base, w0]
+        pad = (lambda *t: (*t, None)) if w0 is None else (lambda *t: t)
+        got = _grads(lambda *t, _p=pad: triton_rmsnorm_adamod(*_p(*t), _EPS), ins, da)
+        ref = _grads(lambda *t, _p=pad: rmsnorm_adamod_reference(*_p(*t), _EPS),
+                     ins, da)
+        names = ["dq", "dc", "dWsc", "dWsh"] + ([] if w0 is None else ["dweight"])
+        for n, g, r in zip(names, got, ref, strict=True):
+            out[f"{n}_{tag}"] = (g, r)
+    return out
