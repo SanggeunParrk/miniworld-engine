@@ -74,47 +74,46 @@ def _proj() -> torch.Tensor:
 # ── rmsnorm ──────────────────────────────────────────────────────────────────────────────────
 
 
-def rmsnorm_fwd_triton() -> None:
-    """rmsnorm_fwd_kernel, at BOTH values of HAS_WEIGHT (two compiled kernels, two buckets)."""
-    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
-
-    triton_rmsnorm(_rows(_D), vec(_D), _EPS)   # triangle_attention: affine
-    triton_rmsnorm(_rows(_D), None, _EPS)      # SWA q/k: non-affine
-
-
-def rmsnorm_bwd_triton() -> None:
-    """rmsnorm_bwd_kernel, via _RMSNorm.backward, at both values of HAS_WEIGHT."""
-    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
-
-    triton_rmsnorm(_rows(_D), vec(_D), _EPS).sum().backward()
-    triton_rmsnorm(_rows(_D), None, _EPS).sum().backward()
-
-
-# ── rmsnorm_modulate ─────────────────────────────────────────────────────────────────────────
-# HAS_MODULATION=True. A separate registry row and not a mode of the two above: it is keyed on a
-# different width (d_model, not head_dim) and it is a different compiled kernel.
-
-
 def _mod_args() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(x, scale, shift)``. scale/shift are per-ELEMENT -- chunks of a projection of the
-    conditioning vector -- so they carry x's shape, not a per-channel one."""
+    """``(x, scale, shift)`` at d_model. scale/shift are per-ELEMENT -- chunks of a projection of
+    the conditioning vector -- so they carry x's shape, not a per-channel one."""
     return _rows(_DM), _rows(_DM), _rows(_DM)
 
 
-def rmsnorm_modulate_fwd_triton() -> None:
-    """rmsnorm_fwd_kernel at HAS_MODULATION=True, both values of HAS_WEIGHT."""
-    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_modulate
+def rmsnorm_fwd_triton() -> None:
+    """rmsnorm_fwd_kernel, at all FOUR (HAS_WEIGHT, HAS_MODULATION) combinations.
 
+    One driver and not four rows, because a config ladder belongs to a KERNEL: the modulate form
+    is `rmsnorm_fwd_kernel` with a constexpr flipped, and it reads `configs_for(
+    "rmsnorm_fwd_triton")` like the plain form does. A second registry row would have to name a
+    ladder nothing reads. The four DO get four cache buckets -- both flags are in the autotune
+    key -- which is why all four are launched here.
+
+    Two widths for the same reason: the q/k normalization reduces over head_dim and the DiT
+    modulate over d_model, and the shape key separates them.
+    """
+    from miniworld_engine.kernels.rmsnorm.interface import (
+        triton_rmsnorm,
+        triton_rmsnorm_modulate,
+    )
+
+    triton_rmsnorm(_rows(_D), vec(_D), _EPS)   # triangle_attention: affine
+    triton_rmsnorm(_rows(_D), None, _EPS)      # SWA q/k: non-affine
     x, sc, sh = _mod_args()
     triton_rmsnorm_modulate(x, sc, sh, vec(_DM), _EPS)
     x, sc, sh = _mod_args()
     triton_rmsnorm_modulate(x, sc, sh, None, _EPS)
 
 
-def rmsnorm_modulate_bwd_triton() -> None:
-    """rmsnorm_bwd_kernel at HAS_MODULATION=True, both values of HAS_WEIGHT."""
-    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_modulate
+def rmsnorm_bwd_triton() -> None:
+    """rmsnorm_bwd_kernel, via the autograd entry points, at all four combinations."""
+    from miniworld_engine.kernels.rmsnorm.interface import (
+        triton_rmsnorm,
+        triton_rmsnorm_modulate,
+    )
 
+    triton_rmsnorm(_rows(_D), vec(_D), _EPS).sum().backward()
+    triton_rmsnorm(_rows(_D), None, _EPS).sum().backward()
     x, sc, sh = _mod_args()
     triton_rmsnorm_modulate(x, sc, sh, vec(_DM), _EPS).sum().backward()
     x, sc, sh = _mod_args()

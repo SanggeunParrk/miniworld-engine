@@ -47,6 +47,16 @@ dev = ["pytest", "ruff", "ty"]
 # Opt-in so it never enters the default/parent solve; it is a prerelease wheel, so
 # install with: uv pip install --prerelease=allow "flash-attn-4[cu13]"
 flash = ["flash-attn-4"]
+# FlashAttention-2, for sm_80/sm_86/sm_89 (A100, L40S, 4090). FA4 is sm_90+ only, so on an
+# Ampere card the `flash` extra above installs something that cannot run and
+# `swa_atom_attention` falls back to a dense band mask -- which wants a 24 GiB [N, S, S]
+# tensor at A=48, S=8192 and simply OOMs. This extra is what makes that block work there.
+# No prebuilt wheel matches every torch/CUDA pair, so it compiles on install (~40 min):
+#   pip install --no-build-isolation "miniworld-engine[flash2]"
+# The two are mutually exclusive in practice but not in the metadata: the module picks
+# whichever the CARD can use (see modules/swa_atom_attention/module.py::_flash_backend),
+# so installing both is harmless.
+flash2 = ["flash-attn>=2.8,<3"]
 
 [build-system]
 requires = ["setuptools>=77"]  # >=77 for PEP 639 (SPDX `license` string + `license-files`)
