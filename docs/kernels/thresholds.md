@@ -3,42 +3,81 @@
 Derived, not hand-written. An AST pass over `src/miniworld_engine/kernels/**` collects numeric
 literals appearing in comparisons **outside** `@triton.jit` bodies — inside a kernel a constexpr
 comparison is tile algebra, not policy. 0/1/2/-1 and anything under 8 are skipped, as are 100
-and 1000. Script: [`audit_thresholds.py`](audit_thresholds.py), run from the repo root..
+and 1000. Script: [`audit_thresholds.py`](audit_thresholds.py), run from the repo root.
 
-**48 sites.** The point of the audit was to find numbers that route work without saying why. Most
-of these turn out not to be that, and the count of the ones that are is **5**.
+**48 sites.** The audit was looking for numbers that route work without saying why. Most of these
+turn out not to be that. Three are, and only one of the three is reachable on the hardware and
+dtype we actually run.
 
 ## What each kind is, and how many
 
 | kind | n | is it a problem? |
 |---|---|---|
 | architecture predicate | 23 | No. Needs a name, not a measurement. |
-| performance threshold, evidence recorded | 7 | No. |
-| support / correctness bound | 4 | No. Past it the call raises or is wrong, not slow. |
+| performance threshold, evidence recorded | 11 | No. Two of these were miscounted at first — see below. |
+| support / correctness bound | 3 | No. Past it the call raises or is wrong, not slow. |
 | kernel hint | 2 | No. Changes a codegen hint, not a code path. |
 | hardware limit | 2 | No. A number the chip fixes. |
 | dtype width test | 2 | No. `width == 16` is "is this 16-bit". |
+| tile sizing | 1 | No. Picks a tile that covers the shapes, and says so. |
 | config discriminator | 1 | No. Picks a paired constant, and explains itself at length. |
-| **performance threshold, no evidence** | **5** | **Yes. This is the backlog.** |
-| named this pass | 3 | Was 2 support bounds + 1 unjustified threshold. |
+| **performance threshold, no evidence** | **3** | **Yes. Only 1 is reachable on our hardware at bf16.** |
+| total | 48 | |
 
-## The 5 that route work and do not say why
+Three were given names this pass (2 support bounds and 1 threshold); the counts above are after
+that, so those three no longer appear as bare literals.
 
-| file | line | value | expression | what it claims |
+## The 5 that route work — re-read, one at a time
+
+The first pass read +/-8 lines around each site and called all five unjustified. Reading the
+whole enclosing file changes the verdict on two of them, and shows a second thing worth knowing:
+whether the branch is reachable at all on the hardware and dtype we actually run.
+
+| file | line | value | evidence | reachable here? |
 |---|---|---|---|---|
-| `conditioned_transition/triton/training.py` | 447 | 8192 | `M >= 8192` | fused beats cuBLAS above this atom M |
-| `conditioned_transition/triton/training.py` | 448 | 512 | `M <= 512` | fused beats cuBLAS below this token M |
-| `transition/whole_op.py` | 41 | 256 | `d_hidden >= 256` | wide-d goes to the cute fused expand (SM90) |
-| `transition/whole_op.py` | 49 | 256 | `d_hidden >= 256` | wide-d goes to the split GEMM (pre-Hopper) |
-| `transition/triton/fused.py` | 1467 | 128 | `K <= 128` | the cute dab+lnbwd fusion wins below this K |
+| `conditioned_transition/triton/training.py` | 447 | 8192 | **Yes**, 30 lines up | **No** — bf16 forces cuBLAS |
+| `conditioned_transition/triton/training.py` | 448 | 512 | **Yes**, 30 lines up | **No** — bf16 forces cuBLAS |
+| `transition/whole_op.py` | 41 | 256 | No | No — SM90 only, and this cluster has no H100 |
+| `transition/whole_op.py` | 49 | 256 | No | **Yes** — A5000/A6000, bf16, the default path |
+| `transition/triton/fused.py` | 1467 | 128 | No | No — SM90 only, and off by default (`transition_dab_lnbwd`) |
 
-The two in `training.py` sit under a docstring that says "Measured-best forward backend per
-regime", which is a claim of measurement with no number, no card and no date attached — the same
-shape as the `adaln` 256 turned out to be, where the recorded justification was an H100 result
-governing Ampere routing. Treat "measured" without a figure as unverified.
+### The two in `training.py` are documented, just not where the audit looked
 
-Each needs one A/B on both sides of the boundary, per card. That is one GPU job for the pair in
-`training.py` (same function), one for `whole_op.py`, one for `fused.py`.
+`_pick_fwd`'s docstring says only "Measured-best forward backend per regime". The figures are on
+the `_FWD_MODE` constant above it:
+
+> MEASURED (H100, CUDA-graph fwd+bwd; identical backward, only the forward differs): both beat
+> eager 1.12-1.28x. fused-vs-cublas: fused WINS atom large-M (8192: 1.03x) and small token
+> (384/512: 1.01-1.02x), ~ties mid, REGRESSES token>=768 (0.93-0.95x) because the forward must
+> additionally write ab,h,out,scale (saved-for-bwd) that inference never writes.
+
+Card, harness, direction and margin, plus a mechanism for the regression. That is a real
+justification. Two caveats stand: the margins are 1.01-1.03x, which is close to noise for a
+routing decision; and it is an H100 result with no per-card guard — the same shape as the `adaln`
+bug. What keeps it harmless is 30 lines below, where `x.dtype == torch.bfloat16 and mode ==
+"fused"` is rewritten to `"cublas"` because the fused kernel's register pressure was never
+benchmarked at bf16. bf16 is our default dtype, so **at the dtype we run, `_pick_fwd`'s two
+thresholds decide nothing**. They govern fp32 only.
+
+Fix is a docstring cross-reference, not a measurement.
+
+### `whole_op.py:41` and `fused.py:1467` cannot be settled on this cluster
+
+Both are behind an SM90 test and `sinfo` shows only A6000 and A5000 — no Hopper. `fused.py:1467`
+is additionally behind a setting that is off by default and its own comment calls it
+"Experimental/gated". Unjustified, and unmeasurable here; leaving them flagged is the honest
+outcome, not a to-do that quietly never closes.
+
+### `whole_op.py:49` is the one that matters
+
+No evidence anywhere in the file, and it is the live path: A5000/A6000, bf16, every
+`transition` call. It decides that `d_hidden >= 256` goes to `triton_layernorm` +
+`triton_transition` (split) while below it goes to `triton_transition_fused`. The comments assert
+"the shape-general split GEMM wins" and "the AF3 shape" and give no number for either.
+
+The model presents `d_hidden` of 16 and 128 (pair-atom, atom), 384 (`d_single`) and 768 (token),
+with `transition_n: 2`. It never presents 256. So the threshold's real content is just "fused for
+16 and 128, split for 384 and 768" — two claims, both testable on one A5000.
 
 ## Named this pass
 
@@ -88,7 +127,7 @@ inside an `@opaque` returns a non-Tensor — some of these may be inline for tha
 | `transition/triton/fused.py` | 1468 | 9 | `torch.cuda.get_device_capability(x2.device)[0] >= 9` |
 | `trimul_inproj/whole_op.py` | 95 | 10 | `torch.cuda.get_device_capability(x.device)[0] >= 10` |
 
-## Performance thresholds that DO carry evidence (7)
+## Performance thresholds that DO carry evidence (11)
 
 Recorded here so the audit does not have to be redone to find out they are fine.
 
@@ -99,9 +138,13 @@ Recorded here so the audit does not have to be redone to find out they are fine.
 | `layernorm/compile_native.py` | 90 | 128, 512 | Decides which impls enter the *calibration* set, so a wrong bound costs a candidate, not a wrong choice. |
 | `layernorm/triton/main.py` | 396 | 128, 512 | "CUDA beats triton 1.17x @L512, 1.28x @L1024" for the masked path; dense is neutral and stays behind an env flag. Both sides of the split stated. |
 | `layernorm_linear/autograd.py` | 156 | 128 | "wins/ties at K=128 across M (A/B: 1.29x@16384, ~1.0x at larger M)", plus *why* K=256 loses: the full-N epi subtile starves the mainloop with D+C both in smem. |
+| `conditioned_transition/triton/training.py` | 447, 448 | 8192, 512 | The H100 sweep quoted above, on the `_FWD_MODE` constant 30 lines up rather than on `_pick_fwd` itself. Unreachable at bf16. |
 | `transition/cute/gemm_transition_swiglu.py` | 197 | 128 | "the win the K-sweep found: K<=128 -> 256x128 coop; K>=256 -> 192x128 pingpong", verified 2026-08-04 at cos=1.0. A cache-miss fallback, not the primary path. |
 
 ## Everything else (11)
+
+Counts as: 3 support/correctness bounds, 2 kernel hints, 2 hardware limits, 2 dtype width tests,
+1 tile sizing, 1 config discriminator.
 
 Not thresholds. Listed so a future audit does not re-flag them.
 
