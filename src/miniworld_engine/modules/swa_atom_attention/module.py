@@ -32,6 +32,7 @@ Biology", Algorithm 8 / Algorithm 9; RoPE: Su et al. (arXiv:2104.09864).
 from __future__ import annotations
 
 import importlib.util
+import pathlib
 
 import torch
 import torch.nn as nn
@@ -43,6 +44,7 @@ from miniworld_engine._typecheck import typecheck
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.primitives import Linear, MPLinear
 
+
 # FlashAttention-4 (CuTeDSL) is the Hopper/Blackwell windowed-attention backend
 # (FA2 has no sm_100 / B200 support). Its import pulls CUTLASS, so we only *probe*
 # availability here — ``find_spec`` locates the module without executing it — and
@@ -50,7 +52,57 @@ from miniworld_engine.modules.primitives import Linear, MPLinear
 # keeps ``import miniworld_engine.modules`` PyTorch-first (SDPA fallback) and free of any GPU
 # backend until the flash path actually runs. Optimizing this via a
 # ``miniworld_engine`` op is the intended future path; for now the fallback is torch.
-_FLASH_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
+#: Which flash backend this process can actually use: "fa4", "fa2" or None.
+#:
+#: Resolved once, from what is INSTALLED and what the card can run -- not from the package name
+#: alone. `find_spec("flash_attn") is not None` was both: FA4 and FA2 share the top-level package,
+#: so it could not tell them apart, and it never asked the card, so an FA4 wheel on an A100 sent
+#: sm80 down a Hopper/Blackwell path. FA4 (CuTeDSL) needs sm90+; FA2 covers sm80 and has no sm100
+#: support, which is why both are kept rather than one replacing the other.
+#:
+#: Probed with `find_spec`, which locates a module without executing it: importing FA4 pulls
+#: CUTLASS, and `import miniworld_engine.modules` stays PyTorch-first and GPU-backend-free until
+#: the flash path actually runs. The real import stays lazy, inside `flash_window_seqused`.
+def _has_submodule(parent: str, child: str) -> bool:
+    """Is ``parent.child`` installed, WITHOUT importing either.
+
+    `find_spec("flash_attn.cute")` would import `flash_attn` to find its submodule -- and raise
+    ModuleNotFoundError outright when the parent is absent, which is the common case. Looking for
+    the file under the parent's search locations keeps the probe free of both.
+    """
+    try:
+        spec = importlib.util.find_spec(parent)
+    except (ImportError, ValueError):  # a broken or shadowed install
+        return False
+    if spec is None or not spec.submodule_search_locations:
+        return False
+    for root in spec.submodule_search_locations:
+        base = pathlib.Path(root)
+        if (base / child / "__init__.py").exists() or (base / f"{child}.py").exists():
+            return True
+        if any(base.glob(f"{child}.*.so")):  # a compiled extension module
+            return True
+    return False
+
+
+_FA4_SPEC = _has_submodule("flash_attn", "cute")
+_FA2_SPEC = _has_submodule("flash_attn", "flash_attn_interface")
+
+
+def _flash_backend(device: torch.device | None = None) -> str | None:
+    """"fa4" | "fa2" | None for `device` (default: the current CUDA device)."""
+    if not torch.cuda.is_available():
+        return None
+    major = torch.cuda.get_device_capability(device)[0]
+    if _FA4_SPEC and major >= 9:
+        return "fa4"
+    if _FA2_SPEC and major >= 8:
+        return "fa2"
+    return None
+
+
+#: Kept for callers that only ask "is there any flash path at all".
+_FLASH_AVAILABLE = _FA4_SPEC or _FA2_SPEC
 
 # Opt-in runtime guard (``settings.swa_check_front_packed``) that asserts the seqused_k
 # precondition — valid atoms are front-packed in each row. Off by default so it
@@ -89,9 +141,20 @@ def flash_window_seqused(
     the surrounding compiled region never recompiles and the call is CUDA-graph
     capturable. Padding query rows are zeroed on the way out (matches the old path).
     """
-    from flash_attn.cute import (  # ty: ignore[unresolved-import]  # optional extra
-        flash_attn_varlen_func,  # lazy — pulls CUTLASS
-    )
+    backend = _flash_backend(q.device)
+    if backend == "fa4":
+        from flash_attn.cute import (  # ty: ignore[unresolved-import]  # optional extra
+            flash_attn_varlen_func,  # lazy — pulls CUTLASS
+        )
+    elif backend == "fa2":
+        # FA2's varlen entry point is a different module from FA4's; the argument names below
+        # are the ones both accept.
+        from flash_attn.flash_attn_interface import (  # ty: ignore[unresolved-import]
+            flash_attn_varlen_func,
+        )
+    else:  # pragma: no cover - the caller checks first
+        msg = "no usable flash backend for this device; the caller should have taken _sdpa_band"
+        raise RuntimeError(msg)
 
     in_dtype = q.dtype
     nh, hd = q.shape[2], q.shape[3]
@@ -111,13 +174,25 @@ def flash_window_seqused(
     # BOTH seqused_q and seqused_k are required: with a sliding window, passing only
     # seqused_k misaligns the window against the fixed-stride sequence (verified: it
     # diverges from the packed/SDPA reference; passing both matches to bf16 tol).
+    # BOTH seqused_q and seqused_k where they exist. FA2 gained them at different releases, so
+    # pass only what this build's signature declares rather than assuming: a missing keyword is a
+    # TypeError, and silently dropping seqused_k would let padding keys take probability mass.
+    import inspect
+
+    accepted = inspect.signature(flash_attn_varlen_func).parameters
+    kw = {name: seqused for name in ("seqused_q", "seqused_k") if name in accepted}
+    if "seqused_k" not in kw:
+        msg = (f"{backend}'s flash_attn_varlen_func takes neither seqused_k nor seqused_q "
+               f"({sorted(accepted)}); padding keys cannot be excluded exactly, so this build "
+               f"cannot serve the windowed path")
+        raise RuntimeError(msg)
     out = flash_attn_varlen_func(
         q, k, v,
         cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
         max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen,
-        seqused_q=seqused, seqused_k=seqused,
         softmax_scale=scale,
         window_size=window,
+        **kw,
     )
     if isinstance(out, tuple):  # return_lse / aux outputs
         out = out[0]
@@ -405,14 +480,26 @@ class SWA3DRoPEAttention(nn.Module):
         q = apply_rotary_emb_3d(q, cos, sin)
         k = apply_rotary_emb_3d(k, cos, sin)
 
-        use_flash = _FLASH_AVAILABLE and x.is_cuda
-        if use_flash:
+        # FA4 if the card can run it, else FA2, else the dense band-mask. The choice is the
+        # card's as much as the install's -- see `_flash_backend`.
+        if _flash_backend(x.device) is not None:
             out = self._flash_window(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s)
         else:
             out = self._sdpa_band(q, k, v, valid)
 
         out = out.reshape(n, s, -1)
-        out = out * torch.sigmoid(self.gate_proj(x))
+        gate = self.gate_proj(x)
+        if out.is_cuda:
+            # `sigmoid(gate) * out` in ONE triton pass instead of torch's sigmoid-then-multiply,
+            # which reads and writes the whole [N, S, d] twice. The kernel is gated_projection's
+            # `_sigmul`, already public as `kernels.sigmoid_gate_fused` and already tuned on this
+            # card -- nothing new to build or register. It carries its own autograd, and its
+            # shape_key is `both_key(rows_of(...))`, which is the convention its own family uses.
+            from miniworld_engine import kernels
+
+            out = kernels.sigmoid_gate_fused(gate, out)
+        else:
+            out = out * torch.sigmoid(gate)   # CPU unit tests: no triton
         return self.out_proj(out)
 
     def _flash_window(
