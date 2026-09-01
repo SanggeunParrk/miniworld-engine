@@ -44,17 +44,29 @@ def transition(
             expand_a_weight, expand_b_weight, squeeze_weight, n, eps,
         )
 
-    # Pre-Hopper (sm_80 / A100) wide d: the shape-general split GEMM wins, but keep the
-    # input LayerNorm on our fused Triton LN (never native fp32 F.layer_norm).
-    if d_hidden >= 256 and not _dispatch.is_sm90plus(x.device):
+    # Pre-Hopper wide d: the shape-general split GEMM wins, but keep the input LayerNorm on our
+    # fused Triton LN (never native fp32 F.layer_norm).
+    #
+    # The `>= 256` and the `is_sm86` beside it are NOT free-standing numbers: they mirror
+    # `modules/transition/module.py`, which is where the measurements are. A100 (sm_80),
+    # cudagraph-manual: the fused path costs 2.28 ms at d=256 against the split's 1.40, and
+    # 10.9 vs 4.8 at d=512, while d=128 (the AF3 shape) is where fused wins. sm_86
+    # (RTX A5000/A6000) is different enough to need its own answer -- there the fused path
+    # loses at EVERY d, 0.88-0.95x across both the L and d sweeps -- so on sm_86 all widths
+    # take the split. This wrapper had only the `>= 256` half and would send d=128 to the
+    # fused path on an A5000, against that measurement.
+    if not _dispatch.is_sm90plus(x.device) and (d_hidden >= 256 or _dispatch.is_sm86(x.device)):
         from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
         from miniworld_engine.kernels.transition.triton.main import (
             triton_transition,
         )
 
-        x_n = triton_layernorm(
-            x.reshape(-1, d_hidden), ln_in_weight, ln_in_bias, eps,
-        ).reshape(x.shape)
+        # x un-flattened. `triton_layernorm` flattens internally and reads the shape it was
+        # GIVEN to build its autotune key (`rows_of` refuses an already-flat shape, by design --
+        # it cannot tell a token (B, L, D) from a pair (B, L, L, D) once they are 2-D). Handing
+        # it `x.reshape(-1, d_hidden)` raised ValueError on every call, so this branch had never
+        # run: on a non-Hopper card `ops.transition` was dead at every d_hidden it selects.
+        x_n = triton_layernorm(x, ln_in_weight, ln_in_bias, eps)
         return triton_transition(
             x_n, expand_a_weight, expand_b_weight, squeeze_weight, n,
         )
