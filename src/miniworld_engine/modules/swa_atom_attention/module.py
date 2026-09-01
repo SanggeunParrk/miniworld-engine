@@ -181,22 +181,56 @@ def flash_window_seqused(
 
     accepted = inspect.signature(flash_attn_varlen_func).parameters
     kw = {name: seqused for name in ("seqused_q", "seqused_k") if name in accepted}
-    if "seqused_k" not in kw:
-        msg = (f"{backend}'s flash_attn_varlen_func takes neither seqused_k nor seqused_q "
-               f"({sorted(accepted)}); padding keys cannot be excluded exactly, so this build "
-               f"cannot serve the windowed path")
-        raise RuntimeError(msg)
-    out = flash_attn_varlen_func(
-        q, k, v,
-        cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen,
-        softmax_scale=scale,
-        window_size=window,
-        **kw,
-    )
-    if isinstance(out, tuple):  # return_lse / aux outputs
-        out = out[0]
-    out = out.reshape(n, s, nh, hd)
+    if "seqused_k" in kw:
+        out = flash_attn_varlen_func(
+            q, k, v,
+            cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen,
+            softmax_scale=scale,
+            window_size=window,
+            **kw,
+        )
+        if isinstance(out, tuple):  # return_lse / aux outputs
+            out = out[0]
+        out = out.reshape(n, s, nh, hd)
+    else:
+        # NO seqused on this build -- FA2 2.8.3's varlen entry point takes neither, and its
+        # release line never gained them. Dropping them is not an option: with fixed-stride
+        # cu_seqlens the padding positions stay in the sequence, their zeroed keys score 0
+        # against every query, and softmax hands them real probability mass.
+        #
+        # So this branch removes the padding instead of describing it: unpad to a densely
+        # packed [total_valid, H, D] with the true per-row lengths in cu_seqlens, attend, and
+        # scatter back. A padding key cannot take mass because it is not there, and the window
+        # is measured inside each real sequence rather than across a padded stride.
+        #
+        # The cost is the property the FA4 path exists to keep. `unpad_input` calls
+        # `torch.nonzero`, so this is a data-dependent shape: it syncs, it is NOT CUDA-graph
+        # capturable, and a compiled region around it re-traces when the valid count moves.
+        # That is the price of an sm80 card, and it is still the fast path -- `_sdpa_band`
+        # materialises an [N, S, S] mask, which is 24 GiB at the shape this block runs.
+        from flash_attn.bert_padding import (  # ty: ignore[unresolved-import]
+            index_first_axis,
+            pad_input,
+            unpad_input,
+        )
+
+        q4 = q.reshape(n, s, nh, hd)
+        q_un, indices, cu_var, max_var = unpad_input(q4, valid)[:4]
+        flat = (n * s, nh, hd)
+        k_un = index_first_axis(k.reshape(*flat), indices)
+        v_un = index_first_axis(v.reshape(*flat), indices)
+        out = flash_attn_varlen_func(
+            q_un, k_un, v_un,
+            cu_seqlens_q=cu_var, cu_seqlens_k=cu_var,
+            max_seqlen_q=max_var, max_seqlen_k=max_var,
+            softmax_scale=scale,
+            window_size=window,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+        # pad_input writes zeros at the padding rows, which is what the `where` below wants.
+        out = pad_input(out, indices, n, s).reshape(n, s, nh, hd)
     # seqused_q skips padding-query rows (position >= seqused), leaving them
     # uninitialized (can be NaN). SELECT with where (not multiply) so that garbage
     # is discarded rather than turned into NaN*0=NaN; matches the old pad_input zeros.
