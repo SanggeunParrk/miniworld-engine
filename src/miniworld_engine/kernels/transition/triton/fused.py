@@ -289,7 +289,8 @@ def transition_expand_gate(
 # for nothing.
 # fmt: off
 @triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
-                 key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL'])
+                 key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL',
+                      'HAS_LN'])
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
@@ -302,7 +303,7 @@ def _transition_b2b_kernel(
     stride_nm, stride_nk,    # xn out: (M, K) row-major (only used when SAVE_XN)
     BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
     SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    HAS_LN: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     # Back-to-back: a program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. It builds
     # the gated h tile-by-tile and ACCUMULATES the squeeze out[BM, BN] += h_chunk @ Ws[:, chunk]^T,
@@ -347,11 +348,21 @@ def _transition_b2b_kernel(
             if pid_d == 0:
                 tl.store(rstd_out_ptr + rows, rstd, mask=row_mask)
                 tl.store(c1_out_ptr + rows, c1, mask=row_mask)
-        else:
+        elif HAS_LN:
             rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
             c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
-        g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-        beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        else:
+            # No LayerNorm at all. rstd=1 and c1=0 -- with g=1, beta=0 below -- make the
+            # SAME xn expression the identity, so the schedule, the masking and the
+            # tiling stay ONE code path instead of two that can drift apart.
+            rstd = tl.full([BLOCK_M1], 1.0, tl.float32)
+            c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        if HAS_LN:
+            g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+            beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+        else:
+            g = tl.full([BLOCK_K_D], 1.0, tl.float32)
+            beta = tl.zeros([BLOCK_K_D], dtype=tl.float32)
         xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
             x_ptr.dtype.element_ty)
         if SAVE_XN:
@@ -409,9 +420,15 @@ def _transition_b2b_kernel(
             if pid_d == 0:
                 tl.store(rstd_out_ptr + rows, rstd, mask=row_mask)
                 tl.store(c1_out_ptr + rows, c1, mask=row_mask)
-        else:
+        elif HAS_LN:
             rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
             c1 = tl.load(c1_ptr + rows, mask=row_mask, other=0.0)
+        else:
+            # No LayerNorm at all. rstd=1 and c1=0 -- with g=1, beta=0 below -- make the
+            # SAME xn expression the identity, so the schedule, the masking and the
+            # tiling stay ONE code path instead of two that can drift apart.
+            rstd = tl.full([BLOCK_M1], 1.0, tl.float32)
+            c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
 
         # --- Version B: stash the normalized x for backward reuse (first D-block only) ---
         if SAVE_XN:
@@ -424,8 +441,12 @@ def _transition_b2b_kernel(
                         x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
                         mask=km, other=0.0,
                     ).to(tl.float32)
-                    g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-                    beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                    if HAS_LN:
+                        g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                        beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                    else:
+                        g = tl.full([BLOCK_K_D], 1.0, tl.float32)
+                        beta = tl.zeros([BLOCK_K_D], dtype=tl.float32)
                     xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
                         x_ptr.dtype.element_ty)
                     tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
@@ -442,8 +463,12 @@ def _transition_b2b_kernel(
                     x_ptr + rows[:, None] * stride_xm + k[None, :] * stride_xk,
                     mask=row_mask[:, None] & k_mask[None, :], other=0.0,
                 ).to(tl.float32)
-                g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
-                beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                if HAS_LN:
+                    g = tl.load(g_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                    beta = tl.load(beta_ptr + k, mask=k_mask, other=0.0).to(tl.float32)
+                else:
+                    g = tl.full([BLOCK_K_D], 1.0, tl.float32)
+                    beta = tl.zeros([BLOCK_K_D], dtype=tl.float32)
                 xn = ((x * rstd[:, None] - c1[:, None]) * g[None, :] + beta[None, :]).to(
                     x_ptr.dtype.element_ty)
                 wa = tl.load(
@@ -492,8 +517,14 @@ def transition_b2b(
     fuse_stats: bool | None = None,
     add_residual: bool = False,
     shape_key: int | None = None,
+    has_ln: bool = True,
 ):
     """Fully fused LN + SwiGLU expand + squeeze -> out (M, D). h never hits HBM.
+
+    ``has_ln=False`` drops the LayerNorm and computes ``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))``
+    -- the bare SwiGLU FFN, for a caller whose normalization is its own (an adaLN-modulated
+    RMSNorm outside the block, say). ``ln_weight``/``ln_bias``/``stats`` are then unread and
+    may be empty; ``fuse_stats`` must be off, since there are no statistics to fuse.
 
     Requires K to fit one BLOCK_K (K = next_pow2(K) <= 1024) AND the (x row + weight tiles)
     working set to fit smem — practical only for small K (d <= 128). Caller falls back to
@@ -510,8 +541,15 @@ def transition_b2b(
     M, K = x2.shape
     ND = wa.shape[0]
     D = ws.shape[0]
-    fuse_stats = _transition_fuse_stats_enabled() if fuse_stats is None else fuse_stats
-    if fuse_stats:
+    fuse_stats = (False if not has_ln
+                  else _transition_fuse_stats_enabled() if fuse_stats is None else fuse_stats)
+    if not has_ln:
+        if stats is not None:
+            raise ValueError("transition_b2b(has_ln=False) normalizes nothing; do not pass stats")
+        # Unread by the kernel under HAS_LN=False, but the launch still needs pointers.
+        rstd = c1 = x2.new_empty(0, dtype=torch.float32)
+        ln_weight = ln_bias = x2.new_empty(0)
+    elif fuse_stats:
         if stats is not None:
             raise ValueError("transition_b2b(fuse_stats=True) computes stats in-kernel; do not pass stats")
         rstd = torch.empty(M, device=x2.device, dtype=torch.float32)
@@ -534,6 +572,7 @@ def transition_b2b(
         SAVE_XN=save_xn,
         FUSE_STATS=fuse_stats,
         ADD_RESIDUAL=add_residual,
+        HAS_LN=has_ln,
     )
     if fuse_stats:
         return (out, rstd, c1, xn) if save_xn else (out, rstd, c1)
@@ -706,6 +745,91 @@ def transition_b2b_ktiled(
 # path (expand kernel writes h, then a cuBLAS squeeze). The K-tiled variant above lifts this
 # limit once verified.
 _B2B_MAX_K = 128
+
+
+def _swiglu_b2b_fake(x2, wa, wb, ws, shape_key):
+    """``out`` (M, D) in ``x2``'s dtype -- D is the squeeze weight's row count."""
+    return x2.new_empty((x2.shape[0], ws.shape[0]))
+
+
+@opaque(fake=_swiglu_b2b_fake, name="transition_swiglu_b2b")
+def _swiglu_b2b(x2: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
+                shape_key: int) -> torch.Tensor:
+    """The no-LayerNorm b2b launch, and only the launch.
+
+    Opaque for the same reason every other launcher here is: `transition_b2b` is reachable from
+    Dynamo through this autograd Function, and a bare triton launch on a traced path is what
+    `tests/compile/test_compile_wrap_coverage.py` exists to catch.
+    """
+    empty = x2.new_empty(0)
+    return transition_b2b(x2, empty, empty, wa, wb, ws, 0.0,
+                          has_ln=False, shape_key=shape_key)
+
+
+class _SwiGLUFFNFused(torch.autograd.Function):
+    """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` in ONE kernel -- no LayerNorm, no residual."""
+
+    @staticmethod
+    def forward(ctx, x, expand_a_weight, expand_b_weight, squeeze_weight):
+        orig_shape = x.shape
+        x2 = x.reshape(-1, orig_shape[-1])
+        if x2.stride(1) != 1:
+            x2 = x2.contiguous()
+        out = _swiglu_b2b(
+            x2, expand_a_weight.contiguous(), expand_b_weight.contiguous(),
+            squeeze_weight.contiguous(), both_key(rows_of(orig_shape)),
+        )
+        ctx.save_for_backward(x2, expand_a_weight, expand_b_weight, squeeze_weight)
+        ctx.shape, ctx.nd = orig_shape, expand_a_weight.shape[0]
+        return out.reshape(orig_shape)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from miniworld_engine.kernels.transition.triton.main import swiglu_squeeze_backward
+
+        x2, wa, wb, ws = ctx.saved_tensors
+        grad_output = grad_output.reshape(-1, ctx.shape[-1])
+        if grad_output.stride(1) != 1:
+            grad_output = grad_output.contiguous()
+        return swiglu_squeeze_backward(x2, wa, wb, ws, grad_output, ctx.shape, ctx.nd)
+
+
+def triton_swiglu_ffn(
+    x: torch.Tensor,
+    expand_a_weight: torch.Tensor,
+    expand_b_weight: torch.Tensor,
+    squeeze_weight: torch.Tensor,
+) -> torch.Tensor:
+    """``W_down( SiLU(Wa @ x) * (Wb @ x) )`` -- a bare SwiGLU FFN, forward and backward.
+
+    This is `Transition` with its LayerNorm and its residual taken away, which is exactly the
+    FFN an adaLN-Zero block wants: that block normalizes with its own modulated RMSNorm and
+    gates and adds the residual itself, so a Transition would apply a second, unwanted
+    LayerNorm and a second residual.
+
+    The expansion is read from ``expand_a_weight.shape[0]``, so a hidden size rounded to a
+    multiple of 256 -- not to a multiple of ``d`` -- is fine; see `triton_transition`, which
+    takes the same weights and is the fallback here.
+
+    THE SPLIT PATH, not the back-to-back one, and that is a measured choice. b2b keeps the
+    ``(M, ND)`` intermediate off HBM entirely -- 201 MB written and read at the atom shape,
+    about 0.29 ms -- but pays for it: every program loops over ALL of ND and re-reads Wa/Wb,
+    where the split runs two well-shaped GEMMs. At A=48, S=8192, d_atom 128, hidden 256, with
+    a cache built for both (HAS_LN is in the b2b's autotune key, so the no-LayerNorm form is
+    tuned as itself):
+
+        eager PyTorch          fwd 1.69 ms  bwd 2.99  held 864 MB  peak 9622 MB
+        split (this)           fwd 0.61     bwd 1.90  held  96 MB  peak 2039 MB
+        b2b (_SwiGLUFFNFused)  fwd 1.36     bwd 1.89  held  96 MB  peak 2039 MB
+
+    b2b loses the forward 2.2x and holds exactly the same memory -- h is recomputed in the
+    backward either way, so never reaching HBM saves bandwidth, not held activation. The b2b
+    path stays reachable through `_SwiGLUFFNFused` for a shape where that trade may turn
+    (a much larger ND, where the h round-trip grows and the weight re-read does not).
+    """
+    from miniworld_engine.kernels.transition.triton.main import triton_transition
+
+    return triton_transition(x, expand_a_weight, expand_b_weight, squeeze_weight)
 
 
 # ---------------------------------------------------------------------------

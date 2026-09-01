@@ -92,10 +92,10 @@ def transition_fwd_kernel(
     )
 
 
-def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, n, shape_key):
-    """The expand activation, (M, n*d) in ``x``'s dtype: the two SwiGLU halves are already
-    multiplied together in the epilogue, so the width is ``n*d`` and not ``2*n*d``."""
-    return x.new_empty((x.shape[0], n * x.shape[1]))
+def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
+    """The expand activation, (M, ND) in ``x``'s dtype: the two SwiGLU halves are already
+    multiplied together in the epilogue, so the width is ``ND`` and not ``2*ND``."""
+    return x.new_empty((x.shape[0], expand_a_weight.shape[0]))
 
 
 @opaque(fake=_expand_swiglu_fake, name="transition_expand_swiglu")
@@ -103,7 +103,6 @@ def _expand_swiglu(
     x: torch.Tensor,
     expand_a_weight: torch.Tensor,
     expand_b_weight: torch.Tensor,
-    n: int,
     shape_key: int,
 ) -> torch.Tensor:
     """The launch, and only the launch: ``SwiGLU(x @ Wa^T, x @ Wb^T)`` -> ``(M, n*N)``.
@@ -114,8 +113,15 @@ def _expand_swiglu(
     the PRE-flatten shape by the caller, which is the only place that still knows it.
     """
     M, N = x.shape
-    expand = torch.empty(M, n * N, dtype=x.dtype, device=x.device)
-    grid = lambda META: tile_grid(M, n * N, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
+    # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
+    # expanded width; taking it as ``n * N`` made a caller state twice something the weight
+    # already fixes, so an `n` that disagreed with the weight silently read the wrong extent --
+    # and it barred any expansion the ratio cannot spell, which is exactly what an FFN whose
+    # hidden size is rounded to a multiple of 256 has. `conditioned_transition`'s own
+    # `_expand_swiglu` already derives it this way.
+    nd = expand_a_weight.shape[0]
+    expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
+    grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     transition_fwd_kernel[grid](
         x,
         expand_a_weight,
@@ -123,10 +129,46 @@ def _expand_swiglu(
         expand,
         M,
         N,          # K -- the input width
-        n * N,      # ND -- the expanded width
-        shape_key=pack(shape_key, K=N, ND=n * N),
+        nd,         # ND -- the expanded width
+        shape_key=pack(shape_key, K=N, ND=nd),
     )
     return expand
+
+
+def swiglu_squeeze_backward(
+    x: torch.Tensor, expand_a_weight: torch.Tensor, expand_b_weight: torch.Tensor,
+    squeeze_weight: torch.Tensor, grad_output: torch.Tensor,
+    orig_shape: torch.Size, nd: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(dx, dWa, dWb, dWs)`` for ``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))``. ``x`` is 2-D.
+
+    Shared by the split forward here and by the fully fused no-LayerNorm forward in
+    ``fused.py``: the two differ only in how the FORWARD is scheduled -- whether the (M, ND)
+    intermediate reaches HBM -- and not at all in the gradient, which recomputes it either way.
+    Written once so they cannot drift.
+
+    Via the STACKED save-xn kernel: one launch emits h (the SwiGLU output, for dWs) and
+    dAB=[dA|dB], so the squeeze input is not recomputed by a second forward kernel and
+    dWa/dWb/dx collapse to single stacked GEMMs. ~9% faster than recompute-expand plus
+    transition_bwd_kernel at d>=256 (measured, A100), and bit-for-bit the same math.
+
+    ``x`` is whatever the forward normalized: the post-LN activation for `Transition`, and the
+    module input itself where there is no LayerNorm. Either way the LN boundary is the caller's.
+    """
+    from miniworld_engine.kernels.transition.triton.fused import (
+        _transition_expand_gatebwd_savedxn_stacked,
+    )
+
+    grad_expand = torch.matmul(grad_output, squeeze_weight)        # dh  [M, ND]
+    h, dAB = _transition_expand_gatebwd_savedxn_stacked(
+        x, expand_a_weight, expand_b_weight, grad_expand,
+        shape_key=both_key(rows_of(orig_shape)),   # grad_output's pre-flatten shape
+    )
+    grad_squeeze_weight = torch.matmul(grad_output.T, h)           # dWs  [D, ND]
+    grad_ab = torch.matmul(dAB.T, x)                               # [2*ND, K] = [dWa; dWb]
+    w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)     # [2*ND, K]
+    dx = torch.matmul(dAB, w_ab).reshape(orig_shape)               # [M, K] single GEMM
+    return dx, grad_ab[:nd], grad_ab[nd:], grad_squeeze_weight
 
 
 class TritonTransitionFunction(torch.autograd.Function):
@@ -138,8 +180,15 @@ class TritonTransitionFunction(torch.autograd.Function):
         expand_a_weight: Float[torch.Tensor, "nd d"],
         expand_b_weight: Float[torch.Tensor, "nd d"],
         squeeze_weight: Float[torch.Tensor, "d nd"],
-        n: int,
+        n: int | None = None,
     ) -> Float[torch.Tensor, "... d"]:
+        """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` -- no normalization, no residual.
+
+        ``n`` is the expansion RATIO and is now optional and advisory: the expanded width is
+        ``expand_a_weight.shape[0]``, which is the only place it was ever really written down.
+        Passed, it is checked; an FFN sized to a multiple of 256 rather than to a multiple of
+        ``d`` simply leaves it out.
+        """
         orig_shape = x.shape
         x = x.view(-1, orig_shape[-1]).contiguous()
 
@@ -150,11 +199,16 @@ class TritonTransitionFunction(torch.autograd.Function):
             expand_b_weight = expand_b_weight.to(dtype)
             squeeze_weight = squeeze_weight.to(dtype)
 
+        nd = expand_a_weight.shape[0]
+        if n is not None and n * orig_shape[-1] != nd:
+            msg = (f"expansion ratio n={n} says the expand width is {n * orig_shape[-1]}, but "
+                   f"expand_a_weight is {tuple(expand_a_weight.shape)} -- width {nd}. The "
+                   f"weight decides; drop n or make it agree.")
+            raise ValueError(msg)
         expand = _expand_swiglu(
             x,
             expand_a_weight,
             expand_b_weight,
-            n,
             # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
             # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
             both_key(rows_of(orig_shape)),
@@ -166,7 +220,7 @@ class TritonTransitionFunction(torch.autograd.Function):
             expand_b_weight,
             squeeze_weight,
         )
-        ctx.n = n
+        ctx.nd = nd
 
         output = torch.matmul(expand, squeeze_weight.T)
         return output.reshape(orig_shape)
@@ -179,7 +233,7 @@ class TritonTransitionFunction(torch.autograd.Function):
             expand_b_weight,
             squeeze_weight,
         ) = ctx.saved_tensors
-        n = ctx.n
+        nd = ctx.nd
         M, N = x.shape
 
         if grad_output.dtype != x.dtype:
@@ -193,23 +247,9 @@ class TritonTransitionFunction(torch.autograd.Function):
         # than the old recompute-expand + transition_bwd_kernel at d>=256 (measured, A100),
         # bit-for-bit the same math: it consumes the SAVED post-LN xn (`x`) directly, so there
         # is no LN-boundary or xn-recompute mismatch. (LN backward stays in the module's ln_in.)
-        from miniworld_engine.kernels.transition.triton.fused import (
-            _transition_expand_gatebwd_savedxn_stacked,
+        dx, grad_a_weight, grad_b_weight, grad_squeeze_weight = swiglu_squeeze_backward(
+            x, expand_a_weight, expand_b_weight, squeeze_weight, grad_output, orig_shape, nd,
         )
-
-        nd = n * N
-        grad_expand = torch.matmul(grad_output, squeeze_weight)        # dh  [M, ND]
-        h, dAB = _transition_expand_gatebwd_savedxn_stacked(
-            x, expand_a_weight, expand_b_weight, grad_expand,
-            shape_key=both_key(rows_of(orig_shape)),   # grad_output's pre-flatten shape
-        )
-        grad_squeeze_weight = torch.matmul(grad_output.T, h)           # dWs  [D, ND]
-        grad_ab = torch.matmul(dAB.T, x)                               # [2*ND, K] = [dWa; dWb]
-        grad_a_weight = grad_ab[:nd]
-        grad_b_weight = grad_ab[nd:]
-        w_ab = torch.cat((expand_a_weight, expand_b_weight), dim=0)     # [2*ND, K]
-        dx = torch.matmul(dAB, w_ab).reshape(orig_shape)               # dxn  [M, K] single GEMM
-
         return dx, grad_a_weight, grad_b_weight, grad_squeeze_weight, None
 
 

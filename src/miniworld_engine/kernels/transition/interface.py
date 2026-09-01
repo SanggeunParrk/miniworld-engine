@@ -21,7 +21,10 @@ implementation in this family to point at.
 
 from __future__ import annotations
 
-from miniworld_engine.kernels.transition.triton.fused import triton_transition_fused
+from miniworld_engine.kernels.transition.triton.fused import (
+    triton_swiglu_ffn,
+    triton_transition_fused,
+)
 from miniworld_engine.kernels.transition.triton.main import triton_transition
 
 
@@ -49,6 +52,7 @@ def cute_transition_fused(*args, **kwargs):
 __all__ = [
     "cuda_transition_b2b",
     "cute_transition_fused",
+    "triton_swiglu_ffn",
     "triton_transition",
     "triton_transition_fused",
 ]

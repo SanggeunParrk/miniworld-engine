@@ -161,11 +161,20 @@ def transition_layernorm_expand_swiglu_triton() -> None:
 
 
 def transition_fwd_b2b_triton() -> None:
-    """_transition_b2b_kernel via transition_b2b at K_SMALL (<= _B2B_MAX_K), stats precomputed."""
+    """_transition_b2b_kernel via transition_b2b at K_SMALL (<= _B2B_MAX_K), stats precomputed.
+
+    BOTH values of HAS_LN. The no-LayerNorm form -- the bare SwiGLU FFN an adaLN-Zero block
+    wants, reached through `triton_swiglu_ffn` -- is a separate compiled kernel and a separate
+    cache bucket (HAS_LN is in the autotune key), so a config tuned with the LayerNorm in place
+    says nothing about it. One driver and not a second registry row, because both are
+    `_transition_b2b_kernel` and a config ladder belongs to a kernel.
+    """
     from miniworld_engine.kernels.transition.triton.fused import transition_b2b
 
     x2, g, b, wa, wb, ws = _transition_operands(k=K_SMALL)
     transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False, shape_key=SHAPE_KEY)
+    empty = x2.new_empty(0)
+    transition_b2b(x2, empty, empty, wa, wb, ws, 0.0, has_ln=False, shape_key=SHAPE_KEY)
 
 
 def transition_fwd_b2b_ktiled_triton() -> None:
