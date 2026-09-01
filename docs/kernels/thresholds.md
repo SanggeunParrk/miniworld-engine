@@ -6,22 +6,25 @@ comparison is tile algebra, not policy. 0/1/2/-1 and anything under 8 are skippe
 and 1000. Script: [`audit_thresholds.py`](audit_thresholds.py), run from the repo root.
 
 **48 sites.** The audit was looking for numbers that route work without saying why. Most of these
-turn out not to be that. Three are, and only one of the three is reachable on the hardware and
-dtype we actually run.
+turn out not to be that. Three were. Two of those turned out to be documented
+elsewhere in their own file, and the third — the only one reachable on our hardware — is now
+sourced to the module that measured it, after the branch it guards was found to have never run.
+What is left is two thresholds that are genuinely unjustified and genuinely unmeasurable here,
+because both are SM90-only and this cluster has no Hopper.
 
 ## What each kind is, and how many
 
 | kind | n | is it a problem? |
 |---|---|---|
 | architecture predicate | 23 | No. Needs a name, not a measurement. |
-| performance threshold, evidence recorded | 11 | No. Two of these were miscounted at first — see below. |
+| performance threshold, evidence recorded | 12 | No. Three of these were miscounted at first — see below. |
 | support / correctness bound | 3 | No. Past it the call raises or is wrong, not slow. |
 | kernel hint | 2 | No. Changes a codegen hint, not a code path. |
 | hardware limit | 2 | No. A number the chip fixes. |
 | dtype width test | 2 | No. `width == 16` is "is this 16-bit". |
 | tile sizing | 1 | No. Picks a tile that covers the shapes, and says so. |
 | config discriminator | 1 | No. Picks a paired constant, and explains itself at length. |
-| **performance threshold, no evidence** | **3** | **Yes. Only 1 is reachable on our hardware at bf16.** |
+| **performance threshold, no evidence** | **2** | **Both SM90-only, and this cluster has no Hopper.** |
 | total | 48 | |
 
 Three were given names this pass (2 support bounds and 1 threshold); the counts above are after
@@ -38,7 +41,7 @@ whether the branch is reachable at all on the hardware and dtype we actually run
 | `conditioned_transition/triton/training.py` | 447 | 8192 | **Yes**, 30 lines up | **No** — bf16 forces cuBLAS |
 | `conditioned_transition/triton/training.py` | 448 | 512 | **Yes**, 30 lines up | **No** — bf16 forces cuBLAS |
 | `transition/whole_op.py` | 41 | 256 | No | No — SM90 only, and this cluster has no H100 |
-| `transition/whole_op.py` | 49 | 256 | No | **Yes** — A5000/A6000, bf16, the default path |
+| `transition/whole_op.py` | 49 | 256 | **Now yes** — sourced to the module | **Yes**, once the branch was fixed — it used to raise |
 | `transition/triton/fused.py` | 1467 | 128 | No | No — SM90 only, and off by default (`transition_dab_lnbwd`) |
 
 ### The two in `training.py` are documented, just not where the audit looked
@@ -68,16 +71,36 @@ is additionally behind a setting that is off by default and its own comment call
 "Experimental/gated". Unjustified, and unmeasurable here; leaving them flagged is the honest
 outcome, not a to-do that quietly never closes.
 
-### `whole_op.py:49` is the one that matters
+### `whole_op.py:49` — settled, and not the way the audit expected
 
-No evidence anywhere in the file, and it is the live path: A5000/A6000, bf16, every
-`transition` call. It decides that `d_hidden >= 256` goes to `triton_layernorm` +
-`triton_transition` (split) while below it goes to `triton_transition_fused`. The comments assert
-"the shape-general split GEMM wins" and "the AF3 shape" and give no number for either.
+Chasing it found the branch it guards **had never run**. It passed
+`x.reshape(-1, d_hidden)` to `triton_layernorm`, which reads the shape it is given to build its
+autotune key; `rows_of` rejects an already-flat shape by design, because once a token
+`(B, L, D)` and a pair `(B, L, L, D)` are both 2-D it cannot tell which key to build. On an
+A5000, `ops.transition` raised `ValueError` at all four of krystal's widths. Nothing caught it
+because nothing called it: `modules/transition/module.py` — what the model runs — carries its own
+copy of the arch dispatch and reaches `kernels.triton_transition` directly, and the tests naming
+`ops.transition` check the export table and the compile surface, not a call.
 
-The model presents `d_hidden` of 16 and 128 (pair-atom, atom), 384 (`d_single`) and 768 (token),
-with `transition_n: 2`. It never presents 256. So the threshold's real content is just "fused for
-16 and 128, split for 384 and 768" — two claims, both testable on one A5000.
+So the threshold never needed its own measurement. It needed a **source**, and the module is it:
+
+> A100, cudagraph-manual: fused 2.28 ms vs split 1.40 at d=256, and 10.9 vs 4.8 at d=512, while
+> d=128 (the AF3 shape) is where fused wins. sm_86 (A5000/A6000) needs its own answer — there the
+> fused path loses at EVERY d, 0.88-0.95x across both the L and d sweeps — so on sm_86 all widths
+> take the split.
+
+The wrapper had only the first clause, so even working it would have sent d=128 to the fused path
+on an A5000, against that measurement. Both clauses now match the module, quoted at the site, and
+`tests/numerics/test_whole_op_reachable_gpu.py` calls `ops.transition` at 16, 128, 384 and 768 so
+the branch cannot go dead again unnoticed. 4 passed on an A5000; the 384 and 768 cases raise on
+the old code.
+
+An independent A/B on this branch was attempted and **abandoned, on purpose**. The tuned cache
+does not match this branch's config grid ("STALE (kernel config grid changed)"), so both paths
+fall back to a heuristic 24-of-1296 subset. A first row at d=16 came back with fused ahead 1.27x,
+which contradicts the sm_86 clause — but an untuned eager measurement cannot be set against the
+module's tuned cudagraph-manual sweep, and reporting it as if it could is the exact error this
+audit exists to remove. Settling sm_86 independently needs a tuned cache for this branch first.
 
 ## Named this pass
 
@@ -127,7 +150,7 @@ inside an `@opaque` returns a non-Tensor — some of these may be inline for tha
 | `transition/triton/fused.py` | 1468 | 9 | `torch.cuda.get_device_capability(x2.device)[0] >= 9` |
 | `trimul_inproj/whole_op.py` | 95 | 10 | `torch.cuda.get_device_capability(x.device)[0] >= 10` |
 
-## Performance thresholds that DO carry evidence (11)
+## Performance thresholds that DO carry evidence (12)
 
 Recorded here so the audit does not have to be redone to find out they are fine.
 
@@ -138,6 +161,7 @@ Recorded here so the audit does not have to be redone to find out they are fine.
 | `layernorm/compile_native.py` | 90 | 128, 512 | Decides which impls enter the *calibration* set, so a wrong bound costs a candidate, not a wrong choice. |
 | `layernorm/triton/main.py` | 396 | 128, 512 | "CUDA beats triton 1.17x @L512, 1.28x @L1024" for the masked path; dense is neutral and stays behind an env flag. Both sides of the split stated. |
 | `layernorm_linear/autograd.py` | 156 | 128 | "wins/ties at K=128 across M (A/B: 1.29x@16384, ~1.0x at larger M)", plus *why* K=256 loses: the full-N epi subtile starves the mainloop with D+C both in smem. |
+| `transition/whole_op.py` | 49 | 256 | The A100 and sm_86 sweeps in `modules/transition/module.py`, now quoted at the site. |
 | `conditioned_transition/triton/training.py` | 447, 448 | 8192, 512 | The H100 sweep quoted above, on the `_FWD_MODE` constant 30 lines up rather than on `_pick_fwd` itself. Unreachable at bf16. |
 | `transition/cute/gemm_transition_swiglu.py` | 197 | 128 | "the win the K-sweep found: K<=128 -> 256x128 coop; K>=256 -> 192x128 pingpong", verified 2026-08-04 at cos=1.0. A cache-miss fallback, not the primary path. |
 
