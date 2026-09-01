@@ -1,0 +1,26 @@
+{
+  "gate|128|128|1048576": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|128|131072": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|128|262144": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|128|128|524288": {
+    "choice": "fused",
+    "ms": {}
+  },
+  "gate|256|256|131072": {
+    "choice": "split",
+    "ms": {}
+  },
+  "gate|512|512|131072": {
+    "choice": "split",
+    "ms": {}
+  }
+}

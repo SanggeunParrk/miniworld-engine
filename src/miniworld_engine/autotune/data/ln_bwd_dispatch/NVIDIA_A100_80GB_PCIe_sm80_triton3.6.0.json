@@ -1,0 +1,44 @@
+{
+  "128|1048576": {
+    "ms": {
+      "atomic": 0.582579,
+      "persistent": 0.681671
+    },
+    "path": "atomic"
+  },
+  "128|131072": {
+    "ms": {
+      "atomic": 0.101494,
+      "persistent": 0.127196
+    },
+    "path": "atomic"
+  },
+  "128|262144": {
+    "ms": {
+      "atomic": 0.161718,
+      "persistent": 0.194687
+    },
+    "path": "atomic"
+  },
+  "128|524288": {
+    "ms": {
+      "atomic": 0.336913,
+      "persistent": 0.395394
+    },
+    "path": "atomic"
+  },
+  "256|131072": {
+    "ms": {
+      "atomic": 0.209812,
+      "persistent": 0.22957
+    },
+    "path": "atomic"
+  },
+  "512|131072": {
+    "ms": {
+      "atomic": 0.485289,
+      "persistent": 0.377964
+    },
+    "path": "persistent"
+  }
+}
