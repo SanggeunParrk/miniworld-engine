@@ -2579,6 +2579,54 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+#: (target, implementation) -> the minimum GPU architecture that implementation needs.
+#:
+#: `bench_kernel all` offers every implementation a target defines to whatever card is running, so
+#: an A100 sweep spent 99 of its 307 failed rows launching H100/B200 kernels that answer with
+#: `AssertionError: SM90 (H100) only`, `NotImplementedError: Gemm Sm80 is not implemented yet` or
+#: `OpError: expects arch to be sm_90a`. That is a declaration the harness already has for kernels
+#: -- `registry.csv`'s `arch`, gated by `run_all.meets_arch` -- and did not have for bench
+#: implementations. Neither derivation works: an implementation's `path=` string names a function
+#: or a package as often as a file (22 of 34 map), and its imports go through the flat
+#: `miniworld_engine.kernels` re-export (16 of 32). So it is declared, and a test holds every key
+#: against the real target and implementation names so it cannot drift into naming nothing.
+#:
+#: Every entry below is the message that card actually produced, not a guess. An implementation
+#: absent from this table is offered everywhere, which is the behaviour that was there before.
+IMPL_MIN_ARCH: dict[tuple[str, str], str] = {
+    # AssertionError: first version targets SM90 (H100)
+    ("adaln", "adaln_lnfold"): "sm90",
+    ("gemm_epilogue", "layernorm_linear_cute"): "sm90",
+    # AssertionError: SM90 (H100) only
+    ("gemm_epilogue", "layernorm_linear_cute_fused"): "sm90",
+    ("transition", "cute"): "sm90",
+    ("transition_b2b", "cute_transition_fused"): "sm90",
+    # OpError: expects arch to be sm_90a, but got sm_80
+    ("gemm_gate", "tm2_cute"): "sm90",
+    # NotImplementedError: Gemm Sm80 is not implemented yet
+    ("dual_gemm_epilogue", "tm1_cute"): "sm90",
+    ("dual_gemm_epilogue", "trimul_inproj_cute"): "sm90",
+    ("triangle_multiplication_bidirectional", "cute"): "sm90",
+}
+
+
+def runnable_here(target: str, implementation: str) -> bool:
+    """Can this card run this implementation? Unlisted implementations always can.
+
+    A `*_bwd` target falls back to its forward sibling's entry. `transition_b2b_bwd` benches the
+    backward of the kernels `transition_b2b` benches, so an implementation the card cannot run one
+    way it cannot run the other -- and keying both separately means every future entry has to be
+    written twice, which is exactly how `cute_transition_fused` stayed ungated on the backward
+    target after the forward one was fixed.
+    """
+    from miniworld_engine.autotune.run_all import meets_arch
+
+    want = IMPL_MIN_ARCH.get((target, implementation))
+    if want is None and target.endswith("_bwd"):
+        want = IMPL_MIN_ARCH.get((target.removesuffix("_bwd"), implementation))
+    return True if want is None else meets_arch({"arch": want})
+
+
 def expand_implementations(level: str, target: str, requested: list[str]) -> list[str]:
     """Resolve the sentinel ``all`` to every implementation of ``target``."""
     if [r.strip().lower() for r in requested] != ["all"]:
@@ -2587,7 +2635,17 @@ def expand_implementations(level: str, target: str, requested: list[str]) -> lis
     if not impls:
         msg = f"implementations=all: no implementations found for {level} target {target!r}"
         raise ValueError(msg)
-    return list(impls)
+    # `all` means "every implementation this CARD can run". One it cannot is not a result: it
+    # occupies a row, reports an architecture assertion as a bench failure, and buries the
+    # failures that are defects. Asking for one BY NAME still runs it and still reports what the
+    # kernel says -- the filter is on the sentinel, not on the implementation.
+    here = [i for i in impls if runnable_here(target, i)]
+    skipped = [i for i in impls if i not in here]
+    if skipped:
+        print(f"=== {target}: skipping {len(skipped)} implementation(s) this card cannot run: "
+              f"{', '.join(f'{i} (needs {IMPL_MIN_ARCH[(target, i)]})' for i in skipped)}",
+              flush=True)
+    return here
 
 
 _KERNELS_ROOT = _REPO_ROOT / "benchmarks" / "kernels"
