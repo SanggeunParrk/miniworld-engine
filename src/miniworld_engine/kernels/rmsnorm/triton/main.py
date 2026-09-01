@@ -238,6 +238,54 @@ def rmsnorm_adamod_fwd_kernel(
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
     row_mask = rows < M
 
+    if BLOCK_K >= N:
+        # ONE tile over the normalized axis, so q is read once and held: the reduction that
+        # makes rstd and the output that consumes it are the same registers. The tiled branch
+        # below cannot -- rstd needs the whole row before any output element is final -- and
+        # reads q a second time, and c once per N tile.
+        #
+        # It does NOT win at d_model 128, where it is reachable (BLOCK_K 128): a full sweep of
+        # the ladder picks BLOCK_M1=64 BLOCK_K=64 over every covering config. Two reasons, both
+        # worth knowing before reaching for this branch again. The re-reads it removes are L1/L2
+        # hits, not HBM traffic -- the second N tile wants the same 48 KB of c the first just
+        # read -- so there is far less to win than the byte count suggests. And covering costs
+        # registers: acc_sc and acc_sh are each [BLOCK_M1, BLOCK_K] fp32, so doubling BLOCK_K
+        # doubles both and forces BLOCK_M1 down.
+        #
+        # It stays because it is the right shape of code for a NARROW normalized axis (a model
+        # config with d_model 64, or ragged mode's 125), where covering is the only tiling and
+        # the accumulators are small. The autotuner decides; this branch just has to exist for
+        # it to be able to.
+        cols = tl.arange(0, BLOCK_K)
+        col_mask = cols < N
+        mask = row_mask[:, None] & col_mask[None, :]
+        q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
+                    mask=mask, other=0.0).to(tl.float32)
+        rstd = 1 / tl.sqrt(tl.sum(q * q, axis=1) / N + eps)
+        tl.store(Rstd + rows, rstd, mask=row_mask)
+
+        acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
+        acc_sh = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_C):
+            ks = k0 + tl.arange(0, BLOCK_C)
+            k_mask = ks < K
+            c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
+                        mask=row_mask[:, None] & k_mask[None, :], other=0.0)
+            wmask = k_mask[:, None] & col_mask[None, :]
+            wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
+                          mask=wmask, other=0.0)
+            wsh = tl.load(WSH + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
+                          mask=wmask, other=0.0)
+            acc_sc += tl.dot(c, wsc)
+            acc_sh += tl.dot(c, wsh)
+        y = q * rstd[:, None]
+        if HAS_WEIGHT:
+            w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+            y = y * w[None, :]
+        y = y * (1.0 + acc_sc) + acc_sh
+        tl.store(Y + rows[:, None] * stride_qr + cols[None, :] * stride_qc, y, mask=mask)
+        return
+
     ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
     for n0 in range(0, N, BLOCK_K):
         cols = n0 + tl.arange(0, BLOCK_K)
@@ -611,7 +659,12 @@ class _RMSNormAdaMod(torch.autograd.Function):
         # dshift IS dy, so the shift half of every chain below is spelled with dy directly.
         dwsc = (dscale.mT @ c2).to(wsc.dtype)
         dwsh = (dy2.mT @ c2).to(wsh.dtype)
-        dc = torch.addmm(dscale @ wsc, dy2, wsh).reshape(tuple(ctx.cshape))
+        # In place on the first product, not `torch.addmm(dscale @ wsc, dy2, wsh)`: that spells
+        # one [M, K] temporary for the product and a second for the sum, and at the atom-DiT
+        # shape each of those is 302 MB written and read for nothing.
+        dc = dscale @ wsc
+        dc.addmm_(dy2, wsh)
+        dc = dc.reshape(tuple(ctx.cshape))
         dweight = dw.to(weight.dtype) if ctx.has_w else None
         return dq.reshape(tuple(ctx.shape)), dc, dwsc, dwsh, dweight, None
 
