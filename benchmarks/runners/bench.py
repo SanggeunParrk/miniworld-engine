@@ -54,6 +54,13 @@ from miniworld_engine.modules.triangle_multiplication.module import _load_cute_f
 DTV1_IMPL = "dtv1"
 MINIWORLD_IMPL = "miniworld"
 OLD_TRITON_IMPL = "old_triton"
+#: An ABLATION, not a backend: the attention logits ARE the pair bias, so there is no query, no
+#: key, no qk^T and no qk RMSNorm -- `out = softmax(bias) @ v`. Everything around the core is the
+#: module's own (AdaLN, the projections that remain, both sigmoid gates, the conditioning scale),
+#: which is what makes the difference readable as the cost of the qk half.
+#: The bias is (B, L, L, H) and carries no augmentation axis, so ONE softmax serves all A samples
+#: where the full path computes A of them -- most of the training saving is there.
+BIAS_ONLY_V_IMPL = "bias_only_v"
 if not torch.cuda.is_available():
     msg = "CUDA is not available. Please run on a machine with a CUDA-capable GPU."
     raise RuntimeError(msg)
@@ -230,7 +237,7 @@ def module_miniworld_spec(raw: str) -> ImplementationSpec:
 def triton_miniworld_spec(raw: str) -> ImplementationSpec:
     if raw.strip().lower() == MINIWORLD_IMPL:
         return ImplementationSpec(ImplementationType.TRITON, None, raw)
-    if raw.strip().lower() == OLD_TRITON_IMPL:
+    if raw.strip().lower() in {OLD_TRITON_IMPL, BIAS_ONLY_V_IMPL}:
         return ImplementationSpec(ImplementationType.PYTORCH, None, raw)
     return parse_implementation_spec(raw)
 
@@ -1240,7 +1247,7 @@ def bench_module_conditioned_transition(
             self.layers = nn.ModuleList(
                 [
                     # The token side: `d_single_token` (768) conditioned on `d_single` (384), which
-                    # is what krystal's `token_dit` builds and what AlphaFold-3 calls c_token and
+                    # is what the model's `token_dit` builds and what AlphaFold-3 calls c_token and
                     # c_s. This read `d_hidden=d_pair(128), d_cond=d_single_token(768)` -- the two
                     # roles swapped and the wrong widths, a combination the model never builds.
                     ConditionedTransition(
@@ -1464,7 +1471,38 @@ def bench_module_augmented_attention_token(
 ):
     spec = triton_miniworld_spec(implementation)
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
-    model = AugmentedAttentionPairBias(
+
+    class BiasOnlyValue(AugmentedAttentionPairBias):
+        """`out = softmax(bias) @ v` -- see BIAS_ONLY_V_IMPL.
+
+        The whole forward is overridden rather than just the core: to_query and to_key are the
+        point of the ablation, and a core-only override would still pay for them.
+        """
+
+        def forward(self, single, cond, pair, mask=None, *, compute_dtype=None):
+            # Imported here, not at module scope: this file carries `torch` and `nn` only, and
+            # an implementation reaches for what it needs at its own branch.
+            from miniworld_engine.modules.functional import sigmoid_gate
+
+            single = self.ada_ln_in(single, cond)
+            pair = self.ln_pair(pair)
+            value, gate = self.to_value(single), self.to_gate(single)
+            bias = self.to_bias(pair)                                   # (B, L, L, H)
+            n_aug, batch, len_res = value.shape[:3]
+            hidden = value.shape[-1] // self.n_head
+            value = value.view(n_aug, batch, len_res, self.n_head, hidden)
+            # No `a` on the bias side of the einsum: the softmax is computed once and reused
+            # across the augmentation samples, where the full path computes one per sample.
+            attention = torch.softmax(bias.permute(0, 3, 1, 2), dim=-1)  # (B, H, L, L)
+            out = torch.einsum("bhij,abjhd->abihd", attention, value)
+            out = out.flatten(-2)                                        # (A, B, L, H*D)
+            out = sigmoid_gate(gate, out)
+            out = self.to_out(out)
+            return sigmoid_gate(self.to_scale(cond), out)
+
+    cls = (BiasOnlyValue if implementation.strip().lower() == BIAS_ONLY_V_IMPL
+           else AugmentedAttentionPairBias)
+    model = cls(
         d_single=conf.d_single_token,
         d_cond=conf.d_single_token,
         d_pair=conf.d_pair,
@@ -1874,7 +1912,7 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    # The ATOM side: krystal's `atom_dit` builds both adaln and ConditionedTransition at
+    # The ATOM side: the model's `atom_dit` builds both adaln and ConditionedTransition at
     # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
     # was not -- `d_pair` is the PAIR width, which neither module ever sees. The TOKEN side
     # (768/384) is covered by the module benches.
@@ -2139,7 +2177,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
     from miniworld_engine.modules.exceptions import ImplementationType
 
     # The atom side, as in the adaln kernel benches. n is the transition's expansion factor:
-    # krystal sets `condition.transition_n: 2`, so 4 measured a shape twice as wide as the
+    # the model sets `condition.transition_n: 2`, so 4 measured a shape twice as wide as the
     # one the model launches, and the driver tunes for n=2.
     D, L, n = conf.d_single_atom, seq_len, 2
     torch.manual_seed(0)
@@ -2342,7 +2380,7 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    # The ATOM side: krystal's `atom_dit` builds both adaln and ConditionedTransition at
+    # The ATOM side: the model's `atom_dit` builds both adaln and ConditionedTransition at
     # d_hidden = d_cond = 128 (AlphaFold-3's c_atom). The number was already right; the name
     # was not -- `d_pair` is the PAIR width, which neither module ever sees. The TOKEN side
     # (768/384) is covered by the module benches.
@@ -2576,6 +2614,8 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
     names = [*[m.value for m in ImplementationType], MINIWORLD_IMPL]
     if "OLD_TRITON_IMPL" in src:
         names.append(OLD_TRITON_IMPL)
+    if "BIAS_ONLY_V_IMPL" in src:
+        names.append(BIAS_ONLY_V_IMPL)
     return tuple(names)
 
 
@@ -2610,6 +2650,21 @@ IMPL_MIN_ARCH: dict[tuple[str, str], str] = {
 }
 
 
+def min_arch_for(target: str, implementation: str) -> str | None:
+    """The declared minimum arch for this (target, implementation), or None if unrestricted.
+
+    The `_bwd` fallback lives here rather than in `runnable_here` so that every caller resolves
+    the entry the same way. It did not, and the skip message indexed IMPL_MIN_ARCH directly:
+    `gemm_epilogue_bwd` gated correctly through the fallback and then died formatting the line
+    that says so -- KeyError, hydra aborted the target, and the run produced no rows for it at
+    all, which is worse than the noise the gate was added to remove.
+    """
+    want = IMPL_MIN_ARCH.get((target, implementation))
+    if want is None and target.endswith("_bwd"):
+        want = IMPL_MIN_ARCH.get((target.removesuffix("_bwd"), implementation))
+    return want
+
+
 def runnable_here(target: str, implementation: str) -> bool:
     """Can this card run this implementation? Unlisted implementations always can.
 
@@ -2621,9 +2676,7 @@ def runnable_here(target: str, implementation: str) -> bool:
     """
     from miniworld_engine.autotune.run_all import meets_arch
 
-    want = IMPL_MIN_ARCH.get((target, implementation))
-    if want is None and target.endswith("_bwd"):
-        want = IMPL_MIN_ARCH.get((target.removesuffix("_bwd"), implementation))
+    want = min_arch_for(target, implementation)
     return True if want is None else meets_arch({"arch": want})
 
 
@@ -2643,7 +2696,7 @@ def expand_implementations(level: str, target: str, requested: list[str]) -> lis
     skipped = [i for i in impls if i not in here]
     if skipped:
         print(f"=== {target}: skipping {len(skipped)} implementation(s) this card cannot run: "
-              f"{', '.join(f'{i} (needs {IMPL_MIN_ARCH[(target, i)]})' for i in skipped)}",
+              f"{', '.join(f'{i} (needs {min_arch_for(target, i)})' for i in skipped)}",
               flush=True)
     return here
 
