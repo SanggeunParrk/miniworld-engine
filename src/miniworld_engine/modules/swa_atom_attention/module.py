@@ -456,7 +456,31 @@ def build_3d_rope(
 
 
 def _qk_norm(x: torch.Tensor) -> torch.Tensor:
-    return F.rms_norm(x, (x.size(-1),)).to(x.dtype)
+    """RMSNorm over head_dim, non-affine -- ESMFold2 Algorithm 8's q/k normalization.
+
+    Through the `rmsnorm` family rather than `F.rms_norm`, which is three HBM passes and holds
+    the normalized activation for the backward; the kernel is one pass and recomputes it from
+    the saved row statistic.
+
+    ``eps`` is spelled out, and it is fp32's epsilon and not bf16's. `F.rms_norm` documents its
+    default as ``torch.finfo(x.dtype).eps``, but that is not what it does on a bf16 input: it
+    accumulates in fp32 and the epsilon follows the ACCUMULATION dtype. Measured against this
+    kernel at [4, 512, 4, 32] bf16, matching what F.rms_norm actually computes --
+
+        eps = finfo(float32).eps   rel 1.9e-05   <- rounding, i.e. the same function
+        eps = 1e-5                 rel 1.8e-04
+        eps = finfo(bfloat16).eps  rel 5.0e-03   <- 0.0078; a 0.5% change, not a rounding one
+
+    -- so passing the input dtype's epsilon, which is what the documentation reads like, would
+    have made this a numerical change wearing a scheduling change's clothes.
+
+    Eager on CPU: the kernel is CUDA-only and the module's unit tests are not.
+    """
+    if not x.is_cuda:
+        return F.rms_norm(x, (x.size(-1),)).to(x.dtype)
+    from miniworld_engine import kernels
+
+    return kernels.triton_rmsnorm(x, None, torch.finfo(torch.float32).eps).to(x.dtype)
 
 
 class SWA3DRoPEAttention(nn.Module):

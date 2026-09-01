@@ -70,9 +70,15 @@ def triangle_attention(
         query = rearrange(F.linear(x, to_query_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
         key = rearrange(F.linear(x, to_key_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
         if use_qk_norm:
-            d_head = query.shape[-1]
-            query = F.rms_norm(query, (d_head,), norm_query_weight, eps)
-            key = F.rms_norm(key, (d_head,), norm_key_weight, eps)
+            # No `d_head` here any more: the kernel normalizes over the LAST axis and reads its
+            # width from the tensor, where F.rms_norm wanted it restated as `normalized_shape`.
+            # The `rmsnorm` family, not F.rms_norm: one pass instead of three, and the
+            # normalized activation is recomputed in the backward from the saved row statistic
+            # rather than held. `eps` is this function's own, so nothing about it changes.
+            from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
+
+            query = triton_rmsnorm(query, norm_query_weight, eps)
+            key = triton_rmsnorm(key, norm_key_weight, eps)
         out = triton_triangle_attention_pair_bias(query, key, value, bias)
     else:
         attention = F.softmax(bias, dim=-1)
