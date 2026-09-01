@@ -400,6 +400,10 @@ CUDA_HOME = "$CONDA_PREFIX"
 # RUN IT AFTER EVERY `pixi install`.
 [tool.pixi.tasks]
 fix-te-cu12 = "pip install --no-deps --force-reinstall transformer_engine_cu12==2.16.0"
+# FlashAttention, picked from the CARD rather than from the reader: FA4 is sm90+, FA2 is
+# sm80+, and the wrong one installs fine and then never loads. Needs a visible GPU (or
+# `--arch sm80`), and FA2 compiles from source, so it is a task and not a dependency.
+flash = "miniworld-engine dev install-flash"
 smoke = "python -c 'import torch, triton; print(\"torch\", torch.__version__, \"triton\", triton.__version__)'"
 smoke-te = "python -c 'import transformer_engine.pytorch as te; print(\"TE LayerNormLinear\", te.LayerNormLinear)'"
 smoke-cute = "python -c 'import cutlass.cute as cute; import quack; print(\"cute+quack ok\")'"

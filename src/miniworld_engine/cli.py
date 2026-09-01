@@ -871,6 +871,53 @@ def _empty_triton_cache(dry_run: bool) -> int:
     return 0
 
 
+def cmd_install_flash(args: argparse.Namespace) -> int:
+    """Install whichever FlashAttention this machine's card can actually run.
+
+    Two incompatible lines and no way to say so in the metadata: FA4 is sm_90+, FA2 covers
+    sm_80/86/89, and a wheel for the wrong one installs cleanly and then never loads. PEP 508
+    markers cannot branch on a GPU, so `pyproject.toml` has to expose both as extras
+    (`[flash]` / `[flash2]`) and leave the choice to whoever is installing. This makes that
+    choice from the device instead of from the reader.
+
+    NOT run on import, and not a side effect of anything else. Installing packages is the
+    caller's decision; this only makes it one command instead of a lookup table.
+    """
+    import subprocess
+    import sys
+
+    cap = args.arch
+    if not cap:
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                print("no CUDA device visible; run this on the machine that will train, or "
+                      "pass --arch (e.g. --arch sm80)")
+                return 2
+            major, minor = torch.cuda.get_device_capability()
+            cap = f"sm{major}{minor}"
+        except ImportError:
+            print("torch is not importable, so the card cannot be detected; pass --arch")
+            return 2
+    sm = int(cap.removeprefix("sm"))
+    if sm >= 90:
+        # Prerelease wheel, hence --pre; see the `flash` extra's note in pyproject.toml.
+        cmd = [sys.executable, "-m", "pip", "install", "--pre", "flash-attn-4"]
+    elif sm >= 80:
+        # No prebuilt wheel matches every torch/CUDA pair, so this compiles (~40 min).
+        cmd = [sys.executable, "-m", "pip", "install", "--no-build-isolation",
+               "flash-attn>=2.8,<3"]
+    else:
+        print(f"{cap}: neither FlashAttention line supports this card. swa_atom_attention will "
+              f"use its SDPA band, which needs an [N, S, S] mask -- 24 GiB at A=48, S=8192.")
+        return 1
+    print(f"{cap} -> {' '.join(cmd[3:])}")
+    if args.dry_run:
+        return 0
+    return subprocess.call(cmd)
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     """Verify the build system AND that every declared (op, bucket) is in the shipped cache."""
     from miniworld_engine.build import audit as _audit  # imports every kernel
@@ -1287,6 +1334,14 @@ def build_parser() -> argparse.ArgumentParser:
                              choices=("", "disable", "custom_op"),
                              help="how kernel entry points are exposed to torch.compile "
                                   "(default: leave settings alone)")
+
+    flash = dev.add_parser(
+        "install-flash",
+        help="install the FlashAttention line this card can run (FA4 on sm90+, FA2 on sm80+)")
+    flash.add_argument("--arch", default="",
+                       help="skip detection and install for this arch, e.g. sm80")
+    flash.add_argument("--dry-run", action="store_true", help="print the command, install nothing")
+    flash.set_defaults(func=cmd_install_flash)
 
     aud = dev.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")
