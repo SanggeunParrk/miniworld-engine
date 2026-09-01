@@ -1,6 +1,7 @@
 # vendored + trimmed from team-gm psk/benchmark : benchmarks/runners/bench.py
 # Single bench entry for miniworld-engine. Drops the model-level
 # Pairformer / DiffusionTransformer benches; keeps the kernel-wrapping layers.
+import contextlib
 import csv
 import functools
 import importlib
@@ -369,6 +370,49 @@ def _skips_compile_under_cudagraph(level: str, target: str) -> bool:
     return 'conf.cudagraph == "disabled"' in src and ".compile()" in src
 
 
+_CAPTURE_STREAM: "torch.cuda.Stream | None" = None
+
+
+def capture_stream() -> "torch.cuda.Stream":
+    """The one non-default stream that graph capture and its forward graph must share.
+
+    Ported from cf68bd2c, which fixed this on `origin/mpnn` and was never merged here.
+
+    A CUDA graph captures on a non-default stream, and the autograd engine replays every backward
+    op on the stream its FORWARD op ran on. Build the forward on the default stream and capture
+    elsewhere and CUDA rejects the capture: `cudaErrorStreamCaptureIsolation`, "operation would
+    make the legacy stream depend on a capturing blocking stream". That is why adaln_bwd,
+    transition_b2b_bwd and gemm_epilogue_bwd -- every target that times `torch.autograd.grad` --
+    produced no captured number at all, while layernorm_bwd (a pure function, nothing routes it
+    back to the default stream) was fine.
+
+    And a dead capture leaves the default generator registered to it, so every LATER row in the
+    process fails on RNG with "Offset increment outside graph capture" instead. One bad capture
+    loses the whole sweep and reports a misleading error for every row after the first: on the
+    A100 run each of the three targets failed row 1 with cudaErrorStreamCaptureInvalidated and
+    rows 2-12 with the RNG message.
+    """
+    global _CAPTURE_STREAM
+    if _CAPTURE_STREAM is None:
+        _CAPTURE_STREAM = torch.cuda.Stream()
+    return _CAPTURE_STREAM
+
+
+def forward_stream(conf) -> "contextlib.AbstractContextManager":
+    """Build a bench's forward on the capture stream, unless no graph will be captured.
+
+    cf68bd2c did this inside `_bwd_autograd_result`, which then took the `build` callable. That
+    signature is gone -- the three backward benches construct `out` themselves -- so it moves to
+    the one place every bench function is invoked. Keeping the forward off the default stream is
+    what the fix needs; where the construction sits is not.
+    """
+    if getattr(conf, "cudagraph", "disabled") == "disabled":
+        return contextlib.nullcontext()
+    side = capture_stream()
+    side.wait_stream(torch.cuda.current_stream())
+    return torch.cuda.stream(side)
+
+
 def capture_cudagraph(step: Callable, params: list, is_train: bool,
                       warmup_iters: int = 8) -> "torch.cuda.CUDAGraph":
     """Capture `step` (the existing training_step = fwd + fabric.backward, or inference_step = fwd)
@@ -400,7 +444,7 @@ def capture_cudagraph(step: Callable, params: list, is_train: bool,
                 with torch.no_grad():
                     step()
         torch.cuda.synchronize()
-    side = torch.cuda.Stream()
+    side = capture_stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
         for _ in range(warmup_iters):
@@ -413,10 +457,12 @@ def capture_cudagraph(step: Callable, params: list, is_train: bool,
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
     if is_train:
-        with torch.cuda.graph(graph):
+        # The SAME stream the forward was built on; `torch.cuda.graph` left to
+        # itself picks an internal one and reintroduces the split.
+        with torch.cuda.graph(graph, stream=side):
             step()
     else:
-        with torch.cuda.graph(graph), torch.no_grad():
+        with torch.cuda.graph(graph, stream=side), torch.no_grad():
             step()
     return graph
 
@@ -3043,7 +3089,8 @@ def main(cfg: DictConfig) -> None:
                 status = "ok"
                 error = ""
                 try:
-                    result = bench_func(conf, seq_len, implementation, fabric)
+                    with forward_stream(conf):
+                        result = bench_func(conf, seq_len, implementation, fabric)
                     capture_autotune_state(
                         conf.level,
                         conf.target,
