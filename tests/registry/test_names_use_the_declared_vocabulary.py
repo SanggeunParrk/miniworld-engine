@@ -36,6 +36,8 @@ SPEC = ROOT / "docs/kernels/naming.md"
 #: a name using a token missing from here fails. Longest first: the tokenizer is greedy.
 FUNCS = ("layernorm_linear", "cond_transition", "trimul_outproj", "triangle_attention",
          "augmented_attention", "bias_only_attention", "gated_projection", "layernorm",
+         # before "rmsnorm": the longer, more specific prefix, as layernorm_linear is
+         "rmsnorm_adamod", "rmsnorm",
          "transition", "trimul", "adaln")
 ROLES = ("bwd_reduce", "bwd_pre", "transpose", "epilogue", "layernorm", "sigmoid", "squeeze",
          "swiglu", "expand", "stats", "dbias", "dkdv", "dlnw", "gemm", "gate", "fold", "cast",

@@ -60,6 +60,7 @@ DRIVER_SHAPE_OWNERS = {
     "fused_ln_mask": "layernorm_linear",
     "layernorm": "layernorm_linear",
     "gated_projection": "trimul_inproj",
+    "rmsnorm_adamod": "rmsnorm",
     "tm1": "trimul_inproj",
     "tm2": "trimul_inproj",
 }

@@ -640,7 +640,11 @@ class _RMSNormAdaMod(torch.autograd.Function):
             c2 = c2.contiguous()
         wsc, wsh = w_scale.contiguous(), w_shift.contiguous()
         has_w = weight is not None
-        key = both_key(rows_of(q.shape), N=n)
+        # d_cond is in the key, not just d_model. BLOCK_C tiles the conditioning width, so two
+        # blocks with the same rows and d_model but different d_cond -- 128 on the atom side and
+        # 384 on the token side, which is exactly the pair the model builds -- want different
+        # configs and would otherwise have shared one cache entry.
+        key = both_key(rows_of(q.shape), N=n, K=c2.shape[1])
         y, rstd = _adamod_fwd(q2, c2, wsc, wsh, weight, eps, has_w, key)
         # q and c, NOT scale/shift: saving the projection outputs is the [M, 2N] this exists to
         # not spend, so the backward recomputes `scale` from what the forward already needed.

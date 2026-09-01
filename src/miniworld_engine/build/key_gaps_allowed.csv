@@ -27,3 +27,11 @@ augmented_attention_bwd_pre_triton,stride_m,"== H*HEAD_DIM, product of two alrea
 augmented_attention_bwd_pre_triton,stride_z,"== L*H*HEAD_DIM; keying it keys the EXACT L rather than its bucket -- one entry per sequence length, which is what shape_key exists to prevent"
 adaln_gemm_gate_triton,SAVE_GATE,"pure store AND measured: the guarded block is one tl.store of a tile already in registers, and this kernel is a GEMM (two tl.dot), so that store is noise against the contraction. Both cards, all six shape buckets: SAVE_GATE=0 and SAVE_GATE=1 chose the SAME config and the same time to the nanosecond, 12 of 12. Control: layernorm_stats_triton K=128 vs K=256 differs in 9 of 22 buckets at 1.8-2.0x. NOT extrapolated to store-bound kernels -- gated_projection_gate_dropres_triton has zero tl.dot and keeps the flag"
 transition_bwd_swiglu_recompute_triton,STACK_DAB,"store ADDRESSING only: both branches store the same two tiles with the same masks, into one 2*ND-wide dAB or into two ND-wide dA/dB. Same tile shapes, same values, same COUNT of stores -- which is what separates it from STORE_H in the same kernel, whose guarded store is a whole extra (M, ND) tensor and which stays keyed"
+rmsnorm_fwd_triton,N,"the normalized width; packed into shape_key by both_key(rows, N=n) at the launcher, so it is already keyed -- the audit reads key=[...] and cannot see inside the packing"
+rmsnorm_fwd_triton,eps,numeric tolerance: only use is rstd = 1/sqrt(mean(x^2) + eps)
+rmsnorm_bwd_triton,N,"same packing as the forward: both_key(rows, N=n) carries it, and the backward is handed the forward key verbatim"
+rmsnorm_adamod_fwd_triton,N,"d_model; packed into shape_key by both_key(rows, N=n, K=k)"
+rmsnorm_adamod_fwd_triton,K,"d_cond; packed into shape_key by both_key(rows, N=n, K=k)"
+rmsnorm_adamod_fwd_triton,eps,numeric tolerance: only use is rstd = 1/sqrt(mean(q^2) + eps)
+rmsnorm_adamod_bwd_triton,N,"d_model; packed into the same shape_key the forward computed"
+rmsnorm_adamod_bwd_triton,K,"d_cond; packed into the same shape_key the forward computed"

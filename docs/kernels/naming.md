@@ -10,7 +10,7 @@
 원칙: **이름은 그 커널이 계산하는 것을 말한다.** 파일이 어디 있는지, 어느 경로가 부르는지,
 누가 먼저 썼는지는 이름이 아니다.
 
-## 1. `<func>` — 맨 앞. 이 커널이 구현하는 연산 (11개)
+## 1. `<func>` — 맨 앞. 이 커널이 구현하는 연산 (13개)
 
     layernorm            LN 통계 리덕션을 커널 안에서 수행하는 LayerNorm 계열
     layernorm_linear     LN + Linear GEMM을 한 커널에서 수행
@@ -23,6 +23,8 @@
     augmented_attention  Augmented (atom) Attention
     bias_only_attention  Bias-only Attention
     gated_projection     y = sigma(gate) * proj 계열 (게이트 단독 / GEMM 융합 모두)
+    rmsnorm              RMSNorm 계열 (평균을 빼지 않는 LayerNorm; 변조 포함)
+    rmsnorm_adamod       RMSNorm + adaLN-Zero 변조 + 조건부 투영 GEMM 을 한 커널에서
 
 버린 이름과 이유:
 

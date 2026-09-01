@@ -32,6 +32,18 @@ def _no_tf32():
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev
 
+
+def grads_of(fn, tensors, upstream) -> list[torch.Tensor]:
+    """``fn`` applied to CLONES of ``tensors``, backward through ``upstream``, grads in order.
+
+    Here and not in a family module because two of them need it and `checks/` forbids reaching
+    sideways: a helper more than one family wants belongs in this file, which is the rule the
+    layout test enforces.
+    """
+    ts = [t.clone().requires_grad_() for t in tensors]
+    fn(*ts).backward(upstream)
+    return [t.grad for t in ts]
+
 Pair = tuple[torch.Tensor, torch.Tensor]
 
 

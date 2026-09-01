@@ -164,6 +164,7 @@ OP_FAMILIES = (
     "gated_projection",
     "layernorm_linear",     # before "layernorm": it is the longer, more specific prefix
     "layernorm",
+    "rmsnorm",           # covers rmsnorm_adamod_* too: same prefix
     "swa_atom_attention",
     "tm1",
     "tm2",

@@ -126,6 +126,15 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
     default.
     """
     expect = {"transition": {"pair", "token"},
+              # rmsnorm: pair through triangle_attention's qk-norm
+              # (kernels/triangle_attention/whole_op.py), atom through the SWA atom block's
+              # `_qk_norm` (modules/swa_atom_attention/module.py), and token through the token
+              # DiT's modulate, which normalizes at d_single_token.
+              "rmsnorm": {"pair", "token", "atom"},
+              # rmsnorm_adamod: the two DiT streams and no more. adaLN conditions the diffusion
+              # blocks -- atom_dit and token_dit -- and the pair stream has no adaptive
+              # normalization at all, so claiming `pair` here would be a guess and not a trace.
+              "rmsnorm_adamod": {"token", "atom"},
               "layernorm": {"pair", "token", "atom"},
               "layernorm_linear": {"pair", "token", "atom"},
               "gated_projection": {"pair", "token", "atom"}}
