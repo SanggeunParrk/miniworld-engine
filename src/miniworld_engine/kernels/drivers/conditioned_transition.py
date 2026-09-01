@@ -36,7 +36,7 @@ different tensors, which is the whole point of declaring two. It used to be the 
 ``drivers.FP32`` at every site, matching "fp32 io with TF32 tensor cores" in the family's files;
 that made fp32 the only precision this family COULD be built at, and registry.csv declared fp32
 alone to match. Both halves were true and together they meant the model's own precision was never
-tuned: krystal runs bf16. The one kernel that must stay fp32 says so at its own call site
+tuned: the model runs bf16. The one kernel that must stay fp32 says so at its own call site
 (``cond_transition_fwd_b2b_saveact``), by naming torch.float32 rather than by pinning the family.
 """
 from __future__ import annotations
@@ -79,7 +79,7 @@ _D_BASE = driver_width(128)  # BenchConfig.d_pair default / interface.ATOM_D_MAX
 # A driver's extents are a claim about what the model runs; when they are copied from a bench
 # instead, the cache is tuned for the bench.
 _N_EXPAND = 2
-#: d_cond FOLLOWS d_hidden the way the model pairs them, instead of being a constant. krystal
+#: d_cond FOLLOWS d_hidden the way the model pairs them, instead of being a constant. The model
 #: builds exactly two combinations and every model config (debug/small/medium/large) declares the
 #: same widths for them: `token_dit` is d_single=768 conditioned on d_cond=384 (AlphaFold-3's
 #: c_token and c_s) and `atom_dit` is 128 conditioned on 128 (c_atom for both). So d_cond is 384

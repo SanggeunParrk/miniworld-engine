@@ -8,7 +8,7 @@ by a value that was meant to say something.
 
 The column is also the ONLY thing that knows which stream a `level=token`/`level=atom` kernel sees.
 `level` picks the key function, not the width: adaln, conditioned_transition and augmented_attention
-all key on `atom_key` and all run at d_single_token=768 in krystal's 24 `token_dit` blocks.
+all key on `atom_key` and all run at d_single_token=768 in the model's 24 `token_dit` blocks.
 """
 from __future__ import annotations
 

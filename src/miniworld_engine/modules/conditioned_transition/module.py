@@ -58,7 +58,7 @@ class ConditionedTransition(nn.Module):
 
     def __init__(
         self,
-        # The atom side's widths -- AlphaFold-3's c_atom, which krystal's `atom_dit` passes as both.
+        # The atom side's widths -- AlphaFold-3's c_atom, which the model's `atom_dit` passes as both.
         # 128/384 was neither of the model's two combinations (768/384 token, 128/128 atom); a
         # default that names no real configuration is a shape only the tests and the driver ever
         # build, and the driver copied it.

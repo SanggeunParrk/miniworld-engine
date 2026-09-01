@@ -8,7 +8,7 @@ build shows it in opposite directions.
   * It built shapes the model never presents. An atom count of 8192 at d=768 is an atom activation
     with a token width -- eight of the eighteen units per precision, and the largest ones.
   * It missed the shapes the model does present. `atom_key` started at 256, so a token count of
-    128 and one of 384 both floored into the 256 bucket -- and krystal builds one
+    128 and one of 384 both floored into the 256 bucket -- and the model builds one
     DiffusionTransformer block class 24 times on the token side (d_single=768, d_cond=384) against
     3 times on the atom side (128/128). The side that is 24 of 27 blocks had no bucket of its own.
 

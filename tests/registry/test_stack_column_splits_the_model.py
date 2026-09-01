@@ -1,6 +1,6 @@
 """`build trunk` is only as good as the column it reads.
 
-registry.csv's `stack` says which half of krystal launches a kernel: `trunk` for the Pairformer /
+registry.csv's `stack` says which half of the model launches a kernel: `trunk` for the Pairformer /
 MSA / template stack, `diffusion` for token_dit / atom_dit / the SWA atom transformer, `both` for
 one each side launches. `build trunk` sweeps trunk + both, `build diffusion` sweeps diffusion +
 both -- so a row with a typo, or a blank one, silently drops a kernel out of BOTH builds and the

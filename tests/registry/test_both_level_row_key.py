@@ -108,7 +108,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
 def test_every_both_level_family_names_all_three_streams_it_runs_on():
     """`sides` has to be traced from the model, not defaulted, and the default was wrong for all.
 
-    Traced in krystal (team-gm):
+    Traced in the model (team-gm):
 
       transition           pair (pairformer.py:116), single at token granularity
                            (pairformer.py:123, `transition_single = Transition(d_single)`), MSA
@@ -146,7 +146,7 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
 def test_a_transition_kernel_is_not_built_on_atoms():
     """The finding that produced the `sides` column, pinned so it cannot quietly come back.
 
-    `Transition` in krystal is constructed in pairformer (pair and single), msa_module (msa and
+    `Transition` in the model is constructed in pairformer (pair and single), msa_module (msa and
     pair), template (pair) and the mini_ variants. There is no atom-level use: the atom blocks use
     ConditionedTransition, which is a different family with its own rows. A `transition` kernel
     driven at ATOM_SHAPES is six units per precision spent on a stream it never sees.

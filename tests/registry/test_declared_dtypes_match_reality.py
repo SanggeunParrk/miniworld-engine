@@ -103,13 +103,13 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
     for op, want in declared.items():
         if op.startswith("cond_transition_"):
             # The family used to be fp32 EVERYWHERE, in the driver and in this column together --
-            # two true halves that added up to never tuning krystal's own precision, which is
+            # two true halves that added up to never tuning the model's own precision, which is
             # bf16. The driver was fixed to build at the overridable `BF16` name; this column was
             # the half left behind, so all eight rows still said fp32 and the build made fp32
             # units for kernels the model only ever calls in bf16.
             expect = {"float32"} if op in FP32_ONLY else {"bfloat16", "float32"}
             assert want == expect, (
-                f"{op}: conditioned_transition builds at drivers.BF16 and krystal runs bf16, so "
+                f"{op}: conditioned_transition builds at drivers.BF16 and the model runs bf16, so "
                 f"the row declares both -- except {sorted(FP32_ONLY)}, whose bf16 calls are "
                 f"rerouted before they reach the kernel")
         if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
@@ -137,7 +137,7 @@ def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():
     excludes mixed keys for exactly that reason and so cannot catch this; the dispatch source can.
 
     Scoped to families whose module calls the guard, and to triton rows, which are the ones a build
-    spends units on. conditioned_transition is NOT one of them -- krystal reaches it through
+    spends units on. conditioned_transition is NOT one of them -- the model reaches it through
     `miniworld_engine.ops` rather than through a module -- and it declares both precisions.
     """
     guarded = {f.parent.name for f in (PKG / "modules").rglob("*.py")

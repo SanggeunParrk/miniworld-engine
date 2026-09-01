@@ -66,12 +66,12 @@ DIM_BUCKETS: tuple[int, ...] = (64, 128, 256, 384, 512, 768)
 TOKEN_SHAPES: tuple[int, ...] = (128, 256, 384, 512)
 
 #: Atom-level counts. Starts at 1024: an atom activation is the whole molecule's atoms, thousands
-#: of them (`max_atoms: 5000` in krystal's data config), and 256 or 512 is a crop small enough that
+#: of them (`max_atoms: 5000` in the model's data config), and 256 or 512 is a crop small enough that
 #: nothing in the sweep is sized for it. Anything below 1024 floor-clamps into 1024.
 ATOM_SHAPES: tuple[int, ...] = (1024, 2048, 4096, 8192)
 
 #: The DiT families -- adaln, conditioned_transition, augmented_attention, the seventeen rows that
-#: are `level=atom` with `width=single` -- key on the atom ladder but run on BOTH streams: krystal
+#: are `level=atom` with `width=single` -- key on the atom ladder but run on BOTH streams: the model
 #: builds one DiffusionTransformer block class 24 times at d_single=768/d_cond=384 (the token side)
 #: and 3 times at 128/128 (the atom side). Driving them as ONE list got both halves wrong. It built
 #: shapes the model never presents -- an atom count of 8192 at a token width, eight of the eighteen

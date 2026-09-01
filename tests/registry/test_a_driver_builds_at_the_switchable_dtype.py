@@ -6,7 +6,7 @@ kernel can then only ever be built at that precision, whatever `registry.csv` de
 
 That is not hypothetical. Every conditioned_transition driver was pinned to fp32, and the `dtypes`
 column said fp32 to match. Both halves were true and together they meant the model's own precision
--- krystal runs bf16 -- was never tuned: all eight kernels have float32 entries and nothing else in
+-- the model runs bf16 -- was never tuned: all eight kernels have float32 entries and nothing else in
 the shipped cache on both cards, so in a bf16 run every lookup is a miss and falls back to a
 heuristic subset of the grid.
 

@@ -408,7 +408,7 @@ def cases() -> list[Case]:
              # (d_single, d_cond), so it sees 768/384 and 128/128 and nothing else.
              dims=({"d_hidden": 768, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128}),
              dtypes=BOTH),
-        # The two combinations the model builds, and only those. `krystal`'s config gives the
+        # The two combinations the model builds, and only those. The model's config gives the
         # DiffusionTransformer its `(d_single, d_cond)` and the block passes them straight through
         # as `ConditionedTransition(d_hidden=d_single, d_cond=d_cond)`:
         #
@@ -789,7 +789,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     ops that have config files and drivers.
 
     ``stack`` narrows the sweep to one half of the model. registry.csv's ``stack`` column says
-    which side of krystal each kernel is launched from -- ``trunk`` for the Pairformer / MSA /
+    which side of the model each kernel is launched from -- ``trunk`` for the Pairformer / MSA /
     template stack, ``diffusion`` for the DiT stack (token_dit, atom_dit and the SWA atom
     transformer), ``both`` for a kernel each side launches. Asking for one INCLUDES ``both``: a
     kernel the trunk launches has to be tuned for a trunk build whether or not the diffusion side
@@ -842,7 +842,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: atom STREAM has exactly one width and sweeping more of them tunes shapes production never
     #: presents. `width=atom` is how a row says it only ever sees that stream.
     ATOM_WIDTH = 128
-    #: The SINGLE ladder is the three widths the model declares and no others: all four krystal
+    #: The SINGLE ladder is the three widths the model declares and no others: all four
     #: model configs (debug/small/medium/large) set d_single_atom=128, d_single=384,
     #: d_single_token=768 -- they differ in block counts, not widths -- and those are AlphaFold-3's
     #: c_atom, c_s and c_token. It used to also carry 256 and 512, which no config presents.
@@ -940,7 +940,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # `level` picks the key function (which length ladder a bucket is drawn from), while `width`
         # says which stream's channel width the kernel sees. This used to read
         # `atom_only = level == "atom"` -> one width, 128, and that silently capped three families
-        # that key on `atom_key` but run on BOTH sides of the model. krystal builds one
+        # that key on `atom_key` but run on BOTH sides of the model. The model builds one
         # DiffusionTransformer block class 24 times at d_single=768/d_cond=384 (`token_dit`) and 3
         # times at 128/128 (`atom_dit`), and adaln, ConditionedTransition and
         # AugmentedAttentionPairBias are all constructed inside it -- adaln has no width guard at
