@@ -243,3 +243,71 @@ def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, 
     o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
     tl.store(do_ptr + off, (da * s).to(do_ptr.dtype.element_ty), mask=m)
     tl.store(dg_ptr + off, (da * o * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=m)
+
+
+# ── sigmoid(gate) * x, the standalone one-pass gate ─────────────────────────────────────────
+# The wrappers, the autograd Function and the public entry live WITH the kernels they launch.
+# They used to sit in `bias_only_attention/triton/gate_out.py`, which is one of the callers: the
+# family that owns `_sigmul_fwd`/`_sigmul_bwd` then had to reach across to drive and check them
+# (`drivers/gated_projection.py` said so in its own docstring, "via bias_only_attention's
+# sigmoid_gate_fused"), and every profile attributed the launch to `bias_only_attention_sigmul_*`.
+# `bias_only_attention` still re-exports the name, because its `dispatch.py` is where the choice
+# between this and `fused_gate_out` is made -- that part of the old layout was right.
+
+def _sigmul_fake(gate, out, shape_key):
+    """Same shape and dtype as gate."""
+    return torch.empty_like(gate)
+
+
+@opaque(fake=_sigmul_fake, name="gated_projection_sigmul_fwd")
+def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tensor:
+    """``sigmoid(gate) * out`` in one pass."""
+    a = torch.empty_like(gate)
+    n = gate.numel()
+    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+    _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, shape_key=shape_key)
+    return a
+
+
+def _sigmul_grad_fake(da, gate, out, shape_key):
+    """(dgate, dout), shaped like gate and out respectively."""
+    return torch.empty_like(gate), torch.empty_like(out)
+
+
+@opaque(fake=_sigmul_grad_fake, name="gated_projection_sigmul_bwd")
+def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
+                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""
+    dg = torch.empty_like(gate)
+    do = torch.empty_like(out)
+    n = gate.numel()
+    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
+    _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, shape_key=shape_key)
+    return dg, do
+
+
+class _SigmoidGate(torch.autograd.Function):
+    # both_key, NOT token_key: these kernels are declared level=both, and token_key's top
+    # bucket is 512. Keying a
+    # level=both kernel through it makes every L >= 512 record 512, so its 1024..8192
+    # buckets are unreachable AND the same kernel ends up in two bucket spaces, since
+    # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
+    # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
+    @staticmethod
+    def forward(ctx, gate, out):
+        a = _sigmul(gate, out, both_key(rows_of(gate.shape)))
+        ctx.save_for_backward(gate, out)
+        return a
+
+    @staticmethod
+    def backward(ctx, da):
+        gate, out = ctx.saved_tensors
+        return _sigmul_grad(da, gate, out, both_key(rows_of(gate.shape)))
+
+
+def sigmoid_gate_fused(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """sigmoid(gate) * out in ONE triton pass (vs torch's sigmoid then mul = 2 passes).
+
+    For the DH>=256 back path: this fused elementwise + a cuBLAS to_out beats the
+    wide fused tl.dot of `fused_gate_out`. gate/out same shape -> same shape."""
+    return _SigmoidGate.apply(gate, out)

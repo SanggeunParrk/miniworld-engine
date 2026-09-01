@@ -47,8 +47,8 @@ def gated_projection_bwd_gate_triton() -> None:
 
 
 def gated_projection_gate_flat_triton() -> None:
-    """_sigmul_fwd, via bias_only_attention's sigmoid_gate_fused (one of its two callers)."""
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+    """_sigmul_fwd, via this family's own sigmoid_gate_fused."""
+    from miniworld_engine.kernels.gated_projection.triton.main import (
         sigmoid_gate_fused,
     )
 
@@ -57,7 +57,7 @@ def gated_projection_gate_flat_triton() -> None:
 
 def gated_projection_bwd_gate_flat_triton() -> None:
     """_sigmul_bwd, via _SigmoidGate.backward."""
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+    from miniworld_engine.kernels.gated_projection.triton.main import (
         sigmoid_gate_fused,
     )
 

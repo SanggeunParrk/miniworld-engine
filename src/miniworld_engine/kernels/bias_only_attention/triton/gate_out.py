@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _sigmul_fwd
+from miniworld_engine.kernels.gated_projection.triton.main import sigmoid_gate_fused
 
 import torch
 import triton
@@ -275,60 +275,3 @@ def fused_gate_out(gate: torch.Tensor, out_r: torch.Tensor, wo: torch.Tensor) ->
 # ─────────────── split path: one-pass sigmoid*mul (for DH>=256, gate-out via cuBLAS) ──────────
 
 
-def _sigmul_fake(gate, out, shape_key):
-    """Same shape and dtype as gate."""
-    return torch.empty_like(gate)
-
-
-@opaque(fake=_sigmul_fake, name="bias_only_attention_sigmul_fwd")
-def _sigmul(gate: torch.Tensor, out: torch.Tensor, shape_key: int) -> torch.Tensor:
-    """``sigmoid(gate) * out`` in one pass."""
-    a = torch.empty_like(gate)
-    n = gate.numel()
-    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-    _sigmul_fwd[grid](gate.contiguous(), out.contiguous(), a, n, shape_key=shape_key)
-    return a
-
-
-def _sigmul_grad_fake(da, gate, out, shape_key):
-    """(dgate, dout), shaped like gate and out respectively."""
-    return torch.empty_like(gate), torch.empty_like(out)
-
-
-@opaque(fake=_sigmul_grad_fake, name="bias_only_attention_sigmul_bwd")
-def _sigmul_grad(da: torch.Tensor, gate: torch.Tensor, out: torch.Tensor,
-                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gradients of ``sigmoid(gate) * out`` -> ``(dgate, dout)``."""
-    dg = torch.empty_like(gate)
-    do = torch.empty_like(out)
-    n = gate.numel()
-    grid = lambda M: (triton.cdiv(n, M["BLOCK_E"]),)
-    _sigmul_bwd[grid](da.contiguous(), gate, out, dg, do, n, shape_key=shape_key)
-    return dg, do
-
-
-class _SigmoidGate(torch.autograd.Function):
-    # both_key, NOT _key_of. `_sigmul_fwd` belongs to gated_projection and is declared
-    # level=both, while `_key_of` is token_key -- whose top bucket is 512. Keying a
-    # level=both kernel through it makes every L >= 512 record 512, so its 1024..8192
-    # buckets are unreachable AND the same kernel ends up in two bucket spaces, since
-    # conditioned_transition/{training,train_fused}.py launch it with both_key. Measured over
-    # every bucket: L=512,1024,2048,4096 all recorded shape_key=512 from this path.
-    @staticmethod
-    def forward(ctx, gate, out):
-        a = _sigmul(gate, out, both_key(rows_of(gate.shape)))
-        ctx.save_for_backward(gate, out)
-        return a
-
-    @staticmethod
-    def backward(ctx, da):
-        gate, out = ctx.saved_tensors
-        return _sigmul_grad(da, gate, out, both_key(rows_of(gate.shape)))
-
-
-def sigmoid_gate_fused(gate: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
-    """sigmoid(gate) * out in ONE triton pass (vs torch's sigmoid then mul = 2 passes).
-
-    For the DH>=256 back path: this fused elementwise + a cuBLAS to_out beats the
-    wide fused tl.dot of `fused_gate_out`. gate/out same shape -> same shape."""
-    return _SigmoidGate.apply(gate, out)

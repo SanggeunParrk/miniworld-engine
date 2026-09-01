@@ -13,10 +13,15 @@ from __future__ import annotations
 
 from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
     fused_gate_out,
-    sigmoid_gate_fused,
 )
 from miniworld_engine.kernels.bias_only_attention.triton.main import (
     triton_bias_only_attention,
+)
+
+# Re-exported, not owned: the kernels behind it are gated_projection's. This family names it
+# because `dispatch.py` here is what picks between the two gate epilogues.
+from miniworld_engine.kernels.gated_projection.interface import (
+    sigmoid_gate_fused,
 )
 
 __all__ = [

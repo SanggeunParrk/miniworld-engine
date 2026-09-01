@@ -59,7 +59,7 @@ def gated_projection_bwd_gate_triton():
 
 def gated_projection_gate_flat_triton():
     """_sigmul_fwd: the flat (1-D, all-contiguous) form of the same y = sigmoid(g) * o."""
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+    from miniworld_engine.kernels.gated_projection.triton.main import (
         sigmoid_gate_fused,
     )
 
@@ -73,7 +73,7 @@ def gated_projection_bwd_gate_flat_triton():
     ``da`` is random rather than the driver's ``.sum()`` (all-ones): a uniform upstream grad
     cannot distinguish ``da*o*s*(1-s)`` from an expression that drops the ``da`` factor.
     """
-    from miniworld_engine.kernels.bias_only_attention.triton.gate_out import (
+    from miniworld_engine.kernels.gated_projection.triton.main import (
         sigmoid_gate_fused,
     )
 
