@@ -492,6 +492,30 @@ def adaln_inference_fused(
     return y.reshape(orig_x_shape)
 
 
+#: Width at or below which the single fused kernel beats materialize+cuBLAS.
+#:
+#: It was a bare literal with the magic-value lint rule suppressed beside it and no measurement
+#: anywhere. The docstring below justifies the `> 256` side with "beats the materialize path
+#: 1.12-1.21x", but that is the lnfold CUTE path -- SM90 only, and therefore not the branch an
+#: Ampere card takes. The number was deciding A5000/A6000 routing on the strength of an H100
+#: result.
+#:
+#: Measured on an A5000 (bf16), fused vs materialize, ms:
+#:
+#:     A=48 L=768   d=768   1.131  vs  1.048     materialize wins  (0.93x)
+#:     A=32 L=1024  d=768   1.010  vs  0.937     materialize wins  (0.93x)
+#:     A=48 L=8192  d=768  12.941  vs 11.721     materialize wins  (0.91x)
+#:     A=48 L=768   d=128   0.111  vs  0.309     fused wins        (2.78x)
+#:     A=32 L=1024  d=128   0.111  vs  0.310     fused wins        (2.78x)
+#:     A=48 L=8192  d=128   0.918  vs  1.339     fused wins        (1.46x)
+#:
+#: So the split is real and 256 sits inside it. WHERE inside is still unmeasured -- 256, 384 and
+#: 512 were not run, and neither was any card other than the A5000. A value that happens to be
+#: right is not the same as a value with a reason, which is why this says what it knows and what
+#: it does not.
+_FUSED_D_MAX = 256
+
+
 def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                     eps_x, eps_cond, **kw):
     """Dispatch: small d (≤256) → single fused kernel; token d (>256) → LN-folded cute GEMM
@@ -501,7 +525,7 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
 
     lnfold's cute GEMM (quack SM90) is 16/8-bit ONLY, so fp32 falls back to materialize+cuBLAS —
     there is no fast fused fp32/TF32 GEMM here (triton's TF32 GEMM is ~0.5× cuBLAS)."""
-    if x.shape[-1] <= 256:  # noqa: PLR2004
+    if x.shape[-1] <= _FUSED_D_MAX:
         return adaln_inference_fused(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                      bias_weight, eps_x, eps_cond)
     # lnfold's fused GEMM is the cute quack path imported directly from
