@@ -52,7 +52,7 @@ from ...layernorm_linear.triton.stats import stats_triton
 # LayerNorm stay fp32; only the three GEMM operands are downcast.
 _GEMM_BF16 = False
 
-#: adaLN's two widths: atom d=128, token d=768. The fused forward is gated above it.
+#: adaLN's two widths: atom d=128, token d=768. `_pick_fwd` routes the forward on this boundary.
 _ATOM_D_MAX = 128
 
 
@@ -630,6 +630,29 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
     return y, gate
 
 
+# Forward backend for training (mirrors conditioned_transition's ``_FWD_MODE``):
+#   "cublas" = sb-GEMM (cuBLAS, writes the (M, 2NX) [scale|bias]) + fused-triton epilogue.
+#   "fused"  = fused-triton GEMM+gate (`_adaln_fwd_gate`), keeps scale|bias in registers.
+#   "auto"   = measured-best per width (default). The fused kernel removes the sb round-trip --
+#              113 MB at the token width but only 19 MB at the atom width -- so it PAYS at d=768
+#              (fwd 0.85x -> 1.28x, A6000) and LOSES at d=128, where the extra stats launch and the
+#              mean=c1/rstd op cost more than the 19 MB trip (fwd 1.15x -> 0.90x). So token ->
+#              fused, atom -> cublas.
+_FWD_MODE = "auto"  # {"auto", "cublas", "fused"}
+
+
+def set_forward_mode(name: str) -> None:
+    """Force the training forward backend, or "auto" (default) for the per-width measured-best."""
+    global _FWD_MODE  # noqa: PLW0603
+    assert name in ("auto", "cublas", "fused")
+    _FWD_MODE = name
+
+
+def _pick_fwd(nx: int) -> str:
+    """Measured-best forward by width: token (nx > _ATOM_D_MAX) -> fused, atom -> cublas."""
+    return "fused" if nx > _ATOM_D_MAX else "cublas"
+
+
 class AdaLNTrainFn(torch.autograd.Function):
     """Every launch these two methods reach is wrapped by ``opaque`` at its own definition, so the
     methods need no wrapper: the cuBLAS matmuls, the ``cat``, the reductions and the dtype casts
@@ -653,27 +676,19 @@ class AdaLNTrainFn(torch.autograd.Function):
         cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
                                                    shape_key=both_key(rows_of(orig_cond_shape)))
 
-        # ONE kernel for the projections AND the gate: `sb = cond_aff @ w_cat.T` used to write a
-        # (M, 2NX) matrix (113 MB at the token width) that the epilogue read straight back. The
-        # fused kernel keeps scale|bias in registers -- measured 1022 -> 726 us (1.41x, A6000) --
-        # and emits `gate` for the backward. Weights transposed to (NC, NX) once so the dot's K
-        # axis is contiguous; x's stats come from the family's stats kernel so x is read once.
-        #
-        # Gated like the inference twin: `tl.dot` runs TF32 regardless of the matmul flag, so
-        # strict fp32 (allow_tf32 off) keeps the sb-GEMM + epilogue path, whose cuBLAS respects
-        # the flag. bf16/fp16 and TF32-fp32 take the fused kernel.
         ak = atom_key(length_of(orig_x_shape))
-        # Token width ONLY. The fused kernel removes the sb round-trip, and that trip is 113 MB
-        # at the token width but 19 MB at the atom width -- so the fusion pays at d=768 (fwd
-        # 0.85x -> 1.28x, A6000) and LOSES at d=128, where the extra stats launch and the
-        # mean=c1/rstd op cost more than a 19 MB round trip (measured fwd 1.15x -> 0.90x). The
-        # atom side keeps the sb-GEMM + epilogue it already beat compile with. `_ATOM_D_MAX` is
-        # the shared name for this boundary; the model presents 128 (atom) and 768 (token).
+        # FORWARD backend (see `_FWD_MODE`): `_pick_fwd` routes the token width to the fused
+        # GEMM+gate and the atom width to the sb-GEMM + epilogue; `_FWD_MODE` overrides for A/B.
+        # Both branches emit `gate` (and mean_x, rstd_x) for the backward. `tl.dot` always runs
+        # TF32, so strict fp32 (allow_tf32 off) must keep the cuBLAS epilogue whatever the mode --
+        # the fused kernel would silently give TF32 numbers.
+        mode = _pick_fwd(nx) if _FWD_MODE == "auto" else _FWD_MODE
         tf32_ok = x.dtype in (torch.float16, torch.bfloat16) or (
             x.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32
         )
-        use_fused = tf32_ok and nx > _ATOM_D_MAX
-        if use_fused:
+        if mode == "fused" and not tf32_ok:
+            mode = "cublas"
+        if mode == "fused":
             rstd_x, c1 = stats_triton(x2d, eps_x, shape_key=ak)
             y, gate = _adaln_fwd_gate(cond_aff, scale_weight.t().contiguous(), scale_bias,
                                       bias_weight.t().contiguous(), x2d, rstd_x, c1, shape_key=ak)
