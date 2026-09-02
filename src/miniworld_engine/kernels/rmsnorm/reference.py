@@ -53,8 +53,6 @@ def rmsnorm_adamod_reference(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Te
     normed = qf * torch.rsqrt(qf.pow(2).mean(dim=-1, keepdim=True) + eps)
     if weight is not None:
         normed = normed * weight.float()
-    # SiLU first: adaLN is Linear(SiLU(c)), and the kernel folds the activation in.
-    cs = torch.nn.functional.silu(c.float())
-    scale = torch.nn.functional.linear(cs, w_scale.float())
-    shift = torch.nn.functional.linear(cs, w_shift.float())
+    scale = torch.nn.functional.linear(c.float(), w_scale.float())
+    shift = torch.nn.functional.linear(c.float(), w_shift.float())
     return (normed * (1.0 + scale) + shift).to(q.dtype)

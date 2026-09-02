@@ -270,13 +270,7 @@ def rmsnorm_adamod_fwd_kernel(
             ks = k0 + tl.arange(0, BLOCK_C)
             k_mask = ks < K
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
-                        mask=row_mask[:, None] & k_mask[None, :],
-                        other=0.0).to(tl.float32)
-            # SiLU belongs to the modulation, not to the caller: adaLN is Linear(SiLU(c)),
-            # so a kernel that skipped it would not be computing the block's function. Applied
-            # to the tile already in registers, it costs nothing -- doing it outside writes a
-            # whole [M, d_cond] and reads it back once per use.
-            c = (c * tl.sigmoid(c)).to(C.dtype.element_ty)
+                        mask=row_mask[:, None] & k_mask[None, :], other=0.0)
             wmask = k_mask[:, None] & col_mask[None, :]
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                           mask=wmask, other=0.0)
@@ -314,13 +308,7 @@ def rmsnorm_adamod_fwd_kernel(
             # bf16 operands into tl.dot, fp32 accumulator: casting to fp32 first would drop the
             # tensor cores this loop exists to use.
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
-                        mask=row_mask[:, None] & k_mask[None, :],
-                        other=0.0).to(tl.float32)
-            # SiLU belongs to the modulation, not to the caller: adaLN is Linear(SiLU(c)),
-            # so a kernel that skipped it would not be computing the block's function. Applied
-            # to the tile already in registers, it costs nothing -- doing it outside writes a
-            # whole [M, d_cond] and reads it back once per use.
-            c = (c * tl.sigmoid(c)).to(C.dtype.element_ty)
+                        mask=row_mask[:, None] & k_mask[None, :], other=0.0)
             wmask = k_mask[:, None] & col_mask[None, :]
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                           mask=wmask, other=0.0)
@@ -497,13 +485,7 @@ def rmsnorm_adamod_bwd_kernel(
             ks = k0 + tl.arange(0, BLOCK_C)
             k_mask = ks < K
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
-                        mask=row_mask[:, None] & k_mask[None, :],
-                        other=0.0).to(tl.float32)
-            # SiLU belongs to the modulation, not to the caller: adaLN is Linear(SiLU(c)),
-            # so a kernel that skipped it would not be computing the block's function. Applied
-            # to the tile already in registers, it costs nothing -- doing it outside writes a
-            # whole [M, d_cond] and reads it back once per use.
-            c = (c * tl.sigmoid(c)).to(C.dtype.element_ty)
+                        mask=row_mask[:, None] & k_mask[None, :], other=0.0)
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                           mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             acc_sc += tl.dot(c, wsc)
@@ -538,13 +520,7 @@ def rmsnorm_adamod_bwd_kernel(
                 ks = k0 + tl.arange(0, BLOCK_C)
                 k_mask = ks < K
                 c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
-                            mask=row_mask[:, None] & k_mask[None, :],
-                            other=0.0).to(tl.float32)
-                # SiLU belongs to the modulation, not to the caller: adaLN is Linear(SiLU(c)),
-                # so a kernel that skipped it would not be computing the block's function. Applied
-                # to the tile already in registers, it costs nothing -- doing it outside writes a
-                # whole [M, d_cond] and reads it back once per use.
-                c = (c * tl.sigmoid(c)).to(C.dtype.element_ty)
+                            mask=row_mask[:, None] & k_mask[None, :], other=0.0)
                 wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                               mask=k_mask[:, None] & col_mask[None, :], other=0.0)
                 acc_sc += tl.dot(c, wsc)
@@ -577,13 +553,7 @@ def rmsnorm_adamod_bwd_kernel(
                 ks = k0 + tl.arange(0, BLOCK_C)
                 k_mask = ks < K
                 c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
-                            mask=row_mask[:, None] & k_mask[None, :],
-                            other=0.0).to(tl.float32)
-                # SiLU belongs to the modulation, not to the caller: adaLN is Linear(SiLU(c)),
-                # so a kernel that skipped it would not be computing the block's function. Applied
-                # to the tile already in registers, it costs nothing -- doing it outside writes a
-                # whole [M, d_cond] and reads it back once per use.
-                c = (c * tl.sigmoid(c)).to(C.dtype.element_ty)
+                            mask=row_mask[:, None] & k_mask[None, :], other=0.0)
                 wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                               mask=k_mask[:, None] & col_mask[None, :], other=0.0)
                 acc_sc += tl.dot(c, wsc)
@@ -691,24 +661,14 @@ class _RMSNormAdaMod(torch.autograd.Function):
             dy2 = dy2.contiguous()
         dq, dscale, dw = _adamod_bwd(dy2, q2, c2, wsc, weight, rstd, ctx.has_w, ctx.key)
         # dshift IS dy, so the shift half of every chain below is spelled with dy directly.
-        #
-        # The projection contracts SiLU(c), not c, so the weight gradients contract it too. It is
-        # RECOMPUTED and not saved, for the same reason `scale` is: holding it is the [M, d_cond]
-        # the forward exists to not hold, and it is one elementwise pass to get back.
-        # bf16 and in place wherever it can be. Spelled in fp32 this is seven [M, d_cond]
-        # temporaries -- 604 MB each at the atom shape -- and it cost 24 ms of backward.
-        sig = torch.sigmoid(c2)
-        cs = c2 * sig
-        dwsc = (dscale.mT @ cs).to(wsc.dtype)
-        dwsh = (dy2.mT @ cs).to(wsh.dtype)
+        dwsc = (dscale.mT @ c2).to(wsc.dtype)
+        dwsh = (dy2.mT @ c2).to(wsh.dtype)
         # In place on the first product, not `torch.addmm(dscale @ wsc, dy2, wsh)`: that spells
         # one [M, K] temporary for the product and a second for the sum, and at the atom-DiT
         # shape each of those is 302 MB written and read for nothing.
-        dcs = dscale @ wsc
-        dcs.addmm_(dy2, wsh)
-        # Through the activation. d/dx silu(x) = sigmoid(x) + silu(x) * (1 - sigmoid(x)), which
-        # is the usual sig*(1 + x*(1-sig)) rearranged to reuse `cs` and never touch `c` again.
-        dc = dcs.mul_(sig.add_(cs.mul_(1 - sig))).reshape(tuple(ctx.cshape))
+        dc = dscale @ wsc
+        dc.addmm_(dy2, wsh)
+        dc = dc.reshape(tuple(ctx.cshape))
         dweight = dw.to(weight.dtype) if ctx.has_w else None
         return dq.reshape(tuple(ctx.shape)), dc, dwsc, dwsh, dweight, None
 
@@ -716,13 +676,17 @@ class _RMSNormAdaMod(torch.autograd.Function):
 def triton_rmsnorm_adamod(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Tensor,
                           w_shift: torch.Tensor, weight: torch.Tensor | None = None,
                           eps: float = 1e-5) -> torch.Tensor:
-    """``rmsnorm(q) * (1 + Wsc @ silu(c)) + Wsh @ silu(c)`` -- the whole modulation, fwd and bwd.
+    """``rmsnorm(q) * (1 + c @ w_scale^T) + c @ w_shift^T``, projection included, fwd and bwd.
 
-    SiLU included, because adaLN IS ``Linear(SiLU(c))`` (``adaln_modulation = Sequential(nn.SiLU(),
-    Linear(d_cond, 6 * d_atom, bias=False))``); a version that took the activation as the caller's
-    job would compute something the block does not. It is applied to the ``c`` tile already in
-    registers, so it is free here and saves the [M, d_cond] the caller would otherwise write and
-    read back once per use.
+    ``c`` IS THE ACTIVATED CONDITIONING -- the caller passes ``SiLU(c)``, not ``c``. adaLN is
+    ``Sequential(nn.SiLU(), Linear(d_cond, 6 * d_atom, bias=False))``, and the activation is one
+    elementwise pass that ALL SIX chunks share, so it belongs where it is computed once. Folding
+    it in here was tried and measured, and it loses twice over: this kernel is reached twice per
+    block and re-reads ``c`` once per N tile, so the activation is recomputed four times where
+    the caller did it once; and the gate chunks keep an ordinary ``Linear`` on it, so the tensor
+    gets built anyway and the forward saves nothing. The backward is worse still -- the weight
+    gradients contract ``SiLU(c)``, so the kernel has to WRITE it back out, which tripled its
+    stores and took the block's adaLN backward from 6.86 ms to 13.87.
 
     ``w_scale``/``w_shift`` are the two ``(d_model, d_cond)`` slices of the block's adaLN
     projection -- the slices, not the whole 6-chunk weight, so the total GEMM work is what it was.
