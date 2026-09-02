@@ -665,11 +665,23 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
     # fusing removes. That also puts this below the sum of the two floors (0.898 ms), which is
     # only possible because the fused form never materialises scale/bias at all.
     #
-    # fp32 stays on materialize: none of the above was measured there, and the GEMM's TF32
-    # behaviour is a separate regime.
-    if x.dtype in (torch.float16, torch.bfloat16):
+    # fp32 comes here too, but ONLY under TF32. Measured on an A6000 (allow_tf32=True both
+    # sides, cos vs a float64 reference 0.9999999 for us and 1.0000000 for compile -- the same
+    # TF32 accuracy class):
+    #
+    #     A=48 L=768    torch.compile 1703 us | materialize 1841 (0.93x) | this 1336 (1.27x)
+    #     A=32 L=1024   torch.compile 1533 us | materialize 1654 (0.93x) | this 1195 (1.28x)
+    #
+    # So the materialize fallback was the one cell still LOSING at fp32, and this kernel wins it.
+    # The TF32 guard is not a performance choice: `tl.dot` runs TF32 regardless of
+    # `torch.backends.cuda.matmul.allow_tf32`, so sending strict fp32 here would silently take
+    # mantissa bits a user explicitly asked to keep. Strict fp32 stays on materialize, whose
+    # cuBLAS GEMMs respect the flag.
+    if x.dtype in (torch.float16, torch.bfloat16) or (
+        x.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32
+    ):
         return adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias,
-                                        bias_weight, eps_x, eps_cond)
+                                         bias_weight, eps_x, eps_cond)
     return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                        bias_weight, eps_x, eps_cond, **kw)
 
