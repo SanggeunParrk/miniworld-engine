@@ -76,6 +76,7 @@ import torch.nn.functional as F
 from miniworld_engine.kernels.checks import _fixed, _no_tf32
 from miniworld_engine.kernels.drivers import BF16, _rand
 from miniworld_engine.kernels.drivers.conditioned_transition import (
+    _D,
     _M,
     _ND,
     _SHAPE_KEY,
@@ -221,6 +222,29 @@ def cond_transition_fwd_b2b_saveact():
 
 
 # ── conditioned_transition: backward ──────────────────────────────────────────────────────────
+
+
+def cond_transition_bwd_gemm_swiglu():
+    """training._dh_swiglu_bwd_kernel: the same dab the split path makes, from (dout, ws, a, b).
+
+    The reference recomputes dh in fp32 and reuses ``_swiglu_bwd`` -- the very helper the
+    unfused checker compares against -- so the only thing under test is that fusing the GEMM in
+    did not change the answer.
+    """
+    from miniworld_engine.kernels.conditioned_transition.triton.training import (
+        _dh_swiglu_bwd,
+    )
+
+    _fixed()
+    dout = _rand(_M, _D, dtype=BF16)
+    ws = _rand(_D, _ND, dtype=BF16)
+    a = _rand(_M, _ND, dtype=BF16)
+    b = _rand(_M, _ND, dtype=BF16)
+    dab = _dh_swiglu_bwd(dout, ws, a, b, shape_key=_SHAPE_KEY)
+    with _no_tf32():
+        dh = dout.float() @ ws.float()
+    da, db = _swiglu_bwd(a, b, dh)
+    return dab, torch.cat([da, db], dim=1)
 
 
 def cond_transition_bwd_swiglu_flat():

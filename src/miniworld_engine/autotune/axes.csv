@@ -32,6 +32,10 @@ bias_only_attention_bwd_triton,_attn_bwd,miniworld_engine/kernels/bias_only_atte
 bias_only_attention_bwd_triton,_attn_bwd,miniworld_engine/kernels/bias_only_attention/triton/main.py,282,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 bias_only_attention_fwd_triton,_attn_fwd,miniworld_engine/kernels/bias_only_attention/triton/main.py,76,BLOCK_M1,64,128,16,32,64,32 64 128 256,128,16,64,64,1,0,,
 bias_only_attention_fwd_triton,_attn_fwd,miniworld_engine/kernels/bias_only_attention/triton/main.py,76,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,0,0,,
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,BLOCK_K,32,64,16,32,64,16 32 64 128,32,16,32,64,0,1,D,1
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,BLOCK_M,64,128,32,64,64,64 128 256,128,32,64,128,1,0,,
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,BLOCK_N,128,128,64,64,128,64 128 256,64,64,128,128,1,0,,
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,GROUP_M,4,4,1,4,4,1 2 4 8 16,4,1,4,4,0,0,,
 cond_transition_bwd_swiglu_flat_triton,_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,148,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 cond_transition_expand_swiglu_saveact_triton,_fwd_expand_swiglu_kernel,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,64,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
 cond_transition_expand_swiglu_saveact_triton,_fwd_expand_swiglu_kernel,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,64,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
