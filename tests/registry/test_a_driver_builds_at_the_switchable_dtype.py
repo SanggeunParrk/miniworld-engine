@@ -28,6 +28,7 @@ DRIVERS = ROOT / "src" / "miniworld_engine" / "kernels" / "drivers"
 ALLOWED = {
     "adaln.py:FP32": "a LayerNorm statistic (mean/rstd) is fp32 whatever the activation is",
     "triangle_multiplication.py:torch.float32": "sigma is fp32 by definition, not an activation",
+    "rope.py:torch.float32": "cos/sin are fp32 angle tensors (rotation precision), not activations",
 }
 
 #: The import line and the docstrings that DISCUSS the names are not uses of them.

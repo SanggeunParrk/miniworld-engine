@@ -535,8 +535,13 @@ class SWA3DRoPEAttention(nn.Module):
         qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
         q, k = _qk_norm(q), _qk_norm(k)
-        q = apply_rotary_emb_3d(q, cos, sin)
-        k = apply_rotary_emb_3d(k, cos, sin)
+        if q.is_cuda:
+            from miniworld_engine import kernels
+            q = kernels.triton_rope_3d(q, cos, sin)
+            k = kernels.triton_rope_3d(k, cos, sin)
+        else:  # the kernel is CUDA-only; the module's unit tests are not
+            q = apply_rotary_emb_3d(q, cos, sin)
+            k = apply_rotary_emb_3d(k, cos, sin)
 
         # FA4 if the card can run it, else FA2, else the dense band-mask. The choice is the
         # card's as much as the install's -- see `_flash_backend`.

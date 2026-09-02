@@ -35,3 +35,6 @@ rmsnorm_adamod_fwd_triton,K,"d_cond; packed into shape_key by both_key(rows, N=n
 rmsnorm_adamod_fwd_triton,eps,numeric tolerance: only use is rstd = 1/sqrt(mean(q^2) + eps)
 rmsnorm_adamod_bwd_triton,N,"d_model; packed into the same shape_key the forward computed"
 rmsnorm_adamod_bwd_triton,K,"d_cond; packed into the same shape_key the forward computed"
+rope_fwd_triton,H,"n_heads; the kernel loops it and it does not tile -- a pure function of the launch, and the same for every shape the atom block presents"
+rope_fwd_triton,D,"head_dim; packed into shape_key by both_key(rows, D=d)"
+rope_fwd_triton,HALF,"active rope width = D/2 here; a pure function of D, which is keyed"

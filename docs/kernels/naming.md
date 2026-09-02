@@ -20,6 +20,7 @@
     trimul               TriangleMultiplication in-projection 스테이지
     trimul_outproj       TriangleMultiplication out 스테이지 (LN + 게이티드 출력 투영)
     triangle_attention   Triangle Attention
+    rope                 Rotary position embedding (3D-RoPE for the SWA atom block)
     augmented_attention  Augmented (atom) Attention
     bias_only_attention  Bias-only Attention
     gated_projection     y = sigma(gate) * proj 계열 (게이트 단독 / GEMM 융합 모두)

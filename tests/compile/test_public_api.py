@@ -42,6 +42,7 @@ _CONTRACT = frozenset(
         "triton_bias_only_attention",
         "triton_layernorm",
         "triton_rmsnorm",
+        "triton_rope_3d",
         "triton_rmsnorm_adamod",
         "triton_swiglu_ffn",
         "triton_tm1",
