@@ -210,14 +210,14 @@ def rmsnorm_bwd_kernel(
 
 
 @triton.autotune(configs=configs_for("rmsnorm_adamod_fwd_triton"),
-                 key=["shape_key", "HAS_WEIGHT"])
+                 key=["shape_key", "HAS_WEIGHT", "HAS_GATE"])
 @triton.jit
 def rmsnorm_adamod_fwd_kernel(
-    Q, C, WSC, WSH, W, Y, Rstd,
+    Q, C, WSC, WSH, WG, W, Y, Rstd, GATE,
     stride_qr, stride_qc, stride_cr, stride_cc, stride_wn, stride_wk,
     M, N: tl.constexpr, K: tl.constexpr, eps: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_C: tl.constexpr,
-    shape_key, HAS_WEIGHT: tl.constexpr,
+    shape_key, HAS_WEIGHT: tl.constexpr, HAS_GATE: tl.constexpr,
 ):
     """``rmsnorm(q) * (1 + c@Wsc^T) + c@Wsh^T`` -- the modulation projection folded in.
 
@@ -266,6 +266,12 @@ def rmsnorm_adamod_fwd_kernel(
 
         acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
         acc_sh = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
+        if HAS_GATE:
+            # The block's THIRD chunk, from the same c tile. adaLN projects six of these from
+            # one conditioning vector; taking only two left the gate to a Linear that read `c`
+            # all over again and whose backward was two more GEMMs. No extra read here -- c is
+            # in registers for the other two, and the weight tile is the only new load.
+            acc_g = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
         for k0 in range(0, K, BLOCK_C):
             ks = k0 + tl.arange(0, BLOCK_C)
             k_mask = ks < K
@@ -278,12 +284,19 @@ def rmsnorm_adamod_fwd_kernel(
                           mask=wmask, other=0.0)
             acc_sc += tl.dot(c, wsc)
             acc_sh += tl.dot(c, wsh)
+            if HAS_GATE:
+                wg = tl.load(WG + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
+                             mask=wmask, other=0.0)
+                acc_g += tl.dot(c, wg)
         y = q * rstd[:, None]
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
             y = y * w[None, :]
         y = y * (1.0 + acc_sc) + acc_sh
         tl.store(Y + rows[:, None] * stride_qr + cols[None, :] * stride_qc, y, mask=mask)
+        if HAS_GATE:
+            tl.store(GATE + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
+                     acc_g, mask=mask)
         return
 
     ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
@@ -302,6 +315,12 @@ def rmsnorm_adamod_fwd_kernel(
         mask = row_mask[:, None] & col_mask[None, :]
         acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
         acc_sh = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
+        if HAS_GATE:
+            # The block's THIRD chunk, from the same c tile. adaLN projects six of these from
+            # one conditioning vector; taking only two left the gate to a Linear that read `c`
+            # all over again and whose backward was two more GEMMs. No extra read here -- c is
+            # in registers for the other two, and the weight tile is the only new load.
+            acc_g = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
         for k0 in range(0, K, BLOCK_C):
             ks = k0 + tl.arange(0, BLOCK_C)
             k_mask = ks < K
@@ -316,6 +335,10 @@ def rmsnorm_adamod_fwd_kernel(
                           mask=wmask, other=0.0)
             acc_sc += tl.dot(c, wsc)
             acc_sh += tl.dot(c, wsh)
+            if HAS_GATE:
+                wg = tl.load(WG + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
+                             mask=wmask, other=0.0)
+                acc_g += tl.dot(c, wg)
         q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
                     mask=mask, other=0.0).to(tl.float32)
         y = q * rstd[:, None]
@@ -324,6 +347,9 @@ def rmsnorm_adamod_fwd_kernel(
             y = y * w[None, :]
         y = y * (1.0 + acc_sc) + acc_sh
         tl.store(Y + rows[:, None] * stride_qr + cols[None, :] * stride_qc, y, mask=mask)
+        if HAS_GATE:
+            tl.store(GATE + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
+                     acc_g, mask=mask)
 
 
 def _rms_fwd_fake(x_2d, weight, scale, shift, eps, has_w, has_mod, shape_key):
@@ -587,40 +613,45 @@ def rmsnorm_adamod_bwd_kernel(
             tl.store(DQ + rows[:, None] * stride_qr + cols[None, :] * stride_qc, dq, mask=mask)
 
 
-def _adamod_fwd_fake(q_2d, c_2d, wsc, wsh, weight, eps, has_w, shape_key):
-    """``y`` like ``q_2d``, plus ``rstd`` as (M,) fp32."""
-    return torch.empty_like(q_2d), q_2d.new_empty((q_2d.shape[0],), dtype=torch.float32)
+def _adamod_fwd_fake(q_2d, c_2d, wsc, wsh, wg, weight, eps, has_w, has_gate, shape_key):
+    """``y`` like ``q_2d``, ``rstd`` as (M,) fp32, and ``gate`` -- empty when not asked for."""
+    return (torch.empty_like(q_2d), q_2d.new_empty((q_2d.shape[0],), dtype=torch.float32),
+            torch.empty_like(q_2d) if has_gate else q_2d.new_empty((0,)))
 
 
 @opaque(fake=_adamod_fwd_fake, name="rmsnorm_adamod_fwd")
 def _adamod_fwd(q_2d: torch.Tensor, c_2d: torch.Tensor, wsc: torch.Tensor, wsh: torch.Tensor,
-                weight: torch.Tensor | None, eps: float, has_w: bool,
-                shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """``rmsnorm(q) * (1 + c@wsc^T) + c@wsh^T`` with the projection kept in registers."""
+                wg: torch.Tensor | None, weight: torch.Tensor | None, eps: float, has_w: bool,
+                has_gate: bool, shape_key: int,
+                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``rmsnorm(q) * (1 + c@wsc^T) + c@wsh^T``, and optionally ``c@wg^T``, from one c tile."""
     m, n = q_2d.shape
     k = c_2d.shape[1]
+    empty = q_2d.new_empty((0,))
     y = torch.empty_like(q_2d)
     rstd = q_2d.new_empty((m,), dtype=torch.float32)
+    gate = torch.empty_like(q_2d) if has_gate else empty
     grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
     rmsnorm_adamod_fwd_kernel[grid](
-        q_2d, c_2d, wsc, wsh, weight if has_w else q_2d.new_empty((0,)), y, rstd,
+        q_2d, c_2d, wsc, wsh, wg if has_gate else empty,
+        weight if has_w else empty, y, rstd, gate,
         q_2d.stride(0), q_2d.stride(1), c_2d.stride(0), c_2d.stride(1),
         wsc.stride(0), wsc.stride(1),
-        m, n, k, eps, shape_key=shape_key, HAS_WEIGHT=has_w,
+        m, n, k, eps, shape_key=shape_key, HAS_WEIGHT=has_w, HAS_GATE=has_gate,
     )
-    return y, rstd
+    return y, rstd, gate
 
 
-def _adamod_bwd_fake(dy_2d, q_2d, c_2d, wsc, weight, rstd, has_w, shape_key):
-    """``(dq, [dscale | dy] as one (M, 2N), dweight)``. The big GEMMs are the caller's."""
+def _adamod_bwd_fake(dy_2d, q_2d, c_2d, wsc, weight, rstd, has_w, chunks, shape_key):
+    """``(dq, the stacked (M, chunks*N) gradient buffer, dweight)``. Big GEMMs are the caller's."""
     m, nn = q_2d.shape
-    return (torch.empty_like(q_2d), q_2d.new_empty((m, 2 * nn)),
+    return (torch.empty_like(q_2d), q_2d.new_empty((m, chunks * nn)),
             q_2d.new_empty((nn,), dtype=torch.float32))
 
 
 @opaque(fake=_adamod_bwd_fake, name="rmsnorm_adamod_bwd")
 def _adamod_bwd(dy_2d: torch.Tensor, q_2d: torch.Tensor, c_2d: torch.Tensor, wsc: torch.Tensor,
-                weight: torch.Tensor | None, rstd: torch.Tensor, has_w: bool,
+                weight: torch.Tensor | None, rstd: torch.Tensor, has_w: bool, chunks: int,
                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``dq``, ``[dscale | dy]`` stacked as one (M, 2N), and ``dweight``.
 
@@ -632,7 +663,10 @@ def _adamod_bwd(dy_2d: torch.Tensor, q_2d: torch.Tensor, c_2d: torch.Tensor, wsc
     m, n = q_2d.shape
     k = c_2d.shape[1]
     dq = torch.empty_like(q_2d)
-    dsd = q_2d.new_empty((m, 2 * n))
+    # ``chunks`` wide, not 2: the caller adds a column block per adaLN chunk it wants stacked
+    # (three when the gate is fused in). The kernel is unaware -- it writes slots 0 and 1 through
+    # `stride_sr`, and a wider stride simply leaves room after them.
+    dsd = q_2d.new_empty((m, chunks * n))
     # ZEROED, not `new_empty`: the kernel accumulates dweight across row tiles with
     # `atomic_add`, and the autotuner's `reset_to_zero` only fires on the paths that
     # benchmark a config -- once a shape is tuned and served from cache, nothing clears
@@ -652,7 +686,7 @@ def _adamod_bwd(dy_2d: torch.Tensor, q_2d: torch.Tensor, c_2d: torch.Tensor, wsc
 
 class _RMSNormAdaMod(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, c, w_scale, w_shift, weight, eps):
+    def forward(ctx, q, c, w_scale, w_shift, w_gate, weight, eps):
         shape = list(q.shape)
         n = shape[-1]
         q2 = q.reshape(-1, n)
@@ -663,42 +697,54 @@ class _RMSNormAdaMod(torch.autograd.Function):
             c2 = c2.contiguous()
         wsc, wsh = w_scale.contiguous(), w_shift.contiguous()
         has_w = weight is not None
+        has_gate = w_gate is not None
+        wg = w_gate.contiguous() if has_gate else None
         # d_cond is in the key, not just d_model. BLOCK_C tiles the conditioning width, so two
         # blocks with the same rows and d_model but different d_cond -- 128 on the atom side and
         # 384 on the token side, which is exactly the pair the model builds -- want different
         # configs and would otherwise have shared one cache entry.
         key = both_key(rows_of(q.shape), N=n, K=c2.shape[1])
-        y, rstd = _adamod_fwd(q2, c2, wsc, wsh, weight, eps, has_w, key)
+        y, rstd, gate = _adamod_fwd(q2, c2, wsc, wsh, wg, weight, eps, has_w, has_gate, key)
         # q and c, NOT scale/shift: saving the projection outputs is the [M, 2N] this exists to
         # not spend, so the backward recomputes `scale` from what the forward already needed.
-        ctx.save_for_backward(q2, c2, wsc, wsh, weight, rstd)
-        ctx.shape, ctx.cshape, ctx.key, ctx.has_w = shape, list(c.shape), key, has_w
-        return y.reshape(tuple(shape))
+        ctx.save_for_backward(q2, c2, wsc, wsh, wg, weight, rstd)
+        ctx.shape, ctx.cshape, ctx.key = shape, list(c.shape), key
+        ctx.has_w, ctx.has_gate = has_w, has_gate
+        # Always a pair, so the autograd graph has one arity; the public entry drops the empty
+        # second element when no gate weight was given.
+        return y.reshape(tuple(shape)), gate.reshape(tuple(shape)) if has_gate else gate
 
     @staticmethod
-    def backward(ctx, dy):
-        q2, c2, wsc, wsh, weight, rstd = ctx.saved_tensors
+    def backward(ctx, dy, dgate):
+        q2, c2, wsc, wsh, wg, weight, rstd = ctx.saved_tensors
         n = q2.shape[1]
         dy2 = dy.reshape(-1, n)
         if dy2.stride(1) != 1:
             dy2 = dy2.contiguous()
-        dq, dsd, dw = _adamod_bwd(dy2, q2, c2, wsc, weight, rstd, ctx.has_w, ctx.key)
-        # dshift IS dy, and the kernel has already put it beside dscale in one (M, 2N) buffer,
-        # so both chains below are ONE GEMM each rather than two. The weight pair is 98 KB a
-        # slice, so stacking it costs nothing measurable.
-        n = q2.shape[1]
-        w_pair = torch.cat((wsc, wsh), dim=0)                  # [2N, K]
-        dw_pair = dsd.mT @ c2                                   # [2N, K]
-        dwsc = dw_pair[:n].to(wsc.dtype)
-        dwsh = dw_pair[n:].to(wsh.dtype)
-        dc = (dsd @ w_pair).reshape(tuple(ctx.cshape))          # [M, K]
+        # dshift IS dy, and the kernel writes it beside dscale in ONE stacked buffer, so both
+        # chains below are a single GEMM each instead of one per chunk. The gate takes a third
+        # column block when it is present -- the kernel does not know about it, it just strides
+        # over a wider buffer, and the caller fills the slot.
+        chunks = 3 if ctx.has_gate else 2
+        dq, dsd, dw = _adamod_bwd(dy2, q2, c2, wsc, weight, rstd, ctx.has_w, chunks, ctx.key)
+        stack = [wsc, wsh]
+        if ctx.has_gate:
+            dg2 = dgate.reshape(-1, n)
+            dsd[:, 2 * n:].copy_(dg2 if dg2.stride(1) == 1 else dg2.contiguous())
+            stack.append(wg)
+        w_stack = torch.cat(stack, dim=0)                       # [chunks*N, K], 98 KB a slice
+        dw_stack = dsd.mT @ c2                                  # [chunks*N, K]  ONE GEMM
+        dc = (dsd @ w_stack).reshape(tuple(ctx.cshape))         # [M, K]         ONE GEMM
         dweight = dw.to(weight.dtype) if ctx.has_w else None
-        return dq.reshape(tuple(ctx.shape)), dc, dwsc, dwsh, dweight, None
+        dwg = dw_stack[2 * n:].to(wg.dtype) if ctx.has_gate else None
+        return (dq.reshape(tuple(ctx.shape)), dc, dw_stack[:n].to(wsc.dtype),
+                dw_stack[n:2 * n].to(wsh.dtype), dwg, dweight, None)
 
 
 def triton_rmsnorm_adamod(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Tensor,
-                          w_shift: torch.Tensor, weight: torch.Tensor | None = None,
-                          eps: float = 1e-5) -> torch.Tensor:
+                          w_shift: torch.Tensor, w_gate: torch.Tensor | None = None,
+                          weight: torch.Tensor | None = None,
+                          eps: float = 1e-5) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """``rmsnorm(q) * (1 + c @ w_scale^T) + c @ w_shift^T``, projection included, fwd and bwd.
 
     ``c`` IS THE ACTIVATED CONDITIONING -- the caller passes ``SiLU(c)``, not ``c``. adaLN is
@@ -711,20 +757,24 @@ def triton_rmsnorm_adamod(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Tenso
     gradients contract ``SiLU(c)``, so the kernel has to WRITE it back out, which tripled its
     stores and took the block's adaLN backward from 6.86 ms to 13.87.
 
-    ``w_scale``/``w_shift`` are the two ``(d_model, d_cond)`` slices of the block's adaLN
-    projection -- the slices, not the whole 6-chunk weight, so the total GEMM work is what it was.
+    ``w_gate`` is optional and is the block's THIRD chunk for this sub-layer. Given, it comes
+    back beside ``y`` as ``(y, gate)`` and costs no extra read of ``c``: the tile is already in
+    registers for the other two projections. It exists because the alternative -- a separate
+    ``Linear`` for the gates -- reads the whole conditioning again and adds two GEMMs to the
+    backward, where fused it only widens the stacked gradient buffer.
+
+    ``w_scale``/``w_shift``/``w_gate`` are ``(d_model, d_cond)`` slices of the block's adaLN
+    projection -- slices, not the whole 6-chunk weight, so the total GEMM work is what it was.
     No bias: the call site this is written for uses ``Linear(..., bias=False)``.
 
     Neither ``scale`` nor ``shift`` ever reaches HBM, in either direction: the forward keeps the
     projection in registers, and the backward recomputes ``scale`` from ``c`` rather than saving
-    it. THAT is what this buys. Measured at the atom-DiT shape (M = 48*8192, d_model 128, d_cond
-    384), against the same thing written as two `Linear`s and `triton_rmsnorm_modulate`:
+    it. Measured at the atom-DiT shape (M = 48*8192, d_model 128, d_cond 384) against the same
+    thing written with a shared 6-chunk projection, over one block's adaLN portion:
 
-        held 193.5 MB -> 97.5 MB, peak 3392 MB -> 2240 MB
-        forward 0.77 ms -> 0.61, backward 2.26 -> 2.40, full step 3.03 -> 3.01
-
-    So: a memory win, and a time WASH. The forward is genuinely faster -- it skips two [M, N]
-    writes -- and the backward gives that back recomputing `scale`, which is the trade the
-    recompute makes on purpose. Do not reach for this expecting a faster step.
+        eager                     fwd 3.55 ms  bwd 5.05  step 8.59  held 1443 MB
+        shared GEMM + modulate    fwd 2.84     bwd 3.94  step 6.79  held 1251 MB
+        this                      fwd 2.00     bwd 5.49  step 7.49  held  675 MB
     """
-    return _RMSNormAdaMod.apply(q, c, w_scale, w_shift, weight, eps)
+    y, gate = _RMSNormAdaMod.apply(q, c, w_scale, w_shift, w_gate, weight, eps)
+    return (y, gate) if w_gate is not None else y

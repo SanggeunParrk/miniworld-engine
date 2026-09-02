@@ -38,8 +38,9 @@ def rmsnorm_modulate_reference(x: torch.Tensor, scale: torch.Tensor, shift: torc
 
 
 def rmsnorm_adamod_reference(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Tensor,
-                             w_shift: torch.Tensor, weight: torch.Tensor | None = None,
-                             eps: float = 1e-5) -> torch.Tensor:
+                             w_shift: torch.Tensor, w_gate: torch.Tensor | None = None,
+                             weight: torch.Tensor | None = None,
+                             eps: float = 1e-5):
     """``rmsnorm(q) * (1 + c @ w_scale^T) + c @ w_shift^T``, the projection written out.
 
     Spelled as two `Linear`s and a modulate -- the arrangement the fused kernel replaces -- so a
@@ -55,4 +56,7 @@ def rmsnorm_adamod_reference(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Te
         normed = normed * weight.float()
     scale = torch.nn.functional.linear(c.float(), w_scale.float())
     shift = torch.nn.functional.linear(c.float(), w_shift.float())
-    return (normed * (1.0 + scale) + shift).to(q.dtype)
+    y = (normed * (1.0 + scale) + shift).to(q.dtype)
+    if w_gate is None:
+        return y
+    return y, torch.nn.functional.linear(c.float(), w_gate.float()).to(q.dtype)
