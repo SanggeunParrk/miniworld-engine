@@ -113,6 +113,9 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     "adaptive_layernorm": ModuleTarget(("adaptive_layernorm",)),
     "augmented_attention_token": ModuleTarget(("augmented_attention",)),
     "augmented_attention_atom": ModuleTarget(("augmented_attention",)),
+    # ESMFold2 SWA atom attention. The build case already exists (builder.py `swa_atom_attention`,
+    # driving SWA3DRoPEAttention); this exposes it to `bench_module` and the capture path.
+    "swa_atom_attention": ModuleTarget(("swa_atom_attention",)),
 }
 
 #: Named groups so `capture pairformer` means something. A group is just a set of targets.
@@ -123,7 +126,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "pairformer": ("transition", "triangle_attention", "attention_pair_bias",
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
-                  "augmented_attention_token", "augmented_attention_atom"),
+                  "augmented_attention_token", "augmented_attention_atom",
+                  "swa_atom_attention"),
     "attention": ("triangle_attention", "attention_pair_bias",
                   "augmented_attention_token", "augmented_attention_atom"),
 }

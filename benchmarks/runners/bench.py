@@ -40,6 +40,8 @@ from miniworld_engine.modules import (
     TriangleAttention,
     TriangleMultiplication,
 )
+from miniworld_engine.modules.swa_atom_attention import SWA3DRoPEAttention
+from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
 from miniworld_engine.modules.triangle_multiplication.baseline_dtv1 import (
     fused_triangle_multiplicative_update_dtv1,
 )
@@ -1553,6 +1555,72 @@ def bench_module_augmented_attention_token(
     )
 
 
+def bench_module_swa_atom_attention(
+    conf: BenchConfig,
+    seq_len: int,
+    implementation: str,
+    fabric: FabricLike,
+):
+    """ESMFold2 SWA atom attention core: Wqkv -> qk-RMSNorm -> 3D RoPE -> windowed attention
+    (FA4/FA2, SDPA fallback) -> sigmoid gate -> out_proj. The adaLN modulate and SwiGLU FFN that
+    wrap it into a full block live in the consumer's SWAAtomBlock, not here.
+
+    Runs at the atom length (``seq_len * 8``), the granularity the atom stack operates on. The
+    windowed attention needs a flash backend to run at that length -- SDPA's [N, S, S] band mask
+    is 24 GiB at S=8192 -- so on a card/install without one this reports NaN rather than OOM.
+    """
+    spec = triton_miniworld_spec(implementation)
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    n_head = 4
+    model = SWA3DRoPEAttention(
+        conf.d_single_atom, n_head, half_window=64,
+    ).to(device=DEVICE, dtype=dtype)
+    if conf.compile:
+        model.compile()
+    model = fabric.setup_module(model)
+
+    atom_len = seq_len * 8
+    n = conf.n_augment
+    half = conf.d_single_atom // n_head // 2
+    x = torch.randn(n, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype)
+    # cos/sin are per batch element (no augmentation axis) -- B=1 here -- and fp32 for angle
+    # precision; build_attention_params expands them over the num_aug=n axis. Values are random:
+    # the shapes drive the kernels, and the perf does not depend on the angles.
+    cos = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
+    sin = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
+    valid = torch.ones(n, atom_len, dtype=torch.bool, device=DEVICE)
+    ap = build_attention_params(cos, sin, valid, num_aug=n)
+    dy = torch.randn_like(x)
+    x.requires_grad = True
+
+    def inference_step() -> torch.Tensor:
+        return model(x, ap)
+
+    def training_step() -> None:
+        y = inference_step()
+        fabric.backward(y, dy)
+
+    func = inference_step if is_inference_mode(conf.mode) else training_step
+    from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
+
+    backend = _flash_backend(DEVICE)
+    execution_path = (
+        f"modules.swa_atom_attention.SWA3DRoPEAttention[{backend or 'sdpa_band'}]"
+        if spec.impl in {ImplementationType.TRITON, ImplementationType.MINIWORLD}
+        else "module.reference.torch")
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=[x, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(x.dtype).replace("torch.", ""),
+        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        execution_path=execution_path,
+        reference="module.reference.torch",
+    )
+
+
 def bench_module_augmented_attention_atom(
     conf: BenchConfig,
     seq_len: int,
@@ -2535,6 +2603,7 @@ KERNEL_TARGETS = {
 # by `level`, not by mangling one of the two names.
 MODULE_TARGETS = {
     "triangle_multiplication": bench_module_triangle_multiplication,
+    "swa_atom_attention": bench_module_swa_atom_attention,
     "triangle_multiplication_bidirectional": bench_module_triangle_multiplication_bidirectional,
     "attention_pair_bias": bench_module_attention_pair_bias,
     "triangle_attention": bench_module_triangle_attention,
