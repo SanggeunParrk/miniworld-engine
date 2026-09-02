@@ -178,6 +178,35 @@ def test_without_no_build_the_pre_bench_build_still_runs(monkeypatch):
     assert called, "build_all did not run without --no-build"
 
 
+def test_bench_module_never_runs_build_all(monkeypatch):
+    """`bench_module <t>` benches directly; it must not run a pre-bench build.
+
+    A module's warmup tunes any uncovered bucket over the grid before the timed region (measured:
+    transition with 24 uncovered buckets tuned them in warmup and produced a clean number), so a
+    ``build_all`` first is redundant -- and its 1,738-unit case decomposition once deadlocked the
+    GPU pool with the bench never reached. Pre-tuning the cache is what `build` is for. So the fix
+    for "bench_module hangs" is that bench_module simply does not build: this asserts that.
+    """
+    import argparse
+
+    from miniworld_engine.autotune import builder
+
+    def explode(*a, **k):
+        raise AssertionError("build_all ran from bench_module -- it must bench, not build")
+
+    ran = []
+    monkeypatch.setattr(builder, "build_all", explode)
+    monkeypatch.setattr(cli, "apply_config_dir", lambda d: 0)
+    monkeypatch.setattr(cli, "_run_bench",
+                        lambda *a, **k: ran.append(1) or 0)
+    args = argparse.Namespace(target="transition", mode="inference", impl="all", gpus="1",
+                              no_build=False, shards="/tmp/x", compile_jobs=1, resume=False,
+                              sweep_axis="seq_len", cudagraph="manual", compile="true",
+                              compile_wrap="")
+    assert cli.cmd_bench_module(args) == 0
+    assert ran, "bench_module did not reach the bench"
+
+
 def test_the_sweep_axis_reaches_bench_py():
     """Without this the CLI could only ever sweep seq_len.
 

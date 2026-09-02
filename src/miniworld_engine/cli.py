@@ -1155,8 +1155,18 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     """Module-level bench: takes NO config_type.
 
     A module bench is the production-shaped measurement -- whole module, its own dispatch decisions
-    -- so the config space is not the caller's to pick: it is whatever the cache holds. That is
-    ``default``, passed here as a constant rather than an argument so the two cannot disagree.
+    -- so the config space is not the caller's to pick: it is whatever the cache holds. That is the
+    ``grid`` set, passed here as a constant rather than an argument so the two cannot disagree.
+
+    Unlike ``bench_kernel``, this does NOT run a pre-bench build. A module's warmup tunes any bucket
+    the cache is missing over the grid BEFORE the timed region -- measured: transition with 24
+    uncovered buckets tuned them in warmup and produced a clean number -- so the tuning never lands
+    in a measured rep the way it would for a single-kernel bench. A ``build_all`` first is therefore
+    redundant here, and its CASE decomposition (1,738 module units for the shipped ops, more than
+    half of them re-tuning a bucket another unit already covered) is minutes-to-hours of work that
+    also once deadlocked its GPU pool with the bench never reached. Pre-tuning the cache into
+    ``data/`` is what ``miniworld-engine build`` is for; benching is what this is for. ``--no-build``
+    is accepted for symmetry with ``bench_kernel`` and is now the only behaviour.
     """
     repo = Path(__file__).resolve().parents[2]
     targets = GROUPS.get(args.target, (args.target,))
@@ -1166,17 +1176,14 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
               f"{', '.join(sorted(MODULE_TARGETS))}; groups: {', '.join(GROUPS)}",
               file=sys.stderr)
         return 2
-    # A module bench takes no config set, so the build uses the default one -- see the docstring.
-    cases = {name: MODULE_TARGETS[name].cases for name in MODULE_TARGETS}
-    rc = _bench_build_first(args, targets, repo, cases, "MODULE_TARGETS")
-    if rc:
-        return rc
     directory = resolve_config_dir(DEFAULT_CONFIG_SET, repo)
     if isinstance(directory, int):
         return directory
     rc = apply_config_dir(directory)
     if rc:
         return rc
+    print(f"=== bench against the cache in data/ (grid config set); warmup tunes any uncovered "
+          f"bucket over the grid before the timed region", flush=True)
     return _run_bench(args, targets, repo, directory, level="module")
 
 
