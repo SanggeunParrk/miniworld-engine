@@ -549,15 +549,29 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         L = int(length) if length is not None else length_of(x.shape)
         ctx.length = L
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
-        if x.dtype == torch.bfloat16 and mode == "fused":
-            # The reroute stands on ONE of its two original reasons now. It read "broken
-            # (dtype/spill)": the dtype half was `tl.dot` being handed an fp32 accumulator beside
-            # a bf16 weight, so the kernel did not COMPILE at bf16 -- fixed above by casting `h`,
-            # and the checker now measures 3.13e-03 there, the same as the inference twin the
-            # model already runs at bf16. The SPILL half is untested: nothing has benchmarked this
-            # kernel at bf16, where the register pressure differs from the fp32 shape it was tuned
-            # at. So bf16 still takes the cuBLAS split, and lifting this needs a measurement, not
-            # an argument. registry.csv declares this kernel fp32 to match.
+        if x.dtype == torch.bfloat16 and mode == "fused" and x.shape[1] > _ATOM_D_MAX:
+            # The reroute used to cover ALL of bf16 on the strength of an untested spill
+            # concern: "nothing has benchmarked this kernel at bf16 ... lifting this needs a
+            # measurement, not an argument". Benchmarked now, on an A5000 at M=36864, the fused
+            # forward against the cuBLAS split it would otherwise take:
+            #
+            #                    token d=768        atom d=128
+            #     bf16      4296 -> 4408 us 0.97x   305 -> 247 us 1.24x
+            #     fp32/TF32 8686 -> 9349 us 0.93x   625 -> 581 us 1.08x
+            #
+            # So the concern was real at the token width and wrong at the atom width, where the
+            # blanket rule was costing 1.24x. Narrowed to the half the measurement supports;
+            # fp32 needs no clause because `_pick_fwd` already sends token M > 512 to cuBLAS.
+            #
+            # The fp32 row is the one to read twice. A first pass had it at 2.43x for the fused
+            # form -- because the script never set `allow_tf32`, so cuBLAS ran full fp32 while
+            # `tl.dot` used TF32 by default. Matched, the same comparison is 0.93x. A dtype whose
+            # TF32 setting is not recorded is not measured.
+            #
+            # Two things this still does NOT say. The fused kernel is Triton and ran from a
+            # heuristic config subset while cuBLAS needs no tuning, so the token 0.97x is a floor
+            # for it, not a verdict -- a built cache could move it. And only M=36864 was measured;
+            # `_pick_fwd` also routes token M <= 512 to fused, which nothing here covers.
             mode = "cublas"
         if mode == "fused":
             y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
