@@ -181,20 +181,18 @@ def rmsnorm_adamod_fwd_kernel(
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
-    """``rmsnorm(q) * (1 + c@Wsc^T) + c@Wsh^T`` -- the modulation projection folded in.
+    """``(rmsnorm(q) * (1 + c@Wsc^T) + c@Wsh^T,  c@Wg^T)`` -- adaLN modulate + gate, one kernel.
 
-    The projection output never reaches HBM. That is the whole point: at the atom-DiT shape
-    (M = 48*8192, d_model 128, d_cond 384) the `[M, 2*d]` scale/shift pair is 96 MB held between
-    forward and backward, and dropping it halves what the step holds, 193.5 MB to 97.5 MB. The
-    forward also comes out ahead -- 0.61 ms against 0.77 for two cuBLAS GEMMs and a fused
-    modulate -- because the two projection writes it skips cost more than a hand-tiled `tl.dot`
-    gives up. Over a full training step that lead is spent again (see the backward); the memory
-    is what survives.
+    The projection outputs (scale, shift, gate) never reach HBM; the kernel keeps them in
+    registers and writes only ``y`` and ``gate``. That held-activation saving, and the measured
+    ladder against the shared-projection alternative, are in docs/kernels/rmsnorm-adamod.md --
+    kept there rather than here so the numbers do not drift out of a docstring.
 
-    Two tile axes and two passes. Pass one reduces q over the normalized axis for rstd; pass two
-    walks the same axis again and, per tile, contracts c against the two weight slices with
-    `tl.dot`. c is re-read once per N tile -- one tile at d_model 128, six at 768 -- which is the
-    price of not materialising the projection.
+    Grid is 1-D over rows (each program owns BLOCK_M1 rows and all of N/K); the rstd reduction
+    couples the row, so N cannot be split across programs the way a plain GEMM would. Two passes:
+    pass one reduces q over the normalized axis N for rstd; pass two walks N again and, per N
+    tile, contracts c (BLOCK_K over d_cond) against the three weight slices with `tl.dot`. c is
+    re-read once per N tile, which is an L1/L2 hit (the same rows), not HBM traffic.
     """
     row = tl.program_id(0).to(tl.int64)
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
@@ -671,11 +669,11 @@ def triton_rmsnorm_adamod(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Tenso
     ``Sequential(nn.SiLU(), Linear(d_cond, 6 * d_atom, bias=False))``, and the activation is one
     elementwise pass that ALL SIX chunks share, so it belongs where it is computed once. Folding
     it in here was tried and measured, and it loses twice over: this kernel is reached twice per
-    block and re-reads ``c`` once per N tile, so the activation is recomputed four times where
-    the caller did it once; and the gate chunks keep an ordinary ``Linear`` on it, so the tensor
-    gets built anyway and the forward saves nothing. The backward is worse still -- the weight
-    gradients contract ``SiLU(c)``, so the kernel has to WRITE it back out, which tripled its
-    stores and took the block's adaLN backward from 6.86 ms to 13.87.
+    block and re-reads ``c`` once per N tile, so the activation would be recomputed several times
+    where the caller does it once; and the gate chunks keep an ordinary ``Linear`` on ``SiLU(c)``,
+    so the tensor is built anyway and the forward saves nothing. The backward is worse -- the
+    weight gradients contract ``SiLU(c)``, so folding it in makes the kernel WRITE it back out.
+    The measured cost of that attempt is in docs/kernels/rmsnorm-adamod.md.
 
     ``w_gate`` is the block's THIRD chunk for this sub-layer and is REQUIRED: ``(y, gate)`` is
     always the return. It costs no extra read of ``c`` -- the tile is in registers for the other

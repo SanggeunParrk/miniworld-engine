@@ -90,3 +90,16 @@ slower — the autotuner still chose BLOCK_M1=64. Closing the gap to cuBLAS is a
 pipeline rewrite (the shape of work the transition family's hand-CUDA b2b kernel is on sm90), not
 a tiling change, and is not done here. The backward kernel is already at ~78% of bandwidth, and
 the cuBLAS GEMMs it feeds at 66–79% of tensor-core peak.
+
+## Precision and tile naming
+
+The family runs bf16 and fp32, like layernorm (`dtypes=bf16|fp32`). The pure-reduction kernels
+(rmsnorm fwd/bwd) and rope land at ~2e-7 in fp32 -- true fp32 -- while `rmsnorm_adamod`'s `tl.dot`
+uses TF32 tensor cores in fp32 io (~9e-4), the same "fp32 io with TF32" the layernorm_linear
+family documents. Per-precision bands are in registry.csv.
+
+Tile axes follow docs/kernels/grid-sweep.md's prefix rule (`BLOCK_M*`->M, `BLOCK_N*`->N,
+`BLOCK_K*`->K). adamod is the GEMM `c[M,d_cond] @ W[d_cond,d_model]`, so `BLOCK_N` tiles d_model,
+`BLOCK_K` tiles the d_cond contraction, `BLOCK_M1` the rows. Its three `tl.dot` axes floor at 16
+(Triton's minimum); the reduce/elem kernels floor their rows at 1. Plain rmsnorm keeps `BLOCK_K`
+for its normalized width, which is its reduction axis, exactly as layernorm does.
