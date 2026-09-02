@@ -31,11 +31,8 @@ def rmsnorm_adamod_fwd_triton() -> None:
     """
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_adamod
 
-    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), None, None, _EPS)
-    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), None, vec(_DM), _EPS)
-    # HAS_GATE too: it is in the autotune key, so the gated form is a separate compiled kernel
-    # and a separate cache bucket.
     triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), _proj(), None, _EPS)
+    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), _proj(), vec(_DM), _EPS)
 
 
 def rmsnorm_adamod_bwd_triton() -> None:
@@ -46,8 +43,6 @@ def rmsnorm_adamod_bwd_triton() -> None:
     """
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm_adamod
 
-    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), None, None, _EPS).sum().backward()
-    triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), None,
-                          vec(_DM), _EPS).sum().backward()
-    y, g = triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), _proj(), None, _EPS)
-    (y.sum() + g.sum()).backward()
+    for w in (None, vec(_DM)):
+        y, g = triton_rmsnorm_adamod(_rows(_DM), _cond(), _proj(), _proj(), _proj(), w, _EPS)
+        (y.sum() + g.sum()).backward()

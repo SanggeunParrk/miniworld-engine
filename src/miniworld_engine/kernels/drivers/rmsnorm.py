@@ -38,9 +38,13 @@ _M = ragged(_L) ** 2 if both_level_is_pair(_L) else ragged(_L)
 #: d_model. The base every other width here derives from, per :func:`driver_width` -- overriding
 #: it moves the whole family the way changing the model's width would.
 _D_BASE = driver_width(128)
-#: head_dim, the axis ``triton_rmsnorm`` reduces. The SWA atom block runs d_model 128 over 4
-#: heads; the ratio, not the 32, is what follows the base.
-_D = ragged(_D_BASE // 4)
+#: Heads the SWA atom block runs (`modules/swa_atom_attention/module.py:457`,
+#: ``head_dim = d_model // n_heads``); d_model 128 over 4 of them is head_dim 32. The RATIO is
+#: what follows the swept base, which is why it is here and not a width of its own.
+_N_HEADS = 4
+#: head_dim, the axis ``triton_rmsnorm`` reduces -- not d_model, which is what the DiT-block
+#: entry points normalize over.
+_D = ragged(_D_BASE // _N_HEADS)
 #: d_model itself, for the two DiT-block entry points.
 _DM = ragged(_D_BASE)
 #: d_cond FOLLOWS d_model the way the model pairs them -- 384 conditioning a token width, 128 on
