@@ -510,7 +510,7 @@ _FWD_MODE = "auto"  # {"auto", "cublas", "fused"}
 
 def set_forward_mode(name: str):
     global _FWD_MODE
-    assert name in ("auto", "cublas", "fused")
+    assert name in ("auto", "cublas", "fused", "mixed")
     _FWD_MODE = name
 
 
@@ -572,14 +572,34 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             # heuristic config subset while cuBLAS needs no tuning, so the token 0.97x is a floor
             # for it, not a verdict -- a built cache could move it. And only M=36864 was measured;
             # `_pick_fwd` also routes token M <= 512 to fused, which nothing here covers.
-            mode = "cublas"
+            #
+            # ...and "cublas" here does not mean the all-cuBLAS split, because the fused forward
+            # is TWO kernels and only one of them was losing. Measured separately at the token
+            # width (bf16, M=36864), each half against its cuBLAS counterpart:
+            #
+            #     A  expand+swiglu   2738 -> 2633 us   1.04x   fused wins
+            #     B  squeeze+gate    1562 -> 1677 us   0.93x   fused loses
+            #
+            #     all-cuBLAS 4300 | all-fused 4310 | A fused + B cuBLAS 4195   1.03x
+            #
+            # That is why the whole path measured 0.97x: B was dragging a winner down, and the
+            # mix nobody had tried is the one that wins. At the atom width both halves win
+            # (1.61x and 1.53x, 1.58x together), which is what lifting the reroute above buys.
+            mode = "mixed"
         if mode == "fused":
             y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
                                                     shape_key=atom_key(L))
-        else:  # "cublas": cat-merged expand (one GEMM) + cuBLAS GEMMs + triton elementwise
-            ab = x @ wcat.t()                     # (M, 2*ND)
-            a, b = ab[:, :ND], ab[:, ND:]
-            h = _swiglu(a, b, shape_key=atom_key(L))
+        else:  # "cublas" / "mixed": cuBLAS GEMMs + triton elementwise
+            if mode == "mixed":
+                # Kernel A only. It writes ab AND h in one pass, so ab is not read back between
+                # them -- the 226 MB round trip that is most of this forward's gap over its GEMM
+                # floor (3705 us of cuBLAS against a 4142 us forward).
+                from .fwd_saveact import _fwd_expand_swiglu
+
+                h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=atom_key(L))
+            else:  # cat-merged expand (one GEMM) + the flat swiglu pass
+                ab = x @ wcat.t()                 # (M, 2*ND)
+                h = _swiglu(ab[:, :ND], ab[:, ND:], shape_key=atom_key(L))
             out = h @ ws.t()
             scale = torch.addmm(bsc, cond, wsc.t())
             # `_gate` launches gated_projection's `_sigmul_fwd`, which is level=BOTH in
