@@ -13,7 +13,6 @@ from __future__ import annotations
 from miniworld_engine.kernels.rmsnorm.triton.main import (
     triton_rmsnorm,
     triton_rmsnorm_adamod,
-    triton_rmsnorm_modulate,
 )
 
-__all__ = ["triton_rmsnorm", "triton_rmsnorm_adamod", "triton_rmsnorm_modulate"]
+__all__ = ["triton_rmsnorm", "triton_rmsnorm_adamod"]

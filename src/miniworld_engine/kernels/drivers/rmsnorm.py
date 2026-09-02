@@ -1,19 +1,15 @@
-"""Drivers for the ``rmsnorm`` family.
+"""Drivers for the ``rmsnorm`` family -- and the shape block ``drivers/rmsnorm_adamod.py`` shares.
 
-THREE entry points, and they do not share a width. ``triton_rmsnorm`` normalizes per attention
-HEAD -- ``modules/swa_atom_attention`` over ``head_dim = d_model // n_heads`` (module.py:457) and
-``kernels/triangle_attention/whole_op.py`` over its own ``d_head`` -- so its normalized axis is
-small and the ladders in ``configs/grid/rmsnorm_*.csv`` start their BLOCK_K at 32 rather than at
-layernorm's 64. ``triton_rmsnorm_modulate`` and ``triton_rmsnorm_adamod`` are DiT-block ops and
-act on the whole ``d_model`` vector. A driver that used one width for all three would tune a
-shape two of them never present.
+``triton_rmsnorm`` normalizes per attention HEAD: ``modules/swa_atom_attention`` over
+``head_dim = d_model // n_heads`` (module.py:457) and ``kernels/triangle_attention/whole_op.py``
+over its own ``d_head``. Its normalized axis is small, which is why the ladders in
+``configs/grid/rmsnorm_*.csv`` start BLOCK_K at 32 rather than layernorm's 64. The adaLN modulate
+that acts on the whole ``d_model`` vector is the separate ``rmsnorm_adamod`` family, which reuses
+``_DM``/``_DC`` from here (see docs/kernels/rmsnorm-adamod.md).
 
-Every constexpr combination production actually reaches is driven here, because ``HAS_WEIGHT``
-and ``HAS_MODULATION`` are in the kernels' autotune ``key``: each combination is a separate
-compiled kernel AND a separate cache bucket, so one driven combination says nothing about the
-others. Both values of ``HAS_WEIGHT`` are real -- SWA's q/k normalization is non-affine
-(module.py:433) and triangle_attention passes a weight -- and so the weighted and unweighted
-forms are both launched below rather than one standing in for the other.
+Both values of ``HAS_WEIGHT`` are driven: it is in the autotune key, so each is a separate
+compiled kernel and cache bucket, and both are real -- SWA's q/k normalization is non-affine
+(module.py:433) and triangle_attention passes a weight.
 """
 from __future__ import annotations
 
@@ -70,47 +66,25 @@ def _rows(d: int) -> torch.Tensor:
 # ── rmsnorm ──────────────────────────────────────────────────────────────────────────────────
 
 
-def _mod_args() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(x, scale, shift)`` at d_model. scale/shift are per-ELEMENT -- chunks of a projection of
-    the conditioning vector -- so they carry x's shape, not a per-channel one."""
-    return _rows(_DM), _rows(_DM), _rows(_DM)
+# ── rmsnorm ──────────────────────────────────────────────────────────────────────────────────
 
 
 def rmsnorm_fwd_triton() -> None:
-    """rmsnorm_fwd_kernel, at all FOUR (HAS_WEIGHT, HAS_MODULATION) combinations.
+    """rmsnorm_fwd_kernel, at both values of HAS_WEIGHT.
 
-    One driver and not four rows, because a config ladder belongs to a KERNEL: the modulate form
-    is `rmsnorm_fwd_kernel` with a constexpr flipped, and it reads `configs_for(
-    "rmsnorm_fwd_triton")` like the plain form does. A second registry row would have to name a
-    ladder nothing reads. The four DO get four cache buckets -- both flags are in the autotune
-    key -- which is why all four are launched here.
-
-    Two widths for the same reason: the q/k normalization reduces over head_dim and the DiT
-    modulate over d_model, and the shape key separates them.
+    Two cache buckets -- the flag is in the autotune key -- so both are launched. The modulate
+    form (adaLN's `rmsnorm(x)*(1+scale)+shift`) is NOT here: it lives in the `rmsnorm_adamod`
+    family, which folds the conditioning projection in too. See docs/kernels/rmsnorm-adamod.md.
     """
-    from miniworld_engine.kernels.rmsnorm.interface import (
-        triton_rmsnorm,
-        triton_rmsnorm_modulate,
-    )
+    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
 
     triton_rmsnorm(_rows(_D), vec(_D), _EPS)   # triangle_attention: affine
     triton_rmsnorm(_rows(_D), None, _EPS)      # SWA q/k: non-affine
-    x, sc, sh = _mod_args()
-    triton_rmsnorm_modulate(x, sc, sh, vec(_DM), _EPS)
-    x, sc, sh = _mod_args()
-    triton_rmsnorm_modulate(x, sc, sh, None, _EPS)
 
 
 def rmsnorm_bwd_triton() -> None:
-    """rmsnorm_bwd_kernel, via the autograd entry points, at all four combinations."""
-    from miniworld_engine.kernels.rmsnorm.interface import (
-        triton_rmsnorm,
-        triton_rmsnorm_modulate,
-    )
+    """rmsnorm_bwd_kernel, via the autograd entry point, at both values of HAS_WEIGHT."""
+    from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
 
     triton_rmsnorm(_rows(_D), vec(_D), _EPS).sum().backward()
     triton_rmsnorm(_rows(_D), None, _EPS).sum().backward()
-    x, sc, sh = _mod_args()
-    triton_rmsnorm_modulate(x, sc, sh, vec(_DM), _EPS).sum().backward()
-    x, sc, sh = _mod_args()
-    triton_rmsnorm_modulate(x, sc, sh, None, _EPS).sum().backward()

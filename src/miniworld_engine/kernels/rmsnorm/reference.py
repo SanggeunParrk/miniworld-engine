@@ -20,23 +20,6 @@ def rmsnorm_reference(x: torch.Tensor, weight: torch.Tensor | None = None,
     return y.to(x.dtype)
 
 
-def rmsnorm_modulate_reference(x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor,
-                               weight: torch.Tensor | None = None,
-                               eps: float = 1e-5) -> torch.Tensor:
-    """``rmsnorm(x) * (1 + scale) + shift``, the adaLN-Zero modulate, in fp32 throughout.
-
-    The normalization is inlined rather than delegated to `rmsnorm_reference` for the reason that
-    function's caller in `rmsnorm_adamod_reference` gives: it rounds its result to the input
-    dtype, which is correct when the normalization IS the op and wrong for an intermediate the
-    fused kernel keeps in fp32.
-    """
-    xf = x.float()
-    normed = xf * torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
-    if weight is not None:
-        normed = normed * weight.float()
-    return (normed * (1.0 + scale.float()) + shift.float()).to(x.dtype)
-
-
 def rmsnorm_adamod_reference(q: torch.Tensor, c: torch.Tensor, w_scale: torch.Tensor,
                              w_shift: torch.Tensor, w_gate: torch.Tensor,
                              weight: torch.Tensor | None = None,

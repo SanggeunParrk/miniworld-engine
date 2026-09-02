@@ -36,15 +36,18 @@ from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 
 
-@triton.autotune(configs=configs_for("rmsnorm_fwd_triton"), key=["shape_key", "HAS_WEIGHT", "HAS_MODULATION"])
+@triton.autotune(configs=configs_for("rmsnorm_fwd_triton"), key=["shape_key", "HAS_WEIGHT"])
 @triton.jit
 def rmsnorm_fwd_kernel(
-    X, Y, W, Rstd, Scale, Shift,
+    X, Y, W, Rstd,
     stride_r, stride_c,
     M, N: tl.constexpr, eps: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    shape_key, HAS_WEIGHT: tl.constexpr, HAS_MODULATION: tl.constexpr,
+    shape_key, HAS_WEIGHT: tl.constexpr,
 ):
+    """``x / sqrt(mean(x^2) + eps) (* w)`` over the last axis. No modulation: the adaLN modulate
+    that folds a projection into this step is `rmsnorm_adamod`, its own family; this one is the
+    bare normalization the SWA q/k and triangle-attention call sites want."""
     row = tl.program_id(0).to(tl.int64)
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
     row_mask = rows < M
@@ -65,12 +68,6 @@ def rmsnorm_fwd_kernel(
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
             y = y * w[None, :]
-        if HAS_MODULATION:
-            sc = tl.load(Scale + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                     mask=mask, other=0.0).to(tl.float32)
-            sh = tl.load(Shift + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                     mask=mask, other=0.0).to(tl.float32)
-            y = y * (1.0 + sc) + sh
         tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
     else:
         ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
@@ -93,30 +90,24 @@ def rmsnorm_fwd_kernel(
             if HAS_WEIGHT:
                 w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
                 y = y * w[None, :]
-            if HAS_MODULATION:
-                sc = tl.load(Scale + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                             mask=mask, other=0.0).to(tl.float32)
-                sh = tl.load(Shift + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                             mask=mask, other=0.0).to(tl.float32)
-                y = y * (1.0 + sc) + sh
             tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
 
 
-@triton.autotune(configs=configs_for("rmsnorm_bwd_triton"), key=["shape_key", "HAS_WEIGHT", "HAS_MODULATION"],
+@triton.autotune(configs=configs_for("rmsnorm_bwd_triton"), key=["shape_key", "HAS_WEIGHT"],
                  reset_to_zero=["DW"])
 @triton.jit
 def rmsnorm_bwd_kernel(
-    DX, DY, DW, DSCALE, X, W, Rstd, Scale,
+    DX, DY, DW, X, W, Rstd,
     stride_r, stride_c,
     M, N: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    shape_key, HAS_WEIGHT: tl.constexpr, HAS_MODULATION: tl.constexpr,
+    shape_key, HAS_WEIGHT: tl.constexpr,
 ):
-    """``dx`` and, under HAS_MODULATION, ``dscale``.
+    """``dx`` and, with a weight, ``dweight``.
 
-    ``dshift`` is not written: ``y = normed*(1+scale) + shift`` makes it exactly ``dy``, so the
-    autograd Function hands ``dy`` back for it. Writing it would cost a second [M, N] store of a
-    tensor the caller already holds.
+    ``dweight`` is fp32 and accumulated across row tiles with ``atomic_add``, so its buffer is
+    zeroed by the caller (not merely by the autotuner's ``reset_to_zero``, which fires only while
+    a config is being benchmarked).
     """
     row = tl.program_id(0).to(tl.int64)
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
@@ -132,24 +123,12 @@ def rmsnorm_bwd_kernel(
         dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
                      mask=mask, other=0.0).to(tl.float32)
         xhat = tl.where(mask, x * rstd[:, None], 0.0)
-        # `normed` is what the modulation multiplies: xhat, weighted if there is a weight.
-        normed = xhat
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-            normed = xhat * w[None, :]
-        gain = tl.full([BLOCK_M1, BLOCK_K], 1.0, tl.float32)
-        if HAS_MODULATION:
-            sc = tl.load(Scale + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                         mask=mask, other=0.0).to(tl.float32)
-            gain = 1.0 + sc
-            tl.store(DSCALE + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                     dy * normed, mask=mask)
-        dnormed = tl.where(mask, dy * gain, 0.0)
-        if HAS_WEIGHT:
-            tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask)
-            wdy = tl.where(mask, dnormed * w[None, :], 0.0)
+            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
+            wdy = tl.where(mask, dy * w[None, :], 0.0)
         else:
-            wdy = dnormed
+            wdy = tl.where(mask, dy, 0.0)
         # No c2: without the mean there is only the rstd term in the derivative.
         c1 = tl.sum(xhat * wdy, axis=1) / N
         dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
@@ -165,23 +144,12 @@ def rmsnorm_bwd_kernel(
             dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
                          mask=mask, other=0.0).to(tl.float32)
             xhat = tl.where(mask, x * rstd[:, None], 0.0)
-            normed = xhat
             if HAS_WEIGHT:
                 w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-                normed = xhat * w[None, :]
-            gain = tl.full([BLOCK_M1, BLOCK_K], 1.0, tl.float32)
-            if HAS_MODULATION:
-                sc = tl.load(Scale + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                             mask=mask, other=0.0).to(tl.float32)
-                gain = 1.0 + sc
-                tl.store(DSCALE + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                         dy * normed, mask=mask)
-            dnormed = tl.where(mask, dy * gain, 0.0)
-            if HAS_WEIGHT:
-                tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask)
-                wdy = tl.where(mask, dnormed * w[None, :], 0.0)
+                tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
+                wdy = tl.where(mask, dy * w[None, :], 0.0)
             else:
-                wdy = dnormed
+                wdy = tl.where(mask, dy, 0.0)
             c1 += tl.sum(xhat * wdy, axis=1)
         c1 = c1 / N
 
@@ -194,17 +162,11 @@ def rmsnorm_bwd_kernel(
             dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
                          mask=mask, other=0.0).to(tl.float32)
             xhat = tl.where(mask, x * rstd[:, None], 0.0)
-            gain = tl.full([BLOCK_M1, BLOCK_K], 1.0, tl.float32)
-            if HAS_MODULATION:
-                sc = tl.load(Scale + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                             mask=mask, other=0.0).to(tl.float32)
-                gain = 1.0 + sc
-            dnormed = tl.where(mask, dy * gain, 0.0)
             if HAS_WEIGHT:
                 w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-                wdy = tl.where(mask, dnormed * w[None, :], 0.0)
+                wdy = tl.where(mask, dy * w[None, :], 0.0)
             else:
-                wdy = dnormed
+                wdy = tl.where(mask, dy, 0.0)
             dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
             tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
 
@@ -348,17 +310,16 @@ def rmsnorm_adamod_fwd_kernel(
                  acc_g, mask=mask)
 
 
-def _rms_fwd_fake(x_2d, weight, scale, shift, eps, has_w, has_mod, shape_key):
+def _rms_fwd_fake(x_2d, weight, eps, has_w, shape_key):
     """``y`` like ``x_2d``, plus ``rstd`` as (M,) fp32 -- the kernel reduces and stores the row
     statistic in fp32 whatever the activation dtype is, and the backward reloads it as such."""
     return torch.empty_like(x_2d), x_2d.new_empty((x_2d.shape[0],), dtype=torch.float32)
 
 
 @opaque(fake=_rms_fwd_fake, name="rmsnorm_fwd")
-def _rms_fwd(x_2d: torch.Tensor, weight: torch.Tensor | None, scale: torch.Tensor | None,
-             shift: torch.Tensor | None, eps: float, has_w: bool, has_mod: bool,
+def _rms_fwd(x_2d: torch.Tensor, weight: torch.Tensor | None, eps: float, has_w: bool,
              shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(x * rstd (* w)) (* (1+scale) + shift)`` over the last axis of a flattened (M, N)."""
+    """``x * rstd (* w)`` over the last axis of a flattened (M, N)."""
     m, n = x_2d.shape
     y = torch.empty_like(x_2d)
     rstd = x_2d.new_empty((m,), dtype=torch.float32)
@@ -366,81 +327,67 @@ def _rms_fwd(x_2d: torch.Tensor, weight: torch.Tensor | None, scale: torch.Tenso
     grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
     rmsnorm_fwd_kernel[grid](
         x_2d, y, weight if has_w else empty, rstd,
-        scale if has_mod else empty, shift if has_mod else empty,
         x_2d.stride(0), x_2d.stride(1), m, n, eps,
-        shape_key=shape_key, HAS_WEIGHT=has_w, HAS_MODULATION=has_mod,
+        shape_key=shape_key, HAS_WEIGHT=has_w,
     )
     return y, rstd
 
 
-def _rms_bwd_fake(dy_2d, x_2d, weight, scale, rstd, has_w, has_mod, input_shape, shape_key):
-    """``(dx at the pre-flatten shape, dweight (N,) fp32, dscale like x_2d)``."""
+def _rms_bwd_fake(dy_2d, x_2d, weight, rstd, has_w, input_shape, shape_key):
+    """``(dx at the pre-flatten shape, dweight (N,) fp32)``."""
     return (dy_2d.new_empty(tuple(input_shape)),
-            x_2d.new_empty((x_2d.shape[1],), dtype=torch.float32),
-            torch.empty_like(x_2d))
+            x_2d.new_empty((x_2d.shape[1],), dtype=torch.float32))
 
 
 @opaque(fake=_rms_bwd_fake, name="rmsnorm_bwd")
 def _rms_bwd(dy_2d: torch.Tensor, x_2d: torch.Tensor, weight: torch.Tensor | None,
-             scale: torch.Tensor | None, rstd: torch.Tensor, has_w: bool, has_mod: bool,
-             input_shape: list[int], shape_key: int
-             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(dx, dweight, dscale)``. ``dshift`` is not here: it is exactly ``dy``.
+             rstd: torch.Tensor, has_w: bool, input_shape: list[int], shape_key: int
+             ) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(dx, dweight)``.
 
-    ``dweight`` is fp32 and zeroed by the autotuner's ``reset_to_zero``, because the kernel
-    accumulates it across row tiles with ``atomic_add``.
+    ``dweight`` is fp32 and zeroed here, not merely by the autotuner's ``reset_to_zero``: the
+    kernel accumulates it across row tiles with ``atomic_add``, and reset_to_zero fires only
+    while a config is being benchmarked -- a cache-served shape would start from allocator junk.
     """
     m, n = x_2d.shape
     dx = torch.empty_like(x_2d)
-    # ZEROED, not `new_empty`: the kernel accumulates dweight across row tiles with
-    # `atomic_add`, and the autotuner's `reset_to_zero` only fires on the paths that
-    # benchmark a config -- once a shape is tuned and served from cache, nothing clears
-    # the buffer and the accumulation starts from whatever the allocator handed back.
     dw = x_2d.new_zeros((n,), dtype=torch.float32)
-    dscale = torch.empty_like(x_2d) if has_mod else x_2d.new_empty((0,))
     empty = x_2d.new_empty((0,))
     grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
     rmsnorm_bwd_kernel[grid](
-        dx, dy_2d, dw, dscale, x_2d, weight if has_w else empty, rstd,
-        scale if has_mod else empty,
+        dx, dy_2d, dw, x_2d, weight if has_w else empty, rstd,
         x_2d.stride(0), x_2d.stride(1), m, n,
-        shape_key=shape_key, HAS_WEIGHT=has_w, HAS_MODULATION=has_mod,
+        shape_key=shape_key, HAS_WEIGHT=has_w,
     )
-    return dx.reshape(tuple(input_shape)), dw, dscale
+    return dx.reshape(tuple(input_shape)), dw
 
 
 class _RMSNorm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, weight, scale, shift, eps):
+    def forward(ctx, x, weight, eps):
         shape = list(x.shape)
         n = shape[-1]
         x_2d = x.reshape(-1, n)
         if x_2d.stride(1) != 1:
             x_2d = x_2d.contiguous()
-        has_w, has_mod = weight is not None, scale is not None
-        s2d = scale.reshape(-1, n).contiguous() if has_mod else None
-        h2d = shift.reshape(-1, n).contiguous() if has_mod else None
+        has_w = weight is not None
         # both_key(rows) + the normalized width, as layernorm's launchers key it: these kernels
         # run on both streams, and one length means two different launches for them.
         key = both_key(rows_of(x.shape), N=n)
-        y, rstd = _rms_fwd(x_2d, weight, s2d, h2d, eps, has_w, has_mod, key)
-        ctx.save_for_backward(x_2d, weight, s2d, rstd)
-        ctx.shape, ctx.key, ctx.has_w, ctx.has_mod = shape, key, has_w, has_mod
+        y, rstd = _rms_fwd(x_2d, weight, eps, has_w, key)
+        ctx.save_for_backward(x_2d, weight, rstd)
+        ctx.shape, ctx.key, ctx.has_w = shape, key, has_w
         return y.reshape(tuple(shape))
 
     @staticmethod
     def backward(ctx, dy):
-        x_2d, weight, s2d, rstd = ctx.saved_tensors
+        x_2d, weight, rstd = ctx.saved_tensors
         dy_2d = dy.reshape(-1, x_2d.shape[1])
         if dy_2d.stride(1) != 1:
             dy_2d = dy_2d.contiguous()
-        dx, dw, dscale = _rms_bwd(dy_2d, x_2d, weight, s2d, rstd, ctx.has_w, ctx.has_mod,
-                                  ctx.shape, ctx.key)
+        dx, dw = _rms_bwd(dy_2d, x_2d, weight, rstd, ctx.has_w, ctx.shape, ctx.key)
         dweight = dw.to(weight.dtype) if ctx.has_w else None
-        if not ctx.has_mod:
-            return dx, dweight, None, None, None
-        # dshift IS dy: y = normed*(1+scale) + shift. Reshaped, not recomputed.
-        return dx, dweight, dscale.reshape(tuple(ctx.shape)), dy, None
+        return dx, dweight, None
 
 
 def triton_rmsnorm(x: torch.Tensor, weight: torch.Tensor | None = None,
@@ -451,24 +398,7 @@ def triton_rmsnorm(x: torch.Tensor, weight: torch.Tensor | None = None,
     triangle-attention call site passes one. Shape is preserved; anything before the last axis is
     flattened into rows.
     """
-    return _RMSNorm.apply(x, weight, None, None, eps)
-
-
-def triton_rmsnorm_modulate(x: torch.Tensor, scale: torch.Tensor, shift: torch.Tensor,
-                            weight: torch.Tensor | None = None,
-                            eps: float = 1e-5) -> torch.Tensor:
-    """``rmsnorm(x) * (1 + scale) + shift`` -- the DiT block's modulate step, in ONE pass.
-
-    ``scale`` and ``shift`` are per-element (they are chunks of a projection of the conditioning
-    vector, so they carry the same shape as ``x``), not per-channel. Written separately the step
-    is three passes and, worse, it holds ``rmsnorm(x)`` for the backward; here that intermediate
-    never reaches HBM and the backward recomputes it from ``x`` and the saved ``rstd``.
-
-    ``1 + scale``, not ``scale``: adaLN-Zero initialises the projection at zero so an untrained
-    block is the identity, which is a different op from the ``sigmoid(scale)`` the ``adaln``
-    family computes for AF3 -- that is why this is here and not a mode of that one.
-    """
-    return _RMSNorm.apply(x, weight, scale, shift, eps)
+    return _RMSNorm.apply(x, weight, eps)
 
 
 @triton.autotune(configs=configs_for("rmsnorm_adamod_bwd_triton"),

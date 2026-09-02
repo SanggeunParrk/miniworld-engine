@@ -70,7 +70,6 @@ _LAZY_EXPORTS = {
     "triton_rmsnorm": (".rmsnorm.interface", "triton_rmsnorm"),
     "triton_swiglu_ffn": (".transition.interface", "triton_swiglu_ffn"),
     "triton_rmsnorm_adamod": (".rmsnorm.interface", "triton_rmsnorm_adamod"),
-    "triton_rmsnorm_modulate": (".rmsnorm.interface", "triton_rmsnorm_modulate"),
     "triton_augmented_attention_pair_bias": (
         ".augmented_attention.interface",
         "triton_augmented_attention_pair_bias",
@@ -164,7 +163,6 @@ __all__ = [
     "triton_layernorm",
     "triton_rmsnorm",
     "triton_rmsnorm_adamod",
-    "triton_rmsnorm_modulate",
     "triton_swiglu_ffn",
     "triton_tm1",
     "triton_tm2",

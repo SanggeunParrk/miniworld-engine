@@ -127,10 +127,10 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
     """
     expect = {"transition": {"pair", "token"},
               # rmsnorm: pair through triangle_attention's qk-norm
-              # (kernels/triangle_attention/whole_op.py), atom through the SWA atom block's
-              # `_qk_norm` (modules/swa_atom_attention/module.py), and token through the token
-              # DiT's modulate, which normalizes at d_single_token.
-              "rmsnorm": {"pair", "token", "atom"},
+              # (kernels/triangle_attention/whole_op.py) and atom through the SWA atom block's
+              # `_qk_norm` (modules/swa_atom_attention/module.py). No token stream: the token-DiT
+              # user was the adaLN modulate, now the rmsnorm_adamod family.
+              "rmsnorm": {"pair", "atom"},
               # rmsnorm_adamod: the two DiT streams and no more. adaLN conditions the diffusion
               # blocks -- atom_dit and token_dit -- and the pair stream has no adaptive
               # normalization at all, so claiming `pair` here would be a guess and not a trace.
