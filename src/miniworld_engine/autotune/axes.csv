@@ -8,6 +8,10 @@ adaln_epilogue_saveact_triton,_epilogue_train_kernel,miniworld_engine/kernels/ad
 adaln_epilogue_saveact_triton,_epilogue_train_kernel,miniworld_engine/kernels/adaln/triton/training.py,89,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
 adaln_epilogue_triton,_adaln_epilogue_kernel,miniworld_engine/kernels/adaln/triton/inference.py,150,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,N,1
 adaln_epilogue_triton,_adaln_epilogue_kernel,miniworld_engine/kernels/adaln/triton/inference.py,150,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,BLOCK_K,32,64,16,32,64,16 32 64 128,32,16,32,32,0,1,NC,1
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,BLOCK_M,64,128,32,64,64,32 64 128 256,128,32,64,128,1,0,,
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,BLOCK_N,64,128,64,64,64,64 128 256,128,64,128,64,1,0,,
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,GROUP_M,4,4,1,4,4,1 2 4 8 16,4,1,4,4,0,0,,
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_K_NC,64,128,16,32,64,16 32 64,128,16,64,64,0,1,NC,1
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_K_NX,64,128,16,32,64,16 32 64,64,32,64,64,0,1,NX,1
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,

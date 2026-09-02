@@ -1,0 +1,7 @@
+axis,values
+BLOCK_M,64 128 256
+BLOCK_N,64 128 256
+BLOCK_K,16 32 64 128
+GROUP_M,1 2 4 8 16
+num_warps,4 8
+num_stages,2 3 4

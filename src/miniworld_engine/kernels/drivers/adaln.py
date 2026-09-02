@@ -63,6 +63,18 @@ def adaln_epilogue():
     _adaln_epilogue(_rand(_M, _D), _rand(_M, 2 * _D), _EPS, shape_key=_SHAPE_KEY)
 
 
+def adaln_fwd_gate():
+    """training._adaln_fwd_gate_kernel: the fused training forward (y + gate), cond ALREADY
+    normalised, weights ALREADY (NC, NX), x stats as (rstd, c1=mean*rstd). Same shapes the
+    training forward hands it, so the tuned K extent is NC and not NX.
+    """
+    from miniworld_engine.kernels.adaln.triton.training import _adaln_fwd_gate
+
+    stat = torch.empty(_M, device=dev(), dtype=FP32).fill_(1.0)
+    _adaln_fwd_gate(_rand(_M, _DC), _rand(_DC, _D), _rand(_D), _rand(_DC, _D),
+                    _rand(_M, _D), stat, stat.clone(), shape_key=_SHAPE_KEY)
+
+
 def adaln_gemm_gate():
     """inference._adaln_gemm_gate_kernel. cond ALREADY normalised, weights ALREADY (NC, NX).
 
