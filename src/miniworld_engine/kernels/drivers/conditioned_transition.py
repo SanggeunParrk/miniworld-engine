@@ -163,6 +163,21 @@ def cond_transition_bwd_swiglu_flat():
                        _rand(_M, _ND, dtype=BF16), shape_key=_SHAPE_KEY)
 
 
+def cond_transition_bwd_gemm_swiglu():
+    """training._dh_swiglu_bwd_kernel: dh = dout @ ws fused into the SwiGLU backward.
+
+    ``ws`` is (D, ND) -- the squeeze weight as the kernel's B operand, not transposed. The
+    driver hands the same shapes the backward does, so the K extent tuned here is D and not ND.
+    """
+    from miniworld_engine.kernels.conditioned_transition.triton.training import (
+        _dh_swiglu_bwd,
+    )
+
+    _dh_swiglu_bwd(_rand(_M, _D, dtype=BF16), _rand(_D, _ND, dtype=BF16),
+                   _rand(_M, _ND, dtype=BF16), _rand(_M, _ND, dtype=BF16),
+                   shape_key=_SHAPE_KEY)
+
+
 def cond_transition_fwd_b2b_saveact():
     """training._b2b_fwd_train_kernel (atom fused b2b training forward).
 

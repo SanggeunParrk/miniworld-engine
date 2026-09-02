@@ -197,6 +197,79 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 # is a fast cuBLAS-adjacent reduction; keep it separate.
 
 
+@triton.autotune(configs=configs_for("cond_transition_bwd_gemm_swiglu_triton"),
+                 key=["shape_key"])
+@triton.jit
+def _dh_swiglu_bwd_kernel(
+    Dout, Ws, A, B, Dab, M, ND: tl.constexpr, D: tl.constexpr,
+    sdo0, sw0, sa0, sp0,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr, shape_key,
+):
+    """dab = [da | db] from (dout, ws, a, b), with dh = dout @ ws never reaching HBM.
+
+    The split it replaces is a cuBLAS GEMM writing dh (M, ND) followed by a flat elementwise
+    pass reading it back. At the token width dh is 113 MB out and 113 MB back, and the
+    elementwise half is pure bandwidth -- so the GEMM's spare bandwidth pays for it.
+    """
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
+                              tl.cdiv(ND, BLOCK_N), GROUP_M)
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rmask = rows < M
+    nmask = cols < ND
+
+    dh = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+    for k0 in range(0, D, BLOCK_K):
+        kc = k0 + tl.arange(0, BLOCK_K)
+        kmask = kc < D
+        do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
+                     mask=rmask[:, None] & kmask[None, :], other=0.0)
+        w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
+                    mask=kmask[:, None] & nmask[None, :], other=0.0)
+        dh += tl.dot(do, w, out_dtype=tl.float32)
+
+    m = rmask[:, None] & nmask[None, :]
+    off = rows[:, None] * sa0 + cols[None, :]
+    a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
+    b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
+    # h = silu(a)*b, so d/da = b * sa * (1 + a*(1-sa)) and d/db = silu(a). Same expression as
+    # `_swiglu_bwd_kernel`; only where dh comes from differs.
+    sa = tl.sigmoid(a)
+    da = dh * b * (sa * (1.0 + a * (1.0 - sa)))
+    db = dh * (a * sa)
+    base = rows[:, None] * sp0
+    tl.store(Dab + base + cols[None, :], da.to(Dab.dtype.element_ty), mask=m)
+    tl.store(Dab + base + (cols + ND)[None, :], db.to(Dab.dtype.element_ty), mask=m)
+
+
+def _dh_swiglu_bwd_fake(dout, ws, a, b, shape_key=None):
+    """(M, 2*ND) -- the packed [da | db], twice the width of ``a``."""
+    return a.new_empty((a.shape[0], 2 * a.shape[1]))
+
+
+@opaque(fake=_dh_swiglu_bwd_fake, name="conditioned_transition_dh_swiglu_bwd")
+def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
+                   shape_key: int | None = None) -> torch.Tensor:
+    """dab = [da | db] : (M, 2*ND), with the squeeze-bwd GEMM fused in. ``ws`` is (D, ND)."""
+    M, ND = a.shape
+    D = dout.shape[-1]
+    if shape_key is None:
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape and pass it down."
+        )
+    dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
+    grid = lambda META: tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
+    _dh_swiglu_bwd_kernel[grid](
+        dout, ws, a, b, dab, M, int(ND), int(D),
+        dout.stride(0), ws.stride(0), a.stride(0), dab.stride(0),
+        shape_key=pack(shape_key, ND=ND, D=D),
+    )
+    return dab
+
+
 def _swiglu_bwd_packed_fake(a, b, dh, shape_key=None):
     """(M, 2*ND) -- the packed [da | db], twice the width of `a`."""
     return a.new_empty((a.shape[0], 2 * a.shape[1]))
@@ -526,11 +599,38 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         db_sc = dscale.sum(0)                           # (D,) — cheap cuBLAS-adjacent reduction
         del dscale                                      # last use; see the `del` note below
         # squeeze bwd
-        dh = dout @ ws                                  # (M, ND)
         dWs = dout.t() @ h                              # (D, ND)
-        del dout, dy      # dy is the same (M, D) block and `_gate_bwd` was its last reader
-        # swiglu bwd (fused elementwise) -> packed [da | db] : (M, 2*ND)
-        dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
+        # dh = dout @ ws, then the SwiGLU backward off it -- in ONE kernel, so dh never reaches
+        # HBM. Measured on an A5000, bf16, M=36864, against cuBLAS dh + the shipped flat pass:
+        #
+        #     d_hidden=768 (token)   1726.5 us -> 1430.1 us   1.21x
+        #     d_hidden=128 (atom)     187.8 us ->  123.5 us   1.52x
+        #
+        # It also LOWERS the peak this function was written around: dh is (M, ND) and is gone,
+        # while `dout` (M, D) only stays alive a few lines longer. At the token width ND = 2D,
+        # so that trades a 113 MB block for holding a 56 MB one -- the note below explains why
+        # the peak here is worth this much care.
+        # Everything but fp32-at-the-token-width. The first cut of this branched on dtype
+        # alone; measuring says the answer is dtype AND width, and fp32 wins at the atom
+        # width by more than bf16 does (A5000, M=36864, fused vs cuBLAS dh + the flat pass):
+        #
+        #                 token d=768              atom d=128
+        #     bf16   1844 ->  1641 us  1.12x   187 -> 125 us  1.50x
+        #     fp32   3738 ->  3824 us  0.98x   376 -> 244 us  1.55x
+        #
+        # Only fp32-at-token loses, and it loses by 2%: at that shape the split's dh is a big
+        # cuBLAS TF32 GEMM that the Triton one does not quite match, and there is no saved
+        # bandwidth left to pay for the difference. Everywhere else the fused form wins, so the
+        # exception is one cell and not a dtype rule. The flat kernel stays reachable for it.
+        wide_fp32 = dout.dtype == torch.float32 and x.shape[1] > _ATOM_D_MAX
+        if not wide_fp32:
+            dab = _dh_swiglu_bwd(dout, ws, a, b, shape_key=shape_key)
+            del dout, dy
+        else:
+            dh = dout @ ws                              # (M, ND)
+            del dout, dy
+            dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
+            del dh
         # `del` after last use, and it is not cosmetic. A hand-written backward holds every
         # intermediate in a LOCAL until the function returns, where autograd frees each one as soon
         # as its consumer node has run -- so the peak here carried dscale, dout and dh (48 + 48 +
@@ -538,12 +638,32 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # allocation, dab @ wcat, ran. Measured with the allocator trace: at the peak instant torch
         # held three (M, ND) blocks and NO (M, d) block, while this function held three of them.
         # That difference was the whole of this module's training-memory disadvantage.
-        del dh
-        # expand bwd: one concatenated GEMM each (vs 2 + add).
+        #
+        # `dh` is no longer one of the three: it is fused into the SwiGLU backward above and
+        # never allocated, so its 96 MiB is gone from that tally rather than merely freed early.
+        # expand bwd. dx stays one concatenated GEMM (vs 2 + add); the WGRAD does not.
         dx = dab @ wcat                                 # (M, K)
-        dWcat = dab.t() @ x                             # (2*ND, K)
+        # The merged wgrad `dab.T @ x` is (2ND, M)x(M, K), and cuBLAS picks a WORSE kernel for it
+        # than for the same GEMM at ND. Measured on an A5000, bf16, M=36864, the two halves taken
+        # from STRIDED views -- no copy, which is what a real split hands cuBLAS:
+        #
+        #     d_hidden=768 (token)   merged 2807 us  62.0 TFLOP/s | split 2093 us  83.1 TFLOP/s
+        #     d_hidden=128 (atom)    merged   77 us  62.9 TFLOP/s | split   99 us  48.6 TFLOP/s
+        #
+        # So the answer FLIPS with the width: splitting is 1.34x at the token width and 0.77x at
+        # the atom width. `_ATOM_D_MAX` is this file's existing name for that boundary -- the one
+        # `_fused_fwd_train` already dispatches on -- rather than a new number of its own. Where
+        # inside 128..768 it actually crosses is NOT measured; the model presents only these two.
+        #
+        # The two forms are not bitwise equal (different cuBLAS kernels accumulate in a different
+        # order), which is a reduction-order difference and not a correctness one.
+        if x.shape[1] <= _ATOM_D_MAX:
+            dWcat = dab.t() @ x                         # (2*ND, K)
+            dWa, dWb = dWcat[:ND], dWcat[ND:]
+        else:
+            dWa = dab[:, :ND].t() @ x                   # (ND, K) each, straight from the views
+            dWb = dab[:, ND:].t() @ x
         del dab                                         # (M, 2*ND) -- the largest block here
-        dWa, dWb = dWcat[:ND], dWcat[ND:]
         # 8 returns for 8 forward inputs: the trailing None is `length` (an int shape key, not a
         # differentiable tensor). A missing one is an arity error, which is the point.
         return dx, dcond, dWa.contiguous(), dWb.contiguous(), dWs, dWsc, db_sc, None
