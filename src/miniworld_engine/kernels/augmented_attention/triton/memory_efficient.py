@@ -401,6 +401,14 @@ def _memeff_bwd(
     return dq, dk, dv, dbias
 
 
+#: Largest head dim this kernel accepts. NOT a routing threshold -- past it the call
+#: raises, so it is a statement about what the kernel supports. The bound is the tile
+#: the kernel is written around; it is not derived from a measurement and no larger
+#: head dim has been tried. The model runs 32 and 64 (see the D != 32 branch in
+#: triangle_attention/triton/atomic.py for the other one), so nothing asks for more yet.
+_MAX_HEAD_DIM = 64
+
+
 class TritonAugmentedAttentionFunction(torch.autograd.Function):
     @typecheck
     @staticmethod
@@ -413,7 +421,7 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
         mask: Bool[torch.Tensor, "A B L"] | None = None,
     ) -> Float[torch.Tensor, "A B L H D"]:
         A, B, L, H, D = q.shape
-        if D > 64:  # noqa: PLR2004
+        if D > _MAX_HEAD_DIM:
             msg = f"Only support HEAD_DIM <= 64, but got {D}."
             raise ValueError(msg)
 

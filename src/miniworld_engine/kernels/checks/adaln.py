@@ -220,6 +220,55 @@ def adaln_bwd_dx_dlnw():
     return {"DCond": (dcond, cr.grad), "DLnW": (dlnw, lw.grad)}
 
 
+def adaln_fwd_gate():
+    """training._adaln_fwd_gate_kernel: y and gate from (cond_n, Ws.T, Wb.T, x, rstd, c1).
+
+    The reference builds scale/bias in fp32 from the same pre-normalised cond and the true x
+    stats, so a transposed weight or a mis-masked tail moves the gate or the offset rather than
+    cancelling. Both y and gate are checked. ``_no_tf32`` so the reference GEMMs keep the bits.
+    """
+    from miniworld_engine.kernels.adaln.triton.training import _adaln_fwd_gate
+
+    _fixed()
+    cond_n, x = _rand(_M, _DC), _rand(_M, _D)
+    sw_t, bw_t, scale_b = _rand(_DC, _D), _rand(_DC, _D), _rand(_D)
+    xf = x.float()
+    mean = xf.mean(dim=-1)
+    rstd = torch.rsqrt(xf.var(dim=-1, unbiased=False) + _EPS)
+    y, gate = _adaln_fwd_gate(cond_n, sw_t, scale_b, bw_t, x, rstd, mean * rstd,
+                              shape_key=_SHAPE_KEY)
+    with _no_tf32():
+        scale = cond_n.float() @ sw_t.float() + scale_b.float()
+        bias = cond_n.float() @ bw_t.float()
+    e_gate = torch.sigmoid(scale)
+    return {"Y": (y, e_gate * _ln(x) + bias), "Gate": (gate, e_gate)}
+
+
+def adaln_gemm_gate():
+    """inference._adaln_gemm_gate_kernel: the adaLN forward minus LN(cond), in one kernel.
+
+    ``rstd``/``c1`` are the TRUE statistics of the x passed, not the driver's 1.0 filler, so the
+    reference is the same normalisation the kernel applies (``x*rstd - c1``, with c1 = mean*rstd).
+    The two projections are compared through one output because they meet there: a transposed
+    weight or a mis-masked K tail moves the gate or the offset and cannot cancel.
+    ``_no_tf32`` because the reference GEMMs must not drop mantissa bits the kernel keeps.
+    """
+    from miniworld_engine.kernels.adaln.triton.inference import _adaln_gemm_gate
+
+    _fixed()
+    cond_n, x = _rand(_M, _DC), _rand(_M, _D)
+    sw_t, bw_t, scale_b = _rand(_DC, _D), _rand(_DC, _D), _rand(_D)
+    xf = x.float()
+    mean = xf.mean(dim=-1)
+    rstd = torch.rsqrt(xf.var(dim=-1, unbiased=False) + _EPS)
+    y = _adaln_gemm_gate(cond_n, sw_t, scale_b, bw_t, x, rstd, mean * rstd,
+                         shape_key=_SHAPE_KEY)
+    with _no_tf32():
+        scale = cond_n.float() @ sw_t.float() + scale_b.float()
+        bias = cond_n.float() @ bw_t.float()
+    return y, torch.sigmoid(scale) * _ln(x) + bias
+
+
 def adaln_epilogue():
     """inference._adaln_epilogue_kernel: y = sigmoid(SB[:, :N]) * LN(x) + SB[:, N:].
 

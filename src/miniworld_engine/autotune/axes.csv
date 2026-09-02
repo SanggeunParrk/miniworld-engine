@@ -8,9 +8,17 @@ adaln_epilogue_saveact_triton,_epilogue_train_kernel,miniworld_engine/kernels/ad
 adaln_epilogue_saveact_triton,_epilogue_train_kernel,miniworld_engine/kernels/adaln/triton/training.py,89,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
 adaln_epilogue_triton,_adaln_epilogue_kernel,miniworld_engine/kernels/adaln/triton/inference.py,150,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,N,1
 adaln_epilogue_triton,_adaln_epilogue_kernel,miniworld_engine/kernels/adaln/triton/inference.py,150,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,BLOCK_K,32,64,16,32,64,16 32 64 128,32,16,32,32,0,1,NC,1
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,BLOCK_M,64,128,32,64,64,32 64 128 256,128,32,64,128,1,0,,
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,BLOCK_N,64,128,64,64,64,64 128 256,128,64,128,64,1,0,,
+adaln_fwd_gate_triton,_adaln_fwd_gate_kernel,miniworld_engine/kernels/adaln/triton/training.py,516,GROUP_M,4,4,1,4,4,1 2 4 8 16,4,1,4,4,0,0,,
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_K_NC,64,128,16,32,64,16 32 64,128,16,64,64,0,1,NC,1
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_K_NX,64,128,16,32,64,16 32 64,64,32,64,64,0,1,NX,1
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,BLOCK_K,32,64,16,32,64,16 32 64 128,32,16,32,32,0,1,NC,1
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,BLOCK_M,64,128,32,64,64,64 128 256,128,32,64,128,1,0,,
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,BLOCK_N,64,128,64,64,64,64 128 256,128,64,128,64,1,0,,
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,GROUP_M,8,8,1,4,8,1 2 4 8 16,8,1,4,8,0,0,,
 augmented_attention_bwd_atomic_triton,_attn_bwd,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,118,BLOCK_M1,64,128,16,32,64,32 64 128 256,128,16,64,64,0,0,,
 augmented_attention_bwd_atomic_triton,_attn_bwd,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,118,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 augmented_attention_bwd_pre_triton,_attn_bwd_preprocess,miniworld_engine/kernels/augmented_attention/triton/main.py,254,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,128,16,64,64,1,0,,
@@ -24,6 +32,10 @@ bias_only_attention_bwd_triton,_attn_bwd,miniworld_engine/kernels/bias_only_atte
 bias_only_attention_bwd_triton,_attn_bwd,miniworld_engine/kernels/bias_only_attention/triton/main.py,282,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 bias_only_attention_fwd_triton,_attn_fwd,miniworld_engine/kernels/bias_only_attention/triton/main.py,76,BLOCK_M1,64,128,16,32,64,32 64 128 256,128,16,64,64,1,0,,
 bias_only_attention_fwd_triton,_attn_fwd,miniworld_engine/kernels/bias_only_attention/triton/main.py,76,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,0,0,,
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,BLOCK_K,32,64,16,32,64,16 32 64 128,32,16,32,64,0,1,D,1
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,BLOCK_M,64,128,32,64,64,64 128 256,128,32,64,128,1,0,,
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,BLOCK_N,128,128,64,64,128,64 128 256,64,64,128,128,1,0,,
+cond_transition_bwd_gemm_swiglu_triton,_dh_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,203,GROUP_M,4,4,1,4,4,1 2 4 8 16,4,1,4,4,0,0,,
 cond_transition_bwd_swiglu_flat_triton,_swiglu_bwd_kernel,miniworld_engine/kernels/conditioned_transition/triton/training.py,148,BLOCK_E,64,128,16,32,64,16 32 64 128 256 512 1024 2048,128,16,64,64,1,0,,
 cond_transition_expand_swiglu_saveact_triton,_fwd_expand_swiglu_kernel,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,64,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
 cond_transition_expand_swiglu_saveact_triton,_fwd_expand_swiglu_kernel,miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py,64,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,

@@ -36,6 +36,8 @@ from ...layernorm_linear.triton.te_style import (
     _ln_bwd,
     _ln_materialize,
 )
+from ..._tiles import tile_grid, tile_order
+from ...layernorm_linear.triton.stats import stats_triton
 
 # Both axes are tuned tiles for the two row-wise kernels below. BLOCK_N used to arrive as
 # next_pow2(NX) from the launcher — the whole row, a constant the tuner never saw, which is also
@@ -49,6 +51,9 @@ from ...layernorm_linear.triton.te_style import (
 # fp32-IO speed since a TF32 WGMMA custom kernel is infeasible in this CuTeDSL/quack env). IO and
 # LayerNorm stay fp32; only the three GEMM operands are downcast.
 _GEMM_BF16 = False
+
+#: adaLN's two widths: atom d=128, token d=768. `_pick_fwd` routes the forward on this boundary.
+_ATOM_D_MAX = 128
 
 
 def set_gemm_bf16(flag: bool) -> None:
@@ -210,6 +215,12 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
+#: N at or below which the covering tile (BLOCK_K = next_pow2(N)) reads each row once and is
+#: forced in the launcher rather than autotuned -- see the note in `_bwd_x`. 768 (token) and 128
+#: (atom) both fit; the bound leaves headroom without inviting a covering tile that spills.
+_BWD_X_COVER_MAX_N = 1024
+
+
 @triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['shape_key'])
 @triton.jit
 def _bwd_x_kernel(
@@ -318,14 +329,28 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
         )
     D = torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype)   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
-    _bwd_x_kernel[grid](
-        dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
-        dy.stride(0), dy.stride(1), x.stride(0), x.stride(1), gate.stride(0), gate.stride(1),
-        D.stride(0), D.stride(1), dx.stride(0), dx.stride(1),
-        shape_key=pack(shape_key, N=N),
-    )
+    args = (dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
+            dy.stride(0), dy.stride(1), x.stride(0), x.stride(1),
+            gate.stride(0), gate.stride(1), D.stride(0), D.stride(1),
+            dx.stride(0), dx.stride(1))
+    if N <= _BWD_X_COVER_MAX_N:
+        # Force the covering tile (BLOCK_K >= N, one read of the row) instead of autotuning it.
+        # It is the kernel's own single-read branch, and it WINS at every production row count --
+        # 1.24x at M=1536 rising to 1.45x at M=32768+ (A5000, N=768) -- while merely TYING at the
+        # 512 rows the driver builds with. The autotuner only ever measured those 512 rows, so it
+        # stored a tiled config that then costs production 1.44x (742 vs 494 us at M=36864). The
+        # root cause is structural: the best config is M-dependent and the shape key does not
+        # encode M, so no cache entry can be right for both the driver's M and production's. This
+        # sidesteps it for the one axis that has a provable answer. warps/stages are the sweep's
+        # winner and are M-flat here; BLOCK_M1=8 was best across the M range.
+        bk = triton.next_power_of_2(N)
+        grid = (triton.cdiv(M, 8),)
+        _bwd_x_kernel.fn[grid](*args, BLOCK_M1=8, BLOCK_K=bk,
+                               shape_key=pack(shape_key, N=N), num_warps=8, num_stages=1)
+    else:
+        # Wide N cannot cover in one tile; keep the autotuned two-pass schedule.
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
     return D, dx
 
 
@@ -468,6 +493,10 @@ def _dgrad_condln_fake(D, w_cat, cond, mean_c, rstd_c, lnw, shape_key=None):
         torch.empty_strided((m, nc), cond.stride(), device=cond.device, dtype=cond.dtype),
         lnw.new_empty((nc,)),
     )
+#: Row count above which _dgrad_condln forces the swept-best config instead of autotuning it --
+#: see the note in the launcher. The driver builds at 512 rows; production runs 36864. 8192 sits
+#: well above the driver and below every production shape.
+_DGRAD_BIG_M = 8192
 
 
 @opaque(fake=_dgrad_condln_fake, name="adaln_dgrad_condln")
@@ -483,14 +512,23 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
     NC = w_cat.shape[1]
     dcond = torch.empty_strided((M, NC), cond.stride(), device=cond.device, dtype=cond.dtype)
     dlnw = torch.zeros(NC, dtype=torch.float32, device=cond.device)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    # NC is tl.constexpr now (it drives the BLOCK_NC >= NC fold) -> pass a plain python int.
-    _dgrad_condln_kernel[grid](
-        D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
-        D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
-        cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1),
-        shape_key=pack(shape_key, NC=int(NC), K2=K2),
-    )
+    dargs = (D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
+             D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
+             cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1))
+    if M >= _DGRAD_BIG_M:
+        # Same M-coverage failure as _bwd_x: the config is row-count dependent (grid/occupancy),
+        # the shape key does not encode M, and the driver tunes at 512 rows while production runs
+        # 36864. The tuner stored a small-M config (M1=32, K2-tile 16) that costs production 2.05x
+        # -- 138 vs 67 us at M=36864, NC=128, K2=256 (A5000). Forced to the swept-best config for
+        # large M; small M (the driver's own regime) keeps the autotuned path, where its choice is
+        # right. Only the atom stream reaches this branch (token NC=384 takes cuBLAS above).
+        _dgrad_condln_kernel.fn[(triton.cdiv(M, 64),)](
+            *dargs, BLOCK_M1=64, BLOCK_K_NC=128, BLOCK_K_K2=64,
+            shape_key=pack(shape_key, NC=int(NC), K2=K2), num_warps=4, num_stages=2)
+    else:
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+        _dgrad_condln_kernel[grid](
+            *dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2))
     return dcond, dlnw.to(lnw.dtype)
 
 
@@ -507,6 +545,112 @@ def set_dgrad_triton(flag) -> None:
     """Select dgrad impl: None=auto (by NC), True=force fused triton, False=force cuBLAS+_ln_bwd."""
     global _DGRAD_TRITON  # noqa: PLW0603
     _DGRAD_TRITON = flag
+
+
+@triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"])
+@triton.jit
+def _adaln_fwd_gate_kernel(
+    CondN, SW, SB, BW, X, Rstd, C1, Y, Gate,
+    M, NX: tl.constexpr, NC: tl.constexpr,
+    scn0, sw0, sbw0, sx0, sy0, sg0,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr, shape_key,
+):
+    """Training forward in one kernel: y AND gate=sigmoid(scale), so sb (M, 2NX) never lands.
+
+    The training twin of the inference `_adaln_gemm_gate_kernel`: same GEMM+gate fusion (scale =
+    CondN@SW + ScaleB, bias = CondN@BW, y = gate*(x*rstd - c1) + bias), but it also stores `gate`
+    for the backward. The forward's old shape was `sb = cond_aff @ w_cat.T` (cuBLAS, writes 113 MB
+    at the token width) followed by an epilogue that read it straight back; measured on an A6000
+    that pair was 1022 us and this is 726 (1.41x), because the GEMM is compute-bound and the
+    epilogue's traffic rides in its spare bandwidth -- the same win inference took.
+
+    `Rstd`/`C1` are x's stats from `layernorm_stats_triton` (c1 = mean*rstd), so x is read once
+    here and x_hat is `x*rstd - c1`. mean_x for the backward is recovered as c1/rstd at the
+    launcher -- an (M,) elementwise, negligible against this kernel.
+    """
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
+                              tl.cdiv(NX, BLOCK_N), GROUP_M)
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rmask, nmask = rows < M, cols < NX
+    scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    for k0 in range(0, NC, BLOCK_K):
+        kc = k0 + tl.arange(0, BLOCK_K)
+        kmask = kc < NC
+        a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
+                    mask=rmask[:, None] & kmask[None, :], other=0.0)
+        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :],
+                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :],
+                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        scale += tl.dot(a, w_s, out_dtype=tl.float32)
+        bias += tl.dot(a, w_b, out_dtype=tl.float32)
+    xm = rmask[:, None] & nmask[None, :]
+    xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
+    rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]
+    c1 = tl.load(C1 + rows, mask=rmask, other=0.0)[:, None]
+    sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
+    g = tl.sigmoid(scale + sb[None, :])
+    y = g * (xv * rstd - c1) + bias
+    tl.store(Y + rows[:, None] * sy0 + cols[None, :], y.to(Y.dtype.element_ty), mask=xm)
+    tl.store(Gate + rows[:, None] * sg0 + cols[None, :], g.to(Gate.dtype.element_ty), mask=xm)
+
+
+def _adaln_fwd_gate_fake(cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, shape_key=None):
+    """(y, gate) -- both x's shape and dtype; the weights only supply the gate."""
+    return torch.empty_like(x), torch.empty_like(x)
+
+
+@opaque(fake=_adaln_fwd_gate_fake, name="adaln_fwd_gate")
+def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: torch.Tensor,
+                    bias_wt: torch.Tensor, x: torch.Tensor, rstd: torch.Tensor,
+                    c1: torch.Tensor, shape_key: int | None = None,
+                    ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Launcher for :func:`_adaln_fwd_gate_kernel`. ``scale_wt``/``bias_wt`` are (NC, NX)."""
+    M, NX = x.shape
+    NC = cond_n.shape[-1]
+    if shape_key is None:
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened (M, D) "
+            "matrix, and M alone cannot say whether it is L or L*L. Compute the key at the "
+            "caller that still holds the pre-flatten shape and pass it down."
+        )
+    y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
+    gate = torch.empty(M, NX, device=x.device, dtype=x.dtype)
+    grid = lambda META: tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
+    _adaln_fwd_gate_kernel[grid](
+        cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y, gate,
+        M, int(NX), int(NC),
+        cond_n.stride(0), scale_wt.stride(0), bias_wt.stride(0), x.stride(0),
+        y.stride(0), gate.stride(0),
+        shape_key=pack(shape_key, NX=NX, NC=NC),
+    )
+    return y, gate
+
+
+# Forward backend for training (mirrors conditioned_transition's ``_FWD_MODE``):
+#   "cublas" = sb-GEMM (cuBLAS, writes the (M, 2NX) [scale|bias]) + fused-triton epilogue.
+#   "fused"  = fused-triton GEMM+gate (`_adaln_fwd_gate`), keeps scale|bias in registers.
+#   "auto"   = measured-best per width (default). The fused kernel removes the sb round-trip --
+#              113 MB at the token width but only 19 MB at the atom width -- so it PAYS at d=768
+#              (fwd 0.85x -> 1.28x, A6000) and LOSES at d=128, where the extra stats launch and the
+#              mean=c1/rstd op cost more than the 19 MB trip (fwd 1.15x -> 0.90x). So token ->
+#              fused, atom -> cublas.
+_FWD_MODE = "auto"  # {"auto", "cublas", "fused"}
+
+
+def set_forward_mode(name: str) -> None:
+    """Force the training forward backend, or "auto" (default) for the per-width measured-best."""
+    global _FWD_MODE  # noqa: PLW0603
+    assert name in ("auto", "cublas", "fused")
+    _FWD_MODE = name
+
+
+def _pick_fwd(nx: int) -> str:
+    """Measured-best forward by width: token (nx > _ATOM_D_MAX) -> fused, atom -> cublas."""
+    return "fused" if nx > _ATOM_D_MAX else "cublas"
 
 
 class AdaLNTrainFn(torch.autograd.Function):
@@ -532,12 +676,27 @@ class AdaLNTrainFn(torch.autograd.Function):
         cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
                                                    shape_key=both_key(rows_of(orig_cond_shape)))
 
-        w_cat = torch.cat([scale_weight, bias_weight], dim=0)          # (2NX, NC)
-        sb = _mm(cond_aff, w_cat.t())                                  # (M, 2NX) raw [scale|bias]
-
-        # scale_bias (β for the scale half) is folded into the epilogue — no full (M,2NX) add pass.
-        y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias,
-                                                 shape_key=atom_key(length_of(orig_x_shape)))
+        ak = atom_key(length_of(orig_x_shape))
+        # FORWARD backend (see `_FWD_MODE`): `_pick_fwd` routes the token width to the fused
+        # GEMM+gate and the atom width to the sb-GEMM + epilogue; `_FWD_MODE` overrides for A/B.
+        # Both branches emit `gate` (and mean_x, rstd_x) for the backward. `tl.dot` always runs
+        # TF32, so strict fp32 (allow_tf32 off) must keep the cuBLAS epilogue whatever the mode --
+        # the fused kernel would silently give TF32 numbers.
+        mode = _pick_fwd(nx) if _FWD_MODE == "auto" else _FWD_MODE
+        tf32_ok = x.dtype in (torch.float16, torch.bfloat16) or (
+            x.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32
+        )
+        if mode == "fused" and not tf32_ok:
+            mode = "cublas"
+        if mode == "fused":
+            rstd_x, c1 = stats_triton(x2d, eps_x, shape_key=ak)
+            y, gate = _adaln_fwd_gate(cond_aff, scale_weight.t().contiguous(), scale_bias,
+                                      bias_weight.t().contiguous(), x2d, rstd_x, c1, shape_key=ak)
+            mean_x = c1 / rstd_x   # for the backward; c1 = mean*rstd. (M,) elementwise.
+        else:
+            w_cat = torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
+            sb = _mm(cond_aff, w_cat.t())                            # (M, 2NX) raw [scale|bias]
+            y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias, shape_key=ak)
 
         ctx.save_for_backward(x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
                               cond_ln_weight, scale_weight, bias_weight)

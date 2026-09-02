@@ -36,6 +36,7 @@ from quack.cute_dsl_utils import (
     get_max_active_clusters,
 )
 from quack.epi_ops import RowVecLoad, ColVecLoad
+from quack.gemm_sm80 import GemmSm80
 from quack.gemm_sm90 import GemmSm90
 from quack.gemm_default_epi import GemmDefaultEpiMixin
 from quack.rounding import RoundingMode
@@ -93,6 +94,32 @@ class GemmLayerNormLinearSm90(GemmLayerNormLinearMixin, GemmSm90):
     pass
 
 
+# The same epilogue on Ampere. The mixin knows nothing about the architecture -- it defines
+# `epi_to_underlying_arguments` and `epi_visit_subtile` and nothing else -- and quack composes its
+# own epilogue mixins against both bases in exactly this shape
+# (`GemmDefaultSm80(GemmDefaultEpiMixin, GemmSm80)` in gemm_default_epi.py,
+# `GemmNormGatedSm80(GemmNormGatedMixin, GemmSm80)` in gemm_norm_act.py), so this is the seam
+# quack already relies on and not a new one. `GemmSm80` declares
+# `_supported_archs = (80, 86, 87, 89)`: A100, A5000/A6000 and Ada -- every card in this cluster
+# that is not a Hopper.
+#
+# NOT the fused kernel beside this file: that one forks GemmSm90's internals (warp-group barriers,
+# TMA atoms, cluster layouts) and its own docstring says there was "no smaller seam". Ampere has
+# none of those, so it is a rewrite, not a port. This path is the composable one.
+#
+# DOES NOT RUN YET, and the reason is upstream, not here: quack 0.5.0's `GemmSm80.kernel` is
+# `raise NotImplementedError("Gemm Sm80 is not implemented yet")` (gemm_sm80.py:150). Everything
+# on this side -- class composition, arch dispatch, SM80 config list, the semaphore fix below --
+# reaches that line and stops. Kept so that the day quack fills the stub in, the wiring is
+# already correct and measured against; do not treat it as a working Ampere path.
+class GemmLayerNormLinearSm80(GemmLayerNormLinearMixin, GemmSm80):
+    pass
+
+
+#: What quack's own dispatch does (`gemm.py`: `sm_to_cls = {8: GemmDefaultSm80, 9: ...}`).
+_GEMM_CLS_BY_ARCH = {8: GemmLayerNormLinearSm80, 9: GemmLayerNormLinearSm90}
+
+
 @jit_cache
 def _compile_gemm_lnl(
     a_dtype,
@@ -109,7 +136,7 @@ def _compile_gemm_lnl(
     is_dynamic_persistent,
     device_capacity,
 ):
-    GemmCls = GemmLayerNormLinearSm90
+    GemmCls = _GEMM_CLS_BY_ARCH[device_capacity[0]]
     mA, mB, mD, mC, m, n, k, l = make_fake_gemm_tensors(
         a_dtype, b_dtype, d_dtype, None, a_major, b_major, d_major, None
     )
@@ -160,8 +187,18 @@ def gemm_layernorm_linear(
 ) -> None:
     """Run the fused GEMM+LayerNorm epilogue, writing Y into D."""
     device_capacity = get_device_capacity(A.device)
-    assert device_capacity[0] == 9, "first version targets SM90 (H100)"
-    if config is None:
+    assert device_capacity[0] in _GEMM_CLS_BY_ARCH, (
+        f"no fused LN+GEMM epilogue for SM{device_capacity[0]}x; "
+        f"have {sorted(_GEMM_CLS_BY_ARCH)}")
+    if device_capacity[0] == 8:
+        # Ampere has no clusters and no warp-group ping-pong, so those knobs are not choices here.
+        # The config comes from quack's own SM80 list rather than the sm90 sweep: `resolve_config`
+        # keys its cache on the sm90 candidate space, and handing it sm80 shapes would look up
+        # entries that were never measured.
+        if config is None:
+            from quack.gemm_config import _get_sm80_configs
+            config = _get_sm80_configs()[0]
+    elif config is None:
         # Brute-force autotuned over the FULL sm90 (plain) config space, cache-selected per
         # (gpu, dtype, M-bucket, N). Config is performance-only. On a cache MISS we fall back to the
         # OLD hand-baked _tuned table (m1_config_for) for its (M,N) grid, else quack's default — so
@@ -209,10 +246,15 @@ def gemm_layernorm_linear(
     if is_compile_only():
         return
 
-    max_active_clusters = get_max_active_clusters(config.cluster_m * config.cluster_n)
+    max_active_clusters = get_max_active_clusters(
+        config.cluster_m * config.cluster_n, device_capacity=device_capacity)
+    # quack asserts a GMEM semaphore for the dynamic persistent scheduler on BOTH SM8x and SM90
+    # ("Dynamic persistent tile scheduler for SM8x and SM90 requires a semaphore in GMEM"), so the
+    # condition is `<= 9`, not `== 9`. Written as `== 9` this allocated nothing on Ampere and the
+    # assert fired inside quack.
     tile_count_semaphore = (
         torch.zeros(1, dtype=torch.int32, device=A.device)
-        if (is_dynamic_persistent and device_capacity[0] == 9)
+        if (is_dynamic_persistent and device_capacity[0] <= 9)
         else None
     )
     epi_args = GemmLayerNormLinearMixin.EpilogueArguments(
