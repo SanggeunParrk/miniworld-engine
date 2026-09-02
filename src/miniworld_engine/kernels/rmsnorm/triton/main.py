@@ -178,7 +178,7 @@ def rmsnorm_adamod_fwd_kernel(
     Q, C, WSC, WSH, WG, W, Y, Rstd, GATE,
     stride_qr, stride_qc, stride_cr, stride_cc, stride_wn, stride_wk,
     M, N: tl.constexpr, K: tl.constexpr, eps: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_C: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
     """``rmsnorm(q) * (1 + c@Wsc^T) + c@Wsh^T`` -- the modulation projection folded in.
@@ -234,8 +234,8 @@ def rmsnorm_adamod_fwd_kernel(
         # bucket that nothing reaches. No extra read here -- c is in registers for the other
         # two, and the weight tile is the only new load.
         acc_g = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_C):
-            ks = k0 + tl.arange(0, BLOCK_C)
+        for k0 in range(0, K, BLOCK_DC):
+            ks = k0 + tl.arange(0, BLOCK_DC)
             k_mask = ks < K
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                         mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -281,8 +281,8 @@ def rmsnorm_adamod_fwd_kernel(
         # bucket that nothing reaches. No extra read here -- c is in registers for the other
         # two, and the weight tile is the only new load.
         acc_g = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_C):
-            ks = k0 + tl.arange(0, BLOCK_C)
+        for k0 in range(0, K, BLOCK_DC):
+            ks = k0 + tl.arange(0, BLOCK_DC)
             k_mask = ks < K
             # bf16 operands into tl.dot, fp32 accumulator: casting to fp32 first would drop the
             # tensor cores this loop exists to use.
@@ -409,7 +409,7 @@ def rmsnorm_adamod_bwd_kernel(
     stride_qr, stride_qc, stride_cr, stride_cc, stride_wn, stride_wk,
     stride_sr, stride_sc,
     M, N: tl.constexpr, K: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_C: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
     """``dq``, ``dscale`` and ``dweight`` for the fused modulate. ``dshift`` IS ``dy``.
@@ -434,8 +434,8 @@ def rmsnorm_adamod_bwd_kernel(
         col_mask = cols < N
         mask = row_mask[:, None] & col_mask[None, :]
         acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_C):
-            ks = k0 + tl.arange(0, BLOCK_C)
+        for k0 in range(0, K, BLOCK_DC):
+            ks = k0 + tl.arange(0, BLOCK_DC)
             k_mask = ks < K
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                         mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -476,8 +476,8 @@ def rmsnorm_adamod_bwd_kernel(
             col_mask = cols < N
             mask = row_mask[:, None] & col_mask[None, :]
             acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-            for k0 in range(0, K, BLOCK_C):
-                ks = k0 + tl.arange(0, BLOCK_C)
+            for k0 in range(0, K, BLOCK_DC):
+                ks = k0 + tl.arange(0, BLOCK_DC)
                 k_mask = ks < K
                 c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                             mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -516,8 +516,8 @@ def rmsnorm_adamod_bwd_kernel(
             col_mask = cols < N
             mask = row_mask[:, None] & col_mask[None, :]
             acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-            for k0 in range(0, K, BLOCK_C):
-                ks = k0 + tl.arange(0, BLOCK_C)
+            for k0 in range(0, K, BLOCK_DC):
+                ks = k0 + tl.arange(0, BLOCK_DC)
                 k_mask = ks < K
                 c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                             mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -627,7 +627,7 @@ class _RMSNormAdaMod(torch.autograd.Function):
         wsc, wsh = w_scale.contiguous(), w_shift.contiguous()
         has_w = weight is not None
         wg = w_gate.contiguous()
-        # d_cond is in the key, not just d_model. BLOCK_C tiles the conditioning width, so two
+        # d_cond is in the key, not just d_model. BLOCK_DC tiles the conditioning width, so two
         # blocks with the same rows and d_model but different d_cond -- 128 on the atom side and
         # 384 on the token side, which is exactly the pair the model builds -- want different
         # configs and would otherwise have shared one cache entry.
