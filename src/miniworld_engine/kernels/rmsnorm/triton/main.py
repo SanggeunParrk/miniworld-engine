@@ -453,8 +453,9 @@ def triton_rmsnorm_modulate(x: torch.Tensor, scale: torch.Tensor, shift: torch.T
                  key=["shape_key", "HAS_WEIGHT"], reset_to_zero=["DW"])
 @triton.jit
 def rmsnorm_adamod_bwd_kernel(
-    DQ, DSCALE, DW, DY, Q, C, WSC, W, Rstd,
+    DQ, DSD, DW, DY, Q, C, WSC, W, Rstd,
     stride_qr, stride_qc, stride_cr, stride_cc, stride_wn, stride_wk,
+    stride_sr, stride_sc,
     M, N: tl.constexpr, K: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_C: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
@@ -498,8 +499,15 @@ def rmsnorm_adamod_bwd_kernel(
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
             normed = xhat * w[None, :]
-        tl.store(DSCALE + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
+        # dscale and dy go into ONE [M, 2N] buffer, side by side. Both are already in
+        # registers here, so the second store is the whole cost of a concatenation the
+        # caller would otherwise pay for -- and it turns the caller's four GEMMs into two:
+        #   dWpair = [dscale|dy]^T @ cs      (was dWsc and dWsh separately)
+        #   dc     = [dscale|dy] @ [Wsc;Wsh] (was two [M,N]@[N,K] and an add)
+        tl.store(DSD + rows[:, None] * stride_sr + cols[None, :] * stride_sc,
                  dy * normed, mask=mask)
+        tl.store(DSD + rows[:, None] * stride_sr + (N + cols[None, :]) * stride_sc,
+                 dy, mask=mask)
         dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
         if HAS_WEIGHT:
             tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask)
@@ -533,8 +541,15 @@ def rmsnorm_adamod_bwd_kernel(
             if HAS_WEIGHT:
                 w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
                 normed = xhat * w[None, :]
-            tl.store(DSCALE + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
+            # dscale and dy go into ONE [M, 2N] buffer, side by side. Both are already in
+            # registers here, so the second store is the whole cost of a concatenation the
+            # caller would otherwise pay for -- and it turns the caller's four GEMMs into two:
+            #   dWpair = [dscale|dy]^T @ cs      (was dWsc and dWsh separately)
+            #   dc     = [dscale|dy] @ [Wsc;Wsh] (was two [M,N]@[N,K] and an add)
+            tl.store(DSD + rows[:, None] * stride_sr + cols[None, :] * stride_sc,
                      dy * normed, mask=mask)
+            tl.store(DSD + rows[:, None] * stride_sr + (N + cols[None, :]) * stride_sc,
+                     dy, mask=mask)
             dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
             if HAS_WEIGHT:
                 tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask)
@@ -597,20 +612,27 @@ def _adamod_fwd(q_2d: torch.Tensor, c_2d: torch.Tensor, wsc: torch.Tensor, wsh: 
 
 
 def _adamod_bwd_fake(dy_2d, q_2d, c_2d, wsc, weight, rstd, has_w, shape_key):
-    """``(dq, dscale, dweight)``. The three big GEMMs are the caller's, on cuBLAS."""
-    return (torch.empty_like(q_2d), torch.empty_like(q_2d),
-            q_2d.new_empty((q_2d.shape[1],), dtype=torch.float32))
+    """``(dq, [dscale | dy] as one (M, 2N), dweight)``. The big GEMMs are the caller's."""
+    m, nn = q_2d.shape
+    return (torch.empty_like(q_2d), q_2d.new_empty((m, 2 * nn)),
+            q_2d.new_empty((nn,), dtype=torch.float32))
 
 
 @opaque(fake=_adamod_bwd_fake, name="rmsnorm_adamod_bwd")
 def _adamod_bwd(dy_2d: torch.Tensor, q_2d: torch.Tensor, c_2d: torch.Tensor, wsc: torch.Tensor,
                 weight: torch.Tensor | None, rstd: torch.Tensor, has_w: bool,
                 shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``dq``, ``dscale`` and ``dweight``; ``scale`` is recomputed rather than read back."""
+    """``dq``, ``[dscale | dy]`` stacked as one (M, 2N), and ``dweight``.
+
+    Stacked because every consumer wants them together: the weight gradients are one
+    ``[dscale|dy]^T @ cs`` instead of two, and ``dc`` is one ``[dscale|dy] @ [Wsc;Wsh]`` instead
+    of two GEMMs and an add. The kernel holds both in registers already, so the stacking is a
+    store and not a concatenation. ``scale`` is still recomputed rather than read back.
+    """
     m, n = q_2d.shape
     k = c_2d.shape[1]
     dq = torch.empty_like(q_2d)
-    dscale = torch.empty_like(q_2d)
+    dsd = q_2d.new_empty((m, 2 * n))
     # ZEROED, not `new_empty`: the kernel accumulates dweight across row tiles with
     # `atomic_add`, and the autotuner's `reset_to_zero` only fires on the paths that
     # benchmark a config -- once a shape is tuned and served from cache, nothing clears
@@ -618,13 +640,14 @@ def _adamod_bwd(dy_2d: torch.Tensor, q_2d: torch.Tensor, c_2d: torch.Tensor, wsc
     dw = q_2d.new_zeros((n,), dtype=torch.float32)
     grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
     rmsnorm_adamod_bwd_kernel[grid](
-        dq, dscale, dw, dy_2d, q_2d, c_2d, wsc,
+        dq, dsd, dw, dy_2d, q_2d, c_2d, wsc,
         weight if has_w else q_2d.new_empty((0,)), rstd,
         q_2d.stride(0), q_2d.stride(1), c_2d.stride(0), c_2d.stride(1),
         wsc.stride(0), wsc.stride(1),
+        dsd.stride(0), dsd.stride(1),
         m, n, k, shape_key=shape_key, HAS_WEIGHT=has_w,
     )
-    return dq, dscale, dw
+    return dq, dsd, dw
 
 
 class _RMSNormAdaMod(torch.autograd.Function):
@@ -659,16 +682,16 @@ class _RMSNormAdaMod(torch.autograd.Function):
         dy2 = dy.reshape(-1, n)
         if dy2.stride(1) != 1:
             dy2 = dy2.contiguous()
-        dq, dscale, dw = _adamod_bwd(dy2, q2, c2, wsc, weight, rstd, ctx.has_w, ctx.key)
-        # dshift IS dy, so the shift half of every chain below is spelled with dy directly.
-        dwsc = (dscale.mT @ c2).to(wsc.dtype)
-        dwsh = (dy2.mT @ c2).to(wsh.dtype)
-        # In place on the first product, not `torch.addmm(dscale @ wsc, dy2, wsh)`: that spells
-        # one [M, K] temporary for the product and a second for the sum, and at the atom-DiT
-        # shape each of those is 302 MB written and read for nothing.
-        dc = dscale @ wsc
-        dc.addmm_(dy2, wsh)
-        dc = dc.reshape(tuple(ctx.cshape))
+        dq, dsd, dw = _adamod_bwd(dy2, q2, c2, wsc, weight, rstd, ctx.has_w, ctx.key)
+        # dshift IS dy, and the kernel has already put it beside dscale in one (M, 2N) buffer,
+        # so both chains below are ONE GEMM each rather than two. The weight pair is 98 KB a
+        # slice, so stacking it costs nothing measurable.
+        n = q2.shape[1]
+        w_pair = torch.cat((wsc, wsh), dim=0)                  # [2N, K]
+        dw_pair = dsd.mT @ c2                                   # [2N, K]
+        dwsc = dw_pair[:n].to(wsc.dtype)
+        dwsh = dw_pair[n:].to(wsh.dtype)
+        dc = (dsd @ w_pair).reshape(tuple(ctx.cshape))          # [M, K]
         dweight = dw.to(weight.dtype) if ctx.has_w else None
         return dq.reshape(tuple(ctx.shape)), dc, dwsc, dwsh, dweight, None
 
