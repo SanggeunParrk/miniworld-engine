@@ -215,6 +215,12 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
+#: N at or below which the covering tile (BLOCK_K = next_pow2(N)) reads each row once and is
+#: forced in the launcher rather than autotuned -- see the note in `_bwd_x`. 768 (token) and 128
+#: (atom) both fit; the bound leaves headroom without inviting a covering tile that spills.
+_BWD_X_COVER_MAX_N = 1024
+
+
 @triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['shape_key'])
 @triton.jit
 def _bwd_x_kernel(
@@ -323,14 +329,28 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
         )
     D = torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype)   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    # N is tl.constexpr now (it drives the BLOCK_N >= N fold) -> pass a plain python int.
-    _bwd_x_kernel[grid](
-        dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
-        dy.stride(0), dy.stride(1), x.stride(0), x.stride(1), gate.stride(0), gate.stride(1),
-        D.stride(0), D.stride(1), dx.stride(0), dx.stride(1),
-        shape_key=pack(shape_key, N=N),
-    )
+    args = (dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
+            dy.stride(0), dy.stride(1), x.stride(0), x.stride(1),
+            gate.stride(0), gate.stride(1), D.stride(0), D.stride(1),
+            dx.stride(0), dx.stride(1))
+    if N <= _BWD_X_COVER_MAX_N:
+        # Force the covering tile (BLOCK_K >= N, one read of the row) instead of autotuning it.
+        # It is the kernel's own single-read branch, and it WINS at every production row count --
+        # 1.24x at M=1536 rising to 1.45x at M=32768+ (A5000, N=768) -- while merely TYING at the
+        # 512 rows the driver builds with. The autotuner only ever measured those 512 rows, so it
+        # stored a tiled config that then costs production 1.44x (742 vs 494 us at M=36864). The
+        # root cause is structural: the best config is M-dependent and the shape key does not
+        # encode M, so no cache entry can be right for both the driver's M and production's. This
+        # sidesteps it for the one axis that has a provable answer. warps/stages are the sweep's
+        # winner and are M-flat here; BLOCK_M1=8 was best across the M range.
+        bk = triton.next_power_of_2(N)
+        grid = (triton.cdiv(M, 8),)
+        _bwd_x_kernel.fn[grid](*args, BLOCK_M1=8, BLOCK_K=bk,
+                               shape_key=pack(shape_key, N=N), num_warps=8, num_stages=1)
+    else:
+        # Wide N cannot cover in one tile; keep the autotuned two-pass schedule.
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
     return D, dx
 
 
