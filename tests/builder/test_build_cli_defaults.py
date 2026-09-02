@@ -278,3 +278,35 @@ def test_capture_argv_names_the_target_and_its_level() -> None:
     # a square combination no model config declares.
     assert "precision=32" in cond, cond
     assert not [a for a in cond if a.startswith("d_single_token=")], cond
+
+
+def test_pruning_defaults_to_ownership(monkeypatch):
+    """The build empties a cache directory it OWNS, and only such a directory.
+
+    118 GB of compile cache on the filesystem holding SlurmdSpoolDir drained two nodes because
+    cleanup was a flag somebody had to remember. Ownership is the condition now: pointing the
+    build at its own $TRITON_CACHE_DIR is what creates the node-local pile, so setting it is
+    what turns pruning on. Unset means ~/.triton/cache, shared with every other Triton workload
+    on the machine -- not the build's to empty.
+    """
+    parse = cli.build_parser().parse_args
+
+    monkeypatch.setenv("TRITON_CACHE_DIR", "/tmp/nobody/tc-test")
+    assert cli._should_prune(parse(["build", "all"])), "owned directory: prune by default"
+    assert not cli._should_prune(parse(["build", "all", "--keep-triton-cache"])), (
+        "the opt-out exists for re-measuring unchanged kernels on a warm cache")
+
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    assert not cli._should_prune(parse(["build", "all"])), (
+        "the shared ~/.triton/cache is not the build's to empty")
+    # Explicit --prune-cache without the variable still ASKS; _empty_triton_cache is the layer
+    # that refuses, with the message saying why, so the request is not silently absorbed here.
+    assert cli._should_prune(parse(["build", "all", "--prune-cache"]))
+
+
+def test_the_prune_pair_cannot_both_be_said():
+    """--prune-cache --keep-triton-cache is a contradiction, not a precedence puzzle."""
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["build", "all", "--prune-cache", "--keep-triton-cache"])

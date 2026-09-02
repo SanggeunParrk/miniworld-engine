@@ -838,9 +838,30 @@ def cmd_build(args: argparse.Namespace) -> int:
     rc = _merge_built_shards(args, results)
     # AFTER the merge, never before: the shipped output is the JSON the merge writes, and until it
     # is written the triton cache is the only place the build's work exists.
-    if getattr(args, "prune_cache", False) and not rc:
+    if not rc and _should_prune(args):
         _empty_triton_cache(dry_run=False)
     return rc
+
+
+def _should_prune(args: argparse.Namespace) -> bool:
+    """Prune by DEFAULT whenever the build was handed its own cache directory.
+
+    Ownership is the condition, and the only one. A build pointed at a $TRITON_CACHE_DIR of its
+    own is the scenario that drained two nodes -- 118 GB of compile cache on the filesystem that
+    holds SlurmdSpoolDir, with cleanup left to a flag somebody had to remember -- so there the
+    cache is emptied after a successful merge unless --keep-triton-cache says otherwise (the
+    honest reason to keep it: re-measuring unchanged kernels, where a warm cache skips the
+    recompile). With the variable UNSET the cache is ~/.triton/cache, shared with every other
+    Triton workload on the machine; the build does not own that and never touches it --
+    `_empty_triton_cache` refuses even an explicit --prune-cache there.
+
+    --prune-cache survives as a no-op-when-defaulted for the job scripts that already pass it.
+    """
+    if getattr(args, "keep_triton_cache", False):
+        return False
+    if getattr(args, "prune_cache", False):
+        return True
+    return bool(os.environ.get("TRITON_CACHE_DIR"))
 
 
 def _empty_triton_cache(dry_run: bool) -> int:
@@ -1270,9 +1291,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "unit that is MEASURING otherwise competes with every other unit's "
                           "compile workers, and the measurement is what a build produces. "
                           "Default on; --no-pin-cores pools them.")
-    bld.add_argument("--prune-cache", action="store_true",
-                     help="after a successful merge, empty $TRITON_CACHE_DIR. It is a build "
-                          "artifact -- what ships is the JSON under autotune/data/.")
+    # Ownership decides the default: see _should_prune. The pair is mutually exclusive so a
+    # script cannot say both and silently get one of them.
+    _prune = bld.add_mutually_exclusive_group()
+    _prune.add_argument("--prune-cache", action="store_true",
+                        help="after a successful merge, empty $TRITON_CACHE_DIR. This is the "
+                             "DEFAULT whenever $TRITON_CACHE_DIR is set -- the flag remains for "
+                             "the job scripts that pass it -- and it is refused when unset, "
+                             "because ~/.triton/cache is shared with everything else here.")
+    _prune.add_argument("--keep-triton-cache", action="store_true",
+                        help="keep $TRITON_CACHE_DIR after the merge, for re-measuring "
+                             "unchanged kernels where the warm cache skips the recompile.")
     bld.add_argument("--resume", action="store_true",
                      help="skip units whose shard already has entries")
     bld.add_argument("--per-op", action="store_true",
