@@ -27,6 +27,8 @@ from miniworld_engine.autotune.configs import configs_for
 
 # The weighted-LayerNorm kernel that used to live here was fused3.py's `_ln_kernel` with
 # HAS_W=True -- bitwise equal on the output (.bench/direct.out). Imported now.
+from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 from .ln_strided import _ln_kernel
 
 import contextlib
@@ -232,6 +234,112 @@ def _adaln_epilogue(x: torch.Tensor, sb: torch.Tensor, eps: float,
         x, sb, y, M, int(N), eps,
         x.stride(0), x.stride(1), sb.stride(0), sb.stride(1), y.stride(0), y.stride(1),
         shape_key=pack(shape_key, N=N),
+    )
+    return y
+
+
+#: The K-tile this GEMM wants, and it is SMALLER than every other ladder in the family.
+#:
+#: adaLN's projection is (M, NC) @ (NC, 2*NX) -- at the token width that is K=384, a THIN K.
+#: A thin-K GEMM wants a small K tile with more pipeline stages, not a big one: the K loop is
+#: short, so what has to be hidden is latency, not bandwidth. Measured on an A5000 (bf16,
+#: M=36864, NX=768, NC=384), same kernel, only these differing:
+#:
+#:     BLOCK_K=64  stages=3   0.868 ms
+#:     BLOCK_K=32  stages=3   0.776 ms      11% faster
+#:     BLOCK_K=32  stages=3   0.580 ms      once the grid became 2-D (below)
+#:
+#: Every other adaLN ladder starts at 64 and climbs -- ``adaln_fwd_triton`` caps its width axes
+#: at 64, ``adaln_epilogue_triton`` runs 64..1024 -- which is why sweeping the older fused kernel
+#: over 216 configs, well past its own ladder, never beat the materialize path: the search only
+#: went UP. Up also runs out of shared memory; over half of those 216 failed with OutOfResources
+#: on sm86's ~100 KB.
+_THIN_K_TILE = 32
+
+
+@triton.autotune(configs=configs_for("adaln_gemm_gate_triton"), key=["shape_key"])
+@triton.jit
+def _adaln_gemm_gate_kernel(
+    CondN, SW, SB, BW, X, Rstd, C1, Y,
+    M, NX: tl.constexpr, NC: tl.constexpr,
+    scn0, sw0, sbw0, sx0, sy0,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    GROUP_M: tl.constexpr, shape_key,
+):
+    """y = sigmoid(CondN @ SW + SB) * (x*rstd - c1) + CondN @ BW, one program per output tile.
+
+    Three things are the caller's job, and each is why this beats ``_adaln_fused_kernel``:
+
+      * ``CondN`` is cond ALREADY layer-normalised and scaled by the cond LN weight. The older
+        kernel re-derives LN(cond) INSIDE its x-block loop, so at NX=768 with a 128-wide block it
+        normalises cond six times over. Once outside costs one ``_cond_affine`` launch.
+      * ``SW``/``BW`` are the to_scale / to_bias weights ALREADY transposed to (NC, NX). The
+        older kernel reads them as (NX, NC) with the NC axis strided -- the transposed direction
+        for a dot's K axis. Transposing once at the call site is 590 KB of copy, ~1.5 us.
+      * ``Rstd``/``C1`` come from ``layernorm_stats_triton``, so x is read once here rather than
+        twice. ``c1`` is ``mean*rstd``, so ``x_hat = x*rstd - c1`` with no second pass.
+
+    The grid is 1-D over (row tile, column tile) via :func:`tile_order`, NOT one program per row
+    block looping over all of NX. That was worth 0.776 -> 0.580 ms on its own: a per-row program
+    serialises NX/BLOCK_N iterations inside one CTA, which is parallelism left on the floor.
+    """
+    pid_m, pid_n = tile_order(tl.program_id(0), tl.cdiv(M, BLOCK_M), tl.cdiv(NX, BLOCK_N),
+                              GROUP_M)
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rmask = rows < M
+    nmask = cols < NX
+
+    scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    for k0 in range(0, NC, BLOCK_K):
+        kc = k0 + tl.arange(0, BLOCK_K)
+        kmask = kc < NC
+        a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
+                    mask=rmask[:, None] & kmask[None, :], other=0.0)
+        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :],
+                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :],
+                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        scale += tl.dot(a, w_s, out_dtype=tl.float32)
+        bias += tl.dot(a, w_b, out_dtype=tl.float32)
+
+    # x last: its tile would otherwise sit in shared memory for the whole K loop, and shared
+    # memory is what capped the kernel this replaces.
+    xm = rmask[:, None] & nmask[None, :]
+    xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
+    rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)
+    c1 = tl.load(C1 + rows, mask=rmask, other=0.0)
+    sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
+    y = tl.sigmoid(scale + sb[None, :]) * (xv * rstd[:, None] - c1[:, None]) + bias
+    tl.store(Y + rows[:, None] * sy0 + cols[None, :], y.to(Y.dtype.element_ty), mask=xm)
+
+
+def _adaln_gemm_gate_fake(cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, shape_key=None):
+    """x's shape and dtype -- the weights only supply the gate."""
+    return torch.empty_like(x)
+
+
+@opaque(fake=_adaln_gemm_gate_fake, name="adaln_gemm_gate")
+def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: torch.Tensor,
+                     bias_wt: torch.Tensor, x: torch.Tensor, rstd: torch.Tensor,
+                     c1: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
+    """Launcher for :func:`_adaln_gemm_gate_kernel`. ``scale_wt``/``bias_wt`` are (NC, NX)."""
+    M, NX = x.shape
+    NC = cond_n.shape[-1]
+    if shape_key is None:
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened (M, D) "
+            "matrix, and M alone cannot say whether it is L or L*L. Compute the key at the "
+            "caller that still holds the pre-flatten shape and pass it down."
+        )
+    y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
+    grid = lambda META: tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
+    _adaln_gemm_gate_kernel[grid](
+        cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y,
+        M, int(NX), int(NC),
+        cond_n.stride(0), scale_wt.stride(0), bias_wt.stride(0), x.stride(0), y.stride(0),
+        shape_key=pack(shape_key, NX=NX, NC=NC),
     )
     return y
 
@@ -539,5 +647,61 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
     ):
         return adaln_inference_lnfold(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                       bias_weight, eps_x, eps_cond, **kw)
+    # Pre-Hopper wide d: LN(cond) once, then ONE kernel for the projections and the gate.
+    #
+    # Measured on an A5000, bf16, the token shape the model presents (A=48, L=768, d_hidden=768,
+    # d_cond=384, M=36864 rows):
+    #
+    #     torch eager                                3.691 ms
+    #     torch.compile                              0.957 ms
+    #     materialize + cuBLAS  (what ran here)      1.073 ms   0.89x -- LOSING
+    #     adaln_inference_fused, best of 216 configs 1.077 ms   0.89x -- also losing
+    #     LN(cond) 0.084 + this kernel 0.776         0.860 ms   1.11x
+    #
+    # For scale it is worth knowing what the two halves cost alone: cuBLAS does this GEMM in
+    # 0.588 ms (74 TFLOP/s, past the card's nominal bf16 peak) and the standalone epilogue runs
+    # at 730 GB/s of a 768 GB/s bus, tying torch.compile exactly. Neither kernel had anything
+    # left to give -- the whole 0.116 ms gap was the round trip BETWEEN them, which is what
+    # fusing removes. That also puts this below the sum of the two floors (0.898 ms), which is
+    # only possible because the fused form never materialises scale/bias at all.
+    #
+    # fp32 stays on materialize: none of the above was measured there, and the GEMM's TF32
+    # behaviour is a separate regime.
+    if x.dtype in (torch.float16, torch.bfloat16):
+        return adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias,
+                                        bias_weight, eps_x, eps_cond)
     return adaln_inference_materialize(x, cond, cond_ln_weight, scale_weight, scale_bias,
                                        bias_weight, eps_x, eps_cond, **kw)
+
+
+def adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
+                             eps_x, eps_cond):
+    """LN(cond) -> one fused GEMM+gate kernel. The pre-Hopper wide-d path; see the dispatch note.
+
+    The two transposes are 590 KB of copy each, ~1.5 us against this call's ~860 us, and they are
+    what make the dot's K axis contiguous. Caching them on the module would save that 0.35% and
+    cost a second copy of every adaLN weight; it is not worth it until something measures it.
+    """
+    orig = x.shape
+    nx = orig[-1]
+    x2 = x.reshape(-1, nx)
+    cond2d = cond.reshape(-1, cond.shape[-1])
+    if x2.stride(-1) != 1:
+        x2 = x2.contiguous()
+    if cond2d.stride(-1) != 1:
+        cond2d = cond2d.contiguous()
+    # `_cond_affine`, not `triton_layernorm`: adaLN's cond LN has a WEIGHT and no bias, and
+    # triton_layernorm's kernel takes its bias pointer unconditionally -- there is no HAS_B flag
+    # to pass None through. This is the same launcher the materialize path uses for the same
+    # tensor, so both paths tune one cond-LN kernel rather than two.
+    key_x = atom_key(length_of(orig))
+    cond_n = _cond_affine(cond2d, cond_ln_weight, eps_cond,
+                          shape_key=atom_key(length_of(cond.shape)))
+    # x's LN statistics from the family's own stats kernel rather than a pass inside the fused
+    # kernel: that pass read x a second time, and this one is already registered and tuned.
+    rstd, c1 = stats_triton(x2, eps_x, shape_key=key_x)
+    y = _adaln_gemm_gate(
+        cond_n, scale_weight.t().contiguous(), scale_bias,
+        bias_weight.t().contiguous(), x2, rstd, c1, shape_key=key_x,
+    )
+    return y.reshape(orig)

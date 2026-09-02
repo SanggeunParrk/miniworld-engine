@@ -11,6 +11,10 @@ adaln_epilogue_triton,_adaln_epilogue_kernel,miniworld_engine/kernels/adaln/trit
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_K_NC,64,128,16,32,64,16 32 64,128,16,64,64,0,1,NC,1
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_K_NX,64,128,16,32,64,16 32 64,64,32,64,64,0,1,NX,1
 adaln_fwd_triton,_adaln_fused_kernel,miniworld_engine/kernels/adaln/triton/inference.py,368,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,BLOCK_K,32,64,16,32,64,16 32 64 128,32,16,32,32,0,1,NC,1
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,BLOCK_M,64,128,32,64,64,64 128 256,128,32,64,128,1,0,,
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,BLOCK_N,64,128,64,64,64,64 128 256,128,64,128,64,1,0,,
+adaln_gemm_gate_triton,_adaln_gemm_gate_kernel,miniworld_engine/kernels/adaln/triton/inference.py,262,GROUP_M,8,8,1,4,8,1 2 4 8 16,8,1,4,8,0,0,,
 augmented_attention_bwd_atomic_triton,_attn_bwd,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,118,BLOCK_M1,64,128,16,32,64,32 64 128 256,128,16,64,64,0,0,,
 augmented_attention_bwd_atomic_triton,_attn_bwd,miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py,118,BLOCK_M2,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 augmented_attention_bwd_pre_triton,_attn_bwd_preprocess,miniworld_engine/kernels/augmented_attention/triton/main.py,254,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,128,16,64,64,1,0,,
