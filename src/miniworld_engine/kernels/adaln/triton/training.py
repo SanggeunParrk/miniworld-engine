@@ -493,6 +493,10 @@ def _dgrad_condln_fake(D, w_cat, cond, mean_c, rstd_c, lnw, shape_key=None):
         torch.empty_strided((m, nc), cond.stride(), device=cond.device, dtype=cond.dtype),
         lnw.new_empty((nc,)),
     )
+#: Row count above which _dgrad_condln forces the swept-best config instead of autotuning it --
+#: see the note in the launcher. The driver builds at 512 rows; production runs 36864. 8192 sits
+#: well above the driver and below every production shape.
+_DGRAD_BIG_M = 8192
 
 
 @opaque(fake=_dgrad_condln_fake, name="adaln_dgrad_condln")
@@ -508,14 +512,23 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
     NC = w_cat.shape[1]
     dcond = torch.empty_strided((M, NC), cond.stride(), device=cond.device, dtype=cond.dtype)
     dlnw = torch.zeros(NC, dtype=torch.float32, device=cond.device)
-    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    # NC is tl.constexpr now (it drives the BLOCK_NC >= NC fold) -> pass a plain python int.
-    _dgrad_condln_kernel[grid](
-        D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
-        D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
-        cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1),
-        shape_key=pack(shape_key, NC=int(NC), K2=K2),
-    )
+    dargs = (D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
+             D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
+             cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1))
+    if M >= _DGRAD_BIG_M:
+        # Same M-coverage failure as _bwd_x: the config is row-count dependent (grid/occupancy),
+        # the shape key does not encode M, and the driver tunes at 512 rows while production runs
+        # 36864. The tuner stored a small-M config (M1=32, K2-tile 16) that costs production 2.05x
+        # -- 138 vs 67 us at M=36864, NC=128, K2=256 (A5000). Forced to the swept-best config for
+        # large M; small M (the driver's own regime) keeps the autotuned path, where its choice is
+        # right. Only the atom stream reaches this branch (token NC=384 takes cuBLAS above).
+        _dgrad_condln_kernel.fn[(triton.cdiv(M, 64),)](
+            *dargs, BLOCK_M1=64, BLOCK_K_NC=128, BLOCK_K_K2=64,
+            shape_key=pack(shape_key, NC=int(NC), K2=K2), num_warps=4, num_stages=2)
+    else:
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+        _dgrad_condln_kernel[grid](
+            *dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2))
     return dcond, dlnw.to(lnw.dtype)
 
 
