@@ -122,24 +122,17 @@ def _flash_window_seqused_fake(q, k, v, cu_seqlens, seqused, max_seqlen, valid, 
 # eager leaf so torch.compile breaks here once (no per-trace resume churn / cache pressure)
 # and CUDA graphs (reduce-overhead) capture the compiled regions around it; under
 # "custom_op" it is an opaque graph node instead and nothing breaks at all.
-@opaque(fake=_flash_window_seqused_fake, name="swa_atom_attention_flash_window")
-def flash_window_seqused(
+def _flash_window_core(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, seqused: torch.Tensor, max_seqlen: int,
     valid: torch.Tensor, n: int, s: int, scale: float, half_window: int,
 ) -> torch.Tensor:
-    """Static-shape sliding-window attention via FA4. q/k/v: [N, S, H, D] -> [N, S, H, D].
+    """The flash windowed attention itself -- eager and DIFFERENTIABLE.
 
-    Keeps the full padded ``[N, S]`` layout — no unpad/gather/scatter. Each row is
-    one fixed-stride length-``S`` sequence (``cu_seqlens = [0, S, 2S, ...]``, static)
-    and ``seqused_k`` (= per-row valid-atom count) tells FA4 that only the first
-    ``seqused[i]`` positions are real keys, so padding keys are excluded *exactly*
-    (no probability mass leaks to them). Requires valid atoms to be front-packed in
-    each row — enforced in :func:`build_attention_params`.
-
-    Everything is static-shape: no ``torch.nonzero``, no data-dependent gather, so
-    the surrounding compiled region never recompiles and the call is CUDA-graph
-    capturable. Padding query rows are zeroed on the way out (matches the old path).
+    Shared by the opaque forward launch and the backward's recompute. flash's own
+    varlen func is differentiable, so calling this under ``enable_grad`` and running
+    ``autograd.grad`` through it is what gives the op a backward -- FA2 and FA4, the
+    seqused and the unpad paths, all without reimplementing flash's backward.
     """
     backend = _flash_backend(q.device)
     if backend == "fa4":
@@ -236,6 +229,60 @@ def flash_window_seqused(
     # is discarded rather than turned into NaN*0=NaN; matches the old pad_input zeros.
     mask = valid.unsqueeze(-1).unsqueeze(-1)
     return torch.where(mask, out, torch.zeros_like(out)).to(in_dtype)
+
+
+@opaque(fake=_flash_window_seqused_fake, name="swa_atom_attention_flash_window")
+def flash_window_seqused(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    cu_seqlens: torch.Tensor, seqused: torch.Tensor, max_seqlen: int,
+    valid: torch.Tensor, n: int, s: int, scale: float, half_window: int,
+) -> torch.Tensor:
+    """Static-shape sliding-window attention via FA4/FA2. q/k/v: [N,S,H,D]->[N,S,H,D].
+
+    The forward LAUNCH only -- opaque to Dynamo. It is differentiable through
+    ``register_autograd`` below, whose backward recomputes ``_flash_window_core`` and
+    backprops flash's own varlen kernel; without it a custom_op boundary (the default
+    compile_wrap) silently blocks gradient and training sees no attention grad.
+    """
+    with torch.no_grad():
+        return _flash_window_core(
+            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
+
+
+def _flash_window_setup_context(ctx, inputs, output):
+    q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window = inputs
+    ctx.save_for_backward(q, k, v, cu_seqlens, seqused, valid)
+    ctx.meta = (max_seqlen, n, s, scale, half_window)
+
+
+def _flash_window_backward(ctx, grad_out):
+    """Recompute the flash forward with grad and backprop -- flash's own varlen backward.
+
+    Reentrant autograd rather than a hand-written flash backward: it is backend-agnostic (FA2 and
+    FA4) and covers the seqused and unpad paths for free. The cost is one extra flash forward per
+    backward -- the usual activation-recomputation trade, not a lost gradient.
+    """
+    q, k, v, cu_seqlens, seqused, valid = ctx.saved_tensors
+    max_seqlen, n, s, scale, half_window = ctx.meta
+    qd = q.detach().requires_grad_(ctx.needs_input_grad[0])
+    kd = k.detach().requires_grad_(ctx.needs_input_grad[1])
+    vd = v.detach().requires_grad_(ctx.needs_input_grad[2])
+    with torch.enable_grad():
+        out = _flash_window_core(
+            qd, kd, vd, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
+    wanted = [t for t, g in zip((qd, kd, vd), ctx.needs_input_grad[:3], strict=True) if g]
+    grads = torch.autograd.grad(out, wanted, grad_out) if wanted else ()
+    it = iter(grads)
+    dq = next(it) if ctx.needs_input_grad[0] else None
+    dk = next(it) if ctx.needs_input_grad[1] else None
+    dv = next(it) if ctx.needs_input_grad[2] else None
+    # Only q/k/v are differentiable; cu_seqlens, seqused, max_seqlen, valid, n, s, scale,
+    # half_window are integer/index/constant inputs.
+    return dq, dk, dv, None, None, None, None, None, None, None, None
+
+
+flash_window_seqused.register_autograd(
+    _flash_window_backward, setup_context=_flash_window_setup_context)
 
 
 def sparse_neighbor_attention(
