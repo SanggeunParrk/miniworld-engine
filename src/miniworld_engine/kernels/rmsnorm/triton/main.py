@@ -178,7 +178,7 @@ def rmsnorm_adamod_fwd_kernel(
     Q, C, WSC, WSH, WG, W, Y, Rstd, GATE,
     stride_qr, stride_qc, stride_cr, stride_cc, stride_wn, stride_wk,
     M, N: tl.constexpr, K: tl.constexpr, eps: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
     """``rmsnorm(q) * (1 + c@Wsc^T) + c@Wsh^T`` -- the modulation projection folded in.
@@ -200,25 +200,25 @@ def rmsnorm_adamod_fwd_kernel(
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
     row_mask = rows < M
 
-    if BLOCK_K >= N:
+    if BLOCK_N >= N:
         # ONE tile over the normalized axis, so q is read once and held: the reduction that
         # makes rstd and the output that consumes it are the same registers. The tiled branch
         # below cannot -- rstd needs the whole row before any output element is final -- and
         # reads q a second time, and c once per N tile.
         #
-        # It does NOT win at d_model 128, where it is reachable (BLOCK_K 128): a full sweep of
-        # the ladder picks BLOCK_M1=64 BLOCK_K=64 over every covering config. Two reasons, both
+        # It does NOT win at d_model 128, where it is reachable (BLOCK_N 128): a full sweep of
+        # the ladder picks BLOCK_M1=64 BLOCK_N=64 over every covering config. Two reasons, both
         # worth knowing before reaching for this branch again. The re-reads it removes are L1/L2
         # hits, not HBM traffic -- the second N tile wants the same 48 KB of c the first just
         # read -- so there is far less to win than the byte count suggests. And covering costs
-        # registers: acc_sc and acc_sh are each [BLOCK_M1, BLOCK_K] fp32, so doubling BLOCK_K
+        # registers: acc_sc and acc_sh are each [BLOCK_M1, BLOCK_N] fp32, so doubling BLOCK_N
         # doubles both and forces BLOCK_M1 down.
         #
         # It stays because it is the right shape of code for a NARROW normalized axis (a model
         # config with d_model 64, or ragged mode's 125), where covering is the only tiling and
         # the accumulators are small. The autotuner decides; this branch just has to exist for
         # it to be able to.
-        cols = tl.arange(0, BLOCK_K)
+        cols = tl.arange(0, BLOCK_N)
         col_mask = cols < N
         mask = row_mask[:, None] & col_mask[None, :]
         q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
@@ -226,16 +226,16 @@ def rmsnorm_adamod_fwd_kernel(
         rstd = 1 / tl.sqrt(tl.sum(q * q, axis=1) / N + eps)
         tl.store(Rstd + rows, rstd, mask=row_mask)
 
-        acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        acc_sh = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
+        acc_sc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+        acc_sh = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
         # The block's THIRD chunk, from the same c tile, and NOT optional. adaLN projects six
         # of these from one conditioning vector and every sub-layer uses its scale, its shift
         # AND its gate, so a no-gate variant is a second compiled kernel and a second cache
         # bucket that nothing reaches. No extra read here -- c is in registers for the other
         # two, and the weight tile is the only new load.
-        acc_g = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_DC):
-            ks = k0 + tl.arange(0, BLOCK_DC)
+        acc_g = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            ks = k0 + tl.arange(0, BLOCK_K)
             k_mask = ks < K
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                         mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -260,8 +260,8 @@ def rmsnorm_adamod_fwd_kernel(
         return
 
     ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
-    for n0 in range(0, N, BLOCK_K):
-        cols = n0 + tl.arange(0, BLOCK_K)
+    for n0 in range(0, N, BLOCK_N):
+        cols = n0 + tl.arange(0, BLOCK_N)
         mask = row_mask[:, None] & (cols[None, :] < N)
         q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
                     mask=mask, other=0.0).to(tl.float32)
@@ -269,20 +269,20 @@ def rmsnorm_adamod_fwd_kernel(
     rstd = 1 / tl.sqrt(ss / N + eps)
     tl.store(Rstd + rows, rstd, mask=row_mask)
 
-    for n0 in range(0, N, BLOCK_K):
-        cols = n0 + tl.arange(0, BLOCK_K)
+    for n0 in range(0, N, BLOCK_N):
+        cols = n0 + tl.arange(0, BLOCK_N)
         col_mask = cols < N
         mask = row_mask[:, None] & col_mask[None, :]
-        acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        acc_sh = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
+        acc_sc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+        acc_sh = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
         # The block's THIRD chunk, from the same c tile, and NOT optional. adaLN projects six
         # of these from one conditioning vector and every sub-layer uses its scale, its shift
         # AND its gate, so a no-gate variant is a second compiled kernel and a second cache
         # bucket that nothing reaches. No extra read here -- c is in registers for the other
         # two, and the weight tile is the only new load.
-        acc_g = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_DC):
-            ks = k0 + tl.arange(0, BLOCK_DC)
+        acc_g = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            ks = k0 + tl.arange(0, BLOCK_K)
             k_mask = ks < K
             # bf16 operands into tl.dot, fp32 accumulator: casting to fp32 first would drop the
             # tensor cores this loop exists to use.
@@ -409,7 +409,7 @@ def rmsnorm_adamod_bwd_kernel(
     stride_qr, stride_qc, stride_cr, stride_cc, stride_wn, stride_wk,
     stride_sr, stride_sc,
     M, N: tl.constexpr, K: tl.constexpr,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_DC: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
     """``dq``, ``dscale`` and ``dweight`` for the fused modulate. ``dshift`` IS ``dy``.
@@ -419,7 +419,7 @@ def rmsnorm_adamod_bwd_kernel(
     GEMMs the chain still needs -- ``dWsc``, ``dWsh``, ``dc`` -- stay in the caller, on cuBLAS,
     which is better at them than a hand-tiled `tl.dot` and needs no scratch here.
 
-    The covering-tile branch (BLOCK_K >= N, which is the atom-DiT d_model of 128) keeps
+    The covering-tile branch (BLOCK_N >= N, which is the atom-DiT d_model of 128) keeps
     everything in registers and recomputes nothing twice. The tiled branch cannot: ``c1`` reduces
     over the whole row, so the GEMM is recomputed in the second pass rather than spilling
     ``dnormed`` to a [M, N] scratch buffer.
@@ -429,13 +429,13 @@ def rmsnorm_adamod_bwd_kernel(
     row_mask = rows < M
     rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
 
-    if BLOCK_K >= N:
-        cols = tl.arange(0, BLOCK_K)
+    if BLOCK_N >= N:
+        cols = tl.arange(0, BLOCK_N)
         col_mask = cols < N
         mask = row_mask[:, None] & col_mask[None, :]
-        acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-        for k0 in range(0, K, BLOCK_DC):
-            ks = k0 + tl.arange(0, BLOCK_DC)
+        acc_sc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+        for k0 in range(0, K, BLOCK_K):
+            ks = k0 + tl.arange(0, BLOCK_K)
             k_mask = ks < K
             c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                         mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -471,13 +471,13 @@ def rmsnorm_adamod_bwd_kernel(
         tl.store(DQ + rows[:, None] * stride_qr + cols[None, :] * stride_qc, dq, mask=mask)
     else:
         c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
+        for n0 in range(0, N, BLOCK_N):
+            cols = n0 + tl.arange(0, BLOCK_N)
             col_mask = cols < N
             mask = row_mask[:, None] & col_mask[None, :]
-            acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-            for k0 in range(0, K, BLOCK_DC):
-                ks = k0 + tl.arange(0, BLOCK_DC)
+            acc_sc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                ks = k0 + tl.arange(0, BLOCK_K)
                 k_mask = ks < K
                 c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                             mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -511,13 +511,13 @@ def rmsnorm_adamod_bwd_kernel(
             c1 += tl.sum(xhat * wdy, axis=1)
         c1 = c1 / N
 
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
+        for n0 in range(0, N, BLOCK_N):
+            cols = n0 + tl.arange(0, BLOCK_N)
             col_mask = cols < N
             mask = row_mask[:, None] & col_mask[None, :]
-            acc_sc = tl.zeros([BLOCK_M1, BLOCK_K], dtype=tl.float32)
-            for k0 in range(0, K, BLOCK_DC):
-                ks = k0 + tl.arange(0, BLOCK_DC)
+            acc_sc = tl.zeros([BLOCK_M1, BLOCK_N], dtype=tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                ks = k0 + tl.arange(0, BLOCK_K)
                 k_mask = ks < K
                 c = tl.load(C + rows[:, None] * stride_cr + ks[None, :] * stride_cc,
                             mask=row_mask[:, None] & k_mask[None, :], other=0.0)
@@ -627,7 +627,7 @@ class _RMSNormAdaMod(torch.autograd.Function):
         wsc, wsh = w_scale.contiguous(), w_shift.contiguous()
         has_w = weight is not None
         wg = w_gate.contiguous()
-        # d_cond is in the key, not just d_model. BLOCK_DC tiles the conditioning width, so two
+        # d_cond is in the key, not just d_model. BLOCK_K tiles the conditioning width, so two
         # blocks with the same rows and d_model but different d_cond -- 128 on the atom side and
         # 384 on the token side, which is exactly the pair the model builds -- want different
         # configs and would otherwise have shared one cache entry.

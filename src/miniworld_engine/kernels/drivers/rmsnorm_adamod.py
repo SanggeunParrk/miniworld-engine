@@ -1,7 +1,9 @@
 """Drivers for the ``rmsnorm_adamod`` family.
 
 Its own family and not a mode of ``rmsnorm``: the projection makes it a ``gemm`` where the other
-is a ``reduce``, it carries its own config ladder (``tl.dot`` needs BLOCK_M1 from 16, not 1), and
+is a ``reduce``, it carries its own ladder -- its three `tl.dot` axes (BLOCK_M1 x BLOCK_N
+contracting BLOCK_K) each floor at 16, Triton's `tl.dot` minimum, where the reduce floors at 1 --
+and
 it runs on the two DiT streams only -- there is no pair-stream adaLN. The shape block is shared
 with ``drivers/rmsnorm.py`` rather than restated, the way ``drivers/layernorm.py`` shares
 ``drivers/layernorm_linear.py``'s.

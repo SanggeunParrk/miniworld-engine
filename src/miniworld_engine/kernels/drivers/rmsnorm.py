@@ -3,7 +3,8 @@
 ``triton_rmsnorm`` normalizes per attention HEAD: ``modules/swa_atom_attention`` over
 ``head_dim = d_model // n_heads`` (module.py:457) and ``kernels/triangle_attention/whole_op.py``
 over its own ``d_head``. Its normalized axis is small, which is why the ladders in
-``configs/grid/rmsnorm_*.csv`` start BLOCK_K at 32 rather than layernorm's 64. The adaLN modulate
+``configs/grid/rmsnorm_*.csv`` floor BLOCK_K at 16 (a valid tile; no `tl.dot` on this axis so
+no higher floor is forced) and the rows at 1. The adaLN modulate
 that acts on the whole ``d_model`` vector is the separate ``rmsnorm_adamod`` family, which reuses
 ``_DM``/``_DC`` from here (see docs/kernels/rmsnorm-adamod.md).
 
