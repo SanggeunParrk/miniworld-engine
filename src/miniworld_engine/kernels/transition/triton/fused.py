@@ -256,19 +256,14 @@ def transition_expand_gate(
     return (expand, xn) if save_xn else expand
 
 
-# Single baked winner (BLOCK_M1=64, BLOCK_N=64) for the d=128 b2b path. NOT env-gated:
-# multi-config autotune was timing-UNSTABLE here (cached bad configs -> 0.49-0.64ms runs);
-# the single baked config is stable at ~0.31ms. (Unlike the expand kernel, which autotunes.)
-# The d contraction and the squeeze output width are tuned extents now. They used to be,
-# respectively, the launcher's ``next_power_of_2(K)`` and the raw shape constant D
-# (`tl.arange(0, D)` + a `[BLOCK_M1, D]` accumulator). BLOCK_K is a CSV tile so the
-# whole-row single-tile schedule this kernel was written for is still in the sweep.
-#
-# The squeeze output rides on BLOCK_N rather than getting its own axis: both are "how wide a chunk
-# of the fused body do I hold", they trade against the same register/smem budget, and a fourth
-# independent axis would multiply this sweep 5x for a combination (narrow ND tile + wide D tile)
-# the tuner has no reason to want. What matters is that the extent is a tuned one, not the shape
-# constant D.
+# The July winner for the d=128 b2b path was BLOCK_M1=64, ND chunk 64, full-D output, ~1.66 ms.
+# THREE tuned extents now, deliberately decoupled: BLOCK_K_D (d contraction), BLOCK_N (ND inner
+# chunk) and BLOCK_K_ND (squeeze output / D). BLOCK_N and BLOCK_K_ND briefly SHARED one axis to
+# hold the sweep down -- but that made the covering schedule (BLOCK_K_ND >= D, full-D accumulator)
+# also loop ND in D-wide chunks, and the July full-D-output-with-a-64-wide-ND-chunk config was then
+# unreachable: measured +13% (1.87 vs 1.66) on the AF3 d=128 shape. The extra axis is worth it; the
+# prune below keeps the resulting sweep small by pinning the two covering extents and only letting
+# BLOCK_N/BLOCK_M1/warps/stages vary.
 
 
 
@@ -293,19 +288,21 @@ def _prefer_covering_b2b(configs, nargs, **_):
     The kernel has two schedules chosen at compile time by ``BLOCK_K_D >= K`` (and D == K here, so
     ``BLOCK_K_ND >= K`` covers the squeeze output too): the *covering* one reads x once and keeps the
     normalized row resident (the fast, July schedule), and the *k-tiled* ``else`` re-reads x per
-    ND chunk (needed only when d is too large for one tile). Two things this fixes, both measured on
+    ND chunk (needed only when d is too large for one tile). Three things this fixes, all measured on
     the AF3 d=128 shape:
 
       * the config grid used to top out at BLOCK_K_D=64 < K=128, so the covering branch was
         UNREACHABLE and every launch took the k-tiled path (~4x x re-read) -- 4.17 vs 1.66 ms;
       * once 128/256 are in the grid the raw autotuner still mis-picks -- it chose BLOCK_K_ND=256
-        at D=128 (half the squeeze tile masked-off waste) and measured 5.2 ms. So don't leave the
-        schedule to the tuner: restrict to the covering configs, and among them to the smallest
-        covering tile per axis, so the tuner only varies BLOCK_M1/warps/stages within the one
-        schedule that is right for this shape.
+        at D=128 (half the squeeze tile masked-off waste) and measured 5.2 ms;
+      * BLOCK_N (the ND inner chunk) is now its own axis, so the covering schedule can pair a full-D
+        output (BLOCK_K_ND >= D) with a NARROW ND chunk -- the July BLOCK_N=64 config, which was
+        unreachable while the ND chunk and the output width were one knob (+13%).
 
-    When no config covers K (d larger than every offered tile) the covering set is empty and the
-    full list is returned -- the k-tiled ``else`` is exactly the fallback for that case.
+    So pin the two covering extents to their smallest covering value (BLOCK_K_D and BLOCK_K_ND) and
+    leave the schedule's real degrees of freedom -- BLOCK_N, BLOCK_M1, warps, stages -- to the tuner.
+    When no config covers K (d larger than every offered tile) the covering set is empty and the full
+    list is returned -- the k-tiled ``else`` is exactly the fallback for that case.
     """
     k = nargs["K"]
     cov = [c for c in configs
@@ -314,8 +311,14 @@ def _prefer_covering_b2b(configs, nargs, **_):
         return list(configs)
     dmin = min(c.kwargs["BLOCK_K_D"] for c in cov)
     ndmin = min(c.kwargs["BLOCK_K_ND"] for c in cov)
+    # GROUP_M is the output-tile VISIT ORDER, and the covering schedule has exactly one output tile
+    # (BLOCK_K_ND >= D -> cdiv(D, BLOCK_K_ND) == 1 -> pid_d == 0 always), so every GROUP_M value
+    # compiles the identical kernel. Pin it to the smallest so the tuner does not bench each config
+    # twice for a knob that cannot matter here.
+    gmin = min(c.kwargs["GROUP_M"] for c in cov)
     return [c for c in cov
-            if c.kwargs["BLOCK_K_D"] == dmin and c.kwargs["BLOCK_K_ND"] == ndmin]
+            if c.kwargs["BLOCK_K_D"] == dmin and c.kwargs["BLOCK_K_ND"] == ndmin
+            and c.kwargs["GROUP_M"] == gmin]
 
 
 # fmt: off
@@ -333,15 +336,21 @@ def _transition_b2b_kernel(
     stride_sd, stride_sn,    # Ws: (D, ND) row-major
     stride_om, stride_od,
     stride_nm, stride_nk,    # xn out: (M, K) row-major (only used when SAVE_XN)
-    BLOCK_M1: tl.constexpr, BLOCK_K_ND: tl.constexpr, BLOCK_K_D: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K_ND: tl.constexpr,
+    BLOCK_K_D: tl.constexpr,
     SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
     HAS_LN: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     # Back-to-back: a program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. It builds
-    # the gated h tile-by-tile and ACCUMULATES the squeeze out[BM, BN] += h_chunk @ Ws[:, chunk]^T,
-    # so the (M, ND) intermediate h never touches HBM. BLOCK_K_D tiles the d contraction and BLOCK_K_ND
-    # tiles both the ND chunk and the squeeze output; at BLOCK_K_D >= K and BLOCK_K_ND >= D the grid is
-    # 1-D over M and every k-loop is a single iteration, i.e. exactly the original schedule.
+    # the gated h tile-by-tile and ACCUMULATES the squeeze out[BM, BD] += h_chunk @ Ws[:, chunk]^T,
+    # so the (M, ND) intermediate h never touches HBM. THREE tuned extents, decoupled: BLOCK_K_D tiles
+    # the d contraction, BLOCK_N tiles the ND inner loop (how wide an expand chunk to gate at once),
+    # and BLOCK_K_ND tiles the squeeze OUTPUT (D). They used to share one axis (BLOCK_K_ND drove both
+    # the ND chunk and the output), which forced the covering schedule -- BLOCK_K_ND >= D for a full-D
+    # accumulator -- to ALSO loop ND in D-wide chunks. The July winner was a full-D output with a
+    # NARROWER ND chunk (BLOCK_N=64), unreachable while they were the same knob (measured +13% on the
+    # AF3 d=128 shape). Splitting BLOCK_N back out restores it. At BLOCK_K_D >= K, BLOCK_K_ND >= D and
+    # BLOCK_N a divisor of ND the grid is 1-D over M and the d-loop is single-trip -- the July schedule.
     # Visit order, tuned: see kernels/_tiles.py. b2b: ND is looped inside, so every program reads all of Wa/Wb -- the WEIGHTS are what gets
     # re-read here, not x, and the row-first walk this had may already be right. `K` is the
     # output width (D == K here). The `pid_d == 0` guards below test the VALUE, not the launch
@@ -400,8 +409,8 @@ def _transition_b2b_kernel(
         if SAVE_XN:
             if pid_d == 0:
                 tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
-        for n0 in range(0, ND, BLOCK_K_ND):
-            cols = n0 + tl.arange(0, BLOCK_K_ND)
+        for n0 in range(0, ND, BLOCK_N):
+            cols = n0 + tl.arange(0, BLOCK_N)
             col_mask = cols < ND
             wa = tl.load(
                 wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
@@ -483,11 +492,11 @@ def _transition_b2b_kernel(
                         x_ptr.dtype.element_ty)
                     tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=km)
 
-        for n0 in range(0, ND, BLOCK_K_ND):
-            cols = n0 + tl.arange(0, BLOCK_K_ND)
+        for n0 in range(0, ND, BLOCK_N):
+            cols = n0 + tl.arange(0, BLOCK_N)
             col_mask = cols < ND
-            a = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
-            b = tl.zeros((BLOCK_M1, BLOCK_K_ND), dtype=tl.float32)
+            a = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+            b = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for k0 in range(0, K, BLOCK_K_D):
                 k = k0 + tl.arange(0, BLOCK_K_D)
                 k_mask = k < K
