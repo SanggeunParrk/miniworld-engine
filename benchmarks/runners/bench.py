@@ -3,7 +3,6 @@
 # Pairformer / DiffusionTransformer benches; keeps the kernel-wrapping layers.
 import contextlib
 import csv
-import functools
 import importlib
 import os
 import sys
@@ -356,7 +355,7 @@ def measured_result(
     if os.environ.get("BENCH_MARK_STEP") == "1":
         _inner_func = func
 
-        def func():  # noqa: F811 -- wrap to begin a cudagraph-trees step each call
+        def func():
             torch.compiler.cudagraph_mark_step_begin()
             return _inner_func()
 
@@ -384,34 +383,16 @@ def measured_result(
 
 
 def actual_compiled_flag(conf: BenchConfig) -> bool:
-    """Was the module under test COMPILED, as opposed to asked to be?
+    """Was the module under test COMPILED? Now unconditional: every bench compiles its module when
+    ``conf.compile`` is set, whatever the cudagraph regime, so the recorded flag is exactly it.
 
-    Four of the eight module benches guard their `model.compile()` with
-    `and conf.cudagraph == "disabled"` -- the capture takes the eager module -- so
-    `compile=true cudagraph=manual` runs eager for those and compiled for the other four. The
-    column recorded the REQUEST, and the request is not what ran: 330 of the 350 committed result
-    tables say `compiled=True, cudagraph=manual`, and for triangle_multiplication,
-    triangle_attention and attention_pair_bias that is a measurement of eager code.
-
-    Read from the bench function's own source, like `target_impls`, rather than the hand-kept
-    `target == "transition"` list this used to be -- which is how three of the four went unnoticed.
+    It used to differ from the request: four module benches guarded ``model.compile()`` with
+    ``and conf.cudagraph == "disabled"`` -- a manual capture over a compiled module crashed under
+    the old ``compile_wrap="disable"`` -- so ``compile=true cudagraph=manual`` measured eager code
+    labelled compiled. The default wrap is ``custom_op`` now (no breaks), the gates are gone, and
+    the flag no longer has to detect them.
     """
-    if (conf.compile and conf.cudagraph != "disabled"
-            and _skips_compile_under_cudagraph(conf.level, conf.target)):
-        return False
     return conf.compile
-
-
-@functools.cache
-def _skips_compile_under_cudagraph(level: str, target: str) -> bool:
-    """Does ``target``'s bench guard its compile on ``cudagraph == "disabled"``?"""
-    import inspect as _inspect
-
-    fn = targets_for(level).get(target)
-    if fn is None:
-        return False
-    src = _inspect.getsource(fn)
-    return 'conf.cudagraph == "disabled"' in src and ".compile()" in src
 
 
 _CAPTURE_STREAM: "torch.cuda.Stream | None" = None

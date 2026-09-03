@@ -1182,8 +1182,8 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     rc = apply_config_dir(directory)
     if rc:
         return rc
-    print(f"=== bench against the cache in data/ (grid config set); warmup tunes any uncovered "
-          f"bucket over the grid before the timed region", flush=True)
+    print("=== bench against the cache in data/ (grid config set); warmup tunes any uncovered "
+          "bucket over the grid before the timed region", flush=True)
     return _run_bench(args, targets, repo, directory, level="module")
 
 
