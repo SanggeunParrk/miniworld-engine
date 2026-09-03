@@ -8,11 +8,11 @@ d_single_atom: 128
 d_pair_atom: 16
 
 n_layers: 1
-n_augment: 32
+n_augment: 48
 mask_prob: 0.0
-min_seq_len: 384
-max_seq_len: 1024
-seq_len_step: 128
+min_seq_len: 768
+max_seq_len: 768
+seq_len_step: 768
 min_d_pair: 128
 max_d_pair: 512
 d_pair_step: 128
@@ -21,7 +21,7 @@ d_pair_values:
   - 256
   - 512
 sweep_axis: seq_len   # seq_len | d_pair
-sweep_seq_len: 384    # fixed L for d_pair sweeps
+sweep_seq_len: 768
 
 # Which op to bench, and in which namespace. `level: module` targets (this file's set) are
 # the folders under benchmarks/modules/:
@@ -42,7 +42,7 @@ implementations:
 mode: inference        # inference | training
 metric: time           # time | memory
 compile: true
-cudagraph: disabled    # disabled | manual (bucketed capture) | graphed (make_graphed_callables, pad-to-max)
+cudagraph: disabled
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""

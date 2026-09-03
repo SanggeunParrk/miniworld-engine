@@ -5,11 +5,11 @@ d_single_atom: 128
 d_pair_atom: 16
 
 n_layers: 1
-n_augment: 32
+n_augment: 48
 mask_prob: 0.0
-min_seq_len: 128
-max_seq_len: 384
-seq_len_step: 64
+min_seq_len: 1024
+max_seq_len: 1024
+seq_len_step: 1024
 min_d_pair: 128
 max_d_pair: 512
 d_pair_step: 128
@@ -18,7 +18,7 @@ d_pair_values:
   - 256
   - 512
 sweep_axis: seq_len
-sweep_seq_len: 384
+sweep_seq_len: 1024
 
 target: augmented_attention_atom
 level: module
