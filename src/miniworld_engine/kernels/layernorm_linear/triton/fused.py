@@ -47,8 +47,30 @@ def get_seq_group(rows) -> int:
 # epilogue is served to the bias one. Every in-repo launch site passes bias=None (HAS_BIAS=False);
 # the True side is reachable only through the public wrappers (`layernorm_linear`,
 # `layernorm_linear_triton_fn`), so it is a real code path but currently an untuned one.
+def _prefer_covering_lnl(configs, nargs, **_):
+    """Covering-when-fits: tune only the smallest BLOCK_K that spans the whole d_in row.
+
+    Same shape as the transition b2b fix. ``_lnl_fwd_kernel`` picks two schedules at compile time
+    by ``BLOCK_K >= K``: the covering one reads the row once, computes the LN stats once and reuses
+    them across the N-loop (the fast, original schedule), and a k-tiled ``else`` for K too large for
+    one block. The grid used to top out at BLOCK_K=64 < K (d_in=128 for the pair-bias/trimul call
+    sites, 384 for the single side), so the covering branch was UNREACHABLE and every launch took
+    the k-tiled path -- gemm_epilogue @1024 regressed 0.41 -> 0.51 ms. Widen BLOCK_K to 512 and
+    restrict tuning to the smallest covering block, so the tuner varies only BLOCK_M1/BLOCK_N/warps/
+    stages within the right schedule; when K exceeds every block (larger d) the covering set is
+    empty and the full k-tiled list is returned.
+    """
+    k = nargs["K"]
+    cov = [c for c in configs if c.kwargs["BLOCK_K"] >= k]
+    if not cov:
+        return list(configs)
+    kmin = min(c.kwargs["BLOCK_K"] for c in cov)
+    return [c for c in cov if c.kwargs["BLOCK_K"] == kmin]
+
+
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"),
-                 key=['shape_key', 'HAS_BIAS'])
+                 key=['shape_key', 'HAS_BIAS'],
+                 prune_configs_by={'early_config_prune': _prefer_covering_lnl})
 @triton.jit
 def _lnl_fwd_kernel(
     x_ptr, w_ptr, b_ptr, g_ptr, beta_ptr, y_ptr,
