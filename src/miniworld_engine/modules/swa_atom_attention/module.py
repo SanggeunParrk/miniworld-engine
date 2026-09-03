@@ -239,11 +239,20 @@ def flash_window_seqused(
 ) -> torch.Tensor:
     """Static-shape sliding-window attention via FA4/FA2. q/k/v: [N,S,H,D]->[N,S,H,D].
 
-    The forward LAUNCH only -- opaque to Dynamo. It is differentiable through
-    ``register_autograd`` below, whose backward recomputes ``_flash_window_core`` and
-    backprops flash's own varlen kernel; without it a custom_op boundary (the default
-    compile_wrap) silently blocks gradient and training sees no attention grad.
+    The forward LAUNCH only -- opaque to Dynamo. Differentiability depends on the mode:
+
+    * ``custom_op`` (the default) -- the op is a leaf to autograd, so the forward runs under
+      ``no_grad`` and the backward comes from ``register_autograd`` below, which recomputes
+      ``_flash_window_core`` and backprops flash's own varlen kernel. Without it a custom_op
+      boundary silently blocks gradient and training sees no attention grad.
+    * ``disable`` -- ``@opaque`` returned ``torch.compiler.disable(fn)``, a plain eager function
+      with no ``register_autograd``; here ``_flash_window_core`` (flash's own varlen autograd) must
+      run WITH grad so the backward flows through it directly. Wrapping it in ``no_grad`` here would
+      detach the attention output and, as in the custom_op-without-register case, kill training grad.
     """
+    if settings.current().compile_wrap == "disable":
+        return _flash_window_core(
+            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
     with torch.no_grad():
         return _flash_window_core(
             q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
@@ -281,8 +290,11 @@ def _flash_window_backward(ctx, grad_out):
     return dq, dk, dv, None, None, None, None, None, None, None, None
 
 
-flash_window_seqused.register_autograd(
-    _flash_window_backward, setup_context=_flash_window_setup_context)
+# Only a custom_op object carries register_autograd; under compile_wrap="disable" the decorator
+# returned a plain torch.compiler.disable(fn), which is differentiable on its own (see the forward).
+if hasattr(flash_window_seqused, "register_autograd"):
+    flash_window_seqused.register_autograd(
+        _flash_window_backward, setup_context=_flash_window_setup_context)
 
 
 def sparse_neighbor_attention(

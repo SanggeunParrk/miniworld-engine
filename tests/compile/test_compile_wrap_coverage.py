@@ -242,6 +242,52 @@ def test_nothing_bypasses_the_compile_wrap_switch() -> None:
 
 
 @pytest.mark.parametrize("wrap", ["disable", "custom_op"])
+def test_opaque_with_register_autograd_imports_under_both_wraps(wrap: str) -> None:
+    """A site that calls ``.register_autograd`` at import must guard for the ``disable`` mode.
+
+    ``@opaque`` returns a ``torch.library.custom_op`` under ``custom_op`` (which HAS
+    ``register_autograd``) but a plain ``torch.compiler.disable(fn)`` under ``disable`` (which does
+    NOT). ``swa_atom_attention.module`` registers the flash windowed-attention backward at import;
+    an unguarded call there raised ``AttributeError: 'function' object has no attribute
+    'register_autograd'`` and made the whole ``modules`` package unimportable under
+    ``compile_wrap="disable"`` -- the setting every committed result table was measured with.
+
+    :func:`test_custom_op_mode_registers_every_site` did not catch it: that error is raised from the
+    module's own code, not from inside ``torch/_library``, so it was tolerated as a missing-extension
+    import. This asserts the import itself succeeds (a CPU-only fact -- flash is lazy) under BOTH
+    modes for every module that calls ``register_autograd`` at import.
+    """
+    callers = [p for p in _python_files() if ".register_autograd(" in p.read_text()]
+    assert callers, "no register_autograd sites found -- the test is looking in the wrong place"
+    mods = [
+        "miniworld_engine." + ".".join(
+            p.relative_to(SRC).with_suffix("").parts).removesuffix(".__init__")
+        for p in callers
+    ]
+    script = f"""
+import sys, importlib
+from miniworld_engine import settings
+settings.configure(compile_wrap={wrap!r})
+bad = []
+for m in {mods!r}:
+    try:
+        importlib.import_module(m)
+    except (AttributeError, TypeError) as e:   # the register_autograd class of bug
+        bad.append(m + " :: " + type(e).__name__ + ": " + str(e)[:300])
+    except Exception:
+        pass   # a missing CUDA/flash extension on a CPU runner is not what this checks
+print("BAD=" + str(len(bad)))
+for m in bad:
+    print("  " + m)
+sys.exit(1 if bad else 0)
+"""
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       timeout=900, check=False)
+    assert r.returncode == 0, (
+        f"compile_wrap={wrap!r}: a register_autograd site fails to import:\n{r.stdout}")
+
+
+@pytest.mark.parametrize("wrap", ["disable", "custom_op"])
 def test_custom_op_mode_registers_every_site(wrap: str) -> None:
     """Import every module that HAS an ``opaque`` site, under each mode. Registration is at import.
 
