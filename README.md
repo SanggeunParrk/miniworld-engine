@@ -184,7 +184,13 @@ in -- `level=module` for a production module (`triangle_multiplication`,
 (`triangle_attention`, `layernorm`, `adaln`, ...). A kernel and the module built
 out of it may share a name, which is why the level is not optional.
 All final benchmarks run the `torch.compile`d path; non-compiled debug probes
-are not valid final benchmark results.
+are not valid final benchmark results. The CUDA-graph regime defaults to
+`cudagraph=auto`, resolved per `(mode, module)` from a measured sweep: **inference**
+is launch-bound for the small/many-launch modules so it captures a manual graph;
+**training** is backward-dominated (compute-bound) so it stays compile-only (no
+graph). `swa_atom_attention` is the one exception — its FlashAttention path is not
+graph-capturable — and stays no-graph in both modes. Pass an explicit `--cudagraph`
+to force one regime. See [docs/benchmarking-cautions.md](docs/benchmarking-cautions.md).
 Generated results land in the selected target's `artifacts/` directory, for
 example `benchmarks/modules/triangle_multiplication/artifacts/`.
 The benchmark CSV is the source of truth. It includes method, dimensions,
