@@ -287,10 +287,42 @@ def transition_expand_gate(
 # `tl.rsqrt(var + EPS)` under FUSE_STATS (which IS keyed), it is nn.LayerNorm's `ln_in.eps`, and
 # no value of it can change which tile is fastest. Keying on it would multiply the bucket count
 # for nothing.
+def _prefer_covering_b2b(configs, nargs, **_):
+    """Covering-when-fits, sized tight: tune only the SMALLEST tile that covers the whole d row.
+
+    The kernel has two schedules chosen at compile time by ``BLOCK_K_D >= K`` (and D == K here, so
+    ``BLOCK_K_ND >= K`` covers the squeeze output too): the *covering* one reads x once and keeps the
+    normalized row resident (the fast, July schedule), and the *k-tiled* ``else`` re-reads x per
+    ND chunk (needed only when d is too large for one tile). Two things this fixes, both measured on
+    the AF3 d=128 shape:
+
+      * the config grid used to top out at BLOCK_K_D=64 < K=128, so the covering branch was
+        UNREACHABLE and every launch took the k-tiled path (~4x x re-read) -- 4.17 vs 1.66 ms;
+      * once 128/256 are in the grid the raw autotuner still mis-picks -- it chose BLOCK_K_ND=256
+        at D=128 (half the squeeze tile masked-off waste) and measured 5.2 ms. So don't leave the
+        schedule to the tuner: restrict to the covering configs, and among them to the smallest
+        covering tile per axis, so the tuner only varies BLOCK_M1/warps/stages within the one
+        schedule that is right for this shape.
+
+    When no config covers K (d larger than every offered tile) the covering set is empty and the
+    full list is returned -- the k-tiled ``else`` is exactly the fallback for that case.
+    """
+    k = nargs["K"]
+    cov = [c for c in configs
+           if c.kwargs["BLOCK_K_D"] >= k and c.kwargs["BLOCK_K_ND"] >= k]
+    if not cov:
+        return list(configs)
+    dmin = min(c.kwargs["BLOCK_K_D"] for c in cov)
+    ndmin = min(c.kwargs["BLOCK_K_ND"] for c in cov)
+    return [c for c in cov
+            if c.kwargs["BLOCK_K_D"] == dmin and c.kwargs["BLOCK_K_ND"] == ndmin]
+
+
 # fmt: off
 @triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
                  key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL',
-                      'HAS_LN'])
+                      'HAS_LN'],
+                 prune_configs_by={'early_config_prune': _prefer_covering_b2b})
 @triton.jit
 def _transition_b2b_kernel(
     x_ptr, rstd_ptr, c1_ptr, rstd_out_ptr, c1_out_ptr, g_ptr, beta_ptr,
