@@ -602,12 +602,22 @@ class SWA3DRoPEAttention(nn.Module):
             q = apply_rotary_emb_3d(q, cos, sin)
             k = apply_rotary_emb_3d(k, cos, sin)
 
-        # FA4 if the card can run it, else FA2, else the dense band-mask. The choice is the
-        # card's as much as the install's -- see `_flash_backend`.
+        # FA4 (sm90+) or FA2 (sm80+) on CUDA -- see `_flash_backend`. There is NO silent CUDA fallback:
+        # the dense `_sdpa_band` is an O(S^2) CPU/test reference with a different launch profile, and
+        # quietly using it on the GPU measures the wrong kernel (that is exactly how a whole benchmark
+        # sweep once ran on the band-mask path). Require flash on CUDA and fail loudly otherwise.
         if _flash_backend(x.device) is not None:
             out = self._flash_window(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s)
+        elif x.is_cuda:
+            msg = (
+                "swa_atom_attention needs a flash-attention backend on CUDA (FA2 for sm80+, FA4 for "
+                "sm90+) and none is installed/usable on this device. The dense `_sdpa_band` path is a "
+                "CPU/test-only reference, NOT a production or benchmark fallback. Install flash-attn "
+                "(e.g. `miniworld-engine dev install-flash`)."
+            )
+            raise RuntimeError(msg)
         else:
-            out = self._sdpa_band(q, k, v, valid)
+            out = self._sdpa_band(q, k, v, valid)  # CPU unit tests only (no CUDA, no flash)
 
         out = out.reshape(n, s, -1)
         gate = self.gate_proj(x)
