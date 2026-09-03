@@ -1,6 +1,6 @@
 """``miniworld-engine`` command line: build autotune caches and run benchmarks.
 
-    miniworld-engine build all                # the DECLARED work list: 922 (op, dtype, bucket)
+    miniworld-engine build all                # the DECLARED work list: 2,101 (op, dtype, bucket)
     miniworld-engine build all --resume       # skip what a previous run already claimed
     miniworld-engine bench_kernel all         # the kernel benches
     miniworld-engine bench_module all         # the module benches
@@ -613,7 +613,7 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     from miniworld_engine.autotune import builder
 
     if getattr(args, "no_build", False):
-        # `build all` decomposes into one unit per (op, dtype, shape bucket) -- 922 of them, with
+        # `build all` decomposes into one unit per (op, dtype, shape bucket) -- 2,101 of them, with
         # no redundancy. The CASE decomposition this function uses is the older one: 1,738 module
         # units for the same 91 ops, of which more than half re-tune a bucket another unit already
         # covered. After a completed `build all` the pre-bench build is therefore days of work for

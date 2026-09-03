@@ -53,8 +53,9 @@ and it writes `autotune/manifests/<your card>.csv` recording what it found.
 python -m miniworld_engine.autotune.run_all
 ```
 
-Expect a line like `declared 103  driven 97  ok 97  failed 0  skipped 6`. `skipped` is kernels
-whose declared `arch` is above your card — a correct answer, not a failure. See
+Expect a line like `declared 94  driven 88  ok 88  failed 0  skipped 6` on an sm80 card. `skipped`
+is kernels whose declared `arch` is above your card (the 6 cute GEMMs) — a correct answer, not a
+failure. See
 [docs/supported.md](docs/supported.md) for what has actually been run, and
 [docs/troubleshooting.md](docs/troubleshooting.md) when a step does not do this.
 
@@ -270,15 +271,15 @@ from the code.
 | **sm100+** | B200 | 4 | cute 4 |
 <!-- END GENERATED: hardware-support -->
 
-**The floor is sm80.** 94 of 103 kernels run there: all 88 unmarked Triton kernels (committed result
+**The floor is sm80.** 88 of the 94 kernels run there: the 82 Triton kernels (committed result
 tables exist for A100, A5000, A6000, H100 and B200) and the 6 hand-CUDA ones, whose
 `kernels/<family>/cuda/setup.py` declares `-gencode` for compute_80/86/89/90 explicitly rather than
 relying on torch's arch autodetect.
 
-**Above the floor is opt-in, and never the only path.** The 9 sm90/sm100 kernels are CuTeDSL/quack
-GEMMs and three Triton kernels written for Blackwell. Every op they serve also has a Triton
-implementation at sm80, and `modules/dispatch.py` selects between them — so an unsupported card
-loses performance, not function. `implementation='triton'` pins the portable path everywhere.
+**Above the floor is opt-in, and never the only path.** The 6 sm90/sm100 kernels are CuTeDSL/quack
+GEMMs (2 at sm90, 4 at sm100). Every op they serve also has a Triton implementation at sm80, and
+`modules/dispatch.py` selects between them — so an unsupported card loses performance, not
+function. `implementation='triton'` pins the portable path everywhere.
 
 One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on
@@ -296,7 +297,7 @@ from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WI
 `miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
 
 ```bash
-miniworld-engine build all            # tune this GPU: 922 (op, dtype, shape bucket) units
+miniworld-engine build all            # tune this GPU: 2,101 (op, dtype, shape bucket) units
 miniworld-engine build all --resume   # skip what a previous run already claimed
 miniworld-engine dev audit            # which declared (op, dtype, bucket) the cache actually holds
 ```
