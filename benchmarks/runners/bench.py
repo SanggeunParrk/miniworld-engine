@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 import triton
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from triton.runtime.autotuner import Autotuner
 
 from miniworld_engine.modules import (
@@ -157,10 +157,34 @@ class BenchConfig(BaseModel):
     #   "graphed" — torch.cuda.make_graphed_callables (auto static buffers + input copy); the
     #               PAD-TO-MAX single-shape regime (e.g. fixed 384 crops / multi-GPU max-len).
     #               Training only; fabric-wrapped baselines (dtv1) may fail here (raw backward).
-    cudagraph: Literal["disabled", "manual", "graphed"] = "manual"
+    #   "auto" — the empirically-best regime by MODE, resolved below. Measured across every module at
+    #            its real seq_len: TRAINING is backward-dominated (compute-bound), so a captured graph
+    #            removes no meaningful launch overhead and its copy/replay only adds cost -- no-graph
+    #            wins for every module. INFERENCE is launch-bound for the small/many-launch modules, so
+    #            manual capture wins (triangle_multiplication -12%, bidirectional -10%; transition and
+    #            the layernorm-ish modules a little); the heavy-GEMM attention modules (attention_pair_
+    #            bias, triangle_attention, augmented_attention_token) are compute-bound even in
+    #            inference and want no-graph, but the ~2-3% cost of manual there is kept for a simple
+    #            mode-only rule. (swa_atom_attention is NOT special-cased: its earlier -51%/-21% was a
+    #            smallest-bucket + SDPA-fallback artifact; at its real seq it is a wash.)
+    cudagraph: Literal["disabled", "manual", "graphed", "auto"] = "auto"
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
     name_suffix: str = ""
+
+    @model_validator(mode="after")
+    def _resolve_auto_cudagraph(self) -> "BenchConfig":
+        if self.cudagraph == "auto":
+            # swa_atom_attention's FlashAttention path is NOT CUDA-graph capturable: it bumps a philox
+            # RNG offset outside the capture ("Offset increment outside graph capture") and its varlen
+            # setup hits an aten.nonzero graph break. Manual/graphed both fail there, so it stays
+            # no-graph in BOTH modes. Every other module: inference is launch-bound (manual capture),
+            # training is backward-dominated (no-graph).
+            if self.target == "swa_atom_attention":
+                self.cudagraph = "disabled"
+            else:
+                self.cudagraph = "manual" if is_inference_mode(self.mode) else "disabled"
+        return self
 
 
 def is_inference_mode(mode: str) -> bool:
@@ -325,6 +349,17 @@ def measured_result(
     execution_path: str,
     reference: str,
 ) -> BenchResult:
+    # reduce-overhead (inductor cudagraph-trees) reuses static output buffers across replays and
+    # requires the caller to mark a new step before each invocation, else it raises "accessing tensor
+    # output of CUDAGraphs that has been overwritten". The direct-call paths below (metric=memory and
+    # the cudagraph=="disabled" else) loop func() with no such mark; opt in via BENCH_MARK_STEP=1.
+    if os.environ.get("BENCH_MARK_STEP") == "1":
+        _inner_func = func
+
+        def func():  # noqa: F811 -- wrap to begin a cudagraph-trees step each call
+            torch.compiler.cudagraph_mark_step_begin()
+            return _inner_func()
+
     if conf.metric == "memory":
         value = bench_memory(func)["median_mb"]
     elif conf.cudagraph == "manual":
@@ -793,7 +828,12 @@ def bench_module_triangle_multiplication(
             return pair
 
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
-    if conf.compile and conf.cudagraph == "disabled":   # cudagraph captures the eager module (below)
+    # Real deployment = compiled kernels, then graph-captured. The old guard compiled the model ONLY
+    # when cudagraph=="disabled" and captured the EAGER model under a graph -- a leftover from
+    # compile_wrap="disable", where a graph break crashed manual capture mid-stream. The default wrap
+    # is custom_op now (no breaks), so compile+capture is the regime that actually ships; compile
+    # whenever asked and let the capture below wrap the compiled module.
+    if conf.compile:
         model.compile()
     if implementation != MINIWORLD_IMPL:
         model = fabric.setup_module(model)
@@ -941,7 +981,7 @@ def bench_module_attention_pair_bias(
             return pair
 
     model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
-    if conf.compile and conf.cudagraph == "disabled":
+    if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         model.compile()
     model = fabric.setup_module(model)
 
@@ -1022,7 +1062,7 @@ def bench_module_triangle_attention(
             return pair
 
     model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
-    if conf.compile and conf.cudagraph == "disabled":
+    if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         model.compile()
     model = fabric.setup_module(model)
 
@@ -1117,7 +1157,7 @@ def bench_module_transition(
     for layer, state in zip(model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
     model.train(not is_inference_mode(conf.mode))
-    if conf.compile and conf.cudagraph == "disabled":
+    if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
         model.compile()
     model = fabric.setup_module(model)
 
@@ -1126,7 +1166,7 @@ def bench_module_transition(
     for layer, state in zip(ref_model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
     ref_model.train(not is_inference_mode(conf.mode))
-    if conf.compile and conf.cudagraph == "disabled":
+    if conf.compile:  # ref compiled too, regardless of graph, so the comparison is apples-to-apples
         ref_model.compile()
     ref_model = fabric.setup_module(ref_model)
 
