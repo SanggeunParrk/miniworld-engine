@@ -1,5 +1,7 @@
 {
   "config_space_hash": "f1261f8ed75e",
+  "driver_id_scheme": 2,
+  "driver_identity": "1a8261dbf14d",
   "entries": {
     "bfloat16|shape_key=128": [
       {
@@ -39,7 +41,7 @@
           "BLOCK_E": 512
         },
         "ms": 0.02457600086927414,
-        "num_stages": 6,
+        "num_stages": 5,
         "num_warps": 1
       }
     ],
@@ -57,6 +59,14 @@
           "BLOCK_E": 2048
         },
         "ms": 0.08396799862384796,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 2048
+        },
+        "ms": 0.08396799862384796,
         "num_stages": 3,
         "num_warps": 2
       },
@@ -75,14 +85,6 @@
         "ms": 0.08396799862384796,
         "num_stages": 5,
         "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 256
-        },
-        "ms": 0.08499199897050858,
-        "num_stages": 1,
-        "num_warps": 1
       }
     ],
     "bfloat16|shape_key=384": [
@@ -90,7 +92,7 @@
         "kwargs": {
           "BLOCK_E": 256
         },
-        "ms": 0.16998399794101715,
+        "ms": 0.16896000504493713,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -98,15 +100,7 @@
         "kwargs": {
           "BLOCK_E": 256
         },
-        "ms": 0.16998399794101715,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_E": 256
-        },
-        "ms": 0.16998399794101715,
+        "ms": 0.16896000504493713,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -114,17 +108,25 @@
         "kwargs": {
           "BLOCK_E": 256
         },
-        "ms": 0.16998399794101715,
-        "num_stages": 4,
+        "ms": 0.16896000504493713,
+        "num_stages": 5,
         "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_E": 256
         },
-        "ms": 0.16998399794101715,
-        "num_stages": 5,
+        "ms": 0.16896000504493713,
+        "num_stages": 6,
         "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 256
+        },
+        "ms": 0.16896000504493713,
+        "num_stages": 1,
+        "num_warps": 2
       }
     ],
     "bfloat16|shape_key=512": [
@@ -176,7 +178,7 @@
   "op": "gated_projection_gate_inplace_flat_triton",
   "op_identity": "8e2291dbf8af",
   "provenance": {
-    "built_utc": "2026-08-30T22:31:59+00:00",
+    "built_utc": "2026-09-05T11:02:56+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },

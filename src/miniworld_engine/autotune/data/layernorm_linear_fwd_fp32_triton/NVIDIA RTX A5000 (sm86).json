@@ -1,5 +1,7 @@
 {
   "config_space_hash": "7afae1e6862b",
+  "driver_id_scheme": 2,
+  "driver_identity": "90fb28ba487e",
   "entries": {
     "bfloat16+float32|N=128,NH=4,shape_key=1024": [
       {

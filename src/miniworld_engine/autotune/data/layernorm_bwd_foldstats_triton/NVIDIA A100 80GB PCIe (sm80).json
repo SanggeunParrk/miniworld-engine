@@ -1,5 +1,7 @@
 {
   "config_space_hash": "a90e01c944f1",
+  "driver_id_scheme": 2,
+  "driver_identity": "8378b3bb5d5e",
   "entries": {
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=1099512154005": [
       {

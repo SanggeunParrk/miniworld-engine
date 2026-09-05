@@ -1,5 +1,7 @@
 {
   "config_space_hash": "9603df8aa627",
+  "driver_id_scheme": 2,
+  "driver_identity": "922f6be7672f",
   "entries": {
     "bfloat16+float32|shape_key=140737555597786": [
       {
@@ -16,7 +18,15 @@
         },
         "ms": 0.014336000196635723,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 4
       },
       {
         "kwargs": {
@@ -24,7 +34,7 @@
         },
         "ms": 0.014336000196635723,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 4
       },
       {
         "kwargs": {
@@ -32,23 +42,15 @@
         },
         "ms": 0.014336000196635723,
         "num_stages": 4,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.014336000196635723,
-        "num_stages": 4,
-        "num_warps": 2
+        "num_warps": 4
       }
     ],
-    "bfloat16+float32|shape_key=17592387504602": [
+    "bfloat16+float32|shape_key=17592454580698": [
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -56,7 +58,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -64,119 +66,51 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.009216000325977802,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 3,
-        "num_warps": 2
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 1,
         "num_warps": 2
       }
     ],
     "bfloat16+float32|shape_key=17592454613466": [
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
         },
         "ms": 0.010239999741315842,
         "num_stages": 2,
         "num_warps": 1
       },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 4,
-        "num_warps": 4
-      }
-    ],
-    "bfloat16+float32|shape_key=17592588831194": [
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 4,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 1,
-        "num_warps": 2
-      }
-    ],
-    "bfloat16+float32|shape_key=26388480526810": [
       {
         "kwargs": {
           "BLOCK_M1": 16
         },
         "ms": 0.010239999741315842,
         "num_stages": 3,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
@@ -184,7 +118,7 @@
         },
         "ms": 0.010239999741315842,
         "num_stages": 4,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
@@ -192,44 +126,96 @@
         },
         "ms": 0.010239999741315842,
         "num_stages": 1,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|shape_key=17592454679002": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK_M1": 64
+          "BLOCK_M1": 8
         },
-        "ms": 0.010239999741315842,
+        "ms": 0.01228800043463707,
         "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK_M1": 64
+          "BLOCK_M1": 8
         },
-        "ms": 0.010239999741315842,
+        "ms": 0.01228800043463707,
         "num_stages": 3,
-        "num_warps": 8
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|shape_key=26388547602906": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.011264000087976456,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.011264000087976456,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.011264000087976456,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.011264000087976456,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.011264000087976456,
+        "num_stages": 1,
+        "num_warps": 1
       }
     ],
     "bfloat16+float32|shape_key=26388547635674": [
       {
         "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
           "BLOCK_M1": 16
         },
         "ms": 0.01228800043463707,
@@ -243,6 +229,14 @@
         "ms": 0.01228800043463707,
         "num_stages": 3,
         "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 2,
+        "num_warps": 2
       },
       {
         "kwargs": {
@@ -250,34 +244,18 @@
         },
         "ms": 0.01228800043463707,
         "num_stages": 4,
-        "num_warps": 1
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 4,
+        "num_warps": 4
       }
     ],
-    "bfloat16+float32|shape_key=26388681853402": [
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.015359999611973763,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.015359999611973763,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.015359999611973763,
-        "num_stages": 3,
-        "num_warps": 1
-      },
+    "bfloat16+float32|shape_key=26388547701210": [
       {
         "kwargs": {
           "BLOCK_M1": 8
@@ -293,9 +271,41 @@
         "ms": 0.015359999611973763,
         "num_stages": 1,
         "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.015359999611973763,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.015359999611973763,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.015359999611973763,
+        "num_stages": 1,
+        "num_warps": 4
       }
     ],
     "bfloat16+float32|shape_key=281475043953114": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.02252800017595291,
+        "num_stages": 3,
+        "num_warps": 4
+      },
       {
         "kwargs": {
           "BLOCK_M1": 32
@@ -306,43 +316,43 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 64
+          "BLOCK_M1": 32
         },
         "ms": 0.02252800017595291,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK_M1": 64
+          "BLOCK_M1": 32
         },
         "ms": 0.02252800017595291,
-        "num_stages": 1,
-        "num_warps": 16
+        "num_stages": 3,
+        "num_warps": 8
       },
       {
         "kwargs": {
-          "BLOCK_M1": 64
-        },
-        "ms": 0.02252800017595291,
-        "num_stages": 2,
-        "num_warps": 16
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 64
+          "BLOCK_M1": 32
         },
         "ms": 0.02252800017595291,
         "num_stages": 4,
-        "num_warps": 16
+        "num_warps": 8
       }
     ],
-    "bfloat16+float32|shape_key=35184573549018": [
+    "bfloat16+float32|shape_key=35184640625114": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 4,
+        "num_warps": 4
+      },
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.01228800043463707,
+        "ms": 0.013311999849975109,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -350,7 +360,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.01228800043463707,
+        "ms": 0.013311999849975109,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -358,7 +368,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.01228800043463707,
+        "ms": 0.013311999849975109,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -366,17 +376,9 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.01228800043463707,
+        "ms": 0.013311999849975109,
         "num_stages": 4,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.01228800043463707,
-        "num_stages": 1,
-        "num_warps": 2
       }
     ],
     "bfloat16+float32|shape_key=35184640657882": [
@@ -385,12 +387,20 @@
           "BLOCK_M1": 8
         },
         "ms": 0.014336000196635723,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.014336000196635723,
         "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
         "ms": 0.014336000196635723,
         "num_stages": 2,
@@ -398,7 +408,7 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
         "ms": 0.014336000196635723,
         "num_stages": 3,
@@ -406,52 +416,20 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
         "ms": 0.014336000196635723,
         "num_stages": 4,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.014336000196635723,
-        "num_stages": 1,
-        "num_warps": 2
       }
     ],
-    "bfloat16+float32|shape_key=35184774875610": [
+    "bfloat16+float32|shape_key=35184640723418": [
       {
         "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.018432000651955605,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
         "ms": 0.018432000651955605,
         "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.018432000651955605,
-        "num_stages": 4,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.018432000651955605,
-        "num_stages": 2,
         "num_warps": 4
       },
       {
@@ -460,48 +438,72 @@
         },
         "ms": 0.018432000651955605,
         "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 4,
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|shape_key=52776759593434": [
+    "bfloat16+float32|shape_key=52776826669530": [
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
-        "ms": 0.015359999611973763,
+        "ms": 0.016383999958634377,
         "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
-        "ms": 0.015359999611973763,
+        "ms": 0.016383999958634377,
         "num_stages": 2,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
-        "ms": 0.015359999611973763,
+        "ms": 0.016383999958634377,
         "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
-        "ms": 0.015359999611973763,
+        "ms": 0.016383999958634377,
         "num_stages": 4,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
-        "ms": 0.015359999611973763,
-        "num_stages": 2,
+        "ms": 0.016383999958634377,
+        "num_stages": 1,
         "num_warps": 2
       }
     ],
@@ -540,25 +542,17 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 32
         },
         "ms": 0.018432000651955605,
-        "num_stages": 1,
-        "num_warps": 2
+        "num_stages": 4,
+        "num_warps": 1
       }
     ],
-    "bfloat16+float32|shape_key=52776960920026": [
+    "bfloat16+float32|shape_key=52776826767834": [
       {
         "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.025599999353289604,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
         "ms": 0.025599999353289604,
         "num_stages": 2,
@@ -566,7 +560,7 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
         "ms": 0.025599999353289604,
         "num_stages": 3,
@@ -574,19 +568,27 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
         "ms": 0.025599999353289604,
-        "num_stages": 4,
-        "num_warps": 1
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 3,
+        "num_warps": 2
       },
       {
         "kwargs": {
           "BLOCK_M1": 16
         },
         "ms": 0.025599999353289604,
-        "num_stages": 2,
-        "num_warps": 2
+        "num_stages": 1,
+        "num_warps": 1
       }
     ],
     "bfloat16+float32|shape_key=562950020663770": [
@@ -627,7 +629,7 @@
           "BLOCK_M1": 16
         },
         "ms": 0.03891199827194214,
-        "num_stages": 1,
+        "num_stages": 2,
         "num_warps": 2
       }
     ],
@@ -637,15 +639,7 @@
           "BLOCK_M1": 8
         },
         "ms": 0.010239999741315842,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.010239999741315842,
-        "num_stages": 3,
+        "num_stages": 2,
         "num_warps": 1
       },
       {
@@ -661,7 +655,7 @@
           "BLOCK_M1": 8
         },
         "ms": 0.010239999741315842,
-        "num_stages": 1,
+        "num_stages": 2,
         "num_warps": 2
       },
       {
@@ -669,25 +663,25 @@
           "BLOCK_M1": 8
         },
         "ms": 0.010239999741315842,
-        "num_stages": 2,
-        "num_warps": 2
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 3,
+        "num_warps": 4
       }
     ],
-    "bfloat16+float32|shape_key=8796294482394": [
+    "bfloat16+float32|shape_key=8796361558490": [
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
         "ms": 0.008191999979317188,
         "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.008191999979317188,
-        "num_stages": 2,
         "num_warps": 1
       },
       {
@@ -703,16 +697,24 @@
           "BLOCK_M1": 8
         },
         "ms": 0.008191999979317188,
-        "num_stages": 4,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
         "ms": 0.008191999979317188,
-        "num_stages": 1,
-        "num_warps": 2
+        "num_stages": 2,
+        "num_warps": 1
       }
     ],
     "bfloat16+float32|shape_key=8796361591258": [
@@ -721,23 +723,7 @@
           "BLOCK_M1": 8
         },
         "ms": 0.008191999979317188,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.008191999979317188,
         "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.008191999979317188,
-        "num_stages": 3,
         "num_warps": 1
       },
       {
@@ -750,29 +736,45 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
         },
         "ms": 0.008191999979317188,
         "num_stages": 1,
-        "num_warps": 2
-      }
-    ],
-    "bfloat16+float32|shape_key=8796495808986": [
+        "num_warps": 1
+      },
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 16
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.008191999979317188,
+        "num_stages": 4,
+        "num_warps": 1
+      }
+    ],
+    "bfloat16+float32|shape_key=8796361656794": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
         },
         "ms": 0.009216000325977802,
         "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.009216000325977802,
-        "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
@@ -780,7 +782,7 @@
         },
         "ms": 0.009216000325977802,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
@@ -788,20 +790,28 @@
         },
         "ms": 0.009216000325977802,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 8
       },
       {
         "kwargs": {
           "BLOCK_M1": 16
         },
         "ms": 0.009216000325977802,
-        "num_stages": 2,
-        "num_warps": 2
+        "num_stages": 4,
+        "num_warps": 8
       }
     ],
     "float32|shape_key=140737555597786": [
       {
         "kwargs": {
+          "BLOCK_M1": 128
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
           "BLOCK_M1": 4
         },
         "ms": 0.021503999829292297,
@@ -831,38 +841,22 @@
         "ms": 0.021503999829292297,
         "num_stages": 4,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.021503999829292297,
-        "num_stages": 1,
-        "num_warps": 2
       }
     ],
-    "float32|shape_key=17592387504602": [
+    "float32|shape_key=17592454580698": [
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.011264000087976456,
-        "num_stages": 1,
+        "ms": 0.01228800043463707,
+        "num_stages": 2,
         "num_warps": 4
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
-        "ms": 0.011264000087976456,
-        "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.011264000087976456,
+        "ms": 0.01228800043463707,
         "num_stages": 4,
         "num_warps": 4
       },
@@ -870,17 +864,25 @@
         "kwargs": {
           "BLOCK_M1": 16
         },
-        "ms": 0.011264000087976456,
-        "num_stages": 1,
-        "num_warps": 8
+        "ms": 0.01228800043463707,
+        "num_stages": 3,
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 16
         },
-        "ms": 0.011264000087976456,
-        "num_stages": 2,
-        "num_warps": 8
+        "ms": 0.01228800043463707,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
+        "num_warps": 2
       }
     ],
     "float32|shape_key=17592454613466": [
@@ -889,23 +891,7 @@
           "BLOCK_M1": 4
         },
         "ms": 0.013311999849975109,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.013311999849975109,
         "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.013311999849975109,
-        "num_stages": 3,
         "num_warps": 1
       },
       {
@@ -918,19 +904,35 @@
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
         },
         "ms": 0.013311999849975109,
         "num_stages": 1,
-        "num_warps": 2
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 2,
+        "num_warps": 4
       }
     ],
-    "float32|shape_key=17592588831194": [
+    "float32|shape_key=17592454679002": [
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.01740800030529499,
+        "ms": 0.018432000651955605,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -938,7 +940,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.01740800030529499,
+        "ms": 0.018432000651955605,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -946,7 +948,15 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.01740800030529499,
+        "ms": 0.018432000651955605,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.018432000651955605,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -954,59 +964,51 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.01740800030529499,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.01740800030529499,
-        "num_stages": 3,
+        "ms": 0.018432000651955605,
+        "num_stages": 1,
         "num_warps": 2
       }
     ],
-    "float32|shape_key=26388480526810": [
+    "float32|shape_key=26388547602906": [
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 8
         },
-        "ms": 0.014336000196635723,
+        "ms": 0.015359999611973763,
         "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 8
         },
-        "ms": 0.014336000196635723,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.014336000196635723,
+        "ms": 0.015359999611973763,
         "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 8
         },
-        "ms": 0.014336000196635723,
+        "ms": 0.015359999611973763,
         "num_stages": 1,
         "num_warps": 2
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 8
         },
-        "ms": 0.014336000196635723,
+        "ms": 0.015359999611973763,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.015359999611973763,
         "num_stages": 2,
-        "num_warps": 2
+        "num_warps": 4
       }
     ],
     "float32|shape_key=26388547635674": [
@@ -1015,30 +1017,6 @@
           "BLOCK_M1": 4
         },
         "ms": 0.01740800030529499,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.01740800030529499,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.01740800030529499,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.01740800030529499,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -1047,16 +1025,48 @@
           "BLOCK_M1": 4
         },
         "ms": 0.01740800030529499,
-        "num_stages": 1,
+        "num_stages": 3,
         "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01740800030529499,
+        "num_stages": 1,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01740800030529499,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01740800030529499,
+        "num_stages": 3,
+        "num_warps": 1
       }
     ],
-    "float32|shape_key=26388681853402": [
+    "float32|shape_key=26388547701210": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.023552000522613525,
+        "num_stages": 4,
+        "num_warps": 8
+      },
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.023552000522613525,
+        "ms": 0.02457600086927414,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -1064,7 +1074,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.023552000522613525,
+        "ms": 0.02457600086927414,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -1072,7 +1082,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.023552000522613525,
+        "ms": 0.02457600086927414,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -1080,17 +1090,9 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.023552000522613525,
+        "ms": 0.02457600086927414,
         "num_stages": 4,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.023552000522613525,
-        "num_stages": 1,
-        "num_warps": 2
       }
     ],
     "float32|shape_key=281475043953114": [
@@ -1108,15 +1110,7 @@
         },
         "ms": 0.03481600061058998,
         "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.03481600061058998,
-        "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 2
       },
       {
         "kwargs": {
@@ -1124,107 +1118,115 @@
         },
         "ms": 0.03481600061058998,
         "num_stages": 4,
-        "num_warps": 1
+        "num_warps": 2
       },
       {
         "kwargs": {
           "BLOCK_M1": 16
         },
         "ms": 0.03481600061058998,
-        "num_stages": 1,
-        "num_warps": 2
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.03481600061058998,
+        "num_stages": 4,
+        "num_warps": 4
       }
     ],
-    "float32|shape_key=35184573549018": [
+    "float32|shape_key=35184640625114": [
       {
         "kwargs": {
-          "BLOCK_M1": 32
+          "BLOCK_M1": 8
         },
-        "ms": 0.016383999958634377,
-        "num_stages": 3,
-        "num_warps": 16
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.01740800030529499,
-        "num_stages": 1,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.01740800030529499,
+        "ms": 0.018432000651955605,
         "num_stages": 2,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 16
         },
-        "ms": 0.01740800030529499,
-        "num_stages": 3,
+        "ms": 0.018432000651955605,
+        "num_stages": 2,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 16
         },
-        "ms": 0.01740800030529499,
+        "ms": 0.018432000651955605,
         "num_stages": 4,
         "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 16
+        },
+        "ms": 0.018432000651955605,
+        "num_stages": 4,
+        "num_warps": 2
       }
     ],
     "float32|shape_key=35184640657882": [
       {
         "kwargs": {
-          "BLOCK_M1": 8
+          "BLOCK_M1": 32
         },
         "ms": 0.020479999482631683,
-        "num_stages": 1,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32
+        },
+        "ms": 0.020479999482631683,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.021503999829292297,
+        "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 4
         },
-        "ms": 0.020479999482631683,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.020479999482631683,
+        "ms": 0.021503999829292297,
         "num_stages": 4,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 4
         },
-        "ms": 0.020479999482631683,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.020479999482631683,
+        "ms": 0.021503999829292297,
         "num_stages": 1,
-        "num_warps": 4
+        "num_warps": 2
       }
     ],
-    "float32|shape_key=35184774875610": [
+    "float32|shape_key=35184640723418": [
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.028672000393271446,
+        "ms": 0.02969600073993206,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -1232,7 +1234,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.028672000393271446,
+        "ms": 0.02969600073993206,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -1240,7 +1242,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.028672000393271446,
+        "ms": 0.02969600073993206,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -1248,7 +1250,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.028672000393271446,
+        "ms": 0.02969600073993206,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -1256,51 +1258,51 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.028672000393271446,
+        "ms": 0.02969600073993206,
         "num_stages": 1,
         "num_warps": 2
       }
     ],
-    "float32|shape_key=52776759593434": [
+    "float32|shape_key=52776826669530": [
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.02252800017595291,
+        "ms": 0.025599999353289604,
         "num_stages": 1,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.02252800017595291,
+        "ms": 0.025599999353289604,
         "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
-        "ms": 0.02252800017595291,
-        "num_stages": 1,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.02252800017595291,
-        "num_stages": 2,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.02252800017595291,
+        "ms": 0.025599999353289604,
         "num_stages": 3,
-        "num_warps": 8
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 4,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.025599999353289604,
+        "num_stages": 1,
+        "num_warps": 2
       }
     ],
     "float32|shape_key=52776826702298": [
@@ -1341,16 +1343,16 @@
           "BLOCK_M1": 8
         },
         "ms": 0.028672000393271446,
-        "num_stages": 1,
+        "num_stages": 3,
         "num_warps": 2
       }
     ],
-    "float32|shape_key=52776960920026": [
+    "float32|shape_key=52776826767834": [
       {
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.03993599861860275,
+        "ms": 0.04095999896526337,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -1358,7 +1360,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.03993599861860275,
+        "ms": 0.04095999896526337,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -1366,15 +1368,7 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.03993599861860275,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.03993599861860275,
+        "ms": 0.04095999896526337,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -1382,51 +1376,59 @@
         "kwargs": {
           "BLOCK_M1": 8
         },
-        "ms": 0.03993599861860275,
+        "ms": 0.04095999896526337,
         "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.04095999896526337,
+        "num_stages": 2,
         "num_warps": 2
       }
     ],
     "float32|shape_key=562950020663770": [
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 64
         },
         "ms": 0.05734400078654289,
         "num_stages": 4,
+        "num_warps": 16
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.058368001133203506,
+        "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
-        "ms": 0.05734400078654289,
-        "num_stages": 1,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.05734400078654289,
+        "ms": 0.058368001133203506,
         "num_stages": 2,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
-        "ms": 0.05734400078654289,
+        "ms": 0.058368001133203506,
         "num_stages": 3,
-        "num_warps": 4
+        "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 16
+          "BLOCK_M1": 8
         },
-        "ms": 0.05734400078654289,
+        "ms": 0.058368001133203506,
         "num_stages": 4,
-        "num_warps": 4
+        "num_warps": 1
       }
     ],
     "float32|shape_key=70368811420122": [
@@ -1435,14 +1437,6 @@
           "BLOCK_M1": 4
         },
         "ms": 0.013311999849975109,
-        "num_stages": 1,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.013311999849975109,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -1451,16 +1445,8 @@
           "BLOCK_M1": 4
         },
         "ms": 0.013311999849975109,
-        "num_stages": 3,
+        "num_stages": 4,
         "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.013311999849975109,
-        "num_stages": 1,
-        "num_warps": 8
       },
       {
         "kwargs": {
@@ -1469,14 +1455,38 @@
         "ms": 0.013311999849975109,
         "num_stages": 2,
         "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 1,
+        "num_warps": 2
       }
     ],
-    "float32|shape_key=8796294482394": [
+    "float32|shape_key=8796361558490": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 32
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 3,
+        "num_warps": 16
+      },
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -1484,7 +1494,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -1492,25 +1502,17 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.009216000325977802,
-        "num_stages": 4,
+        "ms": 0.010239999741315842,
+        "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.009216000325977802,
-        "num_stages": 2,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.009216000325977802,
+        "ms": 0.010239999741315842,
         "num_stages": 4,
-        "num_warps": 4
+        "num_warps": 1
       }
     ],
     "float32|shape_key=8796361591258": [
@@ -1527,8 +1529,16 @@
           "BLOCK_M1": 4
         },
         "ms": 0.010239999741315842,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.010239999741315842,
         "num_stages": 2,
-        "num_warps": 1
+        "num_warps": 2
       },
       {
         "kwargs": {
@@ -1536,7 +1546,7 @@
         },
         "ms": 0.010239999741315842,
         "num_stages": 3,
-        "num_warps": 1
+        "num_warps": 2
       },
       {
         "kwargs": {
@@ -1544,56 +1554,48 @@
         },
         "ms": 0.010239999741315842,
         "num_stages": 4,
+        "num_warps": 2
+      }
+    ],
+    "float32|shape_key=8796361656794": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
         "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.010239999741315842,
-        "num_stages": 1,
-        "num_warps": 2
-      }
-    ],
-    "float32|shape_key=8796495808986": [
-      {
-        "kwargs": {
-          "BLOCK_M1": 8
-        },
-        "ms": 0.011264000087976456,
+        "ms": 0.01228800043463707,
         "num_stages": 3,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.011264000087976456,
-        "num_stages": 1,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 16
-        },
-        "ms": 0.011264000087976456,
-        "num_stages": 3,
-        "num_warps": 8
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32
-        },
-        "ms": 0.011264000087976456,
-        "num_stages": 2,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 32
+          "BLOCK_M1": 4
         },
-        "ms": 0.011264000087976456,
-        "num_stages": 2,
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.01228800043463707,
+        "num_stages": 1,
         "num_warps": 4
       }
     ]
@@ -1604,7 +1606,7 @@
   "op": "augmented_attention_bwd_pre_triton",
   "op_identity": "e76fd3b022ec",
   "provenance": {
-    "built_utc": "2026-08-30T22:31:54+00:00",
+    "built_utc": "2026-09-05T07:44:12+00:00",
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
