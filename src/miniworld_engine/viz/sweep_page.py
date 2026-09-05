@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import pathlib
 import csv
 import html
 import json
@@ -80,6 +81,81 @@ def _coverage() -> dict[str, float]:
     return out
 
 
+def _prune_fn_name(path: pathlib.Path, symbol: str) -> str | None:
+    """The function named in ``@triton.autotune(prune_configs_by={'early_config_prune': X})``.
+
+    Read from the SOURCE, not from the decorated object: `autotune/cache.py`'s reader replaces
+    `Autotuner.early_config_prune` with its own wrapper at import, so asking the live object gives
+    the cache reader's heuristic subset (24 for every kernel) instead of the kernel's own prune.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError):
+        return None
+    want = symbol.split(".")[-1]
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != want:
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            for kw in dec.keywords:
+                if kw.arg != "prune_configs_by" or not isinstance(kw.value, ast.Dict):
+                    continue
+                for k, v in zip(kw.value.keys, kw.value.values):
+                    if getattr(k, "value", None) == "early_config_prune":
+                        return getattr(v, "id", None)
+    return None
+
+
+def _benched_per_unit(op: str, grid: int, sides) -> int:
+    """Configs one unit actually compiles and times -- `grid` minus what the KERNEL's own
+    `early_config_prune` deletes first.
+
+    `units x grid` is the page's obvious cost model and it is wrong for any kernel that ships a
+    prune. `autotune/cache.py`'s reader wraps `early_config_prune` and, on the BUILD path, returns
+    `base(configs, nargs)` -- the kernel's own prune still runs, and `capture` makes that pruned
+    list the round's work item for both compile and bench. Reporting the unpruned grid made
+    `transition_fwd_b2b_triton` read as a quarter of the whole sweep when it is well under one
+    percent: `_prefer_covering_b2b` pins BLOCK_K_D, BLOCK_K_ND and GROUP_M at the K its driver
+    builds, cutting 28,000 configs to 560. A page that is read to decide where tuning time goes
+    must not price 50x of phantom.
+
+    Two kernels in the repository ship a prune (`transition_fwd_b2b_triton`,
+    `layernorm_linear_fwd_triton`); everything else returns `grid` unchanged. Falls back to `grid`
+    on any failure -- over-reporting is the safe direction for a cost estimate, under-reporting is
+    not.
+    """
+    import importlib
+
+    from miniworld_engine.autotune.configs import configs_for
+
+    row = {r["kernel"]: r for r in _rows()}.get(op)
+    if row is None:
+        return grid
+    name = _prune_fn_name(PKG.parent / row["file"], row["symbol"])
+    if name is None:
+        return grid
+    try:
+        prune = getattr(importlib.import_module(row["file"].replace("/", ".")[:-3]), name)
+        cfgs = configs_for(op)
+        # Evaluate at the SMALLEST width this op is driven at, not the largest. The prune keys on
+        # the launch's K, and both kernels that ship one have a driver that PINS K rather than
+        # following the unit's width: `drivers/transition.py:99` sets `K_SMALL = ragged(128)` and
+        # says so outright ("does NOT follow the swept width, and that is not an oversight"),
+        # because `transition_b2b` is dispatched only at K <= _B2B_MAX_K = 128. Taking the max
+        # over the unit widths evaluates the prune at a K the driver never builds -- at K=512
+        # `_prefer_covering_b2b` keeps all 28,000, and the phantom this function exists to remove
+        # comes straight back.
+        widths = sorted({w for _s, (_L, W) in sides.items() for w in W}) or [128]
+        return min(len(list(prune(cfgs, {"K": w, "D": w, "ND": 4 * w, "M": 1 << 16})))
+                   for w in widths) or grid
+    except Exception:
+        return grid
+
+
 def collect() -> tuple[list[dict], dict]:
     """One record per kernel a build drives, plus the totals."""
     from miniworld_engine.autotune.builder import op_units
@@ -104,13 +180,14 @@ def collect() -> tuple[list[dict], dict]:
         for values in ax.values():
             grid *= len(values)
         r = reg[op]
-        cost = units[op] * grid
+        benched = _benched_per_unit(op, grid, sides[op])
+        cost = units[op] * benched
         total += cost
         out.append({
             "kernel": op, "kind": r["kind"], "stack": r["stack"], "dtypes": r["dtypes"],
             "where": r["file"].split("miniworld_engine/kernels/", 1)[-1],
             "level": r["level"], "width": (r["width"] or "both").strip(),
-            "axes": ax, "units": units[op], "grid": grid, "cost": cost,
+            "axes": ax, "units": units[op], "grid": grid, "benched": benched, "cost": cost,
             "cover": cover.get(op, 0.0), "exempt": exempt.get(op, ""),
             "sides": [{"name": s, "L": sorted(L), "W": sorted(W)}
                       for s, (L, W) in sorted(sides[op].items())],

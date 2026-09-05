@@ -29,6 +29,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
 )
+from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
     bidir_front_triton,
@@ -157,7 +158,6 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     it cudagraphs at cute's speed (the merged Function's saves are used only under
     grad). Mirrors the bidir ``_bidir_infer``."""
     B, L, _, D = x_n.shape
-    M = B * L * L
     left, right, _ = bidir_front_triton(x_n, WLt, WLgt, WRt, WRgt, save_preact=False)
     H = left.shape[1]
     lf = left.reshape(H, L, L)
@@ -167,10 +167,31 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
         lf = lf * mm
         rf = rf * mm
     tri = _contract(lf, rf, outgoing)                           # (H, L, L)
-    proj = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps)[0]
-    # fuse the residual (== module input pair) into the gate store (inference: no dropout)
-    y = gate_elem_triton(x_n.reshape(M, D), proj, Wgt, residual=residual, seq_len=L)
-    return y.view(B, L, L, D)
+    # Fused back-half: LN_out + proj-gemm + gate-gemm + mul in ONE kernel (``trimul_back_triton``),
+    # the exact kernel the H100 sm90 cute path already uses (module ``_forward_cute_free``). It
+    # replaces the 2-kernel ``_te_forward`` (LN_out+proj) + ``gate_elem_triton`` (gate+mul) split:
+    # one fewer launch and one fewer HBM round-trip of the [L,L,D] proj tensor. All triton, so it
+    # runs on A100/sm86 as well as the Hopper path it came from.
+    #
+    # NUMERICS: bit-identical to the split path on this card, measured once the A/B probe was
+    # fixed. The first three probes all reported a 0.0 relative error against an fp32 reference --
+    # impossible for a bf16 kernel -- because ``to_out`` is a zero-initialised Linear, so
+    # ``y = pair + 0`` made every variant trivially equal; randomising ``to_out``/``to_gate`` is
+    # what made the comparison mean anything. It still makes the TRITON inference path differ in
+    # STRUCTURE from the TRITON training path (``_UniBackHalfTriton``, unchanged, still splits).
+    #
+    # TODO(bench): SPEED is still unestablished, and the measurement that appeared to settle it was
+    # invalid. The corrected probe put the fused form at 1.03x / 1.00x -- no win -- but it ran while
+    # this kernel's cache missed on the DTYPE axis at every launch: production keys
+    # `bfloat16+float32` (the LN_out affine is fp32, pinned by `primitives._Fp32ParamsMixin`) and
+    # the committed cache held `bfloat16` only, so the fused path was on the bounded heuristic
+    # subset while the split path it was timed against had tuned configs. The driver now builds the
+    # affine at fp32; re-measure against the rebuilt cache before drawing any conclusion.
+    # Weight forms: trimul_back wants ``.T`` weights, so Wp (to_out, nn.Linear form) -> Wp.T; Wgt is
+    # already to_gate.weight.T. residual comes in flat [M,D] and is reshaped to [B,L,L,D].
+    res = residual.view(B, L, L, D) if residual is not None else None
+    return trimul_back_triton(tri.unsqueeze(0), x_n, Wp.T.contiguous(), Wgt,
+                              ln_out_w, ln_out_b, eps, residual=res)
 
 
 def trimul_triton(
