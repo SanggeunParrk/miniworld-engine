@@ -169,6 +169,11 @@ class BenchConfig(BaseModel):
     cudagraph: Literal["disabled", "manual", "graphed", "auto"] = "auto"
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
+    #: Opt-in escape hatch for the "ref1" eager floor: an uncompiled, un-graphed baseline is
+    #: normally refused (a raw eager number must never be mistaken for the shipped kernel), but the
+    #: two-reference methodology wants exactly that point (ref1 = compile off + no graph, ref2 =
+    #: compile on + graph auto), so a run that sets this deliberately is allowed through.
+    allow_eager: bool = False
     name_suffix: str = ""
 
     @model_validator(mode="after")
@@ -352,6 +357,19 @@ def measured_result(
     # requires the caller to mark a new step before each invocation, else it raises "accessing tensor
     # output of CUDAGraphs that has been overwritten". The direct-call paths below (metric=memory and
     # the cudagraph=="disabled" else) loop func() with no such mark; opt in via BENCH_MARK_STEP=1.
+    # Inference runs under no_grad, ALWAYS -- production inference builds no autograd graph, and a
+    # grad-enabled forward makes grad-keyed dispatch (e.g. trimul/triangle_attention/transition)
+    # take the save-activation TRAINING kernels and pay the graph-build overhead, so a bench that
+    # forgot to wrap its inference_step measured the training forward mislabelled as inference.
+    # Enforce it here, centrally, so no per-bench wrapper can be forgotten (nested no_grad in the
+    # benches that already do it is harmless).
+    if not is_train:
+        _fwd_only = func
+
+        def func():
+            with torch.no_grad():
+                return _fwd_only()
+
     if os.environ.get("BENCH_MARK_STEP") == "1":
         _inner_func = func
 
@@ -808,7 +826,19 @@ def bench_module_triangle_multiplication(
                     )
             return pair
 
+    # Full bf16 for EVERY impl. The old code fed only miniworld a bf16 `pair` and left the others at
+    # fp32, so pytorch/triton/cuequiv were timed as fp32 kernels -- an unfair, much slower floor
+    # (triton 15.8ms fp32 vs 2.8ms bf16). The fix is the bf16 input for all of them: the custom ops
+    # compute in their input dtype, and the torch path follows its inputs. `fabric` here is the
+    # no-op `_NoFabric` shim -- there is NO autocast and no fp32 master anywhere in this harness.
+    # The module cast below is likewise only PARTLY a cast: `_Fp32ParamsMixin._apply`
+    # (modules/primitives.py) deliberately pins norm affine params to fp32 through any
+    # `.to(bfloat16)` (gamma at 1.0 stagnates in bf16 -- its ULP exceeds an Adam step), which is why
+    # `parameter_dtype` still records float32. Trunk weights become bf16; norm gammas stay fp32.
+    bf16 = conf.precision != FP32_PRECISION
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
+    if bf16:
+        model = model.to(torch.bfloat16)
     # Real deployment = compiled kernels, then graph-captured. The old guard compiled the model ONLY
     # when cudagraph=="disabled" and captured the EAGER model under a graph -- a leftover from
     # compile_wrap="disable", where a graph break crashed manual capture mid-stream. The default wrap
@@ -824,7 +854,7 @@ def bench_module_triangle_multiplication(
         ref_model.compile()
     ref_model = fabric.setup_module(ref_model)
 
-    pair_dtype = torch.bfloat16 if implementation == MINIWORLD_IMPL else torch.float32
+    pair_dtype = torch.bfloat16 if bf16 else torch.float32
     torch.manual_seed(1)
     pair = torch.randn(
         1,
@@ -880,7 +910,16 @@ def bench_module_triangle_multiplication(
     accuracy = correctness()
     for item in [pair, *list(model.parameters()), *list(ref_model.parameters())]:
         item.grad = None
-    func = inference_step if is_inference_mode(conf.mode) else training_step
+    # Inference under no_grad (this bench does its own capture, so it can't lean on
+    # measured_result's central guard): a grad-enabled forward routes trimul's grad-keyed dispatch
+    # to the save-activation TRAINING kernels. Wrap only the timed func -- training_step must keep
+    # grad, and it reuses inference_step, so no_grad cannot live inside inference_step itself.
+    if is_inference_mode(conf.mode):
+        def func() -> torch.Tensor:
+            with torch.no_grad():
+                return inference_step()
+    else:
+        func = training_step
     grad_to_none = [pair, *list(model.parameters())]
     if conf.metric == "time" and conf.cudagraph == "manual":
         # manual capture of one static shape (bucketed-training regime); replay timed.
@@ -914,92 +953,6 @@ def bench_module_triangle_multiplication(
         execution_path=triangle_multiplication_path(implementation, conf.mode, conf.d_pair),
         reference=ImplementationType.PYTORCH.value,
         **accuracy,
-    )
-
-
-def bench_module_attention_pair_bias(
-    conf: BenchConfig,
-    seq_len: int,
-    implementation: str,
-    fabric: FabricLike,
-):
-    spec = triton_miniworld_spec(implementation)
-    is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
-    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
-
-    class OldTritonBiasOnlyAttention(TriangleAttention):
-        def _kernel_bias_only_attention(
-            self,
-            value: torch.Tensor,
-            bias: torch.Tensor,
-        ) -> torch.Tensor:
-            from miniworld_engine import kernels
-
-            return kernels.triton_bias_only_attention(value, bias)
-
-    class MultiTriangleAttention(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            layer_cls = OldTritonBiasOnlyAttention if is_old_triton else TriangleAttention
-            self.layers = nn.ModuleList(
-                [
-                    layer_cls(
-                        conf.d_pair,
-                        implementation=spec.impl,
-                        use_self_attention=False,
-                    )
-                    for _ in range(conf.n_layers)
-                ],
-            )
-
-        def forward(
-            self,
-            pair: torch.Tensor,
-            mask: torch.Tensor | None,
-        ) -> torch.Tensor:
-            for layer in self.layers:
-                pair = layer(pair, mask)
-            return pair
-
-    model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
-    if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
-        model.compile()
-    model = fabric.setup_module(model)
-
-    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
-    dy = torch.randn_like(pair)
-    pair.requires_grad = True
-    mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
-
-    def inference_step() -> torch.Tensor:
-        return model(pair, mask)
-
-    def training_step() -> None:
-        y = inference_step()
-        fabric.backward(y, dy)
-
-    func = inference_step if is_inference_mode(conf.mode) else training_step
-    grad_to_none = [pair, *list(model.parameters())]
-    execution_path = {
-        ImplementationType.PYTORCH: "module.reference.torch",
-        ImplementationType.TRITON: (
-            "modules.triangle_attention.bias_only."
-            "layernorm_linear+torch_bias_only_attention+gate_out"
-        ),
-        ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
-    }.get(spec.impl, spec.impl.value)
-    if is_old_triton:
-        execution_path = "kernels.bias_only_attention.triton.main"
-    return measured_result(
-        conf=conf,
-        func=func,
-        grad_to_none=grad_to_none,
-        params=list(model.parameters()),
-        is_train=not is_inference_mode(conf.mode),
-        input_dtype=str(pair.dtype).replace("torch.", ""),
-        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
-        execution_path=execution_path,
-        reference="module.reference.torch",
     )
 
 
@@ -2626,7 +2579,6 @@ MODULE_TARGETS = {
     "triangle_multiplication": bench_module_triangle_multiplication,
     "swa_atom_attention": bench_module_swa_atom_attention,
     "triangle_multiplication_bidirectional": bench_module_triangle_multiplication_bidirectional,
-    "attention_pair_bias": bench_module_attention_pair_bias,
     "triangle_attention": bench_module_triangle_attention,
     "transition": bench_module_transition,
     "conditioned_transition": bench_module_conditioned_transition,
@@ -2825,12 +2777,6 @@ AUTOTUNE_MODULES = {
         "miniworld_engine.kernels.tm1.triton.main",
         "miniworld_engine.kernels.tm2.triton.main",
         "miniworld_engine.kernels.trimul_inproj.triton.back_fused",
-    ],
-    "attention_pair_bias": [
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "miniworld_engine.kernels.layernorm_linear.triton.main",
-        "miniworld_engine.kernels.bias_only_attention.triton.gate_out",
-        "miniworld_engine.kernels.bias_only_attention.triton.main",
     ],
     "triangle_attention": [
         "miniworld_engine.kernels.layernorm.triton.main",
@@ -3171,8 +3117,22 @@ def main(cfg: DictConfig) -> None:
     if _cfgdir:
         print(f"config set: {_cfgdir}", flush=True)
     conf = BenchConfig.model_validate(cfg)
-    if not conf.compile and conf.cudagraph == "disabled":
-        msg = "Final benchmarks must run compiled or cudagraph'd. Use compile=true or cudagraph=manual|graphed."
+    # The registry says which dtype(s) a target actually has kernels for (bench_policy). Benching
+    # outside that set measures a fallback -- an fp32 run of a bf16-only fused op silently lands on
+    # the torch reference and gets reported under the kernel's name -- so say so loudly rather than
+    # publishing it. A warning, not an error: an exploratory run is legitimate, a silent one is not.
+    try:
+        from bench_policy import declared_precisions
+        _allowed = declared_precisions(conf.level, conf.target)
+    except Exception:
+        _allowed = None
+    if _allowed is not None and conf.precision not in _allowed:
+        print(f"WARNING: {conf.level}/{conf.target} declares dtypes {_allowed} in registry.csv, "
+              f"but this run is precision={conf.precision!r}. The kernels for the missing dtype do "
+              f"not exist, so those rows measure a fallback under the kernel's name.", flush=True)
+    if not conf.compile and conf.cudagraph == "disabled" and not conf.allow_eager:
+        msg = ("Final benchmarks must run compiled or cudagraph'd. Use compile=true or "
+               "cudagraph=manual|graphed, or allow_eager=true for the ref1 eager floor.")
         raise ValueError(msg)
     from miniworld_engine.autotune.capture import install_launch_recorder
     install_launch_recorder()   # coverage accounting; no effect on what or how anything is benched

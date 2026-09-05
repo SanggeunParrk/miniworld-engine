@@ -210,13 +210,21 @@ def _coerce(impl: ImplementationType | str) -> ImplementationType:
 # --------------------------------------------------------------------------- #
 _DEFAULT_BACKEND = KernelBackend.TRITON  # unknown op / unknown GPU -> portable Triton
 
-# Ops that actually have a cuequivariance kernel. cuequivariance only ships a triangle
-# multiplication kernel; for every OTHER op an explicit CUEQUIVARIANCE request has no cueq
-# kernel to run, so it must fall back to the PYTORCH reference (the honest baseline) — NOT
-# the miniworld Triton fused path. Routing a no-cueq op's CUEQUIVARIANCE request into the
-# Triton family was a bug (e.g. the bf16 transition fused kernel OOMs shared memory at
-# d>=256 on H100). PYTORCH is the default fallback for cueq on these ops.
-_CUEQ_OPS = frozenset({"triangle_multiplication"})
+# Ops that actually have a cuequivariance kernel to run. cuequivariance_torch (0.9.1 here) ships
+# fused kernels for triangle_multiplication AND triangle self-attention (``cet.triangle_attention``,
+# wired in triangle_attention/module.py); an explicit CUEQUIVARIANCE request on those runs the
+# real vendor kernel. For every OTHER op cueq has no matching kernel, so the request falls back to
+# the PYTORCH reference (the honest baseline) -- NOT the miniworld Triton fused path (routing a
+# no-cueq op's request into the Triton family was a bug: the bf16 transition fused kernel OOMs
+# shared memory at d>=256 on H100).
+#
+# CAUTION -- ``triangle_attention`` is the op name for THREE module shapes, and only one of them
+# has a cueq kernel: `TriangleAttention(use_self_attention=True)` (the real branch),
+# `TriangleAttention(use_self_attention=False)` (bias-only: `_kernel_bias_only_attention` takes no
+# backend and always runs its einsum, so a CUEQUIVARIANCE request there is a LABEL, not a kernel),
+# and `BidirectionalTriangleAttention` (no cueq kernel at all -- its forward routes CUEQUIVARIANCE
+# to the pytorch reference explicitly, because adding this name here would otherwise make it raise).
+_CUEQ_OPS = frozenset({"triangle_multiplication", "triangle_attention"})
 
 
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
@@ -260,8 +268,8 @@ def resolve(
     any concrete backend passes through unchanged. Single entry point behind the per-op
     ``resolve_*`` wrappers kept below for the modules / benchmark harness."""
     impl = _coerce(impl)
-    # cuequivariance only has a trimul kernel: for any other op, an explicit CUEQUIVARIANCE
-    # request falls back to the PYTORCH reference (default), never the Triton fused path.
+    # An explicit CUEQUIVARIANCE request for an op with no cueq kernel (anything outside
+    # _CUEQ_OPS) falls back to the PYTORCH reference, never the Triton fused path.
     if impl == ImplementationType.CUEQUIVARIANCE and op not in _CUEQ_OPS:
         return KernelBackend.PYTORCH
     if impl != ImplementationType.MINIWORLD:

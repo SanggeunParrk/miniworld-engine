@@ -14,6 +14,8 @@ The pieces underneath are still reachable, under `dev`, where they do not clutte
 
     miniworld-engine dev merge --shards <shard-dir>   # shards from ANOTHER machine, or a re-merge
     miniworld-engine dev audit                        # build-system + cache-coverage checks
+    miniworld-engine dev cache-status                 # are the committed caches stale? (no GPU)
+    miniworld-engine dev cache-backfill               # recover driver_identity from git history
     miniworld-engine dev capture all                  # shards without merging (see below)
 
 `dev audit`'s checks are already run by the CPU suite (`test_registry_complete`,
@@ -92,9 +94,6 @@ STACKS: tuple[str, ...] = ("trunk", "diffusion")
 #: A module target is named after the production MODULE it benches, spelled the way the engine
 #: spells it -- while a kernel target (:data:`KERNEL_TARGETS`) is named after the kernel FAMILY it
 #: benches. The two are separate namespaces, which is why `triangle_attention` can be both.
-#: `attention_pair_bias` was called `bias_only_attention` until now, after the kernel family it
-#: dispatches to: that both misnamed it (the bench builds an ``AttentionPairBias``) and occupied
-#: the name the kernel-level target needs.
 MODULE_TARGETS: dict[str, ModuleTarget] = {
     "transition": ModuleTarget(("transition",)),
     "triangle_multiplication": ModuleTarget(("triangle_multiplication",)),
@@ -102,7 +101,6 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
         ("triangle_multiplication_bidirectional",)),
     "triangle_attention": ModuleTarget(
         ("triangle_attention_bidirectional", "triangle_attention_heads")),
-    "attention_pair_bias": ModuleTarget(("attention_pair_bias",)),
     # fp32 stays -- every file in this kernel family states "fp32 io with TF32 tensor cores".
     # `d_single_token=384` does NOT: the bench builds ConditionedTransition(d_hidden=768,
     # d_cond=384), the model's `token_dit`, and pinning d_single_token to 384 made it 384/384 --
@@ -123,12 +121,12 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
 #: (see modules/pairformer/module.py); leaving it out was the same drift as above.
 GROUPS: dict[str, tuple[str, ...]] = {
     "all": tuple(MODULE_TARGETS),
-    "pairformer": ("transition", "triangle_attention", "attention_pair_bias",
+    "pairformer": ("transition", "triangle_attention",
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
                   "swa_atom_attention"),
-    "attention": ("triangle_attention", "attention_pair_bias",
+    "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }
 
@@ -149,10 +147,10 @@ SHAPES = {
 #: switch -> (values, applicable targets, applicable modes)
 PINS: dict[str, tuple[tuple, tuple[str, ...], tuple[str, ...]]] = {
     # bias_only gate epilogue: fused_gate_out vs sigmoid_gate_fused + the split backward
-    "gate_backend": (("fused", "split"), ("attention_pair_bias", "triangle_attention"),
+    "gate_backend": (("fused", "split"), ("triangle_attention",),
                      ("inference", "training")),
     # inference LN+proj concat fusion (layernorm_linear) -- consulted on the inference path only
-    "infer_concat": ((True, False), ("attention_pair_bias", "triangle_attention"),
+    "infer_concat": ((True, False), ("triangle_attention",),
                      ("inference",)),
     # Row-broadcast dropout in the trimul residual epilogue. USE_DROPOUT is part of
     # trimul_gate_elem_mul / _bwd_ew's autotune KEY, so dropout on and off are DIFFERENT cache
@@ -374,6 +372,34 @@ def cmd_capture(args: argparse.Namespace) -> int:
         print(f"  FAIL  {r['label']}  exit={r['rc']} -> {r['log']}")
     # An empty shard is a silent failure: the run "succeeded" and the merge would just skip it.
     return 1 if (failed or empty) else 0
+
+
+def cmd_cache_status(args: argparse.Namespace) -> int:
+    """Scan every committed cache's fingerprints against the current grids -- no GPU, no kernel
+    launch. Returns 1 if any cache is grid/scheme-stale, so CI and a pre-bench check both catch a
+    grid edit that was never followed by a rebuild (the failure mode that silently benched the
+    heuristic fallback)."""
+    from miniworld_engine.autotune import cache_status
+
+    rows = cache_status.scan(gpu_substr=args.gpu or None)
+    print(cache_status.format_report(rows, gpu_substr=args.gpu or None))
+    if args.verbose:
+        for r in rows:
+            if r.verdict == "OK":
+                print(f"  OK    {r.op:44} {r.gpu}")
+    return 1 if any(r.stale for r in rows) else 0
+
+
+def cmd_cache_backfill(args: argparse.Namespace) -> int:
+    """Recover ``driver_identity`` for caches written before the field existed, from the commit
+    that last wrote each one -- so the guard turns on now instead of after every cache is rebuilt."""
+    from miniworld_engine.autotune import cache_backfill
+
+    rows = cache_backfill.backfill(apply=args.apply)
+    print(cache_backfill.format_report(rows, applied=args.apply))
+    if not args.apply:
+        print("\n(dry run -- pass --apply to write)")
+    return 0
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
@@ -1254,6 +1280,19 @@ def build_parser() -> argparse.ArgumentParser:
     mrg.add_argument("--gpu", default="", help="cache key; defaults to this machine's GPU")
     mrg.add_argument("--top-k", type=int, default=5, help="configs kept per bucket")
     mrg.set_defaults(func=cmd_merge)
+
+    cst = dev.add_parser("cache-status",
+                         help="up-front staleness scan of the committed caches (no GPU); "
+                              "exits non-zero if any is grid/scheme-stale")
+    cst.add_argument("--gpu", default="", help="substring filter on the GPU key (e.g. A100)")
+    cst.add_argument("--verbose", action="store_true", help="list OK caches too")
+    cst.set_defaults(func=cmd_cache_status)
+
+    bkf = dev.add_parser("cache-backfill",
+                         help="recover driver_identity for pre-field caches from git history "
+                              "(dry-run unless --apply)")
+    bkf.add_argument("--apply", action="store_true", help="write the recovered hashes")
+    bkf.set_defaults(func=cmd_cache_backfill)
 
     bld = sub.add_parser("build", help="build the cache by driving the production modules")
     bld.add_argument("case", nargs="?", default="all",

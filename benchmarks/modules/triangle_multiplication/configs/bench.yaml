@@ -10,9 +10,9 @@ d_pair_atom: 16
 n_layers: 1
 n_augment: 48
 mask_prob: 0.0
-min_seq_len: 768
-max_seq_len: 768
-seq_len_step: 768
+min_seq_len: 384
+max_seq_len: 1024
+seq_len_step: 128
 min_d_pair: 128
 max_d_pair: 512
 d_pair_step: 128
@@ -21,8 +21,7 @@ d_pair_values:
   - 256
   - 512
 sweep_axis: seq_len   # seq_len | d_pair
-sweep_seq_len: 768
-
+sweep_seq_len: 384
 # Which op to bench, and in which namespace. `level: module` targets (this file's set) are
 # the folders under benchmarks/modules/:
 #   triangle_multiplication | triangle_multiplication_bidirectional | attention_pair_bias |
@@ -34,12 +33,11 @@ target: triangle_multiplication
 level: module
 implementations:
   - pytorch
-  - dtv1
   - cuequivariance
   - miniworld
-  - triton
-# TriangleMultiplication also accepts:
-#   triton | triton_pytorch_ln | triton_ln | cute
+# miniworld auto-routes to the triton path on A100 (sm_80) and the cute path on Hopper+
+# (see modules/dispatch.py). TriangleMultiplication also accepts, explicitly:
+#   triton | dtv1 | triton_pytorch_ln | triton_ln | cute
 mode: inference        # inference | training
 metric: time           # time | memory
 compile: true

@@ -245,7 +245,13 @@ class BidirectionalTriangleAttention(nn.Module):
         backend = _dispatch.guard_dtype(
             self._backend, pair.dtype, op="BidirectionalTriangleAttention"
         )
-        if backend == KernelBackend.PYTORCH:
+        # cuequivariance ships a SINGLE-direction triangle-attention kernel only; there is no
+        # bidirectional one, so a CUEQUIVARIANCE request here runs the pytorch reference -- the
+        # honest baseline -- exactly as it did before `triangle_attention` joined `_CUEQ_OPS`.
+        # Without this arm the request falls past both branches and raises: the bidirectional class
+        # resolves under the same op name as the single-direction one, so adding that name to the
+        # cueq set re-routed it to a backend its forward never handled.
+        if backend in (KernelBackend.PYTORCH, KernelBackend.CUEQUIVARIANCE):
             pln = self.ln_pair(pair)
             if self.use_self_attention:
                 out = self._attend_sa(pln, mask, backend)

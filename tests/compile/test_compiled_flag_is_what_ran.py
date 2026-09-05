@@ -1,9 +1,9 @@
 """The `compiled` column must say what RAN -- and it now does so trivially.
 
-Four module benches used to guard `model.compile()` with `and conf.cudagraph == "disabled"`: the
-CUDA-graph capture then took the eager module, so `compile=true cudagraph=manual` ran eager for
+Several module benches used to guard `model.compile()` with `and conf.cudagraph == "disabled"`:
+the CUDA-graph capture then took the eager module, so `compile=true cudagraph=manual` ran eager for
 half the matrix while the CSV recorded `conf.compile` for all of it -- eager code labelled
-compiled (triangle_multiplication, triangle_attention, attention_pair_bias). Under the default
+compiled (triangle_multiplication, triangle_attention). Under the default
 `compile_wrap="custom_op"` there are no graph breaks, so compile+capture is the real deployment
 regime; the gates are removed and every bench compiles unconditionally. The recorded flag is then
 exactly `conf.compile`, and `actual_compiled_flag` is that and nothing else.
