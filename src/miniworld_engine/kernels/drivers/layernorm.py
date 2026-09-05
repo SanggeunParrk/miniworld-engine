@@ -54,6 +54,19 @@ _D_CUDA_BWD = aligned_only(
 )
 
 
+def _sm90plus() -> bool:
+    """Is this card one where the cute paths -- the only producers of a row-scaled LN -- run?
+
+    `dispatch.is_sm90plus`, imported lazily so a driver module stays importable on a machine with
+    no CUDA (the CPU test suite imports every driver).
+    """
+    try:
+        from miniworld_engine.modules.dispatch import is_sm90plus
+        return is_sm90plus()
+    except Exception:
+        return False
+
+
 # ── layernorm ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -61,7 +74,24 @@ def layernorm_fwd_saveact_triton() -> None:
     from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 
     x = _act()
-    triton_layernorm(x, vec(_D), vec(_D), 1e-5)
+    # HAS_ROWSCALE is CARD-DEPENDENT, so this driver branches on the card rather than picking one
+    # side for every build. The =1 program folds the AF pair-mask into the LN epilogue, and every
+    # producer of it is a cute path -- `cute/v6_training_merged.py:144`, `cute/bidir_training.py`,
+    # `cute/inference.py` -- which `dispatch` selects only at sm90+.
+    #
+    #   sm80/sm86: =0 only. The triton trimul deliberately does NOT fold the mask into LN_in
+    #     (unidirectional.py:225-227). `dev audit --replay` on an A100 DID show `HAS_ROWSCALE=1`
+    #     lookups, and each is immediately followed by `NotImplementedError: Gemm Sm80 is not
+    #     implemented yet` -- `builder.cases()` forces `implementation="cute"` and the case aborts.
+    #     A lookup from a path that cannot run is not a bucket worth tuning.
+    #   sm90+: =1 is production. Pinning this driver to =0 would ship an H100/B200 cache with the
+    #     masked LN -- the normal case there -- permanently on the heuristic subset.
+    #
+    # The registry row is `arch=sm80`, i.e. built on every card, so the branch has to live here.
+    triton_layernorm(x, vec(_D), vec(_D), 1e-5)                              # HAS_ROWSCALE=0
+    if _sm90plus():
+        rs = torch.rand(x.reshape(-1, _D).shape[0], device=dev(), dtype=x.dtype)
+        triton_layernorm(x, vec(_D), vec(_D), 1e-5, row_scale=rs)            # HAS_ROWSCALE=1
 
 
 def layernorm_bwd_atomic_triton() -> None:
@@ -72,7 +102,25 @@ def layernorm_bwd_atomic_triton() -> None:
     # would hand it M = L*L and clamp every L to the 8192 bucket.
     x = _act()
     mean, rstd = _ln_stats(x.reshape(-1, _D))  # [M] fp32, one row per (b, i, j)
-    _bwd_atomic_impl(torch.randn_like(x), x, vec(_D), mean, rstd)
+    # HAS_ROWSCALE=0 is what `_bwd_atomic_impl` pins (compile_native.py:154). The =1 side comes
+    # from a different launcher (main.py:419) and is USUALLY preceded at main.py:395 by a branch
+    # routing bf16 with 128 <= N <= 512 to the hand-CUDA backward -- but "usually" is not "never":
+    # that branch is wrapped in a bare `except Exception: pass`, so any nvcc/JIT failure falls
+    # through to the triton launch, and the width guard does not cover the MSA width 64 the build
+    # now drives. Cheap insurance on the card where the cute paths make it production anyway.
+    _bwd_atomic_impl(torch.randn_like(x), x, vec(_D), mean, rstd)            # HAS_ROWSCALE=0
+    if _sm90plus():
+        from miniworld_engine import settings
+        from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+
+        previous = settings.current().layernorm_bwd_path
+        settings.configure(layernorm_bwd_path="atomic")
+        try:
+            xg = _act().requires_grad_(True)
+            rs = torch.rand(xg.reshape(-1, _D).shape[0], device=dev(), dtype=xg.dtype)
+            triton_layernorm(xg, vec(_D), vec(_D), 1e-5, row_scale=rs).sum().backward()
+        finally:
+            settings.configure(layernorm_bwd_path=previous)
 
 
 def layernorm_bwd_split_triton() -> None:

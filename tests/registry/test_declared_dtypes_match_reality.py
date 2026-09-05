@@ -115,9 +115,27 @@ def test_the_two_families_the_bug_was_found_in_are_single_precision():
         if op.startswith(("gated_projection_gate", "gated_projection_bwd_gate")):
             if op.endswith("lowp_triton"):
                 continue
+            if op in {"gated_projection_gate_flat_triton",
+                      "gated_projection_bwd_gate_flat_triton"}:
+                # NOT the cast path, and reading the file again says so. The `.to(torch.bfloat16)`
+                # is inside `TritonGatedProjectionFunction.forward`'s `save_for_backward` -- it
+                # narrows what the BACKWARD reloads, while the forward itself launches at
+                # `op_dtype = x.dtype`. The `_flat` pair is a different launcher again: `_sigmul` /
+                # `_sigmul_grad` cast nothing at all, and `_SigmoidGate`'s own comment names their
+                # caller -- `conditioned_transition/{training,train_fused}.py`, a family that runs
+                # fp32. `dev audit --replay` then measured it: `float32|shape_key=256/384/512/1024`
+                # asked for and missing, against a bf16-only cache. So these two declare both.
+                # Named, not matched on the `_flat_triton` suffix: that also catches
+                # `gated_projection_bwd_gate_recompute_flat_triton`, which is the retired DTv1
+                # baseline's own kernel (modules/triangle_multiplication/baseline_dtv1.py) and is
+                # genuinely bf16-only.
+                assert want == {"bfloat16", "float32"}, (
+                    f"{op}: `_sigmul`/`_sigmul_grad` cast nothing and conditioned_transition "
+                    f"launches them at fp32, so the row declares both precisions")
+                continue
             assert want == {"bfloat16"}, (
-                f"{op}: gated_projection/triton/main.py casts its operands with "
-                f".to(torch.bfloat16) before the launch")
+                f"{op}: gated_projection/triton/main.py casts what it saves for the backward with "
+                f".to(torch.bfloat16), so this kernel only ever sees bf16")
 
 
 def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():

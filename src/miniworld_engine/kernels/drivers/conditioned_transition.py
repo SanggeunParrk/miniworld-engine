@@ -88,6 +88,11 @@ _N_EXPAND = 2
 #: tiled as NC / DC -- because on the token side they are unequal.
 _DC_BASE = 384 if _D_BASE > 128 else 128
 
+#: NOT the row count times a batch: the autotune bucket keys on `length_of(shape)`, which is
+#: `shape[-2]` -- L for the production block `(n_augment, 1, L, d)`, NOT n_augment*L. The driver
+#: builds `(1, _M, D)`, so `length_of` gives `_M` and the key matches production exactly when
+#: `_M == L`. Scaling `_M` by n_augment moves every bucket past `atom_key`'s 8192 clamp and tunes
+#: shapes nothing ever asks for -- see the comment in modules/conditioned_transition/module.py.
 _M = ragged(driver_length(512))       # drivers.rows2d default row count
 _D = ragged(_D_BASE)                  # d_hidden (NX) / the tail's K and D
 _DC = ragged(_DC_BASE, by=5)          # d_cond (NC / DC) -- separately tiled axis

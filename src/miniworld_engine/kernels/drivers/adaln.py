@@ -90,8 +90,12 @@ def adaln_gemm_gate():
 
 
 def adaln_epilogue_saveact():
-    """training._epilogue_train_kernel: x (M,N), sb (M,2N) raw [scale|bias], scale_bias (N,)
-    folded in (HAS_SB=True)."""
+    """training._epilogue_train_kernel: x (M,N), sb (M,2N) raw [scale|bias]. HAS_SB=1 ONLY.
+
+    `HAS_SB = scale_bias is not None` (training.py:206) is keyed, but the sole production launcher
+    (training.py:699) always passes `to_scale.bias`, which always exists:
+    modules/adaptive_layernorm/module.py:42 builds the Linear and modules/primitives.py defaults
+    `bias=True`. So =0 is unreachable, and replay asked for HAS_SB=1 nine times and =0 never."""
     from miniworld_engine.kernels.adaln.triton.training import _epilogue_train
 
     _epilogue_train(_rand(_M, _D), _rand(_M, 2 * _D), _EPS, _rand(_D), shape_key=_SHAPE_KEY)

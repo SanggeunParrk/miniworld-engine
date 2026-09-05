@@ -29,8 +29,25 @@ ALLOWED = {
     "adaln.py:FP32": "a LayerNorm statistic (mean/rstd) is fp32 whatever the activation is",
     "triangle_multiplication.py:torch.float32": "sigma is fp32 by definition, not an activation",
     "rope.py:torch.float32": "cos/sin are fp32 angle tensors (rotation precision), not activations",
+    "fused_ln_mask.py:norm_affine":
+        "the masked LN's gamma/beta, fp32 in production via `primitives._Fp32ParamsMixin` -- "
+        "`dev audit --replay` showed this op keying `bfloat16+float32` against a bf16-only cache",
+    "layernorm_linear.py:norm_affine":
+        "same: `layernorm_linear_triton_fwd` is handed a `primitives.LayerNorm` parameter, so its "
+        "production key is `bfloat16+float32` and the bf16 driver recorded a bucket nothing asks for",
+    "trimul_inproj.py:norm_affine":
+        "the LN_out affine (gamma/beta), which `primitives.LayerNorm`'s `_Fp32ParamsMixin` pins to "
+        "fp32 through the trunk's bulk .to(bfloat16) -- so it is fp32 whatever the ACTIVATION is, "
+        "the same class as adaln.py's statistic. Driving it at BF16 was not a pinned activation "
+        "but the mirror-image bug: `dtype_of_args` keys on the SET of float operand dtypes, so "
+        "production launched `bfloat16+float32` while the driver recorded `bfloat16`, and every "
+        "trimul_outproj_layernorm_gemm_gate lookup missed on the dtype axis alone",
 }
 
+#: ``norm_affine`` is swept alongside the literals on purpose. It is `drivers.norm_affine`, which
+#: builds a norm gamma/beta at fp32 because that is where `primitives._Fp32ParamsMixin` pins it --
+#: a real fixed-precision choice, just a named one. Naming it must not buy an exemption from
+#: declaring it, or the guard would go quiet exactly as sites move to the helper.
 #: The import line and the docstrings that DISCUSS the names are not uses of them.
 _SKIP = re.compile(r"^\s*(#|from |import )|^\s*$")
 
@@ -49,7 +66,7 @@ def _sites() -> dict[str, list[int]]:
                 continue
             if in_doc or _SKIP.match(line):
                 continue
-            for name in ("torch.float32", "FP32"):
+            for name in ("torch.float32", "FP32", "norm_affine"):
                 if name == "FP32" and "torch.float32" in line:
                     continue              # counted once, under its own name
                 if re.search(rf"\b{re.escape(name)}\b", line):

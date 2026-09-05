@@ -7,6 +7,14 @@ and
 it runs on the two DiT streams only -- there is no pair-stream adaLN. The shape block is shared
 with ``drivers/rmsnorm.py`` rather than restated, the way ``drivers/layernorm.py`` shares
 ``drivers/layernorm_linear.py``'s.
+
+NO ``modules/`` CALLER YET, AND THAT IS NOT A REASON TO RETIRE IT. A reachability sweep finds
+``triton_rmsnorm_adamod`` exported by ``kernels/__init__.py`` and called only from this driver and
+``kernels/checks/``, which reads exactly like the three dead ``triangle_attention/triton/atomic.py``
+rows -- but it is the opposite case: the consumer is the SWT DiT block, which is being added to
+``modules/`` and whose adaptive-modulation norm this kernel IS. Retiring it would delete the tuned
+cache the module lands on. Re-check this note once that module exists; until then the family is
+built deliberately, not incidentally.
 """
 from __future__ import annotations
 

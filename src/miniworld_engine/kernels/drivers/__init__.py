@@ -221,6 +221,24 @@ def vec(n: int = 384, dtype: torch.dtype = BF16) -> torch.Tensor:
     return torch.randn(n, device=dev(), dtype=dtype)
 
 
+def norm_affine(n: int = 384) -> torch.Tensor:
+    """A norm gamma/beta AS PRODUCTION HOLDS IT: fp32, whatever the activation dtype is.
+
+    `modules/primitives.LayerNorm` mixes in `_Fp32ParamsMixin`, whose `_apply` pins the affine
+    params to fp32 through the trunk's bulk `.to(torch.bfloat16)` -- at value 1.0 the bf16 ULP
+    (2**-7) exceeds Adam's per-step update, so a bf16 gamma never trains. The affine reaches the
+    fused kernels as a TENSOR OPERAND, and `cache.dtype_of_args` keys on the SET of float operand
+    dtypes -- so a production launch keys `bfloat16+float32` while a driver building the affine
+    with `vec()` (bf16) recorded plain `bfloat16`. Different bucket, permanent miss, on an axis
+    no amount of shape or flag coverage can reach.
+
+    Use this ONLY where the launcher really is handed a `primitives` norm's parameter. Most
+    `vec()` call sites are biases or per-channel scales that production does keep in the
+    activation dtype, and switching those would invent the mirror-image bug.
+    """
+    return torch.randn(n, device=dev(), dtype=torch.float32)
+
+
 # ------------------------------------------------------------------------------------------------
 # Promoted here from the per-family driver modules: each of these is used by more than one
 # family, so it has exactly one home. A helper only one family uses lives in that family's

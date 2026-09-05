@@ -12,7 +12,7 @@ build shows it in opposite directions.
     DiffusionTransformer block class 24 times on the token side (d_single=768, d_cond=384) against
     3 times on the atom side (128/128). The side that is 24 of 27 blocks had no bucket of its own.
 
-So each is two work lists: token counts 256/384/512/768 at d 384/512/768, and atom counts
+So each is two work lists: token counts 256/384/512/768 at d 384/768, and atom counts
 1024..8192 at d 128 and only 128. The ranges are disjoint on purpose -- that is what lets one
 floor-clamp key both sides, where `level=both` needs `both_key`'s row count because a pair L and an
 atom A of the same value are different launches.
@@ -33,7 +33,12 @@ from miniworld_engine.autotune.shape_key import (
 )
 
 ATOM_WIDTH = 128
-TOKEN_WIDTHS = (384, 512, 768)
+#: 384 is d_cond (AF3's c_s) and 768 is d_single_token (c_token) -- the two widths the token DiT
+#: blocks are built at. 512 used to be here as headroom, and it was 17% of the entire `build all`
+#: for a width nothing presents: `builder.cases()` gives d_single 384/768 and d_cond 128/384/768,
+#: and no `benchmarks/**/bench.yaml` sweeps d_single at all. (The pair-side headroom is a different
+#: matter and stays -- 26 bench.yaml files sweep `d_pair_values: [128, 256, 512]`.)
+TOKEN_WIDTHS = (384, 768)
 
 
 def _rows() -> list[dict]:

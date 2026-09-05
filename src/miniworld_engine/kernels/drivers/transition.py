@@ -153,7 +153,12 @@ def transition_fold_triton() -> None:
 
 
 def transition_layernorm_expand_swiglu_triton() -> None:
-    """_transition_expand_gate_kernel via transition_expand_gate (SAVE_XN=False, the default)."""
+    """_transition_expand_gate_kernel via transition_expand_gate. SAVE_XN=0 ONLY.
+
+    SAVE_XN is in the key, but every production caller passes `save_xn=False`:
+    modules/transition/module.py:265 and :326, and kernels/transition/whole_op.py:79. The
+    `save_xn=True` launch inside fused.py is reached only when that argument is already True, so
+    nothing can turn it on. Driving it built a program the model never runs."""
     from miniworld_engine.kernels.transition.triton.fused import transition_expand_gate
 
     x2, g, b, wa, wb, _ = _transition_operands()
@@ -172,7 +177,26 @@ def transition_fwd_b2b_triton() -> None:
     from miniworld_engine.kernels.transition.triton.fused import transition_b2b
 
     x2, g, b, wa, wb, ws = _transition_operands(k=K_SMALL)
+    # BOTH values of ADD_RESIDUAL, because both are launched and an audit that looked only at the
+    # MODULE missed half of it:
+    #   =1  modules/transition/module.py:139 sets `_ADD_RESIDUAL = True` unconditionally and
+    #       threads it through :266/:327 into fused.py:1416,:1432 -- every module launch.
+    #   =0  kernels/transition/whole_op.py:76-80, the public `ops` facade, calls
+    #       `triton_transition_fused` WITHOUT `add_residual`, and fused.py:1780 defaults it False.
+    #       That is the d<=128 AF3 branch, i.e. this card.
+    # The committed cache held 16 buckets of =0 and none of =1, so the module path was missing;
+    # driving only =1 would simply have moved the hole onto the facade.
+    #
+    # The no-LN probe stays at ADD_RESIDUAL=0. `_swiglu_b2b` (fused.py:806) is the only producer of
+    # HAS_LN=0 and it passes no residual, so (HAS_LN=0, ADD_RESIDUAL=1) is a combination nothing
+    # can launch -- building it would tune a program with no caller while dropping the one there is.
+    #
+    # FUSE_STATS and SAVE_XN stay at 0: `settings.transition_fuse_stats` defaults False
+    # (settings.py:201) and its only setter is `builder.SWITCHES`, which the per-op `build all`
+    # never reads; `save_xn=True` has no caller (see transition_layernorm_expand_swiglu above).
     transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False, shape_key=SHAPE_KEY)
+    transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False, add_residual=True,
+                   shape_key=SHAPE_KEY)
     empty = x2.new_empty(0)
     transition_b2b(x2, empty, empty, wa, wb, ws, 0.0, has_ln=False, shape_key=SHAPE_KEY)
 
@@ -190,6 +214,7 @@ def transition_bwd_swiglu_recompute_triton() -> None:
     the Version A stacked launcher TritonTransitionFusedFunction.backward takes by default."""
     from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
     from miniworld_engine.kernels.transition.triton.fused import (
+        _transition_expand_gatebwd_savedxn,
         _transition_expand_gatebwd_stacked,
     )
 
@@ -197,13 +222,23 @@ def transition_bwd_swiglu_recompute_triton() -> None:
     rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
     grad_expand = rows2d(ROWS, wa.shape[0])
     _transition_expand_gatebwd_stacked(x2, rstd, c1, g, b, wa, wb, grad_expand,
-                                       shape_key=SHAPE_KEY)
+                                       shape_key=SHAPE_KEY)          # NORMALIZE=1, STORE_H=1
+    # The Version B (saved-xn) backward is the SAME kernel with NORMALIZE=False -- it reads the
+    # already-normalized xn as the GEMM operand instead of recomputing it -- and it varies STORE_H
+    # on top of that (fused.py:1052-1077, 1093-1117). Both are keyed; neither was driven, so the
+    # whole saved-xn half of this kernel ran on the heuristic subset.
+    _transition_expand_gatebwd_savedxn(x2, wa, wb, grad_expand, store_h=True,
+                                       shape_key=SHAPE_KEY)          # NORMALIZE=0, STORE_H=1
+    # STORE_H=0 is NOT driven: fused.py:1052 defaults `store_h=True` and both callers take that
+    # default (cute/fused.py:216 passes it explicitly, fused.py:1573 implicitly). NORMALIZE=0 is,
+    # because the saved-xn backward really runs it -- replay asked for (NORMALIZE=0, STORE_H=1)
+    # six times.
 
 
 def layernorm_bwd_foldstats_triton() -> None:
     """_transition_ln_bwd_kernel via _transition_ln_bwd. ``transition_lnbwd_cuda`` defaults to
     True and would route bf16/K<=512 to the hand-CUDA LN backward instead, so it is turned off
-    for this launch; PRIVATIZE_DGDB keeps its default (True)."""
+    for this launch; PRIVATIZE_DGDB is driven at BOTH values."""
     from miniworld_engine import settings
     from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
     from miniworld_engine.kernels.transition.triton.fused import _transition_ln_bwd
@@ -211,12 +246,23 @@ def layernorm_bwd_foldstats_triton() -> None:
     x2, g, _, _, _, _ = _transition_operands()
     rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
     previous = settings.current().transition_lnbwd_cuda
+    prev_priv = settings.current().transition_lnbwd_privatize
     settings.configure(transition_lnbwd_cuda=False)
     try:
+        # PRIVATIZE_DGDB=1 only. The kernel's comment (fused.py:1141-1143) says "the autotune
+        # builder sweeps the off-default False side (builder.SWITCHES)" -- true of the MODULE
+        # pass, false of `build all`, which has no switch axis. But the conclusion is to drive the
+        # DEFAULT, not both: `settings.transition_lnbwd_privatize` defaults True (settings.py:213)
+        # and nothing in production sets it, so =0 is reachable only from a build-harness pin.
+        settings.configure(transition_lnbwd_privatize=True)
         _transition_ln_bwd(torch.empty_like(x2).normal_(), x2, rstd, c1, g,
                            shape_key=SHAPE_KEY)
     finally:
-        settings.configure(transition_lnbwd_cuda=previous)
+        # BOTH restored: the loop above leaves `transition_lnbwd_privatize` on its last value, and
+        # a driver that mutates global settings past its own return changes what every LATER
+        # driver in the same build process tunes.
+        settings.configure(transition_lnbwd_cuda=previous,
+                           transition_lnbwd_privatize=prev_priv)
 
 
 def layernorm_fwd_recompute_foldstats_triton() -> None:

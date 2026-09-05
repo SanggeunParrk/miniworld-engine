@@ -9,10 +9,27 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import BF16, TensorKw, _grad, dev
-from miniworld_engine.kernels.drivers.triangle_attention import D, H, L
+from miniworld_engine.kernels.drivers import BF16, TensorKw, _grad, dev, driver_width, ragged
+from miniworld_engine.kernels.drivers.triangle_attention import L
 
 A = 8             # augmentation dim, from bench_kernel_aug_attn; a grid extent, never blocked
+
+#: This family does NOT share triangle_attention's `H`/`D`, and sharing them was a measured bug.
+#: That block is `H = driver_width(128) // 32, D = 32` -- head COUNT derived from the width at a
+#: FIXED head dim -- which is right for triangle_attention (d_pair 128, 4 heads of 32) and wrong
+#: here in the other direction: the DiT fixes the head count and lets the head dim follow d_single.
+#: `builder.cases()` states it -- AugmentedAttentionPairBias at `d_single` 384 and 768, both with
+#: `n_head: 16` -- so production runs HEAD_DIM 24 and 48. The shared block built (H=12, D=32) and
+#: (H=24, D=32) instead: three plausible-looking buckets, none of them one the model ever asks for.
+#: `dev audit --replay` measured 60 misses across this family's three kernels, every one of them
+#: `(H=16, HEAD_DIM=24)` or `(H=16, HEAD_DIM=48)`.
+#:
+#: The atom side keeps the other rule: `d_single_atom` is 128 and the atom DiT runs 4 heads of 32,
+#: which is what the width-derived form gives -- so it is kept for that width rather than replaced.
+_N_HEAD_TOKEN = 16                        # cases(): AugmentedAttentionPairBias(n_head=16)
+_W = driver_width(128)
+H = _N_HEAD_TOKEN if _W >= 384 else _W // 32
+D = ragged(_W // H)
 
 
 def _aug_qkvb() -> tuple[torch.Tensor, ...]:

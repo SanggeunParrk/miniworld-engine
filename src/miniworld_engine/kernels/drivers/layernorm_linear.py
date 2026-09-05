@@ -17,6 +17,7 @@ from miniworld_engine.kernels.drivers import (
     dev,
     driver_length,
     driver_width,
+    norm_affine,
     pair,
     ragged,
     rows2d,
@@ -157,7 +158,10 @@ def layernorm_linear_fwd_triton() -> None:
     # `layernorm_linear_triton_fwd` flattens to (M, K) itself and reshapes the result back, so
     # the reshape this used to do here only destroyed L -- the same defect that was fixed in
     # modules/triangle_attention/module.py.
-    layernorm_linear_triton_fwd(_act(), vec(_D), vec(_D), w, None, 1e-5)
+    # fp32 gamma/beta -- see `drivers.norm_affine`. Production hands this launcher a
+    # `primitives.LayerNorm` parameter, so its key is `bfloat16+float32`; the bf16 driver
+    # recorded `bfloat16` and every launch missed on the dtype axis.
+    layernorm_linear_triton_fwd(_act(), norm_affine(_D), norm_affine(_D), w, None, 1e-5)
 
 
 def layernorm_linear_fwd_fp32_triton() -> None:
