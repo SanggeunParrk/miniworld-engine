@@ -158,17 +158,228 @@ fall back TO differs, and neither is the full grid:
 
 An entry is **stale** when any of these no longer match what it was measured against:
 
-| field | invalidated by |
-| --- | --- |
-| `config_space_hash` | the kernel's config grid changing |
-| `env_identity` | triton / torch / CUDA / ptxas version changing |
-| `op_identity` | the kernel's source, or its `key=[...]` list, changing |
+The question a fingerprint has to answer is **"are the recorded measurements void?"** — which is
+narrower than "did anything change?", and conflating the two cost this repository real measurement
+twice. So the fields split into three tiers:
+
+| field | on mismatch | why |
+| --- | --- | --- |
+| `build_rev` | **RESET** | The only invalidator a *person* writes: a column in `registry.csv`, bumped when the way a kernel is MEASURED changes. See below. |
+| `key_scheme` | **RESET** | The bucket string means something else, so entries are *mislabelled*, not merely old. |
+| `env_identity` | **RESET** | Another triton / CUDA / ptxas really does make a recorded time a claim about a different compiler. Not a person's to notice, so it stays automatic. |
+| `config_space_hash` | **incremental build** | A grid edit is a top-up, never a reset — see below. |
+| `op_identity` | reported only | Auto-hash of the kernel source. Cannot tell a comment from a rewrite. |
+| `driver_identity` | reported only | Auto-hash of the build driver. Changes which buckets get BUILT, never whether a measured winner is right. |
+| `driver_id_scheme` | (gates `driver_identity`) | How that hash is computed; a stamp from another scheme is skipped, not failed. |
+
+### `build_rev` — the invalidator a human writes
+
+`registry.csv` carries a `build_rev` column, one integer per kernel. Bump it when an edit means the
+old numbers are void; leave it and every other edit is *additive*.
+
+The two auto-hashes it replaces were both too eager, measurably:
+
+* `op_identity` hashes the `@triton.jit` body and its `key=[...]`. Reformatting a comment moved it,
+  and moving it discarded every tuned entry for that kernel.
+* `driver_identity` hashes the build driver. Correcting which *shapes* a driver builds moved it —
+  and that reset deleted **32 of 38** tuned buckets from `cond_transition_expand_swiglu_triton`, an
+  edit that said nothing at all against the numbers it destroyed.
+
+Both are still computed and still reported by `dev cache-status`, because they are exactly what
+tells a person where to look. What they no longer do is decide.
+
+### A grid change is an incremental build, not a reset
+
+`cache.configs_to_bench(op, gpu, configs)` returns the current grid **minus the space already
+searched** — each cache records `config_space`, the set of configs the build that wrote it actually
+benched:
+
+* grid **widened** → only the added configs are timed; `store_ranked_configs` merges them against
+  the stored winners, which remain valid for everything they beat.
+* grid **narrowed** → nothing to time. The write drops any stored config the new grid no longer
+  contains, and each surviving winner is still the best of a *smaller* space.
+
+This matters because narrowing a ladder to what the cache proves it needs is maintenance the
+repository's own tests *demand* (`test_a_fully_measured_kernel_carries_its_own_ladder` derives the
+narrowing and fails until it is applied). Under the old rule, applying it cost a full rebuild —
+collapsing `GROUP_M` to its single winning value across 16 kernels priced out at **25 GPU-hours** to
+remove configs no winner needed. The tests asked for a change the cache then punished.
+
+Reading back is unaffected and was already safe: `_cached_subset` intersects the stored entry with
+the live grid (*"the cache names configs, the grid decides what is launchable"*), so a config the
+current grid does not contain can never be served.
+
+`driver_identity` covers what the other three cannot see: the driver decides which
+`(shape, dtype, flag)` buckets get tuned and with what arguments, so adding (say) an
+`ADD_RESIDUAL=1` call changes what the cache *covers* while the kernel body and the grid stay
+byte-identical.
+
+It is **not** consulted by the runtime reader — only by `dev cache-status` and CI. Checking it per
+launch would import build-harness driver modules inside a production `prune_configs` (dragging
+their import-time env-var surface into a consumer process, at ~1.2 ms a call), and it would fail
+CLOSED: the helper returns `None` on any import error, so `stored != None` would mark every stamped
+cache stale and silently drop every launch to the heuristic subset.
+
+Its value carries a scheme number (`driver_id_scheme`). A stamp written under a different scheme is
+skipped, not failed — without that, any change to the hashing scope turns every stamped cache into a
+false STALE that no rebuild-free fix can clear (this happened once already, in development).
+
+Its **scope** is the op's own driver function, the driver module's shared scope (imports, module
+constants, `_`-private helpers), and — since `driver_id_scheme` **2** — the definitions the module
+**imports from sibling driver modules**, transitively. Deliberately *not* the whole file. Measured
+over this repo's own history: hashing the whole driver file flagged **50%** of caches, because one
+op's edit invalidates every other op sharing that file; the scoped hash flags **6%**, the same as
+hashing the function alone but without going blind to a shared-helper (`_x` / `_bdll` / `_w`) change.
+
+Scheme 2 exists because scheme 1's blindness was not theoretical. `drivers/adaln.py` takes its
+shapes from `drivers/conditioned_transition.py`:
+
+```python
+from .conditioned_transition import _D, _DC, _M, _SHAPE_KEY
+```
+
+`_M` is the row count every adaln bucket is built at. Editing it rewrote what adaln's cache covers
+— but the *import statement's text*, all scheme 1 hashed of the sibling, is byte-identical across
+that edit. So adaln's stamp did not move, `dev cache-status` reported it fresh, and the damage was
+found only by diffing cache entries against `HEAD` after a rebuild had already overwritten them.
+Scheme 2 hashes the imported names plus the module-level names they transitively reference — not
+the whole sibling file, which would flag every importer on an unrelated edit. On this repo's
+current tree it adds **zero** new drift while catching that edit;
+`tests/registry/test_cache_status_detects_changes.py::test_driver_identity_follows_cross_module_imports`
+drives the real edit through the real hash. Like
+`op_identity`, an entry written before the field existed reads normally, so it only starts guarding
+once that cache is rebuilt — or backfilled from git (below).
 
 A tuned config is a claim about a compiler and a device, not only about a grid; an entry missing
 `op_identity` (written before that field existed) still reads, so committed caches degrade to the
 old behaviour rather than to a permanent miss. A config is any of: a `triton.Config`, a plain dict of tile params
 (CuTe/CUDA, cluster shapes as tuples), or a pre-shaped `{kwargs, num_warps, num_stages}` dict —
 `as_cfg_dict` normalizes all three and `config_to_dict` serializes them JSON-safely.
+
+## Checking freshness BEFORE you trust a cache (`dev cache-status`)
+
+The staleness fields above are checked per *launch*, and a miss is only a warning — which means a
+benchmark can measure the bounded heuristic fallback from end to end and report it as the tuned
+kernel. That is not hypothetical: narrowing 18 kernels' warp/stage ladders invalidated their
+`config_space_hash` without a rebuild, and every module those kernels back then benched ~10-20%
+slow, silently.
+
+```bash
+miniworld-engine dev cache-status              # every committed cache, every GPU key
+miniworld-engine dev cache-status --gpu A100   # substring filter
+```
+
+It recomputes the code-driven fingerprints (`config_space_hash` from the grid CSVs, `op_identity`
+from the kernel's live autotuner, `driver_identity` from the driver module, `key_scheme`) and
+diffs them against what each cache recorded. **No GPU and no kernel launch** — importing a
+`@triton.autotune` kernel only defines it — so it runs on a login node or in CI, and exits
+non-zero if anything is stale. `env_identity` is reported separately and never fails the command:
+a cache built under another triton/cuda is legitimately "not this machine's" without the committed
+code being wrong.
+
+`tests/registry/test_no_stale_caches.py` runs the same scan in CI, so a commit that edits a grid,
+a kernel body, or a build driver without rebuilding the cache fails there instead of quietly
+costing performance later. `tests/registry/test_cache_status_detects_changes.py` drives a
+synthetic cache to prove each detector actually fires.
+
+### Backfilling `driver_identity` from git
+
+`driver_identity` was added after most caches were committed, and a field a cache does not carry
+cannot guard it — so every pre-existing cache reported OK even if its build driver had since
+changed. The provenance is recoverable: git knows the commit that last wrote each cache, and hence
+what the driver looked like then.
+
+```bash
+miniworld-engine dev cache-backfill            # dry run: what would be stamped, and what drifted
+miniworld-engine dev cache-backfill --apply    # write the recovered hashes
+```
+
+It stamps the *historical* hash, never the current one — stamping today's would assert the cache
+was built by code it has never seen and permanently hide the drift the field exists to surface.
+Caches already stamped **under the current scheme** are skipped; an older-scheme stamp is re-derived.
+
+Finding the historical driver is not a path substitution: the drivers have been reorganised twice
+(one `kernels/drivers.py`, then abbreviated family modules `drivers_attn.py` / `drivers_ln.py`, then
+today's `kernels/drivers/<family>.py`), so the tool SEARCHES the commit's tree for the module that
+actually defines the driver function. Guessing paths silently skipped 70 of 234 caches — the oldest,
+most likely to have drifted. Every skip is now reported with a reason; on this repo it stamps 228
+caches (the 6 it cannot are the runtime-dispatch caches, which have no driver).
+
+What this does **not** cover: a cache whose fingerprints all match but that has no entry for the
+shape a run asks for ("no tuned autotune cache entry for this shape"). That is a coverage gap, not
+a code-drift one, and only `dev audit --replay` (which needs a GPU) can see it.
+
+### A stale fingerprint makes the next write RESET the file — so never build an op halfway
+
+`store_ranked_configs` clears `entries` before writing whenever any fingerprint disagrees (grid,
+env, `op_identity`, `driver_identity`, `key_scheme`). That is right in principle — entries tuned by
+code that has since changed are not evidence about today's kernel — but it has a sharp consequence:
+
+> **A partial rebuild of a fingerprint-stale op deletes every bucket it does not itself rewrite.**
+
+`build --per-op <op>` covers all of that op's units, so it refills what it clears. Anything narrower
+does not. Measured twice on this repository, both silent:
+
+* `rmsnorm_adamod_{fwd,bwd}_triton` lost all 34 / 33 of their `float32` entries to a rebuild that
+  ran only the bf16 unit. The registry declares `bf16|fp32`; the fp32 half simply vanished.
+* `cond_transition_expand_swiglu_triton` went from 38 entries to 6 when a driver edit made it stale
+  and a targeted rebuild refilled only the buckets that edit produced.
+
+Neither showed up as an error: the build reported success, and `dev cache-status` reported OK —
+correctly, because the file it now guards really was written by the current code. What was lost is
+invisible to every fingerprint, since a fingerprint describes the CODE and never the COVERAGE.
+
+So, before a targeted rebuild: check `dev cache-status` for the op. If it is STALE, either rebuild
+the whole op (`build --per-op`) or diff the entry keys against `git show HEAD:<cache>` afterwards.
+`dev audit --replay` is the check that would have caught both cases.
+
+### `dev audit --replay` is the acceptance test, and the only one that sees coverage
+
+Every fingerprint above answers "was this cache built by the current code?". None of them answers
+"does it hold the buckets a run will ask for?" — a cache can be perfectly fresh and still serve
+nothing. `dev audit --replay` is the direct measurement: it drives `builder.cases()` against the
+finished cache and prints every lookup that missed. Needs a GPU; takes about an hour on an A100.
+
+```bash
+miniworld-engine dev audit --replay      # exits 1 if any lookup missed
+```
+
+Read the misses by AXIS, not one at a time — the key is `dtype|FLAGS,shape_key=N`, and each axis
+fails for a different reason and takes a different fix. One A100 run measured 310 misses over 39
+ops, and they sorted cleanly:
+
+| axis | share | what it means | where the fix goes |
+| --- | --- | --- | --- |
+| shape | 204 | the driver never builds that `(length, width)` | the width ladders in `op_units`, or the driver's own shape block |
+| dtype | 54 | the op runs at a precision the row does not declare, or an operand's dtype differs | `registry.csv`'s `dtypes`, or the driver's operand dtypes |
+| flag | 52 | a constexpr in the key is only ever driven one way | the driver — drive both values |
+
+Decoding a `shape_key` is worth the trouble, because "shape" almost never meant length. `pack`
+lays out `base`, then each axis width in sorted-name order, then a CRC digit of the axis names,
+all base-4096 — so with the kernel's axis names from its `*_key(...)` call the key inverts exactly,
+and the CRC digit confirms the arity. Done that way, only 2 of those 204 misses were a missing
+LENGTH. The rest were channel WIDTHS the build never drove:
+
+* `augmented_attention`'s three kernels wanted `(H=16, HEAD_DIM=24)` and `(16, 48)` and were built
+  at `(12, 32)` / `(24, 32)`: the driver derived the head COUNT from the width at a fixed head dim,
+  while the DiT fixes `n_head=16` and lets the head dim follow `d_single`.
+* `trimul_gemm_gate_mmajor_triton` wanted `H2 == K` — the UNIDIRECTIONAL front — and the driver
+  only ever built the bidirectional `H2 = 2*K`.
+* `d_pair=384` and `d_msa=64` were on no ladder at all, though `cases()` presents both.
+
+### The two declarations of "what shapes the model runs"
+
+That last point is the structural one. `builder.cases()` (module dims — what `--replay` drives) and
+`op_units`'s `LADDER` (channel widths — what `build all` sweeps) both claim to say what the model
+presents, and nothing checked them against each other. `build all` takes the per-op path, so the
+ladder alone decides the shipped cache, while replay asks for whatever the cases present: a width
+in one and not the other is a bucket that can never be filled and is asked for on every run.
+
+`tests/layout/test_one_source_of_shape_truth.py` pins the direction that matters — every width a
+case presents is a rung on some ladder — with an explicit `NOT_DRIVEN` list for widths that reach
+no keyed kernel. It does not try to derive one list from the other: the dim-name-to-stream mapping
+is real knowledge, and guessing it is how a "obviously equivalent" driver edit collapsed the adaln
+and conditioned_transition caches into two useless buckets.
 
 ## Cache location & format
 
@@ -177,7 +388,7 @@ old behaviour rather than to a permanent miss. A config is any of: a `triton.Con
   `~/.cache` / env-var override — so a stale per-user cache can never shadow the committed configs.
 - `gpu_key` = device name + capability (e.g. `NVIDIA A100 80GB PCIe (sm80)`); entries keyed
   `"<dtype>|<shape-bucket>"` → list of `{kwargs, num_warps, num_stages, ms}` (top-K), plus the
-  three identity fields above, which reset the file's entries when any of them changes.
+  identity fields above, which reset the file's entries when any of them changes.
   `<dtype>` is what the kernel was OBSERVED to run in, so a kernel with mixed operands records
   `bfloat16+float32`, not the driver's dtype.
 

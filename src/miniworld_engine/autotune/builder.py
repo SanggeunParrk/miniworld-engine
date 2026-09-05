@@ -324,14 +324,22 @@ def cases() -> list[Case]:
     def IT(i):
         return ImplementationType(i)
 
-    PAIR_D = ({"d_pair": 128}, {"d_pair": 256}, {"d_pair": 384}, {"d_pair": 512})
+    #: 128 / 256 / 512, and NOT 384. Four declarations say what pair widths exist -- this one,
+    #: `cli.SHAPES["default"]["d_pairs"]`, every `benchmarks/**/bench.yaml`, and `op_units`'
+    #: pair ladder (`PRESENTED["pair"]` 128 = AF3's c_z, plus HEADROOM_PAIR 256/512) -- and three
+    #: of them said 128/256/512 while this one alone added 384. That is not extra coverage, it is
+    #: a permanent miss: `build all` takes the per-op path, so a width only this list carries can
+    #: never be in the shipped cache, while `dev audit --replay` (which drives THIS list) asks for
+    #: it on every run. Measured: `trimul_outproj_layernorm_gemm_gate_triton` had no `K=384`
+    #: bucket and `layernorm_fwd_saveact_triton` no `N=384`, at every length, forever.
+    PAIR_D = ({"d_pair": 128}, {"d_pair": 256}, {"d_pair": 512})
     # d_hidden is a SEPARATE axis from d_pair, and leaving it at its default is what pinned
     # layernorm_linear_mmajor_bwd to a single bucket N=128 across an entire build: that op keys on
     # N = the projection width, which TriangleMultiplication takes from d_hidden, not d_pair. So
     # sweeping d_pair alone moves the pair tensor and never moves the bucket the kernel keys on.
     PAIR_HID = (
         {"d_pair": 128, "d_hidden": 128}, {"d_pair": 256, "d_hidden": 128},
-        {"d_pair": 256, "d_hidden": 256}, {"d_pair": 384, "d_hidden": 256},
+        {"d_pair": 256, "d_hidden": 256}, {"d_pair": 512, "d_hidden": 256},
         {"d_pair": 512, "d_hidden": 512},
     )
     HID_D = ({"d_hidden": 128}, {"d_hidden": 256}, {"d_hidden": 384})
@@ -865,17 +873,32 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: source so the split cannot be folded away, and it can only read literals.
     PRESENTED = {"atom": (128,), "pair": (128,), "single": (128, 384, 768)}
     HEADROOM_PAIR = (256, 512)
+    #: Widths the MSA stack presents that no other stream does. `cases()` builds
+    #: `msa_pair_weighted_averaging` and `outer_product_mean` at `d_msa=64`, and both dispatch into
+    #: the SHARED layernorm/transition kernels -- so 64 arrives at a `level=both` kernel as a
+    #: channel width with no ladder rung of its own. `dev audit --replay` measured it directly:
+    #: `layernorm_fwd_saveact_triton` missing `(rows=2048, N=64)` and `(4096, 64)`.
+    MSA_WIDTHS = (64,)
     #: The token side of a DiT family. 128 is NOT here: it is d_single_atom, the atom side's width,
     #: and pairing it with a token count builds a shape no config presents. 384 (d_cond, AF3's c_s)
-    #: and 768 (d_single_token, c_token) are what the token blocks run; 512 is headroom between
-    #: them, on the same argument as HEADROOM_PAIR -- a widened config finds a cache, not a miss.
-    DIT_TOKEN_WIDTHS = (384, 512, 768)
+    #: and 768 (d_single_token, c_token) are what the token blocks run.
+    #:
+    #: 512 WAS here, as headroom "on the same argument as HEADROOM_PAIR". The argument does not
+    #: transfer. HEADROOM_PAIR earns its place because 26 `benchmarks/**/bench.yaml` files sweep
+    #: `d_pair_values: [128, 256, 512]`, so a missing 512 would push published bench points onto
+    #: the heuristic subset. NOTHING sweeps d_single: `builder.cases()` presents d_single 384/768
+    #: and d_cond 128/384/768, and no bench.yaml has a d_single axis at all. So this rung was
+    #: 17% of the whole build spent on a width no measurement and no model config asks for.
+    DIT_TOKEN_WIDTHS = (384, 768)
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
               "pair": tuple(sorted(PRESENTED["pair"] + HEADROOM_PAIR)),
               "single": PRESENTED["single"],
+              # `both` is the fallback for a row with no side; the MSA widths reach a
+              # both-level kernel through `_widths("atom")`, which is the side their row count
+              # lands on -- not through this entry, which `_widths` never reads for such a row.
               "both": tuple(sorted(set(PRESENTED["pair"] + HEADROOM_PAIR
-                                       + PRESENTED["single"])))}
+                                       + PRESENTED["single"] + MSA_WIDTHS)))}
     out = []
     for r in csv.DictReader(reg.open()):
         if r["backend"] != "triton" or not (r["driver"] or "").strip():
@@ -915,10 +938,18 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                    "atom": [("atom", A) for A in ATOM_SHAPES],
                    "token": [("token", N) for N in TOKEN_SHAPES]}
             sided = [u for side in want for u in per[side]]
-        elif r["level"] == "atom" and klass == "single":
+        elif r["level"] == "atom":
             # Also two work lists -- see shape_key.DIT_TOKEN_LENGTHS. `level=atom` says which key
-            # function; it does not say the kernel only ever sees atoms, and `width=single` is the
-            # column that gives it away: 384 and 768 are widths only the token stream has.
+            # function; it does not say the kernel only ever sees ATOM COUNTS.
+            #
+            # This used to be gated on `klass == "single"`, on the argument that 384/768 are widths
+            # only the token stream has. True about WIDTH, wrong about LENGTH -- and the two are
+            # independent axes here. `cond_transition_fwd_b2b_triton` is `width=atom` (dispatch
+            # routes it only at d <= 128) and was therefore driven at atom lengths ONLY, while the
+            # 128/128 DiT block it serves is built at every length the sweep runs. Measured by
+            # `dev audit --replay`: identical widths (DC=128, K=128, ND=256), built at L in
+            # 1024..8192, asked for at L in 256..768. The width class still decides the WIDTH --
+            # `_widths` reads `klass`, so a `width=atom` row stays pinned to 128 on both ladders.
             sided = ([("token", L) for L in DIT_TOKEN_LENGTHS]
                      + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
@@ -947,7 +978,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # all. So 768 was 24 of the model's 27 blocks and no unit ever built it: production opened a
         # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
         # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
-        def _widths(side: str, _k=klass) -> tuple:
+        def _widths(side: str, _k=klass, _lvl=r["level"]) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
             # A `level=both` row is driven once per SIDE, and the side names the stream outright,
@@ -960,11 +991,33 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # `both` there, and a test pins the biconditional: unread is not free to be wrong, and
             # `level=both,width=pair` would be a row contradicting itself with nothing to catch it.
             if side == "atom":
-                return (ATOM_WIDTH,)
+                if _lvl != "both":
+                    # A DiT row (`level=atom`) has a real atom stream, and it is 128 and only 128
+                    # -- `test_a_dit_family_is_built_on_both_streams` pins that. The MSA widths
+                    # below are for `level=both` rows only; letting them through here paired an
+                    # atom length with a width the DiT never presents, for 17 families at once.
+                    return (ATOM_WIDTH,)
+                # ATOM_WIDTH plus the MSA widths. The non-pair side of a `level=both` kernel is
+                # not only the atom stream: the MSA stack borrows these same shared LayerNorm /
+                # transition kernels, and an MSA activation is (B, n_msa, n_token, d_msa) whose
+                # ROW COUNT (n_msa*n_token) lands in exactly these buckets while its width is
+                # `d_msa`. `cases()` builds `msa_pair_weighted_averaging` and `outer_product_mean`
+                # at d_msa 64, and `dev audit --replay` measured the consequence directly --
+                # `layernorm_fwd_saveact_triton` asked for (rows=2048, N=64) and (4096, 64) and
+                # had neither, because 64 was a rung on no ladder at all.
+                return tuple(sorted({ATOM_WIDTH, *MSA_WIDTHS}))
             if side == "pair":
                 return LADDER["pair"]
             if side == "token":
-                return DIT_TOKEN_WIDTHS
+                # The class decides the WIDTH even here -- the comment above says so, and this
+                # line used not to honour it. A `level=atom, width=atom` row (cond_transition's
+                # two b2b kernels and rope_fwd) walks the token LENGTH ladder because the 128/128
+                # DiT block runs at token lengths, but its channel width is still 128: the row
+                # says `width=atom` precisely because `dispatch.ATOM_D_MAX` routes it only at
+                # d <= 128. Returning the token widths gave those three rows 30 units each at
+                # 384/512/768 -- shapes their own registry row says they never see, which build
+                # and then store nothing.
+                return (ATOM_WIDTH,) if _k == "atom" else DIT_TOKEN_WIDTHS
             return LADDER.get(_k, LADDER["both"])
 
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)

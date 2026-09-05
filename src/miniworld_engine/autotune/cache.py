@@ -21,6 +21,7 @@ degrades to a warn + full-grid fallback instead of silently pinning old tiles.
 
 from __future__ import annotations
 
+import ast
 import functools
 import hashlib
 import json
@@ -46,6 +47,25 @@ SCHEMA = 1
 #: An entry written under an older scheme is a miss, not a wrong answer: the reader falls back to
 #: the bounded heuristic subset and warns, and the next build overwrites it.
 KEY_SCHEME = 3
+
+#: How ``driver_identity`` is COMPUTED. Bumped whenever `_scoped_driver_source`'s scope changes,
+#: because nothing else catches that: the stored hash and the live hash would simply disagree and
+#: every stamped cache would read as "build driver changed" -- a false STALE the tools cannot tell
+#: from a real one, and one no rebuild-free fix can clear. A stamp whose scheme is absent or older
+#: than this is SKIPPED, not failed: the guard goes quiet for that cache until it is re-stamped.
+#:
+#:   1 -> the op's own driver function + the driver module's shared scope (imports, module
+#:        constants, `_`-private helpers). The first shipped scope; an earlier unreleased revision
+#:        hashed the whole driver FILE, which flagged 50% of caches on this repo's history because
+#:        one op's edit invalidated every other op in the same file.
+#:   2 -> ... plus the definitions IMPORTED FROM SIBLING DRIVER MODULES, transitively
+#:        (`_imported_driver_scope`). Scheme 1 was blind to them, and that blindness is not
+#:        theoretical: `drivers/adaln.py` takes its shapes from `drivers/conditioned_transition.py`
+#:        via `from .conditioned_transition import _D, _DC, _M, _SHAPE_KEY`, so an edit to `_M`
+#:        rewrote every bucket adaln builds while the import line -- all scheme 1 hashed -- stayed
+#:        byte-identical. `cache-status` reported adaln OK against a cache the edit had already
+#:        filled with buckets nothing queries.
+DRIVER_ID_SCHEME = 2
 
 #: Which levels each scheme bump actually changed. Scheme 2 re-based only `level=both` kernels;
 #: a token or atom kernel's bucket means exactly what it did before, so invalidating its entries
@@ -273,6 +293,173 @@ def op_identity(autotuner) -> str:
     return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
 
 
+@functools.lru_cache(maxsize=512)
+def _registry_driver(op: str) -> tuple[str, str] | None:
+    """``(module, function)`` of ``op``'s registry driver -- the BUILD code -- e.g.
+    ``("miniworld_engine.kernels.drivers.adaln", "adaln_gemm_gate")``, or None."""
+    import csv as _csv
+
+    reg = Path(__file__).resolve().parent.parent / "kernels" / "registry.csv"
+    try:
+        with reg.open(encoding="utf-8") as h:
+            for row in _csv.DictReader(h):
+                if row.get("kernel") == op:
+                    drv = (row.get("driver") or "").strip()
+                    if ":" in drv:
+                        mod, fn = drv.split(":", 1)
+                        return (mod.strip(), fn.strip())
+                    return None
+    except OSError:
+        return None
+    return None
+
+
+def _scoped_driver_source(src: str, fn_name: str) -> str | None:
+    """``fn_name``'s source plus the module's SHARED scope -- imports, module constants and the
+    ``_``-private helpers a driver calls (``_x`` / ``_bdll`` / ``_w``) -- and nothing else.
+
+    Granularity matters here, measured on this repo's history: hashing the whole driver FILE
+    flagged 50% of caches (one op's edit invalidating every other op in the same file), while this
+    scope flags 6% -- the same as hashing the function alone, but without being blind to a helper
+    change, which the function alone would miss."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    shared: list[str] = []
+    target: str | None = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == fn_name:
+                target = ast.get_source_segment(src, node)
+            elif node.name.startswith("_"):          # shared private helper
+                shared.append(ast.get_source_segment(src, node) or "")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.Import, ast.ImportFrom)):
+            shared.append(ast.get_source_segment(src, node) or "")
+    if target is None:
+        return None
+    return "\n".join(shared) + "\n" + target
+
+
+#: Package the sibling driver modules live in. An import from anywhere else (torch, the kernels
+#: themselves) is build-independent or already covered by ``op_identity``.
+_DRIVER_PKG = "miniworld_engine.kernels.drivers"
+
+
+def _module_level_defs(tree, src: str) -> dict[str, str]:
+    """name -> its top-level definition's source text, for constants and functions alike."""
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out[node.name] = ast.get_source_segment(src, node) or ""
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            out[node.target.id] = ast.get_source_segment(src, node) or ""
+        elif isinstance(node, ast.Assign):
+            text = ast.get_source_segment(src, node) or ""
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    out[tgt.id] = text
+    return out
+
+
+def _live_driver_source(mod_name: str) -> str | None:
+    """This checkout's source for a driver module. The default reader; the git backfill swaps in
+    one that reads the same module out of a historical tree, so a stamp computed for an old commit
+    hashes THAT commit's siblings rather than today's."""
+    try:
+        import importlib
+        import inspect
+
+        return inspect.getsource(importlib.import_module(mod_name))
+    except Exception:
+        return None
+
+
+def _imported_driver_scope(mod_name: str, src: str, _seen: frozenset[str] = frozenset(),
+                           read_source=_live_driver_source) -> str:
+    """The definitions this driver module IMPORTS FROM SIBLING DRIVER MODULES, transitively.
+
+    The hole this closes, and it is not hypothetical -- it is how a cache-destroying driver edit
+    shipped while the guard reported OK. ``drivers/adaln.py`` gets its shapes with
+    ``from .conditioned_transition import _D, _DC, _M, _SHAPE_KEY``. Changing ``_M``'s definition
+    changes every bucket adaln builds, but the IMPORT STATEMENT's text -- all
+    :func:`_scoped_driver_source` sees of it -- is byte-identical, so adaln's stamp did not move
+    and ``cache-status`` called its now-junk cache fresh.
+
+    Scope is the imported names plus the module-level names those transitively reference (so
+    ``_M = ragged(_N * _BASE)`` still moves when ``_BASE`` does), NOT the whole file: a sibling
+    module holds several families' shapes, and hashing all of it would flag every importer on an
+    unrelated edit -- the same over-sensitivity that made whole-file hashing unusable."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return ""
+    chunks: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        target = (f"{_DRIVER_PKG}.{node.module}" if node.level and node.module
+                  else node.module or "")
+        if not target.startswith(_DRIVER_PKG) or target == mod_name or target in _seen:
+            continue
+        sib_src = read_source(target)
+        if sib_src is None:
+            continue
+        try:
+            sib_tree = ast.parse(sib_src)
+        except SyntaxError:
+            continue
+        defs = _module_level_defs(sib_tree, sib_src)
+        # transitive closure over module-level names the imported definitions reference
+        wanted = {a.name for a in node.names} & set(defs)
+        frontier = set(wanted)
+        while frontier:
+            nxt: set[str] = set()
+            for name in frontier:
+                for sub in ast.walk(ast.parse(defs[name])):
+                    if isinstance(sub, ast.Name) and sub.id in defs and sub.id not in wanted:
+                        nxt.add(sub.id)
+            wanted |= nxt
+            frontier = nxt
+        # the sibling's own import lines: `_M = ragged(...)` means nothing without `ragged`
+        imports = [ast.get_source_segment(sib_src, n) or ""
+                   for n in sib_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        chunks.append(f"# from {target}\n" + "\n".join(imports + [defs[n] for n in sorted(wanted)]))
+        chunks.append(_imported_driver_scope(target, sib_src, _seen | {mod_name, target},
+                                             read_source))
+    return "\n".join(c for c in chunks if c)
+
+
+def driver_identity(op: str) -> str | None:
+    """12-hex of the BUILD code that produced ``op``'s cache: its registry driver function plus the
+    driver module's shared scope. ``op_identity`` fingerprints the KERNEL; this fingerprints the
+    code that *drives* it in the build. The driver decides which (shape, dtype, flag) buckets get
+    tuned and with what arguments, so a driver edit -- adding an ``ADD_RESIDUAL=1`` call, changing
+    a swept width -- changes what the cache covers while the kernel source and the config grid stay
+    byte-identical, a drift neither ``op_identity`` nor ``config_space_hash`` can see.
+
+    Scope is deliberate (see :func:`_scoped_driver_source`): other ops' driver functions in the
+    same file are excluded, their edits are not this op's business. None when the op has no
+    registry driver (a dispatch-only cache) or the module cannot be read here."""
+    ref = _registry_driver(op)
+    if ref is None:
+        return None
+    mod_name, fn_name = ref
+    try:
+        import importlib
+        import inspect
+
+        src = inspect.getsource(importlib.import_module(mod_name))
+    except Exception:
+        return None
+    scoped = _scoped_driver_source(src, fn_name)
+    if scoped is None:
+        return None
+    scoped += "\n" + _imported_driver_scope(mod_name, src)
+    body = "\n".join(ln.rstrip() for ln in scoped.splitlines() if ln.strip())
+    return hashlib.sha1(body.encode()).hexdigest()[:12]
+
+
 # --------------------------------------------------------------------------- #
 # load / store
 # --------------------------------------------------------------------------- #
@@ -295,9 +482,134 @@ def _load(op: str, gk: str) -> dict | None:
     return result
 
 
+@functools.lru_cache(maxsize=1)
+def _build_revs() -> dict[str, int]:
+    """kernel -> registry.csv's ``build_rev``. Read once."""
+    import csv
+
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    if not reg.is_file():
+        return {}
+    out: dict[str, int] = {}
+    for r in csv.DictReader(reg.open()):
+        try:
+            out[r["kernel"]] = int((r.get("build_rev") or "1").strip() or 1)
+        except ValueError:
+            out[r["kernel"]] = 1
+    return out
+
+
+def _stored_rev(data: dict) -> int:
+    """The ``build_rev`` a cache file records, defaulting to 1 when absent.
+
+    Spelled out rather than `int(data.get("build_rev", 1) or 1)`: `or 1` is falsy-tested, so a
+    stored **0** reads back as 1 and a cache built under revision 0 would compare equal to one
+    built under revision 1. Revisions start at 1 by convention, which is exactly why the bug would
+    have stayed invisible until someone used 0.
+    """
+    v = data.get("build_rev", 1)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 1
+
+
+def build_rev(op: str) -> int:
+    """The DECLARED measurement revision for ``op`` -- the one invalidator a human writes.
+
+    Every other fingerprint here answers "did something change?" automatically, and that turned out
+    to be the wrong question twice over. `op_identity` hashes the kernel's source, so reformatting a
+    comment discarded hours of measurement; `driver_identity` hashes the build driver, so correcting
+    which SHAPES get built deleted 32 of 38 tuned buckets that the edit said nothing against. Both
+    conflate "the code moved" with "the numbers are wrong".
+
+    `build_rev` asks the question that actually matters and can only be answered by a person: did
+    the way this kernel is MEASURED change, so that everything recorded under the old way is void?
+    Bump it in registry.csv and the next build discards that kernel's cache. Leave it and edits are
+    additive -- a narrowed ladder keeps its winners, a corrected driver keeps its buckets.
+
+    Two automatic invalidators remain, because neither is a person's to notice: `env_identity` (a
+    different triton/cuda/ptxas really does make a recorded time a claim about another compiler) and
+    `key_scheme` (a bucket string that now means something else is mislabelled, not merely stale).
+    """
+    return _build_revs().get(op, 1)
+
+
+def _entries_survive(data: dict, configs) -> bool:
+    """Is every stored winner still a legal config in the CURRENT grid?
+
+    The reset rule this answers. `store_ranked_configs` used to clear the file whenever
+    `config_space_hash` moved, which conflates two very different edits:
+
+    * the grid GREW -- a config nobody benched now exists, so every stored winner is a claim about
+      a smaller space than the one being searched. Genuinely stale.
+    * the grid was NARROWED and every stored winner survived the cut -- the winner beat everything
+      in the OLD space, and the new space is a subset of it, so the same config is still the best
+      of the new space. Strictly MORE valid than before, and deleting it is pure loss.
+
+    Narrowing a ladder to what the cache proves it needs is the repository's own recommended
+    maintenance (`test_a_fully_measured_kernel_carries_its_own_ladder` derives such a narrowing and
+    demands it). Charging a full rebuild for it made that maintenance cost 25 GPU-hours of
+    re-measuring configs whose winners were already known -- so the tests asked for a change the
+    cache then punished.
+
+    Membership of every winner is the exact test: it holds iff no winner was cut, which for a
+    subset edit is the whole question. If the grid grew, a winner can still be a member while the
+    new values were never benched -- so the caller only reaches here when the space did not grow.
+    """
+    if not configs:
+        return False            # cannot tell -> reset, the safe direction
+    live = {_sig(c) for c in configs}
+    for ranked in (data.get("entries") or {}).values():
+        for cfg in ranked:
+            if _sig_from_dict(cfg) not in live:
+                return False
+    return True
+
+
+def configs_to_bench(op: str, gk: str, configs) -> list:
+    """The configs a build still has to MEASURE -- the current grid minus the space already searched.
+
+    The other half of the incremental policy. `store_ranked_configs` keeps a cache when only the
+    grid moved; this is what makes that cheap instead of merely non-destructive. Each cache records
+    `config_space`, the set of configs the build that wrote it actually searched, so a later build
+    can bench the difference and nothing else:
+
+      * grid WIDENED  -> the added configs were never timed. Bench exactly those and let the write
+        merge them against the stored winners, which are still valid for everything they beat.
+      * grid NARROWED -> nothing new to time. Returns empty, and the write drops any stored config
+        the new grid no longer contains.
+
+    Returns the FULL grid whenever the difference cannot be trusted: no cache, no recorded space (a
+    file written before this field), or a fingerprint that invalidates the measurements outright
+    (`build_rev`, `env_identity`, `key_scheme`) -- in which case the caller is about to reset the
+    file anyway and every config needs timing again.
+
+    The saving this exists for, measured on this repository: collapsing GROUP_M to its single
+    winning value across 16 kernels is a narrowing the cache can already price, and under the old
+    "any grid change resets" rule it cost a 25 GPU-hour rebuild to apply a change that removed
+    nothing any winner needed.
+    """
+    configs = list(configs)
+    data = _load(op, gk)
+    if data is None:
+        return configs
+    if (_stored_rev(data) != build_rev(op)
+            or _scheme_stale(op, data.get("key_scheme"))
+            or data.get("env_identity") != env_identity()):
+        return configs                      # about to be reset: everything needs re-measuring
+    searched = data.get("config_space")
+    if not isinstance(searched, list):
+        return configs                      # predates the field: cannot tell, so measure it all
+    seen = set(searched)
+    todo = [c for c in configs if repr(_sig(c)) not in seen]
+    return todo
+
+
 def store_ranked_configs(
     op: str, gk: str, dtype: str, bucket: str, ranked: list[tuple[object, float]],
     config_space_h: str, *, top_k: int = 5, op_id: str = "", env_id: str = "",
+    configs=None,
 ) -> Path:
     """Persist the top-K (config, ms) for (op, gpu, dtype, bucket) to the in-repo cache.
 
@@ -313,10 +625,39 @@ def store_ranked_configs(
         except Exception:
             data = None
     env_id = env_id or env_identity()
-    if (data is None or data.get("config_space_hash") != config_space_h
-            or _scheme_stale(op, data.get("key_scheme"))
-            or data.get("env_identity") != env_id
-            or (op_id and data.get("op_identity") not in (None, op_id))):
+    driver_id = driver_identity(op)
+    # WHICH fingerprint changes make a stored WINNER wrong -- which is a narrower question than
+    # "did anything about the build change", and conflating the two has cost this repository real
+    # measurements twice.
+    #
+    #   env_identity / op_identity / key_scheme -> yes. A different compiler, a different kernel,
+    #       or a bucket that means something else all make a recorded time a claim about something
+    #       that no longer exists.
+    #   config_space_hash -> ONLY when the space grew, or when a winner was cut out of it. A pure
+    #       narrowing that keeps every winner leaves each entry the best of a SMALLER space.
+    #   driver_identity -> NEVER. The driver decides which buckets get built, not whether a
+    #       measured winner is right. Resetting on it deleted 32 of 38 tuned buckets from
+    #       cond_transition_expand_swiglu the moment its driver was corrected -- data that had
+    #       cost hours and that the edit said nothing against. It stays a recorded stamp, so
+    #       `dev cache-status` still reports the coverage drift; it just no longer destroys.
+    rev = build_rev(op)
+    reset = True
+    if (data is None
+            or _stored_rev(data) != rev                       # declared: the METHOD changed
+            or _scheme_stale(op, data.get("key_scheme"))      # automatic: the key means something else
+            or data.get("env_identity") != env_id             # automatic: another compiler
+            or (op_id and data.get("op_identity") not in (None, op_id))):  # automatic: another kernel
+        # `op_identity` IS here, and demoting it was a mistake worth naming: with no reset and
+        # no re-stamp the reader refuses the entries forever, including the ones a rebuild has
+        # just measured; with no reset and a re-stamp the pre-edit winner is served as if it had
+        # been measured against the current kernel. Neither is acceptable, and the field it was
+        # supposed to be replaced by -- `build_rev` -- solves a different problem: it lets a person
+        # invalidate on purpose, not avoid invalidating when the kernel really did change.
+        #
+        # A GRID change is deliberately NOT here. Widening it leaves the old winners valid for the
+        # configs they beat and needs only the added configs benched; narrowing it leaves each
+        # surviving winner the best of a smaller space. Either way the answer is an incremental
+        # build against `config_space`, not a reset -- see `configs_to_bench`.
         import datetime as _dt  # stamp only when writing
         try:
             import triton as _triton
@@ -329,19 +670,49 @@ def store_ranked_configs(
         data = {
             "schema": SCHEMA, "key_scheme": KEY_SCHEME,
             "gpu": gk, "op": op, "config_space_hash": config_space_h,
-            "env_identity": env_id, "op_identity": op_id,
+            "build_rev": rev,
+            "env_identity": env_id, "op_identity": op_id, "driver_identity": driver_id,
+            "driver_id_scheme": DRIVER_ID_SCHEME if driver_id else None,
             "provenance": {"triton": triton_ver, "torch": torch.__version__,
                            "built_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")},
             "entries": {},
         }
+    else:
+        reset = False
     if op_id:
         data["op_identity"] = op_id
+    if driver_id:
+        data["driver_identity"] = driver_id
+        data["driver_id_scheme"] = DRIVER_ID_SCHEME
     # Stamp it on every write, not only when the file is reset. A token/atom file that predates
     # the field is valid under scheme 2 -- the bump re-based both-level keys only -- but "valid
     # because the field is missing" is a fact you have to know `_SCHEME_AFFECTS` to reconstruct.
     # Writing it down means a file says which scheme its keys are in.
     data["key_scheme"] = KEY_SCHEME
-    data["entries"][f"{dtype}|{bucket}"] = [config_to_dict(c, ms) for c, ms in ranked[:top_k]]
+    data["build_rev"] = rev
+    data["config_space_hash"] = config_space_h
+    if configs is not None:
+        # The SPACE itself, not just its hash. A hash says "different"; the incremental build needs
+        # to know HOW -- which configs were added (bench those) and which were removed (drop any
+        # entry whose winner went with them).
+        data["config_space"] = sorted(repr(x) for x in {_sig(c) for c in configs})
+    # MERGE, not overwrite. Under the incremental policy a build may have benched only the configs
+    # the grid ADDED, so `ranked` can be a strict subset of the search -- overwriting would throw
+    # away the previous winner, which is usually the one that is still best. New measurements win
+    # on a tie because they were taken now; anything the current grid no longer contains is
+    # dropped, since it is no longer a config this kernel can be launched with.
+    key = f"{dtype}|{bucket}"
+    live = {_sig(c) for c in configs} if configs else None
+    merged: dict[tuple, dict] = {}
+    if not reset:
+        for cfg in data["entries"].get(key, []):
+            sig = _sig_from_dict(cfg)
+            if live is None or sig in live:
+                merged[sig] = cfg
+    for c, ms in ranked:
+        merged[_sig(c)] = config_to_dict(c, ms)
+    ordered = sorted(merged.values(), key=lambda d: (d.get("ms") is None, d.get("ms", float("inf"))))
+    data["entries"][key] = ordered[:top_k]
     write_json(fp, data, indent=2, sort_keys=True)
     _load_cache.pop((op, gk), None)  # invalidate memo
     return fp
@@ -650,6 +1021,12 @@ def _cached_subset(autotuner, configs, nargs, meta):
         return _miss(op, gk, dtype,
                      "tuned autotune cache is STALE (kernel source or autotune key list changed)",
                      configs)
+    # NOTE: driver_identity is deliberately NOT checked here. It is a BUILD-time fingerprint --
+    # `dev cache-status` and the CI gate catch driver drift before anything ships -- and checking it
+    # per launch would (a) import build-harness driver modules inside a production `prune_configs`,
+    # dragging their import-time env-var surface into a consumer process, and (b) fail CLOSED: the
+    # helper returns None on any import error, and `stored and stored != None` would then declare
+    # every stamped cache stale and silently drop every launch to the heuristic subset.
     entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
     if not entry:
         return _miss(op, gk, f"{dtype}|{bucket}",
@@ -657,7 +1034,14 @@ def _cached_subset(autotuner, configs, nargs, meta):
     # Intersect rather than trust: the cache names configs, the grid decides what is launchable.
     want = {_sig_from_dict(c) for c in entry}
     keep = [c for c in configs if _sig(c) in want]
-    return keep or None
+    if not keep:
+        # Every tuned config for this shape is outside the current grid -- a narrowing that cut
+        # them all. The caller falls back to the FULL grid, which this module's own docstring calls
+        # ruinous inside a forward, so it must not happen quietly. Unreachable before the grid
+        # stopped resetting the file; reachable now, and this is the only thing that says so.
+        return _miss(op, gk, f"{dtype}|{bucket}",
+                     "every tuned config for this shape was removed from the config grid", configs)
+    return keep
 
 
 def install_cache_reader() -> None:
@@ -751,7 +1135,20 @@ def select_config(
     if not entry:
         _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
         return None
-    best = dict(entry[0])  # fastest-first; drop the stored ms
-    best.pop("ms", None)
-    best["kwargs"] = {k: (tuple(v) if isinstance(v, list) else v) for k, v in best["kwargs"].items()}
-    return best
+    # Intersect with the live candidate space, exactly as the triton reader does. This used to be
+    # implied by the reset -- a changed grid emptied the file, so a stored config could not outlive
+    # the space it came from. Now that a grid edit is non-destructive, a narrowed ladder can leave
+    # entries naming configs this kernel can no longer be launched with, and returning the fastest
+    # stored one would hand the launcher a config that is not on its list.
+    # `candidates` arrives as cache dicts (`cute_config._as_cache_dicts`), so one shape only.
+    live = {_sig_from_dict(c) for c in (candidates or [])}
+    for cfg in entry:
+        if not live or _sig_from_dict(cfg) in live:
+            best = dict(cfg)
+            best.pop("ms", None)
+            best["kwargs"] = {k: (tuple(v) if isinstance(v, list) else v)
+                              for k, v in best["kwargs"].items()}
+            return best
+    _warn_once(op, gk, f"{dtype}|{bucket}",
+               "every tuned config for this shape is outside the current candidate space")
+    return None

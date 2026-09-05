@@ -66,8 +66,16 @@ DIM_BUCKETS: tuple[int, ...] = (64, 128, 256, 384, 512, 768)
 TOKEN_SHAPES: tuple[int, ...] = (128, 256, 384, 512)
 
 #: Atom-level counts. Starts at 1024: an atom activation is the whole molecule's atoms, thousands
-#: of them (`max_atoms: 5000` in the model's data config), and 256 or 512 is a crop small enough that
-#: nothing in the sweep is sized for it. Anything below 1024 floor-clamps into 1024.
+#: of them (`max_atoms: 5000` in the model's data config -- that file is not in this repository, so
+#: treat the number as context, NOT as a cap), and 256 or 512 is a crop small enough that nothing in
+#: the sweep is sized for it. Anything below 1024 floor-clamps into 1024.
+#:
+#: 8192 STAYS, and the reasoning that would remove it is a trap worth naming. `_floor_clamp` clamps
+#: at the TOP as well, so the largest rung is the bucket every larger atom count lands in -- the
+#: whole unbounded tail, not just [8192, 16384). Reading "max_atoms: 5000" as a cap makes 8192 look
+#: unreachable (5000 floors into 4096) and suggests dropping it for ~4% of the build; the moment the
+#: cap moves, every launch above 4096 would then land in a bucket tuned for a quarter of its work.
+#: The rung is cheap insurance on an axis whose ceiling is set outside this repository.
 ATOM_SHAPES: tuple[int, ...] = (1024, 2048, 4096, 8192)
 
 #: The DiT families -- adaln, conditioned_transition, augmented_attention, the seventeen rows that

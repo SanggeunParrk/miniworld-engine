@@ -1459,6 +1459,12 @@ def install() -> None:
 
     def prune_configs(self, kwargs):
         pruned = _orig_prune(self, kwargs)
+        # NO incremental subtraction here. `cache.configs_to_bench` exists and is correct about
+        # WHICH configs a grid edit added, but `config_space` is recorded per FILE while this hook
+        # runs per (dtype, bucket) round -- so subtracting it from a bucket that has never been
+        # measured hands the bencher only the delta and calls the bucket done. Measured: with a
+        # space recorded from a build covering L=1024 only, a fresh L=384 bucket was handed 2 of 4
+        # configs. Re-enable when `config_space` is per entry.
         # per autotuner AND per autotune key: rounds interleave across the kernels of a unit, and
         # one kernel is tuned once per key.
         rnd = _round_id(self, kwargs)
@@ -1732,7 +1738,7 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
             dtype, bucket = bk.split("|", 1)
             ranked = _rank(ent.values())
             fp = store_ranked_configs(op, gk, dtype, bucket, list(ranked), csh, top_k=top_k,
-                                      op_id=a.get("op_id", ""))
+                                      op_id=a.get("op_id", ""), configs=grid)
             written.append((op, bk, len(ranked), str(fp)))
     return written
 
