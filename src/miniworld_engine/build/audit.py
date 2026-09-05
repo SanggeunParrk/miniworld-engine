@@ -384,6 +384,31 @@ def _declared_dtypes() -> dict:
 GPU_SPECIFIC = re.compile(r"_sm(\d+)|^transition_b2b")
 
 
+#: kernel -> the buckets whose config the LAUNCHER pins instead of tuning, from
+#: `kernels/untunable.csv`. `"*"` means every bucket, i.e. the autotuner is never reached.
+#:
+#: These are not defects and not gaps. A launcher that calls `kernel.fn[...]` -- the raw JIT
+#: function rather than the autotuned wrapper -- has decided the config itself, so no build can
+#: capture that launch and no cache entry is ever read for it. The registry still declares the op,
+#: because the kernel is real and ships; what it cannot declare today is "tuned everywhere except
+#: here". Without this list the audit reports a FAIL that no amount of building can clear, which
+#: is worse than silence: it hides the failures that ARE actionable.
+def _untunable() -> dict[str, set[str]]:
+    import csv
+
+    path = Path(__file__).resolve().parents[1] / "kernels" / "untunable.csv"
+    out: dict[str, set[str]] = {}
+    if not path.is_file():
+        return out
+    with path.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            k = (row.get("kernel") or "").strip()
+            if k:
+                out.setdefault(k, set()).update(
+                    b.strip() for b in (row.get("buckets") or "*").split("|") if b.strip())
+    return out
+
+
 def check_reachability(rep: Report, shard_dirs: list[Path]) -> None:
     from miniworld_engine.autotune.configs import registered_ops
 
@@ -412,6 +437,9 @@ def check_reachability(rep: Report, shard_dirs: list[Path]) -> None:
             rep.add("reach", OK, op, "captured by a build")
         elif GPU_SPECIFIC.search(op):
             rep.add("reach", OK, op, "GPU-specific: excluded on this card by policy")
+        elif "*" in _untunable().get(op, set()):
+            rep.add("reach", OK, op,
+                    "launcher pins the config at every driven width (kernels/untunable.csv)")
         else:
             rep.add("reach", FAIL, op, "registered but NO build ever captured it")
     rep.stats["registered"] = len(reg)
@@ -503,6 +531,31 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
         want.setdefault(u.op, set()).add((u.dtype, u.bucket))
     rep.stats["declared_ops"] = len(want)
     rep.stats["declared_pairs"] = sum(len(v) for v in want.values())
+
+    # Buckets whose config the LAUNCHER pins -- declared work that no build can capture and no
+    # launch ever reads. Subtracted from the denominator rather than counted as a hole, so
+    # `missing_pairs` keeps meaning "coverage a rebuild would fix". See kernels/untunable.csv.
+    untunable = _untunable()
+    for op, buckets in untunable.items():
+        if op not in want:
+            continue
+        if "*" in buckets:
+            rep.add("coverage", OK, op, "launcher pins every config (kernels/untunable.csv)")
+            del want[op]
+            continue
+        drop = set()
+        for dt, b in want[op]:
+            try:
+                base = unpack_base(b) if b is not None else None
+            except Exception:
+                base = None
+            if base is not None and str(base) in buckets:
+                drop.add((dt, b))
+        if drop:
+            want[op] -= drop
+            rep.add("coverage", OK, op,
+                    f"{len(drop)} bucket(s) excluded: the launcher pins them "
+                    f"(kernels/untunable.csv: {sorted(buckets)})")
 
     missing = 0
     for op in sorted(want):
