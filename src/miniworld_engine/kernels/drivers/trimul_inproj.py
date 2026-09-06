@@ -102,12 +102,10 @@ def _sm100() -> bool:
 def trimul_outproj_layernorm_gemm_gate_triton() -> None:
     """back.py _back_kernel, via trimul_back_triton (LN_out + proj + gate), fp32 norm affine.
 
-    ADD_RESIDUAL=1 ONLY:
-    this fused back is the INFERENCE-only path (``_uni_infer`` on A100/sm86, ``_forward_cute_free``
-    on H100 sm90; training uses ``_UniBackHalfTriton``), and inference always fuses the module's
-    UNCONDITIONAL pairformer residual (dropout is off outside training), so ADD_RESIDUAL is 1 in
-    every production call. The no-residual bucket exists only for the manual ``_ADD_RESIDUAL=False``
-    raw-op benchmark toggle -- not worth a committed cache entry -- so it is not driven here."""
+    This fused back is the INFERENCE-only path (``_uni_infer`` on A100/sm86,
+    ``_forward_cute_free`` on H100 sm90; training uses ``_UniBackHalfTriton``). There is no
+    residual flag left to drive both sides of -- ``residual`` is a required argument and the add
+    is unconditional -- so one probe covers the kernel."""
     from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 
     # fp32, NOT BF16. `dtype_of_args` keys on the SET of float operand dtypes, and the norm
@@ -118,7 +116,7 @@ def trimul_outproj_layernorm_gemm_gate_triton() -> None:
     # `bfloat16` -- a different bucket, and every production call missed on the dtype axis alone
     # no matter which shapes or flags were built.
     ln_w, ln_b = norm_affine(D), norm_affine(D)
-    trimul_back_triton(_bdll(), _x(), _w(), _w(), ln_w, ln_b, residual=_x())     # ADD_RESIDUAL=1
+    trimul_back_triton(_bdll(), _x(), _w(), _w(), ln_w, ln_b, residual=_x())
 
 
 def trimul_gemm_gate_mmajor_triton() -> None:
@@ -146,35 +144,37 @@ def trimul_gemm_gate_mmajor_triton() -> None:
         bidir_front_triton(_x(), _w(h), _w(h), _w(h), _w(h), save_preact=False)  # inference
 
 
-def gated_projection_gate_dropres_triton() -> None:
-    """gate_elem.py _gate_mul_kernel, via gate_elem_triton -- the three reachable flag combos."""
-    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
+def gated_projection_gate_res_triton() -> None:
+    """gate_elem.py _gate_mul_infer_kernel via gate_elem_infer -- the INFERENCE gate store.
 
-    # x_n as _x(): gate_elem_triton documents (M,K) OR (B,L,L,K) and its ``_shape_key`` reads
+    One probe, because the kernel has no flags: no dropout (inference), no saved gate (nothing
+    backpropagates through it). Its whole coverage is the shape ladder, and a missing shape shows
+    up as a missing cache entry rather than as an unbuilt flag value.
+    """
+    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_infer
+
+    # x_n as _x(): gate_elem_infer documents (M,K) OR (B,L,L,K) and its ``_shape_key`` reads
     # ``length_of`` off a 4-D x_n; a 2-D x_n with no seq_len has no L in it and falls to
     # ``token_key(0)`` -> the smallest bucket (128). It flattens x_n itself, so the launch is
     # unchanged. seq_len=L is passed too, which is what every production caller does.
-    # ADD_RESIDUAL / USE_DROPOUT / SAVE_GATE are all in the key (gate_elem.py:47) and the
-    # per-op build has no switch axis of its own, so whatever the driver does not call is never
-    # built. The reachable combinations, from the production call sites:
-    #   inference       bidirectional.py:343   residual, no gate out   -> 1,0,0
-    #   training        unidirectional.py:83 / bidirectional.py:252    -> 1,0,1 and 1,1,1
-    #                   (`return_gate=True`; dropscale carries pairformer's p_drop=0.25)
-    # BOTH values of ADD_RESIDUAL. The module path is always =1 (`_ADD_RESIDUAL = True` at
-    # module.py:212 / bidirectional.py:106), which is what replay measured -- 18 misses, all =1.
-    # But `trimul_inproj/whole_op.py`, the public `ops` facade, calls the triton trimul without
-    # `add_residual`, and `unidirectional.py:207` / `bidirectional.py:356` default it False, so
-    # `residual_flat` is None and the =0 program launches. Below sm90 that facade resolves to
-    # these very kernels, so =0 is reachable on this card, not just on cute.
+    # Launch sites: bidirectional.py `_bidir_infer`, cute/back_split{,_sm100}.py.
+    gate_elem_infer(_x(), _rows(), _w(), _rows(), seq_len=L)
+
+
+def gated_projection_gate_dropres_triton() -> None:
+    """gate_elem.py _gate_mul_train_kernel via gate_elem_train -- the TRAINING gate store.
+
+    One probe, for the same reason: the flags are gone. This kernel always writes the gate (the
+    backward needs it) and always applies a drop scale (ones when the model's p_drop is 0), so
+    there is no second side to drive. Launch sites: unidirectional.py / bidirectional.py training
+    Functions, cute v6_training_merged / bidir_training.
+    """
+    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_train
+
     # residual is [M,N] (the flattened module input pair), dropscale is [L,N] broadcast
-    # over the i-index -- per gate_elem_triton's docstring, not the 4-D x_n layout.
-    res, ds = _rows(), torch.rand(L, D, device=dev(), dtype=BF16)
-    gate_elem_triton(_x(), _rows(), _w(), seq_len=L)                                    # 0,0,0
-    gate_elem_triton(_x(), _rows(), _w(), seq_len=L, return_gate=True)                  # 0,0,1
-    gate_elem_triton(_x(), _rows(), _w(), seq_len=L, residual=res)                      # 1,0,0
-    gate_elem_triton(_x(), _rows(), _w(), seq_len=L, residual=res, return_gate=True)    # 1,0,1
-    gate_elem_triton(_x(), _rows(), _w(), seq_len=L, residual=res, dropscale=ds,
-                     return_gate=True)                                                  # 1,1,1
+    # over the i-index -- per gate_elem_train's docstring, not the 4-D x_n layout.
+    ds = torch.rand(L, D, device=dev(), dtype=BF16)
+    gate_elem_train(_x(), _rows(), _w(), _rows(), ds, seq_len=L)
 
 
 def gated_projection_bwd_gate_dropres_triton() -> None:
@@ -184,8 +184,8 @@ def gated_projection_bwd_gate_dropres_triton() -> None:
     # seq_len=L: every argument of gate_elem_bwd_ew is already flattened to (M, N) by contract,
     # so its docstring says seq_len "is the only place L can come from"; without it ``_shape_key``
     # returns ``token_key(0)`` -> the smallest bucket (128) at every length.
-    # USE_DROPOUT: both, because pairformer runs p_drop=0.25 in training and 0 in inference
-    # (unidirectional.py:105, bidirectional.py:273 pass `dropscale=ctx.dropscale`).
+    # There is no USE_DROPOUT to drive both sides of: this is the TRAINING backward and every
+    # training launch carries a drop scale (ones when the model's p_drop is 0).
     # FROM_PREACT is CARD-DEPENDENT and the branch has to be here, because the registry row is
     # `arch=sm80` and so this driver runs on every card. The =1 side is passed only by the sm100
     # merged-training paths (cute/bidir_training_sm100.py:82, cute/v6_training_merged_sm100.py:68),
@@ -193,12 +193,9 @@ def gated_projection_bwd_gate_dropres_triton() -> None:
     # "it must be driven on an sm100 build" and then not gating it is how a B200 cache ends up
     # missing half of its training backward.
     ds = torch.rand(L, D, device=dev(), dtype=BF16)
-    gate_elem_bwd_ew(_rows(), _rows(), _rows(), seq_len=L)                              # 0,0
-    gate_elem_bwd_ew(_rows(), _rows(), _rows(), seq_len=L, dropscale=ds)                # 1,0
+    gate_elem_bwd_ew(_rows(), _rows(), _rows(), ds, L)                        # FROM_PREACT=0
     if _sm100():
-        gate_elem_bwd_ew(_rows(), _rows(), _rows(), from_preact=True, seq_len=L)        # 0,1
-        gate_elem_bwd_ew(_rows(), _rows(), _rows(), from_preact=True, dropscale=ds,
-                         seq_len=L)                                                     # 1,1
+        gate_elem_bwd_ew(_rows(), _rows(), _rows(), ds, L, from_preact=True)  # FROM_PREACT=1
 
 
 def trimul_bwd_gate_packed_triton() -> None:

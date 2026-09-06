@@ -114,6 +114,15 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     # ESMFold2 SWA atom attention. The build case already exists (builder.py `swa_atom_attention`,
     # driving SWA3DRoPEAttention); this exposes it to `bench_module` and the capture path.
     "swa_atom_attention": ModuleTarget(("swa_atom_attention",)),
+    # The BLOCKS, not the parts. A per-part result does not compose: our kernels are opaque
+    # `custom_op`s, so a part pays its launch overhead once and a block pays it once per part,
+    # while `torch.compile` fuses across parts in the reference and cannot fuse across ours.
+    # Both effects only land on a block. `dit` is the token track (pair-bias attention),
+    # `swa_dit` the atom track (windowed 3D-RoPE) -- different algorithms, different modules.
+    "dit": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition"),
+                        "precision=32"),
+    "swa_dit": ModuleTarget(
+        ("swa_atom_attention", "adaptive_layernorm", "conditioned_transition"), "precision=32"),
 }
 
 #: Named groups so `capture pairformer` means something. A group is just a set of targets.
@@ -125,7 +134,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
-                  "swa_atom_attention"),
+                  "swa_atom_attention", "dit", "swa_dit"),
     "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }

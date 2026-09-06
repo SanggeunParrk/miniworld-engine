@@ -20,8 +20,8 @@ from pathlib import Path
 
 from miniworld_engine.autotune.cache import (
     DRIVER_ID_SCHEME,
-    _registry_driver,
     _imported_driver_scope,
+    _registry_driver,
     _scoped_driver_source,
     driver_identity,
 )
@@ -109,7 +109,7 @@ def _hash_scoped(src: str, fn_name: str, mod_name: str = "", commit: str = "") -
 
 #: Why caches were passed over on the last :func:`backfill` -- reported, never silent: an
 #: unreported skip is what let a rename hide 37% of the corpus.
-LAST_SKIPPED: "Counter[str]" = Counter()
+LAST_SKIPPED: Counter[str] = Counter()
 
 
 def backfill(*, apply: bool = False) -> list[Backfilled]:

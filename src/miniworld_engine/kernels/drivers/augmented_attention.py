@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.drivers import BF16, TensorKw, _grad, dev, driver_width, ragged
+from miniworld_engine.kernels.drivers import (
+    BF16,
+    TensorKw,
+    _grad,
+    dev,
+    driver_width,
+    ragged,
+)
 from miniworld_engine.kernels.drivers.triangle_attention import L
 
 A = 8             # augmentation dim, from bench_kernel_aug_attn; a grid extent, never blocked

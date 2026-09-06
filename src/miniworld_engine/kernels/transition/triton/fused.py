@@ -322,9 +322,18 @@ def _prefer_covering_b2b(configs, nargs, **_):
 
 
 # fmt: off
+# There is no ADD_RESIDUAL. The residual is not a flag on this kernel; it follows from HAS_LN,
+# which is already in the key and already says WHICH OP this launch is:
+#   HAS_LN=1  the Transition op, `y = x + squeeze(SwiGLU(LN(x)))`. Its residual is
+#             unconditional -- every module and the `ops.transition` facade define it that way.
+#   HAS_LN=0  the bare SwiGLU FFN (`_SwiGLUFFNFused` / `triton_swiglu_ffn`), whose whole
+#             contract is "no LayerNorm, no residual" and whose caller owns its own norm.
+# That is the same pairing the old flag always had -- (HAS_LN=0, ADD_RESIDUAL=1) was a
+# combination nothing could launch -- so folding it in removes a variable without removing a
+# behaviour. The add itself is free: D == K here, so the epilogue reloads the kernel's OWN
+# pre-LN input tile (L2-hot from the LN load) instead of taking a residual tensor argument.
 @triton.autotune(configs=configs_for("transition_fwd_b2b_triton"),
-                 key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'ADD_RESIDUAL',
-                      'HAS_LN'],
+                 key=['shape_key', 'SAVE_XN', 'FUSE_STATS', 'HAS_LN'],
                  prune_configs_by={'early_config_prune': _prefer_covering_b2b})
 @triton.jit
 def _transition_b2b_kernel(
@@ -338,7 +347,7 @@ def _transition_b2b_kernel(
     stride_nm, stride_nk,    # xn out: (M, K) row-major (only used when SAVE_XN)
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K_ND: tl.constexpr,
     BLOCK_K_D: tl.constexpr,
-    SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr, ADD_RESIDUAL: tl.constexpr,
+    SAVE_XN: tl.constexpr, FUSE_STATS: tl.constexpr,
     HAS_LN: tl.constexpr, GROUP_M: tl.constexpr,
 ):
     # Back-to-back: a program owns BLOCK_M1 rows x BLOCK_K_ND output columns and ALL of ND. It builds
@@ -528,11 +537,13 @@ def _transition_b2b_kernel(
                 mask=col_mask[:, None] & d_mask[None, :], other=0.0,
             )
             out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
-    if ADD_RESIDUAL:
-        # Fuse the post-transition residual add: y = transition(x) + x. The residual is the
-        # kernel's OWN pre-LN input x (the module never mutates it before `pair + transition(pair)`),
-        # so no extra tensor arg — reload the input row tile over the D output columns (D == K here;
-        # L2-hot from the LN load above) and add in fp32 before the single output store.
+    if HAS_LN:
+        # Fuse the post-transition residual add: y = transition(x) + x. HAS_LN is what says this
+        # launch is the Transition op rather than the bare SwiGLU FFN, and the Transition op's
+        # residual is unconditional. The residual is the kernel's OWN pre-LN input x (the module
+        # never mutates it before `pair + transition(pair)`), so no extra tensor arg — reload the
+        # input row tile over the D output columns (D == K here; L2-hot from the LN load above)
+        # and add in fp32 before the single output store.
         res = tl.load(
             x_ptr + rows[:, None] * stride_xm + dcols[None, :] * stride_xk,
             mask=row_mask[:, None] & d_mask[None, :], other=0.0,
@@ -556,7 +567,6 @@ def transition_b2b(
     stats: tuple[torch.Tensor, torch.Tensor] | None = None,  # (rstd, c1) precomputed
     save_xn: bool = False,
     fuse_stats: bool | None = None,
-    add_residual: bool = False,
     shape_key: int | None = None,
     has_ln: bool = True,
 ):
@@ -612,7 +622,6 @@ def transition_b2b(
         xn.stride(0), xn.stride(1),
         SAVE_XN=save_xn,
         FUSE_STATS=fuse_stats,
-        ADD_RESIDUAL=add_residual,
         HAS_LN=has_ln,
     )
     if fuse_stats:
@@ -1296,7 +1305,7 @@ def _transition_ln_bwd(dxn, x2, rstd, c1, gamma, *, shape_key: int | None = None
 
 
 def _fused_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight,
-                    squeeze_weight, n, eps, save_xn, add_residual, shape_key):
+                    squeeze_weight, n, eps, save_xn, shape_key):
     """Shapes only. Branches on ``save_xn`` (an argument) and never on the device, because a
     fake has to give the same STRUCTURE the compiled graph was traced with -- which of the
     b2b / split / cute paths below actually runs must not be visible from here."""
@@ -1320,7 +1329,6 @@ def _fused_fwd(
     n: int,
     eps: float,
     save_xn: bool,
-    add_residual: bool,
     shape_key: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Every launch of the fused forward, and nothing else -> ``(out, rstd, c1, xn)``.
@@ -1336,12 +1344,12 @@ def _fused_fwd(
     which knows ``save_xn`` -- is the one that decides whether to save it.
     """
     K = x2.shape[-1]
-    # Fuse the post-transition residual add y = transition(x) + x into the forward output
-    # (the residual is the module input x itself; D == K). Handled in-kernel on the fast
-    # b2b paths; an explicit add on the fallback paths. Backward adds grad_output back to
-    # dx (the identity path of x + f(x)). ``residual_pending`` stays True until a path
-    # has folded the add.
-    residual_pending = add_residual
+    # This IS the Transition op, so the residual add y = transition(x) + x is unconditional --
+    # there is no flag, here or in the kernel (see the note above `_transition_b2b_kernel`).
+    # The residual is the module input x itself (D == K). The fast b2b paths fold it into the
+    # squeeze epilogue; the fallback paths add it explicitly, and ``residual_pending`` tracks
+    # which of the two happened. Backward adds grad_output back to dx (the identity path).
+    residual_pending = True
 
     xn = None
     # Memory-light training path: reuse the FAST inference hand-CUDA b2b forward (fused
@@ -1398,7 +1406,6 @@ def _fused_fwd(
                     ln_weight.contiguous(), ln_bias.contiguous(),
                     expand_a_weight.contiguous(), expand_b_weight.contiguous(),
                     squeeze_weight.contiguous(),
-                    add_residual=residual_pending,
                 )
                 residual_pending = False  # folded into the squeeze epilogue
             except Exception:  # noqa: BLE001  build unavailable -> split fallback (always fits)
@@ -1413,10 +1420,9 @@ def _fused_fwd(
             res = transition_b2b(
                 x2, ln_weight, ln_bias,
                 expand_a_weight, expand_b_weight, squeeze_weight, eps,
-                save_xn=save_xn, fuse_stats=True, add_residual=residual_pending,
-                shape_key=shape_key,
+                save_xn=save_xn, fuse_stats=True, shape_key=shape_key,
             )
-            residual_pending = False  # folded into the squeeze epilogue
+            residual_pending = False  # has_ln=True -> folded into the squeeze epilogue
             if save_xn:
                 out, rstd, c1, xn = res
             else:
@@ -1429,9 +1435,9 @@ def _fused_fwd(
                 x2, ln_weight, ln_bias,
                 expand_a_weight, expand_b_weight, squeeze_weight, eps,
                 stats=(rstd, c1), save_xn=save_xn, fuse_stats=False,
-                add_residual=residual_pending, shape_key=shape_key,
+                shape_key=shape_key,
             )
-            residual_pending = False  # folded into the squeeze epilogue
+            residual_pending = False  # has_ln=True -> folded into the squeeze epilogue
             out, xn = res if save_xn else (res, None)
     else:
         # Large K (K > _B2B_MAX_K). The full-K-row expand kernel loads BLOCK_K =
@@ -1464,7 +1470,7 @@ def _fused_fwd(
 
 
 def _fused_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight,
-                    expand_b_weight, squeeze_weight, xn_saved, eps, has_xn, add_residual,
+                    expand_b_weight, squeeze_weight, xn_saved, eps, has_xn,
                     orig_shape, shape_key):
     """Shapes only -- the six real gradients, in ``forward``'s argument order."""
     return (
@@ -1491,7 +1497,6 @@ def _fused_bwd(
     xn_saved: torch.Tensor | None,
     eps: float,
     has_xn: bool,
-    add_residual: bool,
     orig_shape: list[int],
     shape_key: int,
 ) -> tuple[
@@ -1502,7 +1507,7 @@ def _fused_bwd(
     Split out of ``TritonTransitionFusedFunction.backward`` for the reason the forward is: the
     saved-tensor unpack stays traceable, the launches stay opaque. It returns only the six real
     gradients -- a ``torch.library`` schema cannot return ``None`` -- and the caller re-adds the
-    four ``None`` slots that ``n``, ``eps``, ``save_xn`` and ``add_residual`` need.
+    three ``None`` slots that ``n``, ``eps`` and ``save_xn`` need.
     """
     # SEPARATE (non-fused) backward: explicit per-stage ops, reusing the LN stats
     # (rstd, c1) saved by forward (no mean/rstd recompute). GEMMs are bf16 (matching
@@ -1511,13 +1516,11 @@ def _fused_bwd(
 
     def _finalize_dx(dx_flat):
         # y = x + f(x): the residual identity path contributes grad_output directly to dx.
-        dxr = dx_flat.reshape(orig_shape)
-        if add_residual:
-            # In-place: reuse dx's freshly-computed storage (never saved/aliased) instead of
-            # allocating a new M×D buffer. Matches the unfused AddBackward, which passes
-            # grad_output through without a new buffer -> fusion stays memory-neutral.
-            dxr = dxr.add_(grad_output.reshape(orig_shape).to(dxr.dtype))
-        return dxr
+        # In-place: reuse dx's freshly-computed storage (never saved/aliased) instead of
+        # allocating a new M×D buffer. Matches the unfused AddBackward, which passes
+        # grad_output through without a new buffer -> fusion stays memory-neutral.
+        return dx_flat.reshape(orig_shape).add_(
+            grad_output.reshape(orig_shape).to(dx_flat.dtype))
 
     dt = x2.dtype
     K = x2.shape[-1]              # input dim
@@ -1702,7 +1705,6 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         n: int,
         eps: float,
         save_xn: bool = False,
-        add_residual: bool = False,
     ) -> Float[torch.Tensor, "... d"]:
         orig_shape = x.shape
         K = orig_shape[-1]
@@ -1723,7 +1725,7 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         x2 = x2.contiguous()
         out, rstd, c1, xn = _fused_fwd(
             x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
-            n, eps, save_xn, add_residual, shape_key,
+            n, eps, save_xn, shape_key,
         )
         if not save_xn:
             xn = None   # the op returns an empty placeholder; only save_xn makes it real
@@ -1742,7 +1744,6 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         ctx.eps = eps
         ctx.orig_shape = orig_shape
         ctx.shape_key = shape_key
-        ctx.add_residual = add_residual
         return out.reshape(orig_shape)
 
     @staticmethod
@@ -1761,10 +1762,10 @@ class TritonTransitionFusedFunction(torch.autograd.Function):
         dx, dgamma, dbeta, dWa, dWb, dWs = _fused_bwd(
             grad_output, x2, rstd, c1, ln_weight, ln_bias,
             expand_a_weight, expand_b_weight, squeeze_weight, xn_saved,
-            ctx.eps, ctx.has_xn, ctx.add_residual, list(ctx.orig_shape), ctx.shape_key,
+            ctx.eps, ctx.has_xn, list(ctx.orig_shape), ctx.shape_key,
         )
-        # n, eps, save_xn, add_residual take no gradient.
-        return dx, dgamma, dbeta, dWa, dWb, dWs, None, None, None, None
+        # n, eps and save_xn take no gradient.
+        return dx, dgamma, dbeta, dWa, dWb, dWs, None, None, None
 
 
 def triton_transition_fused(
@@ -1777,18 +1778,20 @@ def triton_transition_fused(
     n: int,
     eps: float = 1e-5,
     save_xn: bool = False,
-    add_residual: bool = False,
 ) -> torch.Tensor:
-    """Fully fused Transition forward (LN folded in).
+    """Fully fused Transition forward (LN folded in). Returns ``y = x + transition(x)``.
 
     ``save_xn`` selects the backward version: False (default) = Version A (recompute xn in
     backward, less memory); True = Version B (save xn in forward, reuse in backward).
 
-    ``add_residual`` folds the post-transition residual add ``y = transition(x) + x`` into the
-    forward output (fused in-kernel on the b2b paths); the backward returns the identity
-    contribution to ``dx``. The caller must then NOT add the residual again outside.
+    The residual add is part of the op, not a flag on it: it is folded into the squeeze
+    epilogue on the b2b paths (free -- D == K, so the kernel reloads its own input tile) and
+    added explicitly on the fallbacks, and the backward returns the identity contribution to
+    ``dx``. Callers must NOT add the residual again outside. The bare
+    ``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` with no LayerNorm and no residual is a different
+    op -- ``triton_swiglu_ffn``.
     """
     return TritonTransitionFusedFunction.apply(
         x, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps,
-        save_xn, add_residual,
+        save_xn,
     )

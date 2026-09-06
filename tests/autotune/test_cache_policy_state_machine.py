@@ -98,7 +98,7 @@ def test_a_changed_build_driver_keeps_the_entries(root):
 
 # --------------------------------------------------------------------------- resets
 
-@pytest.mark.parametrize("field,value,why", [
+@pytest.mark.parametrize(("field", "value", "why"), [
     ("build_rev", 0, "a person declared the measurement method changed"),
     ("env_identity", "deadbeef0000", "another triton/cuda/ptxas measured it"),
     ("op_identity", "deadbeef0000", "a different kernel body"),

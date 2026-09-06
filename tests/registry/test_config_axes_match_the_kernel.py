@@ -66,7 +66,7 @@ def test_every_config_axis_is_a_kernel_constexpr() -> None:
                            f"which {r['symbol']} does not take")
             # The other direction is NOT an invariant: a constexpr may come from the launcher
             # rather than the config -- a shape (`K`, `N`, `NC`) or a dispatch switch
-            # (`ADD_RESIDUAL`) is passed explicitly at the call site and belongs to no config set.
+            # (`SAVE_GATE`) is passed explicitly at the call site and belongs to no config set.
     assert not bad, ("config and kernel disagree -- each of these is a launch failure on a GPU:"
                      "\n  " + "\n  ".join(bad))
 

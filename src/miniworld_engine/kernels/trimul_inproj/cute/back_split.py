@@ -26,7 +26,7 @@ from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import
 )
 from miniworld_engine.kernels.trimul_inproj.cute import dispatch
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
-    gate_elem_quack_fused, gate_elem_triton,
+    gate_elem_infer, gate_elem_quack_fused,
 )
 
 
@@ -37,10 +37,17 @@ def default_lnl_config(N):
     return dict(tile_m=128, tile_n=tile_n, cluster_m=1, cluster_n=1, pingpong=True)
 
 
-def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, eps=1e-5, lnl_config=None):
+def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, residual, eps=1e-5,
+                      lnl_config=None):
     """tri_bdll:(B,K,L,L) with K=hidden (=D for square trimul, =2*d_hidden for bidir),
     x_n:(B,L,L,d_pair), Wp_nn:(d_pair,K)=to_out.weight (N,K), Wg_t:(d_pair,d_pair)=
-    to_gate.weight.T -> y:(B,L,L,d_pair). B=1."""
+    to_gate.weight.T -> y:(B,L,L,d_pair). B=1.
+
+    ``residual`` (== the module input pair) is required: every trimul back half returns the
+    residual form. The triton gate fuses it into the store; the quack-fused gate cannot take a
+    residual in its CUTLASS epilogue, so that branch pays for a separate add -- which is part of
+    what the dispatch below is choosing between.
+    """
     B, K, L, L2 = tri_bdll.shape
     assert B == 1 and L == L2
     N = Wp_nn.shape[0]                                             # output width = d_pair
@@ -53,7 +60,8 @@ def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, eps=1e-5, lnl_conf
                                  config=None)                      # (M, N) — M1, brute-force autotuned
     # ② gate: dispatch fused-quack (act(A@B)⊙C, one launch) vs triton (cuBLAS gemm + ew),
     #    cache the per-shape winner (fused wins large L; triton can win tiny L).
+    res_flat = residual.reshape(M, N)
     y = dispatch.pick("gate_infer", (M, N),
-                      [("fused", lambda: gate_elem_quack_fused(x_n, proj, Wg_t)),
-                       ("triton", lambda: gate_elem_triton(x_n, proj, Wg_t))])
+                      [("fused", lambda: gate_elem_quack_fused(x_n, proj, Wg_t) + res_flat),
+                       ("triton", lambda: gate_elem_infer(x_n, proj, Wg_t, res_flat))])
     return y.view(B, L, L, N)

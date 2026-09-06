@@ -48,28 +48,36 @@ EPS = 1e-5      # trimul_back_triton's own default
 
 # ── trimul_inproj: front / back (triton) ─────────────────────────────────────────────────────
 
-def gated_projection_gate_dropres_triton():
-    """gate_elem.py _gate_mul_kernel: y = res + ds * (sigmoid(glogit) * proj).
+def gated_projection_gate_res_triton():
+    """gate_elem.py _gate_mul_infer_kernel: y = res + sigmoid(glogit) * proj.
 
-    ADD_RESIDUAL and USE_DROPOUT are constexpr AND autotune key entries, so the plain and the
-    fused-residual+dropout forms are different compilations of different configs. Both are
-    checked. ``ds`` is the row-broadcast drop scale [L, N] indexed by ``m % L``; it is filled with
-    distinct positive values rather than a 0/1 mask so a wrong row index cannot pass.
+    The INFERENCE kernel: no dropout, no saved gate, and no flags -- so there is one program to
+    check, not a matrix of them.
     """
-    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_triton
+    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_infer
 
-    x_n, proj, Wg = _rows(), _rows(), _w()
-    y, gate = gate_elem_triton(x_n, proj, Wg, return_gate=True)
+    x_n, proj, Wg, res = _rows(), _rows(), _w(), _rows()
+    y = gate_elem_infer(x_n, proj, Wg, res, seq_len=L)
     g = torch.sigmoid(_f(x_n) @ _f(Wg))
-    p = _f(proj)
+    return {"y": (y, _f(res) + g * _f(proj))}
 
-    res = _rows()
+
+def gated_projection_gate_dropres_triton():
+    """gate_elem.py _gate_mul_train_kernel: y = res + ds * (sigmoid(glogit) * proj), gate saved.
+
+    The TRAINING kernel, also flagless: the drop scale and the gate store are both unconditional.
+    ``ds`` is the row-broadcast drop scale [L, N] indexed by ``m % L``; it is filled with distinct
+    positive values rather than a 0/1 mask so a wrong row index cannot pass.
+    """
+    from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import gate_elem_train
+
+    x_n, proj, Wg, res = _rows(), _rows(), _w(), _rows()
     ds = torch.rand(L, D, device=dev(), dtype=BF16)
-    y_dr = gate_elem_triton(x_n, proj, Wg, residual=res, dropscale=ds, seq_len=L)
+    y, gate = gate_elem_train(x_n, proj, Wg, res, ds, seq_len=L)
+    g = torch.sigmoid(_f(x_n) @ _f(Wg))
     rows = torch.arange(M, device=dev()) % L
-    return {"y": (y, g * p),
-            "gate": (gate, g),
-            "y_dropres": (y_dr, _f(res) + _f(ds)[rows] * (g * p))}
+    return {"y": (y, _f(res) + _f(ds)[rows] * (g * _f(proj))),
+            "gate": (gate, g)}
 
 
 def gated_projection_bwd_gate_dropres_triton():
@@ -107,9 +115,10 @@ def gated_projection_bwd_gate_dropres_triton():
     ds = torch.rand(L, D, device=dev(), dtype=BF16)   # drop scale rows, all distinct
     rows = torch.arange(M, device=dev()) % L
 
-    d_proj, d_glogit = gate_elem_bwd_ew(dy, proj, gate)
-    d_proj_dr, d_glogit_dr = gate_elem_bwd_ew(dy, proj, gate, dropscale=ds, seq_len=L)
-    d_proj_pa, d_glogit_pa = gate_elem_bwd_ew(dy, proj, preact, from_preact=True)
+    ones = torch.ones(L, D, device=dev(), dtype=BF16)
+    d_proj, d_glogit = gate_elem_bwd_ew(dy, proj, gate, ones, L)
+    d_proj_dr, d_glogit_dr = gate_elem_bwd_ew(dy, proj, gate, ds, L)
+    d_proj_pa, d_glogit_pa = gate_elem_bwd_ew(dy, proj, preact, ones, L, from_preact=True)
 
     dyf, gf = _f(dy), _f(gate)
     sig_prime = gf * (1.0 - gf)                       # sigmoid' from the SAVED gate
@@ -179,7 +188,7 @@ def trimul_outproj_layernorm_gemm_gate_triton():
     rounded to bf16 before the GEMM in the kernel; the reference does the same so the check is of
     the kernel's schedule, not of that deliberate cast.
 
-    ADD_RESIDUAL is constexpr and in the autotune key: both compilations are checked.
+    The residual is an input of this op, not an option, so the reference below carries it.
     """
     from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 
@@ -188,7 +197,6 @@ def trimul_outproj_layernorm_gemm_gate_triton():
     ln_w = torch.randn(D, device=dev(), dtype=BF16)
     ln_b = torch.randn(D, device=dev(), dtype=BF16)
     res = _x()
-    y = trimul_back_triton(tri, x_n, Wp, Wg, ln_w, ln_b, eps=EPS)
     y_res = trimul_back_triton(tri, x_n, Wp, Wg, ln_w, ln_b, eps=EPS, residual=res)
 
     norm = torch.nn.functional.layer_norm(_f(tri).reshape(D, M).t(), (D,),
@@ -196,7 +204,7 @@ def trimul_outproj_layernorm_gemm_gate_triton():
     proj = _f(norm.to(BF16)) @ _f(Wp)
     gate = torch.sigmoid(_f(x_n).reshape(M, D) @ _f(Wg))
     ref = (gate * proj).reshape(1, L, L, D)
-    return {"y": (y, ref), "y_residual": (y_res, ref + _f(res))}
+    return {"y_residual": (y_res, ref + _f(res))}
 
 
 def trimul_bwd_gate_packed_triton():

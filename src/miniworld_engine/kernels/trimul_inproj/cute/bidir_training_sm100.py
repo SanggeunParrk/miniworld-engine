@@ -36,7 +36,7 @@ from miniworld_engine.kernels.trimul_inproj.cute.front_train_sm100 import (
 )
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW_sig
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
-    gate_elem_bwd_ew, gate_elem_quack_fused,
+    gate_elem_bwd_ew, gate_elem_quack_fused, ones_dropscale,
 )
 
 
@@ -79,7 +79,11 @@ class BidirBackHalfSm100(torch.autograd.Function):
 
         # ② gate bwd (elementwise; dx_gate add is fused into the dxn addmm below).
         # gate_src is the saved PREACT (glogit); recompute gate=σ(preact) in-kernel.
-        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate_src, from_preact=True)
+        # The sm100 training path has never carried dropout (nothing passes a scale into
+        # it), so the identity scale keeps its numerics exactly and keeps the backward
+        # kernel flagless. If sm100 ever gains dropout, the scale arrives here.
+        ds = ones_dropscale(L, D, gy)
+        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate_src, ds, L, from_preact=True)
         # `del` after last use, inserted where no reference to the name remains anywhere below.
         # autograd frees an intermediate when its consumer node has run; this function holds every
         # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128

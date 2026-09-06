@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import argparse
 import collections
-import pathlib
 import csv
 import html
 import json
+import pathlib
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parents[1]
@@ -104,7 +104,7 @@ def _prune_fn_name(path: pathlib.Path, symbol: str) -> str | None:
             for kw in dec.keywords:
                 if kw.arg != "prune_configs_by" or not isinstance(kw.value, ast.Dict):
                     continue
-                for k, v in zip(kw.value.keys, kw.value.values):
+                for k, v in zip(kw.value.keys, kw.value.values, strict=True):
                     if getattr(k, "value", None) == "early_config_prune":
                         return getattr(v, "id", None)
     return None

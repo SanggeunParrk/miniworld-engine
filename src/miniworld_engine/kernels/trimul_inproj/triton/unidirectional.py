@@ -36,7 +36,8 @@ from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
 )
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew,
-    gate_elem_triton,
+    gate_elem_train,
+    ones_dropscale,
 )
 
 
@@ -80,12 +81,11 @@ class _UniBackHalfTriton(torch.autograd.Function):
             view, ln_out_w, ln_out_b, Wp, None, eps)             # (M, D)
         # Fuse the pairformer residual (== module input pair, [M,D]) + row-broadcast dropout
         # into the gate store epilogue — same kernel path the cute dispatch uses.
-        y, gate = gate_elem_triton(x_n.reshape(M, D), proj, Wg, return_gate=True,
-                                   residual=residual, dropscale=dropscale, seq_len=L)
+        y, gate = gate_elem_train(x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.outgoing, ctx.mm = eps, outgoing, mm
-        ctx.dropscale, ctx.add_residual, ctx.seq_len = dropscale, residual is not None, L
+        ctx.dropscale, ctx.seq_len = dropscale, L
         return y.reshape(B, L, L, D)
 
     @staticmethod
@@ -100,10 +100,10 @@ class _UniBackHalfTriton(torch.autograd.Function):
 
         # residual grad passes straight through (d/d_residual [residual + drop⊙op] = 1); the op
         # branch grad is scaled by the same drop_row mask inside gate_elem_bwd_ew.
-        d_residual = gy.reshape(M, D) if ctx.add_residual else None  # match residual input [M,D]
+        d_residual = gy.reshape(M, D)              # match the residual input [M,D]
         # ② gate bwd (elementwise; dx_gate folded into the dxn GEMM below); dropout-scale dy
         d_proj, d_glogit = gate_elem_bwd_ew(gy.contiguous(), proj.contiguous(), gate.contiguous(),
-                                            dropscale=ctx.dropscale, seq_len=ctx.seq_len)
+                                            ctx.dropscale, ctx.seq_len)
         # `del` after last use, inserted where no reference to the name remains anywhere below.
         # autograd frees an intermediate when its consumer node has run; this function holds every
         # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128
@@ -173,25 +173,38 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     # one fewer launch and one fewer HBM round-trip of the [L,L,D] proj tensor. All triton, so it
     # runs on A100/sm86 as well as the Hopper path it came from.
     #
-    # NUMERICS: bit-identical to the split path on this card, measured once the A/B probe was
-    # fixed. The first three probes all reported a 0.0 relative error against an fp32 reference --
-    # impossible for a bf16 kernel -- because ``to_out`` is a zero-initialised Linear, so
-    # ``y = pair + 0`` made every variant trivially equal; randomising ``to_out``/``to_gate`` is
-    # what made the comparison mean anything. It still makes the TRITON inference path differ in
-    # STRUCTURE from the TRITON training path (``_UniBackHalfTriton``, unchanged, still splits).
+    # MEASURED, against a tuned cache, both paths checked for correctness before any timing:
     #
-    # TODO(bench): SPEED is still unestablished, and the measurement that appeared to settle it was
-    # invalid. The corrected probe put the fused form at 1.03x / 1.00x -- no win -- but it ran while
-    # this kernel's cache missed on the DTYPE axis at every launch: production keys
-    # `bfloat16+float32` (the LN_out affine is fp32, pinned by `primitives._Fp32ParamsMixin`) and
-    # the committed cache held `bfloat16` only, so the fused path was on the bounded heuristic
-    # subset while the split path it was timed against had tuned configs. The driver now builds the
-    # affine at fp32; re-measure against the rebuilt cache before drawing any conclusion.
+    #   L=384   fused 0.355 ms   split 0.444 ms   1.25x   rel_err 2.7e-03 vs 3.9e-03
+    #   L=768   fused 1.028 ms   split 1.360 ms   1.32x   rel_err 3.1e-03 vs 4.1e-03
+    #
+    # Faster AND closer to the fp32 reference, because the fused kernel keeps proj and the gate
+    # logit in its fp32 accumulator where the split path materialises each as bf16 first. NOT
+    # bit-identical to the split path -- that earlier claim was an artefact, see below.
+    #
+    # It took five attempts to get a number worth trusting, and each failure is worth keeping:
+    #   1-3. `to_out` is a zero-initialised Linear, so `y = pair + 0` and every variant was
+    #        trivially equal -- three probes reported rel_err 0.000e+00 against an fp32 reference,
+    #        impossible for a bf16 kernel. Randomising to_out/to_gate is what made the comparison
+    #        mean anything, and is what showed the two paths are NOT bit-identical.
+    #   4.   the fused path was timed while this kernel's cache missed on the DTYPE axis at every
+    #        launch -- production keys `bfloat16+float32` (the LN_out affine is fp32, pinned by
+    #        `primitives._Fp32ParamsMixin`) against a `bfloat16`-only cache -- so it ran on the
+    #        bounded heuristic subset against a split path that had tuned configs. That is where
+    #        "1.03x, no win" came from.
+    #   5.   the two paths were handed the same weight form, when `trimul_back_triton` takes
+    #        `to_out.weight.T` and `_te_forward` takes it as-is. The split path then scored
+    #        rel_err 1.03 -- unrelated to the answer -- and its "1.35x" was timing a wrong result.
+    #
+    # `.bench/probe/fused_back_ab.py` carries all five guards, and refuses to print a speed if
+    # either path is off the fp32 reference by more than 5e-2.
+    #
+    # This still makes the TRITON inference path differ in STRUCTURE from the TRITON training path
+    # (`_UniBackHalfTriton`, unchanged, still splits).
     # Weight forms: trimul_back wants ``.T`` weights, so Wp (to_out, nn.Linear form) -> Wp.T; Wgt is
     # already to_gate.weight.T. residual comes in flat [M,D] and is reshaped to [B,L,L,D].
-    res = residual.view(B, L, L, D) if residual is not None else None
     return trimul_back_triton(tri.unsqueeze(0), x_n, Wp.T.contiguous(), Wgt,
-                              ln_out_w, ln_out_b, eps, residual=res)
+                              ln_out_w, ln_out_b, eps, residual=residual.view(B, L, L, D))
 
 
 def trimul_triton(
@@ -204,7 +217,6 @@ def trimul_triton(
     eps_in, eps_out, d_hidden,
     outgoing,                    # bool: outgoing (True) or incoming (False)
     mask=None,                   # (B,L) residue OR (B,L,L) pair mask, optional (folded into LN_in)
-    add_residual=False,          # fuse y = pair + drop_row(trimul(pair)) into the gate store
     dropscale=None,              # drop_row scale [B,1,L,D] (== mask/(1-p)); training only
 ):
     """Faithful triton mirror of the single-direction cute trimul. Returns
@@ -234,9 +246,10 @@ def trimul_triton(
         m2d = m.to(pair.dtype)                                  # (B, L, L)
     B, L = pair.shape[0], pair.shape[1]
     M = B * L * L
-    # residual == the ORIGINAL (pre-LN_in) input pair; dropscale [B,1,L,D] -> [L,D] (B==1) for the
-    # gate store's row-broadcast indexing. Both fold into the gate_elem epilogue (no external add).
-    residual_flat = pair.reshape(M, d) if add_residual else None
+    # The residual is the ORIGINAL (pre-LN_in) input pair, and it is not optional: this op is
+    # ``y = pair + drop_row(trimul(pair))``. dropscale [B,1,L,D] -> [L,D] (B==1) for the gate
+    # store's row-broadcast indexing. Both fold into the gate_elem epilogue (no external add).
+    residual_flat = pair.reshape(M, d)
     ds_2d = dropscale.reshape(L, d) if dropscale is not None else None
     x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
@@ -248,6 +261,13 @@ def trimul_triton(
         # has no dropscale and would silently skip dropout. Mirrors the cute dispatch's guard.
         return _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout,
                           ln_out_w, ln_out_b, eps_out, outgoing, mask=m2d, residual=residual_flat)
+    # The training path ALWAYS carries a drop scale, ones when the model's p_drop is 0. That is
+    # what lets the training kernel be flagless: `gate_elem_train` and `gate_elem_bwd_ew` apply it
+    # unconditionally instead of branching on a keyed constexpr, at a measured 0.2% (the scale is
+    # [L, N] and stays in L2). Building it here, at the one place that decides "this is training",
+    # keeps that decision in a single spot.
+    if ds_2d is None:
+        ds_2d = ones_dropscale(L, d, pair)
     # TRAINING: merged autograd Function (weights x@W; autograd flows the transpose).
     return _UniBackHalfTriton.apply(
         x_n, WLt, WLgt, WRt, WRgt, Wgt, Wout, ln_out_w, ln_out_b, eps_out, outgoing, m2d,

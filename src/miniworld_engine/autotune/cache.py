@@ -434,7 +434,7 @@ def driver_identity(op: str) -> str | None:
     """12-hex of the BUILD code that produced ``op``'s cache: its registry driver function plus the
     driver module's shared scope. ``op_identity`` fingerprints the KERNEL; this fingerprints the
     code that *drives* it in the build. The driver decides which (shape, dtype, flag) buckets get
-    tuned and with what arguments, so a driver edit -- adding an ``ADD_RESIDUAL=1`` call, changing
+    tuned and with what arguments, so a driver edit -- adding a ``USE_DROPOUT=1`` call, changing
     a swept width -- changes what the cache covers while the kernel source and the config grid stay
     byte-identical, a drift neither ``op_identity`` nor ``config_space_hash`` can see.
 
@@ -490,13 +490,13 @@ def _build_revs() -> dict[str, int]:
     reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
     if not reg.is_file():
         return {}
-    out: dict[str, int] = {}
-    for r in csv.DictReader(reg.open()):
-        try:
-            out[r["kernel"]] = int((r.get("build_rev") or "1").strip() or 1)
-        except ValueError:
-            out[r["kernel"]] = 1
-    return out
+    def _rev(raw) -> int:
+        # A row with a blank or malformed build_rev reads as 1 (the un-bumped default), never as
+        # an exception: one bad cell must not take the whole registry down at import time.
+        text = (raw or "1").strip() or "1"
+        return int(text) if text.lstrip("-").isdigit() else 1
+
+    return {r["kernel"]: _rev(r.get("build_rev")) for r in csv.DictReader(reg.open())}
 
 
 def _stored_rev(data: dict) -> int:
@@ -602,8 +602,7 @@ def configs_to_bench(op: str, gk: str, configs) -> list:
     if not isinstance(searched, list):
         return configs                      # predates the field: cannot tell, so measure it all
     seen = set(searched)
-    todo = [c for c in configs if repr(_sig(c)) not in seen]
-    return todo
+    return [c for c in configs if repr(_sig(c)) not in seen]
 
 
 def store_ranked_configs(

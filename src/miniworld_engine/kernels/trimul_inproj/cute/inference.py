@@ -56,7 +56,9 @@ def trimul_inproj_inference(
     b_lr: torch.Tensor,
     rmask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Whole trimul (outgoing) forward, inference-only. Returns y [B,L,L,D].
+    """Whole trimul (outgoing) forward, inference-only. Returns the RESIDUAL form
+    ``pair + trimul(pair)``, [B,L,L,D] -- the add is fused into the back half's store epilogue,
+    which is what makes it free (the tile is already in registers).
 
     rmask: [M] AF pair-mask, folded into LN_in for free (proj(0)=0 -> left/right
     zeroed at masked positions, == AF's mask*projection at every valid position).
@@ -72,4 +74,4 @@ def trimul_inproj_inference(
     left, right, _ = trimul_inproj_cute_forward(
         xn, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False, b_lr=b_lr)
     tri = torch.einsum("bdik,bdjk->bdij", left, right)        # (B,D,L,L)
-    return trimul_back_triton(tri, xn, Wp, Wg, ln_out_w, ln_out_b, eps)
+    return trimul_back_triton(tri, xn, Wp, Wg, ln_out_w, ln_out_b, eps, residual=pair)

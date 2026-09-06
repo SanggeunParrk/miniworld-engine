@@ -89,7 +89,8 @@ def test_changed_config_grid_is_reported_but_served_incrementally(fake_data):
     _write_cache(fake_data, config_space_hash="deadbeef0000")
     row = _verdict(cache_status.scan())
     assert row.verdict == "OK", row.reason
-    assert "grid" in row.reason and "incremental" in row.reason
+    assert "grid" in row.reason, row.reason
+    assert "incremental" in row.reason, row.reason
 
 
 def test_bumped_build_rev_is_stale(fake_data):

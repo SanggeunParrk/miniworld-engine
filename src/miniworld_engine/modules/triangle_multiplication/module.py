@@ -78,6 +78,33 @@ def _nvtx_range(name: str, enabled: bool):
             torch.cuda.nvtx.range_pop()
 
 
+def _require_square_widths(kind: str, d_pair: int, d_hidden: int) -> None:
+    """Refuse ``d_hidden != d_pair`` at the module boundary, for the kernel paths.
+
+    Every fused trimul back half in this repo folds ``LN(tri)`` and the output gate on ``x_n``
+    into ONE pass, which makes tri's channel axis and the pair width the SAME axis. When they
+    differ there is no correct thing for those kernels to compute.
+
+    ``trimul_triton`` says so and raises (unidirectional.py). The cute paths did not, and one of
+    them -- ``_forward_cute_free`` -- reached ``trimul_back_triton`` with a ``(d_hidden, d_pair)``
+    weight where the kernel indexes ``(K, N) = (d_pair, d_pair)``, i.e. an out-of-bounds READ of
+    the missing rows. It did not reliably crash: the read lands inside whatever the caching
+    allocator holds next, so it usually returned another tensor's bytes and corrupted the result
+    silently, and only trapped when it cleared the mapping. Both the A100 and the A6000 session
+    chased it as an "illegal memory access" that appeared at whatever kernel ran next.
+
+    So the check belongs HERE, once, in front of every kernel path -- not in each kernel, where
+    it can only be a last line of defence (``trimul_back_triton`` now validates too).
+    The pytorch and cuequivariance backends are shape-general and never reach this.
+    """
+    if d_hidden != d_pair:
+        msg = (f"{kind}: d_hidden ({d_hidden}) != d_pair ({d_pair}) is not supported by the "
+               f"fused trimul kernels. Their back half normalises the contraction over tri's "
+               f"channel axis and gates on the pair over the same axis, so the two widths are "
+               f"one axis. Use implementation='pytorch' for asymmetric widths.")
+        raise ValueError(msg)
+
+
 class TriangleMultiplication(nn.Module):
     """Unified implementation of triangular multiplicative update.
 
@@ -103,7 +130,7 @@ class TriangleMultiplication(nn.Module):
         outgoing: bool = True,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         ln_implementation: ImplementationType = ImplementationType.PYTORCH,
-        p_drop: float = 0.0,
+        p_drop: float = 0.25,
     ) -> None:
         super().__init__()
         self.outgoing = outgoing
@@ -113,7 +140,8 @@ class TriangleMultiplication(nn.Module):
         # ``pair = pair + drop_row(trimul(pair))``); residual connections are the standard in this
         # domain, so there is deliberately NO flag to turn it off. The row-broadcast DROPOUT is
         # OPTIONAL: ``p_drop`` (drop_row, broadcast_dim=1) is applied only in ``self.training``;
-        # p_drop=0 (default) or eval => residual only. The block just calls ``module(pair, mask)``.
+        # it DEFAULTS ON at AF3's 0.25, and at eval it is identity. The block just calls
+        # ``module(pair, mask)``.
         #
         # WHY IT'S FUSED IN (SPEED): both the residual add AND the dropout scale are done INSIDE
         # the trimul back/gate kernel's output epilogue — not as separate ``out*ds + pair``
@@ -121,8 +149,10 @@ class TriangleMultiplication(nn.Module):
         # (the gate output + residual input are already resident at store time), which is the whole
         # point of the fusion. Making the residual unconditional is what lets the kernel own that
         # fused epilogue; a runtime residual toggle would force the slow separate-add path.
-        # >>> To run WITHOUT the residual (rare — benchmarking the raw op), you must EDIT THE CODE:
-        # >>> flip the ``_ADD_RESIDUAL`` local at the top of forward() to False.
+        # >>> There is no way to turn it off, not even by editing a local: the residual is part
+        # >>> of what this module IS. For the raw op in isolation -- benchmarking, or a caller
+        # >>> that owns its own residual -- use ``ops.triangle_multiplicative_update``, the
+        # >>> weights-as-args facade that mirrors cuequivariance's signature.
         # ======================================================================================
         self.p_drop = p_drop
         # 'miniworld' (auto) -> concrete backend for the running GPU arch. The
@@ -144,13 +174,24 @@ class TriangleMultiplication(nn.Module):
             )
             raise ValueError(msg)
 
+        # The front projects d_pair -> d_hidden, and `to_out` projects d_hidden -> d_pair
+        # (AF3 Alg. 12). These four were `Linear(d_pair, d_pair)`, which ignored `d_hidden`
+        # entirely and left the module internally inconsistent the moment the two differed: the
+        # front emitted d_pair channels and `to_out` expected d_hidden inputs. Every path broke
+        # on it -- the pytorch reference with `mat1 and mat2 shapes cannot be multiplied`, and
+        # the fused kernels with an out-of-bounds READ (the back half indexes `to_out.weight.T`
+        # as (d_pair, d_pair) when it is (d_hidden, d_pair)), which corrupted silently far more
+        # often than it trapped. `d_hidden` was a parameter this module accepted and did not
+        # implement. With d_hidden == d_pair -- every shape the model runs -- nothing changes.
+        self.d_hidden = d_hidden
         self.ln_pair = LayerNorm(d_pair, implementation=ln_implementation)
-        self.to_left = Linear(d_pair, d_pair, bias=False, init="default")
-        self.to_left_gate = Linear(d_pair, d_pair, bias=False, init="zero")
-        self.to_right = Linear(d_pair, d_pair, bias=False, init="default")
-        self.to_right_gate = Linear(d_pair, d_pair, bias=False, init="zero")
+        self.to_left = Linear(d_pair, d_hidden, bias=False, init="default")
+        self.to_left_gate = Linear(d_pair, d_hidden, bias=False, init="zero")
+        self.to_right = Linear(d_pair, d_hidden, bias=False, init="default")
+        self.to_right_gate = Linear(d_pair, d_hidden, bias=False, init="zero")
 
-        self.ln_out = LayerNorm(d_pair, implementation=ln_implementation)
+        # LN_out normalises the CONTRACTION output, whose width is d_hidden, not d_pair.
+        self.ln_out = LayerNorm(d_hidden, implementation=ln_implementation)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
 
@@ -208,9 +249,8 @@ class TriangleMultiplication(nn.Module):
         domain standard). The row-broadcast DROPOUT is OPTIONAL: ``dropout_p`` overrides the
         instance ``p_drop`` per call (None -> ``self.p_drop``) and is active only in
         ``self.training`` (standard nn.Module semantics); inference is identity.
-        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line."""
-        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (fused epilogue, for speed). Edit to False to disable.
-        add_residual = _ADD_RESIDUAL
+        >>> The raw op without the residual is ``ops.triangle_multiplicative_update``,
+        not a flag on this module."""
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             backend = _dispatch.guard_dtype(
@@ -223,7 +263,7 @@ class TriangleMultiplication(nn.Module):
             def _r(out):  # explicit residual+dropout for paths that don't fold it in-kernel
                 if _ds is not None:
                     out = out * _ds
-                return out + _pair_in if add_residual else out
+                return out + _pair_in
 
             if backend == KernelBackend.CUEQUIVARIANCE:
                 return _r(self._forward_cuequivariance(pair, mask))
@@ -236,8 +276,8 @@ class TriangleMultiplication(nn.Module):
                 # selection inside the module.
                 if torch.is_grad_enabled() or _ds is not None:
                     # training: fuse residual + row-broadcast dropout into the v6 back (sm90).
-                    return self._forward_cute_train(pair, mask, add_residual, _ds)
-                return self._forward_cute(pair, mask, add_residual)
+                    return self._forward_cute_train(pair, mask, _ds)
+                return self._forward_cute(pair, mask)
 
             if backend == KernelBackend.TRITON:
                 # Fused BDLL pipeline (mirrors cute's single-direction dispatch):
@@ -248,7 +288,7 @@ class TriangleMultiplication(nn.Module):
                 # kernels/trimul_inproj/triton/unidirectional.py.
                 # residual + row-broadcast dropout are now FUSED into the triton gate store
                 # (same gate_elem epilogue the cute path uses) — no external _r() add.
-                return self._forward_triton(pair, mask, add_residual, _ds)
+                return self._forward_triton(pair, mask, _ds)
 
             pair = self.ln_pair(pair)
             left, right = self._kernel_tm1(pair, backend)
@@ -273,7 +313,6 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
-        add_residual: bool = False,
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """TRITON single-direction path (fwd + autograd bwd) — the fused BDLL pipeline
@@ -299,7 +338,6 @@ class TriangleMultiplication(nn.Module):
             self.to_left.weight.shape[0],   # d_hidden
             self.outgoing,
             mask=mask,
-            add_residual=add_residual,      # fuse residual + drop_row into the gate store epilogue
             dropscale=dropscale,
         )
 
@@ -346,7 +384,6 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
-        add_residual: bool = False,
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """MINIWORLD (ours) TRAINING path: the v6 merged trimul training kernel
@@ -354,8 +391,10 @@ class TriangleMultiplication(nn.Module):
         else sm90 ``V6TriMulMerged``. Built lazily from this module's own weights and
         cached (the cute inference kernels have no backward). bf16.
 
-        ``add_residual`` / ``dropscale`` fuse the pairformer residual+dropout into the sm90 v6
-        back; on sm100 (no fused path yet) they are applied explicitly."""
+        The residual and ``dropscale`` fuse into the sm90 v6 back's store epilogue; on sm100
+        (no fused path yet) they are applied explicitly."""
+        _require_square_widths(
+            type(self).__name__, pair.shape[-1], self.d_hidden)
         impl = getattr(self, "_train_impl", None)
         if impl is None:
             direction = "out" if self.outgoing else "in"
@@ -376,12 +415,12 @@ class TriangleMultiplication(nn.Module):
             impl = _Impl(self, direction=direction).to(pair.device)
             self._train_impl = impl
         if self._train_fused:
-            return impl(pair, mask, add_residual=add_residual, dropscale=dropscale)
+            return impl(pair, mask, dropscale=dropscale)
         # sm100 v6 (tcgen05): no fused residual+dropout path -> apply explicitly.
         out = impl(pair, mask)
         if dropscale is not None:
             out = out * dropscale
-        return out + pair if add_residual else out
+        return out + pair
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see
@@ -390,7 +429,6 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
-        add_residual: bool = False,
     ) -> torch.Tensor:
         """CuTeDSL path: connects the tm1 / tm2 / fused-LN cute kernels.
 
@@ -399,10 +437,12 @@ class TriangleMultiplication(nn.Module):
 
         Requires the cute env (cutlass-dsl + quack). Outgoing direction only.
         """
+        _require_square_widths(
+            type(self).__name__, pair.shape[-1], self.d_hidden)
         # cuequiv-FREE, unconditionally: our from-scratch tm2 (tm2_dual_from_scratch) is the tm2
         # kernel — the legacy cuequiv A/B path (and the MINIWORLD_TRIMUL_CUEQUIV_FREE gate) were
         # DELETED 2026-08-04. cuequivariance is a comparison-only baseline (pyproject [baselines]).
-        return self._forward_cute_free(pair, mask, add_residual)
+        return self._forward_cute_free(pair, mask)
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see
@@ -411,7 +451,6 @@ class TriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
-        add_residual: bool = False,
     ) -> torch.Tensor:
         """CUEQUIV-FREE cute path (B200 / sm_100), mirroring the H100 trimul_inproj
         design:
@@ -425,6 +464,8 @@ class TriangleMultiplication(nn.Module):
         MINIWORLD_TRIMUL_CUEQUIV_FREE=0 to fall back to the cuequiv-reusing
         _forward_cute for comparison. B=1, bf16.
         """
+        _require_square_widths(
+            type(self).__name__, pair.shape[-1], self.d_hidden)
         from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
         tm1_cute_forward, fused_ln_mask, _lnt = _load_cute_fns()
         b, l1, l2, d = pair.shape
@@ -456,16 +497,16 @@ class TriangleMultiplication(nn.Module):
             from miniworld_engine.kernels.trimul_inproj.cute.back_split_sm100 import (
                 trimul_back_split_sm100,
             )
-            out = trimul_back_split_sm100(
+            return trimul_back_split_sm100(
                 tri, x_normed, self.to_out.weight, self.to_gate.weight.T,
                 self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
+                residual=pair,  # FUSED into the gate store, as on every other back half
             )
-            return out + pair if add_residual else out  # sm100 back: explicit residual (no fuse yet)
         from miniworld_engine.kernels.trimul_inproj.triton.back import (
             trimul_back_triton,
         )
         return trimul_back_triton(
             tri, x_normed, self.to_out.weight.T, self.to_gate.weight.T,
             self.ln_out.weight, self.ln_out.bias, self.ln_out.eps,
-            residual=(pair if add_residual else None),  # FUSED residual add in the store epilogue
+            residual=pair,  # FUSED residual add in the store epilogue
         )

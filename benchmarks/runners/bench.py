@@ -610,6 +610,7 @@ def _miniworld_inference(
         w_gate,
         norm_out_weight,
         norm_out_bias,
+        pair,          # the residual: every trimul back half returns `pair + trimul(pair)`
         eps,
     )
 
@@ -1869,10 +1870,12 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         torch.manual_seed(1)
         return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
 
-    # Transition.forward ALWAYS adds the residual (fused epilogue); the kernels below are called
-    # with add_residual=False. Compare the raw op on both sides -- the residual add is the
-    # module-level bench's business, not this kernel's.
-    ref_fn = ref_mod._torch_forward
+    # The Transition op INCLUDES the residual -- `triton_transition_fused` folds `+x` into its
+    # squeeze epilogue and there is no flag to turn that off. So the reference has to include it
+    # too, and the two rows below that compute the raw op (`cute_transition_fused` has no residual
+    # epilogue; `transition_b2b_ktiled` is the K>128 tile, not the Transition entry) get an
+    # explicit `+ x` so all four rows are timed and scored on the SAME function.
+    ref_fn = lambda x: ref_mod._torch_forward(x) + x
     if implementation == "pytorch":
         kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_transition_fused":
@@ -1881,14 +1884,14 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
         path = "kernels.transition.triton.fused"
     elif implementation == "cute_transition_fused":
         from miniworld_engine.kernels import cute_transition_fused
-        kfn = lambda x: cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
+        kfn = lambda x: cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps) + x
         path = "kernels.transition.cute.fused"
     elif implementation == "transition_b2b_ktiled":
         from miniworld_engine.kernels.transition.triton.fused import (
             transition_b2b_ktiled,
         )
         kfn = lambda x: transition_b2b_ktiled(
-            x.reshape(L * L, D), lw, lb, wa, wb, wsq, eps).reshape(1, L, L, D)
+            x.reshape(L * L, D), lw, lb, wa, wb, wsq, eps).reshape(1, L, L, D) + x
         path = "kernels.transition.triton.fused.b2b_ktiled"
     else:
         return as_bench_result(float("nan"))
@@ -2477,22 +2480,24 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
     torch.manual_seed(1)
     x0 = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
     dy = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
-    # Residual-free on both sides: Transition.forward folds `+x` into the output, which puts an
-    # extra identity `+dy` into ref_dx that the add_residual=False kernels do not produce.
+    # Residual on both sides: the Transition op includes `+x` and there is no flag to turn it
+    # off, so the reference carries it too. It contributes an identity `+dy` to ref_dx, which is
+    # exactly what the fused backward's `_finalize_dx` adds -- comparing a residual kernel to a
+    # residual-free reference would score that identity as error.
     xr = x0.clone().requires_grad_(True)
-    ref_mod._torch_forward(xr).backward(dy)
+    (ref_mod._torch_forward(xr) + xr).backward(dy)
     ref_dx = xr.grad
 
     x = x0.clone().requires_grad_(True)
     if implementation == "pytorch":
-        out, path = ref_mod._torch_forward(x), "module.reference.torch"
+        out, path = ref_mod._torch_forward(x) + x, "module.reference.torch"
     elif implementation == "triton_transition_fused":
         from miniworld_engine.kernels import triton_transition_fused
         out = triton_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
         path = "kernels.transition.triton.fused"
     elif implementation == "cute_transition_fused":
         from miniworld_engine.kernels import cute_transition_fused
-        out = cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps)
+        out = cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps) + x
         path = "kernels.transition.cute.fused"
     else:
         return as_bench_result(float("nan"))
@@ -2570,6 +2575,139 @@ KERNEL_TARGETS = {
     "gemm_epilogue_bwd": bench_kernel_gemm_epilogue_bwd,
 }
 
+def bench_module_dit(conf, seq_len, implementation, fabric):
+    """TOKEN-track DiT block: augmented attention (pair bias) + conditioned transition, both
+    residuals explicit. `modules/dit`.
+
+    A block, not a part, because a per-part result does not compose: every kernel here is an
+    opaque `custom_op`, so a per-part bench pays its launch overhead once and a block pays it
+    once per part -- while `torch.compile` fuses ACROSS parts in the reference and cannot fuse
+    across our opaque ops. Both effects only land here.
+    """
+    from miniworld_engine.modules.dit import DiTBlock
+
+    spec = triton_miniworld_spec(implementation)
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
+                         ImplementationType.MINIWORLD}:
+        return as_bench_result(float("nan"))
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+
+    class MultiDiT(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                DiTBlock(d_single=conf.d_single_token, d_cond=conf.d_single,
+                         d_pair=conf.d_pair, implementation=spec.impl)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, single, cond, pair, mask=None):
+            for layer in self.layers:
+                single = layer(single, cond, pair, mask)
+            return single
+
+    model = MultiDiT().to(device=DEVICE, dtype=dtype)
+    if conf.compile:
+        model.compile()
+    model = fabric.setup_module(model)
+
+    wants_grad = not is_inference_mode(conf.mode)
+    single = torch.randn(conf.n_augment, 1, seq_len, conf.d_single_token,
+                         device=DEVICE, dtype=dtype, requires_grad=wants_grad)
+    cond = torch.randn(conf.n_augment, 1, seq_len, conf.d_single,
+                       device=DEVICE, dtype=dtype, requires_grad=wants_grad)
+    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    dy = torch.randn_like(single)
+
+    def inference_step():
+        with torch.no_grad():
+            return model(single, cond, pair)
+
+    def training_step() -> None:
+        fabric.backward(model(single, cond, pair), dy)
+
+    return measured_result(
+        conf=conf,
+        func=inference_step if is_inference_mode(conf.mode) else training_step,
+        grad_to_none=[single, cond, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=wants_grad,
+        input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=str(dtype).replace("torch.", ""),
+        execution_path=("modules.dit.DiTBlock" if spec.impl != ImplementationType.PYTORCH
+                        else "module.reference.torch"),
+        reference="module.reference.torch",
+    )
+
+
+def bench_module_swa_dit(conf, seq_len, implementation, fabric):
+    """ATOM-track DiT block: adaLN -> windowed 3D-RoPE attention -> conditioned transition.
+    `modules/swa_dit`. Runs at the atom length (`seq_len * 8`), like the swa_atom_attention
+    kernel bench, and reports NaN without a flash backend for the same reason.
+    """
+    from miniworld_engine.modules.swa_atom_attention import build_attention_params
+    from miniworld_engine.modules.swa_dit import SWADiTBlock
+
+    spec = triton_miniworld_spec(implementation)
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
+                         ImplementationType.MINIWORLD}:
+        return as_bench_result(float("nan"))
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    n_head = 4
+
+    class MultiSWADiT(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([
+                SWADiTBlock(d_atom=conf.d_single_atom, d_cond=conf.d_single_atom,
+                            n_head=n_head, implementation=spec.impl)
+                for _ in range(conf.n_layers)])
+
+        def forward(self, x, cond, ap):
+            for layer in self.layers:
+                x = layer(x, cond, ap)
+            return x
+
+    model = MultiSWADiT().to(device=DEVICE, dtype=dtype)
+    if conf.compile:
+        model.compile()
+    model = fabric.setup_module(model)
+
+    atom_len, n = seq_len * 8, conf.n_augment
+    half = conf.d_single_atom // n_head // 2
+    wants_grad = not is_inference_mode(conf.mode)
+    x = torch.randn(n, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype,
+                    requires_grad=wants_grad)
+    cond = torch.randn(n, atom_len, conf.d_single_atom, device=DEVICE, dtype=dtype,
+                       requires_grad=wants_grad)
+    cos = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
+    sin = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
+    valid = torch.ones(n, atom_len, dtype=torch.bool, device=DEVICE)
+    ap = build_attention_params(cos, sin, valid, num_aug=n)
+    dy = torch.randn_like(x)
+
+    def inference_step():
+        with torch.no_grad():
+            return model(x, cond, ap)
+
+    def training_step() -> None:
+        fabric.backward(model(x, cond, ap), dy)
+
+    from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
+
+    backend = _flash_backend(DEVICE)
+    return measured_result(
+        conf=conf,
+        func=inference_step if is_inference_mode(conf.mode) else training_step,
+        grad_to_none=[x, cond, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=wants_grad,
+        input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=str(dtype).replace("torch.", ""),
+        execution_path=(f"modules.swa_dit.SWADiTBlock[{backend or 'sdpa_band'}]"
+                        if spec.impl != ImplementationType.PYTORCH else "module.reference.torch"),
+        reference="module.reference.torch",
+    )
+
 # A module target is named after the production module it benches, spelled as the engine spells
 # it. The key is the directory `benchmarks/modules/<target>/` and the function is
 # `bench_module_<target>` (asserted below). Names may repeat KERNEL_TARGETS keys on purpose: the
@@ -2585,6 +2723,8 @@ MODULE_TARGETS = {
     "adaptive_layernorm": bench_module_adaptive_layernorm,
     "augmented_attention_token": bench_module_augmented_attention_token,
     "augmented_attention_atom": bench_module_augmented_attention_atom,
+    "dit": bench_module_dit,
+    "swa_dit": bench_module_swa_dit,
 }
 
 # The naming rules above are checked here, not just written down: a target whose function is named

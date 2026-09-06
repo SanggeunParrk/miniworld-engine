@@ -44,7 +44,7 @@ ROLES = ("bwd_reduce", "bwd_pre", "transpose", "epilogue", "layernorm", "sigmoid
          "fwd", "bwd", "dx", "dw", "dq", "dk", "dv")
 DETAILS = ("recompute", "foldstats", "noaffine", "rowscale", "dropres", "inplace", "ktiled",
            "strided", "mmajor", "extern", "packed", "atomic", "contig", "split", "flat", "fp32",
-           "sm100", "sm90", "b2b", "saveact")
+           "sm100", "sm90", "b2b", "saveact", "res")
 BACKENDS = ("triton", "cutlass", "cute", "cuda")
 
 _PIECES = tuple(sorted(set(ROLES) | set(DETAILS), key=len, reverse=True))

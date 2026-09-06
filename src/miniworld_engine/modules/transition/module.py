@@ -98,8 +98,9 @@ class Transition(nn.Module):
         # tile is already resident in registers/smem at store time, so the add is effectively
         # free. Keeping it unconditional is what lets the kernel own that fused epilogue; a
         # runtime toggle would force the slow separate-add path.
-        # >>> To run WITHOUT the residual (rare — benchmarking the raw op in isolation), you must
-        # >>> EDIT THE CODE: flip the ``_ADD_RESIDUAL`` local at the top of forward() to False.
+        # >>> The residual is part of what this module IS; there is no way to turn it off, not
+        # >>> even by editing a local. For the raw op in isolation -- benchmarking, or a caller
+        # >>> that owns its own residual -- use ``ops.transition``, the weights-as-args facade.
         # ==========================================================================
         # 'miniworld' (ours, auto) resolves to the TRITON family, which itself
         # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
@@ -135,13 +136,10 @@ class Transition(nn.Module):
         ``out + x`` kernel / HBM round-trip; the input tile is already resident at store time) —
         see the constructor comment. There is intentionally no runtime flag to disable it, as
         residual connections are the standard in this domain (AF3 ``pair = pair + transition(pair)``).
-        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line below."""
-        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (fused epilogue, for speed). Edit to False to disable.
-        add_residual = _ADD_RESIDUAL
+        >>> The raw op without the residual is ``ops.transition``, not a flag on this module."""
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
-            out = self._torch_forward(x)
-            return out + x if add_residual else out
+            return self._torch_forward(x) + x
 
         if backend == KernelBackend.CUDA:
             # kernels.cuda_transition has never been implemented (see its docstring). Reaching
@@ -155,7 +153,7 @@ class Transition(nn.Module):
                 self.squeeze.weight,
                 self.n,
             )
-            return out + x if add_residual else out
+            return out + x
 
         if backend in {
             KernelBackend.TRITON,
@@ -163,8 +161,8 @@ class Transition(nn.Module):
         }:
             is_training = self.training and torch.is_grad_enabled()
             if is_training:
-                return self._training_forward(x, add_residual)
-            return self._inference_forward(x, add_residual)
+                return self._training_forward(x)
+            return self._inference_forward(x)
 
         if backend == KernelBackend.CUTE:
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
@@ -181,14 +179,14 @@ class Transition(nn.Module):
                 self.ln_in.eps,
                 backward_backend=backward_backend,
             )
-            return out + x if add_residual else out
+            return out + x
 
         raise InvalidImplementationError(self.implementation)
 
-    def _inference_forward(self, x: torch.Tensor, add_residual: bool = False) -> torch.Tensor:
+    def _inference_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward-only dispatch: no tensors are saved for backward."""
         def _r(out):  # explicit residual add for paths that don't fold it in-kernel
-            return out + x if add_residual else out
+            return out + x
 
         if _force_split_enabled():
             return _r(self._old_triton_forward(x))
@@ -236,7 +234,6 @@ class Transition(nn.Module):
                 self.expand_b.weight,
                 self.squeeze.weight,
                 self.ln_in.eps,
-                add_residual=add_residual,
             )
         # cute_transition_fused is the quack SM90 (H100) WGMMA path; it asserts
         # SM90-only. Route the wide-d case here on Hopper *exactly*; on Blackwell
@@ -263,10 +260,9 @@ class Transition(nn.Module):
             self.n,
             self.ln_in.eps,
             save_xn=False,
-            add_residual=add_residual,
         )
 
-    def _training_forward(self, x: torch.Tensor, add_residual: bool = False) -> torch.Tensor:
+    def _training_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Training dispatch: fastest kernel per d (transition has NO cuequivariance kernel).
 
         Every path carries a real backward; measured fwd+bwd on H100 (L=384, bf16):
@@ -276,7 +272,7 @@ class Transition(nn.Module):
         Mirrors the inference dispatch: b2b for d<=256, cute split for d=512.
         """
         def _r(out):  # explicit residual add for paths that don't fold it in-kernel
-            return out + x if add_residual else out
+            return out + x
 
         if _force_split_enabled():
             return _r(self._old_triton_forward(x))
@@ -324,7 +320,6 @@ class Transition(nn.Module):
             self.n,
             self.ln_in.eps,
             save_xn=False,
-            add_residual=add_residual,
         )
 
     def _old_triton_forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -177,26 +177,15 @@ def transition_fwd_b2b_triton() -> None:
     from miniworld_engine.kernels.transition.triton.fused import transition_b2b
 
     x2, g, b, wa, wb, ws = _transition_operands(k=K_SMALL)
-    # BOTH values of ADD_RESIDUAL, because both are launched and an audit that looked only at the
-    # MODULE missed half of it:
-    #   =1  modules/transition/module.py:139 sets `_ADD_RESIDUAL = True` unconditionally and
-    #       threads it through :266/:327 into fused.py:1416,:1432 -- every module launch.
-    #   =0  kernels/transition/whole_op.py:76-80, the public `ops` facade, calls
-    #       `triton_transition_fused` WITHOUT `add_residual`, and fused.py:1780 defaults it False.
-    #       That is the d<=128 AF3 branch, i.e. this card.
-    # The committed cache held 16 buckets of =0 and none of =1, so the module path was missing;
-    # driving only =1 would simply have moved the hole onto the facade.
-    #
-    # The no-LN probe stays at ADD_RESIDUAL=0. `_swiglu_b2b` (fused.py:806) is the only producer of
-    # HAS_LN=0 and it passes no residual, so (HAS_LN=0, ADD_RESIDUAL=1) is a combination nothing
-    # can launch -- building it would tune a program with no caller while dropping the one there is.
+    # ONE probe where two used to stand, because there is no longer an ADD_RESIDUAL to drive
+    # both sides of. The residual follows from HAS_LN (see the note above `_transition_b2b_kernel`):
+    # HAS_LN=1 is the Transition op and always adds it, HAS_LN=0 is the bare SwiGLU FFN and never
+    # does. Both HAS_LN values are still driven, one probe each, and HAS_LN IS in the key.
     #
     # FUSE_STATS and SAVE_XN stay at 0: `settings.transition_fuse_stats` defaults False
     # (settings.py:201) and its only setter is `builder.SWITCHES`, which the per-op `build all`
     # never reads; `save_xn=True` has no caller (see transition_layernorm_expand_swiglu above).
     transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False, shape_key=SHAPE_KEY)
-    transition_b2b(x2, g, b, wa, wb, ws, EPS, fuse_stats=False, add_residual=True,
-                   shape_key=SHAPE_KEY)
     empty = x2.new_empty(0)
     transition_b2b(x2, empty, empty, wa, wb, ws, 0.0, has_ln=False, shape_key=SHAPE_KEY)
 

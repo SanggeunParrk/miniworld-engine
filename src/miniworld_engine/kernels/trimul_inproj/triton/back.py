@@ -57,7 +57,10 @@ from miniworld_engine.autotune.shape_key import token_key
 # N is constexpr but deliberately NOT in the key: trimul_back_triton is the only launch site and it
 # passes ``K=D, N=D`` (Wp/Wg are (D, D)), so N == K and the K entry already covers it. The
 # BLOCK_K >= K covering-tile branch is likewise selected by K, which is folded into shape_key.
-@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key', 'ADD_RESIDUAL'])
+# There is no ADD_RESIDUAL. The pairformer residual is part of what this op IS, not an option
+# it offers, so `residual` is required and the add is unconditional -- see gate_elem.py for the
+# measurement (1.27x at both production lengths, and the more accurate of the two forms).
+@triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key'])
 @triton.jit
 def _back_kernel(
     tri_ptr,  # (D, M) channel-major: tri[k, m] at k*M + m
@@ -65,10 +68,10 @@ def _back_kernel(
     wp_ptr, wg_ptr,    # (D, D) = to_out.weight.T, to_gate.weight.T  (K=in, N=out)
     lnw_ptr, lnb_ptr,  # (D,)
     y_ptr,    # (M, D) row-major
-    res_ptr,  # (M, D) row-major residual (== the module input pair); read iff ADD_RESIDUAL
+    res_ptr,  # (M, D) row-major residual (== the module input pair); always read
     M, eps,
     K: tl.constexpr, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    shape_key, ADD_RESIDUAL: tl.constexpr,
+    shape_key,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -107,10 +110,9 @@ def _back_kernel(
             proj = tl.dot(norm, wp)                              # (BLOCK_M1, BLOCK_N)
             gate = tl.sigmoid(tl.dot(xn, wg))                    # (BLOCK_M1, BLOCK_N)
             acc = proj * gate
-            if ADD_RESIDUAL:
-                res = tl.load(res_ptr + rm[:, None] * N + rn[None, :],
-                              mask=mmask & nmask, other=0.0).to(tl.float32)
-                acc = acc + res
+            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :],
+                          mask=mmask & nmask, other=0.0).to(tl.float32)
+            acc = acc + res
             tl.store(y_ptr + rm[:, None] * N + rn[None, :],
                      acc.to(y_ptr.dtype.element_ty), mask=mmask & nmask)
     else:
@@ -170,17 +172,16 @@ def _back_kernel(
             proj = pacc                                              # (BLOCK_M1, BLOCK_N)
             gate = tl.sigmoid(gacc)                                  # (BLOCK_M1, BLOCK_N)
             acc = proj * gate
-            if ADD_RESIDUAL:
-                # Fuse the pairformer residual add y = pair + trimul(pair): the residual is the
-                # module's own (pre-LN) input, added in the same coalesced store. No dropout here
-                # (inference: dropout is identity; training uses the v6 kernel).
-                res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask & nmask, other=0.0).to(tl.float32)
-                acc = acc + res
+            # The pairformer residual add y = pair + trimul(pair): the residual is the module's
+            # own (pre-LN) input, added in the same coalesced store. No dropout here (inference:
+            # dropout is identity; training uses the v6 kernel).
+            res = tl.load(res_ptr + rm[:, None] * N + rn[None, :], mask=mmask & nmask, other=0.0).to(tl.float32)
+            acc = acc + res
             y = acc.to(y_ptr.dtype.element_ty)
             tl.store(y_ptr + rm[:, None] * N + rn[None, :], y, mask=mmask & nmask)
 
 
-def _trimul_back_triton_fake(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residual=None):
+def _trimul_back_triton_fake(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps, residual):
     """y [B, L, L, D]: the back half is shape-preserving, so it matches x_n's shape/dtype."""
     return x_n.new_empty(x_n.shape)
 
@@ -188,26 +189,63 @@ def _trimul_back_triton_fake(tri_bdll, x_n, Wp, Wg, ln_w, ln_b, eps=1e-5, residu
 @opaque(fake=_trimul_back_triton_fake, name="trimul_back_fused")
 def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tensor,
                        Wg: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor,
-                       eps: float = 1e-5,
-                       residual: torch.Tensor | None = None) -> torch.Tensor:
+                       eps: float, residual: torch.Tensor) -> torch.Tensor:
     """tri_bdll:(B,D,L,L), x_n:(B,L,L,D), Wp/Wg:(D,D)=weight.T -> y:(B,L,L,D). B=1.
 
-    ``residual`` (optional, [B,L,L,D] == the module input pair): fuses the pairformer
-    residual add ``y = pair + trimul(pair)`` into the store epilogue. None -> plain trimul.
+    ``residual`` ([B,L,L,D] == the module input pair) is REQUIRED: this op is
+    ``y = pair + trimul(pair)``, with the add fused into the store epilogue.
     """
     # B==1 by design; B>1 works via a per-batch loop, which is faster than a batched single
     # launch (L2 thrashing of large bdll intermediates). See front.py's note and
     # notes/trimul_batch_generalization.
-    B, D, L, L2 = tri_bdll.shape
+    B, K, L, L2 = tri_bdll.shape
     assert B == 1 and L == L2
     M = L * L
-    tri_dm = tri_bdll.reshape(D, M)            # (D, M) contiguous, channel-major
-    xn_flat = x_n.reshape(M, D)
-    y = torch.empty(M, D, device=x_n.device, dtype=x_n.dtype)
-    add_residual = residual is not None
-    res_flat = residual.reshape(M, D).contiguous() if add_residual else y  # dummy ptr when off
+    N = x_n.shape[-1]
+
+    # VALIDATE BEFORE LAUNCHING. The kernel indexes `wp_ptr`/`wg_ptr` as (K, N) and `xn_ptr` as
+    # (M, K); it has no way to notice that the tensor it was handed is smaller. This launcher used
+    # to take ONE `D = tri_bdll.shape[1]` and pass it as both K and N, so a caller whose to_out
+    # maps d_hidden -> d_pair with d_hidden != d_pair handed in a (d_hidden, d_pair) weight while
+    # the kernel read (d_pair, d_pair) -- an out-of-bounds READ of exactly the missing rows.
+    #
+    # That read does not reliably crash. It lands inside whatever the caching allocator has next,
+    # so it usually returns another tensor's bytes and corrupts the result silently; it only traps
+    # when it clears the mapping, which is why it showed up as an "illegal memory access" that
+    # came and went with `torch.cuda.empty_cache()`. Reported by both the A100 and A6000 sessions,
+    # surfacing at whatever kernel ran next (`layernorm_transpose` in one replay), never here.
+    #
+    # A ValueError is the right outcome, not a silent widen: this kernel folds LN(tri) and the
+    # gate on x_n into ONE pass, so it needs tri's channel axis and x_n's width to be the same
+    # axis. When they are not, there is no correct thing for it to compute.
+    def _dims(t):
+        return tuple(t.shape)
+    if x_n.shape[-1] != K:
+        msg = (f"trimul_back_triton: tri channel ({K}) != x_n width ({x_n.shape[-1]}). This "
+               f"kernel normalises tri over its channel axis and gates on x_n over the SAME "
+               f"axis, so the two must match; d_hidden != d_pair needs the split back half.")
+        raise ValueError(msg)
+    for name, w in (("Wp", Wp), ("Wg", Wg)):
+        if _dims(w) != (K, N):
+            msg = (f"trimul_back_triton: {name} is {_dims(w)}, expected (K={K}, N={N}). "
+                   f"Pass the TRANSPOSED weight ((in, out)); a mismatch here is an "
+                   f"out-of-bounds read inside the kernel, not a shape error it can detect.")
+            raise ValueError(msg)
+    for name, v in (("ln_w", ln_w), ("ln_b", ln_b)):
+        if v.numel() != K:
+            msg = f"trimul_back_triton: {name} has {v.numel()} elements, expected K={K}"
+            raise ValueError(msg)
+    if residual.shape[-1] != N or residual.numel() != M * N:
+        msg = (f"trimul_back_triton: residual is {_dims(residual)}, expected (..., {N}) "
+               f"with {M * N} elements")
+        raise ValueError(msg)
+
+    tri_dm = tri_bdll.reshape(K, M)            # (K, M) contiguous, channel-major
+    xn_flat = x_n.reshape(M, K)
+    y = torch.empty(M, N, device=x_n.device, dtype=x_n.dtype)
+    res_flat = residual.reshape(M, N).contiguous()
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
                        ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
-                       K=D, N=D, shape_key=token_key(L, K=D), ADD_RESIDUAL=add_residual)
-    return y.view(B, L, L, D)
+                       K=K, N=N, shape_key=token_key(L, K=K))
+    return y.view(B, L, L, N)

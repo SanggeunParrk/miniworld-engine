@@ -140,7 +140,7 @@ def _trimul_cute(
         if outgoing
         else torch.einsum("bdki,bdkj->bdij", left, right)
     )
-    return trimul_back_split_sm100(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps)
+    return trimul_back_split_sm100(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps, residual=x)
 
 
 def _bidir_cute(
@@ -190,12 +190,27 @@ def triangle_multiplicative_update(
     g_out_weight: torch.Tensor | None = None,     # (d_pair, d_pair)
     eps: float = 1e-5,
 ) -> torch.Tensor:
-    """Fused triangle multiplicative update — cuequiv-compatible whole-op call.
+    """Fused triangle multiplicative update — whole-op call, cuequiv argument-compatible.
 
-    Returns the updated pair ``(B, L, L, d_pair)``. Autograd-transparent: back-prop
-    produces gradients for ``x`` and every weight/bias argument, so the caller can
-    hold them as ``nn.Parameter`` and train normally — exactly like the cuequiv
-    baseline it replaces.
+    Returns the RESIDUAL form ``x + triangle_multiplicative_update(x)``, shape
+    ``(B, L, L, d_pair)``. ``cuequivariance_torch``'s function of the same name returns the
+    bare update instead, so the two are argument-compatible but not return-compatible.
+
+    To compare them, add the residual to THEIRS in plain torch rather than trying to strip it
+    from this one::
+
+        ours  = ops.triangle_multiplicative_update(x, ...)
+        theirs = x + cuequivariance_torch.triangle_multiplicative_update(x, ...)
+
+    That is exactly what ``modules.TriangleMultiplication`` does: its CUEQUIVARIANCE backend
+    calls the bare cuequiv op and then applies the drop scale and the residual as ordinary torch
+    ops, so every backend of that module computes the same function. Stripping the residual here
+    would instead cost a whole zeroed ``[B,L,L,d_pair]`` operand or a lossy ``- x``, to undo an
+    add that is worth 1.27x when it stays fused (see the measurement block in
+    ``trimul_inproj/triton/gate_elem.py``).
+
+    Autograd-transparent: back-prop produces gradients for ``x`` and every weight/bias
+    argument, so the caller can hold them as ``nn.Parameter`` and train normally.
     """
     from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import (
         trimul_triton,
@@ -286,8 +301,13 @@ def bidirectional_triangle_multiplicative_update(
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Bidirectional (outgoing+incoming, one fused block) triangle multiplicative
-    update — whole-op call. Returns ``(B, L, L, d_pair)``. Autograd-transparent:
-    grads flow to ``x`` and every weight. Backed by the TRITON bidir pipeline
+    update — whole-op call. Returns the RESIDUAL form ``x + bidir_trimul(x)``,
+    ``(B, L, L, d_pair)``: the residual is fused into the gate store epilogue and is part of
+    what this op is, not a flag on it (see ``trimul_inproj/triton/gate_elem.py`` for the
+    measurement). cuequivariance has no bidirectional equivalent to compare against; for the
+    single-direction one, add the residual to cuequiv's output in plain torch (see
+    ``triangle_multiplicative_update`` above).
+    Autograd-transparent: grads flow to ``x`` and every weight. Backed by the TRITON bidir pipeline
     (weights-as-args autograd Function + no-grad inference path). ``d_hidden == d_pair``
     required. Unlike single-direction trimul there is no cuequiv equivalent, so this
     takes the four (2·d_hidden, d_pair) projections directly.

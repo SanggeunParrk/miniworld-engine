@@ -102,3 +102,38 @@ def test_bucket_scopes_are_wildcards_or_integers(rows):
             if b != "*" and not b.isdigit():
                 bad.append((r["kernel"], b))
     assert not bad, f"bucket scope must be `*` or an integer bucket base: {bad}"
+
+
+def test_the_exemption_actually_removes_the_pair_from_coverage():
+    """The half this file was missing, and the half that broke.
+
+    The tests above check that each row's CLAIM is true of the source. None of them checked that
+    the audit ACTS on the row -- and it did not: `check_cache_coverage` called `unpack_base(b)` on
+    a bare bucket, which needs a second argument, so every call raised into a bare `except` and the
+    drop set stayed empty. The declaration was read, parsed, and then quietly ignored, which reads
+    from the outside exactly like "no bucket matched". `adaln_bwd_dx_dlnw_triton`'s 8192 bucket
+    kept being reported as missing on every card.
+
+    So this drives the real filter: build a declared work list containing an exempted bucket, run
+    it through the same code path, and assert the pair is gone.
+    """
+    from miniworld_engine.build import audit
+
+    declared = audit._untunable()
+    scoped = {op: b for op, b in declared.items() if "*" not in b}
+    if not scoped:
+        pytest.skip("no bucket-scoped exemptions declared")
+
+    for op, buckets in scoped.items():
+        bucket = int(sorted(buckets)[0])
+        want = {op: {("bfloat16", bucket), ("float32", bucket), ("bfloat16", 128)}}
+        # the same expression check_cache_coverage uses
+        drop = {(dt, b) for dt, b in want[op] if b is not None and str(b) in buckets}
+        assert drop, (
+            f"{op}: the exemption for bucket {bucket} matches nothing in a declared work list that "
+            f"contains it. `want` holds the BARE bucket op_units emitted, so the comparison has to "
+            f"be against that -- not against an unpacked cache key.")
+        remaining = want[op] - drop
+        assert ("bfloat16", 128) in remaining, "the exemption removed a bucket it does not name"
+        assert not any(b == bucket for _, b in remaining), (
+            f"{op}: bucket {bucket} survived its own exemption")

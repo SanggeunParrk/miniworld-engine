@@ -125,13 +125,17 @@ def transition_expand_gatebwd_wgmma(x, rstd, c1, g, beta, wa, wb, grad_expand):
     )
 
 
-def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, add_residual=False):
+def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws):
     """Fused LN + SwiGLU expand + squeeze forward for fixed AF3 transition shapes.
+    Returns ``y = transition(x) + x``.
 
-    ``add_residual``: fold ``y = transition(x) + x`` into the squeeze epilogue (residual == x).
+    The residual is folded into the squeeze epilogue (residual == x) and is not optional: this
+    is the Transition op, and every launcher of it defines the op that way. The C++ entry still
+    takes the flag -- it is one `bool` in `transition_b2b_kernel.cu` -- but nothing can pass
+    False through here, which is what "no variable" means for a Python caller.
     """
     return _ext("transition_b2b_cuda").transition_b2b_fwd(
-        x, rstd, c1, g, beta, wa, wb, ws, add_residual
+        x, rstd, c1, g, beta, wa, wb, ws, True
     )
 
 
@@ -140,7 +144,7 @@ def transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb):
     return _ext("transition_expand_gate_cuda").transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb)
 
 
-def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps, add_residual=False):
+def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps):
     """Module-facing wrapper: LN stats (same ``stats_triton`` as the triton b2b path) +
     the hand-CUDA fused b2b forward. Fixed shapes only (K=128, ND=512, D=128 or
     K=256, ND=1024, D=256; n=4); the caller must gate on shape/dtype/M%128 before
@@ -149,9 +153,9 @@ def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps, add_residual=Fal
     Weight layouts match ``nn.Linear.weight`` directly: ``wa``/``wb`` are ``[ND, K]`` and
     ``ws`` is ``[D, ND]`` — no transpose needed.
 
-    ``add_residual``: fuse the post-transition residual add ``y = transition(x) + x`` into
-    the squeeze output epilogue (the residual is the module input ``x`` itself; D == K).
-    Saves the separate elementwise-add kernel + its M×D round-trip.
+    Returns ``y = transition(x) + x``: the residual add is fused into the squeeze output
+    epilogue (the residual is the module input ``x`` itself; D == K), saving the separate
+    elementwise-add kernel and its M×D round-trip. It is part of the op, not a flag on it.
     """
     from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
@@ -167,7 +171,7 @@ def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps, add_residual=Fal
         wa.contiguous(),
         wb.contiguous(),
         ws.contiguous(),
-        add_residual,
+        True,           # the residual is part of the Transition op, not an option on it
     )
     return out.reshape(*x.shape[:-1], out.shape[-1])
 

@@ -61,7 +61,7 @@ class Settings:
     #: `build all` had to choose between two work lists, and neither is complete on its own. The
     #: per-op sweep covers what registry.csv DECLARES -- every kernel, every shape bucket -- but
     #: drives each kernel through its own driver, so it never produces the constexpr combinations a
-    #: module's real dispatch does (`SAVE_PREACT=1`, `ADD_RESIDUAL=0`, `H2=512,K=256`). Measured on
+    #: module's real dispatch does (`SAVE_PREACT=1`, `SAVE_GATE=0`, `H2=512,K=256`). Measured on
     #: an A6000: a cache built that way answers `missing_pairs 0` to the declared question and
     #: misses 363 lookups the module matrix actually makes, across 42 of 91 ops. Driving modules
     #: reaches those keys, and reaches only the 48 of 91 kernels some module happens to dispatch.

@@ -26,10 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from miniworld_engine.autotune.cache import (
-    _stored_rev,
-    build_rev,
     DRIVER_ID_SCHEME,
     _scheme_stale,
+    _stored_rev,
+    build_rev,
     config_space_hash,
     driver_identity,
     env_identity,
@@ -172,13 +172,11 @@ def format_report(rows: list[CacheStatus], *, gpu_substr: str | None = None) -> 
                  f"({len(rows)} caches)")
     if stale:
         lines.append("\nSTALE -- rebuild before trusting (build the op, then `dev merge`):")
-        for r in stale:
-            lines.append(f"  {r.op:44} {r.gpu:32} {r.reason}")
+        lines.extend(f"  {r.op:44} {r.gpu:32} {r.reason}" for r in stale)
     if env_mismatch:
         lines.append(f"\nENV mismatch on this machine ({len(env_mismatch)}) -- built under a "
                      "different triton/cuda; a rebuild HERE would relabel, not necessarily change:")
-        for r in sorted({(r.op, r.gpu) for r in env_mismatch}):
-            lines.append(f"  {r[0]:44} {r[1]}")
+        lines.extend(f"  {op:44} {gpu}" for op, gpu in sorted({(r.op, r.gpu) for r in env_mismatch}))
     if unknown:
         lines.append(f"\nUNKNOWN ({len(unknown)}): no config grid (dispatch-only caches, expected).")
     if not stale:

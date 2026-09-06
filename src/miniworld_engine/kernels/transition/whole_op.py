@@ -23,7 +23,13 @@ def transition(
     n: int,
     eps: float = 1e-5,
 ) -> torch.Tensor:
-    """Fused SwiGLU transition — whole-op call. Returns the same shape as ``x``.
+    """Fused SwiGLU transition — whole-op call. Returns ``x + transition(x)``, ``x``'s shape.
+
+    The residual is part of the op, not a flag on it: ``modules.Transition``, this facade and
+    the fused kernel's own epilogue all define Transition as ``x + squeeze(SwiGLU(LN(x)))``, and
+    on the b2b paths the add is free (D == K, so the kernel reloads its own input tile). The
+    bare ``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` with no LayerNorm and no residual is a
+    different op -- ``kernels.triton_swiglu_ffn``.
 
     Autograd-transparent: back-prop produces gradients for ``x`` and every weight.
 
@@ -39,10 +45,12 @@ def transition(
 
     # H100 (sm_90) wide d: quack cute WGMMA fused expand — LN folded into the cute prologue.
     if d_hidden >= 256 and _dispatch.is_sm90(x.device):
+        # The cute fused expand has no residual epilogue, so this branch adds it explicitly --
+        # the op is the same op on every arch.
         return kernels.cute_transition_fused(
             x, ln_in_weight, ln_in_bias,
             expand_a_weight, expand_b_weight, squeeze_weight, n, eps,
-        )
+        ) + x
 
     # Pre-Hopper wide d: the shape-general split GEMM wins, but keep the input LayerNorm on our
     # fused Triton LN (never native fp32 F.layer_norm).
@@ -67,9 +75,10 @@ def transition(
         # it `x.reshape(-1, d_hidden)` raised ValueError on every call, so this branch had never
         # run: on a non-Hopper card `ops.transition` was dead at every d_hidden it selects.
         x_n = triton_layernorm(x, ln_in_weight, ln_in_bias, eps)
+        # Split path: no fused epilogue to fold the residual into, so add it here.
         return triton_transition(
             x_n, expand_a_weight, expand_b_weight, squeeze_weight, n,
-        )
+        ) + x
 
     # B200 (sm_100, every d, via cute b2b_fwd_sm100) + d<=128 on any arch (the AF3 shape):
     # the fused Triton entry (LN folded, backward recomputes xn from saved LN stats).

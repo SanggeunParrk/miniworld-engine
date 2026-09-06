@@ -43,7 +43,7 @@ def units():
 @pytest.fixture(scope="module")
 def rows():
     with REGISTRY.open(newline="") as fh:
-        return [r for r in csv.DictReader(fh)]
+        return list(csv.DictReader(fh))
 
 
 def test_every_declared_triton_kernel_with_a_driver_gets_units(units, rows):
@@ -80,7 +80,9 @@ def test_the_non_pair_side_carries_only_the_atom_and_msa_widths(units, rows):
     So the invariant is not "one width" but "one width per level", and the sharp half is that a
     `level=atom` row must never see 64.
     """
-    from miniworld_engine.autotune.builder import op_units as _u  # noqa: F401  (documents source)
+    from miniworld_engine.autotune.builder import (
+        op_units as _u,  # noqa: F401  (documents source)
+    )
     level_of = {r["kernel"]: r["level"] for r in rows}
     MSA_WIDTHS = {64}
     bad_atom = sorted({(u.op, u.width) for u in units

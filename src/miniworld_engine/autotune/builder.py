@@ -337,9 +337,17 @@ def cases() -> list[Case]:
     # layernorm_linear_mmajor_bwd to a single bucket N=128 across an entire build: that op keys on
     # N = the projection width, which TriangleMultiplication takes from d_hidden, not d_pair. So
     # sweeping d_pair alone moves the pair tensor and never moves the bucket the kernel keys on.
+    #: SQUARE ONLY. The asymmetric pairs that used to sit here -- (256, 128) and (512, 256) --
+    #: launched no kernel at all: every fused trimul back half folds LN(tri) and the output gate
+    #: onto the same axis, so `d_hidden != d_pair` is refused (unidirectional.py, and now the cute
+    #: entries too). All three impls this case drives are kernel paths, so those two dims were
+    #: build units that compiled and benched nothing. Worse, before the width fix they reached
+    #: `trimul_back_triton` with a (d_hidden, d_pair) weight the kernel indexed as (d_pair,
+    #: d_pair) -- the out-of-bounds read that showed up as an intermittent illegal memory access.
+    #: Asymmetric widths are a pytorch-only shape; the build drives kernels.
     PAIR_HID = (
-        {"d_pair": 128, "d_hidden": 128}, {"d_pair": 256, "d_hidden": 128},
-        {"d_pair": 256, "d_hidden": 256}, {"d_pair": 512, "d_hidden": 256},
+        {"d_pair": 128, "d_hidden": 128},
+        {"d_pair": 256, "d_hidden": 256},
         {"d_pair": 512, "d_hidden": 512},
     )
     HID_D = ({"d_hidden": 128}, {"d_hidden": 256}, {"d_hidden": 384})

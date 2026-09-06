@@ -71,7 +71,7 @@ class TriangleAttention(nn.Module):
         use_self_attention: bool = True,
         use_qk_norm: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
-        p_drop: float = 0.0,
+        p_drop: float = 0.25,
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -85,14 +85,18 @@ class TriangleAttention(nn.Module):
         # domain standard, so there is deliberately NO flag to turn it off. The DROPOUT is
         # OPTIONAL: ``p_drop`` applies only in ``self.training`` on the AF3 broadcast axis for this
         # module's role — starting => drop_row (broadcast over i, dim=1); ending => drop_col
-        # (broadcast over j, dim=2). p_drop=0 (default) / eval => residual only.
+        # (broadcast over j, dim=2). It DEFAULTS ON at AF3's 0.25 -- training a pairformer
+        # block without it is the unusual case, so it is the value you have to ask to turn off,
+        # not the one you have to ask for. At eval (`self.training` False) it is identity, which
+        # is why dropout stays a variable where the residual does not.
         #
         # NOTE — NOT KERNEL-FUSED YET (unlike Transition / TriangleMultiplication): the residual +
         # dropout are an EXPLICIT ``pair + drop(out)`` after the attention op, not folded into the
         # kernel epilogue. This unifies the module CONTRACT now (the block just calls
         # ``module(pair, mask)``); fusing them into the attention output kernel for the speed win is
         # a separate, later task.
-        # >>> To run WITHOUT the residual, EDIT THE CODE: flip the ``_ADD_RESIDUAL`` local in forward().
+        # >>> There is no way to turn it off, not even by editing a local. The raw op without the
+        # >>> residual is ``_attention()``, which is what ``ops.triangle_attention`` exposes.
         # ======================================================================================
         self.p_drop = p_drop
         self._drop_dim = 1 if starting else 2  # drop_row (i) for starting, drop_col (j) for ending
@@ -267,15 +271,16 @@ class TriangleAttention(nn.Module):
         mask: Bool[torch.Tensor, "B L"] | None = None,
     ) -> Float[torch.Tensor, "B L L d_pair"]:
         """Forward pass. ALWAYS returns the residual output ``pair + drop(tri_attention(pair))``
-        (residual UNCONDITIONAL; dropout optional via ``p_drop``, active only in ``self.training``).
+        (residual UNCONDITIONAL; dropout via ``p_drop``, default 0.25, active only in
+        ``self.training``).
         The residual/dropout are applied EXPLICITLY here (NOT kernel-fused yet — see the constructor
         comment); fusing them into the attention epilogue for the speed win is a later task.
-        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line."""
-        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (explicit add; not fused yet). Edit to False to disable.
+        >>> The raw op without the residual is ``_attention()`` / ``ops.triangle_attention``,
+        not a flag on this module."""
         out = self._attention(pair, mask)
         if self.p_drop > 0.0 and self.training:
             out = out * self._make_drop_scale(pair, self.p_drop)
-        return pair + out if _ADD_RESIDUAL else out
+        return pair + out
 
     def _attention(
         self,

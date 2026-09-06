@@ -42,6 +42,9 @@ def bidirectional_trimul_sm100(
 ):
     """pair:(B,L,L,d) -> y:(B,L,L,d). B=1. h = d_hidden per direction.
 
+    Returns the RESIDUAL form ``pair + bidir_trimul(pair)`` -- the residual is fused into the
+    back half's gate store, not added by the caller.
+
     ``row_scale`` [M] (AF pair-mask folded into LN_in): zeros x at masked pair rows,
     so the front produces 0 there and the trimul k-contraction sums only valid k
     (== masking left/right). Lets the fast free path serve masked/padded inputs."""
@@ -65,7 +68,8 @@ def bidirectional_trimul_sm100(
     out_i = torch.einsum("bdki,bdkj->bdij", left_i, right_i)   # incoming
     tri = torch.cat([out_o, out_i], dim=1)           # [B, 2h, L, L]
 
-    # shared back-half over 2h: ln_out(2h) @ to_out(2h->d), gated by sigmoid(x @ to_gate)
+    # shared back-half over 2h: ln_out(2h) @ to_out(2h->d), gated by sigmoid(x @ to_gate),
+    # with the pairformer residual (the pre-LN input `pair`) fused into the gate store.
     return trimul_back_split_sm100(
-        tri, x, to_out_w, to_gate_w.T, ln_out_w, ln_out_b, eps_out,
+        tri, x, to_out_w, to_gate_w.T, ln_out_w, ln_out_b, eps_out, residual=pair,
     )

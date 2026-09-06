@@ -69,6 +69,10 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
     "triangle_multiplication_bidirectional": "same as triangle_multiplication",
     "triangle_attention": "pulls in layernorm (bf16|fp32); its own attention kernels are bf16-only",
     "swa_atom_attention": "flash-backed; bf16-only, and it has no registry family of its own",
+    "dit": "a BLOCK, not a family: augmented_attention + conditioned_transition. Both are "
+           "bf16|fp32 end to end, so the block is -- but no single registry family names it",
+    "swa_dit": "the atom DiT block wraps swa_atom_attention, so it inherits its flash bf16-only "
+               "core even though the adaLN and the transition around it are bf16|fp32",
 }
 
 # module bench target -> does miniworld have an end-to-end fp32 kernel? The diffusion blocks do
@@ -83,6 +87,10 @@ MODULE_SUPPORTS_FP32: dict[str, bool] = {
     "adaptive_layernorm": True,
     "augmented_attention_token": True,
     "augmented_attention_atom": True,
+    # The token DiT block is augmented attention + conditioned transition, both bf16|fp32
+    # end to end, so the block is too. The atom block is not: its attention core is flash.
+    "dit": True,
+    "swa_dit": False,
 }
 
 

@@ -83,13 +83,14 @@ detail 은 "런치 인자로 표현되는 차이"가 아니라 **호환되지 �
     ktiled       가중치 K 방향 타일링
     packed       여러 오퍼랜드/출력을 한 버퍼에 인터리브·연접
     inplace      입력 버퍼에 되쓴다, 출력 버퍼가 없다 (autotune restore_value 필요)
-    dropres      행 브로드캐스트 dropout scale / residual add 를 게이트 에필로그에 융합
+    res          residual add 를 게이트 에필로그에 융합 (dropout 없음 = 추론 커널)
+    dropres      행 브로드캐스트 dropout scale + residual add 를 게이트 에필로그에 융합
     rowscale     LN 출력에 행별 스칼라(마스크)를 곱한다 — 필수 오퍼랜드
     noaffine     아핀(gamma/beta) 미적용 — 가중치 포인터가 파라미터에 없다
     foldstats    mean 대신 프리폴드된 c1 = mean*rstd 통계를 읽는 계약
     saveact      같은 수학 + backward 용 활성/통계 버퍼를 추가로 쓰는 **별도 커널**.
                  방향은 하나로 고정: **저장하는 쪽이 토큰을 받는다.** `nosave` 는 쓰지 않는다.
-                 같은 커널이 constexpr 플래그(SAVE_GATE/SAVE_PREACT)로 처리하면 붙이지 않는다.
+                 같은 커널이 constexpr 플래그(SAVE_PREACT)로 처리하면 붙이지 않는다.
 
 레이아웃 / 인덱싱 — **레이아웃 계약은 런치 인자가 아니라 의미의 일부다**
 
@@ -155,15 +156,34 @@ detail 이 둘 이상이면 이 순서로 쓴다:
 **constexpr 플래그나 런치 인자로 표현되는 차이는 이름을 얻지 못한다.** 구체적으로 다음은 새 이름의
 근거가 될 수 없다:
 
-    활성(mean/rstd, x_hat, gate, preact) 저장 여부
     affine(gamma/beta) 적용 여부
     in/out 스트라이드 분리
     in-place 여부
     오퍼랜드 패킹 주소지정, contiguous 가정
 
-근거는 리포 자신에 있다: `_gate_mul_kernel`(trimul/gate_elem.py)과 `_bidir_front_kernel`은 이미
-`SAVE_GATE` / `SAVE_PREACT` constexpr 플래그로 저장 여부를 처리한다. 같은 일을 이름으로 처리한
-커널들이 그 옆에 복붙본으로 남아 있었다.
+**예외 — 추론/학습 경계는 이름을 얻는다.** 이 절은 원래 "활성(mean/rstd, x_hat, gate, preact)
+저장 여부"도 금지 목록에 넣고 `_gate_mul_kernel`(trimul/gate_elem.py)의 `SAVE_GATE` 를 올바른
+예로 인용했다. 그 규칙은 뒤집혔고, 뒤집은 근거는 측정이 아니라 **커버리지**다.
+
+`build all` 의 per-op 패스에는 switch 축이 없다. 그래서 플래그 값은 **드라이버가 그 값으로
+호출해야만** 빌드된다. 안 부르면 캐시는 한쪽만 채워지는데 `build all` 은 성공을 보고하고
+`dev cache-status` 도 OK 를 보고한다 — fingerprint 는 *코드가 무엇인지*를 말할 뿐 *캐시가 무엇을
+덮는지*는 말하지 않기 때문이다. 실제로 측정된 결과: 선언된 질문에 `missing_pairs 0` 을 답하는
+캐시가 모듈 매트릭스의 조회 363건을 놓쳤다(91개 op 중 42개).
+
+커널을 나누면 그 실패 모드가 사라진다. 한쪽이 안 빌드되면 "캐시 파일이 없는 op" 가 되고, 그건
+`dev cache-status` 와 audit 이 이미 잡는다. 그래서 **추론 커널과 학습 커널은 별도 이름·별도
+registry 행·별도 캐시 파일을 갖는다.** gate/preact 저장 여부는 그 경계와 일치하므로(backward 가
+있는 쪽만 저장한다) 더 이상 "이름을 얻지 못하는 차이" 가 아니다.
+
+리포는 이미 대부분 그렇게 되어 있었다 — `adaln_epilogue` vs `adaln_epilogue_saveact`,
+`layernorm_fwd` vs `layernorm_fwd_saveact` 등 16개 커널이 `saveact`/`recompute` 로 갈려 있고,
+추론 쪽 key 는 플래그가 0개다. `_gate_mul_kernel` 이 예외였고, 이제
+`gated_projection_gate_res_triton`(추론)과 `gated_projection_gate_dropres_triton`(학습)으로
+갈렸다. 둘 다 key 는 `['shape_key']` 다.
+
+여전히 금지인 것: **같은 경로 안에서** 갈리는 차이. `_bidir_front_kernel` 의 `SAVE_PREACT` 는
+학습 경로 안에서만 갈리므로 계속 constexpr 이다.
 
 ## 6. 금지
 

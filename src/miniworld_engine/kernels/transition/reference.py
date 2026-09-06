@@ -9,11 +9,13 @@ expand pair followed by the squeeze projection, over the last dimension::
     b  = xn @ expand_b_weight.T                        # (..., n*D)
     h  = silu(a) * b = a * sigmoid(a) * b              # SwiGLU, (..., n*D)
     y  = h @ squeeze_weight.T                          # (..., D)
-    y  = y + x                                         # only if add_residual
+    y  = y + x                                         # the residual, unconditional
 
 Weight convention mirrors ``nn.Linear`` (``weight`` is ``(out, in)``), matching the
-kernel argument layout. ``add_residual`` reproduces the kernel's fused residual
-epilogue; ``modules.Transition`` always requests it, the whole-op does not.
+kernel argument layout. The residual is unconditional here because it is unconditional in
+the op: every launcher -- ``modules.Transition``, ``ops.transition``, the fused kernel's own
+epilogue -- returns ``x + transition(x)``. The bare no-LayerNorm, no-residual SwiGLU FFN is a
+different op with a different reference.
 
 Provided as an ``nn.Module`` (:class:`TransitionReference`, owns every weight as a
 parameter) so a kernel can be checked on both forward output and backward gradients::
@@ -47,9 +49,8 @@ def transition_pytorch(
     squeeze_weight: torch.Tensor,  # (D, n*D)
     n: int,
     eps: float = 1e-5,
-    add_residual: bool = False,
 ) -> torch.Tensor:
-    """Compute ``squeeze(silu(a) * b)`` over ``LayerNorm(x)``. Returns ``x``'s shape.
+    """Compute ``x + squeeze(silu(a) * b)`` over ``LayerNorm(x)``. Returns ``x``'s shape.
 
     ``n`` is carried only for signature parity with the kernel (the expansion factor is
     already implied by the weight shapes). The LayerNorm affine params are cast to the
@@ -67,7 +68,7 @@ def transition_pytorch(
     b = F.linear(xn, expand_b_weight)
     h = F.silu(a) * b
     out = F.linear(h, squeeze_weight)
-    return out + x if add_residual else out
+    return out + x
 
 
 class TransitionReference(nn.Module):
@@ -79,7 +80,6 @@ class TransitionReference(nn.Module):
         n: int = 4,
         *,
         eps: float = 1e-5,
-        add_residual: bool = False,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.bfloat16,
     ) -> None:
@@ -87,7 +87,6 @@ class TransitionReference(nn.Module):
         self.d_hidden = d_hidden
         self.n = n
         self.eps = eps
-        self.add_residual = add_residual
         nd = n * d_hidden
 
         def w(out_features: int, in_features: int) -> nn.Parameter:
@@ -115,5 +114,4 @@ class TransitionReference(nn.Module):
             self.squeeze_weight,
             self.n,
             self.eps,
-            self.add_residual,
         )

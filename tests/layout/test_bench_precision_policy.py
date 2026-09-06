@@ -3,14 +3,14 @@ consistent with kernels/registry.csv and cover every bench target."""
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 
 import pytest
 
-import sys
 _RUNNERS = Path(__file__).resolve().parents[2] / "benchmarks" / "runners"
 sys.path.insert(0, str(_RUNNERS))
-import bench_policy as bp  # noqa: E402
+import bench_policy as bp
 
 _REG = Path(__file__).resolve().parents[2] / "src" / "miniworld_engine" / "kernels" / "registry.csv"
 _BENCH = Path(__file__).resolve().parents[2] / "benchmarks"
@@ -63,7 +63,7 @@ def test_declared_precisions_order_and_values():
 
 
 def test_unknown_level_and_module_raise():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="level"):
         bp.declared_precisions("trunk", "x")
     with pytest.raises(KeyError):
         bp.declared_precisions("module", "does_not_exist")

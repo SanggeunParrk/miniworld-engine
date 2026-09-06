@@ -29,7 +29,7 @@ from miniworld_engine.kernels.trimul_inproj.cute.launch import (
 )
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
-    gate_elem_bwd_ew, gate_elem_triton,
+    gate_elem_bwd_ew, gate_elem_train, ones_dropscale,
 )
 
 
@@ -40,7 +40,7 @@ class BidirBackHalf(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, b_lr, eps, h,
-                residual=None, dropscale=None):
+                residual, dropscale=None):
         # residual [B,L,L,D] (== module input pair) + dropscale [1,1,L,D] (drop_row mask/(1-p),
         # broadcast over i) fuse the pairformer residual+dropout into the gate; bwd returns d_residual=gy.
         B, L, _, D = x_n.shape
@@ -56,13 +56,12 @@ class BidirBackHalf(torch.autograd.Function):
         tri = torch.cat([o_out, o_in], dim=0)                   # (H, L, L)
         view = tri.reshape(H, M).t()                            # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
-        y, gate = gate_elem_triton(
-            x_n.reshape(M, D), proj, Wg, return_gate=True,
-            residual=residual, dropscale=dropscale, seq_len=L)
+        y, gate = gate_elem_train(
+            x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h = eps, h
-        ctx.dropscale, ctx.add_residual, ctx.seq_len = dropscale, residual is not None, L
+        ctx.dropscale, ctx.seq_len = dropscale, L
         return y.reshape(B, L, L, D)
 
     @staticmethod
@@ -79,8 +78,7 @@ class BidirBackHalf(torch.autograd.Function):
 
         # ② gate bwd (elementwise only — dx_gate is fused into the dxn GEMM below). Dropout scale
         # is applied to gy inside; the residual identity grad is returned as d_residual = gy.
-        d_proj, d_glogit = gate_elem_bwd_ew(
-            gy, proj, gate, dropscale=ctx.dropscale, seq_len=ctx.seq_len)
+        d_proj, d_glogit = gate_elem_bwd_ew(gy, proj, gate, ctx.dropscale, ctx.seq_len)
         dWg = dispatch.mm("dWg", x_n.reshape(M, D).t(), d_glogit)   # (D, D) huge-K → cuBLAS
 
         # ① LN_out + @Wp bwd
@@ -134,7 +132,7 @@ class BidirBackHalf(torch.autograd.Function):
         # dispatch: cuBLAS wins small L (quack launch overhead), cute ≈/wins large L.
         dx_n = dispatch.pick("dxn", (M, 4 * H + D, D),
                              [("cute", _dxn_cute), ("cublas", _dxn_cublas)]).reshape(B, L, L, D)
-        d_residual = gy.reshape(B, L, L, D) if ctx.add_residual else None
+        d_residual = gy.reshape(B, L, L, D)
         del gy
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
                 d_residual, None)
@@ -145,16 +143,20 @@ class BidirBackHalf(torch.autograd.Function):
 # ``kernels._compile`` -- but it does not need to be.
 def bidir_forward(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
                   ln_out_w, ln_out_b, eps, b_lr, h, row_scale=None,
-                  add_residual=False, dropscale=None):
+                  dropscale=None):
     _bdll_patch.apply()
     _gate_mul_patch.apply()
     # AF pair-mask folded into LN_in (FREE): x_n = LN(pair)*rs -> masked left/right=0; the rs grad
     # folds into the LN backward (no separate (M,D) multiply). rs=None -> plain LN.
     x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps, row_scale=row_scale)
-    # pair passed BOTH as LN input and residual -> autograd accumulates its grad from both paths.
-    residual = pair if add_residual else None
+    # `pair` is passed BOTH as the LN input and as the residual (which is never absent) ->
+    # autograd accumulates its grad from both paths.
+    # A training entry always carries a drop scale, ones when p_drop is 0 -- that is what
+    # keeps `gate_elem_train` and `gate_elem_bwd_ew` flagless. Measured cost 0.2%.
+    if dropscale is None:
+        dropscale = ones_dropscale(pair.shape[1], pair.shape[-1], pair)
     return BidirBackHalf.apply(x_n, WL, WLg, WR, WRg, Wg, Wp_nn, ln_out_w, ln_out_b, b_lr, eps, h,
-                               residual, dropscale)
+                               pair, dropscale)
 
 
 class BidirV6TriMul(nn.Module):
@@ -177,7 +179,7 @@ class BidirV6TriMul(nn.Module):
         self.ln_out_b = nn.Parameter(b.ln_out.bias.detach().clone())
         self.eps = b.ln_pair.eps
 
-    def forward(self, pair, mask=None, add_residual=False, dropscale=None):
+    def forward(self, pair, mask=None, dropscale=None):
         b_lr = prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg)
         row_scale = None
         if mask is not None:
@@ -186,4 +188,4 @@ class BidirV6TriMul(nn.Module):
         return bidir_forward(pair, self.WL, self.WLg, self.WR, self.WRg, self.Wg, self.Wp_nn,
                              self.ln_in_w, self.ln_in_b, self.ln_out_w, self.ln_out_b,
                              self.eps, b_lr, self.h, row_scale,
-                             add_residual=add_residual, dropscale=dropscale)
+                             dropscale=dropscale)

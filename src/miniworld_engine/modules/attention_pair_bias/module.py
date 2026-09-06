@@ -68,8 +68,7 @@ class AttentionPairBias(nn.Module):
     ) -> Float[torch.Tensor, "B L d_single"]:
         """Forward pass. ALWAYS applies the residual: single + attention_pair_bias(single, pair).
         The residual is UNCONDITIONAL (domain standard) and applied EXPLICITLY here (team-gm layer,
-        not kernel-fused). To disable, edit the ``_ADD_RESIDUAL`` local below."""
-        _ADD_RESIDUAL = True  # unconditional residual (explicit add). Edit to False to disable.
+        not kernel-fused). The residual is unconditional and has no flag."""
         single_res = single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
         single = self.ln_single(single)
         query = self.to_query(single)
@@ -97,4 +96,4 @@ class AttentionPairBias(nn.Module):
         out = rearrange(out, "B H L D -> B L (H D)")
         out = sigmoid_gate(gate, out)
         out = self.to_out(out)
-        return single_res + out if _ADD_RESIDUAL else out
+        return single_res + out

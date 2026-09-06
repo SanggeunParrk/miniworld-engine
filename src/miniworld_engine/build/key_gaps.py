@@ -9,7 +9,8 @@ Resolution is by the registry's (file, symbol) PAIR, never by the bare symbol. A
 throwaway version of this check keyed a `name -> constexprs` dict and unioned across files, which
 silently merged the two different kernels both called `_gate_mul_kernel`
 (`tm1/cute/launch.py` takes `BLOCK_E`; `trimul_inproj/triton/gate_elem.py` takes
-`N, BLOCK_M1, BLOCK_K, SAVE_GATE, ADD_RESIDUAL, USE_DROPOUT`). Each then appeared to be missing
+`N, BLOCK_M1, BLOCK_K, SAVE_GATE, ADD_RESIDUAL, USE_DROPOUT` -- ADD_RESIDUAL has since been
+removed from that kernel). Each then appeared to be missing
 the other's parameters, producing two entirely fabricated findings and a third false conclusion --
 that two "sibling" kernels disagreed about keying USE_DROPOUT, when one of them does not have it.
 The same name-collision mistake, in the same repo, that `launch_bind.py` documents.
@@ -178,6 +179,14 @@ def _folded_into_shape_key() -> dict[tuple[str, str, str], set[str]]:
                 src_file = origin.get(local, str(path.relative_to(SRC)))
                 i = _shape_key_pos(src_file, alias.get(local, local))
                 sk = node.args[i] if 0 <= i < len(node.args) else None
+            # A bare Name means the key was built elsewhere and handed down. Follow the assignment
+            # it came from, and if the name is a PARAMETER of the launching function -- rope passes
+            # `shape_key` down two frames and through an `@opaque` boundary -- fall back to the
+            # single key-building call in the module, which is what those launchers have.
+            if isinstance(sk, ast.Name):
+                sk = (_resolve_key_name(tree, sk.id)
+                      or _sole_key_call(tree)
+                      or sk)
             folded = _axes_of(sk)
             # Drop any axis whose folded value disagrees with what the launch passes for the
             # same-named kernel argument. Without this a launcher can name an axis in the shape key
@@ -192,6 +201,60 @@ def _folded_into_shape_key() -> dict[tuple[str, str, str], set[str]]:
             prev = out.get(key)
             out[key] = folded if prev is None else (prev & folded)
     return out
+
+
+def _sole_key_call(tree):
+    """The module's single `*_key(...)` call, when it has exactly one.
+
+    Used only when the launch passes a `shape_key` PARAMETER, so the assignment is in a caller
+    rather than the launching function -- `rope/triton/main.py` builds the key in
+    `_RoPE3D.forward` and threads it through `_rope`. With one such call in the file there is no
+    ambiguity about which key the launch carries.
+
+    With SEVERAL there is, and this returns None so the audit keeps the conservative "folds
+    nothing" answer rather than guessing. That is not hypothetical: `rmsnorm/triton/main.py` holds
+    `both_key(rows, N=n)` for the plain norm and `both_key(rows, N=n, K=c2.shape[1])` for adamod,
+    and picking either one would attribute an axis to a kernel that does not fold it -- which
+    unpacks a bucket that was never packed and reports a hole where the cache is complete. A
+    missing fold costs a false MISSING; a wrong fold costs a false COVERED, and only the second
+    hides a real gap.
+    """
+    calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = getattr(node.func, "id", getattr(node.func, "attr", ""))
+            if fn in ("pack", "atom_key", "both_key", "token_key") and node.keywords:
+                calls.append(node)
+    if len(calls) != 1:
+        return None
+    return calls[0]
+
+
+def _resolve_key_name(tree, name: str):
+    """The `*_key(...)`/`pack(...)` call a local `shape_key` variable was assigned from.
+
+    A launcher does not always fold inline. `rope/triton/main.py` builds the key several frames up
+    -- `key = atom_key(n * s, D=d)` -- and passes it down through an `@opaque` boundary, so the
+    launch site reads `shape_key=shape_key`, a bare Name with no keywords. Reading only the launch
+    then reports the kernel as folding NOTHING, `unpack_base` becomes the identity, and the
+    coverage audit compares a packed key of order 1e10 against a declared bucket of 128 -- every
+    bucket of that op reported missing, on every card, forever.
+
+    So when the launch passes a name, look for what that name was assigned in the same module.
+    Deliberately a same-file lookup and no further: chasing across modules would need real dataflow,
+    and the four kernels this affects all build their key in the file that launches them.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        v = node.value
+        if isinstance(v, ast.Call):
+            fn = getattr(v.func, "id", getattr(v.func, "attr", ""))
+            if fn in ("pack", "atom_key", "both_key", "token_key"):
+                return v
+    return None
 
 
 def _folds_for(kernel_file: str, symbol: str) -> set[str]:

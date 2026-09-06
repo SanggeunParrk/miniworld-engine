@@ -543,14 +543,14 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
             rep.add("coverage", OK, op, "launcher pins every config (kernels/untunable.csv)")
             del want[op]
             continue
-        drop = set()
-        for dt, b in want[op]:
-            try:
-                base = unpack_base(b) if b is not None else None
-            except Exception:
-                base = None
-            if base is not None and str(base) in buckets:
-                drop.add((dt, b))
+        # `want` holds the DECLARED work list, whose bucket is already the bare base that
+        # `op_units` emitted -- 128, 256, 8192. It is not a packed key, so it needs no unpacking:
+        # `unpack_base` is for the other side, where the CACHE stores what a launch recorded.
+        # Calling it here was wrong twice over -- it also takes a required `n_axes`, so every call
+        # raised TypeError into the `except` below and `drop` was never filled. The exemption read
+        # correctly from untunable.csv and then did nothing, silently, because a bare `except` made
+        # the failure look like "no bucket matched".
+        drop = {(dt, b) for dt, b in want[op] if b is not None and str(b) in buckets}
         if drop:
             want[op] -= drop
             rep.add("coverage", OK, op,
@@ -580,7 +580,7 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
     rep.stats["missing_pairs"] = missing
     # Say what this number does NOT cover, at the point it is produced. Declared work is
     # (op, dtype, shape bucket); the cache key also carries each kernel's constexprs (H, ND,
-    # SAVE_PREACT, ADD_RESIDUAL, ...), which no declared work list enumerates. So "missing_pairs 0"
+    # SAVE_PREACT, USE_DROPOUT, ...), which no declared work list enumerates. So "missing_pairs 0"
     # means every declared BUCKET is present, not that a run finds what it asks for -- measured,
     # the module matrix asks for 363 keys this cache does not have, across 42 of 91 ops, against a
     # missing_pairs of 0. `dev audit --replay` is the measure that answers the other question.

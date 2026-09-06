@@ -41,7 +41,8 @@ class MSAPairWeightedAveraging(nn.Module):
         # This layer ALWAYS applies the residual: msa + drop_msa(pwa(msa, pair)). The residual is
         # UNCONDITIONAL (domain standard); the row-broadcast dropout (drop_msa, broadcast_dim=1) is
         # OPTIONAL via p_drop and active only in training. Applied EXPLICITLY (team-gm layer, not
-        # kernel-fused). To disable the residual, edit _ADD_RESIDUAL in forward().
+        # kernel-fused). There is no way to turn the residual off: it is part of what this
+        # module is, and the raw op is the private ``_attention``-style body below.
         self.drop_msa = Dropout(broadcast_dim=1, p_drop=p_drop)
 
         if d_hidden is None:
@@ -67,8 +68,7 @@ class MSAPairWeightedAveraging(nn.Module):
     ) -> Float[torch.Tensor, "B M L d_msa"]:
         """Forward pass. ALWAYS returns the residual output msa + drop_msa(pwa(msa, pair)) — the
         residual is UNCONDITIONAL (domain standard, explicit add) and drop_msa is optional (p_drop,
-        training only). Edit _ADD_RESIDUAL to disable the residual."""
-        _ADD_RESIDUAL = True  # unconditional residual (explicit add). Edit to False to disable.
+        training only). The residual is unconditional and has no flag."""
         msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)
         msa = self.ln_msa(msa)
         value = self.to_value(msa)
@@ -90,4 +90,4 @@ class MSAPairWeightedAveraging(nn.Module):
         out = rearrange(out, "B M L H D -> B M L (H D)")
         out = sigmoid_gate(gate, out)
         out = self.drop_msa(self.to_out(out))
-        return msa_res + out if _ADD_RESIDUAL else out
+        return msa_res + out

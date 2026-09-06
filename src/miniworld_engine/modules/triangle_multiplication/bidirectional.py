@@ -46,7 +46,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         d_hidden: int | None = None,
         *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
-        p_drop: float = 0.0,
+        p_drop: float = 0.25,
     ) -> None:
         super().__init__()
         # Keep the PUBLIC option on self.implementation (contract: modules never overwrite it
@@ -58,14 +58,17 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
         # there is deliberately NO flag to turn it off. The row-broadcast DROPOUT is OPTIONAL:
-        # ``p_drop`` (drop_row, broadcast_dim=1) applies only in ``self.training``; p_drop=0 / eval
+        # ``p_drop`` (drop_row, broadcast_dim=1) applies only in ``self.training`` and DEFAULTS ON
+        # at AF3's 0.25; p_drop=0 / eval
         # => residual only. The block just calls ``module(pair, mask)``.
         # WHY IT'S FUSED IN (SPEED): the residual add + dropout scale are done inside the trimul
         # gate/back kernel's output epilogue (no separate elementwise op / [B,L,L,D] HBM round-trip),
         # which is the whole point of the fusion; an unconditional residual is what lets the kernel
         # own that fused epilogue. See the single-dir TriangleMultiplication for the full rationale.
-        # >>> To run WITHOUT the residual, you must EDIT THE CODE: flip the ``_ADD_RESIDUAL`` local
-        # >>> at the top of forward() to False.
+        # >>> There is no way to turn it off, not even by editing a local: the residual is part
+        # >>> of what this module IS. For the raw op in isolation -- benchmarking, or a caller
+        # >>> that owns its own residual -- use ``ops.bidirectional_triangle_multiplicative_update``, the
+        # >>> weights-as-args facade that mirrors cuequivariance's signature.
         # ======================================================================================
         self.p_drop = p_drop
         self.d_pair = d_pair
@@ -102,9 +105,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
         UNCONDITIONAL (no flag — domain standard, fused FOR SPEED). The row-broadcast DROPOUT is
         OPTIONAL: ``dropout_p`` overrides the instance ``p_drop`` per call (None -> ``self.p_drop``)
         and is active only in ``self.training``.
-        >>> To disable the residual (benchmarking the raw op), EDIT the ``_ADD_RESIDUAL`` line."""
-        _ADD_RESIDUAL = True  # UNCONDITIONAL residual (fused epilogue, for speed). Edit to False to disable.
-        add_residual = _ADD_RESIDUAL
+        >>> The raw op without the residual is ``ops.bidirectional_triangle_multiplicative_update``,
+        not a flag on this module."""
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         _pair_in = pair
         _ds = (self._make_drop_row_scale(pair, dropout_p)
@@ -112,7 +114,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         def _r(out):
             if _ds is not None:
                 out = out * _ds
-            return out + _pair_in if add_residual else out
+            return out + _pair_in
 
         if self._backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
@@ -121,8 +123,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # scale: the v6-faithful fused bidirectional training kernel (residual+dropout fused
             # in the gate) — it is the path that consumes _ds.
             if torch.is_grad_enabled() or _ds is not None:
-                return self._forward_cute_train(pair, mask, add_residual, _ds)
-            return self._forward_cute(pair, mask, add_residual)  # inference: residual fused in-gate
+                return self._forward_cute_train(pair, mask, _ds)
+            return self._forward_cute(pair, mask)  # inference: residual fused in-gate
         if self._backend == KernelBackend.TRITON:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
@@ -130,7 +132,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # autograd pieces). See kernels/trimul_inproj/triton/bidirectional.py.
             # residual + row-broadcast dropout are now FUSED into the triton gate store
             # (same gate_elem epilogue the cute path uses) — no external _r() add.
-            return self._forward_triton(pair, mask, add_residual, _ds)
+            return self._forward_triton(pair, mask, _ds)
         if self._backend != KernelBackend.PYTORCH:
             raise InvalidImplementationError(self.implementation)
 
@@ -204,7 +206,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
-        add_residual: bool = False,
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """TRITON bidirectional path (fwd + autograd bwd) — composed from the
@@ -226,7 +227,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
             mask=mask,
-            add_residual=add_residual,      # fuse residual + drop_row into the gate store epilogue
             dropscale=dropscale,
         )
 
@@ -234,7 +234,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None,
-        add_residual: bool = False,
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """MINIWORLD (ours) TRAINING path: the v6-faithful fused-bidirectional trimul
@@ -282,15 +281,14 @@ class BidirectionalTriangleMultiplication(nn.Module):
             row_scale = m.reshape(-1).to(pair.dtype)     # [M]
         if major < 10:  # sm90 bidir_forward fuses residual+dropout in the gate
             # `_fwd` is one of two functions picked by arch above, and only the sm90 one takes
-            # add_residual/dropscale -- which is what this branch is. ty cannot correlate the
-            # `major < 10` guard with which function `_fwd` is bound to, so it checks the call
-            # against the union of both signatures and flags the sm100 variant.
+            # `dropscale` -- which is what this branch is. ty cannot correlate the `major < 10`
+            # guard with which function `_fwd` is bound to, so it checks the call against the
+            # union of both signatures and flags the sm100 variant.
             return _fwd(
                 pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
                 self.ln_pair.weight, self.ln_pair.bias,
                 self.ln_out.weight, self.ln_out.bias,
                 self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
-                add_residual=add_residual,  # ty: ignore[unknown-argument]
                 dropscale=dropscale,  # ty: ignore[unknown-argument]
             )
         out = _fwd(
@@ -301,7 +299,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         )
         if dropscale is not None:  # sm100 bidir: apply residual+dropout explicitly
             out = out * dropscale
-        return out + pair if add_residual else out
+        return out + pair
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see
@@ -310,7 +308,6 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self,
         pair: torch.Tensor,
         mask: torch.Tensor | None = None,
-        add_residual: bool = False,
     ) -> torch.Tensor:
         """CUTE bidirectional path: compose the single-direction tm1 ``bdll_sm100``
         gate-GEMM+einsum for BOTH directions (outgoing on the first ``d_hidden``
@@ -332,10 +329,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
         ) != "0":
             # free path now folds the pair-mask into LN_in (row_scale), so it serves
             # masked/padded inputs too — no longer gated on `mask is None`.
-            return self._forward_cute_free(pair, mask, add_residual)
+            return self._forward_cute_free(pair, mask)
 
         from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
-            gate_elem_triton,
+            gate_elem_infer,
         )
         from miniworld_engine.modules.triangle_multiplication.module import (
             _load_cute_fns,
@@ -378,19 +375,19 @@ class BidirectionalTriangleMultiplication(nn.Module):
         out_normed = (oo[0] if isinstance(oo, tuple) else oo).view(b, l1, l2, 2 * h)
 
         # shared back: sigmoid(x @ to_gate.T) * (out_normed @ to_out.T)  (gate K=d, out K=2h).
-        # Fuse the residual (== module input pair) into the gate store via gate_elem_triton — the
+        # Fuse the residual (== module input pair) into the gate store via gate_elem_infer — the
         # proj GEMM stays cuBLAS, the sigmoid·mul·+residual is one triton pass.
         proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T           # (M, d) cuBLAS
-        y = gate_elem_triton(
+        y = gate_elem_infer(
             x.reshape(M, d), proj, self.to_gate.weight.T,
-            residual=(pair.reshape(M, d) if add_residual else None), seq_len=l1)
+            residual=pair.reshape(M, d), seq_len=l1)
         return y.view(b, l1, l2, d)
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see
     # ``kernels._compile`` -- but it does not need to be.
     def _forward_cute_free(
-        self, pair: torch.Tensor, mask: torch.Tensor | None = None, add_residual: bool = False,
+        self, pair: torch.Tensor, mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """CUEQUIV-FREE sm100 (B200) bidirectional path — the current sm100 kernels.
 
@@ -415,7 +412,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if mask is not None:
             m = mask.unsqueeze(-1) & mask.unsqueeze(-2)        # [B, L, L]
             row_scale = m.reshape(-1).to(pair.dtype)           # [M]
-        out = bidirectional_trimul_sm100(
+        # The residual is fused into the back half's gate store, so this returns the
+        # residual form directly -- there is no `out + pair` left to do here.
+        return bidirectional_trimul_sm100(
             pair,
             self.to_left.weight, self.to_left_gate.weight,
             self.to_right.weight, self.to_right_gate.weight,
@@ -426,4 +425,3 @@ class BidirectionalTriangleMultiplication(nn.Module):
             tm1_cute_forward, out_layout,
             row_scale=row_scale,
         )
-        return out + pair if add_residual else out  # sm100 bidir: explicit residual (no fuse yet)

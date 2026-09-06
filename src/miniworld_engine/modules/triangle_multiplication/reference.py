@@ -48,13 +48,18 @@ class TriangleMultiplicationReference(nn.Module):
         if d_hidden is None:
             d_hidden = d_pair
 
+        # d_pair -> d_hidden in, d_hidden -> d_pair out (AF3 Alg. 12). These were
+        # `Linear(d_pair, d_pair)` with only `to_out` reading `d_hidden`, which made the module
+        # unbuildable the moment the two differed -- the forward died on
+        # `mat1 and mat2 shapes cannot be multiplied`. Same fix as modules/.../module.py; with
+        # d_hidden == d_pair, every shape the model runs, nothing changes.
         self.ln_pair = LayerNorm(d_pair)
-        self.to_left = Linear(d_pair, d_pair, bias=False, init="default")
-        self.to_left_gate = Linear(d_pair, d_pair, bias=False, init="zero")
-        self.to_right = Linear(d_pair, d_pair, bias=False, init="default")
-        self.to_right_gate = Linear(d_pair, d_pair, bias=False, init="zero")
+        self.to_left = Linear(d_pair, d_hidden, bias=False, init="default")
+        self.to_left_gate = Linear(d_pair, d_hidden, bias=False, init="zero")
+        self.to_right = Linear(d_pair, d_hidden, bias=False, init="default")
+        self.to_right_gate = Linear(d_pair, d_hidden, bias=False, init="zero")
 
-        self.ln_out = LayerNorm(d_pair)
+        self.ln_out = LayerNorm(d_hidden)
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
 
