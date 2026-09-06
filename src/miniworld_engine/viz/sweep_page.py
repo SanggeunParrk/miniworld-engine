@@ -53,17 +53,74 @@ def _exempt_reasons() -> dict[str, str]:
 
 
 def _coverage() -> dict[str, float]:
-    """How much of a full planned build each kernel's shipped cache already holds, 0..1."""
+    """How much of a full planned build each kernel's shipped cache already holds, 0..1.
+
+    COUNTS, not keys -- and that limit is the point of this docstring, because the number read as
+    a guarantee for a while and is not one. It compares how MANY entries a card holds against how
+    many units the plan plans; it does not check that those entries are the buckets the plan
+    names. A cache can be at "100%" and miss every bucket production asks for. Matching keys means
+    unpacking each entry's ``shape_key``, which needs the axis count of the launcher that wrote it
+    (see ``shape_key.unpack_base`` -- "not guessable from the value"), so it belongs with the
+    per-op audit, not on a page that reads only JSON.
+
+    Two things that were wrong ARE fixed here, because both produced false assurance rather than
+    an approximation:
+
+    * ``cpu.json`` counted as a card. It is a dispatch-only cache with its own key set, and for
+      ``cond_transition_fwd_b2b_triton`` it holds 19 keys against a 9-unit plan -- reported as
+      211% coverage for an op whose A100 cache actually holds 4 of 9 buckets. GPU caches only now.
+    * the count was unclamped, so "more entries than planned" read as ">100% covered" when it
+      means the OPPOSITE: the keys do not match the plan. It is clamped, and the excess is
+      reported separately by :func:`_coverage_mismatch` so the page can say so.
+
+    Still MAX across cards, deliberately: this page describes the shipped cache as a whole, and
+    the best-covered card is the honest answer to "does this repo ship a tuned cache for this
+    kernel". Per-card health is ``dev cache-status``'s job.
+    """
+    return {op: min(1.0, frac) for op, frac in _coverage_raw().items()}
+
+
+def _coverage_mismatch() -> dict[str, float]:
+    """Ops whose cache holds MORE entries than the plan has units, as the raw ratio (>1).
+
+    Not a bonus: it is proof the entries are keyed on something the plan does not name, so the
+    coverage number for that op is meaningless in both directions.
+    """
+    return {op: frac for op, frac in _coverage_raw().items() if frac > 1.0}
+
+
+def _coverage_raw() -> dict[str, float]:
+    """The unclamped per-op ratio, best GPU card. See :func:`_coverage`."""
     from miniworld_engine.autotune.builder import op_units
 
+    # DISTINCT (dtype, length) buckets, not units. A unit is (op, dtype, side, length, width) and
+    # several units collapse into ONE cache entry whenever the kernel does not fold `width` into
+    # its shape key -- which most do not. Counting units made every such op read as 1/3 covered
+    # with a COMPLETE cache: `gated_projection_gate_packed_flat_triton` holds 4 entries keyed on
+    # length alone against 12 units (4 lengths x 3 widths), and the whole
+    # `triangle_attention_bwd_*` family reads 33.3% for the same reason.
+    #
+    # Length is the one axis every kernel keys on, so it is the one this file can count from JSON.
+    # It still cannot see width: a kernel that DOES fold width shows one entry per width and reads
+    # over 100%, which `_coverage_mismatch` surfaces rather than hides. A key-level answer needs
+    # `shape_key.unpack_base`, which needs each launcher's axis count -- that is `dev audit`'s job,
+    # not a page that reads only JSON. This number is a smoke alarm, not a guarantee.
     planned: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for u in op_units():
-        planned[u.op][u.dtype] += 1
+        planned[u.op][u.dtype] = 0
+    seen: dict[str, set] = collections.defaultdict(set)
+    for u in op_units():
+        seen[u.op].add((u.dtype, u.length))
+    for op, pairs in seen.items():
+        for dt, _length in pairs:
+            planned[op][dt] += 1
     have: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for d in sorted(DATA.iterdir()):
         if not d.is_dir():
             continue
         for f in sorted(d.glob("*.json")):
+            if f.stem == "cpu":            # a dispatch-only cache, not a card
+                continue
             try:
                 data = json.loads(f.read_text())
             except (OSError, ValueError):
@@ -75,8 +132,16 @@ def _coverage() -> dict[str, float]:
     for op, want in planned.items():
         best = 0.0
         for (_card, dt), n in have.get(op, {}).items():
-            if want.get(dt):
-                best = max(best, n / want[dt])
+            for wdt, wn in want.items():
+                # The two sides SPELL the dtype differently and never matched. A unit declares the
+                # registry dtype (`bfloat16`); the runtime key is `dtype_of_args`, the SET of float
+                # operand dtypes -- and a norm affine pinned to fp32 by `primitives._Fp32ParamsMixin`
+                # puts `bfloat16+float32` in the cache for a kernel whose activations are bf16. So
+                # every such op read as 0.0% covered while holding a full cache: transition_fwd_b2b
+                # (16 entries), triangle_attention_fwd (12), trimul_gemm_gate_saveact (12) all did.
+                # Match on membership: a plan dtype is covered by any recorded key that contains it.
+                if wdt in dt.split("+"):
+                    best = max(best, n / wn)
         out[op] = best
     return out
 

@@ -109,6 +109,48 @@ assert set(DIT_ATOM_LENGTHS) <= set(ATOM_SHAPES), "the atom work list is a slice
 assert not (set(DIT_ATOM_LENGTHS) & set(DIT_TOKEN_LENGTHS)), (
     "the two sides must not share a length, or one floor-clamp cannot tell them apart")
 
+#: WHAT THE RUNGS COST, MEASURED -- and why the answer is "leave them", while a DIFFERENT axis of
+#: the same cache is worth 1.4x. A100 80GB PCIe, fp32, n_augment=32, `bench_time` medians, keys
+#: transplanted at a FIXED true shape by passing `length=` (it only picks the config -- `shape_key`
+#: is never read in a body -- so this reads one shape under another bucket's tuned config).
+#: Every row was measured in ascending AND descending key order; the two agreed within 1%, so none
+#: of this is a warmup ramp.
+#:
+#: 1. GRANULARITY is cheap. Floor-clamping sends L=640 to the 512 rung and L=896 to the 768 rung.
+#:    On the composed path (d_hidden=768/d_cond=384, what `bench_module conditioned_transition`
+#:    runs) the best of ALL seven buckets beats the rung the ladder picks by only 1.02x-1.08x.
+#:    Adding 640+896 to this ladder costs +9.8 GPU-hours on a 110-hour sweep (+8.9%, by
+#:    `python -m miniworld_engine.viz.sweep_page`) to chase at most 8% at two lengths the model
+#:    never runs -- they are bench sweep points. So the rungs stay as they are. Floor, not ceiling,
+#:    is also the safe direction: 896 runs a config tuned for 768 rows' worth of tiles, never one
+#:    tuned for more work than is there.
+#:
+#: 2. THE ROW COUNT the rungs are tuned at is the expensive one. `drivers/conditioned_transition.py`
+#:    builds `(1, _M, D)` with `_M == L`, so bucket L is tuned at M = L rows -- deliberately, so
+#:    that `length_of` records the same bucket production does. But production and every bench
+#:    launch `(n_augment, 1, L, d)`, i.e. M = 32*L rows. The bucket is right and the tuned SHAPE is
+#:    32x too small. On the fused b2b path (d=128), true shape held fixed, transplanted config:
+#:
+#:      true L (true M)   ladder's rung    best rung    ladder / best
+#:        384 (12,288)    0.1034 (miss)    0.0881 @8192     1.17x
+#:        896 (28,672)    0.2294 (miss)    0.1843 @8192     1.24x
+#:       1024 (32,768)    0.2857 @1024     0.2038 @8192     1.40x
+#:
+#:    L=1024 is the one length in that bench ladder where the A100 cache HAS an entry for
+#:    `cond_transition_fwd_b2b_triton`, and the entry is the slowest of the seven configs tried --
+#:    slower even than the 24-config heuristic subset a miss falls back to (0.2427). A rung tuned
+#:    at 1,024 rows is actively worse than no rung at all when the launch is 32,768 rows. Adding
+#:    rungs cannot fix this; only tuning a rung at the row count it will be launched at can. It is
+#:    the failure BOTH_ROWS documents at 1.73x, reaching `level=atom` through the augmentation
+#:    axis rather than through a pair launch.
+#:
+#: 3. This ladder stops at 768, so a TOKEN-side launch at L=1024 floor-clamps into the atom rung
+#:    1024 -- and the atom side is only ever driven at ATOM_WIDTH=128 (see `_widths`), so at a
+#:    token width (K=768, ND=1536) it is a guaranteed miss, not a coarse hit. Measured cost on the
+#:    composed path at L=1024: 1.01x, i.e. the heuristic subset is as good as any rung there.
+#:    Adding 1024 here would close the hole for +4.9 GPU-hours (+4.4%); it is not obviously worth
+#:    it while (2) is unfixed, because the rung it would add would be tuned at 1,024 rows.
+
 #: Kernels used at both levels bucket against the union, so a call from either side lands where it
 #: would have landed in its own set (a token 192 still floors to 128, an atom 300 still to 256).
 #: This is the WORK-LIST axis -- which shapes a build drives -- not the cache key; see BOTH_ROWS.

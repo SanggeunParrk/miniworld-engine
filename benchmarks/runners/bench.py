@@ -2214,7 +2214,16 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
 
 def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabric):
     """Post-adaLN conditioned-transition tail: out=squeeze(silu(x@Wa)*(x@Wb)); y=sigma(cond@Wsc+b)*out.
-    fp32. Rows: pytorch, triton_cond_transition."""
+    Rows: pytorch, triton_cond_transition.
+
+    Honours ``conf.precision``, like every other kernel bench in this file. It used to hardcode
+    fp32 three times over -- ``.float()`` on the module, ``dtype=torch.float32`` in ``_xc()`` and
+    a literal ``dtype="float32"`` in the result -- while ``bench_policy`` sweeps this target at
+    BOTH precisions (its registry family declares ``bf16|fp32``). So the bf16 row and the fp32 row
+    were the same fp32 measurement recorded twice, and the bf16 run wrote its numbers to an
+    artifact named ``..._bf16-mixed_...``. The op is tuned at both precisions -- the A100 cache
+    holds ``bfloat16|...`` and ``float32|...`` entries for ``cond_transition_fwd_b2b_triton`` --
+    so the bf16 half was declared, cached, and never measured."""
     from miniworld_engine import kernels
     from miniworld_engine.modules.conditioned_transition.module import (
         ConditionedTransition,
@@ -2225,8 +2234,11 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
     # the model sets `condition.transition_n: 2`, so 4 measured a shape twice as wide as the
     # one the model launches, and the driver tunes for n=2.
     D, L, n = conf.d_single_atom, seq_len, 2
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     torch.manual_seed(0)
-    ref_mod = ConditionedTransition(D, D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).float()
+    ref_mod = ConditionedTransition(
+        D, D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(dtype)
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
     wa, wb, ws = ref_mod.expand_a.weight, ref_mod.expand_b.weight, ref_mod.squeeze.weight
@@ -2237,8 +2249,8 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
         # `(A, 1, L, D)`, the shape the module hands this family -- see bench_kernel_adaln. This
         # built `(1, L, L, D)`, a pair activation with M = L*L, and passed `length=L` into an
         # atom-level family: at L=512 it asked for the config tuned at 512 rows to run 262,144.
-        return (torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=torch.float32),
-                torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=torch.float32))
+        return (torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype),
+                torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype))
 
     # The kernel is the POST-AdaLN tail: ConditionedTransition.forward runs `ada_ln_in` first and
     # only then calls it. Normalize once here so both sides see the same input.
@@ -2259,7 +2271,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
 
     xc, cc = _xc()
     acc = _acc_fwd(kfn(xc, cc), ref_fn(xc, cc))
-    return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype="float32")
+    return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype=tname)
 
 
 # ---- BACKWARD operations (pure-function launchers; cudagraph-safe) ----------------------------
@@ -2421,7 +2433,28 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
 def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     """adaLN backward (autograd, backward-only). Rows: pytorch, adaln_train.
     Cosine on dx vs pytorch autograd. `triton_adaln` / `adaln_fused3` are gone -- no module
-    reached them."""
+    reached them.
+
+    THE LEAF SET IS THE MEASUREMENT. `AdaLNTrainFn.backward` is ONE autograd node: it always
+    produces all six gradients (dx, dcond, dlnw, dWs, dsb, dWb) because autograd cannot prune
+    inside a node. The torch reference is a graph of ~8 nodes, so asking `autograd.grad` for a
+    SUBSET prunes the rest -- with `[x, cond]` it never runs the two wgrad GEMMs, the ln_cond
+    gamma reduction or the scale-bias sum. GPU time and launch count per backward, A100,
+    A=32, d=128, sum of kernel self-times from the torch profiler:
+
+        leaves              reference (L=384 / L=1024)   ours (L=384 / L=1024)
+        [x, cond]           0.079 / 0.186 ms,  8 kern    0.059 / 0.135 ms, 8 kern
+        [x, cond, *params]  0.181 / 0.449 ms, 15 kern    0.059 / 0.135 ms, 8 kern
+
+    Ours does not change -- it never had the choice -- and the reference more than doubles.
+    What this bench reported, `bench_kernel adaln_bwd --no-build`, before -> after the fix:
+
+        L        384    512    640    768    896   1024
+        before  0.40x  0.52x  0.49x  0.53x  0.51x  0.47x
+        after   0.77x  0.78x  0.79x  0.80x  0.84x  1.00x
+
+    Roughly half the "2x loss" was the pruning; the rest is host dispatch -- see the return.
+    """
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -2459,7 +2492,21 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
         path = "kernels.adaln.triton.training"
     else:
         return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x, c], dy, ref_dx, path=path,
+    # Every leaf `adaln_train`'s node differentiates, so both rows are asked for the same six
+    # gradients. `ln_in` is `elementwise_affine=False` and `ln_cond`/`to_bias` are bias-free, so
+    # these four ARE the module's whole parameter set -- the reference is not being charged for
+    # anything the kernel skips.
+    leaves = [t for t in (x, c, clw, sw, sb, bw) if t is not None]
+    # WHAT THIS NUMBER IS. At the atom width both sides are CPU-DISPATCH bound, not kernel bound:
+    # at L=1024 the reference costs 0.470 ms of host enqueue against 0.449 ms of GPU, ours
+    # 0.565 ms against 0.135 ms, and a back-to-back event bracket sits on the enqueue time for
+    # both -- the GPU is starved. That is why both columns are nearly FLAT in L while the tokens
+    # grow 7x. On the GPU work itself ours wins 3.3x; the bench metric is the Python cost of ~11
+    # eager launches (two of them `torch.library` custom ops wrapping Triton) against torch's
+    # ~15 C++ autograd nodes. `--cudagraph manual` would remove it from both sides, but a graph
+    # capture of `autograd.grad` fails here (`cudaErrorStreamCaptureInvalidated`; every row of
+    # the committed a6000 adaln_bwd table is that failure), so there is no graphed variant yet.
+    return _bwd_autograd_result(conf, out, leaves, dy, ref_dx, path=path,
                                 ref="module.reference.torch", dtype=tname)
 
 
@@ -2501,7 +2548,14 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
         path = "kernels.transition.cute.fused"
     else:
         return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x], dy, ref_dx, path=path,
+    # EVERY leaf, not just x. `torch.autograd.grad(out, leaves, ...)` prunes what no leaf needs,
+    # and the two sides prune differently: `TritonTransitionFusedFunction.backward` is ONE autograd
+    # node, so it always returns dx, dgamma, dbeta, dWa, dWb, dWs -- autograd cannot reach inside a
+    # node -- while the torch reference is a graph whose wgrad GEMMs simply do not run when no
+    # weight is a leaf. Asking for `[x]` charged us for six gradients and the reference for one,
+    # and reported the difference as our kernel being slow. Same defect, same fix, as
+    # bench_kernel_adaln_bwd, where it cost 0.40x -> 0.77x.
+    return _bwd_autograd_result(conf, out, [x, lw, lb, wa, wb, wsq], dy, ref_dx, path=path,
                                 ref="module.reference.torch", dtype="bfloat16")
 
 
@@ -2512,9 +2566,13 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
 
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    lw = torch.randn(D, device=DEVICE, dtype=BF16)
-    lb = torch.randn(D, device=DEVICE, dtype=BF16)
-    w = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()
+    # requires_grad on the weights, and they are leaves below. Without it the torch reference
+    # computes NO weight gradient at all, while `LayerNormLinearTEFn.backward` -- one autograd
+    # node -- always produces dW, dgamma and dbeta. The bench timed our three extra outputs
+    # against a reference excused from them. See bench_kernel_adaln_bwd.
+    lw = torch.randn(D, device=DEVICE, dtype=BF16, requires_grad=True)
+    lb = torch.randn(D, device=DEVICE, dtype=BF16, requires_grad=True)
+    w = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous().requires_grad_(True)
     eps = 1e-5
     torch.manual_seed(1)
     x0 = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
@@ -2540,7 +2598,7 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
         path = "kernels.layernorm_linear.autograd.cute"
     else:
         return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x], dy, ref_dx, path=path,
+    return _bwd_autograd_result(conf, out, [x, lw, lb, w], dy, ref_dx, path=path,
                                 ref="pytorch.autograd", dtype="bfloat16")
 
 
@@ -2644,7 +2702,9 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     `modules/swa_dit`. Runs at the atom length (`seq_len * 8`), like the swa_atom_attention
     kernel bench, and reports NaN without a flash backend for the same reason.
     """
-    from miniworld_engine.modules.swa_atom_attention import build_attention_params
+    from miniworld_engine.modules.swa_atom_attention.module import (
+        build_attention_params,
+    )
     from miniworld_engine.modules.swa_dit import SWADiTBlock
 
     spec = triton_miniworld_spec(implementation)

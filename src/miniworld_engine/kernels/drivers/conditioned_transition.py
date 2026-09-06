@@ -88,12 +88,29 @@ _N_EXPAND = 2
 #: tiled as NC / DC -- because on the token side they are unequal.
 _DC_BASE = 384 if _D_BASE > 128 else 128
 
-#: NOT the row count times a batch: the autotune bucket keys on `length_of(shape)`, which is
-#: `shape[-2]` -- L for the production block `(n_augment, 1, L, d)`, NOT n_augment*L. The driver
-#: builds `(1, _M, D)`, so `length_of` gives `_M` and the key matches production exactly when
-#: `_M == L`. Scaling `_M` by n_augment moves every bucket past `atom_key`'s 8192 clamp and tunes
-#: shapes nothing ever asks for -- see the comment in modules/conditioned_transition/module.py.
-_M = ragged(driver_length(512))       # drivers.rows2d default row count
+#: The KEY and the ROW COUNT are two different numbers, and this driver used to use one for both.
+#:
+#: The key is right as it was: the autotune bucket comes from `length_of(shape)` = `shape[-2]`,
+#: which is L for the production block `(n_augment, 1, L, d)` -- NOT n_augment*L. Scaling the KEY
+#: by n_augment would push every bucket past `atom_key`'s 8192 clamp and label shapes nothing asks
+#: for. So `_SHAPE_KEY` still comes from `_L` below.
+#:
+#: The row count was not. Production launches `(n_augment, 1, L, d)` = A*L rows, A = 32 in every
+#: bench config; the driver built L. A config tuned at 1,024 rows and served to a 32,768-row
+#: launch is not the config that shape wants, and this is the op where that showed up as a cache
+#: entry SLOWER than the heuristic fallback it replaced.
+#:
+#: MEASURED (`_expand_swiglu_kernel`, fp32, D=128 ND=256, A=32, L=1024 so the true launch is
+#: 32,768 rows; each row count's winner re-timed on the true shape):
+#:      tuned at 1,024 rows -> 0.0306 ms      tuned at 8,192  -> 0.0203 ms
+#:      tuned at 2,048      -> 0.0365         tuned at 16,384 -> 0.0221
+#:      tuned at 4,096      -> 0.0225         tuned at 32,768 -> 0.0200  (the true winner)
+#: Tuning small costs 1.53x. Tuning at 8,192 lands within 1.5% of the true winner, because by
+#: then the grid is ~2.4 waves over the SMs and the tile stops changing. So build the SATURATING
+#: row count, not the true one: 32x the rows would be 32x the build for a 1.5% difference.
+_ROWS_SATURATE = 8192
+_L = ragged(driver_length(512))       # the LENGTH the bucket keys on -- production's shape[-2]
+_M = max(_L, _ROWS_SATURATE)          # the ROWS to tune at -- what a production launch has
 _D = ragged(_D_BASE)                  # d_hidden (NX) / the tail's K and D
 _DC = ragged(_DC_BASE, by=5)          # d_cond (NC / DC) -- separately tiled axis
 _ND = ragged(_N_EXPAND * _D_BASE)     # expand width (ND)
@@ -103,7 +120,7 @@ _ND = ragged(_N_EXPAND * _D_BASE)     # expand width (ND)
 # outer entry points compute from the ``(1, _M, D)`` activation via ``length_of`` -- ragged mode
 # included, where both sides see _M = 509. Derived from _M rather than written out, so
 # MINIWORLD_DRIVER_LENGTH moves the recorded bucket with the shape.
-_SHAPE_KEY = atom_key(_M)
+_SHAPE_KEY = atom_key(_L)
 
 
 # ── conditioned_transition ────────────────────────────────────────────────────────────────────
@@ -128,7 +145,7 @@ def cond_transition_fwd_b2b():
     )
 
     # OUTER entry point: takes the flat matrix but names L itself, via ``length=``.
-    cond_transition_inference(*_ct_args(), length=_M)
+    cond_transition_inference(*_ct_args(), length=_L)
 
 
 def cond_transition_expand_swiglu():

@@ -25,6 +25,7 @@ docs/kernels/rename-map.tsv); the script that built them is gone, the cross-chec
 from __future__ import annotations
 
 import contextlib
+import functools
 from pathlib import Path
 
 from miniworld_engine.autotune.cache import _scheme_stale as _scheme_stale
@@ -1230,6 +1231,7 @@ def install_launch_recorder() -> None:
         return
     _REC_INSTALLED = True
     from triton.runtime.autotuner import Autotuner
+    from triton.runtime.jit import JITFunction
 
     prev = Autotuner.run
 
@@ -1243,6 +1245,62 @@ def install_launch_recorder() -> None:
         return prev(self, *args, **kwargs)
 
     Autotuner.run = run
+
+    # AND the JITFunction underneath, because a launcher that pins its own config goes AROUND the
+    # Autotuner: `kernel.fn[grid](...)` reaches the JITFunction directly. Two such sites exist
+    # (`adaln/triton/training.py`, `_bwd_x_kernel` and `_dgrad_condln_kernel`), and both are on
+    # the adaLN BACKWARD -- so a backward-only bench wrote a `.ops` file naming only the two
+    # FORWARD ops and read as though the backward had launched nothing of ours. "We ran the
+    # kernels" has to be answerable for the paths that opt out of autotuning too, or the file
+    # is evidence only where it is least needed.
+    prev_jit = JITFunction.run
+
+    def jit_run(self, *args, **kwargs):
+        key = ("jit", id(self))
+        if key not in _NOTED:
+            _NOTED.add(key)
+            op = _op_of_jit(self)
+            if op:
+                _LAUNCHED[op] = _LAUNCHED.get(op, 0) + 1
+        return prev_jit(self, *args, **kwargs)
+
+    JITFunction.run = jit_run
+
+
+def _op_of_jit(fn) -> str | None:
+    """The op behind a JITFunction launched directly, by the registry symbol that names it.
+
+    The Autotuner path identifies an op by the identity of the config list it was handed; a bare
+    JITFunction was handed none. Its `__name__` is the kernel symbol, which registry.csv already
+    maps to an op -- the same table `dev audit` resolves.
+    """
+    name = getattr(fn, "__name__", None)
+    if not name:
+        return None
+    return _symbol_to_op().get(name)
+
+
+@functools.lru_cache(maxsize=1)
+def _symbol_to_op() -> dict[str, str]:
+    """registry.csv's `symbol` column -> kernel name. Read once.
+
+    A symbol can belong to more than one row (two ops sharing a kernel body); such a symbol is
+    dropped rather than attributed to an arbitrary one of them -- a wrong op name in a coverage
+    file is worse than a missing one.
+    """
+    import csv
+
+    reg = Path(__file__).resolve().parents[1] / "kernels" / "registry.csv"
+    if not reg.is_file():
+        return {}
+    seen: dict[str, str | None] = {}
+    with reg.open(encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            sym = (row.get("symbol") or "").strip()
+            if not sym:
+                continue
+            seen[sym] = None if sym in seen else row["kernel"]
+    return {k: v for k, v in seen.items() if v}
 
 
 def _op_name(autotuner) -> str | None:

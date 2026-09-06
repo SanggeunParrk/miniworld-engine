@@ -172,9 +172,12 @@ def test_driver_identity_follows_cross_module_imports():
             del sys.modules[name]
 
     original = src.read_text()
-    edited = original.replace("_M = ragged(driver_length(512))",
-                              "_M = ragged(48 * driver_length(512))")
-    assert edited != original, "the `_M` definition this test edits has moved"
+    # Edit the row count `adaln` imports from this module. It used to be spelled
+    # `_M = ragged(driver_length(512))`; it is now `_ROWS_SATURATE`, the measured saturating row
+    # count that `_M = max(_L, _ROWS_SATURATE)` builds from -- the key and the row count are two
+    # numbers now, and this test is about the row one.
+    edited = original.replace("_ROWS_SATURATE = 8192", "_ROWS_SATURATE = 4096")
+    assert edited != original, "the row-count definition this test edits has moved"
     before = driver_identity(importer)
     try:
         src.write_text(edited)
