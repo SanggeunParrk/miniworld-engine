@@ -3,7 +3,7 @@
   "driver_id_scheme": 2,
   "driver_identity": "2aee9974acce",
   "entries": {
-    "bfloat16|ADD_RESIDUAL=0,N=128,SAVE_GATE=0,USE_DROPOUT=0,shape_key=128": [
+    "bfloat16|N=128,shape_key=128": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -50,7 +50,7 @@
         "num_warps": 1
       }
     ],
-    "bfloat16|ADD_RESIDUAL=0,N=128,SAVE_GATE=0,USE_DROPOUT=0,shape_key=256": [
+    "bfloat16|N=128,shape_key=256": [
       {
         "kwargs": {
           "BLOCK_K": 128,
@@ -97,7 +97,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=0,N=128,SAVE_GATE=0,USE_DROPOUT=0,shape_key=384": [
+    "bfloat16|N=128,shape_key=384": [
       {
         "kwargs": {
           "BLOCK_K": 32,
@@ -144,7 +144,7 @@
         "num_warps": 8
       }
     ],
-    "bfloat16|ADD_RESIDUAL=0,N=128,SAVE_GATE=0,USE_DROPOUT=0,shape_key=512": [
+    "bfloat16|N=128,shape_key=512": [
       {
         "kwargs": {
           "BLOCK_K": 32,
@@ -195,8 +195,8 @@
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "key_scheme": 2,
-  "op": "gated_projection_gate_dropres_triton",
-  "op_identity": "cca883ec7ed7",
+  "op": "gated_projection_gate_res_triton",
+  "op_identity": "8463c599ac0c",
   "provenance": {
     "built_utc": "2026-08-23T13:59:56+00:00",
     "torch": "2.10.0+cu128",

@@ -3,7 +3,7 @@
   "driver_id_scheme": 2,
   "driver_identity": "925d06139560",
   "entries": {
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=1024": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=1024": [
       {
         "kwargs": {
           "BLOCK_K_D": 16,
@@ -55,7 +55,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=147456": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=147456": [
       {
         "kwargs": {
           "BLOCK_K_D": 32,
@@ -107,7 +107,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=16384": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=16384": [
       {
         "kwargs": {
           "BLOCK_K_D": 32,
@@ -159,7 +159,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=2048": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=2048": [
       {
         "kwargs": {
           "BLOCK_K_D": 16,
@@ -211,7 +211,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=256": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=256": [
       {
         "kwargs": {
           "BLOCK_K_D": 64,
@@ -263,7 +263,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=262144": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=262144": [
       {
         "kwargs": {
           "BLOCK_K_D": 32,
@@ -315,7 +315,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=4096": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=4096": [
       {
         "kwargs": {
           "BLOCK_K_D": 32,
@@ -367,7 +367,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=512": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=512": [
       {
         "kwargs": {
           "BLOCK_K_D": 16,
@@ -419,7 +419,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=65536": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=65536": [
       {
         "kwargs": {
           "BLOCK_K_D": 32,
@@ -471,7 +471,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16+float32|ADD_RESIDUAL=0,FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=8192": [
+    "bfloat16+float32|FUSE_STATS=0,K=128,ND=512,SAVE_XN=0,shape_key=8192": [
       {
         "kwargs": {
           "BLOCK_K_D": 32,

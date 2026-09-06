@@ -3,7 +3,7 @@
   "driver_id_scheme": 2,
   "driver_identity": "78e6b56dd85d",
   "entries": {
-    "bfloat16|ADD_RESIDUAL=1,shape_key=2148009877": [
+    "bfloat16|shape_key=2148009877": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -55,7 +55,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=2148534165": [
+    "bfloat16|shape_key=2148534165": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -107,7 +107,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=2149582741": [
+    "bfloat16|shape_key=2149582741": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -159,7 +159,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=4295493525": [
+    "bfloat16|shape_key=4295493525": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -211,7 +211,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=4296017813": [
+    "bfloat16|shape_key=4296017813": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -263,7 +263,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=4297066389": [
+    "bfloat16|shape_key=4297066389": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -315,7 +315,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=6442977173": [
+    "bfloat16|shape_key=6442977173": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -367,7 +367,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=6443501461": [
+    "bfloat16|shape_key=6443501461": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -419,7 +419,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=6444550037": [
+    "bfloat16|shape_key=6444550037": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -471,7 +471,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=8590460821": [
+    "bfloat16|shape_key=8590460821": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -523,7 +523,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=8590985109": [
+    "bfloat16|shape_key=8590985109": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -575,7 +575,7 @@
         "num_warps": 4
       }
     ],
-    "bfloat16|ADD_RESIDUAL=1,shape_key=8592033685": [
+    "bfloat16|shape_key=8592033685": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -632,7 +632,7 @@
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
   "key_scheme": 3,
   "op": "trimul_outproj_layernorm_gemm_gate_triton",
-  "op_identity": "241724e470b0",
+  "op_identity": "3de2f51ec258",
   "provenance": {
     "built_utc": "2026-09-04T08:51:13+00:00",
     "torch": "2.10.0+cu128",

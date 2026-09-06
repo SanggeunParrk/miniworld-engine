@@ -3,7 +3,7 @@
   "driver_id_scheme": 2,
   "driver_identity": "480c85b89bfa",
   "entries": {
-    "bfloat16|ADD_RESIDUAL=0,K=128,shape_key=128": [
+    "bfloat16|K=128,shape_key=128": [
       {
         "kwargs": {
           "BLOCK_K": 16,
@@ -55,7 +55,7 @@
         "num_warps": 1
       }
     ],
-    "bfloat16|ADD_RESIDUAL=0,K=128,shape_key=256": [
+    "bfloat16|K=128,shape_key=256": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -107,7 +107,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=0,K=128,shape_key=384": [
+    "bfloat16|K=128,shape_key=384": [
       {
         "kwargs": {
           "BLOCK_K": 64,
@@ -159,7 +159,7 @@
         "num_warps": 2
       }
     ],
-    "bfloat16|ADD_RESIDUAL=0,K=128,shape_key=512": [
+    "bfloat16|K=128,shape_key=512": [
       {
         "kwargs": {
           "BLOCK_K": 64,
