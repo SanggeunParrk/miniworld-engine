@@ -1128,39 +1128,62 @@ def _shard_has_entries(shard: Path) -> bool:
 
 
 def _cache_ok_ops() -> set[str]:
-    """Ops whose committed cache for THIS card passes every staleness fingerprint.
+    """Ops whose committed cache for THIS card the RUNTIME will actually serve.
 
-    `dev cache-status` already owns this judgement -- config-grid hash, bucket key scheme, env and
-    op identity -- so the builder asks it instead of re-deriving the rules and drifting from them.
+    `dev cache-status`'s verdict is not that question. Its "OK" means "not stale enough to fail
+    CI", and it says so in the reason: `config grid changed -- incremental build pending` and
+    `build driver changed -- coverage may differ; rebuild the op` are both OK rows that still owe
+    a build. On this repo today every one of the 51 OK A6000 rows carries the first one. The
+    runtime reader is stricter -- a `config_space_hash` mismatch is a full miss (`cache.py`,
+    "STALE (kernel config grid changed)") -- so treating those as done skips the op AND leaves
+    every launch of it on the heuristic fallback, which is the exact failure this cache exists to
+    prevent.
+
+    So: fail CLOSED. Only a verdict of OK with NO reason at all counts, and the toolchain has to
+    match too -- `env_identity` is deliberately kept out of the verdict (it must not fail CI on a
+    different machine) but the runtime treats a mismatch as a miss, which is what makes the
+    "second node, fresh clone" case wrong in the other direction. An unrecognised future reason
+    string therefore costs a rebuild rather than a silently unusable cache.
     """
     from miniworld_engine.autotune import cache_status
     from miniworld_engine.autotune.cache import gpu_key
 
-    return {r.op for r in cache_status.scan(gpu_substr=gpu_key()) if r.verdict == "OK"}
+    return {r.op for r in cache_status.scan(gpu_substr=gpu_key())
+            if r.verdict == "OK" and not r.reason and r.env_matches is True}
+
+
+#: An entry is keyed `<dtype>|<bucket>`, and `dtype_of_args` names the SET of float operand dtypes
+#: a launch carried: a bf16 launch whose norm affine is pinned fp32 records `bfloat16+float32`, a
+#: true fp32 launch records `float32`. So a unit's dtype matches a label by these rules and not by
+#: substring -- `float32 in "bfloat16+float32"` is true and would count a bf16 entry as fp32 cover.
+def _label_serves_dtype(label: str, dtype: str) -> bool:
+    if dtype == "float32":
+        return label == "float32"
+    return label.split("|", 1)[0].startswith(dtype)
 
 
 def _cache_answers(unit: OpUnit, ok_ops: set[str]) -> bool:
-    """Is this unit's OP already tuned by a non-stale committed cache for this card?
+    """Is this unit's (op, dtype) already tuned by a cache the runtime will serve?
 
-    The judgement is per-OP, not per-unit, and deliberately so. A stored entry is keyed by the
-    PACKED shape_key the launch recorded -- `bfloat16|shape_key=12886475546` -- and that packing
-    carries the kernel's own constexprs, which do not exist until the launcher builds them. A
-    planner holds only (op, dtype, length, width, side), so it cannot reconstruct the key; the
-    repo says as much about coverage ("that needs unpacking each key's shape_key, which needs the
-    launcher's axis count, which is `dev audit`'s job"). Op level is what IS decidable here, and it
-    is the level staleness moves at anyway: a grid, key-scheme, env or source change invalidates
-    the whole op, and `_cache_ok_ops` then leaves it out so every one of its units is rebuilt.
+    Op AND dtype, because dtype is the one axis of the entry key a planner can actually read. The
+    key is `<dtype>|<bucket>`; the bucket half is a PACKED shape_key carrying constexprs that do
+    not exist until the launcher builds them, so it cannot be reconstructed here -- but the dtype
+    half is just `unit.dtype`. Ignoring it is self-perpetuating: 23 of this card's 74 caches hold
+    no fp32 entry at all, so their fp32 units would be skipped, the hole would never be filled,
+    and the next build would skip them again for the same reason.
 
-    The cost of the coarser grain is a per-bucket hole inside an otherwise-valid op: those are not
-    refilled by a plain `build all`. `--rebuild-cached` re-tunes the op from scratch, and
-    `dev audit` is what finds the holes.
+    What is still coarser than the truth: `side` and `width`. Both are folded into the packed
+    bucket, so a hole in one of them survives a plain `build all`; `--rebuild-cached` re-tunes the
+    op from scratch and `dev audit` is what finds such holes.
     """
     if unit.op not in ok_ops:
         return False
     from miniworld_engine.autotune.cache import _load, gpu_key
 
     data = _load(unit.op, gpu_key())
-    return bool(data and data.get("entries"))
+    if not data:
+        return False
+    return any(_label_serves_dtype(k, unit.dtype) for k in data.get("entries", {}))
 
 
 def reclaim_orphans(shard_dir: Path) -> list[str]:
@@ -1397,12 +1420,15 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     work = units(selected) if case_build else list(selected)
     if resume:
         work = [u for u in work if not _shard_has_entries(shard_dir / f"{u.stem}.json")]
-    # A unit the shipped cache already answers is not work. Only per-op units carry (op, bucket);
-    # a module Unit re-tunes whatever its case touches and has no single cache entry to test.
-    if skip_cached and not case_build:
+    # A unit the shipped cache already answers is not work. Tested per ITEM with `isinstance`, not
+    # from `case_build`: that flag reads `selected[0]` alone, so a mixed list would send a module
+    # `Unit` -- which has no `.op` -- into a lookup expecting one. Only OpUnits name a single
+    # (op, dtype) to look up; a module Unit re-tunes whatever its case touches.
+    if skip_cached:
         ok_ops = _cache_ok_ops()
         before = len(work)
-        work = [u for u in work if not _cache_answers(u, ok_ops)]
+        work = [u for u in work
+                if not (isinstance(u, OpUnit) and _cache_answers(u, ok_ops))]
         if before != len(work):
             print(f"skipping {before - len(work)} of {before} unit(s): a non-stale committed cache "
                   f"already answers them -- pass --rebuild-cached to redo them", flush=True)

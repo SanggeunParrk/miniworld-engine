@@ -619,8 +619,17 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
     # leftovers -- which are exactly the units that keep failing -- so gating the merge on "did
     # this run succeed?" left 526 finished shards unmerged while the job reported rc=1.
     if not shards:
-        print("no shards to merge.", file=sys.stderr)
-        return 1
+        # Two different outcomes reach here. If units RAN and still left no shard, the build
+        # produced nothing and that is a failure. If none ran, there was nothing to produce --
+        # a fresh shard dir where the committed cache already answered every unit, which is the
+        # case the cache-skip exists to create. Reporting rc=1 for that made the ideal run
+        # ("clone, build, everything already tuned") look like a broken one to CI and to a
+        # Slurm script reading the exit code.
+        if results:
+            print("no shards to merge.", file=sys.stderr)
+            return 1
+        print("nothing to merge: no unit needed building on this card.")
+        return 0
     written = capture.merge_shards(shards)
     if capture._MERGE_SKIPPED:
         # Two reasons land here and they are not the same news. An unreadable shard is a whole
@@ -687,8 +696,7 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
                                 predict=getattr(args, "predict_unusable", False),
                                 bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                 bench_rep_ms=getattr(args, "bench_rep_ms", 0),
-                                pin_cores=getattr(args, "pin_cores", False),
-                                skip_cached=not getattr(args, "rebuild_cached", False))
+                                pin_cores=getattr(args, "pin_cores", False))
     return _merge_built_shards(args, results)
 
 
