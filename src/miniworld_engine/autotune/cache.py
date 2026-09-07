@@ -13,10 +13,18 @@ Cache JSON schema (v1)::
      "config_space_hash": "<12-hex>",          # hash of the kernel's FULL config grid
      "provenance": {"triton": "...", "torch": "...", "built_utc": "..."},
      "entries": {"<dtype>|<bucket>": [{"kwargs": {...}, "num_warps": N, "num_stages": N,
-                                       "ms": <median>}, ... top-K]}}
+                                       "ms": <median>}, ... top-K]},
+     "grids":       {"<12-hex>": ["<config sig repr>", ...]},   # spaces this file's entries were
+     "entry_grids": {"<dtype>|<bucket>": ["<12-hex>", ...]}}    # swept under, by reference
 
 ``config_space_hash`` invalidates an entry when the kernel's grid changes, so a stale cache
 degrades to a warn + full-grid fallback instead of silently pinning old tiles.
+
+``grids`` / ``entry_grids`` are what stop a rebuild re-measuring what is already known: they say
+which configs were actually swept FOR EACH SHAPE, so a build benches the difference and nothing
+else (``configs_to_bench``). Per shape and not per file, because a build visits one shape at a
+time -- ``config_space`` names the grid the last build HELD, which for a shape that build never
+reached is a claim about work nobody did.
 """
 
 from __future__ import annotations
@@ -567,8 +575,21 @@ def _entries_survive(data: dict, configs) -> bool:
     return True
 
 
-def configs_to_bench(op: str, gk: str, configs) -> list:
+def configs_to_bench(op: str, gk: str, configs, *, entry_key: str | None = None,
+                     op_id: str = "") -> list:
     """The configs a build still has to MEASURE -- the current grid minus the space already searched.
+
+    ``entry_key`` is ``"<dtype>|<bucket>"``, the same key ``store_ranked_configs`` files an entry
+    under. Pass it, and the subtraction is per ENTRY: only the configs already searched FOR THAT
+    SHAPE are removed. Omit it and the file-level ``config_space`` is used, which is only ever
+    right when the caller is asking about the file as a whole.
+
+    Per-entry is not a refinement, it is the difference between correct and silently wrong. A
+    build sweeps one (dtype, bucket) at a time, but ``config_space`` is recorded per FILE -- so
+    subtracting it from a bucket the file has NEVER held an entry for hands the bencher the delta
+    and calls that bucket tuned. Measured, and the reason the subtraction sat disabled in
+    ``capture.prune_configs`` behind a comment: with a space recorded from a build covering L=1024
+    only, a fresh L=384 bucket was handed 2 of 4 configs.
 
     The other half of the incremental policy. `store_ranked_configs` keeps a cache when only the
     grid moved; this is what makes that cheap instead of merely non-destructive. Each cache records
@@ -598,11 +619,52 @@ def configs_to_bench(op: str, gk: str, configs) -> list:
             or _scheme_stale(op, data.get("key_scheme"))
             or data.get("env_identity") != env_identity()):
         return configs                      # about to be reset: everything needs re-measuring
-    searched = data.get("config_space")
-    if not isinstance(searched, list):
-        return configs                      # predates the field: cannot tell, so measure it all
-    seen = set(searched)
+    if op_id and data.get("op_identity") not in (None, op_id):
+        return configs                      # another kernel: every stored time is about other code
+    if entry_key is None:
+        searched = data.get("config_space")
+        seen = set(searched) if isinstance(searched, list) else None
+    else:
+        seen = entry_space(data, entry_key)
+    if seen is None:
+        return configs                      # cannot tell what was searched, so measure it all
     return [c for c in configs if repr(_sig(c)) not in seen]
+
+
+def entry_space(data: dict, entry_key: str) -> set | None:
+    """The config signatures already searched for ONE entry, or None if the file cannot say.
+
+    Stored as a reference, not a copy. ``entry_grids[key]`` lists the ``config_space_hash`` of every
+    grid this entry has been swept under, and ``grids`` holds each of those spaces once. The
+    entries of a file overwhelmingly share one grid -- 144 of them in
+    ``layernorm_stats_triton`` -- so writing the space per entry inflated the corpus by 4.3 MILLION
+    lines of JSON for information that fits in one list plus a 12-character key per entry.
+
+    Deliberately does NOT fall back to the file-level ``config_space``. That field says which grid
+    the LAST build to touch the file held, and a file may hold entries from several builds since
+    ``store_ranked_configs`` stopped resetting on a grid change -- so reading it per entry would
+    claim a bucket had been swept with configs that were added after it was last visited. Over-
+    claiming here is silent and permanent: a config never measured because a file says it was.
+    Returning None instead costs a re-measurement, which is merely slow.
+    """
+    refs = data.get("entry_grids")
+    if not isinstance(refs, dict):
+        return None
+    hashes = refs.get(entry_key)
+    if isinstance(hashes, str):
+        hashes = [hashes]
+    if not isinstance(hashes, list) or not hashes:
+        return None
+    grids = data.get("grids")
+    if not isinstance(grids, dict):
+        return None
+    out: set = set()
+    for h in hashes:
+        space = grids.get(h)
+        if not isinstance(space, list):
+            return None                     # a dangling reference is not a smaller space
+        out.update(space)
+    return out or None
 
 
 def store_ranked_configs(
@@ -701,6 +763,28 @@ def store_ranked_configs(
     # on a tie because they were taken now; anything the current grid no longer contains is
     # dropped, since it is no longer a config this kernel can be launched with.
     key = f"{dtype}|{bucket}"
+    if configs is not None:
+        # Which grid THIS entry was swept under -- the only granularity an incremental build can
+        # act on, since the file-level `config_space` above says which grid the build held, not
+        # which buckets it actually visited. Recorded by reference: the space itself goes in
+        # `grids` once, keyed by its hash, and the entry names it.
+        #
+        # APPEND, never replace. A config measured under an older, wider grid stays measured after
+        # the grid is narrowed, and dropping that record re-buys the same measurement the next time
+        # the grid widens back.
+        data.setdefault("grids", {})[config_space_h] = sorted(
+            repr(x) for x in {_sig(c) for c in configs})
+        refs = data.setdefault("entry_grids", {})
+        prior = refs.get(key)
+        prior = [prior] if isinstance(prior, str) else (list(prior) if isinstance(prior, list) else [])
+        if reset:
+            prior = []                      # the entries went; their provenance goes with them
+        refs[key] = sorted({*prior, config_space_h})
+        # A grid nothing points at any more is dead weight, and these lists are the largest thing
+        # in the file. Dropped here rather than never, so a file that has seen six grid edits does
+        # not carry six copies of a 2000-config space forever.
+        wanted = {h for hs in refs.values() for h in ([hs] if isinstance(hs, str) else hs)}
+        data["grids"] = {h: v for h, v in data["grids"].items() if h in wanted}
     live = {_sig(c) for c in configs} if configs else None
     merged: dict[tuple, dict] = {}
     if not reset:

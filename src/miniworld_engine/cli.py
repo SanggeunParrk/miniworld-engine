@@ -16,6 +16,7 @@ The pieces underneath are still reachable, under `dev`, where they do not clutte
     miniworld-engine dev audit                        # build-system + cache-coverage checks
     miniworld-engine dev cache-status                 # are the committed caches stale? (no GPU)
     miniworld-engine dev cache-backfill               # recover driver_identity from git history
+    miniworld-engine dev space-backfill               # recover each entry's searched config space
     miniworld-engine dev capture all                  # shards without merging (see below)
 
 `dev audit`'s checks are already run by the CPU suite (`test_registry_complete`,
@@ -397,6 +398,21 @@ def cmd_cache_status(args: argparse.Namespace) -> int:
             if r.verdict == "OK":
                 print(f"  OK    {r.op:44} {r.gpu}")
     return 1 if any(r.stale for r in rows) else 0
+
+
+def cmd_space_backfill(args: argparse.Namespace) -> int:
+    """Recover ``entry_grids`` for caches written before the field existed.
+
+    Without it every shipped cache answers "what have you already searched?" with silence, and
+    ``build`` re-measures kernels whose search was finished months ago -- which is what it did.
+    """
+    from miniworld_engine.autotune import space_backfill
+
+    rows = space_backfill.backfill(apply=args.apply)
+    print(space_backfill.format_report(rows, applied=args.apply))
+    if not args.apply:
+        print("\n(dry run -- pass --apply to write)")
+    return 0
 
 
 def cmd_cache_backfill(args: argparse.Namespace) -> int:
@@ -1306,6 +1322,13 @@ def build_parser() -> argparse.ArgumentParser:
     cst.add_argument("--gpu", default="", help="substring filter on the GPU key (e.g. A100)")
     cst.add_argument("--verbose", action="store_true", help="list OK caches too")
     cst.set_defaults(func=cmd_cache_status)
+
+    spb = dev.add_parser("space-backfill",
+                         help="recover, from git history, WHICH configs each cached entry was "
+                              "already searched with, so a rebuild measures only the difference "
+                              "(dry-run unless --apply)")
+    spb.add_argument("--apply", action="store_true", help="write the recovered spaces")
+    spb.set_defaults(func=cmd_space_backfill)
 
     bkf = dev.add_parser("cache-backfill",
                          help="recover driver_identity for pre-field caches from git history "

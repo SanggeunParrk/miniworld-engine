@@ -34,6 +34,7 @@ from miniworld_engine.autotune.cache import (
     as_cfg_dict,
     config_space_hash,
     config_to_dict,
+    configs_to_bench,
     gpu_key,
     op_identity,
     store_ranked_configs,
@@ -1379,6 +1380,74 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
         ent[sig] = (config, ms)
 
 
+#: Configs a build did not have to re-measure because the cache had already searched them, by op.
+#: Reported by the builder: an incremental build that silently benches everything looks exactly
+#: like a correct one until the wall-clock comes in, and that is the failure this whole path exists
+#: to make impossible.
+_SKIPPED: dict[str, int] = {}
+#: Off only for `build --rebuild-cached`, the deliberate "measure it all again" escape hatch.
+_INCREMENTAL = True
+
+
+def set_incremental(on: bool) -> None:
+    """Turn the already-measured subtraction off (``--rebuild-cached``) or back on."""
+    global _INCREMENTAL
+    _INCREMENTAL = bool(on)
+
+
+def skipped_configs() -> dict[str, int]:
+    """Configs this process did not re-measure because the cache already held them, per op."""
+    return dict(_SKIPPED)
+
+
+def _skip_measured(autotuner, kwargs, pruned):
+    """``pruned`` minus the configs already searched for this (dtype, bucket) on this card.
+
+    Never returns empty. Triton's ``run`` does ``min(timings, key=timings.get)`` over whatever
+    comes back, and an empty dict makes that a ``ValueError`` that takes the shard down -- so when
+    there is genuinely nothing new to time, this hands back the single cheapest config the cache
+    already knows. One bench instead of a full grid IS the saving; zero benches is not available.
+
+    Fails open on anything unexpected: measuring a config twice costs time, skipping one that was
+    never measured costs a wrong winner, and only one of those is recoverable.
+    """
+    if not _INCREMENTAL or len(pruned) <= 1:
+        return pruned
+    try:
+        op = _op_name(autotuner)
+        if not op:
+            return pruned
+        gk = gpu_key()
+        nargs = getattr(autotuner, "nargs", None) or {}
+        # Exactly the key `_record_one` will file the result under -- same two functions, same
+        # arguments. A key derived any other way would subtract against a different entry.
+        key = f"{_dtype_of(nargs)}|{_bucket_of(autotuner, nargs, kwargs)}"
+        todo = configs_to_bench(op, gk, pruned, entry_key=key,
+                                op_id=op_identity(autotuner))
+    except Exception:
+        return pruned
+    if len(todo) == len(pruned):
+        return pruned
+    _SKIPPED[op] = _SKIPPED.get(op, 0) + (len(pruned) - len(todo))
+    if todo:
+        return todo
+    best = _cheapest_known(op, gk, key, pruned)
+    return best or pruned
+
+
+def _cheapest_known(op: str, gk: str, key: str, pruned: list) -> list:
+    """The one config the cache calls fastest for this entry, if it is still in the grid."""
+    from miniworld_engine.autotune.cache import _load
+
+    data = _load(op, gk) or {}
+    for cfg in (data.get("entries") or {}).get(key, []):
+        want = _sig_from_dict(cfg)
+        for c in pruned:
+            if _sig(c) == want:
+                return [c]
+    return []
+
+
 def install() -> None:
     """Patch Autotuner._bench (capture timings) and triton.compile (bound compile time). Idempotent.
 
@@ -1517,12 +1586,12 @@ def install() -> None:
 
     def prune_configs(self, kwargs):
         pruned = _orig_prune(self, kwargs)
-        # NO incremental subtraction here. `cache.configs_to_bench` exists and is correct about
-        # WHICH configs a grid edit added, but `config_space` is recorded per FILE while this hook
-        # runs per (dtype, bucket) round -- so subtracting it from a bucket that has never been
-        # measured hands the bencher only the delta and calls the bucket done. Measured: with a
-        # space recorded from a build covering L=1024 only, a fresh L=384 bucket was handed 2 of 4
-        # configs. Re-enable when `config_space` is per entry.
+        # Incremental: drop the configs this card has ALREADY measured for this exact
+        # (dtype, bucket). `config_space` used to be recorded per FILE while this hook runs per
+        # bucket, so subtracting it handed a never-measured bucket the delta and called it tuned
+        # (measured: a fresh L=384 bucket got 2 of 4 configs). `cache.entry_space` is per ENTRY
+        # and answers None for a bucket with no entry, which is what makes this safe to run.
+        pruned = _skip_measured(self, kwargs, pruned)
         # per autotuner AND per autotune key: rounds interleave across the kernels of a unit, and
         # one kernel is tuned once per key.
         rnd = _round_id(self, kwargs)

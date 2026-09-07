@@ -1223,7 +1223,7 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
                          fill_gaps: bool = False, share_card: bool = False,
                          keep_ir: bool = False, predict: bool = False,
                          bench_clear_mb: int = 0, bench_rep_ms: int = 0,
-                         cores: str = "") -> dict:
+                         cores: str = "", rebuild_cached: bool = False) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
     shard = shard_dir / f"{unit.stem}.json"
@@ -1246,6 +1246,11 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     triton_cache.store_binary_only_env(env, keep_ir)
     cmd = [sys.executable, "-u", "-m", "miniworld_engine.autotune.builder",
            "--shard", str(shard), "--compile-jobs", str(compile_jobs), *unit.cmd_args()]
+    if rebuild_cached:
+        # On the command line, not in the environment: this is the flag that decides whether a
+        # unit re-measures configs the cache already holds, and a unit has to be reproducible
+        # from its own logged argv or the answer to "why did this take four hours" is unreadable.
+        cmd.append("--rebuild-cached")
     if cores:
         # A slot's own cores, shared with nobody. A unit alternates between compiling on a pool of
         # processes and MEASURING on one thread, and the measurement is the build's product: with
@@ -1463,7 +1468,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                                        config_dir, fill_gaps, share_card=units_per_gpu > 1,
                                        keep_ir=keep_ir, predict=predict,
                                        bench_clear_mb=bench_clear_mb, bench_rep_ms=bench_rep_ms,
-                                       cores=cores)
+                                       cores=cores, rebuild_cached=not skip_cached)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
@@ -1569,6 +1574,13 @@ def _report_unit(shard: str) -> int:
 
     print(capture.precompile_summary(), flush=True)
     print(capture.summary(), flush=True)
+    skipped = capture.skipped_configs()
+    if skipped:
+        # Say it out loud. A unit that reuses the cache and one that re-measures the whole grid
+        # produce the same shard and differ only in wall-clock, so without this line the single
+        # most expensive property of a build is invisible until it is over.
+        print(f"  [incremental] reused {sum(skipped.values())} already-measured config(s): "
+              + ", ".join(f"{op}={n}" for op, n in sorted(skipped.items())), flush=True)
     n = capture.dump_shard(shard)
     errs = capture.record_errors()
     if errs:
@@ -1614,6 +1626,9 @@ def _child_main(argv: list[str] | None = None) -> int:
                     help="dtype passed to forward() as compute_dtype; empty = do not pass one")
     ap.add_argument("--switch", default="")
     ap.add_argument("--value", default="")
+    ap.add_argument("--rebuild-cached", action="store_true",
+                    help="re-measure configs this card's committed cache already searched for the "
+                         "shape being built; off by default, which is what makes a rerun cheap")
     ap.add_argument("--fill-gaps", action="store_true",
                     help="leave keys the cache already holds alone; full-grid only the misses. "
                          "See settings.Settings.fill_gaps")
@@ -1666,6 +1681,7 @@ def _child_main(argv: list[str] | None = None) -> int:
                   f"or the unit silently rebuilds the default side", file=sys.stderr)
             return 2
         settings.configure(**{field: parse(args.value)})
+    capture.set_incremental(not args.rebuild_cached)
     if args.op:
         # ONE kernel at ONE shape, via its registry driver. The shape reached the drivers through
         # MINIWORLD_DRIVER_LENGTH (and, for a `level=both` kernel, MINIWORLD_DRIVER_SIDE) in the
