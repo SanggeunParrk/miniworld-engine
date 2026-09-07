@@ -899,6 +899,19 @@ def cmd_build(args: argparse.Namespace) -> int:
           f"{len(failed)} failed")
     for r in empty + failed:
         print(f"  {'EMPTY' if r in empty else 'FAIL '} {r['label']} -> {r['log']}")
+    dead = _ops_that_measured_nothing(results)
+    if dead:
+        # A unit that dies at ONE shape is ordinary -- the shape does not fit the card, and the
+        # build says so and moves on. A kernel that dies at EVERY shape is a broken driver, and
+        # under "fail only if nothing succeeded" it was invisible: `trimul_outproj_layernorm_
+        # gemm_gate_triton` called its op without the required `eps`, so every one of its units
+        # raised before a single config was timed, on every card, for as long as the op has
+        # existed -- and every build reported success and shipped a kernel with no cache at all.
+        print(f"\nDRIVER FAILURE: {len(dead)} kernel(s) measured NOTHING at any shape this "
+              f"build ran. This is a broken driver, not a shape that does not fit:",
+              file=sys.stderr)
+        for op, log in sorted(dead.items()):
+            print(f"  {op} -> {log}", file=sys.stderr)
     # THE per-op sweep is the path that actually builds the shipped cache, and it was the one path
     # that never merged: `cmd_build` and `_bench_build_first` both folded their shards in, this
     # returned straight to the shell. A 527-unit sweep therefore finished, wrote 145 GB of shards,
@@ -909,7 +922,30 @@ def cmd_build(args: argparse.Namespace) -> int:
     # is written the triton cache is the only place the build's work exists.
     if not rc and _should_prune(args):
         _empty_triton_cache(dry_run=False)
-    return rc
+    # After the merge, so a build that half-worked still ships what it measured -- the same rule
+    # the merge itself follows. The exit code is the only thing a batch job's caller sees.
+    return rc or (1 if dead else 0)
+
+
+def _ops_that_measured_nothing(results: list) -> dict:
+    """Kernels every one of whose units produced no measurement, as op -> a log to read.
+
+    Grouped by OP and not by unit on purpose. The per-unit report already names each failure, and
+    a failure there is usually legitimate (a shape too big for the card). What no per-unit line can
+    say is that a kernel came out of the whole build with nothing at all, which is what a driver
+    that cannot call its own op looks like.
+    """
+    by_op: dict[str, list] = {}
+    for r in results:
+        # `OpUnit.label` is "<op>[<dtype>] <side> L=<n> D=<n>"; the op is everything before the
+        # dtype bracket. A module `Unit`'s label has no bracket, so it groups under its whole
+        # label and never trips this -- correct, since a module unit tunes whatever its case
+        # touches and "this unit measured nothing" says nothing about a particular kernel.
+        op = str(r.get("label", "")).split("[", 1)
+        if len(op) == 2 and op[0].strip():
+            by_op.setdefault(op[0].strip(), []).append(r)
+    return {op: rs[0].get("log", "") for op, rs in by_op.items()
+            if not any(r.get("ops") for r in rs)}
 
 
 def _should_prune(args: argparse.Namespace) -> bool:

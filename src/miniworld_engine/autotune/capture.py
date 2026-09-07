@@ -1330,6 +1330,24 @@ def record_errors() -> dict[str, int]:
     return dict(_RECORD_ERRORS)
 
 
+def _entry_parts(autotuner, meta, nargs=None) -> tuple[str, str]:
+    """The (dtype, bucket) a launch files under. ONE definition, for both sides of the cache.
+
+    The prune hook subtracts against an entry and the recorder writes one, and if those two derive
+    the key even slightly differently the subtraction silently answers about another shape -- which
+    is not a crash, it is a wrong winner. They read the same `nargs` (triton sets `self.nargs`
+    before `prune_configs` and clears it after `run`) and the same `meta` (the keyword arguments,
+    which is what `_bench` is handed), so there is no reason for two spellings of this.
+    """
+    nargs = nargs if nargs is not None else (getattr(autotuner, "nargs", None) or {})
+    return _dtype_of(nargs), _bucket_of(autotuner, nargs, meta)
+
+
+def _entry_key(autotuner, meta, nargs=None) -> str:
+    """:func:`_entry_parts` as the ``"<dtype>|<bucket>"`` string a cache file is keyed by."""
+    return "|".join(_entry_parts(autotuner, meta, nargs))
+
+
 def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=None) -> None:
     op = _op_name(autotuner)
     if not op:
@@ -1365,8 +1383,7 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
     # truthy everywhere and every call raised AttributeError into the caller's `except: pass`.
     # Capture then silently recorded nothing at all: a build that looked like it ran and produced
     # an empty shard. Read and write share these two functions, which is the point.
-    dtype = _dtype_of(nargs)
-    bucket = _bucket_of(autotuner, nargs, meta)
+    dtype, bucket = _entry_parts(autotuner, meta, nargs)
     slot = _CAPTURE.setdefault(op, {"grid": None, "op_id": "", "entries": {}})
     if slot["grid"] is None:
         slot["grid"] = list(autotuner.configs)
@@ -1418,10 +1435,9 @@ def _skip_measured(autotuner, kwargs, pruned):
         if not op:
             return pruned
         gk = gpu_key()
-        nargs = getattr(autotuner, "nargs", None) or {}
-        # Exactly the key `_record_one` will file the result under -- same two functions, same
-        # arguments. A key derived any other way would subtract against a different entry.
-        key = f"{_dtype_of(nargs)}|{_bucket_of(autotuner, nargs, kwargs)}"
+        # Exactly the key `_record_one` will file the result under -- the same function, so the
+        # two cannot drift.
+        key = _entry_key(autotuner, kwargs)
         todo = configs_to_bench(op, gk, pruned, entry_key=key,
                                 op_id=op_identity(autotuner))
     except Exception:

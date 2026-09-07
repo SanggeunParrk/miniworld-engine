@@ -225,3 +225,27 @@ def test_the_hook_never_hands_triton_an_empty_list(root):
     best = X._cheapest_known(OP, GK, KEY, grid)
     assert len(best) == 1
     assert best[0] in grid
+
+
+# --------------------------------------------------------------------------- #
+# the two sides of the cache must key a launch identically
+# --------------------------------------------------------------------------- #
+def test_the_prune_and_the_recorder_derive_one_key() -> None:
+    """The failure this forecloses is silent: a subtraction against the wrong entry is not a
+    crash, it is a winner measured for another shape. Both sides call one function."""
+    import inspect
+
+    src = inspect.getsource(X)
+    assert src.count("_bucket_of(") == 1, (
+        "the bucket is derived in more than one place; prune and record can now disagree")
+    assert src.count("_dtype_of(") == 1, (
+        "the dtype is derived in more than one place; prune and record can now disagree")
+    assert "key = _entry_key(autotuner, kwargs)" in src
+    assert "dtype, bucket = _entry_parts(autotuner, meta, nargs)" in src
+
+
+def test_the_key_is_the_one_a_cache_file_is_written_with(root) -> None:
+    """`_entry_key` joins with '|', which is what `store_ranked_configs` files an entry under."""
+    _write(_configs(4), dtype="bfloat16", bucket="b1")
+    assert KEY == "bfloat16|b1", "the key this file tests is not the one the cache is keyed by"
+    assert KEY in _read(root)["entries"]

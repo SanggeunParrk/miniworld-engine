@@ -119,24 +119,3 @@ def adaln_bwd_dx_dlnw():
     stat = torch.empty(_M, device=dev(), dtype=FP32).fill_(1.0)
     _dgrad_condln(_rand(2 * _D, _M), _rand(2 * _D, _DC), _rand(_M, _DC),
                   stat, stat.clone(), _rand(_DC), shape_key=_SHAPE_KEY)
-
-
-# main.py's four kernels are launched only by TritonAdaptiveLayerNormFunction: the forward kernel
-# by forward(), and all three backward kernels together by backward(). Driving the autograd
-# Function is what reaches them with the tensors the forward actually saved (x_hat/cond_norm/gate
-# are fp32 or gate-dtype buffers it allocates itself).
-
-
-def _adaln_main(*, backward: bool):
-    from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
-
-    # OUTER entry point: TritonAdaptiveLayerNormFunction reshapes x/cond and keys both the
-    # forward and (via ctx.orig_x_shape) all three backward kernels off the pre-flatten shape.
-    x, cond, lnw, ws, sb, wb = _adaln_args(batched=True)
-    if backward:
-        x.requires_grad_(True)
-    y = triton_adaptive_layer_norm(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
-    if backward:
-        y.backward(torch.randn_like(y))
-
-

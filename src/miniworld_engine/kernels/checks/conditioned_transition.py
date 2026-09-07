@@ -48,7 +48,7 @@ change only those VALUES -- real row statistics of the x/cond they pass, and gat
 Saved values, two opposite rules, one per kernel:
 
   * saved ACTIVATIONS (x_hat, cond_norm, gate) are consumed as-is, so the reference must consume
-    the SAME numbers -- hence ``_main_train``'s reconstruction of a leaf whose LayerNorm reproduces
+    the SAME numbers -- hence the reconstruction of a leaf whose LayerNorm reproduces
     the saved x_hat/cond_norm bit-for-bit, and the ``logit(gate)`` pinning that makes the
     reference's ``sigmoid`` land exactly on the saved gate.
   * saved STATISTICS (mean, rstd) are consumed by a LayerNorm BACKWARD, which is the derivative of

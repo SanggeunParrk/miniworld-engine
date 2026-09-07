@@ -99,6 +99,9 @@ def _sm100() -> bool:
 
 # ── trimul_inproj: front / back (triton) ─────────────────────────────────────────────────────
 
+_EPS = 1e-5   # trimul_back_triton's own default; checks/trimul_inproj.py uses the same
+
+
 def trimul_outproj_layernorm_gemm_gate_triton() -> None:
     """back.py _back_kernel, via trimul_back_triton (LN_out + proj + gate), fp32 norm affine.
 
@@ -116,7 +119,12 @@ def trimul_outproj_layernorm_gemm_gate_triton() -> None:
     # `bfloat16` -- a different bucket, and every production call missed on the dtype axis alone
     # no matter which shapes or flags were built.
     ln_w, ln_b = norm_affine(D), norm_affine(D)
-    trimul_back_triton(_bdll(), _x(), _w(), _w(), ln_w, ln_b, residual=_x())
+    # `eps` is POSITIONAL and required. Leaving it out made every unit of this op die with
+    # "trimul_back_fused() is missing value for argument 'eps'" before a single config was timed,
+    # so the op has never been tuned on any card -- a build failure that reads as a kernel that
+    # simply has no cache. The op is registered through `@opaque`, so the miss is a torch.library
+    # schema error at call time rather than a TypeError Python could have caught earlier.
+    trimul_back_triton(_bdll(), _x(), _w(), _w(), ln_w, ln_b, _EPS, residual=_x())
 
 
 def trimul_gemm_gate_mmajor_triton() -> None:

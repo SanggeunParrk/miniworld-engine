@@ -75,56 +75,6 @@ def _gate_bwd_saved(gate, x_norm, dy):
     return s.grad, xn.grad
 
 
-def _main_train():
-    """main.py's autograd Function, forward+backward once: (kernel grads, reference grads).
-
-    Returned in the Function's own order: (dx, dcond, dlnw, dWs, dsb, dWb). The three main.py
-    backward kernels are launched together by one ``backward()`` -- exactly as the drivers reach
-    them -- so the three checkers below each call this and compare their own kernel's buffers.
-
-    Two deliberate differences from ``drivers_adaln._adaln_main(backward=True)``, neither of which
-    changes a shape, a dtype, a stride or which compiled kernel runs:
-      * all six inputs get requires_grad, not just x. The three kernels always compute all six
-        gradients; without this autograd discards five of them and the checker could only see dx.
-      * the saved activations are read back off ``y.grad_fn`` so the reference consumes the same
-        x_hat / cond_norm / gate the backward kernels read (see the module docstring).
-    """
-    from miniworld_engine.kernels.adaln.triton.main import triton_adaptive_layer_norm
-
-    _fixed()
-    # batched=True: the Function reshapes x/cond itself and keys the forward and (via
-    # ctx.orig_x_shape) all three backward kernels off the PRE-flatten shape, so it takes the
-    # (1, M, D) activation -- the driver's call and the only one ``length_of`` accepts.
-    args = _adaln_args(batched=True)
-    for t in args:
-        t.requires_grad_(True)
-    x, cond, lnw, ws, sb, wb = args
-    y = triton_adaptive_layer_norm(x, cond, lnw, ws, sb, wb, _EPS, _EPS)
-    x_hat, cond_norm, gate, _, _, _, rstd_x, rstd_c = y.grad_fn.saved_tensors
-    dy = torch.randn_like(y)
-    got = torch.autograd.grad(y, args, dy)
-    # dx/dcond come back at x/cond's (1, M, D) shape (the backward reshapes them to
-    # ctx.orig_x_shape); the reference's leaves are the 2-D saved activations, so view the two
-    # activation grads at (M, D). A view of the same numbers -- nothing is dropped or reduced.
-    got = (got[0][0], got[1][0], *got[2:])
-
-    # LN(x_hat/rstd) == x_hat and rstd(x_hat/rstd) == rstd exactly (LayerNorm is shift-invariant
-    # and var(x_hat) = 1 - eps*rstd^2), so this leaf reproduces the SAVED activation while leaving
-    # mean/rstd differentiable -- the two properties the backward reference needs at once.
-    with _no_tf32():   # covers the reference's backward GEMMs (dW = grad^T @ aff) too
-        xr = (x_hat / rstd_x[:, None]).detach().requires_grad_(True)
-        cr = (cond_norm / rstd_c[:, None]).detach().requires_grad_(True)
-        lw, w_s, b_s, w_b = (t.float().detach().requires_grad_(True) for t in (lnw, ws, sb, wb))
-        aff = F.layer_norm(cr, (_DC,), eps=_EPS) * lw
-        scale = torch.addmm(b_s, aff, w_s.t())
-        # Pin scale's VALUE at logit(saved gate) -- a detached shift, so every gradient path into
-        # aff / w_s / b_s is untouched while sigmoid(scale) lands on the gate the kernels read.
-        scale = scale + (torch.logit(gate.float()) - scale).detach()
-        y_ref = torch.sigmoid(scale) * F.layer_norm(xr, (_D,), eps=_EPS) + aff @ w_b.t()
-        y_ref.backward(dy[0].float())   # dy at the reference's (M, D) view of the same seed
-    return got, (xr.grad, cr.grad, lw.grad, w_s.grad, b_s.grad, w_b.grad)
-
-
 def layernorm_fwd_strided():
     """ln_strided._ln_kernel (HAS_W=True) via inference._cond_affine: aff = LN(cond) * lnw.
 
