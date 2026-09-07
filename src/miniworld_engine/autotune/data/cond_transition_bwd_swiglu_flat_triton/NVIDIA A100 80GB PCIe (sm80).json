@@ -1600,8 +1600,240 @@
       }
     ]
   },
+  "entry_grids": {
+    "bfloat16|shape_key=12888049149": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=12889097725": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=12891194877": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=137440003581": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=17180919293": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=2150630909": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=2151679485": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=2153776637": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=34360788477": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=4298114557": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=4299163133": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=4301260285": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=6445598205": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=6446646781": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=6448743933": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=68720526845": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=8593081853": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=8594130429": [
+      "dfaedae12ac3"
+    ],
+    "bfloat16|shape_key=8596227581": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=12888049149": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=12889097725": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=12891194877": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=137440003581": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=17180919293": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=2150630909": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=2151679485": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=2153776637": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=34360788477": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=4298114557": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=4299163133": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=4301260285": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=6445598205": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=6446646781": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=6448743933": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=68720526845": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=8593081853": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=8594130429": [
+      "dfaedae12ac3"
+    ],
+    "float32|shape_key=8596227581": [
+      "dfaedae12ac3"
+    ]
+  },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA A100 80GB PCIe (sm80)",
+  "grids": {
+    "dfaedae12ac3": [
+      "((('BLOCK_E', 128),), 1, 1)",
+      "((('BLOCK_E', 128),), 1, 2)",
+      "((('BLOCK_E', 128),), 1, 3)",
+      "((('BLOCK_E', 128),), 1, 4)",
+      "((('BLOCK_E', 128),), 2, 1)",
+      "((('BLOCK_E', 128),), 2, 2)",
+      "((('BLOCK_E', 128),), 2, 3)",
+      "((('BLOCK_E', 128),), 2, 4)",
+      "((('BLOCK_E', 128),), 4, 1)",
+      "((('BLOCK_E', 128),), 4, 2)",
+      "((('BLOCK_E', 128),), 4, 3)",
+      "((('BLOCK_E', 128),), 4, 4)",
+      "((('BLOCK_E', 128),), 8, 1)",
+      "((('BLOCK_E', 128),), 8, 2)",
+      "((('BLOCK_E', 128),), 8, 3)",
+      "((('BLOCK_E', 128),), 8, 4)",
+      "((('BLOCK_E', 16),), 1, 1)",
+      "((('BLOCK_E', 16),), 1, 2)",
+      "((('BLOCK_E', 16),), 1, 3)",
+      "((('BLOCK_E', 16),), 1, 4)",
+      "((('BLOCK_E', 16),), 2, 1)",
+      "((('BLOCK_E', 16),), 2, 2)",
+      "((('BLOCK_E', 16),), 2, 3)",
+      "((('BLOCK_E', 16),), 2, 4)",
+      "((('BLOCK_E', 16),), 4, 1)",
+      "((('BLOCK_E', 16),), 4, 2)",
+      "((('BLOCK_E', 16),), 4, 3)",
+      "((('BLOCK_E', 16),), 4, 4)",
+      "((('BLOCK_E', 16),), 8, 1)",
+      "((('BLOCK_E', 16),), 8, 2)",
+      "((('BLOCK_E', 16),), 8, 3)",
+      "((('BLOCK_E', 16),), 8, 4)",
+      "((('BLOCK_E', 2048),), 1, 1)",
+      "((('BLOCK_E', 2048),), 1, 2)",
+      "((('BLOCK_E', 2048),), 1, 3)",
+      "((('BLOCK_E', 2048),), 1, 4)",
+      "((('BLOCK_E', 2048),), 2, 1)",
+      "((('BLOCK_E', 2048),), 2, 2)",
+      "((('BLOCK_E', 2048),), 2, 3)",
+      "((('BLOCK_E', 2048),), 2, 4)",
+      "((('BLOCK_E', 2048),), 4, 1)",
+      "((('BLOCK_E', 2048),), 4, 2)",
+      "((('BLOCK_E', 2048),), 4, 3)",
+      "((('BLOCK_E', 2048),), 4, 4)",
+      "((('BLOCK_E', 2048),), 8, 1)",
+      "((('BLOCK_E', 2048),), 8, 2)",
+      "((('BLOCK_E', 2048),), 8, 3)",
+      "((('BLOCK_E', 2048),), 8, 4)",
+      "((('BLOCK_E', 256),), 1, 1)",
+      "((('BLOCK_E', 256),), 1, 2)",
+      "((('BLOCK_E', 256),), 1, 3)",
+      "((('BLOCK_E', 256),), 1, 4)",
+      "((('BLOCK_E', 256),), 2, 1)",
+      "((('BLOCK_E', 256),), 2, 2)",
+      "((('BLOCK_E', 256),), 2, 3)",
+      "((('BLOCK_E', 256),), 2, 4)",
+      "((('BLOCK_E', 256),), 4, 1)",
+      "((('BLOCK_E', 256),), 4, 2)",
+      "((('BLOCK_E', 256),), 4, 3)",
+      "((('BLOCK_E', 256),), 4, 4)",
+      "((('BLOCK_E', 256),), 8, 1)",
+      "((('BLOCK_E', 256),), 8, 2)",
+      "((('BLOCK_E', 256),), 8, 3)",
+      "((('BLOCK_E', 256),), 8, 4)",
+      "((('BLOCK_E', 32),), 1, 1)",
+      "((('BLOCK_E', 32),), 1, 2)",
+      "((('BLOCK_E', 32),), 1, 3)",
+      "((('BLOCK_E', 32),), 1, 4)",
+      "((('BLOCK_E', 32),), 2, 1)",
+      "((('BLOCK_E', 32),), 2, 2)",
+      "((('BLOCK_E', 32),), 2, 3)",
+      "((('BLOCK_E', 32),), 2, 4)",
+      "((('BLOCK_E', 32),), 4, 1)",
+      "((('BLOCK_E', 32),), 4, 2)",
+      "((('BLOCK_E', 32),), 4, 3)",
+      "((('BLOCK_E', 32),), 4, 4)",
+      "((('BLOCK_E', 32),), 8, 1)",
+      "((('BLOCK_E', 32),), 8, 2)",
+      "((('BLOCK_E', 32),), 8, 3)",
+      "((('BLOCK_E', 32),), 8, 4)",
+      "((('BLOCK_E', 512),), 1, 1)",
+      "((('BLOCK_E', 512),), 1, 2)",
+      "((('BLOCK_E', 512),), 1, 3)",
+      "((('BLOCK_E', 512),), 1, 4)",
+      "((('BLOCK_E', 512),), 2, 1)",
+      "((('BLOCK_E', 512),), 2, 2)",
+      "((('BLOCK_E', 512),), 2, 3)",
+      "((('BLOCK_E', 512),), 2, 4)",
+      "((('BLOCK_E', 512),), 4, 1)",
+      "((('BLOCK_E', 512),), 4, 2)",
+      "((('BLOCK_E', 512),), 4, 3)",
+      "((('BLOCK_E', 512),), 4, 4)",
+      "((('BLOCK_E', 512),), 8, 1)",
+      "((('BLOCK_E', 512),), 8, 2)",
+      "((('BLOCK_E', 512),), 8, 3)",
+      "((('BLOCK_E', 512),), 8, 4)",
+      "((('BLOCK_E', 64),), 1, 1)",
+      "((('BLOCK_E', 64),), 1, 2)",
+      "((('BLOCK_E', 64),), 1, 3)",
+      "((('BLOCK_E', 64),), 1, 4)",
+      "((('BLOCK_E', 64),), 2, 1)",
+      "((('BLOCK_E', 64),), 2, 2)",
+      "((('BLOCK_E', 64),), 2, 3)",
+      "((('BLOCK_E', 64),), 2, 4)",
+      "((('BLOCK_E', 64),), 4, 1)",
+      "((('BLOCK_E', 64),), 4, 2)",
+      "((('BLOCK_E', 64),), 4, 3)",
+      "((('BLOCK_E', 64),), 4, 4)",
+      "((('BLOCK_E', 64),), 8, 1)",
+      "((('BLOCK_E', 64),), 8, 2)",
+      "((('BLOCK_E', 64),), 8, 3)",
+      "((('BLOCK_E', 64),), 8, 4)"
+    ]
+  },
   "key_scheme": 3,
   "op": "cond_transition_bwd_swiglu_flat_triton",
   "op_identity": "f6e09d3786fd",
