@@ -687,7 +687,8 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
                                 predict=getattr(args, "predict_unusable", False),
                                 bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                 bench_rep_ms=getattr(args, "bench_rep_ms", 0),
-                                pin_cores=getattr(args, "pin_cores", False))
+                                pin_cores=getattr(args, "pin_cores", False),
+                                skip_cached=not getattr(args, "rebuild_cached", False))
     return _merge_built_shards(args, results)
 
 
@@ -862,7 +863,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                                       predict=getattr(args, "predict_unusable", False),
                                       bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                       bench_rep_ms=getattr(args, "bench_rep_ms", 0),
-                                      pin_cores=getattr(args, "pin_cores", False))
+                                      pin_cores=getattr(args, "pin_cores", False),
+                                      skip_cached=not getattr(args, "rebuild_cached", False))
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
@@ -1377,6 +1379,10 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--strict", action="store_true",
                      help="fail without merging if ANY unit failed (default: merge what "
                           "succeeded and report the holes)")
+    bld.add_argument("--rebuild-cached", action="store_true",
+                     help="re-tune units the committed cache already answers. Off by default: "
+                          "`build all` skips any (op, dtype, bucket) whose shipped cache passed "
+                          "`dev cache-status`, so a rebuild costs only what actually went stale")
     bld.add_argument("--reclaim", action="store_true",
                      help="first delete claims left by a killed build (they are otherwise "
                           "skipped silently forever). Do NOT use while another build runs "

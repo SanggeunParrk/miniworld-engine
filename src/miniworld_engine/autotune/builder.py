@@ -1127,6 +1127,42 @@ def _shard_has_entries(shard: Path) -> bool:
     return any(isinstance(v, dict) and v.get("entries") for v in data.values())
 
 
+def _cache_ok_ops() -> set[str]:
+    """Ops whose committed cache for THIS card passes every staleness fingerprint.
+
+    `dev cache-status` already owns this judgement -- config-grid hash, bucket key scheme, env and
+    op identity -- so the builder asks it instead of re-deriving the rules and drifting from them.
+    """
+    from miniworld_engine.autotune import cache_status
+    from miniworld_engine.autotune.cache import gpu_key
+
+    return {r.op for r in cache_status.scan(gpu_substr=gpu_key()) if r.verdict == "OK"}
+
+
+def _cache_answers(unit: OpUnit, ok_ops: set[str]) -> bool:
+    """Is this unit's OP already tuned by a non-stale committed cache for this card?
+
+    The judgement is per-OP, not per-unit, and deliberately so. A stored entry is keyed by the
+    PACKED shape_key the launch recorded -- `bfloat16|shape_key=12886475546` -- and that packing
+    carries the kernel's own constexprs, which do not exist until the launcher builds them. A
+    planner holds only (op, dtype, length, width, side), so it cannot reconstruct the key; the
+    repo says as much about coverage ("that needs unpacking each key's shape_key, which needs the
+    launcher's axis count, which is `dev audit`'s job"). Op level is what IS decidable here, and it
+    is the level staleness moves at anyway: a grid, key-scheme, env or source change invalidates
+    the whole op, and `_cache_ok_ops` then leaves it out so every one of its units is rebuilt.
+
+    The cost of the coarser grain is a per-bucket hole inside an otherwise-valid op: those are not
+    refilled by a plain `build all`. `--rebuild-cached` re-tunes the op from scratch, and
+    `dev audit` is what finds the holes.
+    """
+    if unit.op not in ok_ops:
+        return False
+    from miniworld_engine.autotune.cache import _load, gpu_key
+
+    data = _load(unit.op, gpu_key())
+    return bool(data and data.get("entries"))
+
+
 def reclaim_orphans(shard_dir: Path) -> list[str]:
     """Delete claims whose unit produced nothing, so a restarted build can run them again.
 
@@ -1283,7 +1319,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
               config_dir: Path | None = None, fill_gaps: bool = False,
               units_per_gpu: int = 1, keep_ir: bool = False, predict: bool = False,
               bench_clear_mb: int = 0, bench_rep_ms: int = 0,
-              pin_cores: bool = False) -> list[dict]:
+              pin_cores: bool = False, skip_cached: bool = True) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit.
 
     ``units_per_gpu`` > 1 puts that many units on each card so their phases interleave. A unit
@@ -1361,8 +1397,17 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     work = units(selected) if case_build else list(selected)
     if resume:
         work = [u for u in work if not _shard_has_entries(shard_dir / f"{u.stem}.json")]
+    # A unit the shipped cache already answers is not work. Only per-op units carry (op, bucket);
+    # a module Unit re-tunes whatever its case touches and has no single cache entry to test.
+    if skip_cached and not case_build:
+        ok_ops = _cache_ok_ops()
+        before = len(work)
+        work = [u for u in work if not _cache_answers(u, ok_ops)]
+        if before != len(work):
+            print(f"skipping {before - len(work)} of {before} unit(s): a non-stale committed cache "
+                  f"already answers them -- pass --rebuild-cached to redo them", flush=True)
     if not work:
-        print("nothing to do (every unit already has a shard with entries)")
+        print("nothing to do (every unit is already answered by a shard or the committed cache)")
         return []
 
     queue: Queue = Queue()
