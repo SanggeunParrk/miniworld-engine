@@ -53,6 +53,30 @@ EXTRA_KWARG_AXES = ("GROUP_M",)
 LADDER_SETS = ("grid",)
 
 
+def _superseded(op: str, data: dict) -> bool:
+    """Has the cache policy already declared these measurements invalid?
+
+    A ladder derived from a superseded entry is a ladder derived from a run whose method the
+    repository has said no longer applies. `build_rev` is the case that bites: bumping it for the
+    seventeen ops whose driver moved from 512 tuning rows to 8,192 (`76daae51`) left their old
+    winners in the files until the rebuild lands, and this test read them and asked for the ladder
+    the OLD regime wanted -- proposing to remove `num_warps=8` from a kernel that had just had it
+    restored precisely because the new regime needs it.
+
+    `op_identity` and `env_identity` are here for the same reason, not for symmetry: a winner
+    measured against other kernel source, or by another compiler, is not evidence about this one.
+    """
+    from miniworld_engine.autotune.cache import _stored_rev, build_rev, env_identity
+
+    # `cache._stored_rev`, not `data["build_rev"]`: a file written before the field existed stores
+    # nothing there and means revision 1, and reading the key directly treats those -- which is
+    # most of the corpus -- as matching whatever the registry now declares.
+    if _stored_rev(data) != build_rev(op):
+        return True
+    stored_env = data.get("env_identity")
+    return bool(stored_env) and stored_env != env_identity()
+
+
 def _winners() -> dict[str, dict[str, collections.Counter]]:
     with REGISTRY.open(newline="") as fh:
         live = {r["kernel"] for r in csv.DictReader(fh)}
@@ -65,6 +89,8 @@ def _winners() -> dict[str, dict[str, collections.Counter]]:
             try:
                 data = json.loads(f.read_text())
             except (OSError, ValueError):
+                continue
+            if _superseded(d.name, data):
                 continue
             for ranked in (data.get("entries") or {}).values():
                 if isinstance(ranked, list) and ranked:
@@ -205,6 +231,11 @@ def _measured() -> dict[str, dict[tuple[str, str], int]]:
                 data = json.loads(f.read_text())
             except (OSError, ValueError):
                 continue
+            # The same filter `_winners` applies. Without it the two disagree: a kernel whose
+            # every entry is superseded counts as fully measured here and contributes no winners
+            # there, and `_derive` is then handed an empty counter for an axis it is asked about.
+            if _superseded(d.name, data):
+                continue
             for key, ranked in (data.get("entries") or {}).items():
                 if isinstance(ranked, list) and ranked:
                     out[d.name][(f.stem, key.split("|")[0])] += 1
@@ -278,6 +309,8 @@ def _derive(won_axis: collections.Counter, rungs: tuple[int, ...]) -> list[int]:
             # the +/- 1 rule would leave.
             top = max(max(won_axis), 4)
             out = {v for v in out if v <= top} | {v for v in rungs if v <= top}
+    if not out:
+        return []                    # no surviving evidence: this axis has nothing to say
     if len(out) < 2:
         # A one-value axis is a constant wearing a column. Open the next rung up rather than let
         # the trim turn a search into a pin.

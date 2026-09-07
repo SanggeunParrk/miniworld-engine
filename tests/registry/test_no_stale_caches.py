@@ -33,12 +33,17 @@ from miniworld_engine.autotune import cache_status
 #: hardware. Asserted separately below so the gate stays meaningful for the cards we do build on,
 #: rather than being switched off wholesale.
 #:
-#: sm86 (A5000 / A6000): 36 caches predate the ``KEY_SCHEME`` 3 bump, which re-based every
-#: ``level=atom`` bucket when ``atom_key`` gained the token rungs 384 and 768. Their entries are
-#: mislabelled, not merely old, so the fix is a rebuild on an sm86 card -- and this cluster has
-#: only A100s. Recorded rather than ignored: the day an A5000 is available, this list is the
-#: work item.
-CANNOT_REBUILD_HERE = ("NVIDIA RTX A5000 (sm86)", "NVIDIA RTX A6000 (sm86)")
+#: sm80 (A100): the cluster this repository is developed on has no A100 -- `sinfo -p gpu` is
+#: gpu01/03/04/05 A6000 and gpu02 A5000. The A100 caches are refreshed from a different machine,
+#: so a `build_rev` bump or a kernel edit leaves them stale here with nothing that can be done
+#: about it from this side, and gating on them would turn every deliberate invalidation into a
+#: permanent red.
+#:
+#: This list used to name the sm86 cards on the reasoning that "this cluster has only A100s",
+#: which is the exact inverse of the hardware. It exempted the two cards that CAN be rebuilt here
+#: and gated the one that cannot, so the gate was off for every card anyone could act on -- and
+#: 65 of 76 A6000 caches sat stale through it.
+CANNOT_REBUILD_HERE = ("NVIDIA A100 80GB PCIe (sm80)",)
 
 
 def _stale():

@@ -31,6 +31,7 @@ import pytest
 from miniworld_engine.autotune import cache_status
 from miniworld_engine.autotune.cache import (
     DRIVER_ID_SCHEME,
+    build_rev,
     config_space_hash,
     driver_identity,
     env_identity,
@@ -55,7 +56,11 @@ def _write_cache(root, **overrides):
         "driver_identity": driver_identity(OP),
         "driver_id_scheme": DRIVER_ID_SCHEME,
         "env_identity": env_identity(),
-        "build_rev": 1,
+        # The DECLARED revision, read rather than written out. Hard-coded 1, this fixture stopped
+        # meaning "matches the current code" the moment a `build_rev` was bumped -- which is the
+        # one field a person edits on purpose, so pinning it here turns every deliberate
+        # invalidation into six unrelated test failures.
+        "build_rev": build_rev(OP),
         "entries": {},
     }
     data.update(overrides)

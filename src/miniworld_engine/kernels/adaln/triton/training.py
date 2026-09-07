@@ -215,12 +215,6 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
-#: N at or below which the covering tile (BLOCK_K = next_pow2(N)) reads each row once and is
-#: forced in the launcher rather than autotuned -- see the note in `_bwd_x`. 768 (token) and 128
-#: (atom) both fit; the bound leaves headroom without inviting a covering tile that spills.
-_BWD_X_COVER_MAX_N = 1024
-
-
 @triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['shape_key'])
 @triton.jit
 def _bwd_x_kernel(
@@ -333,24 +327,27 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
             dy.stride(0), dy.stride(1), x.stride(0), x.stride(1),
             gate.stride(0), gate.stride(1), D.stride(0), D.stride(1),
             dx.stride(0), dx.stride(1))
-    if N <= _BWD_X_COVER_MAX_N:
-        # Force the covering tile (BLOCK_K >= N, one read of the row) instead of autotuning it.
-        # It is the kernel's own single-read branch, and it WINS at every production row count --
-        # 1.24x at M=1536 rising to 1.45x at M=32768+ (A5000, N=768) -- while merely TYING at the
-        # 512 rows the driver builds with. The autotuner only ever measured those 512 rows, so it
-        # stored a tiled config that then costs production 1.44x (742 vs 494 us at M=36864). The
-        # root cause is structural: the best config is M-dependent and the shape key does not
-        # encode M, so no cache entry can be right for both the driver's M and production's. This
-        # sidesteps it for the one axis that has a provable answer. warps/stages are the sweep's
-        # winner and are M-flat here; BLOCK_M1=8 was best across the M range.
-        bk = triton.next_power_of_2(N)
-        grid = (triton.cdiv(M, 8),)
-        _bwd_x_kernel.fn[grid](*args, BLOCK_M1=8, BLOCK_K=bk,
-                               shape_key=pack(shape_key, N=N), num_warps=8, num_stages=1)
-    else:
-        # Wide N cannot cover in one tile; keep the autotuned two-pass schedule.
-        grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
+    # Autotuned, on every N. This used to force the covering tile (BLOCK_K = next_pow2(N),
+    # BLOCK_M1=8, 8 warps, 1 stage) whenever N <= 1024 by launching `.fn[...]`, which bypasses the
+    # autotuner entirely. The argument for that was explicit and has since stopped holding:
+    #
+    #   "it WINS at every production row count while merely TYING at the 512 rows the driver
+    #    builds with. The autotuner only ever measured those 512 rows."
+    #
+    # The driver stopped building at 512 rows in `76daae51`: `_M = max(_L, _ROWS_SATURATE)` with
+    # _ROWS_SATURATE = 8192, so the sweep now measures the saturating row count -- the regime the
+    # covering tile was chosen for. The premise gone, what the bypass left behind was worse than
+    # the problem: `.fn[...]` runs no tuning round, so EVERY unit of adaln_bwd_pre_dx came out of
+    # every build EMPTY (10 s, 0 ops, "nothing captured"), the op had no cache entry it could use
+    # on any card, and the pinned constants -- measured on an A5000, with no arch condition --
+    # shipped everywhere.
+    #
+    # And the tuner could not have reproduced them anyway: `num_warps=8` was not on this op's
+    # ladder (1 2 4), so the config the launcher forced was outside the space being searched. It is
+    # back on the ladder, which is where a config that wins belongs -- the sweep can now pick it,
+    # at the row count that makes it win, and record WHY in the cache instead of in a comment.
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
     return D, dx
 
 
@@ -496,9 +493,6 @@ def _dgrad_condln_fake(D, w_cat, cond, mean_c, rstd_c, lnw, shape_key=None):
 #: Row count above which _dgrad_condln forces the swept-best config instead of autotuning it --
 #: see the note in the launcher. The driver builds at 512 rows; production runs 36864. 8192 sits
 #: well above the driver and below every production shape.
-_DGRAD_BIG_M = 8192
-
-
 @opaque(fake=_dgrad_condln_fake, name="adaln_dgrad_condln")
 def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
                   mean_c: torch.Tensor, rstd_c: torch.Tensor, lnw: torch.Tensor,
@@ -515,20 +509,18 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
     dargs = (D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
              D.stride(0), D.stride(1), w_cat.stride(0), w_cat.stride(1),
              cond.stride(0), cond.stride(1), dcond.stride(0), dcond.stride(1))
-    if M >= _DGRAD_BIG_M:
-        # Same M-coverage failure as _bwd_x: the config is row-count dependent (grid/occupancy),
-        # the shape key does not encode M, and the driver tunes at 512 rows while production runs
-        # 36864. The tuner stored a small-M config (M1=32, K2-tile 16) that costs production 2.05x
-        # -- 138 vs 67 us at M=36864, NC=128, K2=256 (A5000). Forced to the swept-best config for
-        # large M; small M (the driver's own regime) keeps the autotuned path, where its choice is
-        # right. Only the atom stream reaches this branch (token NC=384 takes cuBLAS above).
-        _dgrad_condln_kernel.fn[(triton.cdiv(M, 64),)](
-            *dargs, BLOCK_M1=64, BLOCK_K_NC=128, BLOCK_K_K2=64,
-            shape_key=pack(shape_key, NC=int(NC), K2=K2), num_warps=4, num_stages=2)
-    else:
-        grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-        _dgrad_condln_kernel[grid](
-            *dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2))
+    # Autotuned at every M, for the same reason `_bwd_x` is. This forced
+    # (BLOCK_M1=64, BLOCK_K_NC=128, BLOCK_K_K2=64, 4 warps, 2 stages) at M >= 8192 through
+    # `.fn[...]`, on the argument that "the driver tunes at 512 rows while production runs 36864".
+    # `76daae51` made the driver tune at `max(L, 8192)` rows, so the sweep and production are now
+    # the same regime and the tuner sees what the pin was compensating for.
+    #
+    # The pin was also unreachable: BLOCK_K_NC=128 was not on this op's ladder (16 32 64), so no
+    # amount of tuning could have produced it. Since the driver's own M is >= 8192, this branch
+    # fired for EVERY build unit too -- no tuning round, nothing captured, no cache entry, and an
+    # A5000-measured constant with no arch condition on every card.
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2))
     return dcond, dlnw.to(lnw.dtype)
 
 
