@@ -670,7 +670,7 @@ def entry_space(data: dict, entry_key: str) -> set | None:
 def store_ranked_configs(
     op: str, gk: str, dtype: str, bucket: str, ranked: list[tuple[object, float]],
     config_space_h: str, *, top_k: int = 5, op_id: str = "", env_id: str = "",
-    configs=None,
+    configs=None, entry_configs=None,
 ) -> Path:
     """Persist the top-K (config, ms) for (op, gpu, dtype, bucket) to the in-repo cache.
 
@@ -769,17 +769,25 @@ def store_ranked_configs(
         # which buckets it actually visited. Recorded by reference: the space itself goes in
         # `grids` once, keyed by its hash, and the entry names it.
         #
+        # `entry_configs` is that space when the caller knows it to be NARROWER than `configs`.
+        # `merge_shards` does: it unions the grids of every shard of an op for the file, but a
+        # bucket only ever saw the grid of the shard that measured it, and one shard directory
+        # spans a ladder edit as a matter of course. Defaulting it to `configs` keeps the single-
+        # process path (`flush`) unchanged, where the two really are the same list.
+        #
         # APPEND, never replace. A config measured under an older, wider grid stays measured after
         # the grid is narrowed, and dropping that record re-buys the same measurement the next time
         # the grid widens back.
-        data.setdefault("grids", {})[config_space_h] = sorted(
-            repr(x) for x in {_sig(c) for c in configs})
+        searched = configs if entry_configs is None else entry_configs
+        entry_h = config_space_h if entry_configs is None else config_space_hash(searched)
+        data.setdefault("grids", {})[entry_h] = sorted(
+            repr(x) for x in {_sig(c) for c in searched})
         refs = data.setdefault("entry_grids", {})
         prior = refs.get(key)
         prior = [prior] if isinstance(prior, str) else (list(prior) if isinstance(prior, list) else [])
         if reset:
             prior = []                      # the entries went; their provenance goes with them
-        refs[key] = sorted({*prior, config_space_h})
+        refs[key] = sorted({*prior, entry_h})
         # A grid nothing points at any more is dead weight, and these lists are the largest thing
         # in the file. Dropped here rather than never, so a file that has seen six grid edits does
         # not carry six copies of a 2000-config space forever.

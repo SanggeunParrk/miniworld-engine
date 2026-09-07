@@ -249,3 +249,55 @@ def test_the_key_is_the_one_a_cache_file_is_written_with(root) -> None:
     _write(_configs(4), dtype="bfloat16", bucket="b1")
     assert KEY == "bfloat16|b1", "the key this file tests is not the one the cache is keyed by"
     assert KEY in _read(root)["entries"]
+
+
+# --------------------------------------------------------------------------- #
+# the merge: one shard's grid is not another shard's evidence
+# --------------------------------------------------------------------------- #
+def _shard(path, entry_key: str, grid) -> str:
+    path.write_text(json.dumps({"_key_scheme": C.KEY_SCHEME, OP: {
+        "grid": [C.config_to_dict(c) for c in grid], "op_id": "opid-A",
+        "entries": {entry_key: [C.config_to_dict(c, 1.0) for c in grid]}}}))
+    return str(path)
+
+
+def test_a_merge_does_not_give_one_shape_another_shapes_grid(root, tmp_path) -> None:
+    """The union is right for the FILE and wrong for an ENTRY.
+
+    `merge_shards` unions the grids of every shard of an op, because shards that split the config
+    set carry different slices and taking one of them makes the file's hash depend on file order.
+    But a BUCKET only ever saw the grid of the shard that measured it, and one shard directory
+    spans a ladder edit as a matter of course -- reuse the directory, widen a ladder, and half the
+    shards carry the old grid. Recording the union against those buckets says a config nobody has
+    ever timed is done, which is the exact failure the whole per-entry record exists to prevent.
+    """
+    narrow, wide = _configs(1), _configs(3)
+    paths = [_shard(tmp_path / "a.json", "bfloat16|b1", narrow),
+             _shard(tmp_path / "b.json", "bfloat16|b2", wide)]
+    X.merge_shards(paths, gpu=GK)
+    C._load_cache.clear()
+
+    assert len(_todo(wide, key="bfloat16|b1")) == 2, (
+        "the bucket a one-config shard measured was credited with the union of every shard's grid")
+    assert _todo(wide, key="bfloat16|b2") == [], (
+        "the bucket that really did see the whole grid is being re-measured")
+
+
+def test_two_shards_of_one_shape_union_what_they_searched(root, tmp_path) -> None:
+    """The other direction: a bucket measured twice HAS seen both grids."""
+    paths = [_shard(tmp_path / "a.json", "bfloat16|b1", _configs(1)),
+             _shard(tmp_path / "b.json", "bfloat16|b1", _configs(3))]
+    X.merge_shards(paths, gpu=GK)
+    C._load_cache.clear()
+    assert _todo(_configs(3), key="bfloat16|b1") == []
+
+
+def test_the_file_still_records_the_union_as_its_own_space(root, tmp_path) -> None:
+    """Per-entry narrowing must not disturb the file-level fields the reader checks."""
+    paths = [_shard(tmp_path / "a.json", "bfloat16|b1", _configs(1)),
+             _shard(tmp_path / "b.json", "bfloat16|b2", _configs(3))]
+    X.merge_shards(paths, gpu=GK)
+    d = _read(root)
+    assert d["config_space_hash"] == C.config_space_hash(_configs(3)), (
+        "the file's own hash stopped being the union, so a later full-grid run will not reproduce "
+        "it and the reader will call every entry stale")

@@ -1851,7 +1851,7 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
                     (f"{sp}::{op}", f"key scheme {shard_scheme} predates the bump that re-based "
                                     f"this op's buckets"))
                 continue
-            a = agg.setdefault(op, {"grid": {}, "entries": {}, "op_id": ""})
+            a = agg.setdefault(op, {"grid": {}, "entries": {}, "op_id": "", "searched": {}})
             a["op_id"] = a["op_id"] or (slot.get("op_id") or "")
             # UNION the grids, do not take the first shard's. Shards that split by SHAPE all carry
             # the same full grid, so taking one was harmless. Shards that split the CONFIG SET
@@ -1862,6 +1862,14 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
             for cd in slot.get("grid", []):
                 a["grid"].setdefault(_sig_from_dict(cd), cd)
             for bk, lst in slot.get("entries", {}).items():
+                # The space THIS shard searched for THIS bucket, which is the shard's own grid --
+                # not the union above. A bucket measured by a shard whose grid held one config is
+                # not a bucket that has seen the three the union holds, and recording the union
+                # against it tells the next build that two configs nobody ever timed are done.
+                # Reachable whenever one shard directory spans a ladder edit, which is the normal
+                # way a directory is reused.
+                a["searched"].setdefault(bk, {}).update(
+                    {_sig_from_dict(cd): cd for cd in slot.get("grid", [])})
                 ent = a["entries"].setdefault(bk, {})
                 for cd in lst:
                     sig = _sig_from_dict(cd)
@@ -1880,8 +1888,10 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
         for bk, ent in sorted(a["entries"].items()):
             dtype, bucket = bk.split("|", 1)
             ranked = _rank(ent.values())
+            searched = list((a["searched"].get(bk) or {}).values()) or grid
             fp = store_ranked_configs(op, gk, dtype, bucket, list(ranked), csh, top_k=top_k,
-                                      op_id=a.get("op_id", ""), configs=grid)
+                                      op_id=a.get("op_id", ""), configs=grid,
+                                      entry_configs=searched)
             written.append((op, bk, len(ranked), str(fp)))
     return written
 
