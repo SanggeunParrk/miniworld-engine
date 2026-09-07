@@ -124,18 +124,20 @@ def scan(gpu_substr: str | None = None) -> list[CacheStatus]:
                 verdict, reason = "STALE", f"build_rev declared {build_rev(op)} (registry.csv)"
             elif _scheme_stale(op, data.get("key_scheme")):
                 verdict, reason = "STALE", "bucket key scheme changed (cache.KEY_SCHEME)"
-            elif data.get("config_space_hash") != cur_grid:
-                # NOT stale: a grid edit is served incrementally (`cache.configs_to_bench` benches
-                # what the grid ADDED, `store_ranked_configs` drops what it removed). Reported so a
-                # human can see the op owes a top-up build, but it never fails CI -- charging a
-                # full rebuild for a narrowing is what made ladder maintenance cost 25 GPU-hours.
-                verdict, reason = "OK", "config grid changed -- incremental build pending"
             else:
                 # Kernel SOURCE / key=[...] fingerprint -- the "kernel commit hash". Editing the
                 # @triton.jit body or its key re-partitions or invalidates the tuned entries even
                 # when the config grid is untouched, so a cache built before the edit is stale.
                 # Only flagged when BOTH sides are known: a cache from before op_identity was
                 # recorded stores None, and not every op imports on every machine.
+                #
+                # Checked BEFORE the grid, and not in an `elif` after it. A changed grid used to
+                # short-circuit this whole branch, so an op that had BOTH edited since its cache
+                # was built reported "OK -- config grid changed" and never mentioned the source at
+                # all. Every trimul kernel on this repo was in exactly that state: source
+                # 065982b1f6af -> 296036eeade4 on 2026-08-29, grid narrowed on 2026-08-30, verdict
+                # OK. The runtime reader was already refusing those entries, so "OK" meant a cache
+                # that could not be served and a rebuild nobody could see the reason for.
                 cur_src = _current_op_identity(op)
                 stored_src = data.get("op_identity")
                 # Scheme-gated: a stamp written by a DIFFERENT version of the hashing scope is
@@ -150,8 +152,16 @@ def scan(gpu_substr: str | None = None) -> list[CacheStatus]:
                 # exists, while a different BUILD DRIVER only changes which buckets got built --
                 # resetting on the latter deleted 32 of 38 tuned buckets from
                 # cond_transition_expand_swiglu for an edit that said nothing against them.
+                grid_moved = data.get("config_space_hash") != cur_grid
                 if cur_src is not None and stored_src is not None and cur_src != stored_src:
                     verdict, reason = "STALE", "kernel source/key changed (op_identity)"
+                elif grid_moved:
+                    # NOT stale: a grid edit is served incrementally (`cache.configs_to_bench`
+                    # benches what the grid ADDED, `store_ranked_configs` drops what it removed).
+                    # Reported so a human can see the op owes a top-up build, but it never fails
+                    # CI -- charging a full rebuild for a narrowing is what made ladder
+                    # maintenance cost 25 GPU-hours.
+                    verdict, reason = "OK", "config grid changed -- incremental build pending"
                 elif cur_drv is not None and stored_drv is not None and cur_drv != stored_drv:
                     verdict, reason = "OK", "build driver changed -- coverage may differ; rebuild the op"
             env_stored = data.get("env_identity")
