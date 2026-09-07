@@ -1437,6 +1437,19 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
         if before != len(work):
             print(f"skipping {before - len(work)} of {before} unit(s): a non-stale committed cache "
                   f"already answers them -- pass --rebuild-cached to redo them", flush=True)
+    # `--resume` is on by default, so a claim with no shard now costs a unit that is never built
+    # and never reported. Say it: the alternative is a build that looks complete and quietly
+    # covers less than the last one did.
+    orphans = [c.stem for c in sorted(shard_dir.glob("*.claim"))
+               if not _shard_has_entries(shard_dir / f"{c.stem}.json")]
+    if orphans and not reclaim:
+        print(f"WARNING: {len(orphans)} claim(s) here have no shard -- units a killed build left "
+              f"in flight. They are being SKIPPED. Re-run with --reclaim once no other build is "
+              f"using this directory:", flush=True)
+        for stem in orphans[:10]:
+            print(f"    {stem}", flush=True)
+        if len(orphans) > 10:
+            print(f"    ... and {len(orphans) - 10} more", flush=True)
     if not work:
         print("nothing to do (every unit is already answered by a shard or the committed cache)")
         return []

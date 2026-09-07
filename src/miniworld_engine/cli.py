@@ -1394,8 +1394,12 @@ def build_parser() -> argparse.ArgumentParser:
     _prune.add_argument("--keep-triton-cache", action="store_true",
                         help="keep $TRITON_CACHE_DIR after the merge, for re-measuring "
                              "unchanged kernels where the warm cache skips the recompile.")
-    bld.add_argument("--resume", action="store_true",
-                     help="skip units whose shard already has entries")
+    # Default ON. A shard with entries is a finished measurement, and re-running its unit is the
+    # same disaster as re-tuning a cached kernel: the plain command is the one people run after a
+    # build is killed, and it must not throw away the hours that survived.
+    bld.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True,
+                     help="skip units whose shard already has entries (default: on; "
+                          "--no-resume re-runs them)")
     bld.add_argument("--per-op", action="store_true",
                      help="work item = (op, shape bucket) driven through its registry driver, "
                           "instead of (case, dims, length, mode) driving a whole module. No "
