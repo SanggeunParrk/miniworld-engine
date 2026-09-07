@@ -716,32 +716,39 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     return _merge_built_shards(args, results)
 
 
-def _refuse_rebuilding_finished_units(units: list, shard_dir: Path, resume: bool) -> int:
-    """0 if this sweep has nothing already on disk, 2 (having said so) if it does and --resume is off.
+def _report_finished_units(units: list, shard_dir: Path, resume: bool) -> int:
+    """Say how much of this sweep is already measured on disk. Always 0 -- it decides nothing.
 
     `trunk` and `diffusion` are not disjoint. A kernel either side launches carries `stack=both` in
     registry.csv and both sweeps include it -- measured on the shipped registry: trunk 1269 units,
     diffusion 1353, union 1713, so 909 units are in BOTH. A unit's identity (its shard stem) is
     (op, dtype, side, length, width) and carries no stack, so those 909 write the same shard file
-    whichever sweep produced them: running the second half with --resume costs nothing for them,
-    and running it WITHOUT --resume re-benches 909 units that are already done -- 53% more work for
-    an identical result, with no message saying so.
+    whichever sweep produced them, and running the second half without resuming re-benches all 909
+    for an identical result.
 
-    Nothing here decides that the units are stale; that is the operator's call and --resume is how
-    it is spelled. What this refuses is making that call by forgetting a flag.
+    This used to REFUSE (exit 2) unless `--resume` was passed, so that re-benching took a flag
+    rather than forgetting one. `--resume` is the default now, which serves that purpose better:
+    forgetting a flag skips the finished work instead of redoing it, and the flag you have to
+    remember (`--no-resume`) is the one that costs GPU-hours.
+
+    What is left is the part a default cannot do. Nothing here decides the shards are still GOOD --
+    a kernel edited since they were written makes them measurements of code that no longer exists,
+    and that judgement is the operator's. So the count is printed rather than assumed away, with
+    the two ways to act on it.
     """
     from miniworld_engine.autotune.builder import _shard_has_entries
 
-    if resume or not shard_dir.is_dir():
+    if not shard_dir.is_dir():
         return 0
     done = [u for u in units if _shard_has_entries(shard_dir / f"{u.stem}.json")]
     if not done:
         return 0
-    print(f"{len(done)} of {len(units)} unit(s) in this sweep already have measurements under "
+    verb = "SKIPPING" if resume else "RE-RUNNING"
+    print(f"{verb} {len(done)} of {len(units)} unit(s) that already have measurements under "
           f"{shard_dir} (e.g. {', '.join(u.stem for u in done[:3])}).\n"
-          f"Pass --resume to skip them, or point --shards somewhere else to rebuild them "
-          f"deliberately.", file=sys.stderr)
-    return 2
+          f"  --no-resume re-runs them; `dev cache-status` says whether their kernels have "
+          f"changed since.", file=sys.stderr)
+    return 0
 
 
 def _op_names(case: str) -> list[str]:
@@ -868,10 +875,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     # Op units only: a Case has no shard of its own (build_all decomposes it into Units first), so
     # there is nothing to compare until that happens, and `--resume` already filters there.
     if not module_pass:
-        rc = _refuse_rebuilding_finished_units(
-            selected, Path(args.shards).expanduser(), args.resume)
-        if rc:
-            return rc
+        _report_finished_units(selected, Path(args.shards).expanduser(), args.resume)
 
     # `fill_gaps=False`: this is one pass and it searches the whole grid. The flag exists for a pass
     # that runs AFTER another has already tuned a key -- it re-ranks 3 configs instead of sweeping --

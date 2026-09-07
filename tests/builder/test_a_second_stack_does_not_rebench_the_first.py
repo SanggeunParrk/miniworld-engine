@@ -10,8 +10,11 @@ A unit's identity is (op, dtype, side, length, width). No stack. So those 909 wr
 file whichever sweep produced them, and the second command re-benches every one of them unless
 `--resume` filters them out first. Nothing said so: the build printed "1353 units" and ran them.
 
-`cmd_build` now refuses instead. Not because it knows the shards are still good -- it cannot, and
-that judgement is the operator's -- but so that making it takes a flag rather than forgetting one.
+`cmd_build` used to REFUSE instead (exit 2 unless `--resume` was passed), so that re-benching took
+a flag rather than forgetting one. `--resume` is the DEFAULT now, which serves the same end better:
+forgetting a flag skips the finished work rather than redoing it, and the flag you have to remember
+(`--no-resume`) is the one that costs GPU-hours. What a default cannot decide -- whether the shards
+are still good, which a kernel edit invalidates -- is printed, not assumed.
 """
 from __future__ import annotations
 
@@ -65,24 +68,29 @@ def _finish(shard_dir, unit) -> None:
         {unit.op: {"entries": [{"config": {}, "ms": 1.0}], "op_id": 0}}))
 
 
-def test_a_finished_unit_stops_the_second_stack(spy, tmp_path) -> None:
+def test_a_finished_unit_is_skipped_by_the_second_stack(spy, tmp_path, capsys) -> None:
     cd = config_set("grid")
     shared = next(iter({u.stem for u in builder.op_units(config_dir=cd, stack="trunk")}
                        & {u.stem for u in builder.op_units(config_dir=cd, stack="diffusion")}))
     unit = next(u for u in builder.op_units(config_dir=cd, stack="diffusion") if u.stem == shared)
     _finish(tmp_path, unit)
 
-    assert cli.cmd_build(_args(tmp_path, "diffusion")) == 2, (
-        "the second stack re-benched a unit the first had already finished")
-    assert not spy, "it should not have reached build_all at all"
+    assert cli.cmd_build(_args(tmp_path, "diffusion")) == 0
+    assert cli.build_parser().parse_args(
+        ["build", "diffusion", "--shards", str(tmp_path)]).resume is True, (
+        "the plain command stopped resuming -- it is the one run after a build is killed")
+    assert "SKIPPING 1 of" in capsys.readouterr().err, (
+        "the operator was not told which finished units this sweep is standing on; a kernel edited "
+        "since they were written makes them measurements of code that no longer exists")
 
 
-def test_resume_is_how_you_say_skip_them(spy, tmp_path) -> None:
+def test_no_resume_is_how_you_say_measure_it_all_again(spy, tmp_path, capsys) -> None:
     cd = config_set("grid")
     units = builder.op_units(config_dir=cd, stack="diffusion")
     _finish(tmp_path, units[0])
-    assert cli.cmd_build(_args(tmp_path, "diffusion", "--resume")) == 0
-    assert spy, "--resume must let the build through; builder.build_all does the filtering"
+    assert cli.cmd_build(_args(tmp_path, "diffusion", "--no-resume")) == 0
+    assert spy, "--no-resume must let the build through; builder.build_all does the filtering"
+    assert "RE-RUNNING 1 of" in capsys.readouterr().err
 
 
 def test_an_empty_shard_dir_is_not_a_refusal(spy, tmp_path) -> None:
