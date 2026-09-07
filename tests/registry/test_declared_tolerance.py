@@ -172,6 +172,10 @@ def test_a_declared_band_is_above_what_that_kernel_measured() -> None:
                     continue
                 b = declared_rtol(row, dt) if "=" in band else float(band)
                 where = f"{row['kernel']} [{dt}]"
+                # `declared_rtol` returns None for "the default applies". A row reaching here has
+                # a non-empty band, so it should never be None -- and comparing None below is a
+                # TypeError that would read as a broken test rather than a broken registry row.
+                assert b is not None, f"{where}: band {band!r} parsed to no number"
                 if b < worst:
                     too_tight.append(f"{where}: band {b:.1e} < measured {worst:.1e}")
                 elif b >= DEFAULT_RTOL:

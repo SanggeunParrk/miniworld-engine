@@ -38,6 +38,18 @@ def rmsnorm_fwd_triton():
     return out
 
 
+def _xw(t: tuple) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """``(x, weight)`` from the 1- or 2-tensor input list ``grads_of`` hands back.
+
+    The None has to be PASSED, not omitted: ``weight`` is positional in both
+    ``triton_rmsnorm`` and ``rmsnorm_reference``, so dropping it hands ``eps`` over as the weight.
+    A fixed-width tuple rather than the pair of arity-normalising lambdas this used to build:
+    those made the call's argument count unreadable to a checker (and to a reader), which is the
+    same thing that let a driver call an op without a required argument for months.
+    """
+    return t[0], (t[1] if len(t) > 1 else None)
+
+
 def rmsnorm_bwd_triton():
     """rmsnorm_bwd_kernel: dx and dweight, against autograd over the reference."""
     from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
@@ -48,11 +60,8 @@ def rmsnorm_bwd_triton():
     da = torch.randn_like(x0)
     for tag, w0 in (("aff", vec(_D)), ("plain", None)):
         ins = [x0] if w0 is None else [x0, w0]
-        # The None has to be PASSED, not omitted: `weight` is positional, so dropping it hands
-        # `eps` over as the weight.
-        pad = (lambda x: (x, None)) if w0 is None else (lambda x, w: (x, w))
-        got = grads_of(lambda *t, _p=pad: triton_rmsnorm(*_p(*t), _EPS), ins, da)
-        ref = grads_of(lambda *t, _p=pad: rmsnorm_reference(*_p(*t), _EPS), ins, da)
+        got = grads_of(lambda *t: triton_rmsnorm(*_xw(t), _EPS), ins, da)
+        ref = grads_of(lambda *t: rmsnorm_reference(*_xw(t), _EPS), ins, da)
         names = ["dx"] if w0 is None else ["dx", "dweight"]
         for n, g, r in zip(names, got, ref, strict=True):
             out[f"{n}_{tag}"] = (g, r)

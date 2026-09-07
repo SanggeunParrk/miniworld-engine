@@ -339,7 +339,19 @@ invalid-method-override = "ignore"
 
 [tool.ty.environment]
 python-version = "3.10"
-# tests/registry/test_registry_complete.py imports classify/launch_bind/key_gaps from
+# Import roots a `sys.path.insert` creates at call time, which no checker can follow.
+#
+# `benchmarks/runners` holds `bench_policy`, imported by tests/layout/test_bench_precision_policy
+# after inserting the directory on `sys.path` -- runners are scripts a bench invokes by path, not
+# a package, so there is nothing to import them AS. Naming the directory here resolves those
+# imports for real instead of suppressing them; it stays out of `[tool.ty.src].include`, so its
+# own contents are not checked.
+#
+# This line and half its comment were lost when `tools/kernel-audit` (the original entry) moved
+# into `src/miniworld_engine/build`, leaving a sentence that stops mid-clause and one unresolved
+# import that made `ty check` non-empty -- which is what a gate documented as "runs clean, so a
+# new finding fails the build" cannot afford: a standing finding hides the next real one.
+extra-paths = ["benchmarks/runners"]
 
 # ----------------------------------------------------------------------------
 # pixi — single unified environment for the whole repo (triton + Transformer

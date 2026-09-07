@@ -29,11 +29,13 @@ def _side_choices() -> set[str]:
             continue
         if getattr(node.func, "attr", None) != "add_argument":
             continue
-        if not (node.args and getattr(node.args[0], "value", None) == "--side"):
+        first = node.args[0] if node.args else None
+        if not isinstance(first, ast.Constant) or first.value != "--side":
             continue
         for kw in node.keywords:
-            if kw.arg == "choices":
-                return {getattr(e, "value", None) for e in kw.value.elts}
+            if kw.arg == "choices" and isinstance(kw.value, (ast.Tuple, ast.List)):
+                return {e.value for e in kw.value.elts
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str)}
     msg = "no `--side` argument with a `choices=` tuple in builder.py"
     raise AssertionError(msg)
 

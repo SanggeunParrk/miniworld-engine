@@ -47,7 +47,19 @@ def _gated() -> list[tuple[str, str, str]]:
     for k, v in zip(d.keys, d.values, strict=True):
         assert isinstance(k, ast.Tuple), "an IMPL_MIN_ARCH key is a (target, implementation) tuple"
         assert len(k.elts) == 2, "an IMPL_MIN_ARCH key has exactly two parts"
-        out.append((k.elts[0].value, k.elts[1].value, v.value))
+        target, impl = k.elts
+        # Literals, asserted rather than assumed. Reading `.value` off an `ast.expr` is how a
+        # computed entry -- `(NAME, f"{x}_cute")` -- would silently become `None` here and pass
+        # this test by naming an implementation nobody declared.
+        why = "IMPL_MIN_ARCH entries must be str literals; this test reads them out of the source"
+        assert isinstance(target, ast.Constant), why
+        assert isinstance(impl, ast.Constant), why
+        assert isinstance(v, ast.Constant), why
+        t_s, i_s, v_s = target.value, impl.value, v.value
+        assert isinstance(t_s, str), why
+        assert isinstance(i_s, str), why
+        assert isinstance(v_s, str), why
+        out.append((t_s, i_s, v_s))
     return out
 
 

@@ -61,6 +61,7 @@ def test_the_card_is_checked_before_the_precision():
     """Order matters only for the message. A kernel wrong on both counts should say the card --
     the reason someone can act on -- rather than a precision they cannot reach anyway."""
     why = declines_this_run(_row(arch="sm100", dtypes="bf16"), "sm86", "fp32")
+    assert why is not None, "a kernel wrong on both counts was not declined at all"
     assert "sm100" in why, why
 
 

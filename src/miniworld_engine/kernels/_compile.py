@@ -113,6 +113,8 @@ save intermediates, and keeps the eager path byte-identical to what shipped.
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 
 from miniworld_engine import settings
@@ -166,6 +168,17 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
             return cached
         op = torch.library.custom_op(qualname, fn, mutates_args=mutates_args)
         op.register_fake(fake)
+        # Keep the wrapped function reachable. `custom_op` returns a `CustomOpDef` whose
+        # `__call__` is `(*args, **kwargs)`, so the launcher's real parameters disappear: nothing
+        # -- not `inspect.signature`, not a type checker -- can then tell that a caller left out a
+        # required argument, and the mistake surfaces as a torch.library schema error at LAUNCH
+        # time. `trimul_outproj_layernorm_gemm_gate_triton`'s driver omitted `eps` that way and
+        # the op went untuned on every card for as long as it existed.
+        #
+        # `__wrapped__` is what `inspect.signature` follows, so setting it restores the real
+        # signature to every reader without changing how the op is called or registered.
+        with contextlib.suppress(AttributeError, TypeError):
+            op.__wrapped__ = fn
         _REGISTERED[qualname] = op
         return op
 

@@ -138,6 +138,10 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
         dtype = DTYPE_MODE
     prior = load_manifest(gpu_key)
     mine = {r["kernel"]: r for r in prior if r["dtype"] == dtype}
+    # Bound once, so the membership test below and the lookup that follows it read the SAME
+    # object. Written as `in (skipped or {})` and then `skipped[...]`, the two are a different
+    # expression each time and only a human can see that the guard makes the lookup safe.
+    skipped_by = skipped or {}
     rows = []
     for entry in registry():
         # Only kernels this precision applies to. A bf16-only kernel has nothing to say about an
@@ -160,13 +164,13 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
             status, detail = was["status"], was.get("detail", "")
         elif ran is not None:
             status = "ok" if ran else "failed"
-        elif entry["kernel"] in (skipped or {}):
+        elif entry["kernel"] in skipped_by:
             # A THIRD status, because there are three answers and "failed" is not one of them for a
             # kernel this card cannot run. Six arch-gated kernels sat at `failed` in the committed
             # manifest -- recorded before the arch gate existed, then carried forward untouched by
             # every run since, because a skipped kernel never reached `results` and so never
             # updated its own row. The verdict outlived the run that produced it.
-            status, detail = "skipped", skipped[entry["kernel"]]
+            status, detail = "skipped", skipped_by[entry["kernel"]]
         else:
             status, detail = was.get("status", "untested"), was.get("detail", "")
         rows.append({

@@ -39,9 +39,14 @@ def _build_flags() -> dict[str, dict]:
     for node in ast.walk(ast.parse(CLI.read_text())):
         if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "add_argument":
             continue
-        if not node.args or not isinstance(getattr(node.args[0], "value", None), str):
+        # `isinstance` on the NODE, not `getattr(..., "value")` on it: the attribute probe reads
+        # as a narrowing to a human and is none to a checker, so every use of `.value` below is
+        # an attribute on `ast.expr`, which has none.
+        if not node.args or not isinstance(node.args[0], ast.Constant):
             continue
         name = node.args[0].value
+        if not isinstance(name, str):
+            continue
         if not name.startswith("--"):
             continue
         kw = {k.arg: k.value for k in node.keywords}
