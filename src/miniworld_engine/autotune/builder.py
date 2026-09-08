@@ -1191,9 +1191,21 @@ def _cache_ok_ops() -> set[str]:
 #: true fp32 launch records `float32`. So a unit's dtype matches a label by these rules and not by
 #: substring -- `float32 in "bfloat16+float32"` is true and would count a bf16 entry as fp32 cover.
 def _label_serves_dtype(label: str, dtype: str) -> bool:
-    if dtype == "float32":
-        return label == "float32"
-    return label.split("|", 1)[0].startswith(dtype)
+    return dtype_label_serves(label.split("|", 1)[0], dtype)
+
+
+def dtype_label_serves(recorded: str, declared: str) -> bool:
+    """Does a cache entry recorded under `recorded` answer a unit declared `declared`?
+
+    The dtype half alone, so the same rule can be applied where the bucket has already been split
+    off -- `build/audit.py`'s coverage check compares `(dtype, bucket)` pairs and was matching them
+    exactly, which no mixed-operand kernel can ever satisfy: rmsnorm records `bfloat16+float32`
+    against a declared `bfloat16`, so all 78 of its entries read as missing and the audit reported
+    16 holes per op that a rebuild could never close.
+    """
+    if declared == "float32":
+        return recorded == "float32"
+    return recorded.startswith(declared)
 
 
 def _cache_answers(unit: OpUnit, ok_ops: set[str]) -> bool:

@@ -195,16 +195,32 @@ def check_brute(rep: Report, tuners) -> None:
         # product WITH the predicate applied keeps this check strict -- it still fails if anything
         # other than the constraint is missing -- instead of reporting a FAIL whose easiest
         # "fix" is deleting the predicate.
+        # The tile floor is the same kind of thing and has to be counted the same way: the config
+        # GENERATOR drops a tile of three or more BLOCK axes whose product is at or below
+        # 16**dim, so a grid legitimately holds fewer configs than its own value sets multiply out
+        # to. Left out, this reported three ops as incomplete for obeying a rule the repository
+        # enforces at generation -- a FAIL whose easiest "fix" is deleting the rule.
+        from miniworld_engine.autotune.configs import _tile_too_small
+
         keep = getattr(held, "miniworld_keep", None)
+        tiles = [k for k in dims if k.startswith("BLOCK")]
         constraint = ""
+        parts = []
         if keep is not None:
-            full = 0
-            for combo in itertools.product(*[sorted(dims[k]) for k in dims]):
-                cand = triton.Config(dict(zip(dims, combo, strict=False)), num_warps=4, num_stages=3)
-                if keep(cand):
-                    full += 1
+            parts.append("declared keep()")
+        full = 0
+        for combo in itertools.product(*[sorted(dims[k]) for k in dims]):
+            values = dict(zip(dims, combo, strict=False))
+            if _tile_too_small(values, tiles):
+                continue
+            if keep is not None and not keep(triton.Config(values, num_warps=4, num_stages=3)):
+                continue
+            full += 1
+        if full != expect // max(len(warps) * len(stages), 1):
+            parts.append("the tile floor")
+        if parts:
             expect = full * len(warps) * len(stages)
-            constraint = " under declared keep()"
+            constraint = f" under {' and '.join(parts)}"
         missing = []
         if len(cfgs) != expect:
             missing.append(f"not a full product{constraint}: {len(cfgs)} configs, "
@@ -557,6 +573,8 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
                     f"{len(drop)} bucket(s) excluded: the launcher pins them "
                     f"(kernels/untunable.csv: {sorted(buckets)})")
 
+    from miniworld_engine.autotune.builder import dtype_label_serves
+
     missing = 0
     for op in sorted(want):
         got = have.get(op)
@@ -567,7 +585,14 @@ def check_cache_coverage(rep: Report, gpu: str | None = None) -> None:
         # A bucket is covered if any entry names it; ops whose key has no shape_key record None.
         # Ops whose autotune key has no shape_key record bucket None; they declare one bucket.
         shapeless = {b for _, b in got} == {None}
-        gap = set() if shapeless else {p for p in want[op] if p not in got}
+        # Not `p not in got`. A cache entry's dtype half is the SET of float operand dtypes the
+        # launch carried (`dtype_of_args`), so a bf16 run whose norm affine is pinned fp32 records
+        # `bfloat16+float32` while the work list declares `bfloat16` -- an exact tuple match calls
+        # every such entry missing. rmsnorm has 78 of them and was reported as 16 holes per op that
+        # no rebuild could close. Same rule the builder uses to decide whether a unit is answered.
+        gap = set() if shapeless else {
+            (dt, b) for dt, b in want[op]
+            if not any(gb == b and dtype_label_serves(gdt, dt) for gdt, gb in got)}
         if gap:
             missing += len(gap)
             byd: dict = {}

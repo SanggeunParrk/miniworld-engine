@@ -13,6 +13,7 @@ from miniworld_engine.kernels.drivers import BF16, FP32, _rand, dev
 from miniworld_engine.kernels.drivers.conditioned_transition import (
     _D,
     _DC,
+    _L,
     _M,
     _SHAPE_KEY,
 )
@@ -30,12 +31,28 @@ def _adaln_args(m: int = _M, nx: int = _D, nc: int = _DC, dtype=BF16, *, batched
 
     ``batched`` picks x/cond's layout, which is not cosmetic: it is what the entry point can accept.
     The OUTER entry points reshape x/cond themselves and take the autotune key from the pre-flatten
-    shape, so they need the ``(1, M, D)`` activation production hands them. The INNER launchers
+    shape, so they need the ``(B, L, D)`` activation production hands them. The INNER launchers
     unpack ``M, N = t.shape`` and can only take the flat ``(M, D)``; those get ``shape_key=``
     instead. The four weights are weights, not activations -- their rank never changes.
+
+    THE BATCHED SHAPE IS (M // L, L, D), NOT (1, M, D). An outer entry point keys on
+    ``length_of(x.shape)``, which is ``shape[-2]``, so a `(1, M, D)` activation tells it the length
+    is M. Since `76daae51` made `_M = max(_L, 8192)` -- the ROWS to tune at, deliberately larger
+    than the length -- that meant every unit of `adaln_fwd_triton`, at every L the sweep drives,
+    recorded the single bucket `atom_key(8192)` and overwrote the previous one, while the buckets
+    production actually looks up (128 through 4096) stayed empty forever. `dev audit` on the A6000
+    reported it as 16 missing (dtype, bucket) pairs -- the largest hole on the card.
+
+    Splitting the same M rows into `(M // L, L, D)` gives the entry point the length it keys on AND
+    the row count the tuning needs, which is also exactly the shape production hands it: a batch of
+    sequences, not one sequence of 8,192.
     """
-    lead = (1,) if batched else ()
-    return (_rand(*lead, m, nx, dtype=dtype), _rand(*lead, m, nc, dtype=dtype),
+    if not batched:
+        return (_rand(m, nx, dtype=dtype), _rand(m, nc, dtype=dtype), _rand(nc, dtype=dtype),
+                _rand(nx, nc, dtype=dtype), _rand(nx, dtype=dtype), _rand(nx, nc, dtype=dtype))
+    length = min(_L, m)
+    batch = max(1, m // length)
+    return (_rand(batch, length, nx, dtype=dtype), _rand(batch, length, nc, dtype=dtype),
             _rand(nc, dtype=dtype),
             _rand(nx, nc, dtype=dtype), _rand(nx, dtype=dtype), _rand(nx, nc, dtype=dtype))
 
