@@ -149,6 +149,25 @@ class Settings:
     #: num_warps from the row width. This is the same idea: a miss should cost a small, bounded
     #: search, not an unbounded one. A BUILD (run_autotune=True) always gets the full grid.
     autotune_miss_cap: int = 24
+    #: Where a MISS should tune the full grid and keep the answer, instead of taking the bounded
+    #: `autotune_miss_cap` subset and forgetting it.
+    #:
+    #: The cap exists because the cache read and the build share one call site, and returning the
+    #: full grid there is 205,266 configs -- correct for a build, ruinous for a forward. But the
+    #: bounded search is also not WRITTEN anywhere, so the next process meets the same shape and
+    #: pays for the same 24 configs again, forever, and the cache never learns a shape the build
+    #: did not predict.
+    #:
+    #: Set this to a directory and a miss becomes a build: the full grid is searched and this
+    #: process's measurements are written to its own shard there at exit, for `dev merge` to fold
+    #: in. A shard per process, never the in-repo tree, so concurrent runs cannot race -- the same
+    #: rule `dump_shard` already states.
+    #:
+    #: OFF by default and it must stay off by default: the first launch at an unseen shape then
+    #: blocks for the length of a build unit, which this repo has measured at 15 s to 9 minutes.
+    #: That is a deliberate offline cost, not something to hand an inference request. `build all`
+    #: predicting the shape is the fix; this is what catches the one it did not.
+    autotune_on_miss_shards: str = ""
     #: How kernel entry points are exposed to ``torch.compile``: "custom_op" (opaque graph node,
     #: keeps surrounding fusion) or "disable" (graph break). Same kernel, same numbers -- the
     #: gradients are bit-identical either way. Read at IMPORT time by kernels._compile.

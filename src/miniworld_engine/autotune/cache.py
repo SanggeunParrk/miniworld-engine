@@ -1063,6 +1063,49 @@ def heuristic_subset(configs: list, cap: int = 24) -> list:
     return ranked[:cap] or list(configs)
 
 
+#: One arming per process. `capture.install()` is idempotent, but the atexit hook must not stack.
+_ON_MISS_ARMED = False
+
+
+def _arm_on_miss_capture(shard_dir: str) -> None:
+    """Record what this process benches, and write it to its own shard at exit.
+
+    Lazily, on the first miss: a run that never misses pays nothing, and `capture.install()`
+    patches `Autotuner._bench` and `triton.compile`, which is not something to do to every process
+    that merely imports a kernel.
+
+    The filename carries pid AND a monotonic stamp because a shard is per PROCESS and pids are
+    reused; `dump_shard` writes atomically, so a reader never sees a partial file.
+    """
+    global _ON_MISS_ARMED
+    if _ON_MISS_ARMED:
+        return
+    _ON_MISS_ARMED = True
+    import atexit
+    import os
+    import time
+    from pathlib import Path
+
+    from miniworld_engine.autotune import capture
+
+    capture.install()
+    out = Path(shard_dir).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"on-miss-{os.getpid()}-{int(time.time() * 1000)}.json"
+
+    def _flush() -> None:
+        try:
+            n = capture.dump_shard(str(path))
+        except Exception as exc:      # a shard is a by-product; never take the process down for it
+            print(f"[miniworld.autotune] could not write {path}: {exc}", flush=True)
+            return
+        if n:
+            print(f"[miniworld.autotune] wrote {n} op(s) tuned on miss to {path} -- fold them in "
+                  f"with `miniworld-engine dev merge`", flush=True)
+
+    atexit.register(_flush)
+
+
 def _miss(op, gk, what, why, configs):
     """One exit for every cache miss: warn once, then hand back a BOUNDED search.
 
@@ -1071,6 +1114,18 @@ def _miss(op, gk, what, why, configs):
     from miniworld_engine import settings  # avoid an import cycle
 
     cur = settings.current()
+    # A miss can be a BUILD instead of a guess. `autotune_on_miss_shards` names a directory; when
+    # it is set the full grid goes back to triton (cap 0) and `_arm_on_miss_capture` makes sure
+    # this process is recording and will write its shard there at exit. The next `dev merge` folds
+    # it in, so the shape the build did not predict is only ever paid for once.
+    on_miss = getattr(cur, "autotune_on_miss_shards", "")
+    if on_miss:
+        _arm_on_miss_capture(on_miss)
+        _warn_once(op, gk, what, why,
+                   f"the full grid ({len(configs)} configs) -- autotune_on_miss_shards is set, so "
+                   f"this shape is being TUNED and its measurements go to {on_miss}; fold them in "
+                   f"with `miniworld-engine dev merge`")
+        return None
     cap = 0 if getattr(cur, "run_autotune", False) else getattr(cur, "autotune_miss_cap", 0)
     if cap <= 0 or len(configs) <= cap:
         # A build wants the whole space on purpose, and a grid already smaller than the cap is
