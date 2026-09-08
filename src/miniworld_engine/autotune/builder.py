@@ -1121,7 +1121,41 @@ def _shard_has_entries(shard: Path) -> bool:
     holes and could never fill them, which is the failure mode resume exists to avoid.
     """
     try:
-        data = json.loads(shard.read_text())
+        stat = shard.stat()
+    except OSError:
+        return False
+    memo = _HAS_ENTRIES.get(shard)
+    if memo is not None and memo[0] == (stat.st_size, stat.st_mtime_ns):
+        return memo[1]
+    answer = _read_has_entries(shard, stat.st_size)
+    _HAS_ENTRIES[shard] = ((stat.st_size, stat.st_mtime_ns), answer)
+    return answer
+
+
+#: shard path -> ((size, mtime_ns), answer). One build asks this question three times over the same
+#: directory -- the resume filter, `reclaim_orphans`, and the startup report -- and on a shared
+#: filesystem the cost is the open, not the parse.
+_HAS_ENTRIES: dict[Path, tuple[tuple[int, int], bool]] = {}
+
+#: A shard carrying no measurements is `{"_key_scheme": N, "_has_entries": false}`. Anything at or
+#: below this cannot hold an entry, so its answer needs no read at all.
+_EMPTY_SHARD_BYTES = 96
+
+
+def _read_has_entries(shard: Path, size: int) -> bool:
+    """The uncached answer. Reads the head of the file when the shard declares the fact itself."""
+    if size <= _EMPTY_SHARD_BYTES:
+        return False
+    try:
+        with shard.open("rb") as fh:
+            head = fh.read(256)
+            # `dump_shard` writes `_has_entries` first for exactly this: the boolean is answerable
+            # from the first few hundred bytes instead of megabytes. Shards written before that
+            # field fall through to the full parse.
+            if b'"_has_entries"' in head:
+                return b'"_has_entries": true' in head or b'"_has_entries":true' in head
+            fh.seek(0)
+            data = json.loads(fh.read())
     except (OSError, ValueError):
         return False
     return any(isinstance(v, dict) and v.get("entries") for v in data.values())

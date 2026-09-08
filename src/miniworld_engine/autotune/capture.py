@@ -1979,7 +1979,13 @@ def dump_shard(path: str) -> int:
     # bucket strings MEAN, so a merge after a scheme bump folds old and new keys into one file --
     # dead buckets at best, and at worst an old pair measurement landing on the bucket an atom
     # launch now reads (both wrote `shape_key=256`).
-    out: dict = {"_key_scheme": KEY_SCHEME}
+    # `_has_entries` first, so a reader that only needs the boolean can stop after a few hundred
+    # bytes. `_shard_has_entries` is called once per unit by the resume filter, once per claim by
+    # `reclaim_orphans` and once more by the startup report -- three passes over a directory whose
+    # 1,163 shards cost ~0.5 s each to open on this shared filesystem, which is 35 minutes of a
+    # build doing nothing. The data is 0.3 GB; the cost is per-file latency, so the fix is to read
+    # fewer files rather than to parse them faster.
+    out: dict = {"_key_scheme": KEY_SCHEME, "_has_entries": False}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]
@@ -1992,6 +1998,8 @@ def dump_shard(path: str) -> int:
                     for (d, b), sigs in (slot.get("searched") or {}).items()}
         out[op] = {"grid": [config_to_dict(c) for c in grid], "entries": entries,
                    "searched": searched, "op_id": slot.get("op_id", "")}
+    out["_has_entries"] = any(
+        isinstance(v, dict) and v.get("entries") for k, v in out.items() if not k.startswith("_"))
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     # Atomic, like store_ranked_configs. A bare write_text truncates and then writes, so two
