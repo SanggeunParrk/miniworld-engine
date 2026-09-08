@@ -66,6 +66,31 @@ _STRANDED: set[str] = set()
 _DIR: Path | None = None
 
 
+#: A tile of three or more BLOCK axes whose PRODUCT is at or below this per axis is not generated.
+#: 16**3 = 4096 elements is the smallest tile the A6000 rebuild ever chose for a 3-D kernel -- and
+#: it chose it 0 times: over 2,015 winning configs on that card, not one 3-D or 4-D winner had a
+#: block product at or below 16**dim, while 26% of 1-D winners and 11% of 2-D ones did. Reductions
+#: legitimately win on a 4-row tile; GEMMs never win on a 16x16x16 one.
+#:
+#: Per PRODUCT, not per axis, which is the whole point. A floor on each axis at 16 would delete the
+#: winner for 26% of shapes and at 32 for 56% -- `BLOCK_K=16` with `BLOCK_M1=64, BLOCK_N=64` is a
+#: winner in this repository, and an axis floor cannot tell it from `16x16x16`.
+#:
+#: dim >= 3 only. 1-D and 2-D tiles are the reduction kernels, where small really does win.
+_MIN_TILE_BASE = 16
+_MIN_TILE_DIMS = 3
+
+
+def _tile_too_small(values: dict, tiles: list[str]) -> bool:
+    """Is this a tile no measured winner has ever been? See :data:`_MIN_TILE_BASE`."""
+    if len(tiles) < _MIN_TILE_DIMS:
+        return False
+    product = 1
+    for axis in tiles:
+        product *= values[axis]
+    return product <= _MIN_TILE_BASE ** len(tiles)
+
+
 def _read_spec(path: Path, rows: list[dict]) -> list:
     """Expand an ``axis,values`` GRID SPEC into the full cartesian product.
 
@@ -122,9 +147,12 @@ def _read_spec(path: Path, rows: list[dict]) -> list:
     if not axes:
         raise ValueError(f"{path}: grid spec has no tile-axis row")
 
+    tiles = [a for a in axes if a.startswith("BLOCK")]
     out = []
     for combo in itertools.product(*(spec[a] for a in order)):
         v = dict(zip(order, combo, strict=False))
+        if _tile_too_small(v, tiles):
+            continue
         out.append(triton.Config({a: v[a] for a in axes}, num_warps=v["num_warps"],
                                  num_stages=v["num_stages"], maxnreg=v.get("maxnreg")))
     if rng is not None:

@@ -1587,6 +1587,11 @@ def _report_unit(shard: str) -> int:
 
     print(capture.precompile_summary(), flush=True)
     print(capture.summary(), flush=True)
+    dropped = capture.over_budget()
+    if dropped:
+        print(f"  [launch-budget] abandoned {sum(dropped.values())} config(s) whose launch was "
+              f"{capture._LAUNCH_BUDGET_X}x the round's fastest: "
+              + ", ".join(f"{op}={n}" for op, n in sorted(dropped.items())), flush=True)
     skipped = capture.skipped_configs()
     if skipped:
         # Say it out loud. A unit that reuses the cache and one that re-measures the whole grid

@@ -328,6 +328,97 @@ def _use_a_smaller_bench_budget(autotuner) -> None:
               f"benching unchanged", flush=True)
 
 
+#: A config is abandoned once a TIMED launch shows it is this many times slower than the fastest
+#: config this round has measured. Relative, not absolute: what counts as slow is a property of the
+#: kernel and the shape, and no single number describes both a layernorm at 12 us and a b2b GEMM at
+#: 200 us. Measured on the A6000 rebuild, 1,163 units: the median unit launches at 0.012 s, the 99th
+#: percentile at 0.286, the slowest healthy one at 0.786 -- and then six units at 1.8, 2.0, 7.6,
+#: 26.8, 28.0 and 53.5 s per launch, which between them burned 42.7 of the build's 128.4 GPU-hours.
+#: In the worst of them the winning config ran 0.133 ms against launches of 27 s: a factor of
+#: 200,000. A ratio of 100 cuts that by three orders of magnitude and still leaves every healthy
+#: config three orders of headroom.
+_LAUNCH_BUDGET_X = 100
+#: ...and never judge a config faster than this, whatever the ratio says. A kernel whose whole grid
+#: runs in microseconds would otherwise be judged on scheduling noise: 100x of 8 us is 0.8 ms, which
+#: a context switch can produce.
+_LAUNCH_BUDGET_FLOOR_S = 0.05
+#: Fastest launch (seconds) seen so far this round, per autotuner. Per ROUND and not global:
+#: rounds of different kernels interleave, and an elementwise kernel's best would set an impossible
+#: budget for a GEMM -- the same reason the compile budget keeps its own per-round anchor.
+_ROUND_FASTEST: dict[int, float] = {}
+#: Configs dropped by the budget, per op. Reported, because a build that silently stops measuring
+#: is indistinguishable from one that measured and found nothing.
+_OVER_BUDGET: dict[str, int] = {}
+
+
+def over_budget() -> dict[str, int]:
+    """Configs this process abandoned for being too slow to be the winner, per op."""
+    return dict(_OVER_BUDGET)
+
+
+def _install_launch_budget(autotuner) -> None:
+    """Stop timing a config once one launch proves it cannot win.
+
+    `do_bench` picks its repeat count to fill a time budget, so a config whose single launch takes
+    27 seconds is not charged once -- it is charged for a warmup and however many repeats the
+    estimate asks for. Nothing bounded that. `builder.py` carries a `#:` comment describing this
+    exact guard ("a single launch may not exceed this before the parent kills the whole unit
+    process"), with the measurement that motivated it -- one config at 468 seconds, 85% of its
+    unit's benchmarking -- and no constant under it: the comment outlived its code.
+
+    THE FIRST LAUNCH IS EXEMPT AND UNTIMED. It pays for handle initialisation and a cold cache
+    (`init_handles` cost 23 s a call in the rebuild), so judging on it would throw away configs
+    whose steady state is fast. What is timed is the launch AFTER the warmup, which is what
+    `do_bench` would be repeating.
+
+    Never raises: an autotuner this cannot wrap benches the way it always did.
+    """
+    import time
+
+    import torch
+
+    try:
+        inner = autotuner._do_bench
+        if inner is None:
+            import triton.testing
+            inner = triton.testing.do_bench
+    except Exception:
+        return
+
+    def guarded(kernel_call, quantiles=None):
+        try:
+            kernel_call()                       # warmup: exempt, untimed
+            torch.cuda.synchronize()
+            t0 = time.monotonic()
+            kernel_call()
+            torch.cuda.synchronize()
+            took = time.monotonic() - t0
+        except Exception:
+            # A config that RAISES is triton's own business: `_bench` catches OutOfResources and
+            # friends and scores +inf. Hand it back the call it expected to make.
+            return inner(kernel_call, quantiles=quantiles)
+        best = _ROUND_FASTEST.get(id(autotuner))
+        if best is not None and took > max(_LAUNCH_BUDGET_FLOOR_S, best * _LAUNCH_BUDGET_X):
+            op = _op_name(autotuner) or "?"
+            _OVER_BUDGET[op] = _OVER_BUDGET.get(op, 0) + 1
+            return [float("inf")] * len(quantiles) if quantiles else float("inf")
+        res = inner(kernel_call, quantiles=quantiles)
+        # Anchor on the MEASURED median, not on the single launch above: the anchor is what every
+        # later config is compared against, and one noisy sample must not tighten it.
+        ms = res[0] if isinstance(res, (list, tuple)) else res
+        try:
+            secs = float(ms) / 1000.0
+        except (TypeError, ValueError):
+            return res
+        if secs == secs and secs > 0 and (best is None or secs < best):
+            _ROUND_FASTEST[id(autotuner)] = secs
+        return res
+
+    autotuner._do_bench = guarded
+    with contextlib.suppress(AttributeError, KeyError):
+        del autotuner.__dict__["do_bench"]      # drop the cached_property's memo
+
+
 def _bench_lock_acquire() -> None:
     """Take this card's bench lock, if the build gave one (`settings.bench_lock`).
 
@@ -475,6 +566,8 @@ def _install_launch_probes() -> None:
 
             self.pre_hook = pre_hook
             _use_a_smaller_bench_budget(self)
+            # AFTER the smaller budget, so the guard wraps whatever `_do_bench` ends up being.
+            _install_launch_budget(self)
         return orig_at_run(self, *a, **k)
 
     Autotuner.run = at_run
@@ -1611,6 +1704,9 @@ def install() -> None:
         # per autotuner AND per autotune key: rounds interleave across the kernels of a unit, and
         # one kernel is tuned once per key.
         rnd = _round_id(self, kwargs)
+        # A round is one shape. The launch budget's anchor is what "slow" is measured against and
+        # it does not carry across shapes: the same config is 0.9 ms at L=128 and 27 s at L=384.
+        _ROUND_FASTEST.pop(id(self), None)
         _ROUND[id(self)] = (list(pruned), rnd)
         _ROUND_ID[id(self)] = rnd
         _ROUND_LEFT[id(self)] = len(pruned)
