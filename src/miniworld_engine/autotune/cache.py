@@ -831,6 +831,16 @@ def cache_misses() -> frozenset:
     return frozenset(_CACHE_MISSES)
 
 
+def drop_cache_misses(keys) -> None:
+    """Forget these misses.
+
+    For `builder.audit`: a case that ABORTED still made lookups on its way to the exception, and
+    counting them says production asks for a key it does not. The one caller snapshots the set
+    before a case and drops the difference when the case returns 0.
+    """
+    _CACHE_MISSES.difference_update(keys)
+
+
 def clear_cache_misses() -> None:
     """Forget what this process has missed so far.
 

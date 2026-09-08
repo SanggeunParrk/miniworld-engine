@@ -1684,17 +1684,45 @@ def audit(selected: list[Case]) -> list[tuple]:
     named the same four misses a filled cache had just covered.
     """
     from miniworld_engine import settings
-    from miniworld_engine.autotune.cache import cache_misses, clear_cache_misses
+    from miniworld_engine.autotune.cache import (
+        cache_misses,
+        clear_cache_misses,
+    )
+    from miniworld_engine.autotune.cache import (
+        drop_cache_misses as _drop_cache_misses,
+    )
 
     clear_cache_misses()
     settings.configure(run_autotune=False, capture=False)   # use the cache, do not rebuild it
+    aborted = 0
     for case in selected:
         for di in range(len(case.dims)):
             for length in case.lengths:
                 for dtype in case.dtypes:
                     for train in ((False, True) if case.train else (False,)):
                         for impl in case.impls:
-                            run_case(case, length, di, train=train, impl=impl, dtype=dtype)
+                            # Snapshot BEFORE, and drop what this case added if it then died. A
+                            # miss is a claim that production asks for a key the cache lacks, and
+                            # a case that aborts is production doing no such thing: the lookups it
+                            # made before the exception are for a shape this card never reaches.
+                            #
+                            # 31 of one A6000 replay's misses came from `cases()` forcing
+                            # `implementation="cute"` on triangle_multiplication, every one of them
+                            # followed immediately by `NotImplementedError: Gemm Sm80 is not
+                            # implemented yet`. They cannot be built here -- the case that would
+                            # capture them dies at the same line -- so counting them made the
+                            # number unactionable and sent a 1,220-unit build after keys no unit
+                            # could ever produce.
+                            before = set(cache_misses())
+                            if run_case(case, length, di, train=train, impl=impl, dtype=dtype):
+                                continue
+                            added = set(cache_misses()) - before
+                            if added:
+                                aborted += len(added)
+                                _drop_cache_misses(added)
+    if aborted:
+        print(f"  ({aborted} lookup(s) ignored: recorded by a case that then failed to run -- "
+              f"a shape this card does not reach)", flush=True)
     return sorted(cache_misses())
 
 
