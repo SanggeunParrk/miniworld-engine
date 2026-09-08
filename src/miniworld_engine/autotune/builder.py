@@ -870,12 +870,14 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: c_s (384) and c_token (768), with d_pair at 128. HEADROOM is 256 and 512 on the pair side,
     #: kept so a config that widens d_pair finds a tuned cache instead of a miss.
     #
-    #: Measured on the shipped registry: of 1,827 (op, dtype, side, length, width) units in
-    #: `build all`, **674 -- 37% -- are at 256 or 512**, widths no model config presents. That is
-    #: 37% of every full build's GPU time spent on shapes nothing asks for today. Whether to keep
+    #: Measured on the shipped registry: of 2,079 (op, dtype, side, length, width) units in
+    #: `build all`, **514 -- 25% -- are at 256 or 512**, widths no model config presents. That is
+    #: 25% of every full build's GPU time spent on shapes nothing asks for today. (It was 674 of
+    #: 1,827, 37%, before the seven `head_dim` / `pair_bidir` rows stopped drawing from this
+    #: ladder: their widths are derived, so 256 and 512 are no longer rungs they walk.) Whether to keep
     #: paying it is a decision about the future, not a fact about the code, so it is written here
     #: as a decision rather than buried in a literal. Dropping HEADROOM_PAIR makes `build all`
-    #: 1,153 units; the cost of being wrong is a cache miss (a warning and a heuristic subset,
+    #: 1,565 units; the cost of being wrong is a cache miss (a warning and a heuristic subset,
     #: `cache._miss`), not a failure.
     #: Literal, not `(ATOM_WIDTH,)`: a test reads these two declarations straight out of the
     #: source so the split cannot be folded away, and it can only read literals.
@@ -898,6 +900,36 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: and d_cond 128/384/768, and no bench.yaml has a d_single axis at all. So this rung was
     #: 17% of the whole build spent on a width no measurement and no model config asks for.
     DIT_TOKEN_WIDTHS = (384, 768)
+    #: Widths that are a kernel's own axis DERIVED from d_pair, not d_pair itself.
+    #:
+    #: `Case`'s docstring states the rule this implements: "Dimensions are declared with the
+    #: module's OWN parameter names -- d_pair, d_single, d_hidden, n_head -- not as a single
+    #: anonymous width. They are not interchangeable: a kernel's cache bucket is built from the
+    #: constexprs it was launched with." The `width` column had only stream names, so a kernel
+    #: whose bucket carries a DERIVED axis had no way to say so and was declared `pair`, which
+    #: drives the wrong numbers entirely.
+    #:
+    #: Both entries are the set `cases()` already declares, read off the same Case rows a
+    #: `dev audit --replay` drives -- so the declaration and the measurement cannot disagree:
+    #:
+    #:   head_dim: `Case("triangle_attention_heads")` sweeps (n_head, d_hidden) =
+    #:     (4,128) (8,128) (4,256) (16,256), i.e. head dims 32, 16, 64, 16. The driver drove
+    #:     `ragged(32)` alone, and `--replay` missed exactly 16 and 64, at every length.
+    #:
+    #:   pair_bidir: `front_bwd_dW` keys on H, the PER-SIDE hidden width, and says so --
+    #:     "Din = WL.shape[0] (= d_pair); may differ from H (bidirectional)". A bidirectional
+    #:     trimul meets 2*d_pair, so the ladder is the pair ladder doubled. Its driver says
+    #:     "Square single-dir (H = Din = D)" in its own docstring: it drives one half of what the
+    #:     row meets, and `--replay` missed H=1024 (2 x 512) at three lengths.
+    HEAD_DIMS = (16, 32, 64)
+    PAIR_BIDIR = tuple(sorted({2 * w for w in PRESENTED["pair"] + HEADROOM_PAIR}))
+    #: One entry PER LINE, like LADDER: `test_the_builders_ladder_defines_exactly_these` reads the
+    #: vocabulary straight out of this source and takes the first quoted name on each line, so a
+    #: one-line dict declares only its first class to the test that exists to catch a typo.
+    DERIVED_WIDTHS = {
+        "head_dim": HEAD_DIMS,
+        "pair_bidir": PAIR_BIDIR,
+    }
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
               "pair": tuple(sorted(PRESENTED["pair"] + HEADROOM_PAIR)),
@@ -989,6 +1021,13 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         def _widths(side: str, _k=klass, _lvl=r["level"]) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
+            # A DERIVED class first, and regardless of side: the number in these kernels' buckets
+            # is not any stream's channel width, so no stream ladder can produce it and no side
+            # changes that. `head_dim` is d_hidden // n_head; `pair_bidir` is the per-side hidden
+            # width of a BIDIRECTIONAL trimul, which is 2*d_pair. Both were declared `pair`, whose
+            # ladder is d_pair itself -- the right column, the wrong quantity.
+            if _k in DERIVED_WIDTHS:
+                return DERIVED_WIDTHS[_k]
             # A `level=both` row is driven once per SIDE, and the side names the stream outright,
             # so it decides the ladder: its atom units are a real atom activation (128 and only
             # 128) and its pair units a real pair one, whatever the row's own class says. The

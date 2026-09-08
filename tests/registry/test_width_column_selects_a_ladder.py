@@ -17,7 +17,9 @@ from paths import registry_rows
 
 #: The four the builder's LADDER defines. `atom` is the fixed atom-stream width (128); `pair` and
 #: `single` are the two streams' ladders; `both` is the union, for a kernel that meets both.
-KNOWN = {"atom", "pair", "single", "both"}
+#: `head_dim` and `pair_bidir` are DERIVED classes: the number in those kernels'
+#: buckets is `d_hidden // n_head` and `2 * d_pair`, which no stream ladder produces.
+KNOWN = {"atom", "pair", "single", "both", "head_dim", "pair_bidir"}
 
 
 def _rows() -> list[dict]:
@@ -36,8 +38,15 @@ def test_every_width_value_names_a_known_ladder() -> None:
 def test_the_builders_ladder_defines_exactly_these() -> None:
     """The test's vocabulary and the builder's must not drift apart."""
     src = (REG.parent.parent / "autotune/builder.py").read_text()
-    body = src.split("LADDER = {", 1)[1].split("}", 1)[0]
-    defined = {line.split('"')[1] for line in body.splitlines() if '"' in line}
+    defined = set()
+    # TWO declarations, because a width class is one of two kinds. `LADDER` holds the STREAM
+    # classes, whose rungs are a stream's channel width. `DERIVED_WIDTHS` holds the ones whose
+    # number is computed from a stream width and is therefore on no stream ladder --
+    # `d_hidden // n_head`, `2 * d_pair`. Reading only the first is how a row could say
+    # `width=head_dim`, fall through to the union, and be tuned at widths it never sees.
+    for name in ("LADDER = {", "DERIVED_WIDTHS = {"):
+        body = src.split(name, 1)[1].split("}", 1)[0]
+        defined |= {line.split('"')[1] for line in body.splitlines() if '"' in line}
     assert defined == KNOWN, f"builder defines {sorted(defined)}, this test knows {sorted(KNOWN)}"
 
 

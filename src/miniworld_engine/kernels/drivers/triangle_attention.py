@@ -71,8 +71,16 @@ from miniworld_engine.kernels.drivers import (
 )
 
 L = ragged(driver_length(128))   # sequence length: tiles in BOTH the query loop and the key/value loop
-H = driver_width(128) // 32   # d_pair // head dim; a grid extent, never a tl.arange block
-D = ragged(32)    # head dim, masked against HEAD_DIM inside the HEAD_DIM_PAD block
+#: The head dim, which is what these kernels PACK -- `pack(..., HEAD_DIM=D)`. It is
+#: `d_hidden // n_head`, a quantity no stream's channel ladder produces, so the registry row says
+#: `width=head_dim` and the unit hands it over here. It used to be the constant 32: `cases()`
+#: declares (n_head, d_hidden) of (4,128) (8,128) (4,256) (16,256), i.e. head dims 32, 16 and 64,
+#: and `dev audit --replay` missed exactly 16 and 64 at every length, forever, because no unit
+#: ever built them.
+D = ragged(driver_width(32))
+#: n_head -- a GRID extent, never a `tl.arange` block, and NOT in the cache key. Derived from a
+#: fixed total qkv width so it stays a plausible head count as D moves; the bucket does not see it.
+H = max(1, 128 // D) if D <= 128 else 1
 
 #: The atomic triangle path refuses any other head dim, so it keeps a power-of-two 32.
 D32 = aligned_only(

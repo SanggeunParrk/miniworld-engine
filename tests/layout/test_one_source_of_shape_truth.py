@@ -38,12 +38,13 @@ NOT_A_WIDTH = frozenset({"n_head", "n_heads"})
 #: shape -- `pack` folds a kernel's own tiled axes into the key, and a projection width that never
 #: becomes one of them changes no bucket. The evidence for an entry here is a clean
 #: `dev audit --replay`: if a width really were keyed and undriven, replay would ask for it.
-NOT_DRIVEN: dict[int, str] = {
-    32: "`outer_product_mean.d_hidden` and `pairformer_block.d_hidden_tri_attention` -- the small "
-        "inner projection width of the OPM / tri-attention hidden GEMMs, which no keyed kernel "
-        "tiles over: the A100 replay asked for no bucket at width 32, while it did ask for 64, "
-        "384 and the augmented-attention head dims (all now driven)",
-}
+#: EMPTY. 32 was the last entry -- the OPM / tri-attention inner projection width, excused because
+#: "the A100 replay asked for no bucket at width 32". It is driven now, as a rung of the
+#: `head_dim` ladder: `triangle_attention`'s bucket carries `d_hidden // n_head`, and `cases()`
+#: declares combinations giving 16, 32 and 64. The number is the same 32 for a different reason,
+#: which is exactly why this test compares numbers and not stories -- a width on a ladder needs no
+#: excuse, whatever put it there.
+NOT_DRIVEN: dict[int, str] = {}
 
 
 def _presented_widths() -> dict[int, list[str]]:

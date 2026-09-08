@@ -49,7 +49,13 @@ from miniworld_engine.kernels.drivers import (
 #   L  sequence length. The activation is [B, L, L, D], so one perturbation makes BOTH spatial
 #      axes ragged at once, and M = L*L (the flattened row count every kernel tiles over) goes
 #      ragged with it: 64 -> 61, M 4096 -> 3721.
-D = ragged(driver_width(128))  # BenchConfig.d_pair
+#: What the packed axis of this family carries. For most kernels here it IS d_pair; for the two
+#: `width=pair_bidir` rows the unit hands over `2 * d_pair`, because that is the per-side hidden
+#: width a bidirectional trimul meets and it is what lands in the bucket.
+D = ragged(driver_width(128))  # BenchConfig.d_pair, or the derived width the unit declares
+#: The width projected FROM. `_x()` builds the activation at it and `front_bwd_dW` reads it off
+#: `WL.shape[0]`; it is NOT in the cache key, so it does not follow D onto the derived ladder.
+_DIN = ragged(128)
 L = ragged(driver_length(64))   # BenchConfig.min_seq_len
 #: A level=both kernel meets 512 and below as a PAIR activation (1, L, L, D) flattening to
 #: M = L*L, and 1024 and above as an ATOM activation (1, A, D) flattening to M = A -- see
@@ -72,9 +78,14 @@ def _rows(n: int = D) -> torch.Tensor:
     return torch.randn(M, n, device=dev(), dtype=BF16)
 
 
-def _w(n: int = D) -> torch.Tensor:
-    """(D, n) weight in x@W form."""
-    return (torch.randn(D, n, device=dev(), dtype=BF16) * (D**-0.5)).contiguous()
+def _w(n: int = D, din: int = D) -> torch.Tensor:
+    """``(din, n)`` weight in x@W form.
+
+    ``din`` is separate because ``front_bwd_dW`` reads the INPUT width off it -- `Din =
+    WL.shape[0]` -- while the packed axis is the per-side hidden width `n`. A bidirectional trimul
+    has `n = 2 * Din`, so a driver that ties the two can only ever build the square case.
+    """
+    return (torch.randn(din, n, device=dev(), dtype=BF16) * (din**-0.5)).contiguous()
 
 
 def _bdll(c: int = D) -> torch.Tensor:
@@ -207,10 +218,21 @@ def gated_projection_bwd_gate_dropres_triton() -> None:
 
 
 def trimul_bwd_gate_packed_triton() -> None:
-    """back_fused.py _dconcat_kernel, via front_bwd_dW. Square single-dir (H = Din = D)."""
+    """back_fused.py _dconcat_kernel, via front_bwd_dW.
+
+    The bucket is `pack(token_key(L), D=H)` where H is the PER-SIDE hidden width -- and
+    `front_bwd_dW` says so itself: "Din = WL.shape[0] (= d_pair); may differ from H
+    (bidirectional)". This used to say "Square single-dir (H = Din = D)" and drive H = d_pair,
+    which is half of what a bidirectional trimul meets; `dev audit --replay` missed H = 1024
+    (2 x 512) at three lengths. The registry row now says `width=pair_bidir` and H arrives here.
+    """
     from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 
-    front_bwd_dW(_bdll(), _bdll(), _bdll(4 * D), _x(), _w(), _w(), _w(), _w())
+    # H -- the per-side hidden width, which is what the bucket carries -- comes from the unit.
+    # Din, the width being projected FROM, stays the driver's pair width: `front_bwd_dW` reads it
+    # off `WL.shape[0]` and it is not in the key, so it does not need its own ladder.
+    front_bwd_dW(_bdll(D), _bdll(D), _bdll(4 * D), _x(),
+                 _w(D, _DIN), _w(D, _DIN), _w(D, _DIN), _w(D, _DIN))
 
 
 def trimul_bwd_gate_packed_recompute_triton() -> None:
