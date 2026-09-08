@@ -23,7 +23,7 @@ import csv
 
 from paths import REGISTRY as REG
 
-from miniworld_engine.autotune import width_evidence
+from miniworld_engine.autotune import builder, width_evidence
 from miniworld_engine.autotune.builder import op_units
 from miniworld_engine.autotune.shape_key import (
     ATOM_KEY_BUCKETS,
@@ -79,7 +79,18 @@ def test_each_is_driven_from_both_streams_with_that_streams_widths() -> None:
             widths = TOKEN_WIDTHS
             if width_evidence.collapses(r["kernel"], TOKEN_WIDTHS):
                 widths = (max(TOKEN_WIDTHS),)
-            want_t = {(L, w) for L in DIT_TOKEN_LENGTHS for w in widths}
+            # DIT_TOKEN_LENGTHS is the KEY set `atom_key` floor-clamps into, and it stops at 768
+            # so the two sides stay disjoint. The WORK list is not the same thing: `cases()` runs
+            # these families at 256..1024, so a token launch at 1024 exists and `--replay` asked
+            # augmented_attention for (H=16, HEAD_DIM=24) and (16, 48) at base 1024 -- token
+            # widths -- while the build drove 1024 on the atom side only. The builder reads the
+            # case lengths for the work list; so does this.
+            lengths = set(DIT_TOKEN_LENGTHS) | {
+                length for case in builder.cases()
+                if case.name in ("adaptive_layernorm", "conditioned_transition",
+                                 "augmented_attention", "dit")
+                for length in case.lengths}
+            want_t = {(L, w) for L in lengths for w in widths}
             want_a = {(A, ATOM_WIDTH) for A in DIT_ATOM_LENGTHS}
             if token != want_t:
                 bad.append(f"{r['kernel']} [{dtype}] token side: {sorted(token)}")
@@ -94,9 +105,14 @@ def test_no_unit_pairs_an_atom_length_with_a_token_width() -> None:
     """The shape that motivated the split. It is worth its own name because it is the expensive
     half: an atom count of 8192 at d=768 is the biggest activation the old work list built and the
     one the model never asks for."""
+    # On the ATOM SIDE. The side is what says which activation a length names: an atom-side unit
+    # at 1024 is 1024 ATOMS, and a token-side one at 1024 is 1024 tokens of the DiT's own track --
+    # a different tensor, at the token width, which `cases()` declares and `--replay` asks for.
+    # Checking the length alone conflated the two the moment the token work list reached 1024.
     ops = {r["kernel"] for r in _rows()}
-    bad = sorted({(u.op, u.length, u.width) for u in op_units()
-                  if u.op in ops and u.length in DIT_ATOM_LENGTHS and u.width != ATOM_WIDTH})
+    bad = sorted({(u.op, u.side, u.length, u.width) for u in op_units()
+                  if u.op in ops and u.side == "atom"
+                  and u.length in DIT_ATOM_LENGTHS and u.width != ATOM_WIDTH})
     assert not bad, f"atom counts built at a token width: {bad}"
 
 

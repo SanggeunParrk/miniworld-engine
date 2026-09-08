@@ -933,6 +933,35 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: the same trade HEADROOM_PAIR is explicit about making the other way. Widen it when a replay
     #: asks.
     EXPANDED_SHARED = (1024,)
+    #: What a SHARED (`level=both`) kernel meets on each side beyond that side's own stream.
+    #:
+    #: These rows are the layernorm / transition kernels every family dispatches into, so the width
+    #: they see is whichever family handed them the activation -- not the width of the stream the
+    #: side names. The side ladders gave the pair side d_pair's rungs, the token side the DiT's, and
+    #: the atom side 128/64, and `dev audit --replay` asked for the crossings that leaves out:
+    #:
+    #:   pair  += 384   `layernorm_fwd_saveact` / `_bwd_atomic` at rows 65536/147456/262144, N=384
+    #:   token += 128, 256, 512, 1024   the 128/128 DiT block and the transition widths at token
+    #:                                  lengths -- 12 of `layernorm_fwd_saveact_strided`'s misses
+    #:   atom  += 384   `layernorm_fwd_strided` / `_bwd_atomic_strided` at 1024, N=384
+    #:
+    #: Measured, not derived: each rung here is one a replay asked for. The full union of every
+    #: width across every side would be 7 rungs on each of 3 sides against today's 4/2/2, and this
+    #: repo has HEADROOM_PAIR as the standing example of what unmeasured headroom costs.
+    SHARED_EXTRA = {"pair": (384,), "token": (128, 256, 512, 1024)}
+    #: ...and only for the families that ARE the shared path. A `level=both` row is shared in the
+    #: sense that both streams reach it; these three families are the normalisation and transition
+    #: kernels that every OTHER family dispatches into, which is why they see widths belonging to
+    #: no stream of their own. `gated_projection` and the two rmsnorm families are `level=both`
+    #: too and asked for none of these -- their callers hand them their own stream's width -- so
+    #: giving them the extras would be 300-odd units for buckets no measurement has requested.
+    SHARED_EXTRA_FAMILIES = frozenset({"layernorm", "layernorm_linear", "transition"})
+    #: ...and the token lengths beyond TOKEN_SHAPES that those rows were asked at. 1024 and only
+    #: 1024: `--replay` asked `layernorm_fwd_strided` and `layernorm_bwd_atomic_strided` for
+    #: (rows=1024, N=384) and for nothing longer. `cases()` runs these families at 256..1024, so
+    #: taking the case list wholesale would add 768 as well -- 300-odd units for a bucket no
+    #: measurement has requested, which is the trade HEADROOM_PAIR exists to warn about.
+    SHARED_EXTRA_LENGTHS = (1024,)
     #: The token side of a DiT family. 128 is NOT here: it is d_single_atom, the atom side's width,
     #: and pairing it with a token count builds a shape no config presents. 384 (d_cond, AF3's c_s)
     #: and 768 (d_single_token, c_token) are what the token blocks run.
@@ -1041,6 +1070,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # stripped: an unstripped "single " matches no ladder key and falls through to the union,
         # which is the exact failure test_width_column_selects_a_ladder exists to stop.
         klass = (r.get("width") or "both").strip() or "both"
+        #: A row that IS the shared normalisation/transition path -- see SHARED_EXTRA.
+        _shared = r["level"] == "both" and r["family"] in SHARED_EXTRA_FAMILIES
         if r["level"] == "both":
             # WHICH sides comes from the row, not from the level. `level=both` says the kernel is
             # keyed on rows and driven per side; it does not say which streams the model runs it
@@ -1052,9 +1083,17 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # pair+atom pair, which is right for layernorm (the DiT normalises atoms) and for
             # gated_projection until someone traces it.
             want = [x for x in (r.get("sides") or "pair|atom").split("|") if x]
+            # The token side of a SHARED row runs at the lengths `cases()` runs, not at
+            # TOKEN_SHAPES. `--replay` asked `layernorm_fwd_strided` and `_bwd_atomic_strided` for
+            # (rows=1024, N=384): 1024 rows of a 384-wide TOKEN activation, which is the DiT token
+            # track at length 1024 being normalised by the shared kernel. TOKEN_SHAPES stops at
+            # 512, so the only rung at 1024 was the ATOM side -- a different activation, at the
+            # atom width -- and the key was never built.
+            _tok_shared = tuple(sorted(set(TOKEN_SHAPES)
+                                       | (set(SHARED_EXTRA_LENGTHS) if _shared else set())))
             per = {"pair": [("pair", L) for L in BOTH_PAIR_LENGTHS],
                    "atom": [("atom", A) for A in ATOM_SHAPES],
-                   "token": [("token", N) for N in TOKEN_SHAPES]}
+                   "token": [("token", N) for N in _tok_shared]}
             sided = [u for side in want for u in per[side]]
         elif r["level"] == "atom":
             # Also two work lists -- see shape_key.DIT_TOKEN_LENGTHS. `level=atom` says which key
@@ -1068,7 +1107,23 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # `dev audit --replay`: identical widths (DC=128, K=128, ND=256), built at L in
             # 1024..8192, asked for at L in 256..768. The width class still decides the WIDTH --
             # `_widths` reads `klass`, so a `width=atom` row stays pinned to 128 on both ladders.
-            sided = ([("token", L) for L in DIT_TOKEN_LENGTHS]
+            # The token side runs at every length `cases()` runs these families at, which is not
+            # DIT_TOKEN_LENGTHS. That list stops at 768 because it is a KEY set -- `atom_key`
+            # floor-clamps into it and the two side lists are disjoint so one clamp can serve both
+            # -- and it was reused here as a WORK list. `cases()` builds adaptive_layernorm,
+            # conditioned_transition and augmented_attention at 256..1024, so a token launch at
+            # 1024 keys to `atom_key(1024)`, and the build drove that length on the ATOM side only,
+            # at the atom width. `--replay` asked augmented_attention for (H=16, HEAD_DIM=24) and
+            # (16, 48) at base 1024 -- token widths -- and had them only at 128..768.
+            #
+            # Driving both sides at 1024 collides with nothing: the key carries the widths too, and
+            # the atom unit there is width 128 while the token units are 384/768.
+            _tok = tuple(sorted(set(DIT_TOKEN_LENGTHS) | {
+                L for c in cases()
+                if c.name in ("adaptive_layernorm", "conditioned_transition",
+                              "augmented_attention", "dit")
+                for L in c.lengths}))
+            sided = ([("token", L) for L in _tok]
                      + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
             sided = [("", L) for L in SHAPES_BY_LEVEL[r["level"]]]
@@ -1096,7 +1151,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # all. So 768 was 24 of the model's 27 blocks and no unit ever built it: production opened a
         # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
         # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
-        def _widths(side: str, _k=klass, _lvl=r["level"]) -> tuple:
+        def _widths(side: str, _k=klass, _lvl=r["level"], _shared=_shared) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
             # A DERIVED class first, and regardless of side: the number in these kernels' buckets
@@ -1138,7 +1193,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 # A `level=pair`/`token` row keeps the plain pair ladder: it is one family's own
                 # kernel, and the expansion is not on its stream.
                 if _lvl == "both":
-                    return tuple(sorted(set(LADDER["pair"]) | set(EXPANDED_SHARED)))
+                    return tuple(sorted(set(LADDER["pair"]) | set(EXPANDED_SHARED)
+                                        | (set(SHARED_EXTRA["pair"]) if _shared else set())))
                 return LADDER["pair"]
             if side == "token":
                 # The class decides the WIDTH even here -- the comment above says so, and this
@@ -1149,7 +1205,11 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 # d <= 128. Returning the token widths gave those three rows 30 units each at
                 # 384/512/768 -- shapes their own registry row says they never see, which build
                 # and then store nothing.
-                return (ATOM_WIDTH,) if _k == "atom" else DIT_TOKEN_WIDTHS
+                if _k == "atom":
+                    return (ATOM_WIDTH,)
+                if _shared:
+                    return tuple(sorted(set(DIT_TOKEN_WIDTHS) | set(SHARED_EXTRA["token"])))
+                return DIT_TOKEN_WIDTHS
             return LADDER.get(_k, LADDER["both"])
 
         # A ladder is a guess that a different width is a different bucket. For 17 ops it is not:
