@@ -1133,12 +1133,24 @@ def _shard_has_entries(shard: Path) -> bool:
 
 
 #: shard path -> ((size, mtime_ns), answer). One build asks this question three times over the same
-#: directory -- the resume filter, `reclaim_orphans`, and the startup report -- and on a shared
-#: filesystem the cost is the open, not the parse.
+#: directory -- the resume filter, `reclaim_orphans`, and the startup report.
+#:
+#: NOT because the scan is expensive. Measured on gpu04, gpu05 and the login node: 1,163 shards in
+#: 2.4-3.8 s, i.e. 3.3 ms a file. An earlier version of this comment said 0.5 s a file and blamed a
+#: 35-minute startup on it; that was a misreading of a py-spy sample. The 35 minutes were one
+#: contended node (gpu03: 270 KB/s against 120 MB/s elsewhere, process in state D behind another
+#: user's job on the same filesystem), and the identical build on gpu05 started in seconds.
+#:
+#: The memo and the `_has_entries` flag stay because doing three passes where one will do is worth
+#: having, and because it is exactly what shortens the contended case -- not because the uncontended
+#: one was ever slow.
 _HAS_ENTRIES: dict[Path, tuple[tuple[int, int], bool]] = {}
 
 #: A shard carrying no measurements is `{"_key_scheme": N, "_has_entries": false}`. Anything at or
 #: below this cannot hold an entry, so its answer needs no read at all.
+#:
+#: It cannot be the WHOLE test: a shard whose every config scored +inf carries a full grid and no
+#: entries -- 530 such configs in one A6000 unit -- and would read as finished on size alone.
 _EMPTY_SHARD_BYTES = 96
 
 
