@@ -107,3 +107,35 @@ def test_a_shard_with_no_entries_does_not_count_as_finished(spy, tmp_path) -> No
     (tmp_path / f"{units[0].stem}.json").write_text("{}")
     assert cli.cmd_build(_args(tmp_path, "trunk")) == 0
     assert spy
+
+
+def test_the_report_does_not_parse_every_shard(tmp_path) -> None:
+    """It prints a count, and a sweep's shard directory is 2,079 files of megabytes on a shared
+    filesystem. Parsing them cost 17 minutes of startup before a single unit ran -- twice, since
+    `build_all` parses them again for the resume filter that actually decides anything."""
+    import inspect
+
+    src = inspect.getsource(cli._report_finished_units)
+    assert "_shard_has_entries(" not in src, (
+        "the startup count parses every shard again; the exact test belongs where it decides work")
+    assert "st_size" in src
+    assert "_EMPTY_SHARD_BYTES" in src
+
+
+def test_the_cheap_test_still_separates_the_two_kinds_of_shard(tmp_path) -> None:
+    """An empty shard is `{"_key_scheme": N}` and nothing else. The margin the size test relies on
+    is four orders of magnitude; this pins that the two really are on opposite sides of it."""
+    import json
+
+    from miniworld_engine.autotune.builder import _shard_has_entries
+
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"_key_scheme": 3}))
+    full = tmp_path / "full.json"
+    full.write_text(json.dumps({"_key_scheme": 3, "op": {
+        "grid": [], "op_id": "x",
+        "entries": {"bfloat16|b1": [{"kwargs": {"BLOCK_M": 64}, "num_warps": 4,
+                                     "num_stages": 2, "ms": 1.0}]}}}))
+    assert empty.stat().st_size <= cli._EMPTY_SHARD_BYTES < full.stat().st_size
+    assert not _shard_has_entries(empty)
+    assert _shard_has_entries(full)

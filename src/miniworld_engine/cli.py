@@ -716,6 +716,12 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
     return _merge_built_shards(args, results)
 
 
+#: A shard with no measurements is `{"_key_scheme": <n>}` and nothing else -- 18 bytes on the
+#: A6000 rebuild. Anything above this carries at least one config, and the margin is four orders
+#: of magnitude, so the count below never has to open a file to be right about it.
+_EMPTY_SHARD_BYTES = 64
+
+
 def _report_finished_units(units: list, shard_dir: Path, resume: bool) -> int:
     """Say how much of this sweep is already measured on disk. Always 0 -- it decides nothing.
 
@@ -736,11 +742,17 @@ def _report_finished_units(units: list, shard_dir: Path, resume: bool) -> int:
     and that judgement is the operator's. So the count is printed rather than assumed away, with
     the two ways to act on it.
     """
-    from miniworld_engine.autotune.builder import _shard_has_entries
-
     if not shard_dir.is_dir():
         return 0
-    done = [u for u in units if _shard_has_entries(shard_dir / f"{u.stem}.json")]
+    # Size, not `_shard_has_entries`. That parses every shard, and a sweep's shard directory is
+    # 2,079 files running to megabytes on a shared filesystem: measured at 17 MINUTES of pure
+    # startup before a single unit ran, and `build_all` then parses them all again for the resume
+    # filter that actually decides anything. This line only prints a count, so it takes the cheap
+    # answer -- an empty shard is the 18 bytes of `{"_key_scheme": N}` and one with measurements is
+    # never close to that. The exact test stays where it decides work.
+    done = [u for u in units
+            if (shard_dir / f"{u.stem}.json").exists()
+            and (shard_dir / f"{u.stem}.json").stat().st_size > _EMPTY_SHARD_BYTES]
     if not done:
         return 0
     verb = "SKIPPING" if resume else "RE-RUNNING"
