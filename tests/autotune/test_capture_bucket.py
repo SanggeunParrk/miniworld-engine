@@ -95,7 +95,10 @@ def test_a_measured_timing_that_is_not_a_number_is_not_recorded():
             capture._record_one(at, _Cfg(BLOCK_M1=64), {}, bad)
         finally:
             capture._op_name = orig
-        assert not capture._CAPTURE, f"{bad} was recorded"
+        entries = {op: slot["entries"] for op, slot in capture._CAPTURE.items()}
+        assert not any(entries.values()), f"{bad} was stored as a winner: {entries}"
+        assert capture._CAPTURE["op_probe"]["searched"], (
+            f"{bad} was not noted as searched either, so every later build re-times it")
 
 
 def test_a_finite_timing_is_recorded():

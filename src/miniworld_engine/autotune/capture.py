@@ -1269,15 +1269,33 @@ def _precompile_round(src, target, options, configs, rnd: str = "") -> None:
         deadline = started + budget * _PRECOMPILE_DEADLINE_X
         done: list = []
         stream = _PRECOMPILE_POOL.imap_unordered(_worker_compile_keyed, pairs, chunksize=1)
+        gave_up = False
         while True:
             try:
                 done.extend(stream.next(timeout=max(1.0, deadline - time.monotonic())))
             except StopIteration:  # noqa: PERF203 -- one try per CHUNK of a seconds-long compile
                 break
-            except Exception:      # a chunk that has not landed by the deadline is left unsettled
+            except mp.TimeoutError:
                 print(f"  [precompile] deadline: keeping {len(done)} of {len(payloads)} config(s) "
                       f"already compiled; the rest stay unsettled and are retried", flush=True)
+                gave_up = True
                 break
+            except Exception as exc:
+                # A chunk that RAISED, not a deadline. `_compile_chunk` calls `os.pipe()` and
+                # `os.fork()` unguarded, so an EAGAIN or EMFILE on a loaded node arrives here --
+                # and `break` would then throw away every chunk that had already finished and
+                # blame the deadline for it in the log. Skip the chunk, keep collecting.
+                print(f"  [precompile] a chunk failed ({type(exc).__name__}: {exc}); its configs "
+                      f"stay unsettled and are retried", flush=True)
+                continue
+        if gave_up:
+            # Abandon the pool with it. `imap_unordered` leaves the chunks nobody waited for in a
+            # module-global FIFO, so the next round queues BEHIND work whose results are already
+            # going to a dead iterator -- its own deadline is computed from its own size and does
+            # not know about the backlog, so it gives up too, and the delay compounds. Measured on
+            # a stand-in pool: a 0.4 s round took 13.5 s behind one abandoned round.
+            _PRECOMPILE_POOL.terminate()
+            _PRECOMPILE_POOL = None
         ok = sum(1 for d in done if d and d[1])
         bad = sum(1 for d in done if not (d and d[1]))
         wt = sum(d[3] for d in done if d)
@@ -1483,10 +1501,38 @@ def _entry_key(autotuner, meta, nargs=None) -> str:
     return "|".join(_entry_parts(autotuner, meta, nargs))
 
 
+def _record_searched(autotuner, config, meta, nargs, op: str) -> None:
+    """Note that this config was TIMED for this shape, whatever it scored.
+
+    Separate from the timing record, and taken before it, because the two answer different
+    questions and the returns in between are about the second. A config that scored +inf did not
+    produce a winner and must not be stored as one -- but it WAS searched, and 530 of them in one
+    unit is eleven hours of an A6000. Recording only the ones that produced a number means every
+    later build pays for the same failures again.
+
+    What this must not become is `autotuner.configs`. That is everything the op could be launched
+    with, and it is what the file's `config_space_hash` is taken over; the configs actually timed
+    are fewer whenever anything narrows the round -- the incremental subtraction, the unusable
+    predictor (whose own model admits 0.19% wrong exclusions), a `--fill-gaps` pass re-ranking a
+    cached top-K, a CUDA context that dies mid-round. Claiming the whole grid per entry let a
+    shard that timed three configs stamp twenty, and the seventeen nobody measured would then
+    never be measured again.
+    """
+    if nargs is None:
+        nargs = getattr(autotuner, "nargs", None) or {}
+    try:
+        key = _entry_parts(autotuner, meta, nargs)
+        slot = _CAPTURE.setdefault(op, {"grid": None, "op_id": "", "entries": {}, "searched": {}})
+        slot.setdefault("searched", {}).setdefault(key, set()).add(_sig(config))
+    except Exception:   # accounting must never take a measurement down
+        return
+
+
 def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=None) -> None:
     op = _op_name(autotuner)
     if not op:
         return
+    _record_searched(autotuner, config, meta, nargs, op)
     # inf is how a FAILED config scores and must never be stored. NaN reaches here from exactly
     # one place and on purpose: an op with a single config runs no tuning loop, so the sole config
     # is the winner by default and there is no measurement to record (`unmeasured=True`). That is
@@ -1519,7 +1565,7 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
     # Capture then silently recorded nothing at all: a build that looked like it ran and produced
     # an empty shard. Read and write share these two functions, which is the point.
     dtype, bucket = _entry_parts(autotuner, meta, nargs)
-    slot = _CAPTURE.setdefault(op, {"grid": None, "op_id": "", "entries": {}})
+    slot = _CAPTURE.setdefault(op, {"grid": None, "op_id": "", "entries": {}, "searched": {}})
     if slot["grid"] is None:
         slot["grid"] = list(autotuner.configs)
         # The autotuner is the ONLY place the kernel source and the key list are both reachable;
@@ -1938,8 +1984,14 @@ def dump_shard(path: str) -> int:
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]
                    for (d, b), ent in slot["entries"].items()}
+        # `searched` is per ENTRY and is what a later build subtracts against; `grid` is the op's
+        # whole config list and is what the file's hash is taken over. Recording only the second
+        # made a shard claim configs it never timed -- see `_record_one`.
+        by_sig = {_sig(c): c for c in grid}
+        searched = {f"{d}|{b}": [config_to_dict(by_sig[g]) for g in sigs if g in by_sig]
+                    for (d, b), sigs in (slot.get("searched") or {}).items()}
         out[op] = {"grid": [config_to_dict(c) for c in grid], "entries": entries,
-                   "op_id": slot.get("op_id", "")}
+                   "searched": searched, "op_id": slot.get("op_id", "")}
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     # Atomic, like store_ranked_configs. A bare write_text truncates and then writes, so two
@@ -2006,8 +2058,13 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
                 # against it tells the next build that two configs nobody ever timed are done.
                 # Reachable whenever one shard directory spans a ladder edit, which is the normal
                 # way a directory is reused.
+                # The shard's own per-entry list when it has one; its grid only for shards
+                # written before that field existed, where the grid is the best available answer
+                # and is at worst too wide by whatever the round pruned.
+                from_entry = (slot.get("searched") or {}).get(bk)
                 a["searched"].setdefault(bk, {}).update(
-                    {_sig_from_dict(cd): cd for cd in slot.get("grid", [])})
+                    {_sig_from_dict(cd): cd
+                     for cd in (from_entry if from_entry is not None else slot.get("grid", []))})
                 ent = a["entries"].setdefault(bk, {})
                 for cd in lst:
                     sig = _sig_from_dict(cd)

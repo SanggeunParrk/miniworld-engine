@@ -70,3 +70,83 @@ def test_every_config_is_still_bounded_on_its_own() -> None:
     assert "_compile_chunk(rest)" in src, (
         "a killed config now condemns the rest of its chunk, which is what the outer timeout was "
         "insuring against -- put one back before relying on it")
+
+
+# --------------------------------------------------------------------------- #
+# the harvest loop, RUN rather than read
+# --------------------------------------------------------------------------- #
+class _Stream:
+    """Stands in for `IMapIterator`: a scripted sequence of chunk results and failures."""
+
+    def __init__(self, script):
+        self.script, self.i = list(script), 0
+
+    def next(self, timeout=None):        # the name multiprocessing's iterator uses
+        if self.i >= len(self.script):
+            raise StopIteration
+        item = self.script[self.i]
+        self.i += 1
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def _harvest(script):
+    """The loop from `_precompile_round`, over a scripted stream. Mirrors the source it tests;
+    `test_the_loop_under_test_is_the_one_that_ships` pins that they stay the same shape."""
+    import multiprocessing as mp
+
+    stream, done, gave_up = _Stream(script), [], False
+    while True:
+        try:
+            done.extend(stream.next(timeout=1.0))
+        except StopIteration:  # noqa: PERF203 -- mirrors the shipped loop, one try per chunk
+            break
+        except mp.TimeoutError:
+            gave_up = True
+            break
+        except Exception:
+            continue
+    return done, gave_up
+
+
+def test_a_chunk_that_raises_does_not_discard_the_ones_that_finished() -> None:
+    """`_compile_chunk` calls `os.pipe()` and `os.fork()` unguarded, so an EAGAIN or EMFILE on a
+    loaded node arrives as a raised chunk. Treating that as the deadline threw away every chunk
+    that had already landed AND blamed the deadline for it in the log."""
+    done, gave_up = _harvest([["a"], OSError("EAGAIN"), ["b"], ["c"]])
+    assert done == ["a", "b", "c"], "a failing chunk took the finished ones with it"
+    assert not gave_up
+
+
+def test_the_deadline_keeps_what_landed_and_stops() -> None:
+    import multiprocessing as mp
+
+    done, gave_up = _harvest([["a"], ["b"], mp.TimeoutError(), ["never"]])
+    assert done == ["a", "b"]
+    assert gave_up, "the round did not record that it gave up, so the pool would be reused"
+
+
+def test_a_round_that_gives_up_abandons_the_pool() -> None:
+    """`imap_unordered` leaves the chunks nobody waited for in a module-global FIFO. The next
+    round queues BEHIND work whose results go to a dead iterator, and its own deadline -- computed
+    from its own size -- does not know about the backlog, so it gives up too."""
+    import inspect
+
+    src = inspect.getsource(X._precompile_round)
+    assert "_PRECOMPILE_POOL.terminate()" in src
+    assert "_PRECOMPILE_POOL = None" in src
+    i, j = src.index("gave_up = True"), src.index("_PRECOMPILE_POOL.terminate()")
+    assert i < j, "the pool is dropped somewhere other than the give-up path"
+
+
+def test_the_loop_under_test_is_the_one_that_ships() -> None:
+    """`_harvest` above is a copy, so it has to be pinned to the original or it drifts into
+    testing nothing."""
+    import inspect
+
+    src = inspect.getsource(X._precompile_round)
+    for line in ("except StopIteration:", "except mp.TimeoutError:", "continue"):
+        assert line in src, f"the shipped loop no longer contains {line!r}"
+    assert src.index("except mp.TimeoutError:") < src.index("except Exception as exc:"), (
+        "the broad handler is back above the deadline one, so a deadline is treated as an error")

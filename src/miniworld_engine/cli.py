@@ -949,13 +949,23 @@ def _ops_that_measured_nothing(results: list) -> dict:
     """
     by_op: dict[str, list] = {}
     for r in results:
-        # `OpUnit.label` is "<op>[<dtype>] <side> L=<n> D=<n>"; the op is everything before the
-        # dtype bracket. A module `Unit`'s label has no bracket, so it groups under its whole
-        # label and never trips this -- correct, since a module unit tunes whatever its case
-        # touches and "this unit measured nothing" says nothing about a particular kernel.
-        op = str(r.get("label", "")).split("[", 1)
-        if len(op) == 2 and op[0].strip():
-            by_op.setdefault(op[0].strip(), []).append(r)
+        # A PERMANENT skip is not a measurement that failed to happen -- it is the card saying the
+        # shape does not fit, which `builder` already records as `skipped` and which the existing
+        # merge rule (`is_bad_unit`) deliberately does not count against a build. Reading only
+        # `ops` made every op whose driven shapes are all too big for this card a DRIVER FAILURE,
+        # which is the exact case the rule above says is ordinary.
+        if r.get("skipped"):
+            continue
+        # `OpUnit.label` is "<op>[<dtype>] <side> L=<n> D=<n>". A module `Unit`'s label is
+        # "<case>[<impl>/<dtype>] dims#<n> L=<n> <mode>" -- it has a bracket too, so splitting on
+        # one alone grouped a CASE under a kernel's heading and reported "DRIVER FAILURE: transition".
+        # The op half of an OpUnit label is a bare identifier; the case half of a module label is
+        # not, because its bracket carries "<impl>/<dtype>".
+        head, sep, rest = str(r.get("label", "")).partition("[")
+        if not sep or "/" in rest.split("]", 1)[0]:
+            continue
+        if head.strip():
+            by_op.setdefault(head.strip(), []).append(r)
     return {op: rs[0].get("log", "") for op, rs in by_op.items()
             if not any(r.get("ops") for r in rs)}
 

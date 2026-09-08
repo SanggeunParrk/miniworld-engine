@@ -35,7 +35,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from miniworld_engine.autotune.cache import _sig, config_space_hash
+from miniworld_engine.autotune.cache import _sig, _sig_from_dict, config_space_hash
 
 _REPO = Path(__file__).resolve().parents[3]
 _DATA = Path(__file__).resolve().parent / "data"
@@ -127,6 +127,67 @@ def _first_seen(rel_cache: str) -> dict[str, str]:
 LAST_SKIPPED: Counter[str] = Counter()
 
 
+def _contains_its_own_winners(space: list[str], ranked: list) -> bool:
+    """Could this entry have been measured with this space? Its own winners answer.
+
+    A cache entry stores the configs that WON for that shape. If one of them is not in the space
+    the entry is stamped with, the entry cannot have been measured with that space -- the file is
+    contradicting itself, and the stamp is wrong however plausible its provenance looked.
+
+    This is the check that was missing. `_first_seen` pins a key to the `config_space_hash` of the
+    commit the key first appeared in, and `store_ranked_configs` used to RESET a file when the grid
+    moved and re-measure the same keys against the new one. A reset does not rename a key, so
+    `setdefault` never saw the re-measurement and stamped the pre-reset grid: 225 entries across 11
+    A100 caches, 140 of them not yet invalidated by a `build_rev` bump, together claiming 46,560
+    configs as searched that nothing had ever measured.
+    """
+    if not ranked:
+        return True
+    have = set(space)
+    return all(repr(_sig_from_dict(c)) in have for c in ranked)
+
+
+def repair(*, apply: bool = False) -> list[tuple[str, str, int]]:
+    """Drop stamps an entry's own winners contradict. Returns (op, gpu, entries dropped).
+
+    Separate from :func:`backfill` because it fixes what backfill already wrote: `backfill` skips a
+    file whose keys are all stamped, so a bad stamp is invisible to it forever. Dropping a stamp
+    costs a re-measurement; keeping a wrong one costs a winner nobody timed.
+    """
+    out: list[tuple[str, str, int]] = []
+    for jf in sorted(_DATA.glob("*/*.json")):
+        try:
+            data = json.loads(jf.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        refs = data.get("entry_grids")
+        grids = data.get("grids") or {}
+        if not isinstance(refs, dict) or not refs:
+            continue
+        entries = data.get("entries") or {}
+        dropped = 0
+        for key in list(refs):
+            hashes = refs[key]
+            hashes = [hashes] if isinstance(hashes, str) else list(hashes or [])
+            space: list[str] = []
+            for h in hashes:
+                space.extend(grids.get(h) or [])
+            if space and not _contains_its_own_winners(space, entries.get(key) or []):
+                del refs[key]
+                dropped += 1
+        if not dropped:
+            continue
+        out.append((jf.parent.name, jf.stem, dropped))
+        if apply:
+            wanted = {h for hs in refs.values() for h in ([hs] if isinstance(hs, str) else hs)}
+            data["grids"] = {h: v for h, v in grids.items() if h in wanted}
+            if not refs:
+                data.pop("entry_grids", None)
+                data.pop("grids", None)
+            jf.write_text(json.dumps(data, indent=2, sort_keys=True))
+    return out
+
+
 def backfill(*, apply: bool = False) -> list[Recovered]:
     """Give every cache an ``entry_space`` its own git history can prove. Reports unless ``apply``."""
     out: list[Recovered] = []
@@ -168,6 +229,13 @@ def backfill(*, apply: bool = False) -> list[Recovered]:
             h = first.get(key, current_hash)
             space = index.get(h) if h else None
             if space is None:
+                unresolved += 1
+                continue
+            if not _contains_its_own_winners(space, entries.get(key) or []):
+                # The recovered grid does not contain this entry's own winners, so the entry was
+                # not measured with it -- most often because the file was RESET and the key
+                # re-measured under a later grid, which `_first_seen` cannot see. Leave it
+                # unresolved: a re-measurement is a cost, a wrong stamp is a wrong answer.
                 unresolved += 1
                 continue
             refs[key] = [h]
