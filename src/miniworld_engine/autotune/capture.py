@@ -71,6 +71,14 @@ _orig_prune = None
 # populations: a healthy config (even at large D) compiles in a few to a few-tens of seconds, while
 # a register-spill monster runs 10-20 MINUTES — so 60s never kills a usable config yet kills fast.
 _COMPILE_BUDGET_S = 60
+#: How far past the precompile round's own worst case the pool is allowed to run before the round
+#: gives up waiting for what has not landed. A multiplier and not a second budget: the worst case
+#: is already `configs x _COMPILE_BUDGET_S / jobs`, which `_compile_chunk` enforces per config, so
+#: a round cannot run away -- what this guards is a pool worker that dies without answering, which
+#: no inner guard can see. It was effectively 1.0, i.e. the inner guard's own worst case plus two
+#: configs, so it fired on healthy rounds that happened to kill a lot of register-spill configs and
+#: never on the failure it was for.
+_PRECOMPILE_DEADLINE_X = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -708,6 +716,22 @@ def _worker_compile(chunk: list) -> list:
     return [(ok, 0.0, seconds, 0.0) for ok, seconds in rows]
 
 
+def _worker_compile_keyed(chunk: list) -> list:
+    """:func:`_worker_compile` over ``(payload, key)`` pairs, with each row TAGGED by its key.
+
+    What the tag is for: the round collects chunks as they FINISH, so a partial harvest cannot be
+    attributed by position. The keys used to be held by the parent and zipped against results that
+    came back in chunk order, which is correct only when every chunk comes back -- the one case a
+    partial harvest is not. A row that names its own config can be recorded whenever it lands, and
+    everything absent simply stays unsettled and is retried.
+
+    Must stay importable at module level (spawn).
+    """
+    rows = _worker_compile([pl for pl, _ in chunk])
+    keys = [k for _, k in chunk]
+    return [(k, *row) for k, row in zip(keys, rows, strict=False)]
+
+
 def _compile_chunk(chunk: list) -> list:
     """Compile a CHUNK of configs in ONE forked child; returns ``(ok, seconds)`` per config.
 
@@ -1228,21 +1252,40 @@ def _precompile_round(src, target, options, configs, rnd: str = "") -> None:
         # chunk order, and zipping it against the original config order is what would silently
         # record every outcome against the wrong config.
         pairs = _balanced_chunks(list(zip(payloads, keys, strict=True)), costs, n_chunks)
-        chunks = [[pl for pl, _ in c] for c in pairs]
-        sent = [k for c in pairs for _, k in c]
-        results = _PRECOMPILE_POOL.map_async(_worker_compile, chunks, chunksize=1)
-        try:
-            done = [r for chunk_res in results.get(timeout=budget) for r in chunk_res]
-        except Exception:  # timeout: proceed, the serial pass still works
-            done = []
-        ok = sum(1 for d in done if d and d[0])
-        bad = sum(1 for d in done if not (d and d[0]))
-        wt = sum(d[2] for d in done if d)
+        # Collected as chunks FINISH, not all-or-nothing at a deadline. This was
+        # `map_async(...).get(timeout=budget)`, which waits for every chunk and, on the timeout,
+        # raises -- taking the chunks that had already finished with it. Measured on the A6000
+        # rebuild: a round of 1,954 configs ran 11,827 s against a budget of 8,460 and reported
+        # "0 compiled, 0 failed, 0% occupancy". Three and a quarter hours of finished compiles,
+        # discarded for being 56 minutes late, and none of them recorded as settled -- so the
+        # serial pass then re-checked all 1,954 one at a time, with the GPU at 0% for 13 hours.
+        #
+        # The deadline is a LAST RESORT now, not a schedule. `_compile_chunk` already bounds every
+        # config at `_COMPILE_BUDGET_S` with its own SIGKILL and hands the untouched remainder to a
+        # fresh child, so a round terminates on its own; what is left to guard is a worker that
+        # dies without answering. The old budget was the inner guard's own worst case
+        # (configs x budget / jobs) plus two configs of slack -- 0.5% -- so it fired exactly when
+        # the inner guard was doing its job, and never when something was actually wrong.
+        deadline = started + budget * _PRECOMPILE_DEADLINE_X
+        done: list = []
+        stream = _PRECOMPILE_POOL.imap_unordered(_worker_compile_keyed, pairs, chunksize=1)
+        while True:
+            try:
+                done.extend(stream.next(timeout=max(1.0, deadline - time.monotonic())))
+            except StopIteration:  # noqa: PERF203 -- one try per CHUNK of a seconds-long compile
+                break
+            except Exception:      # a chunk that has not landed by the deadline is left unsettled
+                print(f"  [precompile] deadline: keeping {len(done)} of {len(payloads)} config(s) "
+                      f"already compiled; the rest stay unsettled and are retried", flush=True)
+                break
+        ok = sum(1 for d in done if d and d[1])
+        bad = sum(1 for d in done if not (d and d[1]))
+        wt = sum(d[3] for d in done if d)
         # The tail is the whole story of a build's compile cost, and averaging it away is how it
         # stayed invisible: on the A6000 rebuild 1.6% of configs ran the full 60 s budget before
         # being killed and took 54% of all compile CPU, while the reported per-config number was
         # the chunk mean, 0.83 s. Print the shape so the budget can be chosen from evidence.
-        secs = sorted(d[2] for d in done if d)
+        secs = sorted(d[3] for d in done if d)
         if secs:
             def _q(f):
                 return secs[min(len(secs) - 1, int(f * len(secs)))]
@@ -1251,12 +1294,11 @@ def _precompile_round(src, target, options, configs, rnd: str = "") -> None:
                   f" max {secs[-1]:.0f}s | {len(over)} at the {_COMPILE_BUDGET_S}s budget"
                   f" = {100 * sum(over) / max(sum(secs), 1e-9):.0f}% of the round's CPU",
                   flush=True)
-        print(f"  [precompile-worker] {len(chunks)} chunks x ~{csize} | child time"
+        print(f"  [precompile-worker] {len(pairs)} chunks x ~{csize} | child time"
               f" {wt:.0f} worker-s -> {wt / max(jobs, 1):.0f}s of the round", flush=True)
-        # settled = attempted and answered, pass or fail. `done` is shorter than `sent` only
-        # if the pool timed out; zip stops at the shorter one, so an unanswered config stays
-        # unsettled and is retried, which is the intent.
-        _mark_settled((k, bool(d and d[0])) for k, d in zip(sent, done, strict=False))
+        # Self-labelled: a row names the config it is about, so a partial harvest is recorded
+        # against the right configs and everything absent simply stays unsettled and is retried.
+        _mark_settled((d[0], bool(d[1])) for d in done if d)
         _PRECOMPILE["compiled"] += ok
         _PRECOMPILE["failed"] += bad
         _PRECOMPILE["rounds"] += 1
