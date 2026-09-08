@@ -43,6 +43,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_forward,
 )
 from miniworld_engine.autotune.shape_key import pack, token_key
+from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew,
@@ -339,9 +340,16 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
     o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))            # outgoing
     o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])            # incoming
     tri = torch.cat([o_out, o_in], dim=0)                        # (H, L, L)
-    proj = _te_forward(tri.reshape(H, M).t(), ln_out_w, ln_out_b, Wp, None, eps)[0]
-    y = gate_elem_infer(x_n.reshape(M, D), proj, Wgt, residual, seq_len=L)  # + residual
-    return y.view(B, L, L, D)
+    # ONE pass: LN_out(H) + proj GEMM (H -> D) + gate GEMM (D -> D) + residual. This used to be
+    # `_te_forward` (LN+GEMM) followed by `gate_elem_infer`, because `trimul_back_triton` gated
+    # over the same axis it normalised and so refused H != D. It takes the gate's width separately
+    # now. Measured on an A6000 at L=1024, d_pair=128: the split pair cost 5.06 ms (2.79 + 2.27)
+    # and materialised an (M, D) proj between the two, while this module sat 1.2 ms behind
+    # cuequivariance for the whole forward.
+    return trimul_back_triton(
+        tri.reshape(1, H, L, L), x_n, Wp.t().contiguous(), Wgt,
+        ln_out_w, ln_out_b, eps, residual.view(B, L, L, D),
+    )
 
 
 def bidirectional_trimul_triton(

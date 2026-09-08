@@ -63,16 +63,26 @@ from miniworld_engine.autotune.shape_key import token_key
 @triton.autotune(configs=configs_for("trimul_outproj_layernorm_gemm_gate_triton"), key=['shape_key'])
 @triton.jit
 def _back_kernel(
-    tri_ptr,  # (D, M) channel-major: tri[k, m] at k*M + m
-    xn_ptr,   # (M, D) row-major
-    wp_ptr, wg_ptr,    # (D, D) = to_out.weight.T, to_gate.weight.T  (K=in, N=out)
-    lnw_ptr, lnb_ptr,  # (D,)
-    y_ptr,    # (M, D) row-major
-    res_ptr,  # (M, D) row-major residual (== the module input pair); always read
+    tri_ptr,  # (K, M) channel-major: tri[k, m] at k*M + m
+    xn_ptr,   # (M, KG) row-major
+    wp_ptr,   # (K, N)  = to_out.weight.T
+    wg_ptr,   # (KG, N) = to_gate.weight.T
+    lnw_ptr, lnb_ptr,  # (K,)
+    y_ptr,    # (M, N) row-major
+    res_ptr,  # (M, N) row-major residual (== the module input pair); always read
     M, eps,
-    K: tl.constexpr, N: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    K: tl.constexpr, N: tl.constexpr, KG: tl.constexpr,
+    BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key,
 ):
+    # K is the axis LN normalises over and the proj GEMM contracts; KG is the axis the GATE
+    # contracts. They were ONE axis, which is what made this kernel refuse the bidirectional
+    # trimul: there the tri block is 2*d_hidden wide while x_n stays d_pair, so a single K cannot
+    # describe both and the module fell back to a split back half -- `_te_forward` (LN+GEMM) then
+    # `gate_elem_infer`, two passes over M x N with a materialised (M, N) proj between them.
+    # Measured on an A6000 at L=1024, d_pair=128: split 5.06 ms (2.79 + 2.27) against 1.68 ms for
+    # this kernel at K = N = 128, while the whole module sat 1.2 ms behind cuequivariance.
+    # KG == K reproduces the old kernel exactly: every loop below is single-trip in that case.
     pid = tl.program_id(0).to(tl.int64)
     rm = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     mmask = rm[:, None] < M
@@ -99,16 +109,26 @@ def _back_kernel(
         norm = tl.where(
             kmask, (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :], 0.0,
         ).to(tl.bfloat16)
-        xn = tl.load(xn_ptr + rm[:, None] * K + rk[None, :], mask=mmask & kmask, other=0.0)
         for j in tl.static_range(0, N, BLOCK_N):
             rn = j + tl.arange(0, BLOCK_N)
             nmask = rn[None, :] < N
             wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :],
                          mask=kmask1[:, None] & nmask, other=0.0)
-            wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :],
-                         mask=kmask1[:, None] & nmask, other=0.0)
             proj = tl.dot(norm, wp)                              # (BLOCK_M1, BLOCK_N)
-            gate = tl.sigmoid(tl.dot(xn, wg))                    # (BLOCK_M1, BLOCK_N)
+            # The gate contracts over KG, which is x_n's width and Wg's first axis. Its own loop,
+            # because KG is not K on the bidirectional shape; at KG == K <= BLOCK_K it is one trip
+            # over the same range the LN just used, which is the original single `tl.dot`.
+            gacc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+            for g0 in range(0, KG, BLOCK_K):
+                rg = g0 + tl.arange(0, BLOCK_K)
+                gmask1 = rg < KG
+                gmask = gmask1[None, :]
+                xn = tl.load(xn_ptr + rm[:, None] * KG + rg[None, :],
+                             mask=mmask & gmask, other=0.0)
+                wg = tl.load(wg_ptr + rg[:, None] * N + rn[None, :],
+                             mask=gmask1[:, None] & nmask, other=0.0)
+                gacc = tl.dot(xn, wg, gacc)
+            gate = tl.sigmoid(gacc)                              # (BLOCK_M1, BLOCK_N)
             acc = proj * gate
             res = tl.load(res_ptr + rm[:, None] * N + rn[None, :],
                           mask=mmask & nmask, other=0.0).to(tl.float32)
@@ -161,13 +181,20 @@ def _back_kernel(
                 norm = tl.where(
                     kmask, (xc * rstd[:, None]) * lnw[None, :] + lnb[None, :], 0.0,
                 ).to(tl.bfloat16)
-                xn = tl.load(xn_ptr + rm[:, None] * K + rk[None, :],
-                             mask=mmask & kmask, other=0.0)
                 wp = tl.load(wp_ptr + rk[:, None] * N + rn[None, :],
                              mask=kmask1[:, None] & nmask, other=0.0)
-                wg = tl.load(wg_ptr + rk[:, None] * N + rn[None, :],
-                             mask=kmask1[:, None] & nmask, other=0.0)
                 pacc = tl.dot(norm, wp, pacc)
+            # The gate's contraction is KG, not K. Separate loop for the same reason as above; at
+            # KG == K it visits the identical k-tiles the proj loop just did, in the same order,
+            # so the accumulation order -- and the result -- is unchanged for the square case.
+            for g0 in range(0, KG, BLOCK_K):
+                rg = g0 + tl.arange(0, BLOCK_K)
+                gmask1 = rg < KG
+                gmask = gmask1[None, :]
+                xn = tl.load(xn_ptr + rm[:, None] * KG + rg[None, :],
+                             mask=mmask & gmask, other=0.0)
+                wg = tl.load(wg_ptr + rg[:, None] * N + rn[None, :],
+                             mask=gmask1[:, None] & nmask, other=0.0)
                 gacc = tl.dot(xn, wg, gacc)
             proj = pacc                                              # (BLOCK_M1, BLOCK_N)
             gate = tl.sigmoid(gacc)                                  # (BLOCK_M1, BLOCK_N)
@@ -220,17 +247,19 @@ def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tens
     # axis. When they are not, there is no correct thing for it to compute.
     def _dims(t):
         return tuple(t.shape)
-    if x_n.shape[-1] != K:
-        msg = (f"trimul_back_triton: tri channel ({K}) != x_n width ({x_n.shape[-1]}). This "
-               f"kernel normalises tri over its channel axis and gates on x_n over the SAME "
-               f"axis, so the two must match; d_hidden != d_pair needs the split back half.")
+    # x_n's width is the GATE's contraction axis and it no longer has to equal K. It used to: the
+    # kernel gated over the same axis it normalised, so the bidirectional trimul -- tri 2*d_hidden
+    # wide, x_n d_pair -- was refused here and used a split back half instead.
+    KG = x_n.shape[-1]
+    if _dims(Wp) != (K, N):
+        msg = (f"trimul_back_triton: Wp is {_dims(Wp)}, expected (K={K}, N={N}). "
+               f"Pass the TRANSPOSED weight ((in, out)); a mismatch here is an "
+               f"out-of-bounds read inside the kernel, not a shape error it can detect.")
         raise ValueError(msg)
-    for name, w in (("Wp", Wp), ("Wg", Wg)):
-        if _dims(w) != (K, N):
-            msg = (f"trimul_back_triton: {name} is {_dims(w)}, expected (K={K}, N={N}). "
-                   f"Pass the TRANSPOSED weight ((in, out)); a mismatch here is an "
-                   f"out-of-bounds read inside the kernel, not a shape error it can detect.")
-            raise ValueError(msg)
+    if _dims(Wg) != (KG, N):
+        msg = (f"trimul_back_triton: Wg is {_dims(Wg)}, expected (KG={KG}, N={N}) -- KG is x_n's "
+               f"width, which is what the gate contracts over. Pass the TRANSPOSED weight.")
+        raise ValueError(msg)
     for name, v in (("ln_w", ln_w), ("ln_b", ln_b)):
         if v.numel() != K:
             msg = f"trimul_back_triton: {name} has {v.numel()} elements, expected K={K}"
@@ -241,11 +270,13 @@ def trimul_back_triton(tri_bdll: torch.Tensor, x_n: torch.Tensor, Wp: torch.Tens
         raise ValueError(msg)
 
     tri_dm = tri_bdll.reshape(K, M)            # (K, M) contiguous, channel-major
-    xn_flat = x_n.reshape(M, K)
+    xn_flat = x_n.reshape(M, KG)
     y = torch.empty(M, N, device=x_n.device, dtype=x_n.dtype)
     res_flat = residual.reshape(M, N).contiguous()
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
+    # KG is in the key: it is a constexpr the kernel tiles over, so two launches that differ only
+    # in the gate's contraction width compile to different code and must not share a tuned config.
     _back_kernel[grid](tri_dm, xn_flat, Wp.contiguous(), Wg.contiguous(),
                        ln_w.contiguous(), ln_b.contiguous(), y, res_flat, M, float(eps),
-                       K=K, N=N, shape_key=token_key(L, K=K))
+                       K=K, N=N, KG=KG, shape_key=token_key(L, K=K, KG=KG))
     return y.view(B, L, L, N)
