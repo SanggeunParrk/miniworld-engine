@@ -889,22 +889,27 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not module_pass:
         _report_finished_units(selected, Path(args.shards).expanduser(), args.resume)
 
-    # `fill_gaps=False`: this is one pass and it searches the whole grid. The flag exists for a pass
-    # that runs AFTER another has already tuned a key -- it re-ranks 3 configs instead of sweeping --
-    # and since G5 collapsed `build all` to one pass, nothing sets it. The machinery stays (builder
-    # takes it, the child parses --fill-gaps, tests pin it) because `--per-module` over an already
-    # built cache is the case it was written for; it just has no caller today.
+    # `fill_gaps` searches the whole grid when off, which is right for a first pass. It has a
+    # caller now: after a width or ladder change, an op the cache already "answers" at one bucket
+    # owes a new one, and reaching that unit used to mean `--rebuild-cached`, which re-measures
+    # every config the cache already holds for every bucket of that op. `--fill-gaps` runs the
+    # units and benches only what is missing.
+    fill_gaps = bool(getattr(args, "fill_gaps", False))
     results: list = builder.build_all(selected, Path(args.shards).expanduser(),
                                       _resolve_gpus(args.gpus), args.compile_jobs,
                                       resume=args.resume, reclaim=args.reclaim,
-                                      config_dir=directory, fill_gaps=False,
+                                      config_dir=directory, fill_gaps=fill_gaps,
                                       units_per_gpu=getattr(args, "units_per_gpu", 1),
                                       keep_ir=getattr(args, "keep_ir", False),
                                       predict=getattr(args, "predict_unusable", False),
                                       bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                       bench_rep_ms=getattr(args, "bench_rep_ms", 0),
                                       pin_cores=getattr(args, "pin_cores", False),
-                                      skip_cached=not getattr(args, "rebuild_cached", False))
+                                      # --fill-gaps has to reach the units too: the unit-level
+                                      # skip drops any op whose cache answers at ANY bucket,
+                                      # which is exactly the op that owes a new one.
+                                      skip_cached=not (getattr(args, "rebuild_cached", False)
+                                                       or fill_gaps))
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
@@ -1463,6 +1468,11 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
+    bld.add_argument("--fill-gaps", action="store_true",
+                     help="run every unit but bench only what the cache is MISSING: the keys it "
+                          "already holds are left alone. Use after a width/ladder change, where "
+                          "an op the cache 'answers' at one bucket owes a new one -- plain "
+                          "--rebuild-cached would re-measure every config it already has")
     bld.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
     bld.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
     bld.add_argument("--units-per-gpu", type=int, default=1,

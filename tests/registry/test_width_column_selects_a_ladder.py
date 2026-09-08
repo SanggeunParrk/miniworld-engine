@@ -17,9 +17,14 @@ from paths import registry_rows
 
 #: The four the builder's LADDER defines. `atom` is the fixed atom-stream width (128); `pair` and
 #: `single` are the two streams' ladders; `both` is the union, for a kernel that meets both.
-#: `head_dim` and `pair_bidir` are DERIVED classes: the number in those kernels'
-#: buckets is `d_hidden // n_head` and `2 * d_pair`, which no stream ladder produces.
-KNOWN = {"atom", "pair", "single", "both", "head_dim", "pair_bidir"}
+#: `head_dim`, `pair_bidir` and `expand_nd` are DERIVED classes: the number in those kernels'
+#: buckets is `d_hidden // n_head`, `2 * d_pair` and `n * d_hidden`, none of which a stream
+#: ladder produces.
+KNOWN = {"atom", "pair", "single", "both", "head_dim", "pair_bidir", "expand_nd"}
+
+#: The derived subset of KNOWN -- the classes whose value is computed from a stream
+#: width rather than being one. `_widths` returns these before it dispatches on side.
+DERIVED = {"head_dim", "pair_bidir", "expand_nd"}
 
 
 def _rows() -> list[dict]:
@@ -69,11 +74,24 @@ def test_a_both_level_row_declares_the_union_and_nothing_else() -> None:
     nothing would have caught it, because nothing reads the cell. Pinning the biconditional turns
     the dead value into a consistency check: `width=both` exactly when `level=both`.
     """
-    wrong = sorted(f"{r['kernel']}: level={r['level']} width={(r.get('width') or '').strip()}"
-                   for r in _rows() if r["backend"] == "triton"
-                   and (r["level"] == "both") != ((r.get("width") or "").strip() == "both"))
+    # ...or a DERIVED class. `_widths` reads DERIVED_WIDTHS before it looks at the side, so a
+    # derived value IS read on a `level=both` row and is not a stream claim at all: it names a
+    # computed quantity (`n * d_hidden`, `d_hidden // n_head`) that no side's ladder produces.
+    # `transition_expand_swiglu_triton` is the case that forced this. It is `level=both` -- the
+    # kernel really does meet both streams -- and it folds ND into its key, so the side ladders
+    # could only ever build the one ND its driver happened to pin, which is what `--replay`
+    # measured: 1024 and 1536 asked for, 512 built, five times over.
+    # Two directions, not one equality: a `level=both` row must say `both` or a derived class,
+    # and `both` may only appear on a `level=both` row. A DERIVED class is free at any level --
+    # `triangle_attention` is `level=token, width=head_dim` and that is the whole point of it.
+    allowed = {"both", *DERIVED}
+    wrong = sorted(
+        f"{r['kernel']}: level={r['level']} width={(r.get('width') or '').strip()}"
+        for r in _rows() if r["backend"] == "triton"
+        and ((r["level"] == "both" and (r.get("width") or "").strip() not in allowed)
+             or ((r.get("width") or "").strip() == "both" and r["level"] != "both")))
     assert not wrong, (
         "level and width disagree about whether the kernel meets both streams. A `level=both` row "
         "is driven once per side and its ladder comes from the side, so the column can only say "
-        "`both`; and a row that says `both` while its level names one stream is claiming a ladder "
-        "it will never be given:\n  " + "\n  ".join(wrong))
+        "`both` or name a derived class; and a row that says `both` while its level names one "
+        "stream is claiming a ladder it will never be given:\n  " + "\n  ".join(wrong))

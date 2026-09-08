@@ -69,6 +69,12 @@ DEVICE = torch.device("cuda")
 FP32_PRECISION = 32
 
 
+#: Targets whose block reaches `SWA3DRoPEAttention`, and therefore FlashAttention's
+#: non-capturable varlen path. `swa_dit` is `SWADiTBlock`, which holds one; `cli.MODULE_TARGETS`
+#: spells the same containment out in its own entry for it.
+_NO_GRAPH_TARGETS = frozenset({"swa_atom_attention", "swa_dit"})
+
+
 class BenchConfig(BaseModel):
     d_single: int = 384
     d_pair: int = 128
@@ -179,12 +185,21 @@ class BenchConfig(BaseModel):
     @model_validator(mode="after")
     def _resolve_auto_cudagraph(self) -> "BenchConfig":
         if self.cudagraph == "auto":
-            # swa_atom_attention's FlashAttention path is NOT CUDA-graph capturable: it bumps a philox
-            # RNG offset outside the capture ("Offset increment outside graph capture") and its varlen
-            # setup hits an aten.nonzero graph break. Manual/graphed both fail there, so it stays
-            # no-graph in BOTH modes. Every other module: inference is launch-bound (manual capture),
-            # training is backward-dominated (no-graph).
-            if self.target == "swa_atom_attention":
+            # The FlashAttention path is NOT CUDA-graph capturable: it bumps a philox RNG offset
+            # outside the capture ("Offset increment outside graph capture") and its varlen setup
+            # hits an aten.nonzero graph break. Manual/graphed both fail there, so any target whose
+            # block CONTAINS that attention stays no-graph in BOTH modes.
+            #
+            # By containment, not by name. This was `self.target == "swa_atom_attention"`, and
+            # `swa_dit` is the atom-track DiT block built AROUND the same `SWA3DRoPEAttention` --
+            # so it took `manual` in inference and died on exactly the error this comment
+            # describes, every implementation, at every length: the target produced no number at
+            # all until `--cudagraph disabled` was passed by hand. It has no dropout of its own;
+            # the RNG being advanced is flash-attention's, at dropout_p=0.
+            #
+            # Every other module: inference is launch-bound (manual capture), training is
+            # backward-dominated (no-graph).
+            if self.target in _NO_GRAPH_TARGETS:
                 self.cudagraph = "disabled"
             else:
                 self.cudagraph = "manual" if is_inference_mode(self.mode) else "disabled"

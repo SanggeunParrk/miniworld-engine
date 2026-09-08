@@ -889,6 +889,29 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: channel width with no ladder rung of its own. `dev audit --replay` measured it directly:
     #: `layernorm_fwd_saveact_triton` missing `(rows=2048, N=64)` and `(4096, 64)`.
     MSA_WIDTHS = (64,)
+    #: Widths the TRANSITION's expansion presents, for the same reason MSA_WIDTHS exists: a shared
+    #: kernel meets them and no stream ladder carries them. The transition expands its hidden width
+    #: by `n` (4) before the SwiGLU, so every kernel downstream of that expansion sees `n*d_hidden`,
+    #: and `cases()` builds the transition at d_hidden 128, 256 and 384 -- 512, 1024 and 1536.
+    #:
+    #: `dev audit --replay` measured all three consequences on an A6000 at once: the LN kernels the
+    #: expanded activation flows through (`layernorm_fwd_saveact_strided_triton`,
+    #: `layernorm_bwd_split_triton`, `layernorm_bwd_atomic_strided_triton`) each asked for a width
+    #: 1024 they had no rung for, and `transition_expand_swiglu_triton` /
+    #: `transition_bwd_swiglu_recompute_triton` -- which fold ND into their key -- asked for 1024
+    #: and 1536 while their driver built 512 at every declared width.
+    #:
+    #: 512 is already on the pair ladder; it is listed anyway so the set says what it is rather
+    #: than relying on an overlap that a change to HEADROOM_PAIR would silently break.
+    EXPANDED_WIDTHS = (512, 1024, 1536)
+    #: What the SHARED kernels get, which is not the same list. The three LN rows above asked for
+    #: 1024 and only 1024; nothing has ever asked them for 1536, and the derivation alone is not
+    #: evidence -- `cases()` declaring d_hidden=384 says the transition runs there, not that the
+    #: expanded activation reaches these kernels at that width. Adding 1536 on the argument that it
+    #: "should" be reachable costs 148 units for a bucket no measurement has requested, which is
+    #: the same trade HEADROOM_PAIR is explicit about making the other way. Widen it when a replay
+    #: asks.
+    EXPANDED_SHARED = (1024,)
     #: The token side of a DiT family. 128 is NOT here: it is d_single_atom, the atom side's width,
     #: and pairing it with a token count builds a shape no config presents. 384 (d_cond, AF3's c_s)
     #: and 768 (d_single_token, c_token) are what the token blocks run.
@@ -929,6 +952,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     DERIVED_WIDTHS = {
         "head_dim": HEAD_DIMS,
         "pair_bidir": PAIR_BIDIR,
+        "expand_nd": EXPANDED_WIDTHS,
     }
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
@@ -1056,6 +1080,13 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 # had neither, because 64 was a rung on no ladder at all.
                 return tuple(sorted({ATOM_WIDTH, *MSA_WIDTHS}))
             if side == "pair":
+                # Plus the transition's expanded widths on a `level=both` row. Those rows are the
+                # SHARED layernorm/transition kernels, and the pair-side transition hands them
+                # `n*d_hidden` -- 1024 is what `--replay` asked three of them for and none had.
+                # A `level=pair`/`token` row keeps the plain pair ladder: it is one family's own
+                # kernel, and the expansion is not on its stream.
+                if _lvl == "both":
+                    return tuple(sorted(set(LADDER["pair"]) | set(EXPANDED_SHARED)))
                 return LADDER["pair"]
             if side == "token":
                 # The class decides the WIDTH even here -- the comment above says so, and this
@@ -1603,7 +1634,17 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                                        config_dir, fill_gaps, share_card=units_per_gpu > 1,
                                        keep_ir=keep_ir, predict=predict,
                                        bench_clear_mb=bench_clear_mb, bench_rep_ms=bench_rep_ms,
-                                       cores=cores, rebuild_cached=not skip_cached)
+                                       cores=cores,
+                                       # `--rebuild-cached` on the CHILD means "re-measure the
+                                       # configs the cache already searched for this shape". That
+                                       # is not what disabling the unit-level skip is for, and the
+                                       # two were the same flag: the only way to reach a unit the
+                                       # cache "answers" was to pay for re-measuring every config
+                                       # it already holds. `--fill-gaps` splits them -- run the
+                                       # unit, subtract what is measured, bench only the rest --
+                                       # which is what a new WIDTH rung on an already-tuned op
+                                       # needs, and what a rebuild should cost.
+                                       rebuild_cached=not skip_cached and not fill_gaps)
             if res.get("claimed_elsewhere"):
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else

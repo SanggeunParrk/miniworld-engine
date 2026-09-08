@@ -97,6 +97,18 @@ N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, n
 # width would tune a bucket the dispatcher never routes to it, and at 384 it would not tune at all
 # -- it would die OutOfResources at every length.
 K_SMALL = ragged(128)  # K: the AF3 transition d, and the b2b path's ceiling; ragged -> 125
+#: The width the kernels DOWNSTREAM of the expansion see: `n * d_hidden`, which is what their
+#: buckets carry. Their registry rows say `width=expand_nd` and the unit hands the expanded width
+#: over here, so K follows from it rather than the other way round.
+#:
+#: This is why they were missing. The driver built `ND_SMALL = 4 * K_SMALL = 512` at every one of
+#: the five widths the sweep declared, so five units wrote one bucket -- and `cases()` builds the
+#: transition at d_hidden 128, 256 and 384, i.e. ND 512, 1024 and 1536. `dev audit --replay` asked
+#: `transition_expand_swiglu_triton` and `transition_bwd_swiglu_recompute_triton` for 1024 and
+#: 1536 and neither had ever been built. Same defect as triangle_attention's frozen head dim and
+#: trimul's frozen per-side width: a kernel keys on a DERIVED width and the driver pinned it.
+ND_DRIVEN = ragged(driver_width(4 * 128))
+K_FROM_ND = max(16, ND_DRIVEN // N_EXPAND)
 # The ktiled kernel is the one that sweeps: it exists FOR K > _B2B_MAX_K, so it follows the width
 # whenever that clears the threshold, and otherwise takes the smallest width that does.
 K_LARGE = ragged(max(256, driver_width(256)))  # -> 253 at the default width
@@ -135,13 +147,17 @@ def _transition_operands(k: int = K_SMALL, n: int = N_EXPAND):
 
 
 def transition_expand_swiglu_triton() -> None:
-    """transition_fwd_kernel via TritonTransitionFunction.forward (kernels/transition/triton/main)."""
+    """transition_fwd_kernel via TritonTransitionFunction.forward (kernels/transition/triton/main).
+
+    At the EXPANDED width the unit declares (`width=expand_nd`), not at the frozen `K_SMALL`: this
+    kernel folds ND into its key, so a driver pinned to one ND can only ever build one bucket.
+    """
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 
-    _, _, _, wa, wb, ws = _transition_operands()
+    _, _, _, wa, wb, ws = _transition_operands(k=K_FROM_ND)
     # The pre-flatten (1, L, L, K) activation, not the flat (M, K): the launcher reads
     # both_key(rows_of(x.shape)) before its own view(-1, d), so a flat x makes it bucket M.
-    triton_transition(_pair_x(), wa, wb, ws, N_EXPAND)
+    triton_transition(_pair_x(K_FROM_ND), wa, wb, ws, N_EXPAND)
 
 
 def transition_fold_triton() -> None:
@@ -207,7 +223,9 @@ def transition_bwd_swiglu_recompute_triton() -> None:
         _transition_expand_gatebwd_stacked,
     )
 
-    x2, g, b, wa, wb, _ = _transition_operands()
+    # At the expanded width the unit declares, like the forward: this kernel's bucket carries the
+    # expand width, so `_transition_operands()` at the frozen K_SMALL built ND 512 for every rung.
+    x2, g, b, wa, wb, _ = _transition_operands(k=K_FROM_ND)
     rstd, c1 = stats_triton(x2, EPS, shape_key=SHAPE_KEY)
     grad_expand = rows2d(ROWS, wa.shape[0])
     _transition_expand_gatebwd_stacked(x2, rstd, c1, g, b, wa, wb, grad_expand,
