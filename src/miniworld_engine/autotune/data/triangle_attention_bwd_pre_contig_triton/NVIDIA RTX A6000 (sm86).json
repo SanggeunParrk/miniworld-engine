@@ -68,14 +68,14 @@
   ],
   "config_space_hash": "cdbcf4d6717b",
   "driver_id_scheme": 2,
-  "driver_identity": "4ba526f5ab0d",
+  "driver_identity": "0ac2dfee4872",
   "entries": {
     "bfloat16+float32|shape_key=2147616806": [
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.018432000651955605,
+        "ms": 0.011264000087976456,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -83,7 +83,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.018432000651955605,
+        "ms": 0.011264000087976456,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -91,7 +91,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.018432000651955605,
+        "ms": 0.011264000087976456,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -99,7 +99,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.018432000651955605,
+        "ms": 0.011264000087976456,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -107,7 +107,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.018432000651955605,
+        "ms": 0.011264000087976456,
         "num_stages": 1,
         "num_warps": 2
       }
@@ -117,7 +117,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.055296000093221664,
+        "ms": 0.03174399957060814,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -125,7 +125,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.055296000093221664,
+        "ms": 0.03174399957060814,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -133,7 +133,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.055296000093221664,
+        "ms": 0.03174399957060814,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -141,7 +141,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.055296000093221664,
+        "ms": 0.03174399957060814,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -149,7 +149,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.055296000093221664,
+        "ms": 0.03174399957060814,
         "num_stages": 1,
         "num_warps": 2
       }
@@ -159,7 +159,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.11366400122642517,
+        "ms": 0.060416001826524734,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -167,7 +167,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.11366400122642517,
+        "ms": 0.060416001826524734,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -175,25 +175,25 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.11366400122642517,
+        "ms": 0.060416001826524734,
         "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
-          "BLOCK_M1": 4
+          "BLOCK_M1": 128
         },
-        "ms": 0.11366400122642517,
-        "num_stages": 4,
-        "num_warps": 1
+        "ms": 0.060416001826524734,
+        "num_stages": 3,
+        "num_warps": 2
       },
       {
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.11366400122642517,
-        "num_stages": 1,
-        "num_warps": 2
+        "ms": 0.06143999844789505,
+        "num_stages": 4,
+        "num_warps": 1
       }
     ],
     "bfloat16+float32|shape_key=8590067750": [
@@ -201,7 +201,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.1955839991569519,
+        "ms": 0.1013759970664978,
         "num_stages": 1,
         "num_warps": 1
       },
@@ -209,7 +209,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.1955839991569519,
+        "ms": 0.1013759970664978,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -217,15 +217,7 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.1955839991569519,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 4
-        },
-        "ms": 0.1955839991569519,
+        "ms": 0.1013759970664978,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -233,8 +225,16 @@
         "kwargs": {
           "BLOCK_M1": 4
         },
-        "ms": 0.1955839991569519,
-        "num_stages": 1,
+        "ms": 0.1013759970664978,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 4
+        },
+        "ms": 0.1013759970664978,
+        "num_stages": 4,
         "num_warps": 2
       }
     ]
