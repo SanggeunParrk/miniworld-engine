@@ -14,6 +14,7 @@ from miniworld_engine.kernels.drivers import (
     TensorKw,
     _grad,
     dev,
+    driver_heads,
     driver_width,
     ragged,
 )
@@ -23,7 +24,16 @@ from miniworld_engine.kernels.drivers.triangle_attention import D, H, L
 # d_pair // head dim, so an H that says d_pair=384 beside a DP that says 128 describes no d_pair
 # the model ever runs, and DH is folded into the shape key.
 DH = ragged(driver_width(128))          # d_hidden: gate/out_r width == the gate-out GEMM's contraction
-DP = ragged(driver_width(128), by=5)    # d_pair: the gate-out GEMM's output width N == wo.shape[0]
+#: d_pair -- the gate-out GEMM's OUTPUT width, `wo.shape[0]`. Independent of DH: the kernel keys on
+#: `pack(..., N=N, DH=DH)`, two axes, and taking both from one `driver_width` could only ever build
+#: the diagonal (128,128) (256,256) (512,512). `cases()` declares gated_projection at (hd, d) of
+#: (128,128) and (256,128), so (256,128) was unreachable -- and `--replay` asked for it, and for
+#: (512,256), at every length.
+#:
+#: The unit carries the pair now: the width is DH and the spare axis is this one. `driver_heads` is
+#: that spare axis; it is a head count on the attention rows and d_pair here, which is why this
+#: reads it under its own name rather than importing the meaning with it.
+DP = ragged(driver_heads(driver_width(128)), by=5)
 
 
 def _bias_only_vb() -> tuple[torch.Tensor, ...]:

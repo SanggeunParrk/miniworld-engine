@@ -65,6 +65,7 @@ from miniworld_engine.kernels.drivers import (
     _grad,
     aligned_only,
     dev,
+    driver_heads,
     driver_length,
     driver_width,
     ragged,
@@ -78,9 +79,14 @@ L = ragged(driver_length(128))   # sequence length: tiles in BOTH the query loop
 #: and `dev audit --replay` missed exactly 16 and 64 at every length, forever, because no unit
 #: ever built them.
 D = ragged(driver_width(32))
-#: n_head -- a GRID extent, never a `tl.arange` block, and NOT in the cache key. Derived from a
-#: fixed total qkv width so it stays a plausible head count as D moves; the bucket does not see it.
-H = max(1, 128 // D) if D <= 128 else 1
+#: n_head. It IS in the cache key -- `main.py:376` packs `pack(shape_key, H=H, HEAD_DIM=D)` -- and
+#: the comment here used to say the opposite while deriving it from a fixed 128, which tied the two
+#: axes together: D=64 forced H=2, D=16 forced H=8. `cases()` declares (n_head, head_dim) of (4,32)
+#: (8,16) (4,64) (16,16), and that ratio can produce neither (4,64) nor (16,16). `--replay` asked
+#: for both at every length, at every rebuild, and no unit could ever have built them.
+#:
+#: The unit says which pair, and the ratio stays as the fallback for a caller that names no count.
+H = driver_heads(max(1, 128 // D) if D <= 128 else 1)
 
 #: The atomic triangle path refuses any other head dim, so it keeps a power-of-two 32.
 D32 = aligned_only(

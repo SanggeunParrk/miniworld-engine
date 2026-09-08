@@ -649,6 +649,18 @@ class OpUnit:
     #: keys on ROWS, so its two sides are different buckets at the same length -- atom A=256 is
     #: 256 rows, pair L=256 is 65,536 -- and the side has to be said, not inferred.
     side: str = ""
+    #: HEAD COUNT, for the kernels whose bucket carries `H` alongside `HEAD_DIM`.
+    #:
+    #: One width is not enough for those. `triangle_attention` packs `pack(shape_key, H=H,
+    #: HEAD_DIM=D)` -- two independent axes -- and its driver derived the second from the first
+    #: (`H = 128 // D`), which ties them: D=64 forces H=2 and D=16 forces H=8. `cases()` declares
+    #: (n_head, d_hidden) of (4,128) (8,128) (4,256) (16,256), i.e. (H, HEAD_DIM) of (4,32) (8,16)
+    #: (4,64) (16,16) -- and (4,64) and (16,16) are exactly the two that ratio cannot produce.
+    #: `dev audit --replay` asked for both at every length and no unit had ever built either, and
+    #: no amount of rebuilding could: the driver had no way to be told.
+    #:
+    #: 0 means "the driver decides", which is every op that does not key on a head count.
+    heads: int = 0
 
     @property
     def bucket(self) -> int:
@@ -676,10 +688,17 @@ class OpUnit:
     def stem(self) -> str:
         tag = f"-{self.side}" if self.side else ""
         w = f"-D{self.width}" if self.width else ""
-        return f"op-{self.op}-{self.dtype}{tag}-L{self.length}{w}"
+        # The spare axis is part of the identity, like the width: two units differing only in it
+        # write DIFFERENT buckets -- (H=4, HEAD_DIM=64) and (H=8, HEAD_DIM=64) are two keys -- so a
+        # shared stem would have one shard overwrite the other and the sweep would silently build
+        # half of what it planned. `test_the_op_sweep_drives_more_than_one_width` pins exactly this.
+        h = f"-H{self.heads}" if self.heads else ""
+        return f"op-{self.op}-{self.dtype}{tag}-L{self.length}{w}{h}"
 
     def cmd_args(self) -> list[str]:
         args = ["--op", self.op, "--dtype", self.dtype, "--length", str(self.length)]
+        if self.heads:
+            args += ["--heads", str(self.heads)]
         if self.width:
             args += ["--width", str(self.width)]
         return args + (["--side", self.side] if self.side else [])
@@ -695,6 +714,8 @@ class OpUnit:
         env = {"MINIWORLD_DRIVER_LENGTH": str(self.length)}
         if self.width:
             env["MINIWORLD_DRIVER_WIDTH"] = str(self.width)
+        if self.heads:
+            env["MINIWORLD_DRIVER_HEADS"] = str(self.heads)
         if self.side:
             env["MINIWORLD_DRIVER_SIDE"] = self.side
         # THE DTYPE, which used to be missing. registry.csv's `dtypes` column splits an op into one
@@ -944,7 +965,38 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #:     trimul meets 2*d_pair, so the ladder is the pair ladder doubled. Its driver says
     #:     "Square single-dir (H = Din = D)" in its own docstring: it drives one half of what the
     #:     row meets, and `--replay` missed H=1024 (2 x 512) at three lengths.
-    HEAD_DIMS = (16, 32, 64)
+    #: (n_head, head_dim) PAIRS, not head dims. The two are independent axes of the same key --
+    #: `pack(shape_key, H=H, HEAD_DIM=D)` -- so a ladder of head dims alone leaves the driver to
+    #: invent the head count, and `H = 128 // D` is what it invented: it can produce (4,32) (8,16)
+    #: (2,64) (16,8) and nothing else. `cases()` declares (4,32) (8,16) (4,64) (16,16); the last
+    #: two are unreachable from that ratio at any width, which is what `--replay` measured.
+    #:
+    #: Read off `cases()` rather than listed, so the two cannot drift.
+    HEAD_PAIRS = tuple(sorted({(d["n_head"], d["d_hidden"] // d["n_head"])
+                               for c in cases() if c.name.startswith("triangle_attention")
+                               for d in c.dims
+                               if d.get("n_head") and d.get("d_hidden")
+                               and d["d_hidden"] % d["n_head"] == 0}))
+    HEAD_DIMS = tuple(sorted({d for _h, d in HEAD_PAIRS})) or (16, 32, 64)
+    #: (d_hidden, d_pair) pairs for the gate-out GEMM, whose bucket is `pack(..., N=N, DH=DH)`:
+    #: DH is the contraction and N the output width, and they are independent. Its driver took both
+    #: from one `driver_width`, so it could only ever build the DIAGONAL -- (128,128) (256,256)
+    #: (512,512) -- while `cases()` declares gated_projection at (hd, d) of (128,128) and
+    #: (256,128). `--replay` asked for (256,128) and (512,256) and neither was reachable.
+    GATE_OUT_PAIRS = tuple(sorted({(d["hd"], d["d"])
+                                   for c in cases() if c.name == "gated_projection"
+                                   for d in c.dims if d.get("hd") and d.get("d")}))
+    #: (d_hidden, d_cond) for the DiT families. Their kernels key on both -- `pack(..., NX=NX,
+    #: NC=NC)` and the `(D, ND)` / `(DC, ND)` variants -- and `drivers/conditioned_transition.py`
+    #: derived the second from the first: `_DC_BASE = 384 if _D_BASE > 128 else 128`. That yields
+    #: (128,128) and (768,384) and nothing else, which happens to be what `cases()` declares -- but
+    #: it welds the pair to the WIDTH, so each pair was only ever built at the lengths that width's
+    #: ladder rung carries. `--replay` asked for (128,128) at 256..768 and had it only at 1024+,
+    #: and for (384,768) at 1024 and had it only at 128..768.
+    DIT_PAIRS = tuple(sorted({(d["d_hidden"], d["d_cond"])
+                              for c in cases()
+                              if c.name in ("adaptive_layernorm", "conditioned_transition")
+                              for d in c.dims if d.get("d_hidden") and d.get("d_cond")}))
     PAIR_BIDIR = tuple(sorted({2 * w for w in PRESENTED["pair"] + HEADROOM_PAIR}))
     #: One entry PER LINE, like LADDER: `test_the_builders_ladder_defines_exactly_these` reads the
     #: vocabulary straight out of this source and takes the first quoted name on each line, so a
@@ -1122,9 +1174,46 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 return widths
             return (max(widths),)
 
-        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)
+        # A `head_dim` row's bucket carries TWO axes, so its units carry the pair. Everything else
+        # gets heads=0, which leaves the driver's own derivation alone.
+        _pairs = (klass == "head_dim")
+        #: The gate-out GEMM's two widths are independent and its driver tied them, so these two
+        #: rows carry the (d_hidden, d_pair) pair the same way a head_dim row carries (H, D). The
+        #: SECOND number rides in `heads` -- it is the unit's spare axis, not a head count here,
+        #: and `drivers/bias_only_attention.py` reads it under its own name.
+        _gate_out = r["kernel"] in ("gated_projection_bwd_dx_triton",
+                                    "gated_projection_gate_gemm_triton")
+        #: The adaLN / conditioned-transition rows: their kernels key on d_hidden AND d_cond, and
+        #: the driver derived the second from the first, which welded the pair to the width. The
+        #: pair rides the same way as the others -- width is d_hidden, the spare axis is d_cond.
+        _dit_pair = r["family"] in ("adaln", "conditioned_transition")
+
+        def _axes(side: str) -> list:
+            """(width, spare axis) per unit. The LADDER still decides the widths -- the pair only
+            says what the second axis is for a width the model actually declares.
+
+            Filtering by the ladder is not decoration. `_widths` is where the side and the registry
+            `width` column are honoured, and returning a pair list outright ignored both: an
+            atom-level row got a token width at an atom length, which three tests forbid and which
+            `_widths`' own comment calls out ("gave those three rows 30 units each at 384/512/768
+            -- shapes their own registry row says they never see").
+            """
+            ws = _distinct(tuple(_widths(side)))
+            if _pairs:
+                # only the (H, D) combinations `cases()` declares, not their cross product: the
+                # cross would build head counts the model never pairs with that head dim.
+                return [(d, h) for h, d in HEAD_PAIRS if d in ws]
+            if _gate_out:
+                pair = {hd: d for hd, d in GATE_OUT_PAIRS}
+                return [(w, pair.get(w, 0)) for w in ws]
+            if _dit_pair:
+                pair = {dh: dc for dh, dc in DIT_PAIRS}
+                return [(w, pair.get(w, 0)) for w in ws]
+            return [(w, 0) for w in ws]
+
+        out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w, heads=h)
                     for dt in dtypes for side, length in sided
-                    for w in _distinct(tuple(_widths(side)))])
+                    for w, h in _axes(side)])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands
@@ -1816,6 +1905,12 @@ def _child_main(argv: list[str] | None = None) -> int:
                     help="base channel width for this unit. Reaches the drivers through "
                          "MINIWORLD_DRIVER_WIDTH before they import, like --length; it is on the "
                          "command line so the unit is reproducible from it.")
+    ap.add_argument("--heads", type=int, default=0,
+                    help="the unit's SECOND width axis, for a kernel whose bucket carries two: "
+                         "n_head beside HEAD_DIM, d_cond beside d_hidden, d_pair beside d_hidden. "
+                         "Reaches the drivers as MINIWORLD_DRIVER_HEADS. A driver that derived it "
+                         "from the first axis could only ever build the pairs that one ratio "
+                         "produces, and `cases()` declares pairs it does not.")
     # Every side `op_units` can emit. "token" was added when the DiT families and the level=both
     # rows were split by stream, and this list was not -- so every token unit died in argparse
     # before it reached a kernel, 3 seconds and 0 ops each. The parent process and the child have

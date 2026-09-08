@@ -179,6 +179,27 @@ def driver_width(default: int) -> int:
     return DRIVER_WIDTH if DRIVER_WIDTH is not None else default
 
 
+_ENV_HEADS = os.environ.get("MINIWORLD_DRIVER_HEADS", "").strip()
+#: The HEAD COUNT a unit declares, or None to let the driver derive one.
+#:
+#: `driver_width` hands over ONE number, and that is enough while a kernel's bucket carries one
+#: width. It is not enough for `triangle_attention`, whose key is `pack(shape_key, H=H,
+#: HEAD_DIM=D)`: two independent axes. Its driver derived the second from the first (`H = 128 //
+#: D`), which makes D=64 mean H=2 and D=16 mean H=8 -- while `cases()` declares (4,64) and
+#: (16,16). Those two pairs were unreachable at any width, and a rebuild could not help because
+#: nothing could say which head count to use.
+DRIVER_HEADS: int | None = int(_ENV_HEADS) or None if _ENV_HEADS else None
+
+
+def driver_heads(default: int) -> int:
+    """The head count this driver should build at -- the unit's, or its own derivation.
+
+    Read at import for the same reason as :func:`driver_width`: these constants are module-level
+    and the kernels reach them through helpers that close over them.
+    """
+    return DRIVER_HEADS if DRIVER_HEADS is not None else default
+
+
 def ragged(n: int, *, by: int = 3, floor: int = 16) -> int:
     """``n`` when aligned, ``n - by`` when ragged, never below ``floor``.
 

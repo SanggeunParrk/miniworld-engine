@@ -45,6 +45,7 @@ from miniworld_engine.autotune.shape_key import atom_key
 from miniworld_engine.kernels.drivers import (
     BF16,
     _rand,
+    driver_heads,
     driver_length,
     driver_width,
     ragged,
@@ -86,7 +87,16 @@ _N_EXPAND = 2
 #: whenever d_hidden is a token width and 128 on the atom side, and a driver that pinned it to one
 #: number tuned a d_cond the other side never presents. The two stay SEPARATE axes -- separately
 #: tiled as NC / DC -- because on the token side they are unequal.
-_DC_BASE = 384 if _D_BASE > 128 else 128
+#: d_cond. INDEPENDENT of d_hidden: these kernels key on both -- `pack(..., NX=NX, NC=NC)` and the
+#: `(D, ND)` / `(DC, ND)` variants -- and this line used to derive it, `384 if _D_BASE > 128 else
+#: 128`. That happens to produce the two pairs `cases()` declares, (128,128) and (768,384), but it
+#: welds each pair to a WIDTH, so a pair could only be built at the lengths that width's ladder rung
+#: carries. `dev audit --replay` asked for (128,128) at lengths 256..768 and the cache had it only
+#: at 1024 and above, and for (384,768) at 1024 and had it only at 128..768 -- 40-odd misses that
+#: no rebuild could close, because the unit had no way to say "this pair, that length".
+#:
+#: The unit carries the pair now: width is d_hidden, `driver_heads` is the spare axis.
+_DC_BASE = driver_heads(384 if _D_BASE > 128 else 128)
 
 #: The KEY and the ROW COUNT are two different numbers, and this driver used to use one for both.
 #:
