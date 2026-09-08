@@ -1066,6 +1066,60 @@ def cmd_install_flash(args: argparse.Namespace) -> int:
     return subprocess.call(cmd)
 
 
+def cmd_buckets(args: argparse.Namespace) -> int:
+    """Measure which of each row's declared widths actually reach its cache key.
+
+    `op_units` crosses every kernel with a ladder of channel widths on the assumption that a
+    different width is a different bucket. For 17 of the 91 triton ops it is not -- they file every
+    declared width into ONE, so 217 of 2,079 units were re-timing a bucket a sibling unit had
+    already timed and overwriting it. The bucket is a packed integer built from constexprs that do
+    not exist until the launcher builds them, so the only way to answer this is to launch and read
+    the key back, which is what this does. `op_units` then drops the duplicate units.
+
+    Re-run it after adding a kernel, changing a driver's shape derivation, or moving a `width`
+    column; an op the file does not cover keeps its full ladder, so a stale file loses no coverage.
+    """
+    import csv
+    from pathlib import Path
+
+    from miniworld_engine.autotune import builder, width_evidence
+
+    rows = {r["kernel"]: r for r in csv.DictReader(
+        (Path(builder.__file__).resolve().parent.parent
+         / "kernels" / "registry.csv").open(newline=""))}
+    # The DECLARED ladders, not the plan: `op_units` narrows the plan with the evidence this
+    # command writes, so probing the plan would re-measure only what the last run left standing and
+    # a collapse could never be revisited -- a driver that started honouring its width would keep
+    # the one rung it was cut down to, forever.
+    real_load = width_evidence.load
+    width_evidence.load = lambda *a, **k: {}
+    try:
+        declared = builder.op_units(None)
+    finally:
+        width_evidence.load = real_load
+
+    want: dict[tuple[str, str], set[int]] = {}
+    for u in declared:
+        r = rows.get(u.op)
+        if not r or (r.get("developed") or "yes").strip() == "no":
+            continue
+        if r["backend"] != "triton" or not (r.get("driver") or "").strip():
+            continue
+        want.setdefault((u.op, r["driver"]), set()).add(u.width or 0)
+    only = set(args.ops.split(",")) if args.ops else None
+    todo = [(op, ref, tuple(sorted(ws))) for (op, ref), ws in sorted(want.items())
+            if only is None or op in only]
+    print(f"probing {sum(len(w) for _, _, w in todo)} (op, width) launches "
+          f"across {len(todo)} ops", flush=True)
+    out = Path(args.out) if args.out else width_evidence.EVIDENCE
+    got = width_evidence.measure(todo, out=out)
+    collapsed = [op for op, per in got.items()
+                 if len(per) > 1 and len({tuple(v) for v in per.values()}) == 1]
+    print(f"wrote {out} -- {len(got)} ops; {len(collapsed)} file every declared width into one "
+          f"bucket: {sorted(collapsed)}", flush=True)
+    return 0
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     """Verify the build system AND that every declared (op, bucket) is in the shipped cache."""
     from miniworld_engine.build import audit as _audit  # imports every kernel
@@ -1535,6 +1589,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="skip detection and install for this arch, e.g. sm80")
     flash.add_argument("--dry-run", action="store_true", help="print the command, install nothing")
     flash.set_defaults(func=cmd_install_flash)
+
+    bkt = dev.add_parser("buckets",
+                         help="measure which declared widths actually reach each kernel's cache "
+                              "key, so the build stops re-timing one bucket N times (needs a GPU)")
+    bkt.add_argument("--ops", default="", help="comma-separated ops; default every driven op")
+    bkt.add_argument("--out", default="", help="where to write the evidence; defaults in-repo")
+    bkt.set_defaults(func=cmd_buckets)
 
     aud = dev.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

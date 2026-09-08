@@ -23,6 +23,7 @@ import csv
 
 from paths import REGISTRY as REG
 
+from miniworld_engine.autotune import width_evidence
 from miniworld_engine.autotune.builder import op_units
 from miniworld_engine.autotune.shape_key import (
     ATOM_KEY_BUCKETS,
@@ -69,7 +70,16 @@ def test_each_is_driven_from_both_streams_with_that_streams_widths() -> None:
             mine = [u for u in us if u.dtype == dtype]
             token = {(u.length, u.width) for u in mine if u.side == "token"}
             atom = {(u.length, u.width) for u in mine if u.side == "atom"}
-            want_t = {(L, w) for L in DIT_TOKEN_LENGTHS for w in TOKEN_WIDTHS}
+            # Both token widths, EXCEPT where `dev buckets` measured that they file into the same
+            # bucket. Two units cannot then be two entries -- the second only overwrites the
+            # first -- so the plan keeps the larger, which is the one that matters here anyway:
+            # 768 is d_single_token, 24 of the model's 27 blocks, and the width whose absence this
+            # test was written for. The exception is the measurement, not a name: an op keeps both
+            # widths unless the evidence says one of them reaches no new key.
+            widths = TOKEN_WIDTHS
+            if width_evidence.collapses(r["kernel"], TOKEN_WIDTHS):
+                widths = (max(TOKEN_WIDTHS),)
+            want_t = {(L, w) for L in DIT_TOKEN_LENGTHS for w in widths}
             want_a = {(A, ATOM_WIDTH) for A in DIT_ATOM_LENGTHS}
             if token != want_t:
                 bad.append(f"{r['kernel']} [{dtype}] token side: {sorted(token)}")

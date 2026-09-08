@@ -38,7 +38,7 @@ from typing import ClassVar
 import torch
 
 from miniworld_engine import build as build_matrix
-from miniworld_engine.autotune import triton_cache
+from miniworld_engine.autotune import triton_cache, width_evidence
 
 BF16 = torch.bfloat16
 
@@ -939,6 +939,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
               # lands on -- not through this entry, which `_widths` never reads for such a row.
               "both": tuple(sorted(set(PRESENTED["pair"] + HEADROOM_PAIR
                                        + PRESENTED["single"] + MSA_WIDTHS)))}
+    #: read once, not once per row -- 91 rows would open the same file 91 times.
+    evidence = width_evidence.load()
     out = []
     for r in csv.DictReader(reg.open()):
         if r["backend"] != "triton" or not (r["driver"] or "").strip():
@@ -1067,8 +1069,31 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 return (ATOM_WIDTH,) if _k == "atom" else DIT_TOKEN_WIDTHS
             return LADDER.get(_k, LADDER["both"])
 
+        # A ladder is a guess that a different width is a different bucket. For 17 ops it is not:
+        # `dev buckets` launched every (op, width) the plan contains and read the key back, and
+        # they file every declared width into ONE. Building the other rungs re-times a bucket a
+        # sibling unit already timed and overwrites it -- 274 of 2,079 units. Drop them here, where
+        # the plan is made, so the work is never scheduled rather than skipped after the fact.
+        #
+        # Measured, not declared: the key is a packed integer built from constexprs that do not
+        # exist until the launcher builds them (see `_cache_answers`), so a registry column saying
+        # this would be a guess with nothing to check it against. An op the evidence does not
+        # cover keeps its full ladder.
+        # The LARGEST of a collapsed group, not the first. When two widths share a bucket they
+        # share a winner, so exactly one of them decides what production gets at both -- and the
+        # repo has already measured which one to pick: `_ROWS_SATURATE` exists because tuning the
+        # adaLN kernels at 512 rows instead of their real row count chose a config that costs
+        # production 1.53x. Tuning at the small end of a saturating bucket is the same mistake on
+        # the other axis. Before this the winner was whichever unit the pool happened to finish
+        # last, which was neither deterministic nor chosen.
+        def _distinct(widths: tuple, _op=r["kernel"]) -> tuple:
+            if len(widths) < 2 or not width_evidence.collapses(_op, widths, evidence):
+                return widths
+            return (max(widths),)
+
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w)
-                    for dt in dtypes for side, length in sided for w in _widths(side)])
+                    for dt in dtypes for side, length in sided
+                    for w in _distinct(tuple(_widths(side)))])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands

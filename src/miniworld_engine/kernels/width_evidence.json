@@ -1,0 +1,1118 @@
+{
+ "adaln_bwd_dx_dlnw_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=35188667581258"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=35197258564426"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=35210143466314"
+  ]
+ },
+ "adaln_bwd_pre_dx_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=8590459674"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=8591508250"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=8593081114"
+  ]
+ },
+ "adaln_epilogue_saveact_triton": {
+  "128": [
+   "bfloat16+float32|HAS_SB=1,shape_key=8590459674"
+  ],
+  "384": [
+   "bfloat16+float32|HAS_SB=1,shape_key=8591508250"
+  ],
+  "768": [
+   "bfloat16+float32|HAS_SB=1,shape_key=8593081114"
+  ]
+ },
+ "adaln_epilogue_triton": {
+  "128": [
+   "bfloat16|shape_key=8590459674"
+  ],
+  "384": [
+   "bfloat16|shape_key=8591508250"
+  ],
+  "768": [
+   "bfloat16|shape_key=8593081114"
+  ]
+ },
+ "adaln_fwd_gate_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=35186520097327"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=35190816113199"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=35190817686063"
+  ]
+ },
+ "adaln_fwd_triton": {
+  "128": [
+   "bfloat16|shape_key=35186520097327"
+  ],
+  "384": [
+   "bfloat16|shape_key=35190816113199"
+  ],
+  "768": [
+   "bfloat16|shape_key=35190817686063"
+  ]
+ },
+ "adaln_gemm_gate_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=35186520097327"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=35190816113199"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=35190817686063"
+  ]
+ },
+ "augmented_attention_bwd_atomic_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=8796160264666"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=8796361558490"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=8796361656794"
+  ]
+ },
+ "augmented_attention_bwd_pre_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=8796160264666"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=8796361558490"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=8796361656794"
+  ]
+ },
+ "augmented_attention_bwd_reduce_triton": {
+  "128": [
+   "float32|shape_key=128"
+  ],
+  "384": [
+   "float32|shape_key=128"
+  ],
+  "768": [
+   "float32|shape_key=128"
+  ]
+ },
+ "augmented_attention_bwd_split_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=8796160264666"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=8796361558490"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=8796361656794"
+  ]
+ },
+ "augmented_attention_fwd_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=8796160264666"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=8796361558490"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=8796361656794"
+  ]
+ },
+ "cond_transition_bwd_gemm_swiglu_triton": {
+  "128": [
+   "bfloat16|shape_key=35186520623344"
+  ],
+  "384": [
+   "bfloat16|shape_key=35190817687792"
+  ],
+  "768": [
+   "bfloat16|shape_key=35197263284464"
+  ]
+ },
+ "cond_transition_bwd_swiglu_flat_triton": {
+  "128": [
+   "bfloat16|shape_key=8590984701"
+  ],
+  "384": [
+   "bfloat16|shape_key=8593081853"
+  ],
+  "768": [
+   "bfloat16|shape_key=8596227581"
+  ]
+ },
+ "cond_transition_expand_swiglu_saveact_triton": {
+  "128": [
+   "bfloat16|shape_key=35186520623270"
+  ],
+  "384": [
+   "bfloat16|shape_key=35190817687718"
+  ],
+  "768": [
+   "bfloat16|shape_key=35197263284390"
+  ]
+ },
+ "cond_transition_expand_swiglu_triton": {
+  "128": [
+   "bfloat16|shape_key=35186520623270"
+  ],
+  "384": [
+   "bfloat16|shape_key=35190817687718"
+  ],
+  "768": [
+   "bfloat16|shape_key=35197263284390"
+  ]
+ },
+ "cond_transition_fwd_b2b_saveact_triton": {
+  "128": [
+   "bfloat16|shape_key=144123986317411177"
+  ]
+ },
+ "cond_transition_fwd_b2b_triton": {
+  "128": [
+   "bfloat16|shape_key=144123986317411177"
+  ]
+ },
+ "cond_transition_squeeze_gate_saveact_triton": {
+  "128": [
+   "bfloat16|shape_key=144123986317412997"
+  ],
+  "384": [
+   "bfloat16|shape_key=144141582800521861"
+  ],
+  "768": [
+   "bfloat16|shape_key=144167971082734213"
+  ]
+ },
+ "cond_transition_squeeze_gate_triton": {
+  "128": [
+   "bfloat16|shape_key=35186520622785"
+  ],
+  "384": [
+   "bfloat16|shape_key=35190817687233"
+  ],
+  "768": [
+   "bfloat16|shape_key=35190820832961"
+  ]
+ },
+ "cond_transition_swiglu_triton": {
+  "128": [
+   "bfloat16|shape_key=8590984701"
+  ],
+  "384": [
+   "bfloat16|shape_key=8593081853"
+  ],
+  "768": [
+   "bfloat16|shape_key=8596227581"
+  ]
+ },
+ "gated_projection_bwd_dx_triton": {
+  "128": [
+   "bfloat16|shape_key=8798241033015"
+  ],
+  "256": [
+   "bfloat16|shape_key=8800389040951"
+  ],
+  "512": [
+   "bfloat16|shape_key=8804685056823"
+  ]
+ },
+ "gated_projection_bwd_gate_dropres_triton": {
+  "128": [
+   "bfloat16|FROM_PREACT=0,shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|FROM_PREACT=0,shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|FROM_PREACT=0,shape_key=2149581594"
+  ]
+ },
+ "gated_projection_bwd_gate_flat_triton": {
+  "128": [
+   "bfloat16|shape_key=4096"
+  ],
+  "256": [
+   "bfloat16|shape_key=4096"
+  ],
+  "384": [
+   "bfloat16|shape_key=4096"
+  ],
+  "512": [
+   "bfloat16|shape_key=4096"
+  ],
+  "64": [
+   "bfloat16|shape_key=4096"
+  ],
+  "768": [
+   "bfloat16|shape_key=4096"
+  ]
+ },
+ "gated_projection_bwd_gate_recompute_flat_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=128"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=128"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=128"
+  ]
+ },
+ "gated_projection_bwd_gate_triton": {
+  "128": [
+   "bfloat16|shape_key=68720004949"
+  ],
+  "256": [
+   "bfloat16|shape_key=68720529237"
+  ],
+  "384": [
+   "bfloat16|shape_key=68721053525"
+  ],
+  "512": [
+   "bfloat16|shape_key=68721577813"
+  ],
+  "64": [
+   "bfloat16|shape_key=68719742805"
+  ],
+  "768": [
+   "bfloat16|shape_key=68722626389"
+  ]
+ },
+ "gated_projection_gate_dropres_triton": {
+  "128": [
+   "bfloat16|shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149581594"
+  ]
+ },
+ "gated_projection_gate_flat_triton": {
+  "128": [
+   "bfloat16|shape_key=4096"
+  ],
+  "256": [
+   "bfloat16|shape_key=4096"
+  ],
+  "384": [
+   "bfloat16|shape_key=4096"
+  ],
+  "512": [
+   "bfloat16|shape_key=4096"
+  ],
+  "64": [
+   "bfloat16|shape_key=4096"
+  ],
+  "768": [
+   "bfloat16|shape_key=4096"
+  ]
+ },
+ "gated_projection_gate_gemm_triton": {
+  "128": [
+   "bfloat16|shape_key=8798241033015"
+  ],
+  "256": [
+   "bfloat16|shape_key=8800389040951"
+  ],
+  "512": [
+   "bfloat16|shape_key=8804685056823"
+  ]
+ },
+ "gated_projection_gate_inplace_flat_triton": {
+  "128": [
+   "bfloat16|shape_key=128"
+  ],
+  "256": [
+   "bfloat16|shape_key=128"
+  ],
+  "512": [
+   "bfloat16|shape_key=128"
+  ]
+ },
+ "gated_projection_gate_packed_flat_triton": {
+  "128": [
+   "bfloat16|shape_key=128"
+  ],
+  "256": [
+   "bfloat16|shape_key=128"
+  ],
+  "512": [
+   "bfloat16|shape_key=128"
+  ]
+ },
+ "gated_projection_gate_res_triton": {
+  "128": [
+   "bfloat16|shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149581594"
+  ]
+ },
+ "gated_projection_gate_triton": {
+  "128": [
+   "bfloat16|shape_key=68720004949"
+  ],
+  "256": [
+   "bfloat16|shape_key=68720529237"
+  ],
+  "384": [
+   "bfloat16|shape_key=68721053525"
+  ],
+  "512": [
+   "bfloat16|shape_key=68721577813"
+  ],
+  "64": [
+   "bfloat16|shape_key=68719742805"
+  ],
+  "768": [
+   "bfloat16|shape_key=68722626389"
+  ]
+ },
+ "layernorm_bwd_atomic_strided_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878432026"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878956314"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879480602"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880004890"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878169882"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881053466"
+  ]
+ },
+ "layernorm_bwd_atomic_triton": {
+  "128": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878432026"
+  ],
+  "256": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878956314"
+  ],
+  "384": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274879480602"
+  ],
+  "512": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274880004890"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878169882"
+  ],
+  "768": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274881053466"
+  ]
+ },
+ "layernorm_bwd_foldstats_triton": {
+  "128": [
+   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "256": [
+   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "384": [
+   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "512": [
+   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "768": [
+   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ]
+ },
+ "layernorm_bwd_split_mmajor_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878432026"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878956314"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879480602"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880004890"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878169882"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881053466"
+  ]
+ },
+ "layernorm_bwd_split_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878432026"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878956314"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879480602"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880004890"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878169882"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881053466"
+  ]
+ },
+ "layernorm_fwd_mmajor_triton": {
+  "128": [
+   "bfloat16|shape_key=274878433796"
+  ],
+  "256": [
+   "bfloat16|shape_key=274878958084"
+  ],
+  "384": [
+   "bfloat16|shape_key=274879482372"
+  ],
+  "512": [
+   "bfloat16|shape_key=274880006660"
+  ],
+  "64": [
+   "bfloat16|shape_key=274878171652"
+  ],
+  "768": [
+   "bfloat16|shape_key=274881055236"
+  ]
+ },
+ "layernorm_fwd_recompute_foldstats_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=68720002965"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=68720002965"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=68720002965"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=68720002965"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=68720002965"
+  ]
+ },
+ "layernorm_fwd_recompute_noaffine_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878433173"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878957461"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879481749"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880006037"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878171029"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881054613"
+  ]
+ },
+ "layernorm_fwd_recompute_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878433173"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878957461"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879481749"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880006037"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878171029"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881054613"
+  ]
+ },
+ "layernorm_fwd_rowscale_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=2148010500"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=2148534788"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=2149583364"
+  ]
+ },
+ "layernorm_fwd_saveact_strided_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878432026"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878956314"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879480602"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880004890"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878169882"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881053466"
+  ]
+ },
+ "layernorm_fwd_saveact_triton": {
+  "128": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878432026"
+  ],
+  "256": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878956314"
+  ],
+  "384": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274879480602"
+  ],
+  "512": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274880004890"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878169882"
+  ],
+  "768": [
+   "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274881053466"
+  ]
+ },
+ "layernorm_fwd_strided_triton": {
+  "128": [
+   "bfloat16|HAS_W=1,shape_key=8590459674"
+  ],
+  "384": [
+   "bfloat16|HAS_W=1,shape_key=8591508250"
+  ],
+  "768": [
+   "bfloat16|HAS_W=1,shape_key=8591508250"
+  ]
+ },
+ "layernorm_linear_bwd_fp32_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=1125902054343871"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=1125904201843903"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=1125906349343935"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=1125908496843967"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=1125900980593855"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=1125912791844031"
+  ]
+ },
+ "layernorm_linear_fwd_fp32_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=1125902054343871"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=1125904201843903"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=1125906349343935"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=1125908496843967"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=1125900980593855"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=1125912791844031"
+  ]
+ },
+ "layernorm_linear_fwd_triton": {
+  "128": [
+   "bfloat16+float32|HAS_BIAS=0,shape_key=1125902054853642"
+  ],
+  "256": [
+   "bfloat16+float32|HAS_BIAS=0,shape_key=1125904202861578"
+  ],
+  "384": [
+   "bfloat16+float32|HAS_BIAS=0,shape_key=1125906350869514"
+  ],
+  "512": [
+   "bfloat16+float32|HAS_BIAS=0,shape_key=1125908498877450"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_BIAS=0,shape_key=1125900980849674"
+  ],
+  "768": [
+   "bfloat16+float32|HAS_BIAS=0,shape_key=1125912794893322"
+  ]
+ },
+ "layernorm_stats_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=274878433173"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=274878957461"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=274879481749"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=274880006037"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=274878171029"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=274881054613"
+  ]
+ },
+ "rmsnorm_adamod_bwd_triton": {
+  "128": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125902054853642",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125902054853642"
+  ],
+  "384": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125906350869514",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125906350869514"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125902054591498",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125902054591498"
+  ],
+  "768": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125906352442378",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125906352442378"
+  ]
+ },
+ "rmsnorm_adamod_fwd_triton": {
+  "128": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125902054853642",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125902054853642"
+  ],
+  "384": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125906350869514",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125906350869514"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125902054591498",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125902054591498"
+  ],
+  "768": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=1125906352442378",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=1125906352442378"
+  ]
+ },
+ "rmsnorm_bwd_triton": {
+  "128": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878038810",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274878038810"
+  ],
+  "256": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878169882",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274878169882"
+  ],
+  "512": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878432026",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274878432026"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274877973274",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274877973274"
+  ]
+ },
+ "rmsnorm_fwd_triton": {
+  "128": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878038810",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274878038810"
+  ],
+  "256": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878169882",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274878169882"
+  ],
+  "512": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274878432026",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274878432026"
+  ],
+  "64": [
+   "bfloat16+float32|HAS_WEIGHT=0,shape_key=274877973274",
+   "bfloat16+float32|HAS_WEIGHT=1,shape_key=274877973274"
+  ]
+ },
+ "rope_fwd_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=8590068228"
+  ]
+ },
+ "transition_bwd_epilogue_triton": {
+  "128": [
+   "bfloat16|shape_key=4096"
+  ],
+  "256": [
+   "bfloat16|shape_key=4096"
+  ],
+  "384": [
+   "bfloat16|shape_key=4096"
+  ],
+  "512": [
+   "bfloat16|shape_key=4096"
+  ],
+  "768": [
+   "bfloat16|shape_key=4096"
+  ]
+ },
+ "transition_bwd_swiglu_recompute_triton": {
+  "128": [
+   "bfloat16+float32|NORMALIZE=1,STORE_H=1,shape_key=281477126293670",
+   "bfloat16|NORMALIZE=0,STORE_H=1,shape_key=281477126293670"
+  ],
+  "256": [
+   "bfloat16+float32|NORMALIZE=1,STORE_H=1,shape_key=281477126293670",
+   "bfloat16|NORMALIZE=0,STORE_H=1,shape_key=281477126293670"
+  ],
+  "384": [
+   "bfloat16+float32|NORMALIZE=1,STORE_H=1,shape_key=281477126293670",
+   "bfloat16|NORMALIZE=0,STORE_H=1,shape_key=281477126293670"
+  ],
+  "512": [
+   "bfloat16+float32|NORMALIZE=1,STORE_H=1,shape_key=281477126293670",
+   "bfloat16|NORMALIZE=0,STORE_H=1,shape_key=281477126293670"
+  ],
+  "768": [
+   "bfloat16+float32|NORMALIZE=1,STORE_H=1,shape_key=281477126293670",
+   "bfloat16|NORMALIZE=0,STORE_H=1,shape_key=281477126293670"
+  ]
+ },
+ "transition_bwd_transpose_packed_triton": {
+  "128": [
+   "bfloat16|shape_key=68721574682"
+  ],
+  "256": [
+   "bfloat16|shape_key=68721574682"
+  ],
+  "384": [
+   "bfloat16|shape_key=68721574682"
+  ],
+  "512": [
+   "bfloat16|shape_key=68721574682"
+  ],
+  "768": [
+   "bfloat16|shape_key=68721574682"
+  ]
+ },
+ "transition_expand_swiglu_triton": {
+  "128": [
+   "bfloat16|shape_key=281477126293670"
+  ],
+  "256": [
+   "bfloat16|shape_key=281477126293670"
+  ],
+  "384": [
+   "bfloat16|shape_key=281477126293670"
+  ],
+  "512": [
+   "bfloat16|shape_key=281477126293670"
+  ],
+  "768": [
+   "bfloat16|shape_key=281477126293670"
+  ]
+ },
+ "transition_fold_triton": {
+  "128": [
+   "bfloat16+float32|K=128,N=512"
+  ],
+  "256": [
+   "bfloat16+float32|K=128,N=512"
+  ],
+  "512": [
+   "bfloat16+float32|K=128,N=512"
+  ]
+ },
+ "transition_fwd_b2b_ktiled_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=281479275874470"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=281479275874470"
+  ],
+  "384": [
+   "bfloat16+float32|shape_key=281481425455270"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=281483575036070"
+  ],
+  "768": [
+   "bfloat16+float32|shape_key=281487874197670"
+  ]
+ },
+ "transition_fwd_b2b_triton": {
+  "128": [
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=0,SAVE_XN=0,shape_key=281477126293670",
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=1,SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "256": [
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=0,SAVE_XN=0,shape_key=281477126293670",
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=1,SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "384": [
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=0,SAVE_XN=0,shape_key=281477126293670",
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=1,SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "512": [
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=0,SAVE_XN=0,shape_key=281477126293670",
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=1,SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "768": [
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=0,SAVE_XN=0,shape_key=281477126293670",
+   "bfloat16+float32|FUSE_STATS=0,HAS_LN=1,SAVE_XN=0,shape_key=281477126293670"
+  ]
+ },
+ "transition_layernorm_expand_swiglu_triton": {
+  "128": [
+   "bfloat16+float32|SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "256": [
+   "bfloat16+float32|SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "384": [
+   "bfloat16+float32|SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "512": [
+   "bfloat16+float32|SAVE_XN=0,shape_key=281477126293670"
+  ],
+  "768": [
+   "bfloat16+float32|SAVE_XN=0,shape_key=281477126293670"
+  ]
+ },
+ "triangle_attention_bwd_atomic_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=2147616806"
+  ]
+ },
+ "triangle_attention_bwd_dkdv_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=2147551270"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=2147747878"
+  ]
+ },
+ "triangle_attention_bwd_dq_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=2147551270"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=2147747878"
+  ]
+ },
+ "triangle_attention_bwd_pre_contig_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=2147616806"
+  ]
+ },
+ "triangle_attention_bwd_pre_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=2147551270"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=2147616806"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=2147747878"
+  ]
+ },
+ "triangle_attention_fwd_contig_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=8796227373530"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=8796160264666"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=8796126710234"
+  ]
+ },
+ "triangle_attention_fwd_triton": {
+  "16": [
+   "bfloat16+float32|shape_key=8796227307994"
+  ],
+  "32": [
+   "bfloat16+float32|shape_key=8796160264666"
+  ],
+  "64": [
+   "bfloat16+float32|shape_key=8796126841306"
+  ]
+ },
+ "trimul_bwd_gate_packed_recompute_triton": {
+  "1024": [
+   "bfloat16|shape_key=2151680516"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148534788"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149583364"
+  ]
+ },
+ "trimul_bwd_gate_packed_triton": {
+  "1024": [
+   "bfloat16|shape_key=2151680516"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148534788"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149583364"
+  ]
+ },
+ "trimul_bwd_gate_recompute_triton": {
+  "128": [
+   "bfloat16|shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149581594"
+  ]
+ },
+ "trimul_gemm_gate_mmajor_triton": {
+  "128": [
+   "bfloat16|SAVE_PREACT=0,shape_key=8798241033606",
+   "bfloat16|SAVE_PREACT=0,shape_key=8800388517254",
+   "bfloat16|SAVE_PREACT=1,shape_key=8798241033606",
+   "bfloat16|SAVE_PREACT=1,shape_key=8800388517254"
+  ],
+  "256": [
+   "bfloat16|SAVE_PREACT=0,shape_key=8800389041542",
+   "bfloat16|SAVE_PREACT=0,shape_key=8804684008838",
+   "bfloat16|SAVE_PREACT=1,shape_key=8800389041542",
+   "bfloat16|SAVE_PREACT=1,shape_key=8804684008838"
+  ],
+  "512": [
+   "bfloat16|SAVE_PREACT=0,shape_key=8804685057414",
+   "bfloat16|SAVE_PREACT=0,shape_key=8813274992006",
+   "bfloat16|SAVE_PREACT=1,shape_key=8804685057414",
+   "bfloat16|SAVE_PREACT=1,shape_key=8813274992006"
+  ]
+ },
+ "trimul_gemm_gate_saveact_triton": {
+  "128": [
+   "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=128,TRANSPOSE_OUT=1,shape_key=128"
+  ],
+  "256": [
+   "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=256,TRANSPOSE_OUT=1,shape_key=128"
+  ],
+  "512": [
+   "bfloat16+float32|ALLOW_TF32=0,APPLY_MASK=0,K=512,TRANSPOSE_OUT=1,shape_key=128"
+  ]
+ },
+ "trimul_gemm_gate_triton": {
+  "128": [
+   "bfloat16|shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149581594"
+  ]
+ },
+ "trimul_outproj_bwd_gate_recompute_triton": {
+  "128": [
+   "bfloat16|shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149581594"
+  ]
+ },
+ "trimul_outproj_gemm_gate_saveact_triton": {
+  "128": [
+   "bfloat16+float32|ALLOW_TF32=0,K=128,shape_key=128"
+  ],
+  "256": [
+   "bfloat16+float32|ALLOW_TF32=0,K=256,shape_key=128"
+  ],
+  "512": [
+   "bfloat16+float32|ALLOW_TF32=0,K=512,shape_key=128"
+  ]
+ },
+ "trimul_outproj_gemm_gate_triton": {
+  "128": [
+   "bfloat16|shape_key=2148008730"
+  ],
+  "256": [
+   "bfloat16|shape_key=2148533018"
+  ],
+  "512": [
+   "bfloat16|shape_key=2149581594"
+  ]
+ },
+ "trimul_outproj_layernorm_gemm_gate_triton": {
+  "128": [
+   "bfloat16+float32|shape_key=2148009877"
+  ],
+  "256": [
+   "bfloat16+float32|shape_key=2148534165"
+  ],
+  "512": [
+   "bfloat16+float32|shape_key=2149582741"
+  ]
+ }
+}

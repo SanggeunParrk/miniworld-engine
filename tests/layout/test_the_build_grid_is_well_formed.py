@@ -20,8 +20,9 @@ import collections
 import csv
 
 import pytest
-from paths import REGISTRY
+from paths import PKG, REGISTRY
 
+from miniworld_engine.autotune import builder, width_evidence
 from miniworld_engine.autotune.builder import op_units
 from miniworld_engine.autotune.shape_key import (
     ATOM_SHAPES,
@@ -135,10 +136,35 @@ def test_lengths_come_from_a_declared_ladder(units):
     assert not bad, f"units at a length on no ladder: {bad}"
 
 
-def test_the_unit_count_is_not_quietly_collapsing(units):
+def _full_plan():
+    """The plan before the width evidence narrows it -- the ladders as declared."""
+    real = width_evidence.load
+    width_evidence.load = lambda *a, **k: {}
+    try:
+        return op_units(None)
+    finally:
+        width_evidence.load = real
+
+
+def test_the_unit_count_is_not_quietly_collapsing(units, rows):
     """A guard on the guard: a filter bug that empties the sweep would pass every test above."""
     ops = {u.op for u in units}
     assert len(units) > 1500, f"only {len(units)} units -- the sweep has collapsed"
     assert len(ops) > 70, f"only {len(ops)} ops have units"
-    thin = sorted(op for op in ops if sum(1 for u in units if u.op == op) < 2)
-    assert not thin, f"ops reduced to a single unit: {thin}"
+    thin = [op for op in ops if sum(1 for u in units if u.op == op) < 2]
+    # One unit IS the whole cache for a kernel whose key carries neither axis the sweep varies.
+    # `transition_fold_triton` keys on `['N', 'K']` -- no `shape_key`, so `_keys_on_shape` already
+    # collapses its lengths -- and `dev buckets` measured its three declared widths filing into the
+    # single bucket `K=128,N=512`. Two more units would be two more writes to that one entry.
+    # Checked, not listed: an op is excused here only while both facts hold of it.
+    unexplained = []
+    for op in sorted(thin):
+        r = next((x for x in rows if x["kernel"] == op), None)
+        keys_shape = r is not None and builder._keys_on_shape(
+            PKG / r["file"].split("miniworld_engine/", 1)[-1], r["symbol"])
+        ladder = tuple(sorted({u.width for u in _full_plan() if u.op == op}))
+        if keys_shape or not width_evidence.collapses(op, ladder):
+            unexplained.append(op)
+    assert not unexplained, (
+        f"ops reduced to a single unit with more than one bucket to fill: {unexplained}. A single "
+        f"unit is only the whole cache when the key carries neither the length nor the width.")
