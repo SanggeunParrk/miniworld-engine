@@ -516,18 +516,9 @@
   ],
   "config_space_hash": "a90e01c944f1",
   "driver_id_scheme": 2,
-  "driver_identity": "e0b43f7ba622",
+  "driver_identity": "931fd007a8c6",
   "entries": {
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=1099512154005": [
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.08089599758386612,
-        "num_stages": 2,
-        "num_warps": 2
-      },
       {
         "kwargs": {
           "BLOCK_K": 128,
@@ -544,6 +535,15 @@
         },
         "ms": 0.0809439979493618,
         "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.08191999793052673,
+        "num_stages": 2,
         "num_warps": 2
       },
       {
@@ -569,19 +569,19 @@
       {
         "kwargs": {
           "BLOCK_K": 128,
-          "BLOCK_M1": 1
+          "BLOCK_M1": 2
         },
         "ms": 0.008191999979317188,
-        "num_stages": 1,
+        "num_stages": 3,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK_K": 128,
-          "BLOCK_M1": 2
+          "BLOCK_M1": 1
         },
-        "ms": 0.008191999979317188,
-        "num_stages": 3,
+        "ms": 0.009216000325977802,
+        "num_stages": 1,
         "num_warps": 4
       },
       {
@@ -619,15 +619,6 @@
           "BLOCK_M1": 16
         },
         "ms": 0.16793599724769592,
-        "num_stages": 1,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.16793599724769592,
         "num_stages": 3,
         "num_warps": 2
       },
@@ -638,6 +629,15 @@
         },
         "ms": 0.16889600455760956,
         "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.16896000504493713,
+        "num_stages": 1,
         "num_warps": 2
       },
       {
@@ -666,15 +666,6 @@
           "BLOCK_M1": 16
         },
         "ms": 0.028672000393271446,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 16
-        },
-        "ms": 0.028672000393271446,
         "num_stages": 3,
         "num_warps": 2
       },
@@ -685,6 +676,15 @@
         },
         "ms": 0.028672000393271446,
         "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 16
+        },
+        "ms": 0.02969600073993206,
+        "num_stages": 2,
         "num_warps": 2
       },
       {
@@ -707,15 +707,6 @@
       }
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=4295493525": [
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 1
-        },
-        "ms": 0.009216000325977802,
-        "num_stages": 1,
-        "num_warps": 2
-      },
       {
         "kwargs": {
           "BLOCK_K": 128,
@@ -751,6 +742,15 @@
         "ms": 0.009216000325977802,
         "num_stages": 2,
         "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 1
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 1,
+        "num_warps": 2
       }
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=4398047037333": [
@@ -760,7 +760,7 @@
           "BLOCK_M1": 16
         },
         "ms": 0.2908160090446472,
-        "num_stages": 2,
+        "num_stages": 3,
         "num_warps": 2
       },
       {
@@ -768,8 +768,8 @@
           "BLOCK_K": 128,
           "BLOCK_M1": 16
         },
-        "ms": 0.2908160090446472,
-        "num_stages": 3,
+        "ms": 0.29183998703956604,
+        "num_stages": 2,
         "num_warps": 2
       },
       {
@@ -854,15 +854,6 @@
           "BLOCK_M1": 1
         },
         "ms": 0.009216000325977802,
-        "num_stages": 1,
-        "num_warps": 4
-      },
-      {
-        "kwargs": {
-          "BLOCK_K": 128,
-          "BLOCK_M1": 1
-        },
-        "ms": 0.009216000325977802,
         "num_stages": 2,
         "num_warps": 4
       },
@@ -886,6 +877,15 @@
       },
       {
         "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 1
+        },
+        "ms": 0.010239999741315842,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
           "BLOCK_K": 64,
           "BLOCK_M1": 4
         },
@@ -897,33 +897,47 @@
   },
   "entry_grids": {
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=1099512154005": [
+      "284c647cfe49",
       "a90e01c944f1"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=2148009877": [
-      "a90e01c944f1"
+      "a90e01c944f1",
+      "c9ca0ada12c2"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=2473901688725": [
+      "42a1b092e6d3",
       "a90e01c944f1"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=274878433173": [
+      "284c647cfe49",
       "a90e01c944f1"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=4295493525": [
-      "a90e01c944f1"
+      "a90e01c944f1",
+      "dfda4bddd46c"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=4398047037333": [
+      "284c647cfe49",
       "a90e01c944f1"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=6442977173": [
-      "a90e01c944f1"
+      "a90e01c944f1",
+      "c9ca0ada12c2"
     ],
     "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=8590460821": [
-      "a90e01c944f1"
+      "a90e01c944f1",
+      "c9ca0ada12c2"
     ]
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "grids": {
+    "284c647cfe49": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 2)"
+    ],
+    "42a1b092e6d3": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 1)"
+    ],
     "a90e01c944f1": [
       "((('BLOCK_K', 128), ('BLOCK_M1', 1)), 1, 1)",
       "((('BLOCK_K', 128), ('BLOCK_M1', 1)), 1, 2)",
@@ -1437,6 +1451,12 @@
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 2)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 3)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 4)"
+    ],
+    "c9ca0ada12c2": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 1)), 4, 1)"
+    ],
+    "dfda4bddd46c": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 1)), 2, 1)"
     ]
   },
   "key_scheme": 3,
