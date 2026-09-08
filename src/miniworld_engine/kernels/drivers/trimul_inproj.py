@@ -65,12 +65,19 @@ IS_PAIR = both_level_is_pair(L)
 M = L * L if IS_PAIR else L      # flattened pair rows, or atom rows A
 
 
-def _x() -> torch.Tensor:
-    """The activation these kernels take: pair (1, L, L, D) on the token side, atom (1, A, D) on
-    the atom side. ``length_of`` reads shape[-2] either way, so both record the same shape_key."""
+def _x(c: int = D) -> torch.Tensor:
+    """The activation these kernels take: pair (1, L, L, c) on the token side, atom (1, A, c) on
+    the atom side. ``length_of`` reads shape[-2] either way, so both record the same shape_key.
+
+    ``c`` defaults to the packed width, which is right wherever the kernel projects a square
+    d_pair -> d_pair. The two `width=pair_bidir` drivers pass `_DIN`: there the packed axis is the
+    per-side HIDDEN width and the activation is still d_pair wide, and `front_bwd_dW` reshapes it
+    to `(M, WL.shape[0])` -- so leaving it at the packed width does not merely mis-shape the run,
+    it raises.
+    """
     if not IS_PAIR:
-        return torch.randn(1, L, D, device=dev(), dtype=BF16)
-    return torch.randn(1, L, L, D, device=dev(), dtype=BF16)
+        return torch.randn(1, L, c, device=dev(), dtype=BF16)
+    return torch.randn(1, L, L, c, device=dev(), dtype=BF16)
 
 
 def _rows(n: int = D) -> torch.Tensor:
@@ -231,7 +238,7 @@ def trimul_bwd_gate_packed_triton() -> None:
     # H -- the per-side hidden width, which is what the bucket carries -- comes from the unit.
     # Din, the width being projected FROM, stays the driver's pair width: `front_bwd_dW` reads it
     # off `WL.shape[0]` and it is not in the key, so it does not need its own ladder.
-    front_bwd_dW(_bdll(D), _bdll(D), _bdll(4 * D), _x(),
+    front_bwd_dW(_bdll(D), _bdll(D), _bdll(4 * D), _x(_DIN),
                  _w(D, _DIN), _w(D, _DIN), _w(D, _DIN), _w(D, _DIN))
 
 
@@ -241,8 +248,8 @@ def trimul_bwd_gate_packed_recompute_triton() -> None:
         front_bwd_dW_sig,
     )
 
-    front_bwd_dW_sig(_bdll(), _bdll(), _bdll(), _bdll(), _bdll(2 * D), _x(),
-                     _w(), _w(), _w(), _w())
+    front_bwd_dW_sig(_bdll(), _bdll(), _bdll(), _bdll(), _bdll(2 * D), _x(_DIN),
+                     _w(D, _DIN), _w(D, _DIN), _w(D, _DIN), _w(D, _DIN))
 
 
 # ── trimul_inproj/cute: the two @triton.jit kernels living under cute/ ───────────────────────
