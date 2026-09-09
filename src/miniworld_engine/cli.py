@@ -932,12 +932,12 @@ def cmd_build(args: argparse.Namespace) -> int:
     if not module_pass:
         _report_finished_units(selected, Path(args.shards).expanduser(), args.resume)
 
-    # `fill_gaps` searches the whole grid when off, which is right for a first pass. It has a
-    # caller now: after a width or ladder change, an op the cache already "answers" at one bucket
-    # owes a new one, and reaching that unit used to mean `--rebuild-cached`, which re-measures
-    # every config the cache already holds for every bucket of that op. `--fill-gaps` runs the
-    # units and benches only what is missing.
-    fill_gaps = bool(getattr(args, "fill_gaps", False))
+    # Build what is missing. That is what a build IS, so it is the default and `--rebuild` is the
+    # word for the other thing. It used to be the reverse -- the cheap, correct behaviour needed
+    # `--fill-gaps` and the ruinous one was the shorter flag next to it -- and the cost is on
+    # record: `layernorm_bwd_split` spent 5h14m re-timing 64 already-tuned units to fill three
+    # missing keys, because the run said `--rebuild-cached` when it meant "reach the new buckets".
+    fill_gaps = not bool(getattr(args, "rebuild", False))
     #: `build all` also owes the kernels no module reaches. Run as a SECOND pass because
     #: `build_all` reads `selected[0]` to decide whether it was handed Cases or OpUnits, so a
     #: mixed list would send a module Unit into a lookup that expects an op name.
@@ -955,8 +955,11 @@ def cmd_build(args: argparse.Namespace) -> int:
                                       # --fill-gaps has to reach the units too: the unit-level
                                       # skip drops any op whose cache answers at ANY bucket,
                                       # which is exactly the op that owes a new one.
-                                      skip_cached=not (getattr(args, "rebuild_cached", False)
-                                                       or fill_gaps))
+                                      # every unit runs; what it BENCHES is fill_gaps'
+                                      # business, so the unit-level skip only gets in the way --
+                                      # it drops any op the cache answers at ANY bucket, which is
+                                      # exactly the op that owes a new one.
+                                      skip_cached=False)
     if extra:
         results += builder.build_all(extra, Path(args.shards).expanduser(),
                                      _resolve_gpus(args.gpus), args.compile_jobs,
@@ -968,8 +971,7 @@ def cmd_build(args: argparse.Namespace) -> int:
                                      bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                      bench_rep_ms=getattr(args, "bench_rep_ms", 0),
                                      pin_cores=getattr(args, "pin_cores", False),
-                                     skip_cached=not (getattr(args, "rebuild_cached", False)
-                                                      or fill_gaps))
+                                     skip_cached=False)
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
@@ -1654,11 +1656,19 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     bld.add_argument("--shards", default="~/.cache/miniworld-build", help="dir for the shards")
+    # Filling the gaps is what a build IS. It was opt-in, and the two ways to get a complete
+    # cache were `--fill-gaps` (bench only the missing keys) and `--rebuild-cached` (re-measure
+    # every config the cache already holds) -- so the cheap, correct thing needed a flag and the
+    # ruinous thing was one word away. It cost 5h14m once: `layernorm_bwd_split` re-timed 64
+    # tuned units to fill 3 missing keys.
     bld.add_argument("--fill-gaps", action="store_true",
-                     help="run every unit but bench only what the cache is MISSING: the keys it "
-                          "already holds are left alone. Use after a width/ladder change, where "
-                          "an op the cache 'answers' at one bucket owes a new one -- plain "
-                          "--rebuild-cached would re-measure every config it already has")
+                     help="accepted and ignored -- this is the default now. Kept so the job "
+                          "scripts that pass it keep working")
+    bld.add_argument("--rebuild", action="store_true",
+                     help="re-measure EVERY config of every key, including the ones the committed "
+                          "cache already holds. The default builds only what is missing, so reach "
+                          "for this only when the measurements themselves are suspect (a new "
+                          "triton, a changed bench setting) -- not to fill a gap")
     bld.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
     bld.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
     bld.add_argument("--units-per-gpu", type=int, default=1,
@@ -1715,21 +1725,21 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--per-op", action="store_true",
                      help="work item = (op, shape bucket) driven through its registry driver, "
                           "instead of (case, dims, length, mode) driving a whole module. No "
-                          "redundancy: each (op, bucket) is tuned exactly once. This is the "
-                          "DEFAULT for `build all`. The positional takes one kernel name or a "
+                          "redundancy: each (op, bucket) is tuned exactly once. `build all` "
+                          "already runs this for the kernels no module reaches; use it to build "
+                          "one kernel by name. The positional takes one kernel name or a "
                           "comma list of them, and a list is ONE sweep -- one import, one GPU "
                           "pool, one interleaved work list.")
     bld.add_argument("--per-module", action="store_true",
-                     help="force the module-unit decomposition for `build all`. Reaches only the "
-                          "kernels a module dispatches to, so it does not produce a complete "
-                          "cache; use it to exercise real dispatch paths, not to tune.")
+                     help="force the module-unit decomposition. This is the DEFAULT for "
+                          "`build all`: the units come from registry_module.csv, and `dev derive` "
+                          "runs the same enumeration to write registry_kernel.csv, so what the "
+                          "build produces is stated in a file before it starts.")
     bld.add_argument("--strict", action="store_true",
                      help="fail without merging if ANY unit failed (default: merge what "
                           "succeeded and report the holes)")
-    bld.add_argument("--rebuild-cached", action="store_true",
-                     help="re-tune units the committed cache already answers. Off by default: "
-                          "`build all` skips any (op, dtype, bucket) whose shipped cache passed "
-                          "`dev cache-status`, so a rebuild costs only what actually went stale")
+    bld.add_argument("--rebuild-cached", dest="rebuild", action="store_true",
+                     help=argparse.SUPPRESS)   # the old spelling of --rebuild
     bld.add_argument("--reclaim", action="store_true",
                      help="first delete claims left by a killed build (they are otherwise "
                           "skipped silently forever). Do NOT use while another build runs "

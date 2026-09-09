@@ -75,7 +75,10 @@ def test_the_default_is_the_module_sweep_alone(spy, tmp_path) -> None:
     _run(_args(tmp_path))
     assert spy, "`build all` ran no pass at all"
     assert spy[0]["kind"] == "Case", spy
-    assert all(p["fill_gaps"] is False for p in spy), "the declared sweep benches the full grid"
+    # Building what is MISSING is the default. It was the reverse -- `--fill-gaps` was opt-in and
+    # `--rebuild-cached` sat next to it -- and that arrangement cost 5h14m of an A6000 once,
+    # re-timing 64 already-tuned units of layernorm_bwd_split to fill three missing keys.
+    assert all(p["fill_gaps"] is True for p in spy), "a build should build what is missing"
     # A second pass is allowed, and only for the complement: the kernels `dev derive` shows no
     # module reaches. It is not a second statement of the same shapes -- that is what was wrong
     # with the old two-pass build -- it is the kernels the first pass provably cannot produce.
@@ -109,7 +112,7 @@ def test_an_explicit_flag_still_asks_for_one_pass(spy, tmp_path, flag, kind) -> 
     _run(_args(tmp_path, flag))
     assert len(spy) == 1, spy
     assert spy[0]["kind"] == kind, spy
-    assert spy[0]["fill_gaps"] is False, "an explicit single pass is the unmodified old behaviour"
+    assert spy[0]["fill_gaps"] is True, "an explicit single pass still fills gaps by default"
 
 
 def test_a_named_case_still_gets_its_single_module_pass(spy, tmp_path) -> None:
@@ -122,7 +125,22 @@ def test_a_named_case_still_gets_its_single_module_pass(spy, tmp_path) -> None:
     _run(_args(tmp_path, case="gated_projection"))
     assert len(spy) == 1, f"a named case ran {len(spy)} passes: {spy}"
     assert spy[0]["kind"] == "Case", spy
-    assert spy[0]["fill_gaps"] is False, spy
+    assert spy[0]["fill_gaps"] is True, spy
+
+
+def test_rebuild_is_the_only_way_to_remeasure_a_key_the_cache_answers(spy, tmp_path) -> None:
+    """The other half of the default, and the reason it is safe to flip it.
+
+    A default that only fills gaps is wrong if there is no way to say "measure it all again" --
+    a new triton or a changed bench setting makes every committed number suspect. `--rebuild` is
+    that word, and it is the only one: the old `--rebuild-cached` spelling maps onto it."""
+    _run(_args(tmp_path, "--rebuild"))
+    assert spy, "--rebuild ran no pass"
+    assert all(p["fill_gaps"] is False for p in spy), spy
+    spy.clear()
+    _run(_args(tmp_path, "--rebuild-cached"))
+    assert spy, "the old spelling ran no pass"
+    assert all(p["fill_gaps"] is False for p in spy), "the old spelling stopped filling nothing"
 
 
 def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:

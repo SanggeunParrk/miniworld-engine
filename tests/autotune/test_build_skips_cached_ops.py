@@ -123,11 +123,35 @@ def test_an_empty_or_missing_cache_is_not_an_answer(monkeypatch) -> None:
 
 
 def test_the_escape_hatch_is_spelled_the_way_the_code_reads_it() -> None:
-    """`cmd_build` reads the flag with `getattr(args, "rebuild_cached", False)`, so a rename or a
-    typo would not raise -- it would silently mean "always skip" and the hatch would be gone."""
-    parsed = cli.build_parser().parse_args(["build", "all", "--rebuild-cached"])
-    assert parsed.rebuild_cached is True
-    assert cli.build_parser().parse_args(["build", "all"]).rebuild_cached is False
+    """`cmd_build` reads the flag with `getattr(args, "rebuild", False)`, so a rename or a typo
+    would not raise -- it would silently mean "only ever fill gaps" and the hatch would be gone.
+
+    The flag is `--rebuild` now. The op-level skip these tests are about is what `--rebuild-cached`
+    used to turn off; the CLI no longer uses that skip at all (see
+    `test_the_cli_no_longer_skips_a_unit_because_its_op_is_answered`), so the two questions the
+    flag used to answer at once -- "run this unit?" and "re-measure keys it already has?" -- are
+    one question now, and this is its name."""
+    parsed = cli.build_parser().parse_args(["build", "all", "--rebuild"])
+    assert parsed.rebuild is True
+    assert cli.build_parser().parse_args(["build", "all"]).rebuild is False
+    # the old spelling still works: job scripts and shell history carry it
+    assert cli.build_parser().parse_args(["build", "all", "--rebuild-cached"]).rebuild is True
+
+
+def test_the_cli_no_longer_skips_a_unit_because_its_op_is_answered() -> None:
+    """The op-level skip and the new default cannot both be on.
+
+    `skip_cached` drops a unit when the cache answers its op at ANY bucket -- which is exactly the
+    unit that owes a NEW bucket after a ladder change. That was survivable while the fix was a
+    separate flag; with "build what is missing" as the default it would cancel the default, so
+    `cmd_build` passes `skip_cached=False` and lets `fill_gaps` decide what gets benched. The
+    parameter stays on `build_all` for callers that plan whole ops rather than modules."""
+    import inspect
+
+    src = inspect.getsource(cli.cmd_build)
+    assert "skip_cached=False" in src, (
+        "cmd_build no longer forces skip_cached off; a unit whose op is answered at some other "
+        "bucket would be dropped before fill_gaps could look at the bucket it owes")
 
 
 def test_skipping_is_the_default_in_the_signature() -> None:
