@@ -165,3 +165,21 @@ def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:
         with pytest.raises(SystemExit):
             builder._run_unit_subprocess(unit, 0, shard_dir, tmp_path, 1, fill_gaps=want)
         assert ("--fill-gaps" in seen["cmd"]) is want, seen["cmd"]
+
+
+def test_the_driver_pass_runs_when_the_card_is_named(spy, tmp_path, monkeypatch) -> None:
+    """`build all`'s second pass, exercised without a GPU.
+
+    It was not exercised at all: `_driver_pass_for_uncovered` returns early when
+    `builder.device_sm()` is None, which it is on every machine these tests run on, so the whole
+    pass was dead code under test. It crashed on its first real launch -- `device_sm` spells the
+    arch `sm_86` and both registries spell it `sm86`, so `uncovered_kernels` raised and all three
+    build jobs exited without writing a shard. Naming the card is all it takes to cover it."""
+    from miniworld_engine.autotune import builder as _builder
+
+    monkeypatch.setattr(_builder, "device_sm", lambda: "sm_86")
+    _run(_args(tmp_path))
+    kinds = [p["kind"] for p in spy]
+    assert kinds == ["Case", "OpUnit"], (
+        f"`build all` on a named card ran {kinds}; it owes the module sweep and then the driver "
+        f"sweep for the kernels no module reaches")

@@ -104,3 +104,31 @@ def test_the_streams_partition_by_length_scale():
     token = set(derive.STREAM_LADDERS["token_pair"]) | set(derive.STREAM_LADDERS["token_single"])
     atom = set(derive.STREAM_LADDERS["atom_single"])
     assert not (token & atom), f"token and atom ladders overlap at {sorted(token & atom)}"
+
+
+def test_the_arch_tag_is_understood_in_both_spellings():
+    """`sm_86` and `sm86` name one architecture, and two callers spell it differently.
+
+    `build_matrix.sm_tag` underscores -- "sm_86" is a filename in build/gpu_to_kernels/ -- while
+    `cache.gpu_key` and both registries use the bare form. `cmd_build` passes the underscored one
+    to `uncovered_kernels`, which killed all three build jobs on the first launch after the driver
+    pass was wired. Worse than the crash was the near miss: `kernel_rows` would have returned an
+    EMPTY list for the underscored tag, which reads as "no module reaches any kernel" and would
+    have put every kernel into the driver sweep instead of three.
+    """
+    from miniworld_engine.autotune import derive
+
+    assert derive.uncovered_kernels("sm86") == derive.uncovered_kernels("sm_86")
+    assert len(derive.kernel_rows("sm_86")) == len(derive.kernel_rows("sm86"))
+
+
+def test_an_arch_with_no_derived_rows_is_an_error_not_an_empty_answer():
+    """The silent half of the bug above, pinned on its own.
+
+    A filter that finds nothing must say so. Returning [] here would make `uncovered_kernels`
+    answer "every kernel", and a build would spend its night on the driver ladders this file
+    exists to retire."""
+    from miniworld_engine.autotune import derive
+
+    with pytest.raises(KeyError, match="no rows for arch"):
+        derive.kernel_rows("sm42")

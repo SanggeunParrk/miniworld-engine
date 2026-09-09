@@ -409,10 +409,30 @@ def write_kernel_registry(entries: dict, arch: str, path: Path = REGISTRY_KERNEL
     return len(rows)
 
 
+def normalise_arch(sm: str) -> str:
+    """``sm_86`` and ``sm86`` are the same architecture spelled by two callers.
+
+    ``build_matrix.sm_tag`` underscores ("sm_86" names a policy file in gpu_to_kernels/) and
+    ``cache.gpu_key`` does not ("NVIDIA RTX A6000 (sm86)" names a device). registry.csv's `arch`
+    column and registry_kernel.csv both use the bare form. Passing the underscored one through
+    made `uncovered_kernels` raise -- and would have made `kernel_rows` return NOTHING, which
+    reads as "no module reaches any kernel" and would have put all 61 into the driver sweep.
+    """
+    return sm.replace("_", "")
+
+
 def kernel_rows(arch: str, path: Path = REGISTRY_KERNEL) -> list[dict]:
-    """The derived work list for one arch."""
+    """The derived work list for one arch. Empty is an error, not an answer."""
+    want = normalise_arch(arch)
     with path.open(newline="") as fh:
-        return [r for r in csv.DictReader(fh) if r["arch"] == arch]
+        rows = list(csv.DictReader(fh))
+    mine = [r for r in rows if normalise_arch(r["arch"]) == want]
+    if not mine:
+        have = sorted({r["arch"] for r in rows})
+        msg = (f"registry_kernel.csv has no rows for arch {arch!r} (it holds {have}). "
+               f"Run `miniworld-engine dev derive` on that card, or with --arch {want}.")
+        raise KeyError(msg)
+    return mine
 
 
 def coverage(arch: str, gpu_key_name: str, data_dir: Path | None = None) -> dict:
@@ -467,14 +487,15 @@ def uncovered_kernels(arch: str, registry: Path | None = None) -> set[str]:
     same shapes in the first place.
     """
     reg = registry or (Path(__file__).resolve().parents[1] / "kernels" / "registry.csv")
-    ceiling = _ARCH_ORDER.index(arch)
+    ceiling = _ARCH_ORDER.index(normalise_arch(arch))
     with reg.open(newline="") as fh:
         buildable = {
             r["kernel"] for r in csv.DictReader(fh)
             if r["backend"] == "triton"
             and (r.get("driver") or "").strip()
             and (r.get("developed") or "").strip() == "yes"
-            and _ARCH_ORDER.index((r.get("arch") or "sm80").strip() or "sm80") <= ceiling
+            and _ARCH_ORDER.index(normalise_arch((r.get("arch") or "sm80").strip()
+                                                 or "sm80")) <= ceiling
         }
     reached = {r["kernel"] for r in kernel_rows(arch)}
     return buildable - reached
