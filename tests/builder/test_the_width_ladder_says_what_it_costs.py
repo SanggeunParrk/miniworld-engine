@@ -1,82 +1,87 @@
 """The build sweeps widths the model runs, plus declared headroom, and the headroom has a price.
 
-`op_units` drives each kernel at a ladder of channel widths. Three of them are the model's own --
-AlphaFold-3's c_atom (128), c_s (384) and c_token (768), with d_pair at 128 -- and two, 256 and 512,
-are headroom: kept so a config that widens d_pair finds a tuned cache instead of a miss.
+The point of this file has not changed: headroom -- a width kept so a config that widens d_pair
+finds a tuned cache instead of a miss -- must be a legible decision, not a number that quietly
+grows in a tuple. What changed is where the decision lives.
 
-The ladder used to be one literal, so the headroom was invisible and free-looking. It is neither:
-674 of `build all`'s 1,827 units are at 256 or 512, which is 37% of a full build's GPU time spent on
-shapes nothing asks for today. That is a decision about the future, and a decision has to be
-legible. This file pins the split and the cost, so dropping or extending the headroom is a visible
-edit rather than a number quietly changing in a tuple.
+It used to be two literals inside `op_units` (`PRESENTED` and `HEADROOM_PAIR`), read out of the
+source by this file. That arrangement is what these tests were guarding against, and it lost: the
+literals were the build's second, independent statement of the shapes, and they drifted from what
+`cases()` actually runs -- token lengths stopped at 512 while the sweep ran to 1024, MSA widths
+held 64 while the config declares 64 and 128. 146 replay misses came out of the gap, and no test
+could see it because both sides were hand-written and neither was the model.
 
-The single ladder was already cut this way, for this reason: it carried 256 and 512 too, and they
-went when someone checked that no config presents them.
+`registry_module.csv` is the single statement now, and every row says where its numbers come from
+in a `source` column. So headroom is not a separate literal any more -- it is a row whose `source`
+says "headroom", and its cost is the units those rows contribute. That is what these tests pin.
 """
 from __future__ import annotations
 
 from miniworld_engine.autotune import builder
-from miniworld_engine.autotune.configs import config_set
+from miniworld_engine.autotune.module_registry import module_rows
+
+ROWS = module_rows()
+#: A row is headroom when its own `source` column says so. Not inferred from the width: 256 is
+#: headroom for d_pair and production for d_hidden_tri_multi, and a rule that guessed from the
+#: number would call one of them wrong.
+HEADROOM = [r for r in ROWS if "headroom" in r.source.lower()]
+PRODUCTION = [r for r in ROWS if "headroom" not in r.source.lower()]
 
 
-def _ladders():
-    """The literals `op_units` defines, read out of its source rather than re-declared here."""
-    import ast
-    import inspect
+def test_every_row_says_where_its_numbers_came_from() -> None:
+    """The check the old literals could not make: a width with no stated origin.
 
-    tree = ast.parse(inspect.getsource(builder.op_units))
-    found = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
-            name = node.targets[0].id
-            if name in ("PRESENTED", "HEADROOM_PAIR", "ATOM_WIDTH"):
-                found[name] = ast.literal_eval(node.value)
-    return found
+    `PRESENTED` and `HEADROOM_PAIR` said which half a number was in and nothing about why it was
+    that number. Half of them turned out to be neither -- 384 was in `cases()` and in no other
+    declaration, so it was swept by the module pass and never by the op pass, forever."""
+    for row in ROWS:
+        assert row.source.strip(), f"{row.module} {row.dims}: no source"
 
 
-def test_the_two_halves_are_still_declared_separately() -> None:
-    """Guard the guard: folding them back into one literal would make every check below vacuous."""
-    got = _ladders()
-    assert set(got) == {"PRESENTED", "HEADROOM_PAIR", "ATOM_WIDTH"}, (
-        f"op_units no longer names the halves separately (found {sorted(got)}); the headroom's "
-        f"cost becomes invisible again")
+def test_the_model_widths_are_the_models_own() -> None:
+    """AlphaFold-3's c_atom 128, c_s 384, c_token 768, and MiniWorld's d_pair 128.
+
+    Same assertion the old `test_the_presented_widths_are_the_models_own` made, against the file
+    the model's own config was copied into rather than against a literal in the builder."""
+    widths = {v for r in PRODUCTION for v in r.dims.values()}
+    for want, why in ((128, "c_atom / d_pair"), (384, "c_s / d_single"), (768, "c_token")):
+        assert want in widths, f"no production row runs at {want} ({why})"
 
 
-def test_the_presented_widths_are_the_models_own() -> None:
-    """128 / 384 / 768 are c_atom, c_s and c_token. A fourth would mean the model changed, and the
-    ladder has to change with it -- silently missing one is what `driver_width` exists to stop."""
-    got = _ladders()
-    assert got["ATOM_WIDTH"] == 128
-    assert got["PRESENTED"]["atom"] == (128,)
-    assert got["PRESENTED"]["pair"] == (128,)
-    assert got["PRESENTED"]["single"] == (128, 384, 768)
+def test_the_headroom_is_declared_and_not_the_majority() -> None:
+    """Headroom is a decision about the future and it is allowed to cost something -- but a build
+    that spends most of itself on shapes nothing asks for today is a different decision, and it
+    should not arrive by accident."""
+    assert HEADROOM, "no row is marked headroom; the split has become invisible again"
+    units = builder.units(builder.cases())
+    by_module_dims = {(r.module, tuple(sorted(r.dims.items()))) for r in HEADROOM}
+    cases = {c.name: c for c in builder.cases()}
+    cost = sum(1 for u in units
+               if (u.case, tuple(sorted(cases[u.case].dims[u.dim_index].items())))
+               in by_module_dims)
+    share = cost / len(units)
+    assert share < 0.5, (
+        f"{cost} of {len(units)} units ({share:.0%}) are headroom widths nothing runs today. "
+        f"That is most of a build; either the headroom or this bound is the wrong call, but it "
+        f"has to be made on purpose.")
 
 
-def test_the_headroom_is_pair_only_and_named() -> None:
-    """Headroom on the single side was removed once already, having cost a third of every build for
-    widths no config presents. It must not come back by being added to a shared tuple."""
-    got = _ladders()
-    assert got["HEADROOM_PAIR"] == (256, 512)
-    presented = {w for ws in got["PRESENTED"].values() for w in ws}
-    assert not (set(got["HEADROOM_PAIR"]) & presented), (
-        "a width cannot be both presented and headroom; the split would say nothing")
+#: Widths the model FIXES: AlphaFold-3's c_atom / c_s / c_token and the MSA hidden width. Every
+#: config -- debug, small, medium, large -- sets these to the same numbers and differs in block
+#: counts, so a value outside the model's own is not headroom, it is a shape nothing will present.
+FIXED_AXES = ("d_single", "d_cond", "d_model", "d_single_atom", "d_hidden_msa")
 
 
-def test_the_headroom_still_costs_what_the_comment_says() -> None:
-    """The number in the comment is the whole argument for making this a decision. If it drifts,
-    the decision is being made against a stale price."""
-    units = builder.op_units(config_dir=config_set("grid"))
-    got = _ladders()
-    head = set(got["HEADROOM_PAIR"])
-    extra = [u for u in units if u.width in head]
-    share = len(extra) / len(units)
-    # The band, not the number: the point is that the comment's price is still the price being
-    # paid, and a band that has to be re-centred every time a row moves ladders is a band nobody
-    # will keep honest. 25% today (514 of 2,079); it was 37% before seven rows moved to derived
-    # widths that draw from no stream ladder at all.
-    assert 0.15 < share < 0.45, (
-        f"headroom is now {len(extra)} of {len(units)} units ({share:.0%}); op_units' comment says "
-        f"674 of 1,827 (37%). Re-measure and update the comment, or the cost written down is not "
-        f"the cost being paid.")
-    without = [u for u in units if u.width not in head]
-    assert without, "dropping the headroom would leave no units at all"
+def test_the_headroom_is_on_a_pair_axis() -> None:
+    """The single ladder carried 256 and 512 once and they went when someone checked that no
+    config presents them. Nothing has re-added them.
+
+    The axis, not the stream: `attention_pair_bias` runs on `token_single` and its headroom row
+    widens `d_pair` to 256, which is pair headroom on a single-stream module. Reading the stream
+    instead of the dims name calls that a violation, and it is not one."""
+    for row in HEADROOM:
+        widened = [a for a in row.dims if a in FIXED_AXES
+                   and row.dims[a] not in (128, 384, 768, 32)]
+        assert not widened, (
+            f"{row.module} declares headroom on {widened}; those widths are fixed by the model "
+            f"(c_atom 128 / c_s 384 / c_token 768) and headroom there tunes nothing")

@@ -36,8 +36,8 @@ the manifest it cites, so this table cannot age past its evidence again.
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 89 | yes, on sm86 (which satisfies sm80) |
-| sm90 | 2 | **no** |
+| sm80 | 84 | yes, on sm86 (which satisfies sm80) |
+| sm90 | 7 | **no** |
 | sm100 | 4 | **no** |
 
 Six kernels are declared for hardware nothing in this repository has ever run them on. They may

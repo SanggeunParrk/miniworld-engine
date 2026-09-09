@@ -58,11 +58,30 @@ def _run(args):
     assert rc == 0, rc
 
 
-def test_the_default_is_the_op_sweep_alone(spy, tmp_path) -> None:
+def test_the_default_is_the_module_sweep_alone(spy, tmp_path) -> None:
+    """One pass, and it is the MODULE pass.
+
+    It was the op pass, on the argument that the op sweep's coverage is DECLARED (registry.csv x
+    a width ladder) while the module pass reaches only what some module dispatches to. The
+    declaration was the problem: the ladders were hand-written in `op_units` and drifted from the
+    shapes `cases()` actually runs -- token lengths stopped at 512 while the sweep ran to 1024,
+    MSA widths held 64 while the config declares 64 and 128 -- and each drift was a bucket
+    production reaches with no entry, found only by a replay on a card (146 of them).
+
+    The module sweep is enumerated from `registry_module.csv` now, and `dev derive` runs that same
+    enumeration on fake tensors to write `registry_kernel.csv`. So the coverage of this pass is
+    not an argument any more: it is a file, and `dev coverage` diffs it against the cache with no
+    GPU at all."""
     _run(_args(tmp_path))
-    assert len(spy) == 1, f"`build all` ran {len(spy)} pass(es); the op sweep now covers the shape"
-    assert spy[0]["kind"] == "OpUnit", spy
-    assert spy[0]["fill_gaps"] is False, "the declared sweep must bench the full grid"
+    assert spy, "`build all` ran no pass at all"
+    assert spy[0]["kind"] == "Case", spy
+    assert all(p["fill_gaps"] is False for p in spy), "the declared sweep benches the full grid"
+    # A second pass is allowed, and only for the complement: the kernels `dev derive` shows no
+    # module reaches. It is not a second statement of the same shapes -- that is what was wrong
+    # with the old two-pass build -- it is the kernels the first pass provably cannot produce.
+    assert len(spy) <= 2, f"`build all` ran {len(spy)} passes"
+    if len(spy) == 2:
+        assert spy[1]["kind"] == "OpUnit", spy
 
 
 def test_the_op_sweep_drives_more_than_one_width(monkeypatch) -> None:

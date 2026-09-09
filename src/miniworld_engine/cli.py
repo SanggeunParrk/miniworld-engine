@@ -879,7 +879,50 @@ def cmd_build(args: argparse.Namespace) -> int:
     # module and `--per-op <kernel>` names a kernel -- so running the op sweep for a case name
     # filters `op_units` by a name no kernel has and returns "no triton op with a driver matched".
     # Which is what this did for one commit, turning `build gated_projection grid` into exit 2.
-    module_pass = args.per_module or (args.case not in ("all", *STACKS) and not args.per_op)
+    # The MODULE pass is the default now, including for `all`. It used to be the op pass, because
+    # the module pass reached only the 48 of 91 kernels some module happened to dispatch to while
+    # the op pass drove every kernel with a driver from a DECLARED ladder. That trade is gone:
+    # the ladders were hand-written in `op_units` and drifted from what the modules launch (146
+    # replay misses), and the module sweep is now enumerated from `registry_module.csv`, which
+    # `dev derive` runs to produce `registry_kernel.csv` -- so what this builds is exactly what
+    # was predicted, and `dev coverage` checks it without a GPU. The op pass is still here under
+    # `--per-op`: it is the only way to reach a kernel no module dispatches to, and `dev derive`
+    # names those (17 on sm86, all alternative implementations kept for A/B).
+    # A STACK (`trunk` / `diffusion`) stays on the op pass: it narrows by registry.csv's `stack`
+    # column, which is a property of a KERNEL, and a module does not belong to one half of the
+    # model -- `transition` is launched by both.
+    module_pass = args.per_module or (not args.per_op and args.case not in STACKS)
+
+    def _driver_pass_for_uncovered():
+        """The kernels no module reaches, driven through their own harnesses.
+
+        `build all` is two sweeps and one command. The module sweep is enumerated from
+        registry_module.csv and covers everything the model dispatches to; this covers the rest --
+        the alternative implementations kept for A/B, which register with the cache but have no
+        caller, so no module sweep can ever produce them.
+
+        It is NARROWED to that complement rather than run whole. The driver sweep's width ladders
+        are hand-written, and running them for a kernel the modules already cover is precisely the
+        arrangement that gave the build two disagreeing statements of the same shapes -- 146
+        buckets production reached with no entry, found only by a replay on a card.
+        """
+        from miniworld_engine.autotune import derive
+
+        sm = builder.device_sm()
+        if sm is None:
+            return []
+        try:
+            names = derive.uncovered_kernels(sm)
+        except FileNotFoundError:
+            print("registry_kernel.csv is missing; run `miniworld-engine dev derive` so the "
+                  "build knows which kernels no module reaches", file=sys.stderr)
+            return []
+        if not names:
+            return []
+        units = builder.op_units(names, config_dir=directory)
+        print(f"driver sweep: {len(units)} (op, shape, width) items — {len(names)} kernel(s) no "
+              f"module dispatches to", flush=True)
+        return units
     selected = (_module_pass if module_pass else _op_pass)()
     if selected is None:
         return 2
@@ -895,6 +938,10 @@ def cmd_build(args: argparse.Namespace) -> int:
     # every config the cache already holds for every bucket of that op. `--fill-gaps` runs the
     # units and benches only what is missing.
     fill_gaps = bool(getattr(args, "fill_gaps", False))
+    #: `build all` also owes the kernels no module reaches. Run as a SECOND pass because
+    #: `build_all` reads `selected[0]` to decide whether it was handed Cases or OpUnits, so a
+    #: mixed list would send a module Unit into a lookup that expects an op name.
+    extra = _driver_pass_for_uncovered() if (module_pass and args.case == "all") else []
     results: list = builder.build_all(selected, Path(args.shards).expanduser(),
                                       _resolve_gpus(args.gpus), args.compile_jobs,
                                       resume=args.resume, reclaim=args.reclaim,
@@ -910,6 +957,19 @@ def cmd_build(args: argparse.Namespace) -> int:
                                       # which is exactly the op that owes a new one.
                                       skip_cached=not (getattr(args, "rebuild_cached", False)
                                                        or fill_gaps))
+    if extra:
+        results += builder.build_all(extra, Path(args.shards).expanduser(),
+                                     _resolve_gpus(args.gpus), args.compile_jobs,
+                                     resume=args.resume, reclaim=False,
+                                     config_dir=directory, fill_gaps=fill_gaps,
+                                     units_per_gpu=getattr(args, "units_per_gpu", 1),
+                                     keep_ir=getattr(args, "keep_ir", False),
+                                     predict=getattr(args, "predict_unusable", False),
+                                     bench_clear_mb=getattr(args, "bench_clear_mb", 0),
+                                     bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                     pin_cores=getattr(args, "pin_cores", False),
+                                     skip_cached=not (getattr(args, "rebuild_cached", False)
+                                                      or fill_gaps))
     failed = [r for r in results if r["rc"] != 0]
     empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
     print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
@@ -1122,6 +1182,132 @@ def cmd_buckets(args: argparse.Namespace) -> int:
                  if len(per) > 1 and len({tuple(v) for v in per.values()}) == 1]
     print(f"wrote {out} -- {len(got)} ops; {len(collapsed)} file every declared width into one "
           f"bucket: {sorted(collapsed)}", flush=True)
+    return 0
+
+
+def cmd_coverage(args: argparse.Namespace) -> int:
+    """Is the built cache exactly what `registry_kernel.csv` says it should be?
+
+    No GPU, no replay: `dev derive` already ran the same dispatch, so the answer is a set
+    difference between two files.
+    """
+    from miniworld_engine.autotune import derive
+
+    rep = derive.coverage(args.arch, args.gpu)
+    print(f"{rep['gpu']} [{rep['arch']}]: derived {rep['want']} buckets, cache holds {rep['have']}")
+    if rep["missing"]:
+        print(f"\n  MISSING -- production reaches these with no entry ({len(rep['missing'])}):")
+        for op, key in rep["missing"][:40]:
+            print(f"    {op}  {key}")
+        if len(rep["missing"]) > 40:
+            print(f"    ... {len(rep['missing']) - 40} more")
+    if rep["extra"]:
+        by_op: dict = {}
+        for op, key in rep["extra"]:
+            by_op.setdefault(op, []).append(key)
+        print(f"\n  EXTRA -- nothing reaches these on {rep['arch']} ({len(rep['extra'])} in "
+              f"{len(by_op)} kernels):")
+        for op, keys in sorted(by_op.items())[:40]:
+            print(f"    {op}  {len(keys)} buckets")
+    if not rep["missing"] and not rep["extra"]:
+        print("  exact match")
+    return 1 if rep["missing"] else 0
+
+
+def cmd_derive(args: argparse.Namespace) -> int:
+    """Derive `registry_kernel.csv` from `registry_module.csv` by running the modules on fake
+    tensors -- no kernel compiled, no memory allocated, every branch decided by Python.
+
+    This is the whole replacement for the hand-written per-axis ladders in `builder`. Those said
+    WHICH axis a kernel buckets on and then guessed the VALUES, and every guess that drifted from
+    what the modules launch was a bucket production reaches with no cache entry. Here the values
+    are not guessed: the modules are run, and what they launch is what gets written.
+    """
+    from miniworld_engine.autotune import derive
+
+    rows = derive.module_rows()
+    work = derive.units(rows)
+    print(f"{len(rows)} module rows -> {len(work)} invocations to record", flush=True)
+
+    def progress(i, total, unit, launches, error):
+        if error and not launches:
+            print(f"  [{i}/{total}] {unit.label}: {error}", flush=True)
+        elif i % 25 == 0 or i == total:
+            print(f"  [{i}/{total}] {unit.label}: {len(launches)} launches", flush=True)
+
+    entries, skipped = derive.derive_all(rows, on_unit=progress, arch=args.arch or None)
+    arch = args.arch or derive.sm_tag()
+    out = Path(args.out) if args.out else derive.REGISTRY_KERNEL
+    written = derive.write_kernel_registry(entries, arch, out)
+    kernels = {op for op, _, _ in entries if not op.startswith("<")}
+    unresolved = sorted({op for op, _, b in entries
+                         if op.startswith("<") or str(b).startswith("<")})
+    print(f"\n{written} rows written to {out}")
+    print(f"  {len(kernels)} kernels, arch {arch}")
+    if unresolved:
+        print(f"  {len(unresolved)} launches with no cache entry to build:")
+        for name in unresolved[:20]:
+            print(f"    {name}")
+    if skipped:
+        print(f"  {len(skipped)} invocations the modules refused (shape not supported):")
+        for unit, why in skipped[:20]:
+            print(f"    {unit.label}: {why}")
+    return 0
+
+
+def cmd_callers(args: argparse.Namespace) -> int:
+    """Record which KERNEL each production case dispatches into.
+
+    `registry.csv` says which family a kernel belongs to. It does not say who CALLS it, and for the
+    shared kernels those are different questions: `layernorm_fwd_saveact_triton` is reached by the
+    transition, the trimul and the DiT, each at its own width. Without that link, "does the plan
+    cover production" cannot be answered without running production -- which is `dev audit
+    --replay`, a card and half an hour, and it reports the answer as a list of missed keys rather
+    than as a rule anything can check.
+
+    With it the question is arithmetic: a case declares dims and lengths, this file says which
+    kernels that case reaches, and a test can compare that against `op_units` at import time.
+
+    Measured, not declared, for the same reason `dev buckets` is: a hand-written "called by" column
+    would be one more list to drift, and drifting lists are what every miss in this repo has come
+    from. Re-run it when a module's dispatch changes.
+    """
+    import json
+    from pathlib import Path
+
+    import torch
+
+    if not torch.cuda.is_available():
+        print("dev callers runs the production cases; this machine has no CUDA device")
+        return 2
+    from miniworld_engine import settings
+    from miniworld_engine.autotune import builder, capture
+
+    settings.configure(run_autotune=False, capture=False)
+    capture.install_launch_recorder()
+    out: dict[str, dict] = {}
+    for case in builder.cases():
+        ops: set[str] = set()
+        ran = 0
+        for di in range(len(case.dims)):
+            for length in case.lengths_for(di):
+                for dtype in case.dtypes:
+                    for train in ((False, True) if case.train else (False,)):
+                        for impl in case.impls:
+                            capture.clear_launched_ops()
+                            if builder.run_case(case, length, di, train=train, impl=impl,
+                                                dtype=dtype):
+                                ran += 1
+                                ops |= set(capture.launched_ops())
+        out[case.name] = {"ops": sorted(ops), "ran": ran,
+                          "lengths": sorted(case.lengths),
+                          "dims": [dict(d) for d in case.dims]}
+        print(f"  {case.name:32s} {ran:3d} run(s), {len(ops):3d} kernel(s)", flush=True)
+    path = Path(args.out) if args.out else (
+        Path(builder.__file__).resolve().parent.parent / "kernels" / "case_callers.json")
+    path.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
+    print(f"wrote {path}: {len(out)} cases, "
+          f"{len({o for v in out.values() for o in v['ops']})} distinct kernels", flush=True)
     return 0
 
 
@@ -1606,6 +1792,30 @@ def build_parser() -> argparse.ArgumentParser:
     bkt.add_argument("--ops", default="", help="comma-separated ops; default every driven op")
     bkt.add_argument("--out", default="", help="where to write the evidence; defaults in-repo")
     bkt.set_defaults(func=cmd_buckets)
+
+    cal = dev.add_parser("callers",
+                         help="record which kernel each production case dispatches into, so the "
+                              "plan can be checked against production without a replay (needs a GPU)")
+    cal.add_argument("--out", default="", help="where to write it; defaults in-repo")
+    cal.set_defaults(func=cmd_callers)
+
+    cov = dev.add_parser("coverage",
+                         help="compare the built cache against registry_kernel.csv -- the offline "
+                              "replacement for `audit --replay` (no GPU, no module run)")
+    cov.add_argument("--arch", default="sm86", help="which derived arch to compare against")
+    cov.add_argument("--gpu", default="NVIDIA RTX A6000 (sm86)",
+                     help="cache key of the card whose entries to check")
+    cov.set_defaults(func=cmd_coverage)
+
+    der = dev.add_parser("derive",
+                         help="derive registry_kernel.csv from registry_module.csv by running the "
+                              "modules on fake tensors (needs a GPU present, runs no kernel)")
+    der.add_argument("--arch", default="",
+                     help="derive FOR this arch (sm86/sm90/sm100) instead of the card this runs "
+                          "on; nothing is launched, so any card can derive any arch")
+    der.add_argument("--out", default="",
+                     help="write here instead of the in-repo registry_kernel.csv")
+    der.set_defaults(func=cmd_derive)
 
     aud = dev.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

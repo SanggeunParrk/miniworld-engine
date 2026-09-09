@@ -1372,6 +1372,18 @@ def launched_ops() -> dict[str, int]:
     return dict(_LAUNCHED)
 
 
+def clear_launched_ops() -> None:
+    """Start a fresh attribution window.
+
+    Both dicts, and that is the point: `_NOTED` memoises "this autotuner has already been counted"
+    so the hot path is one set lookup, which also means a second window would record NOTHING for an
+    op whose autotuner fired in the first. A caller asking "which ops did THIS case launch" has to
+    clear both or every case after the first reads as launching nothing.
+    """
+    _LAUNCHED.clear()
+    _NOTED.clear()
+
+
 def install_launch_recorder() -> None:
     """Record which ops actually launch. Idempotent, and safe inside a timing benchmark.
 

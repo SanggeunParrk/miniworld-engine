@@ -39,6 +39,7 @@ import torch
 
 from miniworld_engine import build as build_matrix
 from miniworld_engine.autotune import triton_cache, width_evidence
+from miniworld_engine.autotune.module_registry import module_rows
 
 BF16 = torch.bfloat16
 
@@ -72,8 +73,29 @@ class Case:
     dims: tuple[dict, ...] = ()
     #: dtypes to build under -- part of the cache key, so each one is a separate set of entries
     dtypes: tuple[torch.dtype, ...] = (BF16,)
-    #: lengths worth sweeping -- spans the trunk sizes the model runs, not just two points
+    #: lengths worth sweeping -- the UNION over this case's rows in registry_module.csv. Kept as
+    #: a field because `audit` and the plan dump ask "what lengths does this case cover"; the
+    #: sweep itself must use `lengths_for(dim_index)`, because a module's rows do NOT share a
+    #: ladder. `conditioned_transition` is the DiT transition on BOTH sides: its (768, 384) row is
+    #: the token DiT at token counts and its (128, 128) row is the atom DiT at atom counts, and
+    #: sweeping the union would tune the atom widths at token lengths and vice versa -- which is
+    #: exactly the hole `registry_module.csv` exists to close.
     lengths: tuple[int, ...] = (256, 384, 512, 768, 1024)
+    #: per-dims length ladder, same order as `dims`. Empty means "every dims uses `lengths`".
+    lengths_by_dim: tuple[tuple[int, ...], ...] = ()
+    #: the stream each dims entry belongs to, same order as `dims` -- token_pair / atom_single /
+    #: token_single / msa_token. Reported, so a unit says which activation it is driving.
+    streams: tuple[str, ...] = ()
+
+    def stream_for(self, dim_index: int) -> str:
+        """Which activation THIS dims entry drives -- and therefore the rank of its input."""
+        return self.streams[dim_index] if self.streams else "token_pair"
+
+    def lengths_for(self, dim_index: int) -> tuple[int, ...]:
+        """The lengths THIS dims entry runs at."""
+        if self.lengths_by_dim:
+            return self.lengths_by_dim[dim_index]
+        return self.lengths
     #: run a backward too -- training-only kernels are a large share of the registry
     train: bool = True
     #: input dtype. Per case, because the modules differ: the fused bf16 kernels want bf16, while
@@ -111,7 +133,7 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     # backend-selection setting below is the same kind of switch and was leaving its far side
     # uncaptured. Each entry names the OFF-DEFAULT value only -- the default side is already
     # covered by the unpinned unit, so pinning both would double the build for nothing.
-    "ln_bwd_path": (("persistent", "atomic"), ("train",)),
+    "ln_bwd_path": (("persistent", "atomic", "cuda"), ("train",)),
     "ln_out_bwd_path": (("split", "fused"), ("train",)),
     "transition_force_split": ((True,), ("eval", "train")),
     "transition_cuda_b2b": ((False,), ("eval",)),
@@ -120,6 +142,18 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     "transition_dab_lnbwd": ((True,), ("train",)),
     "transition_lnbwd_privatize": ((False,), ("train",)),
     "trimul_impl": (("triton", "cute"), ("eval", "train")),
+    # The rest of settings.py's backend selectors. They were left out when SWITCHES was written
+    # and each one is a set of kernels no unit ever reached: measured against the shipped A6000
+    # cache, 26 kernels with working drivers were in the cache and in NO derived unit, and the
+    # far side of these switches is where most of them live.
+    "transition_large_d_training": (("triton", "cute"), ("train",)),
+    "transition_cute_backward": (("cute",), ("train",)),
+    "transition_gatebwd_wgmma": ((False,), ("train",)),
+    "transition_lnbwd_cuda": ((False,), ("train",)),
+    "layernorm_cuda_bwd": ((True,), ("train",)),
+    "trimul_cute_dispatch": ((False,), ("eval", "train")),
+    "trimul_train_front_fused": ((False,), ("train",)),
+    "trimul_out_layout": (("bdll_direct", "bdll_direct_wide"), ("eval", "train")),
 }
 
 #: switch name -> the ``settings`` field it pins, and how to parse the CLI string back to a value.
@@ -138,6 +172,14 @@ SWITCH_SETTINGS: dict[str, tuple[str, Callable[[str], object]]] = {
     "transition_dab_lnbwd": ("transition_dab_lnbwd", lambda v: v == "True"),
     "transition_lnbwd_privatize": ("transition_lnbwd_privatize", lambda v: v == "True"),
     "trimul_impl": ("trimul_impl", str),
+    "transition_large_d_training": ("transition_large_d_training", str),
+    "transition_cute_backward": ("transition_cute_backward", str),
+    "transition_gatebwd_wgmma": ("transition_gatebwd_wgmma", lambda v: v == "True"),
+    "transition_lnbwd_cuda": ("transition_lnbwd_cuda", lambda v: v == "True"),
+    "layernorm_cuda_bwd": ("layernorm_cuda_bwd", lambda v: v == "True"),
+    "trimul_cute_dispatch": ("trimul_cute_dispatch", lambda v: v == "True"),
+    "trimul_train_front_fused": ("trimul_train_front_fused", lambda v: v == "True"),
+    "trimul_out_layout": ("trimul_out_layout", str),
 }
 
 
@@ -290,6 +332,42 @@ CASE_NAMES: tuple[str, ...] = (
 )
 
 
+def _shapes(module: str) -> dict:
+    """Every number a Case sweeps, taken from ``registry_module.csv``.
+
+    This is the whole point of that file. These used to be hand-written tuples on each Case, and
+    a second set of hand-written tuples in ``op_units`` had to agree with them; they did not, and
+    every disagreement was a bucket production reaches with no cache entry (``TOKEN_SHAPES``
+    stopped at 512 while the sweep ran to 1024, ``MSA_WIDTHS`` held 64 while the config declares
+    64 and 128). One file states the shapes now, ``dev derive`` says exactly which kernels those
+    shapes launch, and neither is written by hand.
+
+    Rows of one module must agree on everything except dims and lengths -- see
+    ``test_a_modules_rows_agree_on_what_is_not_a_shape``. dims and lengths are per row precisely
+    because they are what a row IS.
+    """
+    rows = [r for r in module_rows() if r.module == module]
+    if not rows:
+        msg = (f"registry_module.csv has no row for {module!r}. Every case takes its shapes from "
+               f"that file; a case with no row would sweep nothing.")
+        raise KeyError(msg)
+    first = rows[0]
+    switches = tuple(dict.fromkeys(name for r in rows for name, _v in r.options))
+    return {
+        "dims": tuple(r.dims for r in rows),
+        "lengths_by_dim": tuple(r.lengths for r in rows),
+        "streams": tuple(r.stream for r in rows),
+        "lengths": tuple(sorted({n for r in rows for n in r.lengths})),
+        "dtypes": tuple(getattr(torch, d) for d in first.dtypes),
+        "compute_dtypes": tuple(getattr(torch, d) for d in first.computes),
+        "impls": first.impls,
+        # p_drop is a constructor argument, not a settings pin, so it is not a Case switch --
+        # `units` reads it off `case.switches` and SWITCHES, and SWITCHES has it.
+        "switches": switches,
+        "train": "train" in first.modes,
+    }
+
+
 def cases() -> list[Case]:
     """Every production module worth driving, deferred so importing this module needs no GPU.
 
@@ -324,106 +402,81 @@ def cases() -> list[Case]:
     def IT(i):
         return ImplementationType(i)
 
-    #: 128 / 256 / 512, and NOT 384. Four declarations say what pair widths exist -- this one,
-    #: `cli.SHAPES["default"]["d_pairs"]`, every `benchmarks/**/bench.yaml`, and `op_units`'
-    #: pair ladder (`PRESENTED["pair"]` 128 = AF3's c_z, plus HEADROOM_PAIR 256/512) -- and three
-    #: of them said 128/256/512 while this one alone added 384. That is not extra coverage, it is
-    #: a permanent miss: `build all` takes the per-op path, so a width only this list carries can
-    #: never be in the shipped cache, while `dev audit --replay` (which drives THIS list) asks for
-    #: it on every run. Measured: `trimul_outproj_layernorm_gemm_gate_triton` had no `K=384`
-    #: bucket and `layernorm_fwd_saveact_triton` no `N=384`, at every length, forever.
-    PAIR_D = ({"d_pair": 128}, {"d_pair": 256}, {"d_pair": 512})
-    # d_hidden is a SEPARATE axis from d_pair, and leaving it at its default is what pinned
-    # layernorm_linear_mmajor_bwd to a single bucket N=128 across an entire build: that op keys on
-    # N = the projection width, which TriangleMultiplication takes from d_hidden, not d_pair. So
-    # sweeping d_pair alone moves the pair tensor and never moves the bucket the kernel keys on.
-    #: SQUARE ONLY. The asymmetric pairs that used to sit here -- (256, 128) and (512, 256) --
-    #: launched no kernel at all: every fused trimul back half folds LN(tri) and the output gate
-    #: onto the same axis, so `d_hidden != d_pair` is refused (unidirectional.py, and now the cute
-    #: entries too). All three impls this case drives are kernel paths, so those two dims were
-    #: build units that compiled and benched nothing. Worse, before the width fix they reached
-    #: `trimul_back_triton` with a (d_hidden, d_pair) weight the kernel indexed as (d_pair,
-    #: d_pair) -- the out-of-bounds read that showed up as an intermittent illegal memory access.
-    #: Asymmetric widths are a pytorch-only shape; the build drives kernels.
-    PAIR_HID = (
-        {"d_pair": 128, "d_hidden": 128},
-        {"d_pair": 256, "d_hidden": 256},
-        {"d_pair": 512, "d_hidden": 512},
-    )
-    HID_D = ({"d_hidden": 128}, {"d_hidden": 256}, {"d_hidden": 384})
-    BOTH = (BF16, torch.float32)
+    # The dims that used to be declared here -- PAIR_D, PAIR_HID, HID_D, BOTH -- are in
+    # registry_module.csv now, with a `source` column saying where each number came from. They are
+    # gone rather than kept alongside it, because two declarations of the same shapes is exactly
+    # what this file was: `TOKEN_SHAPES` stopped at 512 while these ran to 1024, and the build
+    # tuned one set while `--replay` asked for the other.
+    #
+    # Two facts they carried are worth keeping, and both are enforced elsewhere now:
+    #   * d_hidden must EQUAL d_pair. Every fused trimul back half normalises over tri's channel
+    #     axis and gates the pair over the same axis, so the two widths are one axis; the module
+    #     raises on a mismatch, and `dev derive` reports the refusal rather than silently building
+    #     a unit that launches nothing.
+    #   * an asymmetric pair is a PyTorch-only shape, so it is not a build unit at all.
 
     return [
         Case("transition",
              lambda dims, p, i, dt: Transition(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d_hidden"], dt),),
+             # The stream decides the RANK: token_pair is (B, L, L, D) and token_single is
+             # (B, L, D). Before this the token_single row built a pair too, so it produced
+             # byte-identical units to the d_hidden=384 pair row -- 152 duplicate units, and the
+             # single-stream buckets (rows = B*L, not B*L*L) still had no entry anywhere.
+             lambda b, l, dims, dt, s: (
+                 (_pair if s == "token_pair" else _single)(b, l, dims["d_hidden"], dt),),
              # bf16 only: the fused kernels are bf16, so an fp32 run falls to torch and there is
              # no autotuner to capture -- 12 fp32 units produced 0 ops each.
              # No "cuda" either: that extension is compiled for sm_90a and will not build on sm_86
              # ("Error building extension 'transition_b2b_cuda'"), so the unit can only fail here.
-             dims=HID_D, impls=("miniworld", "triton"),
-             switches=("transition_force_split", "transition_cuda_b2b",
-                       "transition_fuse_stats", "transition_savedxn_split_bwd",
-                       "transition_dab_lnbwd", "transition_lnbwd_privatize",
-                       "ln_bwd_path")),
+             **_shapes("transition")),
         Case("triangle_multiplication",
              lambda dims, p, i, dt: TriangleMultiplication(
                  **dims, implementation=IT(i), p_drop=p).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=PAIR_HID, dtypes=BOTH,
-             switches=("p_drop", "trimul_impl", "ln_out_bwd_path"),
-             impls=("miniworld", "triton", "cute")),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
+             **_shapes("triangle_multiplication")),
         Case("triangle_multiplication_bidirectional",
              lambda dims, p, i, dt: BidirectionalTriangleMultiplication(
                  **dims, implementation=IT(i), p_drop=p).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=PAIR_HID, switches=("p_drop", "trimul_impl", "ln_out_bwd_path")),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
+             **_shapes("triangle_multiplication_bidirectional")),
         Case("triangle_attention_bidirectional",
              lambda dims, p, i, dt: BidirectionalTriangleAttention(
                  **dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=PAIR_D, switches=("gate_backend", "infer_concat"),
-             impls=("miniworld", "triton")),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
+             **_shapes("triangle_attention_bidirectional")),
         # tri-attention buckets key on HEAD_DIM and H, which d_pair never moves
         Case("triangle_attention_heads",
              lambda dims, p, i, dt: TriangleAttention(
                  128, **dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, 128, dt), _mask(b, l)),
+             lambda b, l, dims, dt, s: (_pair(b, l, 128, dt), _mask(b, l)),
              # d_hidden is the TOTAL qkv width and the head dim is d_hidden // n_head, which is
              # what lands in the HEAD_DIM bucket -- and tl.dot needs it >= 16, so d_hidden must be
              # at least 16*n_head. (d_hidden=32 with n_head=4 gives a head dim of 8 and fails to
-             # compile: "Input shapes should have M >= 1, N >= 1 and K >= 16".)
-             dims=({"n_head": 4, "d_hidden": 128}, {"n_head": 8, "d_hidden": 128},
-                   {"n_head": 4, "d_hidden": 256}, {"n_head": 16, "d_hidden": 256}),
-             lengths=(256, 384, 512), impls=("miniworld", "triton")),
+             # compile: "Input shapes should have M >= 1, N >= 1 and K >= 16".
+             **_shapes("triangle_attention_heads")),
         Case("attention_pair_bias",
              lambda dims, p, i, dt: AttentionPairBias(**dims).cuda().to(dt),
-             lambda b, l, dims, dt: (_single(b, l, dims["d_single"], dt),
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_single"], dt),
                                      _pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=({"d_single": 384, "d_pair": 128, "n_head": 8},
-                   {"d_single": 768, "d_pair": 128, "n_head": 16},
-                   {"d_single": 384, "d_pair": 256, "n_head": 8})),
+             **_shapes("attention_pair_bias")),
         Case("augmented_attention",
              lambda dims, p, i, dt: AugmentedAttentionPairBias(
                  **dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_single(2, l, dims["d_single"], dt).unsqueeze(1),
+             lambda b, l, dims, dt, s: (_single(2, l, dims["d_single"], dt).unsqueeze(1),
                                      _single(2, l, dims["d_cond"], dt).unsqueeze(1),
                                      _pair(1, l, dims["d_pair"], dt), _mask(1, l)),
              # module dtype x core dtype. The cross product is the point: the whole-op wrapper
              # runs the core in bf16 under an fp32 forward, so (fp32, bf16) is production, not a
              # corner -- and it keys to a different cache bucket than (bf16, bf16).
-             dims=({"d_single": 384, "d_cond": 384, "d_pair": 128, "n_head": 16},
-                   {"d_single": 768, "d_cond": 768, "d_pair": 128, "n_head": 16}),
-             dtypes=BOTH, compute_dtypes=BOTH),
+             **_shapes("augmented_attention")),
         Case("adaptive_layernorm",
              lambda dims, p, i, dt: AdaptiveLayerNorm(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_single(b, l, dims["d_hidden"], dt),
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_hidden"], dt),
                                      _single(b, l, dims["d_cond"], dt)),
              # Same two the model builds -- AdaptiveLayerNorm is constructed inside
              # ConditionedTransition and AugmentedAttentionPairBias with the block's own
              # (d_single, d_cond), so it sees 768/384 and 128/128 and nothing else.
-             dims=({"d_hidden": 768, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128}),
-             dtypes=BOTH),
+             **_shapes("adaptive_layernorm")),
         # The two combinations the model builds, and only those. The model's config gives the
         # DiffusionTransformer its `(d_single, d_cond)` and the block passes them straight through
         # as `ConditionedTransition(d_hidden=d_single, d_cond=d_cond)`:
@@ -436,34 +489,32 @@ def cases() -> list[Case]:
         # builds while leaving 768/384, the 24-block half, with no entry at all.
         Case("conditioned_transition",
              lambda dims, p, i, dt: ConditionedTransition(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_single(b, l, dims["d_hidden"], dt),
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_hidden"], dt),
                                      _single(b, l, dims["d_cond"], dt)),
              # bf16 is reachable now that the module takes its dtype at construction instead of
              # pinning the four Linears to fp32; fp32 stays because the bench still runs it there.
-             dims=({"d_hidden": 768, "d_cond": 384}, {"d_hidden": 128, "d_cond": 128}),
-             dtypes=BOTH),
+             **_shapes("conditioned_transition")),
         Case("msa_pair_weighted_averaging",
              lambda dims, p, i, dt: MSAPairWeightedAveraging(
                  **dims, implementation=IT(i), p_drop=p).cuda().to(dt),
-             lambda b, l, dims, dt: (torch.randn(b, 8, l, dims["d_msa"], device="cuda", dtype=dt),
+             lambda b, l, dims, dt, s: (torch.randn(b, 8, l, dims["d_msa"], device="cuda", dtype=dt),
                                      _pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=({"d_msa": 64, "d_pair": 128, "n_head": 8},
-                   {"d_msa": 128, "d_pair": 128, "n_head": 8}),
-             lengths=(256, 384, 512)),
+             **_shapes("msa_pair_weighted_averaging")),
         Case("outer_product_mean",
              lambda dims, p, i, dt: OuterProductMean(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (torch.randn(b, 8, l, dims["d_msa"], device="cuda", dtype=dt),
+             lambda b, l, dims, dt, s: (torch.randn(b, 8, l, dims["d_msa"], device="cuda", dtype=dt),
                                      torch.ones(b, 8, l, dtype=torch.bool, device="cuda")),
-             dims=({"d_msa": 64, "d_pair": 128, "d_hidden": 32},
-                   {"d_msa": 128, "d_pair": 128, "d_hidden": 32}),
-             lengths=(256, 384, 512)),
+             **_shapes("outer_product_mean")),
+        # `implementation` is a SECOND argument to PairformerBlock, not a config field, and it was
+        # not being passed -- so every pairformer_block unit built the PyTorch reference and
+        # launched no kernel at all. Silent: the unit succeeded, wrote an empty shard, and the
+        # block's kernels were covered only incidentally by the leaf-module cases.
         Case("pairformer_block",
              lambda dims, p, i, dt: PairformerBlock(
-                 PairformerConfig(**dims, p_drop=p, n_block=1)).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=({"d_pair": 128, "d_hidden_tri_multi": 128, "d_hidden_tri_attention": 32},
-                   {"d_pair": 256, "d_hidden_tri_multi": 128, "d_hidden_tri_attention": 32}),
-             lengths=(256, 384), switches=("p_drop",)),
+                 PairformerConfig(**dims, p_drop=p, n_block=1),
+                 implementation=IT(i)).cuda().to(dt),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
+             **_shapes("pairformer_block")),
         # The two modules below are driven for COVERAGE, not because the current model calls them:
         # an op registers itself with the cache regardless of whether production reaches it today,
         # and an unbuilt op is a full-grid stall the day something starts reaching it. The audit
@@ -472,57 +523,59 @@ def cases() -> list[Case]:
         Case("triangle_pair_attention",
              lambda dims, p, i, dt: TrianglePairAttention(
                  **dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             dims=({"d_pair": 128, "n_head": 4}, {"d_pair": 256, "n_head": 8}),
-             lengths=(256, 384, 512), impls=("miniworld", "triton")),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
+             **_shapes("triangle_pair_attention")),
         # ---- kernels with no module that dispatches to them ------------------------------- #
         # Registered ops are built because they are registered, not because the current model
         # reaches them. Each entry below drives the op through its own public entry point.
         Case("tm1",
              _kernel_case(("miniworld_engine.kernels.tm1.triton.main", "triton_tm1"),
                           _w(("d", "d"), ("d", "d"), ("d", "d"), ("d", "d"))),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt),),
-             dims=({"d": 128}, {"d": 256}), lengths=(256, 384, 512)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             **_shapes("tm1")),
         Case("tm2",
              _kernel_case(("miniworld_engine.kernels.tm2.triton.main", "triton_tm2"),
                           _w(("d", "d"), ("d", "d"))),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt), _pair(b, l, dims["d"], dt)),
-             dims=({"d": 128}, {"d": 256}), lengths=(256, 384, 512)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt), _pair(b, l, dims["d"], dt)),
+             **_shapes("tm2")),
         Case("gated_projection",
              _kernel_case(("miniworld_engine.kernels.gated_projection.triton.main",
                            "TritonGatedProjectionFunction"), _w(("hd", "d"))),
-             lambda b, l, dims, dt: (_pair(b, l, dims["hd"], dt), _pair(b, l, dims["hd"], dt)),
-             dims=({"hd": 128, "d": 128}, {"hd": 256, "d": 128}), lengths=(256, 384)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["hd"], dt), _pair(b, l, dims["hd"], dt)),
+             **_shapes("gated_projection")),
         Case("layernorm_linear_pair_bias",
              _kernel_case(("miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
                            "triton_layer_norm_linear"), _w(("d",), ("n_head", "d"))),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt),),
-             dims=({"d": 128, "n_head": 4}, {"d": 256, "n_head": 8}), lengths=(256, 384, 512)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             **_shapes("layernorm_linear_pair_bias")),
         Case("swa_atom_attention",
              lambda dims, p, i, dt: SWA3DRoPEAttention(**dims).cuda().to(dt),
              # forward takes (x, attention_params); the params tuple is built by the caller in
              # production, so the case supplies the same shape the atom encoder passes.
-             lambda b, l, dims, dt: (_single(b, l, dims["d_model"], dt).squeeze(0),
+             # (N, S, d) -- `forward` reads `n, s = x.shape[:2]` and views Wqkv(x) as
+             # (n, s, 3, n_heads, head_dim). A squeeze(0) here handed it (S, d), so it took the
+             # WIDTH as the sequence length and every unit died on "shape [...] is invalid for
+             # input of size ..." -- at every length, in every build, since the case was written.
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_model"], dt),
                                      _swa_params(l, dims, dt)),
-             dims=({"d_model": 128, "n_heads": 4}, {"d_model": 256, "n_heads": 8}),
-             lengths=(256, 512), train=False),
+             **_shapes("swa_atom_attention")),
         # forward-only kernel probes: no backward is registered for these, so `train=False`
         # (a train unit would only re-run the same forward and write the same entries).
         Case("layernorm_lowreg",
              _kernel_case(("miniworld_engine.kernels.layernorm.triton.lowreg",
                            "triton_layernorm_lowreg"), _w(("d",), ("d",)), tail=(1e-5,)),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt),),
-             dims=({"d": 128}, {"d": 256}), lengths=(256, 384), train=False),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             **_shapes("layernorm_lowreg")),
         Case("layernorm_transpose",
              _kernel_case(("miniworld_engine.kernels.layernorm.triton.transpose",
                            "layer_norm_transpose"), _w(("d",), ("d",))),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt),),
-             dims=({"d": 128}, {"d": 256}), lengths=(256, 384), train=False),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             **_shapes("layernorm_transpose")),
         Case("layernorm_linear_stats",
              _kernel_case(("miniworld_engine.kernels.layernorm_linear.triton.stats",
                            "stats_triton"), _w()),
-             lambda b, l, dims, dt: (_pair(b, l, dims["d"], dt).reshape(-1, dims["d"]), 1e-5),
-             dims=({"d": 128}, {"d": 256}, {"d": 512}), lengths=(256, 384), train=False),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt).reshape(-1, dims["d"]), 1e-5),
+             **_shapes("layernorm_linear_stats")),
     ]
 
 
@@ -542,7 +595,7 @@ def run_case(case: Case, length: int, dim_index: int, *, train: bool, p_drop: fl
               flush=True)
         return 0
     module.train(train)
-    args = case.inputs(1, length, dims, dtype)
+    args = case.inputs(1, length, dims, dtype, case.stream_for(dim_index))
     fwd_kwargs = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
     try:
         if train:
@@ -782,7 +835,7 @@ def _one_config_per_op():
 
 def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
     for case in selected:
-        dims, length, dt = case.dims[0], case.lengths[0], case.dtypes[0]
+        dims, length, dt = case.dims[0], case.lengths_for(0)[0], case.dtypes[0]
         dt_name = str(dt).replace("torch.", "")
         impls = [i for i in case.impls
                  if sm is None or build_matrix.allows(sm, case.name, i, dt_name)]
@@ -792,7 +845,7 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
             module = case.factory(dims, 0.0, impls[0], dt)
             module.eval()
             with torch.no_grad():
-                module(*case.inputs(1, length, dims, dt))
+                module(*case.inputs(1, length, dims, dt, case.stream_for(0)))
             torch.cuda.synchronize()
         except Exception as exc:
             # OutOfResources is the autotuner working, not a broken case: a config that wants more
@@ -902,14 +955,51 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: `cache._miss`), not a failure.
     #: Literal, not `(ATOM_WIDTH,)`: a test reads these two declarations straight out of the
     #: source so the split cannot be folded away, and it can only read literals.
-    PRESENTED = {"atom": (128,), "pair": (128,), "single": (128, 384, 768)}
-    HEADROOM_PAIR = (256, 512)
+    #: Which `cases()` dims name each stream's channel width. This is the ONE mapping left, and it
+    #: is knowledge -- `d_pair` is the pair stream and `d_single` the single stream, and no rule
+    #: derives that. Everything downstream is arithmetic over `cases()`, which is why the ladders
+    #: below are no longer tuples anyone edits.
+    #:
+    #: They were, and every miss this repository has recorded came from one drifting: TOKEN_SHAPES
+    #: stopped at 512 while cases() ran to 1024; MSA_WIDTHS held 64 while cases() declares d_msa 64
+    #: AND 128; the pair side had no 384, which the DiT hands the shared layernorms. Each was found
+    #: by `dev audit --replay` -- a card, a finished cache, half an hour -- and patched by adding
+    #: another tuple.
+    STREAM_DIMS = {
+        "atom": ("d_atom",),
+        "pair": ("d_pair", "d_hidden_tri_multi"),
+        "single": ("d_single", "d_cond"),
+    }
+
+    def _from_cases(*names: str) -> tuple[int, ...]:
+        """Every value `cases()` declares under any of these dims names."""
+        return tuple(sorted({v for c in cases() for d in c.dims
+                             for k, v in d.items() if k in names and isinstance(v, int)}))
+
+    #: The pair stream, from the model. `HEADROOM_PAIR` was (256, 512) beside a PRESENTED of
+    #: (128,) on the argument that 26 bench.yaml files sweep d_pair 128/256/512 -- which is exactly
+    #: what `cases()` declares, so the split had nothing left to say and is gone.
+    PRESENTED = {"atom": (ATOM_WIDTH,),
+                 "pair": _from_cases(*STREAM_DIMS["pair"]) or (128,),
+                 "single": _from_cases(*STREAM_DIMS["single"]) or (128, 384, 768)}
     #: Widths the MSA stack presents that no other stream does. `cases()` builds
     #: `msa_pair_weighted_averaging` and `outer_product_mean` at `d_msa=64`, and both dispatch into
     #: the SHARED layernorm/transition kernels -- so 64 arrives at a `level=both` kernel as a
     #: channel width with no ladder rung of its own. `dev audit --replay` measured it directly:
     #: `layernorm_fwd_saveact_triton` missing `(rows=2048, N=64)` and `(4096, 64)`.
-    MSA_WIDTHS = (64,)
+    MSA_WIDTHS = _from_cases("d_msa") or (64,)
+
+    def _case_lengths() -> tuple[int, ...]:
+        """Every length `cases()` runs, which is the WORK list.
+
+        `TOKEN_SHAPES` and `DIT_TOKEN_LENGTHS` are KEY sets -- what `atom_key` floor-clamps into,
+        deliberately disjoint so one clamp can serve both sides -- and they were also used as the
+        work list. They are not the same thing and they did not agree: the key sets stop at 512 and
+        768 while `cases()` runs to 1024, so a length production runs had no unit at all.
+        """
+        return tuple(sorted({int(L) for c in cases() for L in c.lengths}))
+
+    CASE_LENGTHS = _case_lengths()
     #: Widths the TRANSITION's expansion presents, for the same reason MSA_WIDTHS exists: a shared
     #: kernel meets them and no stream ladder carries them. The transition expands its hidden width
     #: by `n` (4) before the SwiGLU, so every kernel downstream of that expansion sees `n*d_hidden`,
@@ -925,30 +1015,6 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: 512 is already on the pair ladder; it is listed anyway so the set says what it is rather
     #: than relying on an overlap that a change to HEADROOM_PAIR would silently break.
     EXPANDED_WIDTHS = (512, 1024, 1536)
-    #: What the SHARED kernels get, which is not the same list. The three LN rows above asked for
-    #: 1024 and only 1024; nothing has ever asked them for 1536, and the derivation alone is not
-    #: evidence -- `cases()` declaring d_hidden=384 says the transition runs there, not that the
-    #: expanded activation reaches these kernels at that width. Adding 1536 on the argument that it
-    #: "should" be reachable costs 148 units for a bucket no measurement has requested, which is
-    #: the same trade HEADROOM_PAIR is explicit about making the other way. Widen it when a replay
-    #: asks.
-    EXPANDED_SHARED = (1024,)
-    #: What a SHARED (`level=both`) kernel meets on each side beyond that side's own stream.
-    #:
-    #: These rows are the layernorm / transition kernels every family dispatches into, so the width
-    #: they see is whichever family handed them the activation -- not the width of the stream the
-    #: side names. The side ladders gave the pair side d_pair's rungs, the token side the DiT's, and
-    #: the atom side 128/64, and `dev audit --replay` asked for the crossings that leaves out:
-    #:
-    #:   pair  += 384   `layernorm_fwd_saveact` / `_bwd_atomic` at rows 65536/147456/262144, N=384
-    #:   token += 128, 256, 512, 1024   the 128/128 DiT block and the transition widths at token
-    #:                                  lengths -- 12 of `layernorm_fwd_saveact_strided`'s misses
-    #:   atom  += 384   `layernorm_fwd_strided` / `_bwd_atomic_strided` at 1024, N=384
-    #:
-    #: Measured, not derived: each rung here is one a replay asked for. The full union of every
-    #: width across every side would be 7 rungs on each of 3 sides against today's 4/2/2, and this
-    #: repo has HEADROOM_PAIR as the standing example of what unmeasured headroom costs.
-    SHARED_EXTRA = {"pair": (384,), "token": (128, 256, 512, 1024)}
     #: ...and only for the families that ARE the shared path. A `level=both` row is shared in the
     #: sense that both streams reach it; these three families are the normalisation and transition
     #: kernels that every OTHER family dispatches into, which is why they see widths belonging to
@@ -956,12 +1022,6 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: too and asked for none of these -- their callers hand them their own stream's width -- so
     #: giving them the extras would be 300-odd units for buckets no measurement has requested.
     SHARED_EXTRA_FAMILIES = frozenset({"layernorm", "layernorm_linear", "transition"})
-    #: ...and the token lengths beyond TOKEN_SHAPES that those rows were asked at. 1024 and only
-    #: 1024: `--replay` asked `layernorm_fwd_strided` and `layernorm_bwd_atomic_strided` for
-    #: (rows=1024, N=384) and for nothing longer. `cases()` runs these families at 256..1024, so
-    #: taking the case list wholesale would add 768 as well -- 300-odd units for a bucket no
-    #: measurement has requested, which is the trade HEADROOM_PAIR exists to warn about.
-    SHARED_EXTRA_LENGTHS = (1024,)
     #: The token side of a DiT family. 128 is NOT here: it is d_single_atom, the atom side's width,
     #: and pairing it with a token count builds a shape no config presents. 384 (d_cond, AF3's c_s)
     #: and 768 (d_single_token, c_token) are what the token blocks run.
@@ -972,7 +1032,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: the heuristic subset. NOTHING sweeps d_single: `builder.cases()` presents d_single 384/768
     #: and d_cond 128/384/768, and no bench.yaml has a d_single axis at all. So this rung was
     #: 17% of the whole build spent on a width no measurement and no model config asks for.
-    DIT_TOKEN_WIDTHS = (384, 768)
+    DIT_TOKEN_WIDTHS = _from_cases("d_single", "d_cond") or (384, 768)
     #: Widths that are a kernel's own axis DERIVED from d_pair, not d_pair itself.
     #:
     #: `Case`'s docstring states the rule this implements: "Dimensions are declared with the
@@ -1026,7 +1086,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                               for c in cases()
                               if c.name in ("adaptive_layernorm", "conditioned_transition")
                               for d in c.dims if d.get("d_hidden") and d.get("d_cond")}))
-    PAIR_BIDIR = tuple(sorted({2 * w for w in PRESENTED["pair"] + HEADROOM_PAIR}))
+    PAIR_BIDIR = tuple(sorted({2 * w for w in PRESENTED["pair"]}))
     #: One entry PER LINE, like LADDER: `test_the_builders_ladder_defines_exactly_these` reads the
     #: vocabulary straight out of this source and takes the first quoted name on each line, so a
     #: one-line dict declares only its first class to the test that exists to catch a typo.
@@ -1044,13 +1104,21 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     }
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
-              "pair": tuple(sorted(PRESENTED["pair"] + HEADROOM_PAIR)),
+              "pair": PRESENTED["pair"],
               "single": PRESENTED["single"],
               # `both` is the fallback for a row with no side; the MSA widths reach a
               # both-level kernel through `_widths("atom")`, which is the side their row count
               # lands on -- not through this entry, which `_widths` never reads for such a row.
-              "both": tuple(sorted(set(PRESENTED["pair"] + HEADROOM_PAIR
-                                       + PRESENTED["single"] + MSA_WIDTHS)))}
+              # The union a SHARED kernel meets: every stream `cases()` declares, because every
+              # family dispatches into these and hands them its own width. NOT the derived axes --
+              # `EXPANDED_WIDTHS` is what the transition's own kernels key on after expanding, and
+              # a shared layernorm is handed the width BEFORE that. Folding it in here added 1536
+              # to every shared row, which no replay has ever asked for.
+              # MSA_WIDTHS is NOT here: the MSA stack reaches these kernels through their ROW
+              # count, on the non-pair side, and `_widths("atom")` already carries it. Putting it
+              # in the union gave the pair and token sides a d_msa rung as well, which is an
+              # activation neither stream has.
+              "both": tuple(sorted(set(PRESENTED["pair"] + PRESENTED["single"])))}
     #: read once, not once per row -- 91 rows would open the same file 91 times.
     evidence = width_evidence.load()
     out = []
@@ -1090,7 +1158,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         #: the axis from the stream width, so the stream ladder is still the right one.
         _axis_drives = bool(_axis) and r["family"] in ("triangle_attention", "trimul_inproj",
                                                        "transition")
-        #: A row that IS the shared normalisation/transition path -- see SHARED_EXTRA.
+        #: A row that IS the shared normalisation/transition path: every other family
+        #: dispatches into it, so it meets their widths and not only its own stream's.
         _shared = r["level"] == "both" and r["family"] in SHARED_EXTRA_FAMILIES
         if r["level"] == "both":
             # WHICH sides comes from the row, not from the level. `level=both` says the kernel is
@@ -1109,8 +1178,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # track at length 1024 being normalised by the shared kernel. TOKEN_SHAPES stops at
             # 512, so the only rung at 1024 was the ATOM side -- a different activation, at the
             # atom width -- and the key was never built.
-            _tok_shared = tuple(sorted(set(TOKEN_SHAPES)
-                                       | (set(SHARED_EXTRA_LENGTHS) if _shared else set())))
+            # The WORK list is what `cases()` runs. TOKEN_SHAPES is the key set and stops short
+            # of it; using it here is what left the shared layernorms with no unit at 768 or 1024.
+            _tok_shared = tuple(sorted(set(TOKEN_SHAPES) | set(CASE_LENGTHS)))
             per = {"pair": [("pair", L) for L in BOTH_PAIR_LENGTHS],
                    "atom": [("atom", A) for A in ATOM_SHAPES],
                    "token": [("token", N) for N in _tok_shared]}
@@ -1138,11 +1208,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             #
             # Driving both sides at 1024 collides with nothing: the key carries the widths too, and
             # the atom unit there is width 128 while the token units are 384/768.
-            _tok = tuple(sorted(set(DIT_TOKEN_LENGTHS) | {
-                L for c in cases()
-                if c.name in ("adaptive_layernorm", "conditioned_transition",
-                              "augmented_attention", "dit")
-                for L in c.lengths}))
+            _tok = tuple(sorted(set(DIT_TOKEN_LENGTHS) | set(CASE_LENGTHS)))
             sided = ([("token", L) for L in _tok]
                      + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
@@ -1221,9 +1287,12 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 # `n*d_hidden` -- 1024 is what `--replay` asked three of them for and none had.
                 # A `level=pair`/`token` row keeps the plain pair ladder: it is one family's own
                 # kernel, and the expansion is not on its stream.
-                if _lvl == "both":
-                    return tuple(sorted(set(LADDER["pair"]) | set(EXPANDED_SHARED)
-                                        | (set(SHARED_EXTRA["pair"]) if _shared else set())))
+                if _lvl == "both" and _shared:
+                    # A shared kernel is handed whichever stream's width its CALLER has, so its
+                    # pair side is not d_pair's ladder alone. This used to be a hand-written
+                    # `SHARED_EXTRA["pair"] = (384,)`, added because `--replay` asked for exactly
+                    # that; the union of the streams `cases()` declares says it without the list.
+                    return LADDER["both"]
                 return LADDER["pair"]
             if side == "token":
                 # The class decides the WIDTH even here -- the comment above says so, and this
@@ -1237,7 +1306,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 if _k == "atom":
                     return (ATOM_WIDTH,)
                 if _shared:
-                    return tuple(sorted(set(DIT_TOKEN_WIDTHS) | set(SHARED_EXTRA["token"])))
+                    return LADDER["both"]
                 return DIT_TOKEN_WIDTHS
             return LADDER.get(_k, LADDER["both"])
 
@@ -1282,7 +1351,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         #: pair rides the same way as the others -- width is d_hidden, the spare axis is d_cond.
         _dit_pair = r["family"] in ("adaln", "conditioned_transition")
 
-        def _axes(side: str) -> list:
+        def _axes(side: str, _pairs=_pairs, _gate_out=_gate_out, _dit_pair=_dit_pair) -> list:
             """(width, spare axis) per unit. The LADDER still decides the widths -- the pair only
             says what the second axis is for a width the model actually declares.
 
@@ -1298,10 +1367,10 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 # cross would build head counts the model never pairs with that head dim.
                 return [(d, h) for h, d in HEAD_PAIRS if d in ws]
             if _gate_out:
-                pair = {hd: d for hd, d in GATE_OUT_PAIRS}
+                pair = dict(GATE_OUT_PAIRS)
                 return [(w, pair.get(w, 0)) for w in ws]
             if _dit_pair:
-                pair = {dh: dc for dh, dc in DIT_PAIRS}
+                pair = dict(DIT_PAIRS)
                 return [(w, pair.get(w, 0)) for w in ws]
             return [(w, 0) for w in ws]
 
@@ -1364,7 +1433,11 @@ def units(selected: list[Case]) -> list[Unit]:
                    if sm is None or build_matrix.allows(
                        sm, case.name, i, str(d).replace("torch.", ""))}
         for di in range(len(case.dims)):
-            for length in case.lengths:
+            # lengths_for(di), NOT case.lengths: a module's rows do not share a ladder. The union
+            # would sweep the atom DiT (d_hidden=128) at token counts and the token DiT
+            # (768/384) at atom counts -- twice the units, and every one of them a bucket
+            # production never presents.
+            for length in case.lengths_for(di):
                 for dtype in case.dtypes:
                     dt = str(dtype).replace("torch.", "")
                     for train in ((False, True) if case.train else (False,)):
@@ -1880,7 +1953,7 @@ def audit(selected: list[Case]) -> list[tuple]:
     aborted = 0
     for case in selected:
         for di in range(len(case.dims)):
-            for length in case.lengths:
+            for length in case.lengths_for(di):
                 for dtype in case.dtypes:
                     for train in ((False, True) if case.train else (False,)):
                         for impl in case.impls:

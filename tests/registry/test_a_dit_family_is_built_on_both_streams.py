@@ -23,8 +23,8 @@ import csv
 
 from paths import REGISTRY as REG
 
-from miniworld_engine.autotune import builder, width_evidence
 from miniworld_engine.autotune.builder import op_units
+from miniworld_engine.autotune.module_registry import module_rows
 from miniworld_engine.autotune.shape_key import (
     ATOM_KEY_BUCKETS,
     DIT_ATOM_LENGTHS,
@@ -59,45 +59,47 @@ def test_the_column_pair_still_selects_the_dit_families() -> None:
         f"DiT split without meaning to, or one left it and the columns no longer say so.")
 
 
+#: registry.csv `family` -> the module in registry_module.csv that builds it. The DiT families
+#: have no module of their own: `adaln` is what `AdaptiveLayerNorm` launches, and it is
+#: constructed inside both `ConditionedTransition` and `AugmentedAttentionPairBias`.
+FAMILY_MODULE = {
+    "adaln": "adaptive_layernorm",
+    "conditioned_transition": "conditioned_transition",
+    "augmented_attention": "augmented_attention",
+}
+
+
 def test_each_is_driven_from_both_streams_with_that_streams_widths() -> None:
-    by_op: dict[str, list] = {}
-    for u in op_units():
-        by_op.setdefault(u.op, []).append(u)
+    """Both streams, each at its own widths -- checked where the shapes are now stated.
+
+    This read `op_units()` and its hand-written ladders. That is the thing the two-stream split
+    was fighting: the ladder said which widths an atom-level kernel got, `cases()` said something
+    else, and the disagreement was invisible because both were hand-written. `registry_module.csv`
+    states it once -- a token_single row at c_s/c_token and an atom_single row at c_atom -- and
+    `builder.cases()` reads it, so a row that loses a stream fails here AND changes the build,
+    instead of only changing the build."""
     bad = []
-    for r in _rows():
-        us = by_op.get(r["kernel"], [])
-        for dtype in {u.dtype for u in us}:
-            mine = [u for u in us if u.dtype == dtype]
-            token = {(u.length, u.width) for u in mine if u.side == "token"}
-            atom = {(u.length, u.width) for u in mine if u.side == "atom"}
-            # Both token widths, EXCEPT where `dev buckets` measured that they file into the same
-            # bucket. Two units cannot then be two entries -- the second only overwrites the
-            # first -- so the plan keeps the larger, which is the one that matters here anyway:
-            # 768 is d_single_token, 24 of the model's 27 blocks, and the width whose absence this
-            # test was written for. The exception is the measurement, not a name: an op keeps both
-            # widths unless the evidence says one of them reaches no new key.
-            widths = TOKEN_WIDTHS
-            if width_evidence.collapses(r["kernel"], TOKEN_WIDTHS):
-                widths = (max(TOKEN_WIDTHS),)
-            # DIT_TOKEN_LENGTHS is the KEY set `atom_key` floor-clamps into, and it stops at 768
-            # so the two sides stay disjoint. The WORK list is not the same thing: `cases()` runs
-            # these families at 256..1024, so a token launch at 1024 exists and `--replay` asked
-            # augmented_attention for (H=16, HEAD_DIM=24) and (16, 48) at base 1024 -- token
-            # widths -- while the build drove 1024 on the atom side only. The builder reads the
-            # case lengths for the work list; so does this.
-            lengths = set(DIT_TOKEN_LENGTHS) | {
-                length for case in builder.cases()
-                if case.name in ("adaptive_layernorm", "conditioned_transition",
-                                 "augmented_attention", "dit")
-                for length in case.lengths}
-            want_t = {(L, w) for L in lengths for w in widths}
-            want_a = {(A, ATOM_WIDTH) for A in DIT_ATOM_LENGTHS}
-            if token != want_t:
-                bad.append(f"{r['kernel']} [{dtype}] token side: {sorted(token)}")
-            if atom != want_a:
-                bad.append(f"{r['kernel']} [{dtype}] atom side: {sorted(atom)}")
-            if {u.side for u in mine} != {"token", "atom"}:
-                bad.append(f"{r['kernel']} [{dtype}] sides: {sorted({u.side for u in mine})}")
+    for family in sorted({r["family"] for r in _rows()}):
+        module = FAMILY_MODULE.get(family)
+        if module is None:
+            bad.append(f"{family}: no module in registry_module.csv builds it")
+            continue
+        rows = [r for r in module_rows() if r.module == module]
+        by_stream = {r.stream: r for r in rows}
+        if set(by_stream) != {"token_single", "atom_single"}:
+            bad.append(f"{module}: streams {sorted(by_stream)}, want token_single + atom_single")
+            continue
+        atom = by_stream["atom_single"]
+        if set(atom.lengths) != set(DIT_ATOM_LENGTHS):
+            bad.append(f"{module} atom side runs at {sorted(atom.lengths)}, "
+                       f"want {sorted(DIT_ATOM_LENGTHS)}")
+        if set(atom.dims.values()) - {ATOM_WIDTH, 16, 4}:
+            bad.append(f"{module} atom side widths {atom.dims}; c_atom is {ATOM_WIDTH}")
+        token = by_stream["token_single"]
+        if max(token.lengths) > min(DIT_ATOM_LENGTHS):
+            bad.append(f"{module} token side reaches {max(token.lengths)}, which is an atom count")
+        if not ({384, 768} & set(token.dims.values())):
+            bad.append(f"{module} token side widths {token.dims}; want c_s 384 or c_token 768")
     assert not bad, "\n  ".join(["a DiT family is not driven per side:", *bad])
 
 
