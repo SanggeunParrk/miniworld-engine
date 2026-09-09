@@ -150,7 +150,18 @@ def test_the_unit_count_is_not_quietly_collapsing(units, rows):
     """A guard on the guard: a filter bug that empties the sweep would pass every test above."""
     ops = {u.op for u in units}
     assert len(units) > 1500, f"only {len(units)} units -- the sweep has collapsed"
-    assert len(ops) > 70, f"only {len(ops)} ops have units"
+    # Every developed triton kernel with a driver, and exactly those. This was `> 70`, a number
+    # that had to be lowered by hand every time a kernel was held out -- which is the same edit a
+    # filter bug would make, so the guard could not tell the two apart. Derived from the registry
+    # it cannot rot: holding a kernel out means setting developed=no AND writing its reason in
+    # kernels/undeveloped.csv, and dropping one by accident fails here.
+    want = {r["kernel"] for r in rows
+            if r["backend"] == "triton" and (r.get("driver") or "").strip()
+            and (r.get("developed") or "yes").strip() != "no"}
+    assert ops == want, (
+        f"the op sweep drives {len(ops)} of the {len(want)} developed triton kernels with a "
+        f"driver. Not driven: {sorted(want - ops)}. Driven but not declared buildable: "
+        f"{sorted(ops - want)}")
     thin = [op for op in ops if sum(1 for u in units if u.op == op) < 2]
     # One unit IS the whole cache for a kernel whose key carries neither axis the sweep varies.
     # `transition_fold_triton` keys on `['N', 'K']` -- no `shape_key`, so `_keys_on_shape` already

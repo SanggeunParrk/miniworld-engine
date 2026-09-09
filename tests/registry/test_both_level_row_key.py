@@ -67,8 +67,13 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
     So the invariant splits in two: no bucket in the set is unreachable (the union covers it), and
     no unit lands outside the set (nothing floors into a neighbour's bucket).
     """
+    # developed=no is what holds a kernel out of `build all`, so it has no units by definition
+    # and the `sides` column becomes a statement about where it WOULD run. kernels/undeveloped.csv
+    # carries the reason for each; `test_undeveloped_kernels_carry_a_reason` is what keeps that
+    # from becoming a way to silence this check.
     rows = [r for r in registry_rows()
-            if r["level"] == "both" and r["backend"] == "triton" and (r["driver"] or "").strip()]
+            if r["level"] == "both" and r["backend"] == "triton" and (r["driver"] or "").strip()
+            and (r.get("developed") or "yes").strip() != "no"]
     assert rows, "no level=both triton kernels in the registry"
     union, outside = set(), []
     for r in rows:
