@@ -1030,10 +1030,17 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: One entry PER LINE, like LADDER: `test_the_builders_ladder_defines_exactly_these` reads the
     #: vocabulary straight out of this source and takes the first quoted name on each line, so a
     #: one-line dict declares only its first class to the test that exists to catch a typo.
-    DERIVED_WIDTHS = {
-        "head_dim": HEAD_DIMS,
-        "pair_bidir": PAIR_BIDIR,
-        "expand_nd": EXPANDED_WIDTHS,
+    #: The rungs to drive when a row's `key_axis` names an axis that is NOT a stream width.
+    #:
+    #: Keyed by the axis name the KERNEL uses -- `pack(shape_key, H=H, HEAD_DIM=D)` -- not by a
+    #: name coined here. The `width` column keeps saying which stream the kernel sees, which is
+    #: what it has always meant; `key_axis` says which constexpr the bucket carries, and only that
+    #: decides the ladder. Reading a registry row no longer requires knowing that `pair_bidir` was
+    #: a word this file made up for `H`.
+    AXIS_LADDERS = {
+        "HEAD_DIM": HEAD_DIMS,      # d_hidden // n_head
+        "H": PAIR_BIDIR,            # the per-side hidden width; 2 * d_pair on a bidirectional trimul
+        "ND": EXPANDED_WIDTHS,      # n * d_hidden, the transition's expanded width
     }
     assert PRESENTED["atom"] == (ATOM_WIDTH,), "the atom stream has one width and it is ATOM_WIDTH"
     LADDER = {"atom": PRESENTED["atom"],
@@ -1070,6 +1077,19 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # stripped: an unstripped "single " matches no ladder key and falls through to the union,
         # which is the exact failure test_width_column_selects_a_ladder exists to stop.
         klass = (r.get("width") or "both").strip() or "both"
+        #: The axis this kernel's bucket carries, from registry.csv. Blank on a row whose key
+        #: carries a plain stream width, which is most of them. `HEAD_DIM|H` names both axes of a
+        #: two-axis key; the FIRST is the one whose ladder decides the widths, the rest ride in the
+        #: unit's spare slot.
+        _axes = [a for a in (r.get("key_axis") or "").split("|") if a]
+        _axis = _axes[0] if _axes else ""
+        #: ...and whether that axis is what the DRIVER asks `driver_width` for. Three families were
+        #: changed to do that, because their kernels key on a quantity no stream produces and their
+        #: drivers had pinned it: triangle_attention's head dim, the bidirectional trimul's
+        #: per-side hidden width, the transition's expanded ND. Everywhere else the driver derives
+        #: the axis from the stream width, so the stream ladder is still the right one.
+        _axis_drives = bool(_axis) and r["family"] in ("triangle_attention", "trimul_inproj",
+                                                       "transition")
         #: A row that IS the shared normalisation/transition path -- see SHARED_EXTRA.
         _shared = r["level"] == "both" and r["family"] in SHARED_EXTRA_FAMILIES
         if r["level"] == "both":
@@ -1151,16 +1171,25 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # all. So 768 was 24 of the model's 27 blocks and no unit ever built it: production opened a
         # drawer the builder never filled. Rows genuinely pinned to the atom width say `width=atom`
         # (cond_transition's b2b pair, which `dispatch.ATOM_D_MAX` routes only at d <= 128).
-        def _widths(side: str, _k=klass, _lvl=r["level"], _shared=_shared) -> tuple:
+        def _widths(side: str, _k=klass, _lvl=r["level"], _shared=_shared,
+                    _axis=_axis, _axis_drives=_axis_drives) -> tuple:
             if driver_widths:
                 return tuple(driver_widths)
-            # A DERIVED class first, and regardless of side: the number in these kernels' buckets
-            # is not any stream's channel width, so no stream ladder can produce it and no side
-            # changes that. `head_dim` is d_hidden // n_head; `pair_bidir` is the per-side hidden
-            # width of a BIDIRECTIONAL trimul, which is 2*d_pair. Both were declared `pair`, whose
-            # ladder is d_pair itself -- the right column, the wrong quantity.
-            if _k in DERIVED_WIDTHS:
-                return DERIVED_WIDTHS[_k]
+            # The axis ladder REPLACES the stream ladder only where the driver takes that axis as
+            # its width -- `driver_width` returns the head dim itself, or the per-side hidden
+            # width, or ND -- because then no stream rung is the right number and no side changes
+            # that.
+            #
+            # It does NOT replace it just because the row declares an axis. `augmented_attention`
+            # and `cond_transition` fold `HEAD_DIM`/`ND` into their keys too, but their drivers
+            # DERIVE those from the stream width they are handed, and that width differs per side:
+            # augmented_attention's head dim is 768/16 = 48 on the token side and 128/n_head on the
+            # atom side. Handing both sides one axis ladder gave a `level=atom` row head dims
+            # 16/32/64 on its ATOM side, which three tests reject and which the model never runs.
+            # Their `key_axis` is a declaration of what the bucket carries, which is what makes the
+            # unit's second axis and the driver's derivation checkable; it is not a ladder.
+            if _axis in AXIS_LADDERS and _axis_drives:
+                return AXIS_LADDERS[_axis]
             # A `level=both` row is driven once per SIDE, and the side names the stream outright,
             # so it decides the ladder: its atom units are a real atom activation (128 and only
             # 128) and its pair units a real pair one, whatever the row's own class says. The
@@ -1236,7 +1265,12 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
 
         # A `head_dim` row's bucket carries TWO axes, so its units carry the pair. Everything else
         # gets heads=0, which leaves the driver's own derivation alone.
-        _pairs = (klass == "head_dim")
+        # HEAD_PAIRS is triangle_attention's (n_head, head_dim) list, so this may only fire on a
+        # row whose driver takes the head dim as its width. `augmented_attention` declares
+        # `key_axis=HEAD_DIM|H` too and DERIVES both from d_single; gating on the axis alone
+        # intersected its single ladder (128/384/768) with triangle_attention's head dims and left
+        # it with no units at all -- five ops silently dropped from the sweep.
+        _pairs = (_axis == "HEAD_DIM" and _axis_drives)
         #: The gate-out GEMM's two widths are independent and its driver tied them, so these two
         #: rows carry the (d_hidden, d_pair) pair the same way a head_dim row carries (H, D). The
         #: SECOND number rides in `heads` -- it is the unit's spare axis, not a head count here,

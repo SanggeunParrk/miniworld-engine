@@ -17,14 +17,16 @@ from paths import registry_rows
 
 #: The four the builder's LADDER defines. `atom` is the fixed atom-stream width (128); `pair` and
 #: `single` are the two streams' ladders; `both` is the union, for a kernel that meets both.
-#: `head_dim`, `pair_bidir` and `expand_nd` are DERIVED classes: the number in those kernels'
-#: buckets is `d_hidden // n_head`, `2 * d_pair` and `n * d_hidden`, none of which a stream
-#: ladder produces.
-KNOWN = {"atom", "pair", "single", "both", "head_dim", "pair_bidir", "expand_nd"}
+#: A row whose bucket carries something that is not a stream width says so in `key_axis` instead,
+#: naming the kernel's own constexpr.
+KNOWN = {"atom", "pair", "single", "both"}
 
-#: The derived subset of KNOWN -- the classes whose value is computed from a stream
-#: width rather than being one. `_widths` returns these before it dispatches on side.
-DERIVED = {"head_dim", "pair_bidir", "expand_nd"}
+#: The axis names a row may put in `key_axis` -- the constexpr its bucket actually carries, as the
+#: KERNEL spells it in `pack(...)`. These are not width classes and never appear in `width`: the
+#: two columns answer different questions, which stream the kernel sees and which axis its key
+#: folds in. They were one column for a while, with `head_dim` / `pair_bidir` / `expand_nd` as
+#: invented values, and a reader had no way to tell those from the stream names beside them.
+AXES = {"HEAD_DIM", "H", "ND"}
 
 
 def _rows() -> list[dict]:
@@ -49,10 +51,13 @@ def test_the_builders_ladder_defines_exactly_these() -> None:
     # number is computed from a stream width and is therefore on no stream ladder --
     # `d_hidden // n_head`, `2 * d_pair`. Reading only the first is how a row could say
     # `width=head_dim`, fall through to the union, and be tuned at widths it never sees.
-    for name in ("LADDER = {", "DERIVED_WIDTHS = {"):
-        body = src.split(name, 1)[1].split("}", 1)[0]
-        defined |= {line.split('"')[1] for line in body.splitlines() if '"' in line}
+    body = src.split("LADDER = {", 1)[1].split("}", 1)[0]
+    defined |= {line.split('"')[1] for line in body.splitlines() if '"' in line}
     assert defined == KNOWN, f"builder defines {sorted(defined)}, this test knows {sorted(KNOWN)}"
+    # and the axis ladders, under the names the kernels use
+    body = src.split("AXIS_LADDERS = {", 1)[1].split("}", 1)[0]
+    axes = {line.split('"')[1] for line in body.splitlines() if '"' in line}
+    assert axes == AXES, f"builder drives axes {sorted(axes)}, this test knows {sorted(AXES)}"
 
 
 def test_a_triton_row_declares_a_width() -> None:
@@ -74,17 +79,10 @@ def test_a_both_level_row_declares_the_union_and_nothing_else() -> None:
     nothing would have caught it, because nothing reads the cell. Pinning the biconditional turns
     the dead value into a consistency check: `width=both` exactly when `level=both`.
     """
-    # ...or a DERIVED class. `_widths` reads DERIVED_WIDTHS before it looks at the side, so a
-    # derived value IS read on a `level=both` row and is not a stream claim at all: it names a
-    # computed quantity (`n * d_hidden`, `d_hidden // n_head`) that no side's ladder produces.
-    # `transition_expand_swiglu_triton` is the case that forced this. It is `level=both` -- the
-    # kernel really does meet both streams -- and it folds ND into its key, so the side ladders
-    # could only ever build the one ND its driver happened to pin, which is what `--replay`
-    # measured: 1024 and 1536 asked for, 512 built, five times over.
-    # Two directions, not one equality: a `level=both` row must say `both` or a derived class,
-    # and `both` may only appear on a `level=both` row. A DERIVED class is free at any level --
-    # `triangle_attention` is `level=token, width=head_dim` and that is the whole point of it.
-    allowed = {"both", *DERIVED}
+    # `level=both` says `both`, and `both` appears nowhere else. The column is a stream name
+    # again: a row whose key carries something other than a stream width says that in `key_axis`,
+    # which is read independently of this.
+    allowed = {"both"}
     wrong = sorted(
         f"{r['kernel']}: level={r['level']} width={(r.get('width') or '').strip()}"
         for r in _rows() if r["backend"] == "triton"
@@ -95,3 +93,80 @@ def test_a_both_level_row_declares_the_union_and_nothing_else() -> None:
         "is driven once per side and its ladder comes from the side, so the column can only say "
         "`both` or name a derived class; and a row that says `both` while its level names one "
         "stream is claiming a ladder it will never be given:\n  " + "\n  ".join(wrong))
+
+
+def test_key_axis_names_an_axis_the_kernel_actually_packs() -> None:
+    """`key_axis` is the kernel's own constexpr, checked against the source, not a label.
+
+    The column exists because `width` was carrying two different questions. A kernel whose bucket
+    folds in `d_hidden // n_head` is still a PAIR-stream kernel; saying `width=head_dim` answered
+    "which axis" in the cell that answers "which stream", and `head_dim` / `pair_bidir` /
+    `expand_nd` were names this repository invented for `HEAD_DIM`, `H` and `ND` -- so a reader
+    could not tell them from `atom` and `single` beside them, nor find them by grepping the kernels.
+
+    Now the cell names what `pack(...)` names. This is what keeps it true.
+    """
+    import ast
+
+    from paths import PKG
+
+    bad = []
+    for r in _rows():
+        axes = [a for a in (r.get("key_axis") or "").split("|") if a]
+        if not axes:
+            continue
+        path = PKG.parent / r["file"]
+        try:
+            tree = ast.parse(path.read_text())
+        except OSError:
+            bad.append(f"{r['kernel']}: {r['file']} cannot be read")
+            continue
+        packed: set[str] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) in ("pack", "token_key", "atom_key",
+                                                           "both_key")):
+                packed |= {kw.arg for kw in node.keywords if kw.arg}
+        missing = [a for a in axes if a not in packed]
+        if missing:
+            bad.append(f"{r['kernel']}: key_axis names {missing}, and {r['file']} packs "
+                       f"{sorted(packed) or 'nothing'}")
+    assert not bad, (
+        "a row's key_axis names an axis its kernel does not pack. The cell has to be the name the "
+        "launcher uses, or it is a label that drifts:\n  " + "\n  ".join(bad))
+
+
+def test_a_row_that_packs_a_derived_axis_declares_it() -> None:
+    """The other direction: a kernel folding an axis no stream ladder produces must SAY so.
+
+    Without this the column is optional, and an unset cell reads the same as "this kernel's bucket
+    is a plain stream width" -- which is exactly the state that had `triangle_attention` tuned at
+    d_pair's rungs while its key carried head dims, for as long as the column had no way to say
+    otherwise.
+    """
+    derived = {"HEAD_DIM", "H", "ND"}
+    bad = []
+    for r in _rows():
+        if r["backend"] != "triton" or (r.get("developed") or "yes").strip() == "no":
+            continue
+        axes = {a for a in (r.get("key_axis") or "").split("|") if a}
+        import ast
+
+        from paths import PKG
+        try:
+            tree = ast.parse((PKG.parent / r["file"]).read_text())
+        except OSError:
+            continue
+        packed: set[str] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", None) in ("pack", "token_key", "atom_key",
+                                                           "both_key")):
+                packed |= {kw.arg for kw in node.keywords if kw.arg}
+        undeclared = (packed & derived) - axes
+        if undeclared:
+            bad.append(f"{r['kernel']}: {r['file']} packs {sorted(undeclared)} and key_axis is "
+                       f"{r.get('key_axis')!r}")
+    assert not bad, (
+        "a kernel folds a derived axis into its bucket and its row does not declare it, so the "
+        "build tunes it at whatever the stream ladder happens to carry:\n  " + "\n  ".join(bad))
