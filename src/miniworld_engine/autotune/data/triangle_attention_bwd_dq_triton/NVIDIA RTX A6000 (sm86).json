@@ -112,8 +112,290 @@
   ],
   "config_space_hash": "d06596996f18",
   "driver_id_scheme": 2,
-  "driver_identity": "6b14219efffd",
+  "driver_identity": "0080b28ab9c5",
   "entries": {
+    "bfloat16+float32|shape_key=10737485862": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 6.571007966995239,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 6.722048044204712,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 6.9120001792907715,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 6.912511825561523,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 64
+        },
+        "ms": 6.9468159675598145,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|shape_key=10737551398": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 64
+        },
+        "ms": 2.5610239505767822,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 2.5630719661712646,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 2.635264039039612,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 2.6495999097824097,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 2.6767361164093018,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|shape_key=10737682470": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.260351896286011,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.3130879402160645,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.555776119232178,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.63923192024231,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.686847925186157,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|shape_key=12884969510": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 11.439104080200195,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 11.812864303588867,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 64
+        },
+        "ms": 12.172287940979004,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 12.180480003356934,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 12.217344284057617,
+        "num_stages": 3,
+        "num_warps": 2
+      }
+    ],
+    "bfloat16+float32|shape_key=12885035046": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.652544021606445,
+        "num_stages": 4,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 64
+        },
+        "ms": 4.719615936279297,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 64
+        },
+        "ms": 4.761087894439697,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.7923197746276855,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.800512075424194,
+        "num_stages": 3,
+        "num_warps": 4
+      }
+    ],
+    "bfloat16+float32|shape_key=12885166118": [
+      {
+        "kwargs": {
+          "BLOCK_M1": 128,
+          "BLOCK_M2": 32
+        },
+        "ms": 7.156735897064209,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 7.359488010406494,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 7.401472091674805,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 7.414783954620361,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 7.47212815284729,
+        "num_stages": 4,
+        "num_warps": 4
+      }
+    ],
     "bfloat16+float32|shape_key=2147551270": [
       {
         "kwargs": {
@@ -680,10 +962,29 @@
     ]
   },
   "entry_grids": {
+    "bfloat16+float32|shape_key=10737485862": [
+      "d06596996f18"
+    ],
+    "bfloat16+float32|shape_key=10737551398": [
+      "d06596996f18"
+    ],
+    "bfloat16+float32|shape_key=10737682470": [
+      "d06596996f18"
+    ],
+    "bfloat16+float32|shape_key=12884969510": [
+      "d06596996f18"
+    ],
+    "bfloat16+float32|shape_key=12885035046": [
+      "d06596996f18"
+    ],
+    "bfloat16+float32|shape_key=12885166118": [
+      "d06596996f18"
+    ],
     "bfloat16+float32|shape_key=2147551270": [
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=2147616806": [
+      "bef611f4419a",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=2147747878": [
@@ -693,33 +994,82 @@
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=4295100454": [
+      "5a2569877d10",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=4295231526": [
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=6442518566": [
+      "1dcbbe38e110",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=6442584102": [
+      "7e7783ce4813",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=6442715174": [
+      "2dde24d0ed2f",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=8590002214": [
-      "d06596996f18"
+      "d06596996f18",
+      "e7ebc1c2dcad"
     ],
     "bfloat16+float32|shape_key=8590067750": [
+      "79d6f063e589",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=8590198822": [
+      "2dde24d0ed2f",
       "d06596996f18"
     ]
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "grids": {
+    "1dcbbe38e110": [
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 2, 3)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 2)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 4)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 2)"
+    ],
+    "2dde24d0ed2f": [
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 4, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 4, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 4, 4)"
+    ],
+    "5a2569877d10": [
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 64)), 4, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 4)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 4, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 4, 4)"
+    ],
+    "79d6f063e589": [
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 3)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 4)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 64)), 4, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 1)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 4)"
+    ],
+    "7e7783ce4813": [
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 4)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 64)), 4, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 4)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 4, 3)"
+    ],
+    "bef611f4419a": [
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 4)"
+    ],
     "d06596996f18": [
       "((('BLOCK_M1', 128), ('BLOCK_M2', 128)), 1, 1)",
       "((('BLOCK_M1', 128), ('BLOCK_M2', 128)), 1, 2)",
@@ -829,6 +1179,13 @@
       "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 2)",
       "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 3)",
       "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 4)"
+    ],
+    "e7ebc1c2dcad": [
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 2, 2)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 2, 3)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 32)), 4, 2)",
+      "((('BLOCK_M1', 128), ('BLOCK_M2', 64)), 4, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 2, 2)"
     ]
   },
   "key_scheme": 3,

@@ -964,8 +964,102 @@
   ],
   "config_space_hash": "a6ae784f0264",
   "driver_id_scheme": 2,
-  "driver_identity": "5566b6a3791e",
+  "driver_identity": "363e56c916cc",
   "entries": {
+    "bfloat16+float32|shape_key=10738991898": [
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 5,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 256,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.009216000325977802,
+        "num_stages": 6,
+        "num_warps": 8
+      }
+    ],
+    "bfloat16+float32|shape_key=10740564762": [
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.014271999709308147,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 128,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.014336000196635723,
+        "num_stages": 6,
+        "num_warps": 8
+      }
+    ],
     "bfloat16+float32|shape_key=12886475546": [
       {
         "kwargs": {
@@ -1621,6 +1715,100 @@
         },
         "ms": 0.11264000087976456,
         "num_stages": 3,
+        "num_warps": 8
+      }
+    ],
+    "float32|shape_key=10738991898": [
+      {
+        "kwargs": {
+          "BLOCK_K": 512,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 512,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 512,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 512,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 512,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.013311999849975109,
+        "num_stages": 5,
+        "num_warps": 4
+      }
+    ],
+    "float32|shape_key=10740564762": [
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 1,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 2,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 3,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 4,
+        "num_warps": 8
+      },
+      {
+        "kwargs": {
+          "BLOCK_K": 1024,
+          "BLOCK_M1": 8
+        },
+        "ms": 0.01945599913597107,
+        "num_stages": 5,
         "num_warps": 8
       }
     ],
@@ -2284,94 +2472,171 @@
     ]
   },
   "entry_grids": {
-    "bfloat16+float32|shape_key=12886475546": [
+    "bfloat16+float32|shape_key=10738991898": [
       "a6ae784f0264"
+    ],
+    "bfloat16+float32|shape_key=10740564762": [
+      "a6ae784f0264"
+    ],
+    "bfloat16+float32|shape_key=12886475546": [
+      "a6ae784f0264",
+      "be1b2ed4d57c"
     ],
     "bfloat16+float32|shape_key=12888048410": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "bfloat16+float32|shape_key=137439478554": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "b955043b8791"
     ],
     "bfloat16+float32|shape_key=17180394266": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "e77fd76feab7"
     ],
     "bfloat16+float32|shape_key=2149057306": [
+      "1340aad8197b",
       "a6ae784f0264"
     ],
     "bfloat16+float32|shape_key=2150630170": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "bfloat16+float32|shape_key=34360263450": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "ea3de605ce0b"
     ],
     "bfloat16+float32|shape_key=4296540954": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "ec5b4ced7a74"
     ],
     "bfloat16+float32|shape_key=4298113818": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "bfloat16+float32|shape_key=6444024602": [
+      "67fd995fab7b",
       "a6ae784f0264"
     ],
     "bfloat16+float32|shape_key=6445597466": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "bfloat16+float32|shape_key=68720001818": [
+      "9688849177ff",
       "a6ae784f0264"
     ],
     "bfloat16+float32|shape_key=8591508250": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "ec5b4ced7a74"
     ],
     "bfloat16+float32|shape_key=8593081114": [
+      "a6ae784f0264",
+      "bf59b448479b"
+    ],
+    "float32|shape_key=10738991898": [
+      "a6ae784f0264"
+    ],
+    "float32|shape_key=10740564762": [
       "a6ae784f0264"
     ],
     "float32|shape_key=12886475546": [
       "a6ae784f0264"
     ],
     "float32|shape_key=12888048410": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "float32|shape_key=137439478554": [
+      "21f21a69f727",
       "a6ae784f0264"
     ],
     "float32|shape_key=17180394266": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "ac1fb1dbfcb1"
     ],
     "float32|shape_key=2149057306": [
       "a6ae784f0264"
     ],
     "float32|shape_key=2150630170": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "float32|shape_key=34360263450": [
+      "65e04ac46315",
       "a6ae784f0264"
     ],
     "float32|shape_key=4296540954": [
       "a6ae784f0264"
     ],
     "float32|shape_key=4298113818": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "float32|shape_key=6444024602": [
       "a6ae784f0264"
     ],
     "float32|shape_key=6445597466": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ],
     "float32|shape_key=68720001818": [
+      "65d8f4de3a10",
       "a6ae784f0264"
     ],
     "float32|shape_key=8591508250": [
       "a6ae784f0264"
     ],
     "float32|shape_key=8593081114": [
-      "a6ae784f0264"
+      "a6ae784f0264",
+      "bf59b448479b"
     ]
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "grids": {
+    "1340aad8197b": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 6)"
+    ],
+    "21f21a69f727": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 6)"
+    ],
+    "65d8f4de3a10": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 4, 6)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 4, 6)"
+    ],
+    "65e04ac46315": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 4, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 4, 5)"
+    ],
+    "67fd995fab7b": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 5)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 6)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 8, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 8, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 8, 3)"
+    ],
+    "9688849177ff": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 6)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 5)"
+    ],
     "a6ae784f0264": [
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 2)",
@@ -3333,6 +3598,55 @@
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 4)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 5)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 6)"
+    ],
+    "ac1fb1dbfcb1": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 6)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 4, 4)"
+    ],
+    "b955043b8791": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 1)"
+    ],
+    "be1b2ed4d57c": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 5)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 6)"
+    ],
+    "bf59b448479b": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 8, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 8, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 8, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 8, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 8, 5)"
+    ],
+    "e77fd76feab7": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 8, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 8, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 8, 6)"
+    ],
+    "ea3de605ce0b": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 6)"
+    ],
+    "ec5b4ced7a74": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 5)"
     ]
   },
   "key_scheme": 3,

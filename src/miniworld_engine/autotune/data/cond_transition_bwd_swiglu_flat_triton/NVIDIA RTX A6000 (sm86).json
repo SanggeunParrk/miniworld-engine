@@ -116,7 +116,7 @@
   ],
   "config_space_hash": "dfaedae12ac3",
   "driver_id_scheme": 2,
-  "driver_identity": "52a2c2b4dc39",
+  "driver_identity": "a9002ba4b741",
   "entries": {
     "bfloat16|shape_key=12888049149": [
       {
@@ -672,6 +672,48 @@
         "ms": 0.17919999361038208,
         "num_stages": 1,
         "num_warps": 1
+      }
+    ],
+    "float32|shape_key=10743711229": [
+      {
+        "kwargs": {
+          "BLOCK_E": 512
+        },
+        "ms": 0.030719999223947525,
+        "num_stages": 1,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 512
+        },
+        "ms": 0.030719999223947525,
+        "num_stages": 2,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 512
+        },
+        "ms": 0.030719999223947525,
+        "num_stages": 3,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 512
+        },
+        "ms": 0.030719999223947525,
+        "num_stages": 4,
+        "num_warps": 4
+      },
+      {
+        "kwargs": {
+          "BLOCK_E": 2048
+        },
+        "ms": 0.030719999223947525,
+        "num_stages": 1,
+        "num_warps": 4
       }
     ],
     "float32|shape_key=12888049149": [
@@ -1306,10 +1348,14 @@
     "bfloat16|shape_key=8596227581": [
       "dfaedae12ac3"
     ],
+    "float32|shape_key=10743711229": [
+      "dfaedae12ac3"
+    ],
     "float32|shape_key=12888049149": [
       "dfaedae12ac3"
     ],
     "float32|shape_key=12891194877": [
+      "cd7af9133059",
       "dfaedae12ac3"
     ],
     "float32|shape_key=137440003581": [
@@ -1322,6 +1368,7 @@
       "dfaedae12ac3"
     ],
     "float32|shape_key=2153776637": [
+      "3498a27bb62b",
       "dfaedae12ac3"
     ],
     "float32|shape_key=34360788477": [
@@ -1331,12 +1378,14 @@
       "dfaedae12ac3"
     ],
     "float32|shape_key=4301260285": [
+      "3498a27bb62b",
       "dfaedae12ac3"
     ],
     "float32|shape_key=6445598205": [
       "dfaedae12ac3"
     ],
     "float32|shape_key=6448743933": [
+      "3498a27bb62b",
       "dfaedae12ac3"
     ],
     "float32|shape_key=68720526845": [
@@ -1346,12 +1395,27 @@
       "dfaedae12ac3"
     ],
     "float32|shape_key=8596227581": [
+      "3498a27bb62b",
       "dfaedae12ac3"
     ]
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A6000 (sm86)",
   "grids": {
+    "3498a27bb62b": [
+      "((('BLOCK_E', 128),), 8, 1)",
+      "((('BLOCK_E', 128),), 8, 2)",
+      "((('BLOCK_E', 128),), 8, 3)",
+      "((('BLOCK_E', 128),), 8, 4)",
+      "((('BLOCK_E', 2048),), 4, 1)"
+    ],
+    "cd7af9133059": [
+      "((('BLOCK_E', 128),), 8, 1)",
+      "((('BLOCK_E', 128),), 8, 2)",
+      "((('BLOCK_E', 128),), 8, 3)",
+      "((('BLOCK_E', 2048),), 4, 1)",
+      "((('BLOCK_E', 2048),), 4, 2)"
+    ],
     "dfaedae12ac3": [
       "((('BLOCK_E', 128),), 1, 1)",
       "((('BLOCK_E', 128),), 1, 2)",
