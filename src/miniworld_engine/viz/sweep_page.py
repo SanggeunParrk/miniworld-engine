@@ -53,97 +53,21 @@ def _exempt_reasons() -> dict[str, str]:
 
 
 def _coverage() -> dict[str, float]:
-    """How much of a full planned build each kernel's shipped cache already holds, 0..1.
-
-    COUNTS, not keys -- and that limit is the point of this docstring, because the number read as
-    a guarantee for a while and is not one. It compares how MANY entries a card holds against how
-    many units the plan plans; it does not check that those entries are the buckets the plan
-    names. A cache can be at "100%" and miss every bucket production asks for. Matching keys means
-    unpacking each entry's ``shape_key``, which needs the axis count of the launcher that wrote it
-    (see ``shape_key.unpack_base`` -- "not guessable from the value"), so it belongs with the
-    per-op audit, not on a page that reads only JSON.
-
-    Two things that were wrong ARE fixed here, because both produced false assurance rather than
-    an approximation:
-
-    * ``cpu.json`` counted as a card. It is a dispatch-only cache with its own key set, and for
-      ``cond_transition_fwd_b2b_triton`` it holds 19 keys against a 9-unit plan -- reported as
-      211% coverage for an op whose A100 cache actually holds 4 of 9 buckets. GPU caches only now.
-    * the count was unclamped, so "more entries than planned" read as ">100% covered" when it
-      means the OPPOSITE: the keys do not match the plan. It is clamped, and the excess is
-      reported separately by :func:`_coverage_mismatch` so the page can say so.
-
-    Still MAX across cards, deliberately: this page describes the shipped cache as a whole, and
-    the best-covered card is the honest answer to "does this repo ship a tuned cache for this
-    kernel". Per-card health is ``dev cache-status``'s job.
-    """
-    return {op: min(1.0, frac) for op, frac in _coverage_raw().items()}
+    """Exact usable key coverage for the A6000 plan, never a maximum over other cards."""
+    return _coverage_raw()
 
 
 def _coverage_mismatch() -> dict[str, float]:
-    """Ops whose cache holds MORE entries than the plan has units, as the raw ratio (>1).
-
-    Not a bonus: it is proof the entries are keyed on something the plan does not name, so the
-    coverage number for that op is meaningless in both directions.
-    """
-    return {op: frac for op, frac in _coverage_raw().items() if frac > 1.0}
+    return {}
 
 
 def _coverage_raw() -> dict[str, float]:
-    """The unclamped per-op ratio, best GPU card. See :func:`_coverage`."""
-    from miniworld_engine.autotune.builder import op_units
-
-    # DISTINCT (dtype, length) buckets, not units. A unit is (op, dtype, side, length, width) and
-    # several units collapse into ONE cache entry whenever the kernel does not fold `width` into
-    # its shape key -- which most do not. Counting units made every such op read as 1/3 covered
-    # with a COMPLETE cache: `gated_projection_gate_packed_flat_triton` holds 4 entries keyed on
-    # length alone against 12 units (4 lengths x 3 widths), and the whole
-    # `triangle_attention_bwd_*` family reads 33.3% for the same reason.
-    #
-    # Length is the one axis every kernel keys on, so it is the one this file can count from JSON.
-    # It still cannot see width: a kernel that DOES fold width shows one entry per width and reads
-    # over 100%, which `_coverage_mismatch` surfaces rather than hides. A key-level answer needs
-    # `shape_key.unpack_base`, which needs each launcher's axis count -- that is `dev audit`'s job,
-    # not a page that reads only JSON. This number is a smoke alarm, not a guarantee.
-    planned: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
-    for u in op_units():
-        planned[u.op][u.dtype] = 0
-    seen: dict[str, set] = collections.defaultdict(set)
-    for u in op_units():
-        seen[u.op].add((u.dtype, u.length))
-    for op, pairs in seen.items():
-        for dt, _length in pairs:
-            planned[op][dt] += 1
-    have: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
-    for d in sorted(DATA.iterdir()):
-        if not d.is_dir():
-            continue
-        for f in sorted(d.glob("*.json")):
-            if f.stem == "cpu":            # a dispatch-only cache, not a card
-                continue
-            try:
-                data = json.loads(f.read_text())
-            except (OSError, ValueError):
-                continue
-            for key, ranked in (data.get("entries") or {}).items():
-                if isinstance(ranked, list) and ranked:
-                    have[d.name][(f.stem, key.split("|")[0])] += 1
-    out = {}
-    for op, want in planned.items():
-        best = 0.0
-        for (_card, dt), n in have.get(op, {}).items():
-            for wdt, wn in want.items():
-                # The two sides SPELL the dtype differently and never matched. A unit declares the
-                # registry dtype (`bfloat16`); the runtime key is `dtype_of_args`, the SET of float
-                # operand dtypes -- and a norm affine pinned to fp32 by `primitives._Fp32ParamsMixin`
-                # puts `bfloat16+float32` in the cache for a kernel whose activations are bf16. So
-                # every such op read as 0.0% covered while holding a full cache: transition_fwd_b2b
-                # (16 entries), triangle_attention_fwd (12), trimul_gemm_gate_saveact (12) all did.
-                # Match on membership: a plan dtype is covered by any recorded key that contains it.
-                if wdt in dt.split("+"):
-                    best = max(best, n / wn)
-        out[op] = best
-    return out
+    from miniworld_engine.autotune import derive
+    rows = derive.kernel_rows("sm86")
+    report = derive.coverage("sm86", "NVIDIA RTX A6000 (sm86)", DATA)
+    wanted = collections.Counter(r["kernel"] for r in rows)
+    missing = collections.Counter(op for op, _key in report["missing"])
+    return {op: (n - missing[op]) / n for op, n in wanted.items()}
 
 
 def _prune_fn_name(path: pathlib.Path, symbol: str) -> str | None:
@@ -221,20 +145,63 @@ def _benched_per_unit(op: str, grid: int, sides) -> int:
         return grid
 
 
+def _derived_rows(sm: str | None) -> list[dict]:
+    """``registry_kernel.csv`` for this card, or [] when there is nothing to read.
+
+    Empty is not an error here: a checkout that has never run `dev derive`, or a card no
+    derivation has been run for, should still get a page.
+    """
+    from miniworld_engine.autotune import derive
+
+    try:
+        return derive.kernel_rows(sm or "sm86")
+    except (FileNotFoundError, KeyError):
+        return []
+
+
 def collect() -> tuple[list[dict], dict]:
-    """One record per kernel a build drives, plus the totals."""
+    """One record per kernel a build drives, plus the totals.
+
+    Read from ``registry_kernel.csv`` -- the list `dev derive` writes by RUNNING every row of
+    registry_module.csv on fake tensors -- not from ``op_units()``. The page is an inventory of
+    what `build all` does, and `op_units` has not been that since the module sweep became the
+    default: it enumerates the per-kernel driver ladders, which now cover only the handful of
+    kernels no module reaches. Rendering those numbers said 4,948 units and 67 kernels for a build
+    that runs 6,526 units over 60 kernels, which is the exact kind of drift this page exists to
+    make visible.
+
+    Falls back to ``op_units`` when the derived file is missing or is for another card, so a fresh
+    checkout still renders something rather than failing.
+    """
+    from miniworld_engine.autotune import derive, plan
     from miniworld_engine.autotune.builder import op_units
 
     reg = {r["kernel"]: r for r in _rows()}
-    exempt, cover = _exempt_reasons(), _coverage()
+    exempt = _exempt_reasons()
     sides: dict[str, dict[str, tuple[set, set]]] = collections.defaultdict(
         lambda: collections.defaultdict(lambda: (set(), set())))
     units: collections.Counter = collections.Counter()
-    for u in op_units():
-        units[u.op] += 1
-        lengths, widths = sides[u.op][u.side]
-        lengths.add(u.length)
-        widths.add(u.width)
+    try:
+        evidence = plan.load("sm86")
+        verification = "verified against current dispatch sources"
+    except (OSError, ValueError, KeyError) as exc:
+        evidence = None
+        verification = f"UNVERIFIED: {exc}"
+    cover = _coverage() if evidence else {}
+    derived_rows = _derived_rows("sm86")
+    if derived_rows:
+        for r in derived_rows:
+            units[r["kernel"]] += 1
+            for stream in r["streams"].split("|"):
+                lengths, widths = sides[r["kernel"]][stream]
+                lengths.update(json.loads(r.get("shapes") or "{}").get(
+                    stream, [int(x) for x in r["lengths"].split("|") if x]))
+    else:
+        for u in op_units():
+            units[u.op] += 1
+            lengths, widths = sides[u.op][u.side]
+            lengths.add(u.length)
+            widths.add(u.width)
 
     out, total = [], 0
     for op in sorted(units):
@@ -245,7 +212,9 @@ def collect() -> tuple[list[dict], dict]:
         for values in ax.values():
             grid *= len(values)
         r = reg[op]
-        benched = _benched_per_unit(op, grid, sides[op])
+        # The derivation records keys, not the full per-launch prune inputs. Do not infer a
+        # smaller search from a guessed width; show the declared unpruned upper bound.
+        benched = grid
         cost = units[op] * benched
         total += cost
         out.append({
@@ -258,11 +227,21 @@ def collect() -> tuple[list[dict], dict]:
                       for s, (L, W) in sorted(sides[op].items())],
         })
     out.sort(key=lambda r: -r["cost"])
+    # Two different numbers, both wanted, and conflating them is how the page came to say 4,948
+    # for a build that runs 6,526. `units` is what `build all` LAUNCHES -- one module invocation
+    # each, from registry_module.csv. `buckets` is what it PRODUCES -- one cache entry each, from
+    # registry_kernel.csv. The search cost tracks buckets, because a unit whose keys the cache
+    # already answers benches nothing; the wall-clock tracks units, because each is a process.
+    module_units = 0
+    if derived_rows:
+        module_units = len(derive.units(derive.module_rows(), arch="sm86"))
     totals = {
-        "kernels": len(out), "units": sum(units.values()), "cost": total,
+        "kernels": len(out), "buckets": sum(units.values()), "cost": total,
+        "units": module_units or sum(units.values()),
         "hours": total * SECONDS_PER_CONFIG / 3600,
         "derived": sum(1 for r in out if r["cover"] >= 1.0),
         "unmeasured": sum(1 for r in out if r["cover"] == 0.0),
+        "verification": verification,
     }
     return out, totals
 
@@ -402,12 +381,17 @@ TEMPLATE = """<title>Autotune Sweep Grid</title>
 <div class="wrap">
 <header><h1>the autotune sweep, one row per kernel</h1>
 <p class="lede">{n} kernels. Each row is what a full <code>build</code> compiles and benches
-for that kernel: the shapes it is driven at, the config axes it searches, and the product.</p>
+for that kernel: the shapes it is driven at, the config axes it searches, and the product.
+Coverage is for NVIDIA RTX A6000 (sm86), with cache identities checked.
+Config counts are unpruned upper bounds for a cold search. Per-shape pruning and existing
+measurements reduce the actual work; these counts do not provide a build ETA.</p>
+<p class="lede">Plan: {verification}</p>
 <dl class="gm">
- <div><dt>units × grid</dt><dd class="num">{cost} M</dd></div>
- <div><dt>at 0.24 s each</dt><dd class="num">{hours} GPU-h</dd></div>
- <div><dt>units</dt><dd class="num">{units}</dd></div>
- <div><dt>ladders derived</dt><dd class="num">{derived} of {n}</dd></div>
+ <div><dt>buckets × grid</dt><dd class="num">{cost} M</dd></div>
+ <div><dt>build ETA</dt><dd class="num">not measured</dd></div>
+ <div><dt>module invocations declared</dt><dd class="num">{units}</dd></div>
+ <div><dt>cache keys required</dt><dd class="num">{buckets}</dd></div>
+ <div><dt>kernels covered</dt><dd class="num">{derived} of {n}</dd></div>
 </dl>
 <dl class="leg">
  <div><dt>atom_single</dt><dd>an atom count at <code>d_single_atom</code></dd></div>
@@ -416,19 +400,16 @@ for that kernel: the shapes it is driven at, the config axes it searches, and th
    (B, L, L, D), so its L is a token count too</dd></div>
  <div><dt>two shape lines</dt><dd>driven per side: the three DiT families run on the token stream
    and the atom stream at different lengths and different widths</dd></div>
- <div><dt><span class="ev ok">derived</span></dt><dd>the cache covers a whole planned build, so the
-   ladder is the winners plus a rung below — and, for warps, no rung above the largest winner</dd></div>
- <div><dt><span class="ev part">%</span></dt><dd>how much of a planned build is measured. The rest
-   is bf16 and the token widths, unbuilt — too partial to narrow on</dd></div>
- <div><dt><span class="ev no">none</span></dt><dd>no entry at the precision this kernel is now
-   declared at; the <code>dtypes</code> column was corrected after those caches were built</dd></div>
+ <div><dt><span class="ev ok">100%</span></dt><dd>every required key has a usable A6000 cache entry; this does not certify numerical accuracy</dd></div>
+ <div><dt><span class="ev part">%</span></dt><dd>fraction of required keys with a usable A6000 cache entry</dd></div>
+ <div><dt><span class="ev no">none</span></dt><dd>no required key currently has a usable A6000 cache entry</dd></div>
  <div><dt>—</dt><dd>no column-tile axis to order (hover for the reason)</dd></div>
 </dl>
 </header>
 <div class="tw"><table>
 <thead><tr><th>kernel</th><th>kind</th><th>dtype</th><th>shape · L · d</th>
 <th>tile axes</th><th>GROUP_M</th><th>warps</th><th>stages</th>
-<th class="r">units</th><th class="r">grid</th><th class="r">units × grid</th></tr></thead>
+<th class="r">keys</th><th class="r">grid</th><th class="r">keys × grid</th></tr></thead>
 <tbody>{rows}</tbody></table></div>
 </div>
 """
@@ -437,13 +418,26 @@ for that kernel: the shapes it is driven at, the config axes it searches, and th
 # --------------------------------------------------------------------------------------------- #
 # rendering
 # --------------------------------------------------------------------------------------------- #
+#: The stream vocabulary, as `registry_module.csv` spells it. A row read from
+#: `registry_kernel.csv` already carries one of these, so it passes straight through; the
+#: `pair`/`atom`/`token` spellings are what `OpUnit.side` uses and are translated.
+STREAM_NAMES = frozenset({"token_pair", "token_single", "atom_single", "msa_token"})
+
+
 def shape_name(row: dict, side: str) -> str:
     """What a shape line counts and whose width it carries.
 
     Three names, not a length word plus a width word: splitting them printed "atom . atom" and made
     two independent axes look like one repeated thing. A pair activation is (B, L, L, D), so its L
     is a token count too -- which is why there is no "pair" on the counting side.
+
+    The fallback below composes a name out of the registry's `level` and `width` columns, and it
+    is a LAST resort: when the page started reading `registry_kernel.csv` its side values became
+    stream names, none of the branches matched, and every line on the page rendered as
+    "both_both" -- two column values glued together, naming nothing.
     """
+    if side in STREAM_NAMES:
+        return side
     if side == "pair":
         return "token_pair"
     if side == "atom":
@@ -457,13 +451,12 @@ def shape_name(row: dict, side: str) -> str:
 def _badge(row: dict) -> str:
     c = row["cover"]
     if c >= 1.0:
-        return ('<span class="ev ok" title="the cache covers a whole planned build, so this '
-                'ladder is derived from it">derived</span>')
+        return '<span class="ev ok" title="all required A6000 keys are usable">100%</span>'
     if c == 0.0:
         return ('<span class="ev no" title="no cache entry at the precision this kernel is '
                 'declared at">none</span>')
-    return (f'<span class="ev part" title="the cache covers {c:.0%} of a planned build -- the '
-            f'narrow widths only">{c:.0%}</span>')
+    return (f'<span class="ev part" title="{c:.0%} of required A6000 keys are usable">'
+            f'{c:.0%}</span>')
 
 
 def render(rows: list[dict], totals: dict) -> str:
@@ -476,7 +469,8 @@ def render(rows: list[dict], totals: dict) -> str:
         shapes = "".join(
             f'<div class="lad"><span class="lv">{shape_name(r, s["name"])}</span>'
             f'{" ".join(str(x) for x in s["L"])}'
-            f'<span class="faint"> &middot; d </span>{" ".join(str(x) for x in s["W"])}</div>'
+            + (f'<span class="faint"> &middot; d </span>{" ".join(str(x) for x in s["W"])}'
+               if s["W"] else "") + "</div>"
             for s in r["sides"])
         tiles = "".join(
             f'<div class="ta"><span class="an">{e(a.replace("BLOCK_", ""))}</span>'
@@ -498,6 +492,8 @@ def render(rows: list[dict], totals: dict) -> str:
             f'<span class="v lad">{r["cost"]:,}</span></td></tr>')
     return TEMPLATE.format(
         css=CSS, rows="".join(body), n=totals["kernels"], units=f'{totals["units"]:,}',
+        buckets=f'{totals["buckets"]:,}',
+        verification=e(totals.get("verification", "unverified")),
         cost=f'{totals["cost"] / 1e6:.2f}', hours=f'{totals["hours"]:.0f}',
         derived=totals["derived"], unmeasured=totals["unmeasured"],
         partial=totals["kernels"] - totals["derived"] - totals["unmeasured"])
@@ -512,7 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(rows, totals))
     print(f"{args.out}: {totals['kernels']} kernels, {totals['units']:,} units, "
-          f"{totals['cost']:,} (config, shape) = {totals['hours']:.0f} GPU-hours")
+          f"{totals['buckets']:,} required keys; {totals['verification']}; build ETA not measured")
     return 0
 
 

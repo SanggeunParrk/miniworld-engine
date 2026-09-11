@@ -339,3 +339,19 @@ def test_the_prune_pair_cannot_both_be_said():
 
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["build", "all", "--prune-cache", "--keep-triton-cache"])
+
+
+
+def test_held_claim_report_does_not_assert_missing_cache(monkeypatch, tmp_path, capsys):
+    held = {"rc": 0, "ops": -1, "label": "other-worker", "log": "",
+            "claimed_elsewhere": True}
+    for strict in (False, True):
+        merged, rc = _merge(monkeypatch, tmp_path, [GOOD, held], strict=strict)
+        assert bool(merged) == (not strict), "strict and partial merge policy must not change"
+        assert rc == int(strict)
+        stderr = capsys.readouterr().err
+        assert "claimed elsewhere; completion is unverified by this invocation" in stderr
+        assert "After all workers finish, rerun with resume" in stderr
+        assert "failed or empty unit(s)" not in stderr
+        assert "will be MISSING" not in stderr
+        assert "fall back to the full grid" not in stderr

@@ -53,7 +53,7 @@ LEVELS = {"kernel": (BENCH_KERNEL, cli.KERNEL_TARGETS),
 
 
 def tracked_subdirectories(root: Path) -> set[str]:
-    """Subdirectories of `root` holding at least one git-tracked file.
+    """Subdirectories holding source files tracked or not ignored by git.
 
     `benchmarks/` results are gitignored, so a working checkout accumulates output under target
     names that no longer exist and `iterdir()` sees them. That happened: fourteen directories under
@@ -67,7 +67,10 @@ def tracked_subdirectories(root: Path) -> set[str]:
     import subprocess
 
     rel = root.relative_to(REPO)
-    proc = subprocess.run(["git", "ls-files", "-z", "--", str(rel)],
+    # Include new source files in a working checkout without requiring git staging.
+    # Generated artifacts remain excluded by the repository ignore rules.
+    proc = subprocess.run(["git", "ls-files", "--cached", "--others",
+                           "--exclude-standard", "-z", "--", str(rel)],
                           cwd=REPO, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise RuntimeError(f"git ls-files failed for {rel}: {proc.stderr.strip()}")

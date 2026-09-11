@@ -53,7 +53,7 @@ def skip_report() -> str:
     return ", ".join(f"{k}={v}" for k, v in sorted(keys.items())) or "no cudagraph counters"
 
 
-def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> None:
+def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> bool:
     """Time one configuration and report it with inductor's cudagraph counters."""
     dynamo.reset()
     counters.clear()
@@ -61,10 +61,14 @@ def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> None:
     try:
         ms = _measure(mode, manual_graph, train)
         print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
+              f"seq_len={L} d_pair={D} blocks={args.blocks} input_dtype={DT} "
+              f"compile_requested={mode != 'eager'} manual_graph={manual_graph} "
               f"time={ms:.4f} ms  [{skip_report()}]", flush=True)
+        return True
     except Exception as e:
         print(f"wrap={args.wrap} mode={label} train={str(train).lower()} "
               f"FAILED {type(e).__name__}: {str(e)[:220]}  [{skip_report()}]", flush=True)
+        return False
     finally:
         # The model and its activations are locals of _measure, so they are already gone by here
         # and empty_cache can actually hand the memory back before the next configuration builds.
@@ -73,6 +77,8 @@ def run(label: str, mode: str | None, manual_graph: bool, train: bool) -> None:
 
 def _measure(mode: str | None, manual_graph: bool, train: bool) -> float:
     model = build()
+    model.train(train)
+    print("parameter_dtypes=" + ",".join(sorted({str(p.dtype) for p in model.parameters()})), flush=True)
     pair = torch.randn(1, L, L, D, device=DEV, dtype=DT, requires_grad=train)
     fn = model if mode == "eager" else torch.compile(model, mode=mode)
 
@@ -122,10 +128,12 @@ def _measure(mode: str | None, manual_graph: bool, train: bool) -> float:
     return statistics.median(times)
 
 
+failures = 0
 for train_mode in (False, True):
-    run("eager",               "eager",           False, train_mode)
-    run("eager+manualgraph",   "eager",           True,  train_mode)
-    run("compile",             None,              False, train_mode)
-    run("compile+manualgraph", None,              True,  train_mode)
-    run("reduce-overhead",     "reduce-overhead", False, train_mode)
-    run("max-autotune",        "max-autotune",    False, train_mode)
+    for label, compile_mode, manual_graph in (
+        ("eager", "eager", False), ("eager+manualgraph", "eager", True),
+        ("compile", None, False), ("compile+manualgraph", None, True),
+        ("reduce-overhead", "reduce-overhead", False), ("max-autotune", "max-autotune", False),
+    ):
+        failures += not run(label, compile_mode, manual_graph, train_mode)
+raise SystemExit(1 if failures else 0)

@@ -100,6 +100,25 @@ def _launchers(trees: dict[Path, ast.Module]) -> dict[str, set[str]]:
             for sub in ast.walk(fn):
                 if isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name):
                     out[sub.value.id].add(fn.name)
+    # A shared launch helper receives the JIT function as an argument. Resolve direct
+    # function-to-parameter bindings rather than declaring those kernels orphaned.
+    forwarded = {}
+    for tree in trees.values():
+        for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+            names = [a.arg for a in fn.args.args]
+            invoked = {n.value.id for n in ast.walk(fn)
+                       if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)}
+            forwarded[fn.name] = [i for i, name in enumerate(names) if name in invoked]
+    for tree in trees.values():
+        for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+            for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name)):
+                assert isinstance(call.func, ast.Name)
+                for index in forwarded.get(call.func.id, []):
+                    if index < len(call.args) and isinstance(call.args[index], ast.Name):
+                        actual = call.args[index]
+                        assert isinstance(actual, ast.Name)
+                        out[actual.id].add(fn.name)
     return out
 
 

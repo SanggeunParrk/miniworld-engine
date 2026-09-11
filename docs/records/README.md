@@ -6,6 +6,23 @@ to no single kernel.
 
 | | what it records |
 |---|---|
+| [a6000-production-audit.md](a6000-production-audit.md) | Current A6000 final audit: corrected DiT dispatch, strict build/shard checks, package validation and repeated measurements. |
+| [a6000-atom-dit-4096.md](a6000-atom-dit-4096.md) | Historical ordinary pair-bias atom DiT at 4096 atoms (superseded above), A5 graph inference and A48 no-graph training on one A6000. |
+| [workspace-artifact-relocation.md](workspace-artifact-relocation.md) | Team-GM cleanup: 1,067 MiniWorld work entries relocated into engine scratch; provenance paths and movement manifest. |
+| [a6000-swa-gate-output-fusion.md](a6000-swa-gate-output-fusion.md) | SWA output GEMM/gate fusion: controlled inference/training experiment, cached inference dispatch, and build-plan status. |
+| [a6000-dit-qk-fusion-cache-audit.md](a6000-dit-qk-fusion-cache-audit.md) | DiT after the AdaLN repair, paired Q/K RMSNorm+RoPE forward/backward, production cache wiring and workload provenance. |
+| [a6000-swa-inference-attribution.md](a6000-swa-inference-attribution.md) | SWA inference overhead traced to Q/K copies and separate RMSNorm/RoPE launches; live RoPE cache coverage verified. |
+| [a6000-adaln-ct-training-dispatch.md](a6000-adaln-ct-training-dispatch.md) | A6000 training slowdown traced to AdaLN forward dispatch, component-swap controls, and SWA backend clarification. |
+| [build-all-production-contract.md](build-all-production-contract.md) | shared A5/A48 shapes, automatic preflight/plan refresh, A6000 1,007/1,007 coverage, and explicit native-backend gaps. |
+| [a6000-l384-module-bench-latest.md](a6000-l384-module-bench-latest.md) | historical consolidated module table; newer DiT/build results are above, dropout .25 training, refreshed triangle inference and remaining cross-GPU build gaps. |
+| [a6000-rmsnorm-validation-fix.md](a6000-rmsnorm-validation-fix.md) | closes the RMSNorm precision qualification with unrounded reference gradients, a justified BF16 forward band, and FP64 checks. |
+| [a6000-training-dropout025.md](a6000-training-dropout025.md) | real dropout 0.25 training defaults, RNG/gradient validation and L384 native comparisons. |
+| [a6000-trimul-mask-fusion.md](a6000-trimul-mask-fusion.md) | fused masking for outgoing/incoming/bidirectional, full-gradient validation, paired before/after native timings, and two refreshed A6000 caches. |
+| [a6000-trimul-training-cause.md](a6000-trimul-training-cause.md) | historical dtype mismatch, training-forward/backward attribution, and a same-GPU mask A/B that reverses the cuEquivariance ranking. |
+| [a6000-trimul-directions-and-pytorch-reference.md](a6000-trimul-directions-and-pytorch-reference.md) | A6000 outgoing/incoming/sequential/bidirectional comparisons, equivalent cuEquivariance composition, and removal of MiniWorld kernels from the PyTorch SWA reference. |
+| [a6000-small-input-followup.md](a6000-small-input-followup.md) | deferred L128 launch-overhead investigation, evidence and acceptance conditions. |
+| [a6000-l384-cache-built.md](a6000-l384-cache-built.md) | four added L384/A48 keys, explicit RMSNorm precision qualification, and the completed native benchmark. |
+| [a6000-l384-cache-missing.md](a6000-l384-cache-missing.md) | four missing L384/A48 forward/backward cache keys and the augmentation gap in the build plan. |
 | `naming-audit.md` | the defects found while renaming 111 kernels to `docs/kernels/naming.md`'s rules. The old names are its *subject*, so they stay. Current names: `registry.csv`; the mapping: `docs/kernels/rename-map.tsv`. |
 | `tiling-audit.md` | one sweep of every kernel's tile axes. Kernel names are the ones `registry.csv` held at the time. |
 | `pairformer-b200-latency.md` | Pairformer pair-track latency on B200 (sm100). |
@@ -26,3 +43,5 @@ documentation. `docs/` is for pages written to be read as true now.
 `cache-coverage-replay-a6000.md` is kept for a different reason than the others: it is not
 superseded, it is *pending*. It is the first output of `dev audit --replay`, which had existed
 with no caller, and it stays until a rebuilt cache makes it empty.
+
+- [A6000 AdaLN workload-aware cache repair and SWA fusion](a6000-adaln-workload-cache-fix.md)

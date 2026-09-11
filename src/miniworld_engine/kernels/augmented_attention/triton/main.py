@@ -22,9 +22,9 @@ def get_seq_group(length) -> int:
     return bucket_linear(length)
 
 
-# HEAD_DIM_PAD is a LAUNCHER value, next_power_of_2(HEAD_DIM), not a CSV axis: head dims here are
-# 24 and 48, and a block_ptr block_shape has to be a power of two. Delta = sum_d(o*do) reduces over
-# d inside that pad.
+# HEAD_DIM_PAD is a launcher value, not a CSV axis. Tensor-core dot products need
+# at least 16 reduction lanes, including for small heads (e.g. D=8). Loads and
+# stores mask the padded lanes; delta reduces over the same padded dimension.
 
 # The config list is read once and reused -- by the decorator below and by the split-count
 # arithmetic, which has to agree with the BLOCK_M2 the backward actually runs.
@@ -622,7 +622,7 @@ def _aa_fwd(
         H,
         L,
         D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),
         shape_key=pack(shape_key, H=H, HEAD_DIM=D),
     )
     return out, m
@@ -678,7 +678,7 @@ def _aa_bwd(
         H,
         D,
         shape_key=atom_key(L, H=H, HEAD_DIM=D),
-        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),
     )
 
     # dq_expand is (num_splits, A, B, L, H, D): one slot per BLOCK_M2 block.
@@ -727,7 +727,7 @@ def _aa_bwd(
         H,
         L,
         D,
-        HEAD_DIM_PAD=triton.next_power_of_2(D),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),
         shape_key=atom_key(L, H=H, HEAD_DIM=D),
     )
 

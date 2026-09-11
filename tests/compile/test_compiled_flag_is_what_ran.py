@@ -1,59 +1,114 @@
-"""The `compiled` column must say what RAN -- and it now does so trivially.
-
-Several module benches used to guard `model.compile()` with `and conf.cudagraph == "disabled"`:
-the CUDA-graph capture then took the eager module, so `compile=true cudagraph=manual` ran eager for
-half the matrix while the CSV recorded `conf.compile` for all of it -- eager code labelled
-compiled (triangle_multiplication, triangle_attention). Under the default
-`compile_wrap="custom_op"` there are no graph breaks, so compile+capture is the real deployment
-regime; the gates are removed and every bench compiles unconditionally. The recorded flag is then
-exactly `conf.compile`, and `actual_compiled_flag` is that and nothing else.
-
-This file guards the two ways that used to drift: a gate creeping back into a bench, and
-`actual_compiled_flag` growing a by-hand target rule. The suite cannot import bench.py without a
-GPU (it raises at import), so this reads the source.
-"""
+"""Runtime regression: a request, tracing, and reference work are not measured compilation."""
 from __future__ import annotations
 
-import ast
+import importlib.util
+import sys
 from pathlib import Path
 
-BENCH = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "benchmarks" / "runners" / "bench.py"
-SRC = BENCH.read_text()
-TREE = ast.parse(SRC)
-LINES = SRC.splitlines()
+import pytest
+import torch
+
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
+SPEC = importlib.util.spec_from_file_location("benchmark_measurement", ROOT / "benchmarks/runners/measurement.py")
+assert SPEC is not None
+assert SPEC.loader is not None
+measurement = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = measurement
+SPEC.loader.exec_module(measurement)
 
 
-def _fn_bodies() -> dict[str, str]:
-    out = {}
-    for n in ast.walk(TREE):
-        if isinstance(n, ast.FunctionDef) and n.name.startswith("bench_"):
-            out[n.name] = "\n".join(LINES[n.lineno - 1:n.end_lineno])
-    return out
+@pytest.fixture(autouse=True)
+def reset():
+    torch.compiler.reset()
+    yield
+    torch.compiler.reset()
 
 
-BODIES = _fn_bodies()
-GATED = {n for n, b in BODIES.items()
-         if ".compile()" in b and 'conf.cudagraph == "disabled"' in b}
-COMPILING = {n for n, b in BODIES.items() if ".compile()" in b}
+def test_trace_without_execution_does_not_establish_compilation():
+    probe = measurement.CompileProbe("callable", fullgraph=True,
+                                     backend=lambda graph, inputs: lambda x: x + 1)
+    with measurement.observe_execution() as observed:
+        executable = probe(None, [])
+    assert probe.graphs_created == 1
+    assert not observed.compiled
+    with pytest.raises(measurement.UnsupportedBenchmark):
+        measurement.require_compile_evidence(True, observed)
+    with measurement.observe_execution() as executed:
+        assert executable(3) == 4
+    assert executed.compiled
 
 
-def test_no_bench_gates_its_compile_on_the_cudagraph_regime():
-    """A gate is what made `compiled=True, cudagraph=manual` a measurement of eager code. It is
-    removed; this fails if one returns, so the flag cannot silently start lying again."""
-    assert not GATED, (
-        f"these benches gate model.compile() on cudagraph again -- compile+capture is the real "
-        f"regime under custom_op, so the gate makes the recorded compiled flag lie: {sorted(GATED)}")
-    assert COMPILING, "no bench calls .compile() at all -- the source reader is matching nothing"
+def test_reference_only_execution_cannot_label_an_eager_measurement_compiled():
+    probe = measurement.CompileProbe("reference", fullgraph=True,
+                                     backend=lambda graph, inputs: graph.forward)
+    compiled = torch.compile(lambda x: x.sin() + 1, backend=probe, fullgraph=True)
+    x = torch.arange(8, dtype=torch.float32)
+    compiled(x)  # tracing and executing the reference happens before measurement
+    with measurement.observe_execution() as observed:
+        x.cos()
+    assert probe.graphs_created > 0
+    assert not observed.compiled
+    with pytest.raises(measurement.UnsupportedBenchmark):
+        measurement.require_compile_evidence(True, observed)
 
 
-def test_actual_compiled_flag_is_exactly_conf_compile():
-    """No gate to detect means the recorded flag is `conf.compile`, with no target named by hand
-    (`if conf.kernel == "transition"` was the old rule, and three other targets behaved the same)."""
-    fn = next(n for n in ast.walk(TREE)
-              if isinstance(n, ast.FunctionDef) and n.name == "actual_compiled_flag")
-    code = [st for st in fn.body
-            if not (isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant))]
-    body = "\n".join(ast.unparse(st) for st in code)
-    assert body.strip() == "return conf.compile", (
-        f"actual_compiled_flag is no longer just `return conf.compile`; the gates are gone, so it "
-        f"has nothing to branch on:\n{body}")
+def test_actual_compiled_callable_provides_execution_evidence():
+    probe = measurement.CompileProbe("callable", fullgraph=True,
+                                     backend=lambda graph, inputs: graph.forward)
+    fn = torch.compile(lambda x: x.sin() + 1, backend=probe, fullgraph=True)
+    x = torch.arange(8, dtype=torch.float32)
+    with measurement.observe_execution() as observed:
+        torch.testing.assert_close(fn(x), x.sin() + 1)
+    measurement.require_compile_evidence(True, observed)
+    assert observed.scopes == {"callable:fullgraph"}
+    assert len(observed.graphs) == 1
+
+
+def test_noop_compile_cannot_pass_as_a_compiled_measurement():
+    probe = measurement.CompileProbe("callable", fullgraph=False,
+                                     backend=lambda graph, inputs: graph.forward)
+    fn = torch.compile(lambda x: x, backend=probe)
+    with measurement.observe_execution() as observed:
+        fn(torch.ones(2))
+    assert not observed.compiled
+    with pytest.raises(measurement.UnsupportedBenchmark):
+        measurement.require_compile_evidence(True, observed)
+
+
+def test_nested_observation_does_not_leak_reference_evidence():
+    probe = measurement.CompileProbe("reference", fullgraph=True,
+                                     backend=lambda graph, inputs: lambda: None)
+    run = probe(None, [])
+    with measurement.observe_execution() as outer, measurement.observe_execution() as inner:
+        run()
+    assert inner.compiled
+    assert not outer.compiled
+
+
+def test_eager_request_rejects_observed_compiled_execution():
+    evidence = measurement.ExecutionEvidence(graphs={(1, 1)})
+    with pytest.raises(RuntimeError, match="compile=False"):
+        measurement.require_compile_evidence(False, evidence)
+
+
+def test_parameter_dtype_reports_all_parameters():
+    model = torch.nn.Module()
+    model.register_parameter("weight", torch.nn.Parameter(torch.ones(3, dtype=torch.bfloat16)))
+    model.register_parameter("norm", torch.nn.Parameter(torch.ones(3, dtype=torch.float32)))
+    assert measurement.parameter_dtype_of(model) == "bfloat16+float32"
+
+
+def test_real_inductor_options_and_execution():
+    x = torch.arange(8, dtype=torch.float32)
+    compiled = measurement.compile_for_benchmark(lambda value: value.sin() + 1, fullgraph=True)
+    with measurement.observe_execution() as observed:
+        torch.testing.assert_close(compiled(x), x.sin() + 1)
+    measurement.require_compile_evidence(True, observed)
+    assert observed.scopes == {"callable:fullgraph"}
+
+
+def test_changed_sources_cannot_publish_the_original_identity(monkeypatch):
+    monkeypatch.setattr(measurement, "benchmark_source_hash", lambda: "current")
+    measurement.require_source_identity("current")
+    with pytest.raises(RuntimeError, match="sources changed"):
+        measurement.require_source_identity("previous")

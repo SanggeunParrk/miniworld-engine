@@ -38,3 +38,13 @@ rmsnorm_adamod_bwd_triton,K,"d_cond; packed into the same shape_key the forward 
 rope_fwd_triton,H,"n_heads; the kernel loops it and it does not tile -- a pure function of the launch, and the same for every shape the atom block presents"
 rope_fwd_triton,D,"head_dim; packed into shape_key by both_key(rows, D=d)"
 rope_fwd_triton,HALF,"active rope width = D/2 here; a pure function of D, which is keyed"
+qk_norm_rope_fwd_triton,D,packed as D=d in the shared both_key call; the opaque boundary forwards that same key to both launchers
+qk_norm_rope_fwd_triton,HALF,packed as HALF=cos.shape[-1] in the shared both_key call; both launchers use the same key and cosine half-width
+qk_norm_rope_fwd_triton,H,head index reconstruction only; the row-count key includes n*s*h and the kernel reduction width D is packed separately
+qk_norm_rope_fwd_triton,SEQ,sequence index reconstruction only; each program processes row-count-keyed rows with fixed reduction width D
+qk_norm_rope_fwd_triton,EPS,numeric tolerance in rsqrt only; no branch or loop bound depends on it
+qk_norm_rope_bwd_triton,D,packed as D=d in the shared both_key call; the opaque boundary forwards that same key to both launchers
+qk_norm_rope_bwd_triton,HALF,packed as HALF=cos.shape[-1] in the shared both_key call; both launchers use the same key and cosine half-width
+qk_norm_rope_bwd_triton,H,head index reconstruction only; the row-count key includes n*s*h and the kernel reduction width D is packed separately
+qk_norm_rope_bwd_triton,SEQ,sequence index reconstruction only; each program processes row-count-keyed rows with fixed reduction width D
+qk_norm_rope_bwd_triton,EPS,numeric tolerance in rsqrt only; no branch or loop bound depends on it

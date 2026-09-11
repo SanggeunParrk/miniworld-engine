@@ -36,3 +36,23 @@ def rope_fwd_triton() -> None:
 
     x, cos, sin = _args()
     triton_rope_3d(x, cos, sin).sum().backward()
+
+
+def _qk_args():
+    # This row-based family receives flattened head rows from the per-op builder.
+    # Split those rows across heads while preserving production QKV strides.
+    length=max(1,_M//_N_HEADS)
+    qkv=torch.randn(1,length,3,_N_HEADS,_D,device=dev(),dtype=BF16,requires_grad=True)
+    q,k,_v=qkv.unbind(2)
+    cos=torch.randn(1,length,_HALF,device=dev(),dtype=torch.float32)
+    sin=torch.randn_like(cos)
+    return q,k,cos,sin
+
+def qk_norm_rope_fwd():
+    from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
+    with torch.no_grad():qk_norm_rope_3d(*_qk_args())
+
+def qk_norm_rope_bwd():
+    from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
+    q,k=qk_norm_rope_3d(*_qk_args())
+    (q.sum()+k.sum()).backward()

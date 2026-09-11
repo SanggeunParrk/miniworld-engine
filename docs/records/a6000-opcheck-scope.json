@@ -1,0 +1,1544 @@
+{
+  "status": "passed",
+  "validation_job": 1678469,
+  "tests_passed": 5,
+  "pytest_seconds": 43.92,
+  "dtype": "bfloat16",
+  "verified_ops": [
+    "miniworld_engine::adaln_bwd_x",
+    "miniworld_engine::adaln_cond_affine",
+    "miniworld_engine::adaln_dgrad_condln",
+    "miniworld_engine::adaln_epilogue_train",
+    "miniworld_engine::adaln_fwd_gate",
+    "miniworld_engine::adaln_gemm_gate",
+    "miniworld_engine::adaln_inference_fused",
+    "miniworld_engine::augmented_attention_bwd",
+    "miniworld_engine::augmented_attention_fwd",
+    "miniworld_engine::conditioned_transition_b2b_fwd_train",
+    "miniworld_engine::conditioned_transition_composed_expand_swiglu",
+    "miniworld_engine::conditioned_transition_composed_squeeze_gate",
+    "miniworld_engine::conditioned_transition_dh_swiglu_bwd",
+    "miniworld_engine::conditioned_transition_gate_bwd",
+    "miniworld_engine::conditioned_transition_gate_fwd",
+    "miniworld_engine::conditioned_transition_inference",
+    "miniworld_engine::conditioned_transition_swiglu_fwd",
+    "miniworld_engine::gated_projection_sigmul_bwd",
+    "miniworld_engine::gated_projection_sigmul_fwd",
+    "miniworld_engine::layernorm_bwd",
+    "miniworld_engine::layernorm_dispatch_bwd",
+    "miniworld_engine::layernorm_dispatch_fwd",
+    "miniworld_engine::layernorm_fwd",
+    "miniworld_engine::layernorm_linear_bwd_mmajor",
+    "miniworld_engine::layernorm_linear_materialize",
+    "miniworld_engine::layernorm_stats",
+    "miniworld_engine::qk_norm_rope_bwd",
+    "miniworld_engine::qk_norm_rope_fwd",
+    "miniworld_engine::rmsnorm_bwd",
+    "miniworld_engine::rmsnorm_fwd",
+    "miniworld_engine::rope_3d",
+    "miniworld_engine::swa_atom_attention_flash_window",
+    "miniworld_engine::swa_gate_out_fwd",
+    "miniworld_engine::transition_expand_swiglu",
+    "miniworld_engine::transition_gatebwd_savedxn_stacked",
+    "miniworld_engine::triangle_attention_bwd",
+    "miniworld_engine::triangle_attention_fwd",
+    "miniworld_engine::trimul_back_fused",
+    "miniworld_engine::trimul_bidir_front",
+    "miniworld_engine::trimul_front_bwd_dconcat",
+    "miniworld_engine::trimul_gate_elem_bwd_ew",
+    "miniworld_engine::trimul_gate_elem_fwd_train"
+  ],
+  "shipped_cache_changes": [],
+  "private_cache_changes": [],
+  "old_unexercised_count": 66,
+  "expanded_verified_count": 42,
+  "old_unexercised_now_verified": 16,
+  "imported_unexercised": [
+    "miniworld_engine::adaln_inference_epilogue",
+    "miniworld_engine::augmented_attention_memeff_bwd",
+    "miniworld_engine::augmented_attention_memeff_fwd",
+    "miniworld_engine::bias_only_attention_gate_out_dgrad_epilogue",
+    "miniworld_engine::bias_only_attention_gate_out_fwd",
+    "miniworld_engine::conditioned_transition_swiglu_bwd_packed",
+    "miniworld_engine::gated_projection_sigmoid_gate_bwd",
+    "miniworld_engine::gated_projection_sigmoid_gate_fwd",
+    "miniworld_engine::layernorm_linear_ln_bwd",
+    "miniworld_engine::layernorm_linear_recompute_xhat",
+    "miniworld_engine::layernorm_linear_recompute_xnormed",
+    "miniworld_engine::layernorm_masked_fwd",
+    "miniworld_engine::layernorm_persistent_bwd",
+    "miniworld_engine::layernorm_persistent_fwd",
+    "miniworld_engine::rmsnorm_adamod_bwd",
+    "miniworld_engine::rmsnorm_adamod_fwd",
+    "miniworld_engine::transition_expand_gatebwd_recompute",
+    "miniworld_engine::transition_fused_bwd",
+    "miniworld_engine::transition_fused_fwd",
+    "miniworld_engine::transition_swiglu_b2b",
+    "miniworld_engine::trimul_front_bwd_dconcat_sig",
+    "miniworld_engine::trimul_gate_elem_bwd",
+    "miniworld_engine::trimul_gate_elem_fwd_infer"
+  ],
+  "entries": [
+    {
+      "op": "adaln_cond_affine",
+      "module": "miniworld_engine.kernels.adaln.triton.inference",
+      "function": "_cond_affine",
+      "line": 120,
+      "source": "src/miniworld_engine/kernels/adaln/triton/inference.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_strided_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.adaln:layernorm_fwd_strided"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "adaln_dgrad_condln",
+      "module": "miniworld_engine.kernels.adaln.triton.training",
+      "function": "_dgrad_condln",
+      "line": 497,
+      "source": "src/miniworld_engine/kernels/adaln/triton/training.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "adaln_bwd_dx_dlnw_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.adaln:adaln_bwd_dx_dlnw"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "adaln_gemm_gate",
+      "module": "miniworld_engine.kernels.adaln.triton.inference",
+      "function": "_adaln_gemm_gate",
+      "line": 324,
+      "source": "src/miniworld_engine/kernels/adaln/triton/inference.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "adaln_gemm_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.adaln:adaln_gemm_gate"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "adaln_inference_epilogue",
+      "module": "miniworld_engine.kernels.adaln.triton.inference",
+      "function": "_adaln_epilogue",
+      "line": 215,
+      "source": "src/miniworld_engine/kernels/adaln/triton/inference.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "adaln_epilogue_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.adaln:adaln_epilogue"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "adaln_inference_fused",
+      "module": "miniworld_engine.kernels.adaln.triton.inference",
+      "function": "adaln_inference_fused",
+      "line": 567,
+      "source": "src/miniworld_engine/kernels/adaln/triton/inference.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "adaln_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.adaln:adaln_fwd"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "augmented_attention_memeff_bwd",
+      "module": "miniworld_engine.kernels.augmented_attention.triton.memory_efficient",
+      "function": "_memeff_bwd",
+      "line": 323,
+      "source": "src/miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "augmented_attention_bwd_atomic_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.augmented_attention:augmented_attention_bwd_atomic_triton"
+        },
+        {
+          "kernel": "augmented_attention_bwd_pre_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.augmented_attention:augmented_attention_bwd_pre_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "augmented_attention_memeff_fwd",
+      "module": "miniworld_engine.kernels.augmented_attention.triton.memory_efficient",
+      "function": "_memeff_fwd",
+      "line": 253,
+      "source": "src/miniworld_engine/kernels/augmented_attention/triton/memory_efficient.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "augmented_attention_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.augmented_attention:augmented_attention_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "bias_only_attention_bwd",
+      "module": "miniworld_engine.kernels.bias_only_attention.triton.main",
+      "function": "_bias_only_bwd",
+      "line": 415,
+      "source": "src/miniworld_engine/kernels/bias_only_attention/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "bias_only_attention_bwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.bias_only_attention:bias_only_attention_bwd_triton"
+        },
+        {
+          "kernel": "bias_only_attention_bwd_pre_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.bias_only_attention:bias_only_attention_bwd_pre_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "bias_only_attention_fwd",
+      "module": "miniworld_engine.kernels.bias_only_attention.triton.main",
+      "function": "_bias_only_fwd",
+      "line": 374,
+      "source": "src/miniworld_engine/kernels/bias_only_attention/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "bias_only_attention_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.bias_only_attention:bias_only_attention_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "bias_only_attention_gate_out_dgrad_epilogue",
+      "module": "miniworld_engine.kernels.bias_only_attention.triton.gate_out",
+      "function": "_dgrad_epilogue",
+      "line": 179,
+      "source": "src/miniworld_engine/kernels/bias_only_attention/triton/gate_out.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_bwd_dx_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.bias_only_attention:gated_projection_bwd_dx_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "bias_only_attention_gate_out_fwd",
+      "module": "miniworld_engine.kernels.bias_only_attention.triton.gate_out",
+      "function": "_fwd",
+      "line": 210,
+      "source": "src/miniworld_engine/kernels/bias_only_attention/triton/gate_out.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_gate_gemm_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.bias_only_attention:gated_projection_gate_gemm_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_b2b_fwd_train",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.training",
+      "function": "_b2b_fwd_train",
+      "line": 442,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/training.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_fwd_b2b_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_fwd_b2b_saveact"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_composed_expand_swiglu",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.composed",
+      "function": "_expand_swiglu",
+      "line": 177,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/composed.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_expand_swiglu_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_expand_swiglu"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_composed_squeeze_gate",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.composed",
+      "function": "_squeeze_gate",
+      "line": 209,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/composed.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_squeeze_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_squeeze_gate"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_inference",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.inference",
+      "function": "cond_transition_inference",
+      "line": 161,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/inference.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_fwd_b2b_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_fwd_b2b"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_swiglu_bwd_packed",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.training",
+      "function": "_swiglu_bwd_packed",
+      "line": 279,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/training.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_bwd_swiglu_flat_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_bwd_swiglu_flat"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_train_fused_expand_swiglu",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.fwd_saveact",
+      "function": "_fwd_expand_swiglu",
+      "line": 173,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_expand_swiglu_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_expand_swiglu_saveact"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "conditioned_transition_train_fused_squeeze_gate",
+      "module": "miniworld_engine.kernels.conditioned_transition.triton.fwd_saveact",
+      "function": "_fwd_squeeze_gate",
+      "line": 209,
+      "source": "src/miniworld_engine/kernels/conditioned_transition/triton/fwd_saveact.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "cond_transition_squeeze_gate_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.conditioned_transition:cond_transition_squeeze_gate_saveact"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "fused_ln_mask",
+      "module": "miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask",
+      "function": "fused_ln_mask",
+      "line": 140,
+      "source": "src/miniworld_engine/kernels/fused_ln_mask/cute/fused_ln_mask.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_rowscale_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.fused_ln_mask:layernorm_fwd_rowscale_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "gated_projection_sigmoid_gate_bwd",
+      "module": "miniworld_engine.kernels.gated_projection.triton.main",
+      "function": "_sigmoid_gate_bwd",
+      "line": 147,
+      "source": "src/miniworld_engine/kernels/gated_projection/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_bwd_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.gated_projection:gated_projection_bwd_gate_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "gated_projection_sigmoid_gate_fwd",
+      "module": "miniworld_engine.kernels.gated_projection.triton.main",
+      "function": "_sigmoid_gate",
+      "line": 126,
+      "source": "src/miniworld_engine/kernels/gated_projection/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.gated_projection:gated_projection_gate_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_linear_fwd",
+      "module": "miniworld_engine.kernels.layernorm_linear.triton.fused",
+      "function": "layernorm_linear_triton_fwd",
+      "line": 207,
+      "source": "src/miniworld_engine/kernels/layernorm_linear/triton/fused.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_linear_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_linear_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_linear_ln_bwd",
+      "module": "miniworld_engine.kernels.layernorm_linear.autograd",
+      "function": "_ln_backward",
+      "line": 78,
+      "source": "src/miniworld_engine/kernels/layernorm_linear/autograd.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_bwd_atomic_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm:layernorm_bwd_atomic_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_linear_pair_bias_bwd",
+      "module": "miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
+      "function": "_bwd_op",
+      "line": 333,
+      "source": "src/miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_linear_bwd_fp32_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_linear_bwd_fp32_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_linear_pair_bias_fwd",
+      "module": "miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
+      "function": "_fwd_op",
+      "line": 287,
+      "source": "src/miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_linear_fwd_fp32_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_linear_fwd_fp32_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_linear_recompute_xhat",
+      "module": "miniworld_engine.kernels.layernorm_linear.triton.recompute",
+      "function": "_recompute_xhat",
+      "line": 92,
+      "source": "src/miniworld_engine/kernels/layernorm_linear/triton/recompute.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_recompute_noaffine_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_fwd_recompute_noaffine_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_linear_recompute_xnormed",
+      "module": "miniworld_engine.kernels.layernorm_linear.triton.recompute",
+      "function": "_recompute_xnormed",
+      "line": 49,
+      "source": "src/miniworld_engine/kernels/layernorm_linear/triton/recompute.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_fwd_recompute_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_masked_fwd",
+      "module": "miniworld_engine.kernels.layernorm.triton.main",
+      "function": "triton_layernorm_masked",
+      "line": 439,
+      "source": "src/miniworld_engine/kernels/layernorm/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm:layernorm_fwd_saveact_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_persistent_bwd",
+      "module": "miniworld_engine.kernels.layernorm.triton.persistent",
+      "function": "_persist_bwd",
+      "line": 209,
+      "source": "src/miniworld_engine/kernels/layernorm/triton/persistent.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_bwd_split_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm:layernorm_bwd_split_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_persistent_fwd",
+      "module": "miniworld_engine.kernels.layernorm.triton.persistent",
+      "function": "_persist_fwd",
+      "line": 170,
+      "source": "src/miniworld_engine/kernels/layernorm/triton/persistent.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm:layernorm_fwd_saveact_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "layernorm_transpose_dbn_bnd",
+      "module": "miniworld_engine.kernels.layernorm.triton.transpose",
+      "function": "_ln_transpose_dbn_bnd",
+      "line": 115,
+      "source": "src/miniworld_engine/kernels/layernorm/triton/transpose.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_fwd_mmajor_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.layernorm:layernorm_fwd_mmajor_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "qk_norm_rope_bwd",
+      "module": "miniworld_engine.kernels.rope.triton.qk_norm",
+      "function": "_backward",
+      "line": 344,
+      "source": "src/miniworld_engine/kernels/rope/triton/qk_norm.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "qk_norm_rope_bwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rope:qk_norm_rope_bwd"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "qk_norm_rope_fwd",
+      "module": "miniworld_engine.kernels.rope.triton.qk_norm",
+      "function": "_forward",
+      "line": 326,
+      "source": "src/miniworld_engine/kernels/rope/triton/qk_norm.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "qk_norm_rope_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rope:qk_norm_rope_fwd"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "rmsnorm_adamod_bwd",
+      "module": "miniworld_engine.kernels.rmsnorm.triton.main",
+      "function": "_adamod_bwd",
+      "line": 581,
+      "source": "src/miniworld_engine/kernels/rmsnorm/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "rmsnorm_adamod_bwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rmsnorm_adamod:rmsnorm_adamod_bwd_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "rmsnorm_adamod_fwd",
+      "module": "miniworld_engine.kernels.rmsnorm.triton.main",
+      "function": "_adamod_fwd",
+      "line": 547,
+      "source": "src/miniworld_engine/kernels/rmsnorm/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "rmsnorm_adamod_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rmsnorm_adamod:rmsnorm_adamod_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "rmsnorm_bwd",
+      "module": "miniworld_engine.kernels.rmsnorm.triton.main",
+      "function": "_rms_bwd",
+      "line": 341,
+      "source": "src/miniworld_engine/kernels/rmsnorm/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "rmsnorm_bwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rmsnorm:rmsnorm_bwd_triton"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "rmsnorm_fwd",
+      "module": "miniworld_engine.kernels.rmsnorm.triton.main",
+      "function": "_rms_fwd",
+      "line": 318,
+      "source": "src/miniworld_engine/kernels/rmsnorm/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "rmsnorm_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rmsnorm:rmsnorm_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "rope_3d",
+      "module": "miniworld_engine.kernels.rope.triton.main",
+      "function": "_rope",
+      "line": 74,
+      "source": "src/miniworld_engine/kernels/rope/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "rope_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.rope:rope_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "swa_atom_attention_flash_window",
+      "module": "miniworld_engine.modules.swa_atom_attention.module",
+      "function": "flash_window_seqused",
+      "line": 244,
+      "source": "src/miniworld_engine/modules/swa_atom_attention/module.py",
+      "backends": [
+        "FlashAttention2/4"
+      ],
+      "kernel_references": [],
+      "expanded_opcheck": true,
+      "separate_validation": "test_swa_graph_gpu.py, test_reference_purity_and_bidir_gpu.py; FlashAttention reference path"
+    },
+    {
+      "op": "swa_gate_out_fwd",
+      "module": "miniworld_engine.kernels.gated_projection.triton.swa",
+      "function": "_forward",
+      "line": 74,
+      "source": "src/miniworld_engine/kernels/gated_projection/triton/swa.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "swa_gate_out_fwd_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.gated_projection:swa_gate_out_fwd_triton"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "tm1_bwd",
+      "module": "miniworld_engine.kernels.tm1.triton.main",
+      "function": "_tm1_bwd",
+      "line": 287,
+      "source": "src/miniworld_engine/kernels/tm1/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_bwd_gate_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.tm1:trimul_bwd_gate_recompute_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "tm1_fused_gate_mul",
+      "module": "miniworld_engine.kernels.tm1.cute.launch",
+      "function": "_fused_gate_mul",
+      "line": 107,
+      "source": "src/miniworld_engine/kernels/tm1/cute/launch.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_gate_inplace_flat_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.tm1:gated_projection_gate_inplace_flat_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "tm1_fwd",
+      "module": "miniworld_engine.kernels.tm1.triton.main",
+      "function": "_tm1_fwd",
+      "line": 247,
+      "source": "src/miniworld_engine/kernels/tm1/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_gemm_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.tm1:trimul_gemm_gate_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "tm1_gate_gemm_sm100",
+      "module": "miniworld_engine.kernels.tm1.cute.sm100_gate_gemm_collective",
+      "function": "gate_gemm",
+      "line": 599,
+      "source": "src/miniworld_engine/kernels/tm1/cute/sm100_gate_gemm_collective.py",
+      "backends": [
+        "CuTe/CUDA"
+      ],
+      "kernel_references": [],
+      "expanded_opcheck": false,
+      "separate_validation": "No registry numerical checker traced statically for this wrapper; not a proof of missing reference elsewhere"
+    },
+    {
+      "op": "tm1_glu_wide",
+      "module": "miniworld_engine.kernels.tm1.cute.launch",
+      "function": "_glu_wide",
+      "line": 94,
+      "source": "src/miniworld_engine/kernels/tm1/cute/launch.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_gate_packed_flat_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.tm1:gated_projection_gate_packed_flat_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "tm2_bwd",
+      "module": "miniworld_engine.kernels.tm2.triton.main",
+      "function": "_tm2_bwd",
+      "line": 223,
+      "source": "src/miniworld_engine/kernels/tm2/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_outproj_bwd_gate_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.tm2:trimul_outproj_bwd_gate_recompute_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "tm2_fwd",
+      "module": "miniworld_engine.kernels.tm2.triton.main",
+      "function": "_tm2_fwd",
+      "line": 189,
+      "source": "src/miniworld_engine/kernels/tm2/triton/main.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_outproj_gemm_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.tm2:trimul_outproj_gemm_gate_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_cdup_interleave",
+      "module": "miniworld_engine.kernels.transition.cute.backward_gatebwd",
+      "function": "_cdup_interleave",
+      "line": 100,
+      "source": "src/miniworld_engine/kernels/transition/cute/backward_gatebwd.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_bwd_transpose_packed_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_transpose_packed_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_cute_fused_bwd",
+      "module": "miniworld_engine.kernels.transition.cute.fused",
+      "function": "_cute_bwd",
+      "line": 164,
+      "source": "src/miniworld_engine/kernels/transition/cute/fused.py",
+      "backends": [
+        "CuTe + Triton glue"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_bwd_swiglu_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_swiglu_recompute_triton"
+        },
+        {
+          "kernel": "transition_bwd_transpose_packed_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_transpose_packed_triton"
+        },
+        {
+          "kernel": "layernorm_bwd_foldstats_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:layernorm_bwd_foldstats_triton"
+        },
+        {
+          "kernel": "layernorm_fwd_recompute_foldstats_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:layernorm_fwd_recompute_foldstats_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_cute_fused_fwd",
+      "module": "miniworld_engine.kernels.transition.cute.fused",
+      "function": "_cute_fwd",
+      "line": 105,
+      "source": "src/miniworld_engine/kernels/transition/cute/fused.py",
+      "backends": [
+        "CuTe + Triton glue"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_stats_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_stats_triton"
+        },
+        {
+          "kernel": "transition_fold_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_fold_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_expand_gatebwd_recompute",
+      "module": "miniworld_engine.kernels.transition.triton.fused",
+      "function": "_transition_expand_gatebwd",
+      "line": 1000,
+      "source": "src/miniworld_engine/kernels/transition/triton/fused.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_bwd_swiglu_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_swiglu_recompute_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_fold_swiglu",
+      "module": "miniworld_engine.kernels.transition.triton.fold",
+      "function": "fold_swiglu_triton",
+      "line": 95,
+      "source": "src/miniworld_engine/kernels/transition/triton/fold.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_fold_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_fold_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_fused_bwd",
+      "module": "miniworld_engine.kernels.transition.triton.fused",
+      "function": "_fused_bwd",
+      "line": 1487,
+      "source": "src/miniworld_engine/kernels/transition/triton/fused.py",
+      "backends": [
+        "Triton/CuTe/CUDA dispatch"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_bwd_swiglu_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_swiglu_recompute_triton"
+        },
+        {
+          "kernel": "layernorm_bwd_foldstats_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:layernorm_bwd_foldstats_triton"
+        },
+        {
+          "kernel": "transition_bwd_epilogue_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_epilogue_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_fused_fwd",
+      "module": "miniworld_engine.kernels.transition.triton.fused",
+      "function": "_fused_fwd",
+      "line": 1322,
+      "source": "src/miniworld_engine/kernels/transition/triton/fused.py",
+      "backends": [
+        "Triton/CuTe/CUDA dispatch"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_layernorm_expand_swiglu_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_layernorm_expand_swiglu_triton"
+        },
+        {
+          "kernel": "layernorm_stats_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_stats_triton"
+        },
+        {
+          "kernel": "transition_fwd_b2b_ktiled_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_fwd_b2b_ktiled_triton"
+        },
+        {
+          "kernel": "transition_fwd_b2b_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_fwd_b2b_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_grad_mul_inplace",
+      "module": "miniworld_engine.kernels.transition.cute.gatebwd_sm100",
+      "function": "_grad_mul_inplace",
+      "line": 767,
+      "source": "src/miniworld_engine/kernels/transition/cute/gatebwd_sm100.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "transition_bwd_epilogue_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_bwd_epilogue_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "transition_swiglu_b2b",
+      "module": "miniworld_engine.kernels.transition.triton.fused",
+      "function": "_swiglu_b2b",
+      "line": 806,
+      "source": "src/miniworld_engine/kernels/transition/triton/fused.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "layernorm_stats_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16|fp32",
+          "check": "miniworld_engine.kernels.checks.layernorm_linear:layernorm_stats_triton"
+        },
+        {
+          "kernel": "transition_fwd_b2b_triton",
+          "backend": "triton",
+          "arch": "sm90",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.transition:transition_fwd_b2b_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "triangle_attention_atomic_bwd",
+      "module": "miniworld_engine.kernels.triangle_attention.triton.atomic",
+      "function": "_atomic_bwd",
+      "line": 556,
+      "source": "src/miniworld_engine/kernels/triangle_attention/triton/atomic.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "triangle_attention_bwd_atomic_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_attention:triangle_attention_bwd_atomic_triton"
+        },
+        {
+          "kernel": "triangle_attention_bwd_pre_contig_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_attention:triangle_attention_bwd_pre_contig_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "triangle_attention_atomic_fwd",
+      "module": "miniworld_engine.kernels.triangle_attention.triton.atomic",
+      "function": "_atomic_fwd",
+      "line": 503,
+      "source": "src/miniworld_engine/kernels/triangle_attention/triton/atomic.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "triangle_attention_fwd_contig_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_attention:triangle_attention_fwd_contig_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "triangle_multiplication_dtv1_gated_gemm_bwd_combined",
+      "module": "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
+      "function": "_elemwise_bwd_combined",
+      "line": 558,
+      "source": "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_bwd_gate_recompute_flat_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_multiplication:gated_projection_bwd_gate_recompute_flat_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "triangle_multiplication_dtv1_gated_gemm_bwd_separate",
+      "module": "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
+      "function": "_elemwise_bwd_separate",
+      "line": 590,
+      "source": "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_bwd_gate_recompute_flat_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_multiplication:gated_projection_bwd_gate_recompute_flat_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "triangle_multiplication_dtv1_input_gated_gemm",
+      "module": "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
+      "function": "_input_gemm_fwd",
+      "line": 654,
+      "source": "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_gemm_gate_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_multiplication:trimul_gemm_gate_saveact_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "triangle_multiplication_dtv1_output_gated_gemm",
+      "module": "miniworld_engine.modules.triangle_multiplication.baseline_dtv1",
+      "function": "_output_gemm_fwd",
+      "line": 708,
+      "source": "src/miniworld_engine/modules/triangle_multiplication/baseline_dtv1.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_outproj_gemm_gate_saveact_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.triangle_multiplication:trimul_outproj_gemm_gate_saveact_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "trimul_back_fused",
+      "module": "miniworld_engine.kernels.trimul_inproj.triton.back",
+      "function": "trimul_back_triton",
+      "line": 217,
+      "source": "src/miniworld_engine/kernels/trimul_inproj/triton/back.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_outproj_layernorm_gemm_gate_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.trimul_inproj:trimul_outproj_layernorm_gemm_gate_triton"
+        }
+      ],
+      "expanded_opcheck": true,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "trimul_front_bwd_dconcat_sig",
+      "module": "miniworld_engine.kernels.trimul_inproj.triton.back_fused",
+      "function": "_dconcat_sig",
+      "line": 178,
+      "source": "src/miniworld_engine/kernels/trimul_inproj/triton/back_fused.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "trimul_bwd_gate_packed_recompute_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.trimul_inproj:trimul_bwd_gate_packed_recompute_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "trimul_gate_elem_bwd",
+      "module": "miniworld_engine.kernels.trimul_inproj.triton.gate_elem",
+      "function": "gate_elem_bwd",
+      "line": 343,
+      "source": "src/miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_bwd_gate_dropres_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.trimul_inproj:gated_projection_bwd_gate_dropres_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    },
+    {
+      "op": "trimul_gate_elem_fwd_infer",
+      "module": "miniworld_engine.kernels.trimul_inproj.triton.gate_elem",
+      "function": "gate_elem_infer",
+      "line": 195,
+      "source": "src/miniworld_engine/kernels/trimul_inproj/triton/gate_elem.py",
+      "backends": [
+        "triton"
+      ],
+      "kernel_references": [
+        {
+          "kernel": "gated_projection_gate_res_triton",
+          "backend": "triton",
+          "arch": "sm80",
+          "dtypes": "bf16",
+          "check": "miniworld_engine.kernels.checks.trimul_inproj:gated_projection_gate_res_triton"
+        }
+      ],
+      "expanded_opcheck": false,
+      "separate_validation": "Registry numerical checker(s) for statically reachable launches; metadata/alias contract is separate"
+    }
+  ]
+}

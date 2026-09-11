@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -28,10 +31,28 @@ from miniworld_engine.viz import (
 )
 
 BASELINE = "pytorch"
+ACTUAL_FIELDS = ("compiled", "cudagraph", "compile_scope", "measurement_scope", "parameter_dtype")
+
+
+def _measured_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [row for row in rows if row.get("value") and math.isfinite(float(row["value"]))]
+
+
+def series_label(impl: str, rows: list[dict[str, str]]) -> str:
+    measured = _measured_rows(rows)
+    selected = [row for row in measured if canonical(row["implementation"]) == impl]
+    differing = [field for field in ACTUAL_FIELDS
+                 if len({row.get(field, "") for row in measured}) > 1]
+    details = [f"{field}={selected[0].get(field) or 'unknown'}" for field in differing]
+    if impl != BASELINE and selected and all(
+        row.get("execution_path") == "module.reference.torch" for row in selected
+    ):
+        details.append("execution=pytorch reference")
+    return label_for(impl) + (" [" + ", ".join(details) + "]" if details else "")
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
-    with path.open(newline="", encoding="ascii") as handle:
+    with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
 
@@ -59,6 +80,7 @@ def x_label(x_field: str) -> str:
 
 
 def series_by_impl(rows: list[dict[str, str]], x_field: str) -> dict[str, list[tuple[int, float]]]:
+    validate_comparison(rows, x_field)
     series: dict[str, dict[int, float]] = defaultdict(dict)
     for row in rows:
         if not row["value"]:
@@ -68,11 +90,40 @@ def series_by_impl(rows: list[dict[str, str]], x_field: str) -> dict[str, list[t
             continue
         impl = canonical(row["implementation"])
         x_value = int(row[x_field])
-        if impl not in series or row["implementation"] == impl:
-            series[impl][x_value] = value
-        else:
-            series[impl].setdefault(x_value, value)
+        if x_value in series[impl]:
+            raise ValueError(f"duplicate measurement for {impl!r}, {x_field}={x_value}; "
+                             "select one run or explicitly aggregate repetitions first")
+        series[impl][x_value] = value
     return {impl: sorted(points.items()) for impl, points in series.items()}
+
+
+def validate_comparison(rows: list[dict[str, str]], x_field: str) -> None:
+    """Never let first-row captions disguise a mixed-condition comparison."""
+    schemas = {row.get("measurement_schema", "") for row in rows}
+    if schemas != {"2"} and not all(row.get("_allow_legacy_unverified") == "true" for row in rows):
+        raise ValueError("CSV lacks measurement_schema=2 execution evidence; remeasure or use "
+                         "--allow-legacy-unverified for an explicitly unverified historical plot")
+    if len(schemas) > 1:
+        raise ValueError("mixed measurement schemas cannot share a plot")
+    fields = {
+        "target", "level", "mode", "metric", "unit", "device", "precision",
+        "compile_requested", "cudagraph_requested", "mode_requested",
+        "compile_wrap", "torch_version", "cuda_version",
+        "run_name", "run_id", "sweep_axis", "allow_tf32", "n_block", "n_blocks", "batch_size",
+        "seq_len", "d_pair", "dropout",
+    } - {x_field}
+    for field in sorted(fields):
+        values = {row.get(field, "") for row in rows}
+        if len(values) > 1:
+            raise ValueError(f"mixed benchmark conditions for {field}: {sorted(values)}; "
+                             "filter to one run and condition before plotting")
+    measured = _measured_rows(rows)
+    for impl in {canonical(row["implementation"]) for row in measured}:
+        selected = [row for row in measured if canonical(row["implementation"]) == impl]
+        for field in ACTUAL_FIELDS:
+            values = {row.get(field, "") for row in selected}
+            if len(values) > 1:
+                raise ValueError(f"mixed actual {field} for implementation {impl!r}: {sorted(values)}")
 
 
 def output_stem(rows: list[dict[str, str]], requested: str | None) -> str:
@@ -90,22 +141,33 @@ def output_stem(rows: list[dict[str, str]], requested: str | None) -> str:
     graph_suffix = ""
     if row.get("cudagraph", "disabled") != "disabled":
         graph_suffix = f"_{row['cudagraph']}"
-    return f"{target}_{row['mode']}{graph_suffix}_{suffix}"
+    # Include the complete input, including timings: separate repetitions and
+    # different compile/dtype settings must not overwrite one another's plots.
+    payload = json.dumps(rows, sort_keys=True, ensure_ascii=True).encode()
+    digest = hashlib.sha256(payload).hexdigest()[:12]
+    run = re.sub(r"[^A-Za-z0-9_.-]+", "_", row.get("run_name", ""))[:100]
+    stem = run or f"{target}_{row['mode']}{graph_suffix}_{suffix}"
+    return f"{stem}_{digest}"
 
 
 def common_title(rows: list[dict[str, str]], fallback: str) -> str:
     if not rows:
         return fallback
     row = rows[0]
-    graph = row.get("cudagraph", "disabled")
+    graph = row.get("cudagraph_requested", row.get("cudagraph", "disabled"))
     graph_text = "" if graph == "disabled" else f" {graph}"
     return (
         f"{row['target']} {row['mode']}{graph_text} {row['metric']}"
+        + (" [LEGACY UNVERIFIED]" if row.get("measurement_schema") != "2" else "")
     )
 
 
 def caption(rows: list[dict[str, str]]) -> str:
     row = rows[0]
+    measured = _measured_rows(rows)
+    def actual(field: str) -> str:
+        values = {item.get(field, "") for item in measured}
+        return (next(iter(values)) or "unknown") if len(values) == 1 else "see implementation labels"
     fixed = []
     seq_lens = sorted({int(item["seq_len"]) for item in rows})
     d_pairs = sorted({int(item["d_pair"]) for item in rows})
@@ -115,9 +177,16 @@ def caption(rows: list[dict[str, str]]) -> str:
         fixed.append(f"d_pair={d_pairs[0]}")
     fixed_text = f" | {' '.join(fixed)}" if fixed else ""
     return (
-        f"{row['device']} | {row['precision']} | compile={row['compiled']} | "
-        f"cudagraph={row.get('cudagraph', 'disabled')} | "
+        f"{row['device']} | {row['precision']} | compiled={actual('compiled')} | "
+        f"cudagraph={actual('cudagraph')} | "
+        f"dropout={row.get('dropout', 'unrecorded')} | "
+        f"wrap={row.get('compile_wrap', 'unspecified')} | "
         f"torch={row['torch_version']} cuda={row['cuda_version']}{fixed_text}"
+         f"\ncompile_scope={actual('compile_scope')} | measurement_scope={actual('measurement_scope')}"
+         f" | parameter_dtype={actual('parameter_dtype')}"
+        + (f"\nrun={row.get('run_id') or row.get('run_name')}" if row.get("run_id") or row.get("run_name") else "")
+        + (" | LEGACY UNVERIFIED: labels lack execution evidence"
+           if row.get("measurement_schema") != "2" else "")
     )
 
 
@@ -159,7 +228,7 @@ def plot_latency(rows: list[dict[str, str]], out: Path, title: str, x_field: str
             [x + offset for x in xs],
             heights,
             width,
-            label=label_for(impl),
+            label=series_label(impl, rows),
             color=color,
         )
         _annotate_bars(ax, rects, values, "{:.3g}")
@@ -172,7 +241,7 @@ def plot_latency(rows: list[dict[str, str]], out: Path, title: str, x_field: str
         ax.set_ylim(0, hi * 1.35)
     ax.legend(ncol=min(len(impls), 4), loc="upper left")
     fig.text(0.01, 0.01, caption(rows), ha="left", va="bottom", fontsize=8, color="#5A6473")
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.tight_layout(rect=(0, 0.15, 1, 1))
     save_figure(fig, out)
     plt.close(fig)
 
@@ -204,7 +273,7 @@ def plot_speedup(rows: list[dict[str, str]], out: Path, title: str, baseline: st
             [x + offset for x in xs],
             heights,
             width,
-            label=label_for(impl),
+            label=series_label(impl, rows),
             color=color,
         )
         _annotate_bars(ax, rects, speedups, "{:.2f}x")
@@ -212,12 +281,12 @@ def plot_speedup(rows: list[dict[str, str]], out: Path, title: str, baseline: st
     ax.set_xticks(xs)
     ax.set_xticklabels([str(x_value) for x_value in x_values])
     ax.set_xlabel(x_label(x_field))
-    ax.set_ylabel(f"speedup vs {label_for(baseline)} (x)")
+    ax.set_ylabel(f"speedup vs {series_label(baseline, rows)} (x)")
     ax.set_title(f"{title}: higher is better")
     ax.set_ylim(0, top * 1.35)
     ax.legend(ncol=min(len(impls), 4), loc="upper left")
     fig.text(0.01, 0.01, caption(rows), ha="left", va="bottom", fontsize=8, color="#5A6473")
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.tight_layout(rect=(0, 0.15, 1, 1))
     save_figure(fig, out)
     plt.close(fig)
 
@@ -239,6 +308,9 @@ def main() -> None:
     parser.add_argument("--mode", default=None)
     parser.add_argument("--baseline", default=BASELINE)
     parser.add_argument("--x-field", choices=("seq_len", "d_pair"), default=None)
+    parser.add_argument("--allow-legacy-unverified", action="store_true",
+                        help="Render historical CSVs with an explicit unverified label; "
+                             "never mix them with schema 2 measurements.")
     args = parser.parse_args()
 
     if args.output_dir is None:
@@ -255,11 +327,18 @@ def main() -> None:
     rows = filtered_rows(read_rows(args.csv_path), args.metric, args.mode)
     if not rows:
         raise SystemExit(f"no matching rows in {args.csv_path}")
+    if args.allow_legacy_unverified:
+        rows = [row | {"_allow_legacy_unverified": "true"} for row in rows]
 
+    x_field = infer_x_field(rows, args.x_field)
+    # Validate both plots before writing either, including duplicate aliases.
+    grouped = series_by_impl(rows, x_field)
+    args.baseline = canonical(args.baseline)
+    if args.baseline not in grouped:
+        raise SystemExit(f"baseline implementation {args.baseline!r} not found in CSV")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     name = output_stem(rows, args.name)
     title = args.title or common_title(rows, name)
-    x_field = infer_x_field(rows, args.x_field)
     latency_path = args.output_dir / f"{name}_latency"
     speedup_path = args.output_dir / f"{name}_speedup"
     plot_latency(rows, latency_path, title, x_field)

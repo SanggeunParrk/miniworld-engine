@@ -49,7 +49,8 @@ class SWADiTBlock(nn.Module):
         self.ada_ln = AdaptiveLayerNorm(
             d_hidden=d_atom, d_cond=d_cond, implementation=implementation,
         )
-        self.attention = SWA3DRoPEAttention(d_atom, n_head, half_window=half_window)
+        self.attention = SWA3DRoPEAttention(
+            d_atom, n_head, half_window=half_window, implementation=implementation)
         self.transition = ConditionedTransition(
             d_hidden=d_atom, d_cond=d_cond, n=n, implementation=implementation,
         )

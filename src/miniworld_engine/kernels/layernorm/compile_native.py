@@ -59,6 +59,8 @@ def _resolve_bwd_path(
 ) -> str:
     override = _ln_bwd_override()
     if override is not None and override in _VALID_BWD_PATHS:
+        if override == "cuda" and x.dtype != weight.dtype:
+            return _static_bwd_path(m, n, False)
         return override
 
     # The hand-CUDA fast bwd path requires x AND weight to share one dtype (its kernel rejects a
@@ -78,7 +80,7 @@ def _resolve_bwd_path(
 
     mb = dispatch_cache.mbucket(m)
     cached = dispatch_cache.lookup(device, n, mb)
-    if cached in _VALID_BWD_PATHS:
+    if cached in _VALID_BWD_PATHS and (cached != "cuda" or is_bf16):
         return cached
 
     # Don't run a timing sweep while a CUDA graph is capturing.

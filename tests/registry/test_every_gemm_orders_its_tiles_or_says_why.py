@@ -39,7 +39,9 @@ def _uses_tile_order(row: dict) -> bool | None:
                if isinstance(n, ast.FunctionDef) and n.name == row["symbol"]), None)
     if fn is None:
         return None
-    return "tile_order(" in (ast.get_source_segment(path.read_text(), fn) or "")
+    from miniworld_engine.build.classify import source_closure
+
+    return "tile_order(" in source_closure(path, row["symbol"])
 
 
 def _exempt() -> dict[str, str]:

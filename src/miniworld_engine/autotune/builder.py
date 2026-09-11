@@ -86,6 +86,14 @@ class Case:
     #: the stream each dims entry belongs to, same order as `dims` -- token_pair / atom_single /
     #: token_single / msa_token. Reported, so a unit says which activation it is driving.
     streams: tuple[str, ...] = ()
+    rows: tuple = ()
+
+    def augmentation_for(self, dim_index: int, train: bool) -> int:
+        return self.rows[dim_index].augmentation("train" if train else "eval") if self.rows else 1
+
+    def input_args(self, dim_index: int, length: int, dtype: torch.dtype, *, train: bool):
+        return self.inputs(self.augmentation_for(dim_index, train), length,
+                           self.dims[dim_index], dtype, self.stream_for(dim_index))
 
     def stream_for(self, dim_index: int) -> str:
         """Which activation THIS dims entry drives -- and therefore the rank of its input."""
@@ -285,20 +293,22 @@ def _w(*shapes: tuple[int | str, ...]):
     return build
 
 
-def _swa_params(length: int, dims: dict, dtype: torch.dtype) -> tuple:
+def _swa_params(length: int, dims: dict, dtype: torch.dtype, batch: int = 1) -> tuple:
     """``(cos, sin, seqused, cu_seqlens, max_seqlen, valid)`` for SWA3DRoPEAttention.forward.
 
     Its forward takes the rotary tables and the varlen packing as a prebuilt tuple (production
     computes them once per batch and reuses them across blocks), so the case has to supply the
-    same tuple rather than a plain tensor. One sequence of ``length`` tokens, all valid.
+    same tuple rather than a plain tensor. ``batch`` sequences of ``length`` tokens, all valid.
     """
     head_dim = dims["d_model"] // dims["n_heads"]
     half = head_dim // 2
-    cos = torch.ones(1, length, 1, half, device="cuda", dtype=dtype)
-    sin = torch.zeros(1, length, 1, half, device="cuda", dtype=dtype)
-    seqused = torch.tensor([length], dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device="cuda")
-    valid = torch.ones(1, length, dtype=torch.bool, device="cuda")
+    # Match build_attention_params / the native benchmark: one FP32 table per
+    # position, shared across heads. Activation dtype must not alter the cache key.
+    cos = torch.ones(batch, length, half, device="cuda", dtype=torch.float32)
+    sin = torch.zeros(batch, length, half, device="cuda", dtype=torch.float32)
+    seqused = torch.full((batch,), length, dtype=torch.int32, device="cuda")
+    cu_seqlens = torch.arange(0, (batch + 1) * length, length, dtype=torch.int32, device="cuda")
+    valid = torch.ones(batch, length, dtype=torch.bool, device="cuda")
     return (cos, sin, seqused, cu_seqlens, length, valid)
 
 
@@ -355,6 +365,7 @@ def _shapes(module: str) -> dict:
     switches = tuple(dict.fromkeys(name for r in rows for name, _v in r.options))
     return {
         "dims": tuple(r.dims for r in rows),
+        "rows": tuple(rows),
         "lengths_by_dim": tuple(r.lengths for r in rows),
         "streams": tuple(r.stream for r in rows),
         "lengths": tuple(sorted({n for r in rows for n in r.lengths})),
@@ -462,8 +473,8 @@ def cases() -> list[Case]:
         Case("augmented_attention",
              lambda dims, p, i, dt: AugmentedAttentionPairBias(
                  **dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt, s: (_single(2, l, dims["d_single"], dt).unsqueeze(1),
-                                     _single(2, l, dims["d_cond"], dt).unsqueeze(1),
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_single"], dt).unsqueeze(1),
+                                     _single(b, l, dims["d_cond"], dt).unsqueeze(1),
                                      _pair(1, l, dims["d_pair"], dt), _mask(1, l)),
              # module dtype x core dtype. The cross product is the point: the whole-op wrapper
              # runs the core in bf16 under an fp32 forward, so (fp32, bf16) is production, not a
@@ -471,8 +482,8 @@ def cases() -> list[Case]:
              **_shapes("augmented_attention")),
         Case("adaptive_layernorm",
              lambda dims, p, i, dt: AdaptiveLayerNorm(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt, s: (_single(b, l, dims["d_hidden"], dt),
-                                     _single(b, l, dims["d_cond"], dt)),
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_hidden"], dt).unsqueeze(1),
+                                     _single(b, l, dims["d_cond"], dt).unsqueeze(1)),
              # Same two the model builds -- AdaptiveLayerNorm is constructed inside
              # ConditionedTransition and AugmentedAttentionPairBias with the block's own
              # (d_single, d_cond), so it sees 768/384 and 128/128 and nothing else.
@@ -489,8 +500,8 @@ def cases() -> list[Case]:
         # builds while leaving 768/384, the 24-block half, with no entry at all.
         Case("conditioned_transition",
              lambda dims, p, i, dt: ConditionedTransition(**dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt, s: (_single(b, l, dims["d_hidden"], dt),
-                                     _single(b, l, dims["d_cond"], dt)),
+             lambda b, l, dims, dt, s: (_single(b, l, dims["d_hidden"], dt).unsqueeze(1),
+                                     _single(b, l, dims["d_cond"], dt).unsqueeze(1)),
              # bf16 is reachable now that the module takes its dtype at construction instead of
              # pinning the four Linears to fp32; fp32 stays because the bench still runs it there.
              **_shapes("conditioned_transition")),
@@ -531,7 +542,7 @@ def cases() -> list[Case]:
         Case("tm1",
              _kernel_case(("miniworld_engine.kernels.tm1.triton.main", "triton_tm1"),
                           _w(("d", "d"), ("d", "d"), ("d", "d"), ("d", "d"))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
              **_shapes("tm1")),
         Case("tm2",
              _kernel_case(("miniworld_engine.kernels.tm2.triton.main", "triton_tm2"),
@@ -546,7 +557,7 @@ def cases() -> list[Case]:
         Case("layernorm_linear_pair_bias",
              _kernel_case(("miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
                            "triton_layer_norm_linear"), _w(("d",), ("n_head", "d"))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
              **_shapes("layernorm_linear_pair_bias")),
         Case("swa_atom_attention",
              lambda dims, p, i, dt: SWA3DRoPEAttention(**dims).cuda().to(dt),
@@ -557,19 +568,19 @@ def cases() -> list[Case]:
              # WIDTH as the sequence length and every unit died on "shape [...] is invalid for
              # input of size ..." -- at every length, in every build, since the case was written.
              lambda b, l, dims, dt, s: (_single(b, l, dims["d_model"], dt),
-                                     _swa_params(l, dims, dt)),
+                                     _swa_params(l, dims, dt, b)),
              **_shapes("swa_atom_attention")),
         # forward-only kernel probes: no backward is registered for these, so `train=False`
         # (a train unit would only re-run the same forward and write the same entries).
         Case("layernorm_lowreg",
              _kernel_case(("miniworld_engine.kernels.layernorm.triton.lowreg",
                            "triton_layernorm_lowreg"), _w(("d",), ("d",)), tail=(1e-5,)),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
              **_shapes("layernorm_lowreg")),
         Case("layernorm_transpose",
              _kernel_case(("miniworld_engine.kernels.layernorm.triton.transpose",
                            "layer_norm_transpose"), _w(("d",), ("d",))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt)),
+             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
              **_shapes("layernorm_transpose")),
         Case("layernorm_linear_stats",
              _kernel_case(("miniworld_engine.kernels.layernorm_linear.triton.stats",
@@ -595,7 +606,7 @@ def run_case(case: Case, length: int, dim_index: int, *, train: bool, p_drop: fl
               flush=True)
         return 0
     module.train(train)
-    args = case.inputs(1, length, dims, dtype, case.stream_for(dim_index))
+    args = case.input_args(dim_index, length, dtype, train=train)
     fwd_kwargs = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
     try:
         if train:
@@ -641,6 +652,7 @@ class Unit:
     impl: str = "miniworld"
     #: compute dtype passed to forward, "" when the module computes in its own dtype
     compute: str = ""
+    generation: str = ""
 
     @property
     def label(self) -> str:
@@ -656,7 +668,8 @@ class Unit:
         # different units writing different cache buckets, so they must not share a shard file.
         core = f"-core{self.compute}" if self.compute else ""
         return (f"{self.case}-{self.impl}-{self.dtype}{core}-dims{self.dim_index}-L{self.length}-"
-                f"{'train' if self.train else 'eval'}{pin}")
+                f"{'train' if self.train else 'eval'}{pin}"
+                f"{'-plan' + self.generation if self.generation else ''}")
 
     def cmd_args(self) -> list[str]:
         """This unit's own arguments to the child. The runner supplies --shard/--compile-jobs."""
@@ -714,6 +727,7 @@ class OpUnit:
     #:
     #: 0 means "the driver decides", which is every op that does not key on a head count.
     heads: int = 0
+    generation: str = ""
 
     @property
     def bucket(self) -> int:
@@ -727,8 +741,13 @@ class OpUnit:
 
         if self.side == "pair":
             return both_key(self.length * self.length)
-        if self.side == "atom":
+        from miniworld_engine.autotune.cache import _levels
+        from miniworld_engine.autotune.shape_key import atom_key
+        level = _levels().get(self.op)
+        if level == "both":
             return both_key(self.length)
+        if level == "atom":
+            return atom_key(self.length)
         return self.length
 
     @property
@@ -746,7 +765,8 @@ class OpUnit:
         # shared stem would have one shard overwrite the other and the sweep would silently build
         # half of what it planned. `test_the_op_sweep_drives_more_than_one_width` pins exactly this.
         h = f"-H{self.heads}" if self.heads else ""
-        return f"op-{self.op}-{self.dtype}{tag}-L{self.length}{w}{h}"
+        return (f"op-{self.op}-{self.dtype}{tag}-L{self.length}{w}{h}"
+                f"{'-plan' + self.generation if self.generation else ''}")
 
     def cmd_args(self) -> list[str]:
         args = ["--op", self.op, "--dtype", self.dtype, "--length", str(self.length)]
@@ -845,7 +865,7 @@ def _check_inner(selected: list[Case], sm, problems: list[str]) -> list[str]:
             module = case.factory(dims, 0.0, impls[0], dt)
             module.eval()
             with torch.no_grad():
-                module(*case.inputs(1, length, dims, dt, case.stream_for(0)))
+                module(*case.input_args(0, length, dt, train=False))
             torch.cuda.synchronize()
         except Exception as exc:
             # OutOfResources is the autotuner working, not a broken case: a config that wants more
@@ -1426,6 +1446,16 @@ def units(selected: list[Case]) -> list[Unit]:
     out = []
     sm = device_sm()
     for case in selected:
+        if case.rows:
+            from miniworld_engine.autotune import derive
+            positions = {(r.stream, tuple(r.dims.items())): i for i, r in enumerate(case.rows)}
+            for u in derive.units(list(case.rows), arch=sm):
+                switch, value = u.option or ("", None)
+                if switch and value is not None:
+                    value = (float(value) if switch == "p_drop" else SWITCH_SETTINGS[switch][1](value))
+                out.append(Unit(case.name, positions[(u.stream, u.dims)], u.length,
+                                u.mode == "train", u.dtype, switch, value, u.impl, u.compute))
+            continue
         # build/gpu_to_kernels/<sm>.csv, not a list trimmed in cases(): the sweep is shared across
         # cards, so dropping "cute" from Case.impls to protect sm_86 would also stop building it
         # on an H100, where it is the fastest path there is.
@@ -1522,6 +1552,36 @@ def _read_has_entries(shard: Path, size: int) -> bool:
     except (OSError, ValueError):
         return False
     return any(isinstance(v, dict) and v.get("entries") for v in data.values())
+
+
+def _shard_reusable(path: Path) -> bool:
+    """A completed file can resume work only on its recorded GPU/compiler."""
+    from miniworld_engine.autotune.shard import provenance_error
+
+    if not _shard_has_entries(path):
+        return False
+    try:
+        data = json.loads(path.read_text())
+        return isinstance(data, dict) and provenance_error(data) is None
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _generation_for_work(config_dir: Path | None) -> str:
+    """Keep stale shards and claims out of this GPU/source/grid generation."""
+    import hashlib
+
+    from miniworld_engine.autotune import plan
+    from miniworld_engine.autotune.shard import provenance
+
+    digest = hashlib.sha256()
+    digest.update(plan.source_identity().encode())
+    digest.update(json.dumps(provenance(), sort_keys=True).encode())
+    if config_dir is not None:
+        for path in sorted(config_dir.glob("*.csv")):
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
 
 
 def _cache_ok_ops() -> set[str]:
@@ -1627,6 +1687,19 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
 # `Unit | OpUnit`: `build_all` decomposes a per-op sweep into OpUnits and puts them on the
 # same queue, so both kinds reach here. The annotation said `Unit` while every unit of the
 # 922-unit sweep that produced the shipped cache was an OpUnit.
+def visible_device(device: int) -> str:
+    """Resolve a logical GPU through the parent allocation's CUDA visibility mask."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is None:
+        if device < 0:
+            raise ValueError("GPU indices must be nonnegative")
+        return str(device)
+    tokens = [token.strip() for token in visible.split(",") if token.strip()]
+    if device < 0 or device >= len(tokens) or tokens[device] == "-1":
+        raise ValueError(f"GPU {device} is outside CUDA_VISIBLE_DEVICES={visible!r}")
+    return tokens[device]
+
+
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
                          compile_jobs: int, config_dir: Path | None = None,
                          fill_gaps: bool = False, share_card: bool = False,
@@ -1649,7 +1722,7 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     log = shard_dir / "logs" / f"gpu{device}-{unit.stem}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = str(device)   # CUDA's own interface, not an engine switch
+    env["CUDA_VISIBLE_DEVICES"] = visible_device(device)
     # Write cubin + metadata and not the five IR levels: 187 KB an entry becomes 71, and the A6000
     # rebuild's cache was 40 GB of a shared filesystem. See autotune/triton_cache.py.
     triton_cache.store_binary_only_env(env, keep_ir)
@@ -1751,6 +1824,22 @@ def _core_slices(slots: int) -> list[str]:
     return [",".join(str(c) for c in allowed[i * per:(i + 1) * per]) for i in range(slots)]
 
 
+def validate_build_gpus(gpus: list[int]) -> None:
+    """A build publishes one device-model cache, so its workers must match it."""
+    if not gpus or len(gpus) != len(set(gpus)):
+        raise ValueError("build requires a nonempty list of distinct logical GPUs")
+    target = torch.cuda.current_device()
+    devices = set(gpus) | {target}
+    models = {}
+    for device in devices:
+        props = torch.cuda.get_device_properties(device)
+        models[device] = (props.name, props.major, props.minor)
+    if len(set(models.values())) != 1:
+        raise ValueError(
+            f"build workers must match the current GPU used for planning/merge: {models}. "
+            "Run each GPU model separately with CUDA_VISIBLE_DEVICES selecting that model.")
+
+
 def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: int,
               resume: bool = False, reclaim: bool = False,
               config_dir: Path | None = None, fill_gaps: bool = False,
@@ -1786,6 +1875,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     """
     import concurrent.futures as cf
 
+    validate_build_gpus(gpus)
     repo = Path(__file__).resolve().parents[3]
     shard_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1832,8 +1922,37 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
         for stem in freed[:20]:
             print(f"    {stem}", flush=True)
     work = units(selected) if case_build else list(selected)
+    sm = device_sm()
+    if case_build and fill_gaps and sm:
+        from miniworld_engine.autotune import derive, plan
+        try:
+            evidence = plan.load(sm)
+        except (OSError, ValueError):
+            print("No current verified derivation: enumerating every module; shared tuning "
+                  "rounds still prevent duplicate measurements.", flush=True)
+        else:
+            from miniworld_engine.autotune.cache import gpu_key
+            report = derive.coverage(sm, gpu_key())
+            missing = {f"{op}|{key}" for op, key in report["missing"]}
+            before = len(work)
+            work = plan.select(work, selected, evidence["units"], missing)
+            import hashlib
+
+            from miniworld_engine.autotune.cache import config_space_hash
+            from miniworld_engine.autotune.configs import configs_for
+            grids = [(op, config_space_hash(configs_for(op)))
+                     for op in sorted({op for op, _key in report["missing"]})]
+            generation = hashlib.sha256(
+                repr((evidence["source_identity"], sorted(missing), grids)).encode()).hexdigest()[:12]
+            work = [dataclasses.replace(u, generation=generation) for u in work]
+            print(f"verified cache plan: {len(work)} of {before} module units cover "
+                  f"{len(missing)} missing keys", flush=True)
+    if work:
+        generation = _generation_for_work(config_dir)
+        work = [dataclasses.replace(u, generation=(
+            f"{u.generation}-{generation}" if u.generation else generation)) for u in work]
     if resume:
-        work = [u for u in work if not _shard_has_entries(shard_dir / f"{u.stem}.json")]
+        work = [u for u in work if not _shard_reusable(shard_dir / f"{u.stem}.json")]
     # A unit the shipped cache already answers is not work. Tested per ITEM with `isinstance`, not
     # from `case_build`: that flag reads `selected[0]` alone, so a mixed list would send a module
     # `Unit` -- which has no `.op` -- into a lookup expecting one. Only OpUnits name a single
@@ -1902,6 +2021,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                                        # needs, and what a rebuild should cost.
                                        rebuild_cached=not skip_cached and not fill_gaps)
             if res.get("claimed_elsewhere"):
+                got.append(res)
                 continue
             status = ("ok" if res["rc"] == 0 and res["ops"] else
                       "skip" if res.get("skipped") else
@@ -2153,6 +2273,7 @@ def _child_main(argv: list[str] | None = None) -> int:
             return 2
         settings.configure(**{field: parse(args.value)})
     capture.set_incremental(not args.rebuild_cached)
+    capture.set_round_cache(str(Path(args.shard).parent / ".round-cache"))
     if args.op:
         # ONE kernel at ONE shape, via its registry driver. The shape reached the drivers through
         # MINIWORLD_DRIVER_LENGTH (and, for a `level=both` kernel, MINIWORLD_DRIVER_SIDE) in the

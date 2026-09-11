@@ -10,6 +10,8 @@ to **cut one op out of the full model and optimize it in isolation**:
 > and where residuals live) are documented canonically in team-gm's
 > `docs/ARCHITECTURE.md`.
 
+Current A6000 validation, cache coverage, module timings and qualification limits: [final audit](docs/records/a6000-production-audit.md).
+
 ## Quickstart
 
 Four steps, and the first three need no GPU. Every command in this section is executed by
@@ -53,16 +55,16 @@ and it writes `autotune/manifests/<your card>.csv` recording what it found.
 python -m miniworld_engine.autotune.run_all
 ```
 
-Expect a line like `declared 94  driven 88  ok 88  failed 0  skipped 6` on an sm80 card. `skipped`
-is kernels whose declared `arch` is above your card (the 6 cute GEMMs) — a correct answer, not a
-failure. See
+The summary reports `declared`, `driven`, `ok`, `failed`, and `skipped` counts for the
+current registry and device. `skipped` distinguishes unsupported architecture/dtype cases;
+missing drivers and execution failures are reported separately. See
 [docs/supported.md](docs/supported.md) for what has actually been run, and
 [docs/troubleshooting.md](docs/troubleshooting.md) when a step does not do this.
 
 **Then:** using the kernels means `from miniworld_engine import ops` — eight whole-op entry points
 that take the same arguments as their torch equivalents. Getting them *fast* on your card means
-building a tuned cache, which is `miniworld-engine build all` and takes hours; the shipped cache
-covers A5000 and A6000 only.
+building a tuned cache with `miniworld-engine build all`. Its work depends on the GPU,
+current source and existing valid measurements; use `dev coverage` to inspect a specific GPU cache.
 
 ## Critical Safety
 
@@ -266,20 +268,16 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 84 | triton 78, cuda 6 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 87 | triton 81, cuda 6 |
 | **sm90+** | H100 | 7 | triton 5, cute 2 |
 | **sm100+** | B200 | 4 | cute 4 |
 <!-- END GENERATED: hardware-support -->
 
-**The floor is sm80.** 88 of the 94 kernels run there: the 82 Triton kernels (committed result
-tables exist for A100, A5000, A6000, H100 and B200) and the 6 hand-CUDA ones, whose
-`kernels/<family>/cuda/setup.py` declares `-gencode` for compute_80/86/89/90 explicitly rather than
-relying on torch's arch autodetect.
-
-**Above the floor is opt-in, and never the only path.** The 6 sm90/sm100 kernels are CuTeDSL/quack
-GEMMs (2 at sm90, 4 at sm100). Every op they serve also has a Triton implementation at sm80, and
-`modules/dispatch.py` selects between them — so an unsupported card loses performance, not
-function. `implementation='triton'` pins the portable path everywhere.
+**The minimum supported architecture is sm80.** The generated table above states each
+registered kernel's minimum architecture; it is not a numerical qualification for every
+listed GPU. Portable Triton paths and higher-architecture Triton/CuTe alternatives are
+selected by `modules/dispatch.py`. `implementation='triton'` explicitly selects the
+Triton backend; native CUDA and CuTe variants can require a newer architecture.
 
 One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on
@@ -297,13 +295,23 @@ from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WI
 `miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
 
 ```bash
-miniworld-engine build all            # tune this GPU: 2,101 (op, dtype, shape bucket) units
-miniworld-engine build all --resume   # skip what a previous run already claimed
-miniworld-engine dev audit            # which declared (op, dtype, bucket) the cache actually holds
+miniworld-engine build all            # verify the current plan, then fill its cache gaps and alternatives
+miniworld-engine build all --resume   # default: reuse compatible completed measurements
+miniworld-engine dev coverage --arch sm86    # default cache key: NVIDIA RTX A6000 (sm86)
+miniworld-engine dev audit            # registry, tuning and build-system contract checks
 ```
 
-`build` writes into `src/miniworld_engine/autotune/data/`, so a finished build is committed as
-its own commit. Full policy: `docs/operations/dispatch-cache.md`.
+`build all` runs the module plan first and alternative-kernel drivers second, then checks
+required cache coverage after merging. Declared invocations, selected work and cache keys
+are different counts; the command prints them for the current source and GPU.
+A claim file alone does not prove completion: resume requires reusable measurement shards
+and matching provenance. `--no-resume` disables completed-shard reuse.
+
+`build` writes to the installed package's `autotune/data/` directory
+(`src/miniworld_engine/autotune/data/` in a checkout). It requires a writable installation
+or checkout and does not automatically commit results. A successful cache build does not
+replace module numerical tests or benchmarks. Full policy:
+[dispatch-cache.md](docs/operations/dispatch-cache.md).
 
 ## Toolchain
 
@@ -316,8 +324,8 @@ git config core.hooksPath .githooks   # refuses to commit tuned cache data with 
 ```bash
 pixi run ruff-check     # lint  (src tests benchmarks)
 pixi run types          # ty    (src tests benchmarks) -- gates CI, no findings allowed
-pixi run test           # the CPU suite (~30 s, no GPU)
-pixi run test-gpu       # tests/numerics/test_numerical.py, on an allocated node
+pixi run test           # all tests not marked gpu, on an allocated CPU node
+pixi run test-gpu       # all tests marked gpu, on an allocated GPU node
 pixi run ci             # all three, in CI's order
 ```
 

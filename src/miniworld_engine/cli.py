@@ -119,9 +119,10 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     # `custom_op`s, so a part pays its launch overhead once and a block pays it once per part,
     # while `torch.compile` fuses across parts in the reference and cannot fuse across ours.
     # Both effects only land on a block. `dit` is the token track (pair-bias attention),
-    # `swa_dit` the atom track (windowed 3D-RoPE) -- different algorithms, different modules.
+    # `dit_atom` uses the same pair-bias block at atom widths; `swa_dit` uses windowed 3D-RoPE.
     "dit": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition"),
                         "precision=32"),
+    "dit_atom": ModuleTarget(("augmented_attention", "adaptive_layernorm", "conditioned_transition")),
     "swa_dit": ModuleTarget(
         ("swa_atom_attention", "adaptive_layernorm", "conditioned_transition"), "precision=32"),
 }
@@ -135,7 +136,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
-                  "swa_atom_attention", "dit", "swa_dit"),
+                  "swa_atom_attention", "dit", "dit_atom", "swa_dit"),
     "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }
@@ -311,7 +312,7 @@ def _worker_env(device: int) -> dict:
     env = dict(os.environ)
     # Device selection is CUDA's own interface, not an engine switch: the alternative is for every
     # worker to see all GPUs and rely on each kernel honouring a device argument.
-    env["CUDA_VISIBLE_DEVICES"] = str(device)
+    env["CUDA_VISIBLE_DEVICES"] = _bench_visible_device(device)
     return env
 
 
@@ -593,7 +594,8 @@ def is_bad_unit(result: dict) -> bool:
     the `skipped` flag the builder sets -- see tests/registry/test_permanent_skip_classification.py, which
     drives both ends of it.
     """
-    return (result["rc"] != 0 or not result["ops"]) and not result.get("skipped")
+    return (result.get("claimed_elsewhere", False)
+            or ((result["rc"] != 0 or not result["ops"]) and not result.get("skipped")))
 
 
 def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
@@ -621,13 +623,19 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
         print(f"{len(skipped)} unit(s) skipped a shape this GPU cannot hold (OOM / smem); their "
               f"entries are absent by design, not by failure.", file=sys.stderr)
     if bad:
-        print(f"build produced {len(bad)} bad unit(s) of {len(results)}; their (op, bucket) entries "
-              f"will be MISSING from the cache and will fall back to the full grid at runtime:",
-              file=sys.stderr)
-        for r in bad[:10]:
-            print(f"  {r['label']} rc={r['rc']} ops={r['ops']} -> {r['log']}", file=sys.stderr)
-        if len(bad) > 10:
-            print(f"  ... and {len(bad) - 10} more", file=sys.stderr)
+        held = [r for r in bad if r.get("claimed_elsewhere")]
+        failed = [r for r in bad if not r.get("claimed_elsewhere")]
+        if failed:
+            print(f"build produced {len(failed)} failed or empty unit(s) of {len(results)}; "
+                  "their required cache entries need verification after merging:", file=sys.stderr)
+            for r in failed[:10]:
+                print(f"  {r['label']} rc={r['rc']} ops={r['ops']} -> {r['log']}", file=sys.stderr)
+            if len(failed) > 10:
+                print(f"  ... and {len(failed) - 10} more", file=sys.stderr)
+        if held:
+            print(f"{len(held)} unit(s) are claimed elsewhere; completion is unverified "
+                  "by this invocation. After all workers finish, rerun with resume to verify "
+                  "completion.", file=sys.stderr)
         if getattr(args, "strict", False):
             print("--strict: not merging.", file=sys.stderr)
             return 1
@@ -656,7 +664,7 @@ def _merge_built_shards(args: argparse.Namespace, results: list) -> int:
         for sp, why in capture._MERGE_SKIPPED[:10]:
             print(f"  {sp}\n      {why}", file=sys.stderr)
     print(f"=== merged {len(written)} op file(s) into the in-repo cache"
-          f"{f' ({len(bad)} unit(s) missing -- run `audit` for the holes)' if bad else ''}",
+          f"{f' ({len(bad)} unit(s) unresolved -- verify completion and coverage)' if bad else ''}",
           flush=True)
     return 1 if bad and getattr(args, "strict", False) else 0
 
@@ -781,7 +789,7 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     if args.case in ("all", *STACKS):
         return 0
     if args.per_op:
-        rows = (repo / "src" / "miniworld_engine" / "kernels" / "registry.csv").read_text()
+        rows = (Path(__file__).resolve().parent / "kernels" / "registry.csv").read_text()
         ops = {line.split(",", 1)[0] for line in rows.splitlines()[1:] if line.strip()}
         # A COMMA LIST is one sweep over several kernels, and it is not a convenience. `--per-op`
         # took one name, so tuning a related set meant one command per kernel -- and each command
@@ -814,6 +822,13 @@ def cmd_build(args: argparse.Namespace) -> int:
     if rc:
         return rc
 
+    from miniworld_engine.autotune.preflight import cache_write_access
+    try:
+        cache_write_access()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
     # Select the config directory BEFORE cases(), which imports the kernel modules. An op that
     # calls configs_for() with no directory chosen gets triton's substitute Config({}) and can
     # never be refilled, so use_config_dir then refuses with "15 op(s) registered before a config
@@ -827,23 +842,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     if rc:
         return rc
 
-    # `build all` on a fresh card must produce a COMPLETE cache with no one curating a list and no
-    # flags, and the per-op sweep is what does it. Coverage is DECLARED -- registry.csv x level x
-    # width -- so every kernel with a driver is tuned, at every shape the model runs.
-    #
-    # It was not always enough. Each kernel is driven through its own harness, and a harness's WIDTH
-    # constants were frozen at import while only its length could be overridden, so the sweep reached
-    # one width per kernel and every other width the model uses missed the cache: 363 lookups across
-    # 42 of 91 ops, measured on an A6000. The module matrix was the answer -- a second pass, running
-    # with `fill_gaps` so it re-ranked rather than re-swept -- and it reaches only the 48 of 91
-    # kernels some module happens to dispatch to, so neither list covered the other.
-    #
-    # `driver_width` closes that at the source (plan.md G5): a unit is (op, dtype, side, length,
-    # WIDTH), the drivers take the base width from the environment the way they already took the
-    # length, and every other width derives from it as it does in the model. One pass again.
-    #
-    # --per-module still asks for the module matrix, and it is still the honest way to exercise real
-    # dispatch paths. What it is no longer is a REQUIREMENT for coverage.
+    # Module dispatch defines the main plan; drivers cover its unreachable alternatives.
     def _op_pass():
         # `all`, a STACK (`trunk` / `diffusion`), or one kernel name. A stack is the same sweep
         # `all` runs, narrowed by registry.csv's `stack` column to the kernels one half of the
@@ -923,6 +922,21 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(f"driver sweep: {len(units)} (op, shape, width) items — {len(names)} kernel(s) no "
               f"module dispatches to", flush=True)
         return units
+    if module_pass:
+        from miniworld_engine.autotune import plan
+        sm = builder.device_sm()
+        if sm is None:
+            print("Module builds require an available CUDA GPU.", file=sys.stderr)
+            return 2
+        try:
+            if args.case == "all":
+                from miniworld_engine.autotune.preflight import native_dependencies
+                native_dependencies(sm)
+            plan.ensure(sm, workers=min(4, max(1, args.compile_jobs or
+                        len(os.sched_getaffinity(0)))))
+        except (OSError, ValueError) as exc:
+            print(f"Build preflight failed: {exc}", file=sys.stderr)
+            return 1
     selected = (_module_pass if module_pass else _op_pass)()
     if selected is None:
         return 2
@@ -972,12 +986,18 @@ def cmd_build(args: argparse.Namespace) -> int:
                                      bench_rep_ms=getattr(args, "bench_rep_ms", 0),
                                      pin_cores=getattr(args, "pin_cores", False),
                                      skip_cached=False)
-    failed = [r for r in results if r["rc"] != 0]
-    empty = [r for r in results if r["rc"] == 0 and not r["ops"]]
-    print(f"\n{len(results) - len(failed) - len(empty)} ok, {len(empty)} empty, "
-          f"{len(failed)} failed")
+    held = [r for r in results if r.get("claimed_elsewhere")]
+    skipped = [r for r in results if r.get("skipped") and not r.get("claimed_elsewhere")]
+    finished = [r for r in results if not r.get("claimed_elsewhere") and not r.get("skipped")]
+    failed = [r for r in finished if r["rc"] != 0]
+    empty = [r for r in finished if r["rc"] == 0 and not r["ops"]]
+    successful = [r for r in finished if r["rc"] == 0 and r["ops"] > 0]
+    print(f"\n{len(successful)} ok, {len(empty)} empty, {len(failed)} failed, "
+          f"{len(skipped)} skipped, {len(held)} claimed elsewhere")
     for r in empty + failed:
         print(f"  {'EMPTY' if r in empty else 'FAIL '} {r['label']} -> {r['log']}")
+    for r in held:
+        print(f"  HELD  {r['label']} (claimed elsewhere; completion not verified here)")
     dead = _ops_that_measured_nothing(results)
     if dead:
         # A unit that dies at ONE shape is ordinary -- the shape does not fit the card, and the
@@ -1003,7 +1023,33 @@ def cmd_build(args: argparse.Namespace) -> int:
         _empty_triton_cache(dry_run=False)
     # After the merge, so a build that half-worked still ships what it measured -- the same rule
     # the merge itself follows. The exit code is the only thing a batch job's caller sees.
-    return rc or (1 if dead else 0)
+    sm = builder.device_sm()
+    if module_pass and args.case == "all" and sm is not None:
+        from miniworld_engine.autotune import derive, plan
+        from miniworld_engine.autotune.cache import gpu_key
+        try:
+            plan.load(sm)
+            report = derive.coverage(sm, gpu_key())
+        except (OSError, ValueError) as exc:
+            print(f"Build cannot certify coverage: {exc}", file=sys.stderr)
+            return 1
+        if report["missing"]:
+            print(f"Build incomplete: {len(report['missing'])} required keys are not usable.",
+                  file=sys.stderr)
+            return 1
+    # Module coverage cannot certify the alternative driver pass. Preserve good
+    # shards, but never call a full build complete when a planned unit failed.
+    incomplete = args.case == "all" and any(is_bad_unit(r) for r in results)
+    if incomplete:
+        reasons = []
+        if failed or empty:
+            reasons.append(f"{len(failed)} failed and {len(empty)} empty planned units")
+        if held:
+            reasons.append(f"{len(held)} units claimed elsewhere, with completion unverified "
+                           "by this invocation")
+        print(f"Build incomplete: {'; '.join(reasons)}; successful measurements were preserved.",
+              file=sys.stderr)
+    return rc or (1 if dead or incomplete else 0)
 
 
 def _ops_that_measured_nothing(results: list) -> dict:
@@ -1158,12 +1204,13 @@ def cmd_buckets(args: argparse.Namespace) -> int:
     # command writes, so probing the plan would re-measure only what the last run left standing and
     # a collapse could never be revisited -- a driver that started honouring its width would keep
     # the one rung it was cut down to, forever.
-    real_load = width_evidence.load
-    width_evidence.load = lambda *a, **k: {}
-    try:
+    from unittest.mock import patch
+
+    def no_evidence(path: Path | None = None) -> dict[str, dict[str, list[str]]]:
+        return {}
+
+    with patch.object(width_evidence, "load", no_evidence):
         declared = builder.op_units(None)
-    finally:
-        width_evidence.load = real_load
 
     want: dict[tuple[str, str], set[int]] = {}
     for u in declared:
@@ -1193,8 +1240,13 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     No GPU, no replay: `dev derive` already ran the same dispatch, so the answer is a set
     difference between two files.
     """
-    from miniworld_engine.autotune import derive
+    from miniworld_engine.autotune import derive, plan
 
+    try:
+        plan.load(args.arch)
+    except (OSError, ValueError) as exc:
+        print(f"Coverage is unverified: {exc}", file=sys.stderr)
+        return 2
     rep = derive.coverage(args.arch, args.gpu)
     print(f"{rep['gpu']} [{rep['arch']}]: derived {rep['want']} buckets, cache holds {rep['have']}")
     if rep["missing"]:
@@ -1207,7 +1259,7 @@ def cmd_coverage(args: argparse.Namespace) -> int:
         by_op: dict = {}
         for op, key in rep["extra"]:
             by_op.setdefault(op, []).append(key)
-        print(f"\n  EXTRA -- nothing reaches these on {rep['arch']} ({len(rep['extra'])} in "
+        print(f"\n  OUTSIDE PLAN -- preserved, not classified as dead ({len(rep['extra'])} in "
               f"{len(by_op)} kernels):")
         for op, keys in sorted(by_op.items())[:40]:
             print(f"    {op}  {len(keys)} buckets")
@@ -1225,22 +1277,39 @@ def cmd_derive(args: argparse.Namespace) -> int:
     what the modules launch was a bucket production reaches with no cache entry. Here the values
     are not guessed: the modules are run, and what they launch is what gets written.
     """
-    from miniworld_engine.autotune import derive
+    from miniworld_engine.autotune import derive, plan
 
+    source = plan.source_identity()
+    out = Path(args.out) if args.out else derive.REGISTRY_KERNEL
+    evidence = Path(args.per_unit) if getattr(args, "per_unit", "") else out.with_suffix(".units.json")
     rows = derive.module_rows()
-    work = derive.units(rows)
+    work = derive.units(rows, arch=args.arch or derive.sm_tag())
     print(f"{len(rows)} module rows -> {len(work)} invocations to record", flush=True)
 
     def progress(i, total, unit, launches, error):
-        if error and not launches:
+        if error:
             print(f"  [{i}/{total}] {unit.label}: {error}", flush=True)
         elif i % 25 == 0 or i == total:
             print(f"  [{i}/{total}] {unit.label}: {len(launches)} launches", flush=True)
 
-    entries, skipped = derive.derive_all(rows, on_unit=progress, arch=args.arch or None)
+    entries, skipped = derive.derive_all(
+        rows, on_unit=progress, arch=args.arch or None,
+        per_unit=evidence, workers=getattr(args, "workers", 1))
     arch = args.arch or derive.sm_tag()
     out = Path(args.out) if args.out else derive.REGISTRY_KERNEL
+    if skipped:
+        from miniworld_engine._atomic import write_json
+        report = out.with_suffix(".errors.json")
+        write_json(report, [{"unit": u.label, "reason": why} for u, why in skipped])
+        print(f"derivation FAILED: {len(skipped)} invocations; details: {report}",
+              file=sys.stderr)
+        print(f"Existing registry preserved: {out}", file=sys.stderr)
+        return 1
+    if source != plan.source_identity():
+        print("Dispatch sources changed during derivation; existing registry preserved.", file=sys.stderr)
+        return 1
     written = derive.write_kernel_registry(entries, arch, out)
+    plan.stamp(evidence, out, source)
     kernels = {op for op, _, _ in entries if not op.startswith("<")}
     unresolved = sorted({op for op, _, b in entries
                          if op.startswith("<") or str(b).startswith("<")})
@@ -1388,6 +1457,13 @@ def _bench_cmd(args: argparse.Namespace, target: str, config_dir: Path | None,
     return cmd, env
 
 
+def _bench_visible_device(gpu: int) -> str:
+    """Map a logical device to its token in the parent's CUDA visibility mask."""
+    from miniworld_engine.autotune.builder import visible_device
+
+    return visible_device(gpu)
+
+
 def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
                config_dir: Path | None = None, *, level: str) -> int:
     """Bench every target, one process each, spread across the visible GPUs.
@@ -1402,12 +1478,15 @@ def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
     """
     started = time.time()   # coverage must count THIS run's .ops, not history
     gpus = _resolve_gpus(args.gpus) or [0]
+    devices = {gpu: _bench_visible_device(gpu) for gpu in gpus}
+    if len(set(devices.values())) != len(gpus):
+        raise ValueError("benchmark GPUs must identify distinct visible devices")
     jobs = [(t, *_bench_cmd(args, t, config_dir, level)) for t in targets]
     rc = 0
 
     def run(job: tuple, gpu: int) -> tuple[str, int, str]:
         target, cmd, env = job
-        env = {**(env or os.environ), "CUDA_VISIBLE_DEVICES": str(gpu)}
+        env = {**(env or os.environ), "CUDA_VISIBLE_DEVICES": devices[gpu]}
         done = subprocess.run(cmd, cwd=repo, check=False, env=env,
                               capture_output=True, text=True)
         return target, done.returncode, (done.stdout or "") + (done.stderr or "")
@@ -1420,16 +1499,26 @@ def _run_bench(args: argparse.Namespace, targets: tuple[str, ...], repo: Path,
             rc |= code
     else:
         import concurrent.futures as cf
-        import itertools
+        import threading
+
+        print_lock = threading.Lock()
+        # A worker owns a GPU for its entire queue. Submitting individual jobs
+        # round-robin lets an early finisher steal another busy GPU's next job.
+        def run_queue(gpu: int, queue: list[tuple]) -> int:
+            queue_rc = 0
+            for job in queue:
+                target, code, out = run(job, gpu)
+                with print_lock:
+                    print(f"=== bench {target}  (gpu {gpu}, rc={code})", flush=True)
+                    print(out, flush=True)
+                queue_rc |= code
+            return queue_rc
 
         with cf.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
-            futures = {pool.submit(run, job, gpu): job[0]
-                       for job, gpu in zip(jobs, itertools.cycle(gpus))}
+            futures = {pool.submit(run_queue, gpu, jobs[index::len(gpus)]): gpu
+                       for index, gpu in enumerate(gpus)}
             for fut in cf.as_completed(futures):
-                target, code, out = fut.result()
-                print(f"=== bench {target}  (rc={code})", flush=True)
-                print(out, flush=True)
-                rc |= code
+                rc |= fut.result()
     if len(targets) > 1:
         rc |= _report_coverage(targets, repo, level, since=started)
     return rc
@@ -1528,15 +1617,11 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     -- so the config space is not the caller's to pick: it is whatever the cache holds. That is the
     ``grid`` set, passed here as a constant rather than an argument so the two cannot disagree.
 
-    Unlike ``bench_kernel``, this does NOT run a pre-bench build. A module's warmup tunes any bucket
-    the cache is missing over the grid BEFORE the timed region -- measured: transition with 24
-    uncovered buckets tuned them in warmup and produced a clean number -- so the tuning never lands
-    in a measured rep the way it would for a single-kernel bench. A ``build_all`` first is therefore
-    redundant here, and its CASE decomposition (1,738 module units for the shipped ops, more than
-    half of them re-tuning a bucket another unit already covered) is minutes-to-hours of work that
-    also once deadlocked its GPU pool with the bench never reached. Pre-tuning the cache into
-    ``data/`` is what ``miniworld-engine build`` is for; benching is what this is for. ``--no-build``
-    is accepted for symmetry with ``bench_kernel`` and is now the only behaviour.
+    Unlike ``bench_kernel``, this does NOT run a pre-bench build. Warmup resolves
+    missing buckets using the runtime fallback policy, which may sample only a
+    subset of the grid. This does not certify complete autotune coverage; build
+    and audit the cache separately when a fully tuned comparison is required.
+    ``--no-build`` is accepted for symmetry with ``bench_kernel``.
     """
     repo = Path(__file__).resolve().parents[2]
     targets = GROUPS.get(args.target, (args.target,))
@@ -1552,8 +1637,8 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     rc = apply_config_dir(directory)
     if rc:
         return rc
-    print("=== bench against the cache in data/ (grid config set); warmup tunes any uncovered "
-          "bucket over the grid before the timed region", flush=True)
+    print("=== bench against the cache in data/ (grid config set); cache misses use the "
+          "runtime fallback policy during warmup, without certifying full-grid tuning", flush=True)
     return _run_bench(args, targets, repo, directory, level="module")
 
 
@@ -1823,9 +1908,14 @@ def build_parser() -> argparse.ArgumentParser:
     der.add_argument("--arch", default="",
                      help="derive FOR this arch (sm86/sm90/sm100) instead of the card this runs "
                           "on; nothing is launched, so any card can derive any arch")
+    der.add_argument("--per-unit", default="",
+                     help="also write, per unit, the keys it produced -- the evidence for which "
+                          "axis of the sweep earns its units")
     der.add_argument("--out", default="",
                      help="write here instead of the in-repo registry_kernel.csv")
     der.set_defaults(func=cmd_derive)
+    der.add_argument("--workers", type=int, default=1,
+                     help="isolated derivation processes sharing the allocated GPU")
 
     aud = dev.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

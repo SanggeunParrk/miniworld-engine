@@ -2672,19 +2672,20 @@ packages:
   - einops
   - jaxtyping
   - numpy
-  - nvidia-cutlass-dsl==4.5.2 ; extra == 'cute'
-  - quack-kernels==0.5.0 ; extra == 'cute'
-  - cuequivariance-torch>=0.9,<0.10 ; extra == 'baselines'
-  - scipy ; extra == 'baselines'
-  - hydra-core ; extra == 'bench'
-  - lightning ; extra == 'bench'
-  - omegaconf ; extra == 'bench'
-  - pydantic ; extra == 'bench'
-  - matplotlib ; extra == 'bench'
-  - pytest ; extra == 'dev'
-  - ruff ; extra == 'dev'
-  - ty ; extra == 'dev'
-  - flash-attn-4 ; extra == 'flash'
+  - scipy
+  - nvidia-cutlass-dsl==4.5.2; extra == 'cute'
+  - quack-kernels==0.5.0; extra == 'cute'
+  - cuequivariance-torch<0.10,>=0.9; extra == 'baselines'
+  - hydra-core; extra == 'bench'
+  - lightning; extra == 'bench'
+  - omegaconf; extra == 'bench'
+  - pydantic; extra == 'bench'
+  - matplotlib; extra == 'bench'
+  - pytest; extra == 'dev'
+  - ruff; extra == 'dev'
+  - ty; extra == 'dev'
+  - flash-attn-4; extra == 'flash'
+  - flash-attn<3,>=2.8; extra == 'flash2'
   requires_python: '>=3.10'
 - pypi: https://download-r2.pytorch.org/whl/cu128/torch-2.10.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
   name: torch

@@ -89,4 +89,5 @@ def test_every_length_a_case_declares_is_driven() -> None:
 def test_the_declaration_is_not_empty() -> None:
     """Guard the guard: a renamed dims key or lengths field would make both checks vacuous."""
     widths, lengths = _declared()
-    assert widths and lengths, "builder.cases() declares no dims or no lengths"
+    assert widths, "builder.cases() declares no dims"
+    assert lengths, "builder.cases() declares no lengths"

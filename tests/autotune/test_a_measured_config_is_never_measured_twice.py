@@ -255,7 +255,9 @@ def test_the_key_is_the_one_a_cache_file_is_written_with(root) -> None:
 # the merge: one shard's grid is not another shard's evidence
 # --------------------------------------------------------------------------- #
 def _shard(path, entry_key: str, grid) -> str:
-    path.write_text(json.dumps({"_key_scheme": C.KEY_SCHEME, OP: {
+    from miniworld_engine.autotune.shard import provenance
+
+    path.write_text(json.dumps({"_key_scheme": C.KEY_SCHEME, "_provenance": provenance(GK), OP: {
         "grid": [C.config_to_dict(c) for c in grid], "op_id": "opid-A",
         "entries": {entry_key: [C.config_to_dict(c, 1.0) for c in grid]}}}))
     return str(path)
@@ -301,3 +303,9 @@ def test_the_file_still_records_the_union_as_its_own_space(root, tmp_path) -> No
     assert d["config_space_hash"] == C.config_space_hash(_configs(3)), (
         "the file's own hash stopped being the union, so a later full-grid run will not reproduce "
         "it and the reader will call every entry stale")
+
+
+@pytest.fixture(autouse=True)
+def current_merge_source(monkeypatch):
+    from miniworld_engine.autotune import cache_status
+    monkeypatch.setattr(cache_status, "_current_op_identity", lambda op: "opid-A")

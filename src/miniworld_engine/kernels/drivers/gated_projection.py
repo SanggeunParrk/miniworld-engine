@@ -63,3 +63,26 @@ def gated_projection_bwd_gate_flat_triton() -> None:
 
     gate, out = _x().requires_grad_(), _x().requires_grad_()
     sigmoid_gate_fused(gate, out).sum().backward()
+
+
+def _swa_gate_inputs():
+    from miniworld_engine.kernels.drivers import (
+        BF16,
+        dev,
+        driver_length,
+        driver_width,
+        ragged,
+    )
+    rows, width = ragged(driver_length(1024)), ragged(driver_width(128))
+    gate = torch.randn(1, rows, width, device=dev(), dtype=BF16)
+    out = torch.randn_like(gate)
+    weight = torch.randn(width, width, device=dev(), dtype=BF16)
+    return gate, out, weight
+
+
+def swa_gate_out_fwd_triton() -> None:
+    from miniworld_engine.kernels.gated_projection.triton.swa import (
+        swa_gate_out_inference,
+    )
+    with torch.no_grad():
+        swa_gate_out_inference(*_swa_gate_inputs())

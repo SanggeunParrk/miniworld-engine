@@ -3,6 +3,13 @@
 The reference is `rmsnorm/reference.py`, not `F.rms_norm`: comparing one implementation against
 another checks that they agree, not that either is right.
 
+Reference inputs and leaves are FP32 copies of the exact measured values. Do not
+round the reference output or its gradients to BF16: two almost identical FP32
+results can straddle a BF16 rounding boundary and differ by a full BF16 step.
+The registry bands measure kernel error against the unrounded FP32 formula, as
+the LayerNorm checkers do. The BF16 forward band is 4e-3: its former 3.2e-3
+band was below BF16's 2**-8 rounding bound. FP32 and backward bands are unchanged.
+
 Widths come from `drivers/rmsnorm.py` rather than being written again here, so a ragged-mode run
 checks the same partial tiles it builds, and so the two files cannot drift into checking a shape
 nothing tunes. Each checker covers BOTH values of `HAS_WEIGHT`, which are separate compiled kernels. The
@@ -34,7 +41,8 @@ def rmsnorm_fwd_triton():
     out = {}
     x = _x(_D)
     for tag, w in (("aff", vec(_D)), ("plain", None)):
-        out[f"y_{tag}"] = (triton_rmsnorm(x, w, _EPS), rmsnorm_reference(x, w, _EPS))
+        reference = rmsnorm_reference(x.float(), None if w is None else w.float(), _EPS)
+        out[f"y_{tag}"] = (triton_rmsnorm(x, w, _EPS), reference)
     return out
 
 
@@ -61,7 +69,10 @@ def rmsnorm_bwd_triton():
     for tag, w0 in (("aff", vec(_D)), ("plain", None)):
         ins = [x0] if w0 is None else [x0, w0]
         got = grads_of(lambda *t: triton_rmsnorm(*_xw(t), _EPS), ins, da)
-        ref = grads_of(lambda *t: rmsnorm_reference(*_xw(t), _EPS), ins, da)
+        # FP32 leaves matter: promoting only inside the formula still casts the
+        # final gradients back to the original BF16 leaves during autograd.
+        reference_inputs = [t.float() for t in ins]
+        ref = grads_of(lambda *t: rmsnorm_reference(*_xw(t), _EPS), reference_inputs, da.float())
         names = ["dx"] if w0 is None else ["dx", "dweight"]
         for n, g, r in zip(names, got, ref, strict=True):
             out[f"{n}_{tag}"] = (g, r)

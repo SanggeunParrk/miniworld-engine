@@ -34,19 +34,29 @@ def stated() -> dict[str, str]:
 
 def test_the_page_counts_the_kernels_the_build_drives(stated) -> None:
     _rows, totals = collect()
-    said = stated.get("ladders derived", "")
+    said = stated.get("kernels covered", "")
     assert said.endswith(f"of {totals['kernels']}"), (
         f"the page says {said!r} kernels, the repository has {totals['kernels']}. "
         f"Regenerate: python -m miniworld_engine.viz.sweep_page")
 
 
 def test_the_page_states_the_current_sweep_size(stated) -> None:
+    """Both numbers, because they are different questions and the page used to answer neither.
+
+    `module invocations declared` is what `build all` starts -- one module invocation per row of
+    registry_module.csv. `cache keys required` is what it produces -- one per row of
+    registry_kernel.csv. The page read `op_units()` for both and so reported the per-kernel driver
+    ladders, which the module sweep replaced: 4,948 units over 67 kernels for a build that runs
+    6,526 over 60."""
     _rows, totals = collect()
-    assert stated.get("units") == f"{totals['units']:,}", (
-        f"the page says {stated.get('units')!r} units, the repository plans "
+    assert stated.get("module invocations declared") == f"{totals['units']:,}", (
+        f"the page says {stated.get('module invocations declared')!r} units, the repository plans "
         f"{totals['units']:,}. Regenerate the page.")
-    assert stated.get("units × grid") == f"{totals['cost'] / 1e6:.2f} M", (
-        f"the page says {stated.get('units × grid')!r}, the repository is "
+    assert stated.get("cache keys required") == f"{totals['buckets']:,}", (
+        f"the page says {stated.get('cache keys required')!r} entries, the derivation names "
+        f"{totals['buckets']:,}. Re-run `dev derive`, then regenerate the page.")
+    assert stated.get("buckets × grid") == f"{totals['cost'] / 1e6:.2f} M", (
+        f"the page says {stated.get('buckets × grid')!r}, the repository is "
         f"{totals['cost'] / 1e6:.2f} M (config, shape). Regenerate the page.")
 
 

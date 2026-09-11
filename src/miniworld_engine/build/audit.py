@@ -471,14 +471,55 @@ def check_parallelism(rep: Report) -> None:
     jobs = capture._compile_jobs()
     rep.add("parallel", OK if jobs > 1 else FAIL, "cpu-compile",
             f"precompile workers = {jobs}")
+    try:
+        for units_per_gpu in (1, 2):
+            _probe_worker_pool(units_per_gpu)
+    except Exception as exc:
+        rep.add("parallel", FAIL, "gpu-tune",
+                f"worker scheduling probe failed: {type(exc).__name__}: {exc}")
+    else:
+        rep.add("parallel", OK, "gpu-tune",
+                "two logical GPUs each receive concurrent workers at 1 and 2 slots per GPU; "
+                "unit execution stubbed, no GPU work launched")
+
+
+def _probe_worker_pool(units_per_gpu: int) -> None:
+    """Exercise the real scheduler, replacing only hardware and unit execution.
+
+    A barrier makes every worker reserve a unit before any can finish. This detects
+    accidental serialization or dropped devices without depending on variable names
+    or measuring GPU kernels during a CPU audit.
+    """
+    import contextlib
+    import io
+    import tempfile
+    import threading
+    from unittest.mock import patch
+
     from miniworld_engine.autotune import builder
 
-    assert builder.__file__ is not None  # a namespace package would have none; this is a module
-    src = Path(builder.__file__).read_text()
-    if "ThreadPoolExecutor(max_workers=len(gpus))" in src:
-        rep.add("parallel", OK, "gpu-tune", "one unit per GPU, worker pool sized to len(gpus)")
-    else:
-        rep.add("parallel", FAIL, "gpu-tune", "no per-GPU worker pool found in builder")
+    gpus = [0, 1]
+    expected = collections.Counter(dict.fromkeys(gpus, units_per_gpu))
+    barrier = threading.Barrier(sum(expected.values()), timeout=2)
+    work = [builder.OpUnit("audit_probe_triton", length)
+            for length in range(sum(expected.values()))]
+
+    def run_unit(unit, device, *_args, **_kwargs):
+        barrier.wait()
+        return {"label": unit.label, "gpu": device, "rc": 0, "ops": 1,
+                "seconds": 0.0, "shard": "", "log": ""}
+
+    with (tempfile.TemporaryDirectory(prefix="miniworld-scheduler-audit-") as temporary,
+          patch.object(builder, "validate_build_gpus"),
+          patch.object(builder, "device_sm", return_value=None),
+          patch.object(builder, "_generation_for_work", return_value="audit"),
+          patch.object(builder, "_run_unit_subprocess", side_effect=run_unit),
+          contextlib.redirect_stdout(io.StringIO())):
+        results = builder.build_all(work, Path(temporary), gpus, compile_jobs=1,
+                                    units_per_gpu=units_per_gpu, skip_cached=False)
+    actual = collections.Counter(result["gpu"] for result in results)
+    if actual != expected:
+        raise ValueError(f"worker assignments {actual} do not match requested slots {expected}")
 
 
 # --------------------------------------------------------------------------- #

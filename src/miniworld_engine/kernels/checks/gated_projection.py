@@ -83,3 +83,14 @@ def gated_projection_bwd_gate_flat_triton():
     s = torch.sigmoid(_f(gate))
     return {"dg": (gate.grad, _f(da) * _f(out) * s * (1.0 - s)),
             "do": (out.grad, _f(da) * s)}
+
+
+def swa_gate_out_fwd_triton():
+    from miniworld_engine.kernels.drivers.gated_projection import _swa_gate_inputs
+    from miniworld_engine.kernels.gated_projection.triton.swa import (
+        swa_gate_out_inference,
+    )
+    with torch.no_grad():
+        gate, out, weight = _swa_gate_inputs()
+        reference = (torch.sigmoid(gate.float()) * out.float()).to(gate.dtype) @ weight.T
+        return {"output": (swa_gate_out_inference(gate, out, weight), reference)}

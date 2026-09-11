@@ -1,0 +1,386 @@
+{
+  "method": "native benchmark setup; FakeTensor forward+backward; compile disabled; derive Triton recorder; calibration disabled; no timing or numerical validation",
+  "job": "1672504",
+  "device": "NVIDIA RTX A6000",
+  "cache_unchanged": true,
+  "results": [
+    {
+      "target": "adaptive_layernorm",
+      "impl": "miniworld",
+      "error": null,
+      "launches": [
+        {
+          "op": "adaln_bwd_pre_dx_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=6445597466",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "adaln_fwd_gate_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=26394724663855",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "layernorm_bwd_atomic_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=274879480602",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "layernorm_fwd_saveact_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=274879480602",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "layernorm_stats_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=6445598613",
+          "status": "present",
+          "in_plan": true
+        }
+      ]
+    },
+    {
+      "target": "conditioned_transition",
+      "impl": "miniworld",
+      "error": null,
+      "launches": [
+        {
+          "op": "adaln_bwd_pre_dx_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=6445597466",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "adaln_fwd_gate_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=26394724663855",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "cond_transition_bwd_gemm_swiglu_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=26401170262256",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "cond_transition_swiglu_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=6448743933",
+          "status": "present",
+          "in_plan": false
+        },
+        {
+          "op": "gated_projection_bwd_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=16384",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "gated_projection_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=16384",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "layernorm_bwd_atomic_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=274879480602",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "layernorm_fwd_saveact_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=274879480602",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "layernorm_stats_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=6445598613",
+          "status": "present",
+          "in_plan": true
+        }
+      ]
+    },
+    {
+      "target": "dit",
+      "impl": "miniworld",
+      "error": null,
+      "launches": [
+        {
+          "op": "adaln_bwd_pre_dx_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=6445597466",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "adaln_fwd_gate_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=26394724663855",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "augmented_attention_bwd_pre_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=26388547701210",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "augmented_attention_bwd_reduce_triton",
+          "dtype": "float32",
+          "bucket": "shape_key=384",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "augmented_attention_bwd_split_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=26388547701210",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "augmented_attention_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=26388547701210",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "cond_transition_bwd_gemm_swiglu_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=26401170262256",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "cond_transition_swiglu_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=6448743933",
+          "status": "present",
+          "in_plan": false
+        },
+        {
+          "op": "gated_projection_bwd_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=16384",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "gated_projection_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=16384",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "layernorm_bwd_atomic_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=274879480602",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "layernorm_fwd_saveact_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=274879480602",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "layernorm_stats_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=6445598613",
+          "status": "present",
+          "in_plan": true
+        }
+      ]
+    },
+    {
+      "target": "swa_atom_attention",
+      "impl": "miniworld",
+      "error": null,
+      "launches": [
+        {
+          "op": "gated_projection_bwd_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=147456",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "gated_projection_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=147456",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "rmsnorm_bwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_WEIGHT=0,shape_key=9895604781850",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "rmsnorm_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_WEIGHT=0,shape_key=9895604781850",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "rope_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=137439087108",
+          "status": "present",
+          "in_plan": false
+        }
+      ]
+    },
+    {
+      "target": "swa_dit",
+      "impl": "pytorch",
+      "error": null,
+      "launches": [
+        {
+          "op": "gated_projection_bwd_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=147456",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "gated_projection_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=147456",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "rmsnorm_bwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_WEIGHT=0,shape_key=9895604781850",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "rmsnorm_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_WEIGHT=0,shape_key=9895604781850",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "rope_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=137439087108",
+          "status": "present",
+          "in_plan": false
+        }
+      ]
+    },
+    {
+      "target": "swa_dit",
+      "impl": "miniworld",
+      "error": null,
+      "launches": [
+        {
+          "op": "adaln_bwd_dx_dlnw_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=140741783847754",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "adaln_bwd_pre_dx_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=34360263450",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "adaln_epilogue_saveact_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_SB=1,shape_key=34360263450",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "cond_transition_bwd_gemm_swiglu_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=140739636889840",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "cond_transition_fwd_b2b_saveact_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=576469550544978793",
+          "status": "present",
+          "in_plan": false
+        },
+        {
+          "op": "gated_projection_bwd_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=147456",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "gated_projection_gate_flat_triton",
+          "dtype": "bfloat16",
+          "bucket": "shape_key=147456",
+          "status": "present",
+          "in_plan": true
+        },
+        {
+          "op": "layernorm_fwd_saveact_strided_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=2473901687578",
+          "status": "present",
+          "in_plan": false
+        },
+        {
+          "op": "rmsnorm_bwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_WEIGHT=0,shape_key=9895604781850",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "rmsnorm_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "HAS_WEIGHT=0,shape_key=9895604781850",
+          "status": "missing",
+          "in_plan": false
+        },
+        {
+          "op": "rope_fwd_triton",
+          "dtype": "bfloat16+float32",
+          "bucket": "shape_key=137439087108",
+          "status": "present",
+          "in_plan": false
+        }
+      ]
+    }
+  ]
+}

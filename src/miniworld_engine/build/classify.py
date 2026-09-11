@@ -119,13 +119,60 @@ def closure(bodies: dict[str, tuple[str, set[str]]], root: str) -> str:
     return "\n".join(parts)
 
 
+def source_closure(path: Path, symbol: str, seen: set | None = None) -> str:
+    """Follow local calls and explicit imported JIT-body aliases without importing code."""
+    seen = set() if seen is None else seen
+    identity = (path.resolve(), symbol)
+    if identity in seen or not path.is_file():
+        return ""
+    seen.add(identity)
+    text = path.read_text()
+    if path.suffix != ".py":
+        return closure(_cu_bodies(text), symbol)
+    bodies = _py_bodies(text)
+    source = closure(bodies, symbol)
+    if not source:
+        return ""
+    tree = ast.parse(text)
+    imports = {}
+    package_root = next((p.parent for p in path.parents if p.name == "miniworld_engine"), None)
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = path.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+            else:
+                if package_root is None:
+                    continue
+                base = package_root
+            module = base / (node.module or "").replace(".", "/")
+            for alias in node.names:
+                imports[alias.asname or alias.name] = module / (alias.name + ".py")
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            continue
+        name = node.targets[0].id
+        if not re.search(rf"\b{re.escape(name)}\s*\(", source):
+            continue
+        value = node.value
+        # Triton Autotuner.fn is the underlying shared JIT function.
+        while isinstance(value, ast.Attribute) and value.attr == "fn":
+            value = value.value
+        if (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                and value.value.id in imports):
+            dependency = source_closure(imports[value.value.id], value.attr, seen)
+            source += "\n" + dependency
+    return source
+
+
 def classify(path: Path, symbol: str) -> tuple[str, str, str]:
     """(kind, signals, how) for one kernel."""
     if not path.is_file():
         return "?", "", "file missing"
     text = path.read_text()
-    bodies = _py_bodies(text) if path.suffix == ".py" else _cu_bodies(text)
-    src = closure(bodies, symbol)
+    src = source_closure(path, symbol)
     how = "closure"
     if not src:
         src, how = text, "WHOLE FILE (symbol not found)"

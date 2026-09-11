@@ -35,7 +35,7 @@ from miniworld_engine.autotune.shape_key import pack, token_key
 
 @triton.autotune(configs=configs_for("trimul_bwd_gate_packed_triton"), key=['shape_key'])
 @triton.jit
-def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
+def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, pair_mask_ptr, M, DM, D: tl.constexpr, BLOCK_E: tl.constexpr,
                     shape_key):
     """1D channel-major elementwise: out (4D,M) = [d_gLlog; d_pL; d_gRlog; d_pR].
     Iterate over DM=D*M positions (d,m); dL=dL_ptr[idx], dR=dR_ptr[idx] (separate left/right
@@ -53,6 +53,11 @@ def _dconcat_kernel(dL_ptr, dR_ptr, preact, out, M, DM, D: tl.constexpr, BLOCK_E
     D2 = 2 * D
     dL = tl.load(dL_ptr + idx, mask=mask, other=0.0).to(tl.float32)
     dR = tl.load(dR_ptr + idx, mask=mask, other=0.0).to(tl.float32)
+    if pair_mask_ptr is not None:
+        scale = tl.load(pair_mask_ptr + m, mask=mask, other=0).to(tl.float32)
+        # Preserve the separate multiply's dtype rounding before the GLU derivative.
+        dL = (dL * scale).to(dL_ptr.dtype.element_ty).to(tl.float32)
+        dR = (dR * scale).to(dR_ptr.dtype.element_ty).to(tl.float32)
     gLlog = tl.load(preact + (2 * d) * Mi + m, mask=mask, other=0.0).to(tl.float32)
     pL = tl.load(preact + (2 * d + 1) * Mi + m, mask=mask, other=0.0).to(tl.float32)
     gRlog = tl.load(preact + (D2 + 2 * d) * Mi + m, mask=mask, other=0.0).to(tl.float32)
@@ -88,14 +93,14 @@ def front_bwd_fused(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     return dxn, dWL, dWLg, dWR, dWRg
 
 
-def _dconcat_fake(dL2, dR2, preact2, M, D, shape_key):
+def _dconcat_fake(dL2, dR2, preact2, M, D, shape_key, pair_mask=None):
     """The (4D, M) d_concat block [d_gLlog; d_pL; d_gRlog; d_pR], in dL2's dtype."""
     return dL2.new_empty((4 * D, M))
 
 
 @opaque(fake=_dconcat_fake, name="trimul_front_bwd_dconcat")
 def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int, D: int,
-             shape_key: int) -> torch.Tensor:
+             shape_key: int, pair_mask: torch.Tensor | None = None) -> torch.Tensor:
     """The elementwise GLU backward -> dconc (4D, M) = [d_gLlog; d_pL; d_gRlog; d_pR].
 
     Only the launch: the four wgrad GEMMs and the W_stack ``cat`` around it are cuBLAS/torch and
@@ -104,11 +109,11 @@ def _dconcat(dL2: torch.Tensor, dR2: torch.Tensor, preact2: torch.Tensor, M: int
     dm = D * M
     dconc = torch.empty(4 * D, M, device=dL2.device, dtype=dL2.dtype)
     _dconcat_kernel[lambda meta: (triton.cdiv(dm, meta["BLOCK_E"]),)](
-        dL2, dR2, preact2, dconc, M, dm, D=D, shape_key=pack(shape_key, D=D))
+        dL2, dR2, preact2, dconc, pair_mask, M, dm, D=D, shape_key=pack(shape_key, D=D))
     return dconc
 
 
-def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
+def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg, *, pair_mask=None):
     """The front bwd EXCEPT the final dxn GEMM: builds d_concat (elementwise), the 4 weight
     grads (cuBLAS huge-K, STAYS cuBLAS), and the stacked W operand. Returns
     (dconc (4H,M), dWL, dWLg, dWR, dWRg, W_stack (4H,Din)). The caller forms dxn = dconcᵀ@W_stack
@@ -121,7 +126,8 @@ def front_bwd_dW(d_left, d_right, preact, x_n, WL, WLg, WR, WRg):
     preact2 = preact.reshape(4 * H, M)
     xf = x_n.reshape(M, Din)
 
-    dconc = _dconcat(dL2, dR2, preact2, M, H, token_key(L))
+    pair_mask = None if pair_mask is None else pair_mask.to(d_left.dtype).reshape(M).contiguous()
+    dconc = _dconcat(dL2, dR2, preact2, M, H, token_key(L), pair_mask)
 
     # dW: (4H,M)@(M,Din) — dispatched (huge-K reduction reliably picks cuBLAS; quack 2.6-5x
     # slower there — measured. dispatch confirms + self-documents).

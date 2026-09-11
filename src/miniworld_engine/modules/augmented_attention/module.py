@@ -59,7 +59,9 @@ class AugmentedAttentionPairBias(nn.Module):
 
         d_hidden = d_single // n_head
 
-        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond)
+        self.ada_ln_in = AdaptiveLayerNorm(
+            d_single, d_cond, implementation=self.implementation,
+        )
         self.to_query = Linear(d_single, d_hidden * n_head, bias=True)
         self.to_key = Linear(d_single, d_hidden * n_head, bias=False)
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False)

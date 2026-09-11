@@ -131,6 +131,8 @@ def test_every_declared_dtype_becomes_a_unit(units, rows):
 
 def test_lengths_come_from_a_declared_ladder(units):
     known = set(TOKEN_SHAPES) | set(ATOM_SHAPES) | set(DIT_TOKEN_LENGTHS) | set(DIT_ATOM_LENGTHS)
+    from miniworld_engine.autotune.module_registry import STREAM_LADDERS
+    known.update(n for ladder in STREAM_LADDERS.values() for n in ladder)
     known |= {length * length for length in TOKEN_SHAPES}      # pair rows
     bad = sorted({(u.op, u.length) for u in units if u.length not in known})
     assert not bad, f"units at a length on no ladder: {bad}"
@@ -138,12 +140,9 @@ def test_lengths_come_from_a_declared_ladder(units):
 
 def _full_plan():
     """The plan before the width evidence narrows it -- the ladders as declared."""
-    real = width_evidence.load
-    width_evidence.load = lambda *a, **k: {}
-    try:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(width_evidence, "load", lambda *a, **k: {})
         return op_units(None)
-    finally:
-        width_evidence.load = real
 
 
 def test_the_unit_count_is_not_quietly_collapsing(units, rows):

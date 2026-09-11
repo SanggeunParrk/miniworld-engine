@@ -64,17 +64,13 @@ class _UniBackHalfTriton(torch.autograd.Function):
         B, L, _, D = x_n.shape
         M = B * L * L
         H = WL.shape[1]                                          # per-side hidden = d_hidden
-        left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg)
+        left, right, preact = bidir_front_triton(x_n, WL, WLg, WR, WRg, pair_mask=mask)
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
         # Mask applies to the contraction inputs (left/right) ONLY — NOT to x_n, so
         # the output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch/cuequiv
         # reference). mask is (B=1,L,L) -> broadcast over the H channel axis.
-        mm = None
-        if mask is not None:
-            mm = mask.reshape(L, L).to(lf.dtype)
-            lf = lf * mm
-            rf = rf * mm
+        mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
         tri = _contract(lf, rf, outgoing)                        # (H, L, L)
         view = tri.reshape(H, M).t()                             # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(
@@ -128,16 +124,12 @@ class _UniBackHalfTriton(torch.autograd.Function):
             d_left = torch.bmm(rf, d_tri.transpose(1, 2))
             d_right = torch.bmm(lf, d_tri)
         del d_tri
-        # chain back through the elementwise mask (left_masked = left*mm)
-        if ctx.mm is not None:
-            d_left = d_left * ctx.mm
-            d_right = d_right * ctx.mm
         d_left = d_left.reshape(B, H, L, L)
         d_right = d_right.reshape(B, H, L, L)
 
         # front bwd: d_concat (triton) + dW (cuBLAS) + W_stack; dxn fuses the gate add
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
-            d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+            d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
         del d_left, d_right
         dx = torch.mm(d_glogit, Wg.t())                         # dx_gate  (M, D)
         del d_glogit
@@ -158,14 +150,11 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     it cudagraphs at cute's speed (the merged Function's saves are used only under
     grad). Mirrors the bidir ``_bidir_infer``."""
     B, L, _, D = x_n.shape
-    left, right, _ = bidir_front_triton(x_n, WLt, WLgt, WRt, WRgt, save_preact=False)
+    left, right, _ = bidir_front_triton(
+        x_n, WLt, WLgt, WRt, WRgt, save_preact=False, pair_mask=mask)
     H = left.shape[1]
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
-    if mask is not None:                                        # mask left/right only
-        mm = mask.reshape(L, L).to(lf.dtype)
-        lf = lf * mm
-        rf = rf * mm
     tri = _contract(lf, rf, outgoing)                           # (H, L, L)
     # Fused back-half: LN_out + proj-gemm + gate-gemm + mul in ONE kernel (``trimul_back_triton``),
     # the exact kernel the H100 sm90 cute path already uses (module ``_forward_cute_free``). It

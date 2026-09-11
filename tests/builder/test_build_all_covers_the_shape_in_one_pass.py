@@ -37,8 +37,19 @@ def spy(monkeypatch, tmp_path):
 
     from miniworld_engine.autotune import builder
     monkeypatch.setattr(builder, "build_all", fake_build_all)
+    monkeypatch.setattr(builder, "device_sm", lambda: "sm_86")
     monkeypatch.setattr(cli, "_merge_built_shards", lambda args, results: 0)
     monkeypatch.setattr(cli, "_resolve_gpus", lambda g: [0])
+    from miniworld_engine.autotune import derive, plan, preflight
+    # These tests exercise scheduling and final certification. Refresh/dependency
+    # execution has its own tests; a simulated stale certificate must not launch
+    # thousands of real derivation units or import a machine-specific Flash backend.
+    monkeypatch.setattr(plan, "ensure", lambda *a, **kw: tmp_path / "plan.csv")
+    monkeypatch.setattr(preflight, "native_dependencies", lambda arch: None)
+    monkeypatch.setattr(plan, "load", lambda *a: {"complete": True})
+    monkeypatch.setattr(derive, "coverage", lambda *a: {"missing": []})
+    monkeypatch.setattr(derive, "uncovered_kernels",
+                        lambda arch: {"gated_projection_gate_triton"})
     return calls
 
 
@@ -110,8 +121,13 @@ def test_the_op_sweep_drives_more_than_one_width(monkeypatch) -> None:
 @pytest.mark.parametrize(("flag", "kind"), [("--per-op", "OpUnit"), ("--per-module", "Case")])
 def test_an_explicit_flag_still_asks_for_one_pass(spy, tmp_path, flag, kind) -> None:
     _run(_args(tmp_path, flag))
-    assert len(spy) == 1, spy
-    assert spy[0]["kind"] == kind, spy
+    assert spy[0]["kind"] == kind
+    if flag == "--per-module":
+        # `all` still owes the drivers no module reaches on the target card.
+        assert len(spy) == 2, spy
+        assert spy[1]["kind"] == "OpUnit", spy
+    else:
+        assert len(spy) == 1, spy
     assert spy[0]["fill_gaps"] is True, "an explicit single pass still fills gaps by default"
 
 
@@ -183,3 +199,81 @@ def test_the_driver_pass_runs_when_the_card_is_named(spy, tmp_path, monkeypatch)
     assert kinds == ["Case", "OpUnit"], (
         f"`build all` on a named card ran {kinds}; it owes the module sweep and then the driver "
         f"sweep for the kernels no module reaches")
+
+
+def test_successful_units_cannot_hide_missing_cache_keys(spy, tmp_path, monkeypatch):
+    from miniworld_engine.autotune import builder, derive
+    monkeypatch.setattr(builder, "device_sm", lambda: "sm_86")
+    monkeypatch.setattr(derive, "coverage", lambda *a: {"missing": [("op", "float32|128")]})
+    assert cli.cmd_build(_args(tmp_path)) == 1
+
+
+def test_successful_units_cannot_certify_a_stale_plan(spy, tmp_path, monkeypatch):
+    from miniworld_engine.autotune import builder, plan
+    monkeypatch.setattr(builder, "device_sm", lambda: "sm_86")
+    def stale(*args):
+        raise ValueError("stale derivation")
+    monkeypatch.setattr(plan, "load", stale)
+    assert cli.cmd_build(_args(tmp_path)) == 1
+
+
+@pytest.mark.parametrize(("rc", "ops", "skipped", "expected"), [
+    (1, 1, False, 1), (0, 0, False, 1), (1, 0, True, 0),
+])
+def test_partial_driver_failure_is_not_hidden_by_module_coverage(
+        spy, tmp_path, monkeypatch, rc, ops, skipped, expected):
+    from miniworld_engine.autotune import builder, derive
+
+    monkeypatch.setattr(derive, "uncovered_kernels", lambda arch: {"example_triton"})
+    monkeypatch.setattr(builder, "op_units", lambda *a, **kw: [
+        builder.OpUnit("example_triton", 128), builder.OpUnit("example_triton", 256)])
+    merged = []
+
+    def build(selected, *args, **kwargs):
+        if isinstance(selected[0], builder.OpUnit):
+            return [
+                {"label": "example_triton[bfloat16] L=128", "rc": 0, "ops": 1, "log": ""},
+                {"label": "example_triton[bfloat16] L=256", "rc": rc, "ops": ops,
+                 "skipped": skipped, "log": "failed.log"},
+            ]
+        return [{"label": "module[miniworld/bfloat16]", "rc": 0, "ops": 1, "log": ""}]
+
+    monkeypatch.setattr(builder, "build_all", build)
+    monkeypatch.setattr(cli, "_merge_built_shards", lambda args, rows: merged.extend(rows) or 0)
+    assert cli.cmd_build(_args(tmp_path)) == expected
+    assert len(merged) == 3, "successful measurements must survive partial failures"
+
+
+def test_claimed_elsewhere_is_pending_work():
+    assert cli.is_bad_unit({"rc": 0, "ops": -1, "claimed_elsewhere": True})
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_build_summary_distinguishes_completed_skipped_and_held(
+        spy, tmp_path, monkeypatch, capsys, mixed):
+    from miniworld_engine.autotune import builder, derive
+
+    held = {"label": "held[miniworld/bfloat16]", "rc": 0, "ops": -1,
+            "claimed_elsewhere": True, "log": ""}
+    rows = [held]
+    if mixed:
+        rows.extend([
+            {"label": "ok[miniworld/bfloat16]", "rc": 0, "ops": 1, "log": ""},
+            {"label": "empty[miniworld/bfloat16]", "rc": 0, "ops": 0, "log": "empty.log"},
+            {"label": "failed[miniworld/bfloat16]", "rc": 1, "ops": 1, "log": "failed.log"},
+            {"label": "skip[miniworld/bfloat16]", "rc": 1, "ops": 0,
+             "skipped": True, "log": "skip.log"},
+        ])
+    monkeypatch.setattr(derive, "uncovered_kernels", lambda arch: set())
+    monkeypatch.setattr(builder, "build_all", lambda *args, **kwargs: rows)
+    assert cli.cmd_build(_args(tmp_path)) == 1
+    output = capsys.readouterr()
+    counts = "1 ok, 1 empty, 1 failed, 1 skipped" if mixed else "0 ok, 0 empty, 0 failed, 0 skipped"
+    assert f"{counts}, 1 claimed elsewhere" in output.out
+    assert "HELD  held[miniworld/bfloat16]" in output.out
+    assert "1 units claimed elsewhere, with completion unverified" in output.err
+    if mixed:
+        assert "1 failed and 1 empty planned units" in output.err
+    else:
+        assert "failed or produced no measurements" not in output.err
+        assert "failed and" not in output.err

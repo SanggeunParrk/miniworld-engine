@@ -132,14 +132,23 @@ TARGETS = {
     "pairformer_block": pairformer_block,
 }
 if args.only:
+    unknown = set(args.only.split(",")) - TARGETS.keys()
+    if unknown:
+        raise SystemExit(f"unknown targets: {sorted(unknown)}")
     TARGETS = {k: v for k, v in TARGETS.items() if k in args.only.split(",")}
 
-out = {"wrap": args.wrap}
+out = {"wrap": args.wrap, "metadata": {
+    "seq_len": L, "d_pair": D, "input_dtype": str(DT),
+    "device": torch.cuda.get_device_name(0), "torch_version": torch.__version__,
+    "trace_state": "dynamo_reset; kernel and dispatch caches may be warm across targets",
+}}
+failures = 0
 for name, build in TARGETS.items():
     print(f"\n########## {args.wrap} :: {name}", flush=True)
     try:
         mod, inputs = build()
     except Exception as e:
+        failures += 1
         print(f"  BUILD FAILED {type(e).__name__}: {e}", flush=True)
         continue
 
@@ -148,7 +157,8 @@ for name, build in TARGETS.items():
         y = y[0] if isinstance(y, tuple) else y
         return y.float().pow(2).mean()
 
-    # --- graph structure FIRST, on a COLD process ------------------------------------------- #
+    # Explain before this target's parity check. Dynamo is reset, but kernels
+    # shared with earlier targets in this process can already be cached.
     # Order matters and used to be wrong: the parity call below warms caches whose miss path
     # graph-breaks (trimul_inproj/cute/dispatch.py::pick did exactly that), so explaining after
     # it measured a graph real training never gets -- its first compiled step is a cold trace.
@@ -159,7 +169,7 @@ for name, build in TARGETS.items():
         out[f"{name}/breaks"] = ex.graph_break_count
         out[f"{name}/graphs"] = ex.graph_count
         out[f"{name}/nodes"] = nodes
-        print(f"  COLD graphs={ex.graph_count} breaks={ex.graph_break_count} nodes={nodes}",
+        print(f"  DYNAMO_RESET graphs={ex.graph_count} breaks={ex.graph_break_count} nodes={nodes}",
               flush=True)
         for r in ex.break_reasons:
             txt = " | ".join(x.strip() for x in str(getattr(r, "reason", r)).split("\n")
@@ -169,6 +179,7 @@ for name, build in TARGETS.items():
                 print(f"          at {fs.filename.split('miniworld_engine/')[-1]}:{fs.lineno}"
                       f" {fs.name}", flush=True)
     except Exception as e:
+        failures += 1
         out[f"{name}/breaks"] = -1
         print(f"  EXPLAIN FAILED {type(e).__name__}: {str(e)[:300]}", flush=True)
 
@@ -183,6 +194,7 @@ for name, build in TARGETS.items():
             if t.grad is not None:
                 out[f"{name}/grad{i}"] = t.grad.detach().float().cpu()
     except Exception as e:
+        failures += 1
         print(f"  EAGER FAILED {type(e).__name__}: {str(e)[:300]}", flush=True)
         traceback.print_exc()
         continue
@@ -190,3 +202,4 @@ for name, build in TARGETS.items():
 
 torch.save(out, args.out)
 print(f"\n[{args.wrap}] wrote {args.out}", flush=True)
+raise SystemExit(1 if failures else 0)

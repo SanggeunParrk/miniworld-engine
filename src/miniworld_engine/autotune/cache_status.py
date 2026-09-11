@@ -34,6 +34,7 @@ from miniworld_engine.autotune.cache import (
     driver_identity,
     env_identity,
     op_identity,
+    runtime_candidates,
 )
 from miniworld_engine.autotune.configs import configs_for
 
@@ -66,6 +67,19 @@ def _current_op_identity(op: str) -> str | None:
     try:
         autotuner = getattr(importlib.import_module(mod_name), attr)
         return op_identity(autotuner)
+    except Exception:
+        return None
+
+
+def _current_implementation_identity(op: str) -> str | None:
+    """Dependency fingerprint for profiled Triton entries, including JIT helpers."""
+    from miniworld_engine.autotune.cache import implementation_identity
+
+    sym = _registry_symbols().get(op)
+    if sym is None:
+        return None
+    try:
+        return implementation_identity(getattr(importlib.import_module(sym[0]), sym[1]))
     except Exception:
         return None
 
@@ -153,8 +167,13 @@ def scan(gpu_substr: str | None = None) -> list[CacheStatus]:
                 # resetting on the latter deleted 32 of 38 tuned buckets from
                 # cond_transition_expand_swiglu for an edit that said nothing against them.
                 grid_moved = data.get("config_space_hash") != cur_grid
+                implementation = _current_implementation_identity(op) if data.get("measurements") else None
+                helper_stale = any(not runtime_candidates(data, key, implementation)
+                                   for key in data.get("measurements", {}))
                 if cur_src is not None and stored_src is not None and cur_src != stored_src:
                     verdict, reason = "STALE", "kernel source/key changed (op_identity)"
+                elif helper_stale:
+                    verdict, reason = "STALE", "profiled kernel dependency changed (implementation)"
                 elif grid_moved:
                     # NOT stale: a grid edit is served incrementally (`cache.configs_to_bench`
                     # benches what the grid ADDED, `store_ranked_configs` drops what it removed).

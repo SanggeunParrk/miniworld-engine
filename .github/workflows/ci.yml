@@ -137,10 +137,20 @@ jobs:
               "*.cu":                  (sum(x.endswith(".cu") for x in names), len(list(src.rglob("*.cu")))),
           }
           bad = {k: v for k, v in want.items() if v[0] != v[1]}
+          # A reused setuptools build/lib can silently ship deleted modules.
+          expected_py = {"miniworld_engine/" + p.relative_to(src).as_posix()
+                         for p in src.rglob("*.py") if "notes" not in p.parts}
+          actual_py = {n for n in names if n.startswith("miniworld_engine/") and n.endswith(".py")}
+          assert actual_py == expected_py, {
+              "missing_python": sorted(expected_py - actual_py),
+              "obsolete_python": sorted(actual_py - expected_py),
+          }
+
           for k, (got, exp) in want.items():
               print(f"  {k:24} {got:4} / {exp}")
           # What must NOT ship: the lab notebook, and the A/B config sets a consumer never selects.
-          for label, sub in (("notes/", "/notes/"), ("A-B config sets", "autotune/configs/accuracy")):
+          for label, sub in (("notes/", "/notes/"), ("derived plan history", "autotune/plans/"),
+                             ("A-B config sets", "autotune/configs/accuracy")):
               if n(sub):
                   bad[label] = (n(sub), 0)
           assert not bad, f"wheel contents wrong: {bad}"
@@ -159,6 +169,25 @@ jobs:
           assert devices._DEVICES.is_dir(), 'no packaged device manifests'
           print('imported', m.__version__, 'from', m.__file__)
           "
+
+      - name: Core wheel constructs an ordinary DiT block without optional backends
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install dist/*.whl
+          cd /tmp
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import miniworld_engine
+          from miniworld_engine.modules.dit import DiTBlock
+          from miniworld_engine.modules.exceptions import ImplementationType
+
+          assert not Path(miniworld_engine.__file__).is_relative_to(Path(os.environ["GITHUB_WORKSPACE"]))
+          block = DiTBlock(d_single=128, d_cond=128, d_pair=16, n_head=4,
+                           implementation=ImplementationType.PYTORCH)
+          assert sum(p.numel() for p in block.parameters()) > 0
+          print("core wheel constructed DiT:", miniworld_engine.__file__)
+          PY
 
   floor:
     name: declared Python floor (3.10, CPU suite only)

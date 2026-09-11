@@ -14,6 +14,26 @@ override: reads and writes both target this in-repo path, so a stale per-user ca
 can never shadow the repo's committed choices, and a checkout of the repo (direct or
 as a submodule) already carries the calibrated caches.
 
+A read-only wheel can consume its shipped tuned caches. Building or merging new
+tuned caches requires a writable installation (for example a user-owned virtual
+environment) or source checkout. `build` checks the cache destination before
+configuration, plan derivation or GPU work and reports an actionable error when
+it is not writable. No tuned-cache overlay or alternate root is provided.
+The derived-plan cache location below does not remove this build requirement.
+
+## Derived dispatch plans
+
+Dispatch plans are build evidence, separate from the tuned kernel choices above.
+The wheel includes the canonical `kernels/registry_kernel.csv` and matching
+`registry_kernel.units.json` evidence. When their architecture and source identity match,
+they can be reused from a read-only installation. Historical revision directories are
+kept outside the package and do not ship. Missing or stale plans are regenerated under
+`$XDG_CACHE_HOME/miniworld-engine/plans` (default `~/.cache/miniworld-engine/plans`).
+`MINIWORLD_PLAN_CACHE_DIR` selects an explicit writable plan directory, for example
+shared storage visible to Slurm workers. This setting does not redirect tuned caches.
+Plans are validated against their architecture, runtime source files and registry;
+unshipped optimization notes do not change the dispatch identity.
+
 ## LayerNorm Backward
 
 Code:
@@ -168,16 +188,17 @@ twice. So the fields split into three tiers:
 | `key_scheme` | **RESET** | The bucket string means something else, so entries are *mislabelled*, not merely old. |
 | `env_identity` | **RESET** | Another triton / CUDA / ptxas really does make a recorded time a claim about a different compiler. Not a person's to notice, so it stays automatic. |
 | `config_space_hash` | **incremental build** | A grid edit is a top-up, never a reset — see below. |
-| `op_identity` | reported only | Auto-hash of the kernel source. Cannot tell a comment from a rewrite. |
+| `op_identity` | **RESET** when the supplied current identity differs | Guards kernel source and autotune-key compatibility; source edits may require remeasurement. |
 | `driver_identity` | reported only | Auto-hash of the build driver. Changes which buckets get BUILT, never whether a measured winner is right. |
 | `driver_id_scheme` | (gates `driver_identity`) | How that hash is computed; a stamp from another scheme is skipped, not failed. |
 
 ### `build_rev` — the invalidator a human writes
 
 `registry.csv` carries a `build_rev` column, one integer per kernel. Bump it when an edit means the
-old numbers are void; leave it and every other edit is *additive*.
+old numbers are void. Compiler, kernel-source and affected bucket-scheme compatibility
+remain automatic checks; leaving `build_rev` unchanged does not override those checks.
 
-The two auto-hashes it replaces were both too eager, measurably:
+Earlier fingerprint policies exposed two distinct maintenance costs:
 
 * `op_identity` hashes the `@triton.jit` body and its `key=[...]`. Reformatting a comment moved it,
   and moving it discarded every tuned entry for that kernel.
@@ -256,6 +277,37 @@ old behaviour rather than to a permanent miss. A config is any of: a `triton.Con
 (CuTe/CUDA, cluster shapes as tuples), or a pre-shaped `{kwargs, num_warps, num_stages}` dict —
 `as_cfg_dict` normalizes all three and `config_to_dict` serializes them JSON-safely.
 
+## What `build all` verifies
+
+`miniworld-engine build all` verifies the module-derived **Triton autotune key plan**
+before starting expensive tuning. The full build first checks the cache destination is writable, then imports the selected FlashAttention
+backend and checks CuTe imports/cuBLASDx headers on SM90+, failing before tuning when
+those dependencies are broken. A missing, stale, or foreign-architecture plan is
+regenerated in a separate process and checked before publication. Generated plans are isolated by architecture and dispatch-source hash under the
+[writable plan cache](#derived-dispatch-plans); incomplete derivations stop the build. Editing the module shape declarations does not itself invalidate measured
+kernel configs: the builder selects module invocations covering the keys still missing.
+
+Build inputs and derivation use the same `registry_module.csv` declarations. Diffusion
+modules use augmentation **5 for inference and 48 for training**, including all declared
+1024-step atom lengths through 8192. Token attention uses single width 768 and condition
+width 384. Pairformer modules remain unaugmented. These are input lengths; the cache
+continues to use the existing packed shape buckets.
+
+The command builds module-reachable keys, runs drivers for registered alternative Triton
+kernels not reached by modules, then merges the resulting shards. For `all`, it checks the
+merged runtime cache against the verified plan and returns nonzero if required keys remain
+unusable. A completed derivation alone proves Python dispatch/shape coverage, not GPU
+compilation, numerical correctness, or benchmark performance.
+
+This verification currently does **not** certify every backend's cache. In particular,
+`autotune.cute_config.sweep_and_cache` has no builder caller: its six CuTe configuration
+families still resolve an existing cache or a default. CUDA extensions and external
+FlashAttention binaries have their own compilation/dependency requirements. FakeTensor
+recording replaces those native launches with shape contracts so it can record the surrounding
+MiniWorld Triton calls; it does not test those native binaries on another architecture.
+Therefore a successful A6000 run is not an H100/B200 qualification. Those devices still
+require actual build and numerical runs with compatible CuTe/FlashAttention/CUDA dependencies.
+
 ## Checking freshness BEFORE you trust a cache (`dev cache-status`)
 
 The staleness fields above are checked per *launch*, and a miss is only a warning — which means a
@@ -272,14 +324,14 @@ miniworld-engine dev cache-status --gpu A100   # substring filter
 It recomputes the code-driven fingerprints (`config_space_hash` from the grid CSVs, `op_identity`
 from the kernel's live autotuner, `driver_identity` from the driver module, `key_scheme`) and
 diffs them against what each cache recorded. **No GPU and no kernel launch** — importing a
-`@triton.autotune` kernel only defines it — so it runs on a login node or in CI, and exits
-non-zero if anything is stale. `env_identity` is reported separately and never fails the command:
+`@triton.autotune` kernel only defines it — so it can run on an allocated CPU node or in CI, and exits
+non-zero for code-driven stale entries. `env_identity` is reported separately and never fails the command:
 a cache built under another triton/cuda is legitimately "not this machine's" without the committed
 code being wrong.
 
-`tests/registry/test_no_stale_caches.py` runs the same scan in CI, so a commit that edits a grid,
-a kernel body, or a build driver without rebuilding the cache fails there instead of quietly
-costing performance later. `tests/registry/test_cache_status_detects_changes.py` drives a
+`tests/registry/test_no_stale_caches.py` runs the same scan in CI. Build-revision,
+key-scheme and source changes can invalidate entries. Grid changes request an incremental
+build, and driver changes report potentially different coverage without erasing old measurements. `tests/registry/test_cache_status_detects_changes.py` drives a
 synthetic cache to prove each detector actually fires.
 
 ### Backfilling `driver_identity` from git
@@ -307,38 +359,47 @@ caches (the 6 it cannot are the runtime-dispatch caches, which have no driver).
 
 What this does **not** cover: a cache whose fingerprints all match but that has no entry for the
 shape a run asks for ("no tuned autotune cache entry for this shape"). That is a coverage gap, not
-a code-drift one, and only `dev audit --replay` (which needs a GPU) can see it.
+a code-drift one. `dev coverage` checks required keys against the current verified plan;
+`dev audit --replay` additionally observes actual lookups on a GPU.
 
-### A stale fingerprint makes the next write RESET the file — so never build an op halfway
+### Source/compiler invalidation and partial rebuilds
 
-`store_ranked_configs` clears `entries` before writing whenever any fingerprint disagrees (grid,
-env, `op_identity`, `driver_identity`, `key_scheme`). That is right in principle — entries tuned by
-code that has since changed are not evidence about today's kernel — but it has a sharp consequence:
+`store_ranked_configs` resets incompatible measurements when the build revision,
+compiler environment, kernel identity or affected key scheme changes. A grid edit is
+incremental, and a driver-only change does not clear existing entries.
 
-> **A partial rebuild of a fingerprint-stale op deletes every bucket it does not itself rewrite.**
+A partial rebuild after a genuine reset can leave other required buckets missing.
+`build all` checks its merged result against the verified module plan and fails if required
+keys remain unusable; a narrower build is not a declaration of full-plan completion.
 
-`build --per-op <op>` covers all of that op's units, so it refills what it clears. Anything narrower
-does not. Measured twice on this repository, both silent:
+Historical examples that motivated these protections:
 
 * `rmsnorm_adamod_{fwd,bwd}_triton` lost all 34 / 33 of their `float32` entries to a rebuild that
   ran only the bf16 unit. The registry declares `bf16|fp32`; the fp32 half simply vanished.
 * `cond_transition_expand_swiglu_triton` went from 38 entries to 6 when a driver edit made it stale
   and a targeted rebuild refilled only the buckets that edit produced.
 
-Neither showed up as an error: the build reported success, and `dev cache-status` reported OK —
+Under the earlier behavior neither showed up as an error: the build reported success, and `dev cache-status` reported OK —
 correctly, because the file it now guards really was written by the current code. What was lost is
 invisible to every fingerprint, since a fingerprint describes the CODE and never the COVERAGE.
 
 So, before a targeted rebuild: check `dev cache-status` for the op. If it is STALE, either rebuild
 the whole op (`build --per-op`) or diff the entry keys against `git show HEAD:<cache>` afterwards.
-`dev audit --replay` is the check that would have caught both cases.
+Run `dev coverage` against the current plan after a targeted build; GPU replay can additionally
+confirm the actual module lookups.
 
-### `dev audit --replay` is the acceptance test, and the only one that sees coverage
+### Plan coverage and GPU replay answer different questions
 
 Every fingerprint above answers "was this cache built by the current code?". None of them answers
 "does it hold the buckets a run will ask for?" — a cache can be perfectly fresh and still serve
-nothing. `dev audit --replay` is the direct measurement: it drives `builder.cases()` against the
-finished cache and prints every lookup that missed. Needs a GPU; takes about an hour on an A100.
+nothing. `dev coverage` compares usable keys with the current verified derivation without
+running modules. Its default GPU key is `NVIDIA RTX A6000 (sm86)`; for another card,
+pass its exact cache-file GPU key with `--gpu` and its architecture with `--arch`. `dev audit --replay` drives `builder.cases()` on a GPU and reports actual
+lookup misses. Neither command establishes numerical correctness or benchmark performance.
+
+```bash
+miniworld-engine dev coverage --arch sm86    # default cache key: NVIDIA RTX A6000 (sm86)
+```
 
 ```bash
 miniworld-engine dev audit --replay      # exits 1 if any lookup missed
@@ -371,8 +432,8 @@ LENGTH. The rest were channel WIDTHS the build never drove:
 
 That last point is the structural one. `builder.cases()` (module dims — what `--replay` drives) and
 `op_units`'s `LADDER` (channel widths — what `build all` sweeps) both claim to say what the model
-presents, and nothing checked them against each other. `build all` takes the per-op path, so the
-ladder alone decides the shipped cache, while replay asks for whatever the cases present: a width
+presents, and historically nothing checked them against each other. The earlier per-op-only
+build followed the ladder while replay asked for whatever the cases presented: a width
 in one and not the other is a bucket that can never be filled and is asked for on every run.
 
 `tests/layout/test_one_source_of_shape_truth.py` pins the direction that matters — every width a
@@ -412,14 +473,21 @@ one config) or a grid spec (`axis,values`, expanded as a cartesian product).
 
 ## Building the shipped cache (on the target GPU)
 
-**The normal way is `miniworld-engine build all`.** It decomposes the work into one unit per
-`(op, declared dtype, shape bucket)` — 922 units today — runs them across every GPU it is given,
-merges the shards into `data/`, and reports what it could not measure. Coverage is DECLARED
-(registry.csv crossed with each kernel's `level` and `dtypes`), not "whatever a module happened to
-dispatch to": driving modules reached 48 of 91 triton kernels on an A6000.
+**The normal way is `miniworld-engine build all`.** It verifies the current source/GPU
+module plan, selects module invocations covering missing keys, then runs drivers for
+registered alternative Triton kernels. It merges measured shards and fails when required
+keys remain unusable. Declared module invocations, selected work units and required cache
+keys are separate quantities; read the command's current counts rather than a fixed total.
 
-    miniworld-engine build all                  # config set defaults to `grid`
-    miniworld-engine dev audit                  # did every declared (op, dtype, bucket) land?
+    miniworld-engine build all                  # config set defaults to grid; resume is enabled
+    miniworld-engine dev coverage --arch sm86    # default cache key: NVIDIA RTX A6000 (sm86)
+    miniworld-engine dev audit                  # build-system contract checks
+
+`--resume` reuses completed nonempty measurement shards with compatible provenance.
+Work generations include the current source, configuration and GPU/compiler identity;
+a claim file alone does not make work complete. Claim files coordinate concurrent workers,
+and `--reclaim` handles orphaned claims. `--no-resume` disables completed-shard reuse;
+shared valid tuning-round measurements can still be reused.
 
 **Point `TRITON_CACHE_DIR` at a directory of the build's own, and let the build empty it.** The
 triton cache is a build artifact: what ships is the JSON under `autotune/data/`, and nothing reads
@@ -430,7 +498,7 @@ shared with the rest of the lab.
     miniworld-engine build all --gpus 8 --prune-cache
 
 `--prune-cache` empties it after a SUCCESSFUL merge and never before -- until the merge writes,
-the cache is the only place the build's work exists. `miniworld-engine dev prune-cache` does it by
+compiled files may still be needed by unfinished work; measured timings are stored in shards. `miniworld-engine dev prune-cache` does it by
 hand, `--dry-run` says what would go. Both refuse a directory that is not unmistakably a triton
 cache, and both refuse outright when `TRITON_CACHE_DIR` is unset, because then the build is
 sharing `~/.triton/cache` with everything else on the machine.
@@ -490,36 +558,29 @@ measured times 0.3-5% apart -- the run-to-run drift that was there before.
 One more thing to watch: both units hold their driver's tensors on the same card at once, which is
 a real out-of-memory risk on a 24 GB card at large shapes.
 
-`dev audit` is the check that closes the loop — it compares the shipped cache against the declared
-work list and names the holes. A hole is not a wrong answer, only a bucket that pays the bounded
-fallback above at runtime.
+`dev coverage` checks the usable shipped cache against the current verified module plan.
+`dev audit` separately checks build-system contracts. A coverage hole can trigger runtime
+fallback and prevents `build all` from reporting complete required-key coverage.
 
 Both builders write directly into `src/miniworld_engine/autotune/data/`, so after a build you
 `git add` + commit the JSONs — as their own commit, not folded into a code change. A new GPU
-(H100/B200/…) is enabled by running the build on that box and committing its JSONs.
+(H100/B200/…) also needs its native dependencies and numerical/module validation on that
+hardware; committing tuning JSONs alone does not qualify it.
 
 **1. Capture builder (preferred — covers every wired kernel automatically).** Instead of
 hand-replicating each kernel's launch, `autotune/capture.py` instruments the Triton autotuner
 (`Autotuner._bench`) and records every `(config -> measured ms)` as it is benched during a real
 module forward/backward, keyed by the SAME `(op, dtype, bucket)` the runtime prune uses. So one
-module run populates the caches of every autotune kernel it fires. Drive it through the existing
-bench harness:
+module run populates the caches of every autotune kernel it fires. The CLI configures
+capture inside the worker process that actually performs the measurements.
 
-    from miniworld_engine import settings
-    settings.configure(run_autotune=True, capture=True)
+For a targeted cache build, use the existing build command so settings, augmentation,
+training/inference modes, cache keys and provenance follow the same contract:
 
-then run the bench harness in the same process:
+    miniworld-engine build <case>               # named production module
 
-    python benchmarks/runners/bench.py target=<module> level=module implementations='[miniworld]' \
-      compile=false cudagraph=manual mode=training sweep_axis=seq_len ...
-
-`run_autotune=True` unlocks the full grid (no cached narrowing) so every config is benched;
-`capture=True` installs the capture and flushes top-5 per `(op,dtype,bucket)` at the end.
-Validated against the hand builder: capture reproduces its top-1 selections (near-ties aside).
-
-In practice you do not drive this by hand: `miniworld-engine build all` at the top of this
-section runs the whole matrix through exactly this capture, and that is what the shipped caches
-were built with. Reach for the recipe above only to capture ONE module's kernels.
+For a benchmark, use the benchmark command and its measurement contract. Changing a
+CSV flag or configuring another process does not apply `torch.compile` to the timed callable.
 
 **2. One kernel, or one module.** There is no second builder — there used to be
 (`python -m miniworld_engine.autotune.build --op ...`, two hand-written pilot builders) and it was
@@ -531,8 +592,8 @@ builder, narrowed:
     miniworld-engine build <op> --per-op        # one registry kernel, every shape bucket
     miniworld-engine build <case>               # one production module's dispatch path
 
-`--per-op` is the decomposition the shipped caches were built with: one unit per
-`(op, shape bucket)`, each tuned exactly once.
+`--per-op` selects the registered kernel-driver workload; it does not prove coverage of
+every module constexpr combination that can reach that kernel.
 
 **`build all` runs both, and needs no flag to.** Neither list is complete alone. `--per-op`
 coverage is DECLARED — registry.csv × level — so every kernel with a driver is tuned, but each
@@ -542,15 +603,13 @@ way answers `missing_pairs 0` to the declared question and misses 363 lookups th
 makes, across 42 of 91 ops (`docs/records/cache-coverage-replay-a6000.md`). The module matrix
 reaches those keys and reaches only 48 of the 91 kernels.
 
-So the default is the per-op sweep, a merge, then the module matrix with `fill_gaps` — a key the
-first pass already tuned costs a 3-config re-rank instead of a full-grid sweep, so only the gaps
-are searched. `--per-op` and `--per-module` still ask for one pass alone.
+The current default runs the verified module plan first and the registered alternatives
+second. `fill_gaps` and workload-attributed shared tuning records reuse compatible
+measurements. `--per-op` and `--per-module` request one pass alone.
 
-Coverage: every live Triton kernel is wired — 91 ops in registry.csv, 922 declared
-`(op, dtype, bucket)` units. Two commands report what a cache actually holds, and they answer
-different questions — `miniworld-engine dev audit` for the declared buckets, and
-`miniworld-engine dev audit --replay` (needs a card) for what a run of the module matrix asks for
-and does not get. Do not infer either from this paragraph.
+Use `dev coverage` for required-key coverage of the current verified plan, `dev audit`
+for build-system contracts, and `dev audit --replay` for actual GPU lookup behavior.
+The older counts in the replay example above describe that historical run, not today's grid.
 
 ## CuTe / CUDA autotune (sm90+)
 
@@ -587,12 +646,12 @@ performance-only, an un-wired cute kernel simply keeps its default and loses not
 
 | field | values | effect |
 |---|---|---|
-| `run_autotune` | `False` (default) / `True` | `True`: ignore the shipped cache and run the full autotune grid (re-tune) |
+| `run_autotune` | `False` (default) / `True` | Enables full-grid tuning; `fill_gaps` and shared valid measurements can still avoid repeat work |
 | `autotune_miss_cap` | `24` (default), `0` = off | on a cache MISS, how many configs a heuristic subset may keep |
 
-A miss does not fall back to the whole grid. The grid is 205,266 configs across 91 ops, and a
-forward that searches it is not slow, it is stopped: `autotune_miss_cap` bounds the search to a
-heuristic subset instead. `run_autotune=True` lifts the cap, because a build wants the whole
+A runtime miss does not normally fall back to the whole grid. `autotune_miss_cap`
+bounds the search to a heuristic subset instead of putting an unbounded tuning sweep
+inside a forward call. `run_autotune=True` lifts the cap, because a build wants the whole
 space on purpose.
 
 An unknown GPU with no cache warns like: *"[miniworld.autotune] no tuned autotune cache for op

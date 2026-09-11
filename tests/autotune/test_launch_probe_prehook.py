@@ -110,7 +110,8 @@ def _make_autotuner(cls):
 
 def _swap_tail(patched, tail):
     """Replace the `orig_at_run(self, ...)` the probe chains to, keeping the probe's own body."""
-    cell = next(c for c in patched.__closure__ if callable(c.cell_contents)
-                and getattr(c.cell_contents, "__name__", "") != "at_run")
+    # A previous capture installation may leave another at_run probe as the tail. Identify the
+    # closure binding itself, not the function name currently stored inside that binding.
+    cell = patched.__closure__[patched.__code__.co_freevars.index("orig_at_run")]
     cell.cell_contents = tail
     return patched

@@ -1766,7 +1766,7 @@ def prepare_parser():
             "default",
             "none",
         ],
-        help="Benchmark the kernel with nsight or default (cute.testing.benchmark) or none",
+        help="Benchmark with cute.testing.benchmark (default), or only check correctness (none)",
     )
     parser.add_argument(
         "--warmup_iterations", type=int, default=0, help="Warmup iterations"
@@ -1801,6 +1801,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.use_cold_l2:
+        parser.error("--use_cold_l2 is unsupported here: cached tensor preparation reuses "
+                     "the same storage across workspaces")
+    if args.benchmark == "none" and args.skip_ref_check:
+        parser.error("--benchmark none --skip_ref_check performs no kernel execution")
+    if args.iterations < 1 or args.warmup_iterations < 0:
+        parser.error("iterations must be positive and warmup_iterations nonnegative")
+
     if len(args.mnkl) != 4:
         parser.error("--mnkl must contain exactly 4 values")
 
@@ -1812,7 +1820,7 @@ if __name__ == "__main__":
 
     print(f"[DSL INFO] Compiling Blackwell Persistent Dense GEMM with:")
     print(
-        f"[DSL INFO] A dtype: {args.ab_dtype}, B dtype: {args.c_dtype}, C dtype: {args.acc_dtype}, Acc dtype: {args.acc_dtype}"
+        f"[DSL INFO] A dtype: {args.ab_dtype}, B dtype: {args.ab_dtype}, C dtype: {args.c_dtype}, Acc dtype: {args.acc_dtype}"
     )
     print(
         f"[DSL INFO] Matrix majors - A: {args.a_major}, B: {args.b_major}, C: {args.c_major}"
@@ -1824,7 +1832,7 @@ if __name__ == "__main__":
     )
     print(f"[DSL INFO] Use TMA Store: {'True' if args.use_tma_store else 'False'}")
 
-    run(
+    elapsed_us = run(
         args.mnkl,
         args.ab_dtype,
         args.c_dtype,
@@ -1843,4 +1851,9 @@ if __name__ == "__main__":
         args.use_cold_l2,
         args.benchmark == "default",
     )
-    print("PASS")
+    if args.benchmark == "default":
+        import math
+        if not math.isfinite(elapsed_us) or elapsed_us <= 0:
+            raise SystemExit(f"invalid benchmark duration: {elapsed_us!r}")
+        print(f"BENCHMARK COMPLETED time_us={elapsed_us:.6f}")
+    print("REFERENCE CHECK SKIPPED" if args.skip_ref_check else "REFERENCE CHECK PASSED")

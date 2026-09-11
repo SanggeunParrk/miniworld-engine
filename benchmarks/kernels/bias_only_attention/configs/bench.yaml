@@ -42,3 +42,5 @@ cudagraph: disabled    # disabled | manual (bucketed capture) | graphed (make_gr
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""
+dropout: auto
+trimul_direction: outgoing

@@ -41,6 +41,10 @@ def test_the_cli_offers_exactly_the_two_halves() -> None:
 def test_a_family_does_not_straddle_the_two_halves() -> None:
     by_family: dict[str, set[str]] = defaultdict(set)
     for r in _rows():
+        if r["kernel"] == "swa_gate_out_fwd_triton":
+            # SWA-only output projection shares its GEMM family with trunk gates.
+            assert (r["family"], r["stack"]) == ("gated_projection", "diffusion")
+            continue
         by_family[r["family"]].add(r["stack"])
     split = {f: sorted(v) for f, v in by_family.items() if len(v) > 1}
     assert not split, (

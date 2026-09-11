@@ -162,42 +162,37 @@ class BidirectionalTriangleMultiplication(nn.Module):
         pair: torch.Tensor,
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
-        """cuequivariance bidirectional baseline. cuequiv has no fused-bidir kernel,
-        so this is the standard AF3 way: two single-direction
-        ``triangle_multiplicative_update`` calls (outgoing on the first ``d_hidden``
-        channels, incoming on the second), summed — i.e. the two residual updates a
-        pairformer block would apply. Weights are split from this module's doubled
-        (``2*d_hidden``) projections. Not bit-identical to the fused formulation
-        (the fused path shares one LayerNorm over the 2h concat); it is the
-        representative cuequiv cost/quality for a bidirectional update."""
-        # cuequiv backend (opt-in): lazy import so the default miniworld path never needs cuequiv.
-        from cuequivariance_torch import triangle_multiplicative_update
+        """Compose vendor primitives with the same shared 2h output normalization.
 
+        cuEquivariance's public update supports one direction. Two full updates
+        normalize each half separately and implement a different function.
+        Here the vendor input norm/gated projection and output norm surround both
+        contractions. The output projection and gate use torch because the vendor
+        dual-input GEMM requires equal input widths (ours are d_pair and 2h).
+        """
+        from cuequivariance_ops_torch.fused_layer_norm_torch import layer_norm_transpose
+        from cuequivariance_ops_torch.gated_gemm_torch import (
+            fused_sigmoid_gated_dual_gemm,
+        )
+
+        normalized = layer_norm_transpose(
+            pair, self.ln_pair.weight, self.ln_pair.bias,
+            eps=self.ln_pair.eps, layout="bijd->bijd")
+        pair_mask = None if mask is None else mask.unsqueeze(-1) & mask.unsqueeze(-2)
+        projected = fused_sigmoid_gated_dual_gemm(
+            normalized,
+            torch.cat((self.to_left_gate.weight, self.to_right_gate.weight)),
+            torch.cat((self.to_left.weight, self.to_right.weight)),
+            mask=pair_mask, transpose_out=True)
+        left, right = projected.chunk(2, dim=0)
         h = self.d_hidden
-        mask_2d = None
-        if mask is not None:
-            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-
-        def _one(direction: str, sl: slice) -> torch.Tensor:
-            return triangle_multiplicative_update(
-                pair,
-                direction=direction,
-                mask=mask_2d,
-                norm_in_weight=self.ln_pair.weight,
-                norm_in_bias=self.ln_pair.bias,
-                p_in_weight=torch.cat(
-                    [self.to_left.weight[sl], self.to_right.weight[sl]], dim=0
-                ),
-                g_in_weight=torch.cat(
-                    [self.to_left_gate.weight[sl], self.to_right_gate.weight[sl]], dim=0
-                ),
-                norm_out_weight=self.ln_out.weight[sl],
-                norm_out_bias=self.ln_out.bias[sl],
-                p_out_weight=self.to_out.weight[:, sl],
-                g_out_weight=self.to_gate.weight,
-            )
-
-        return _one("outgoing", slice(0, h)) + _one("incoming", slice(h, 2 * h))
+        outgoing = torch.einsum("dbik,dbjk->dbij", left[:h], right[:h])
+        incoming = torch.einsum("dbki,dbkj->dbij", left[h:], right[h:])
+        contraction = torch.cat((outgoing, incoming), dim=0)
+        output = layer_norm_transpose(
+            contraction, self.ln_out.weight, self.ln_out.bias,
+            eps=self.ln_out.eps, layout="dbij->bijd")
+        return sigmoid_gate(self.to_gate(normalized), self.to_out(output))
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see

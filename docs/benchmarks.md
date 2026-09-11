@@ -71,6 +71,33 @@ fused kernel to that path is not a fair or valid result.
   PyTorch baseline, but the principle is absolute: **no non-compiled numbers in any
   benchmark table or graph.** A non-compiled measurement is a debug probe, not a result.
 
+## Module training workload
+
+The default module workload is actual `torch.compile`, inference CUDA Graph ON,
+training CUDA Graph OFF, and augmentation A5 for inference / A48 for training.
+Pair modules do not have an augmentation axis.
+
+`dropout=auto` resolves to **0.25 in training** for triangle multiplication
+(outgoing, incoming, sequential and bidirectional) and triangle attention.
+Inference resolves to 0; modules without dropout (transition, adaptive normalization,
+conditioned transition, augmented attention and DiT/SWA variants) resolve to 0.
+Do not add dropout to modules whose architecture has none. The separate Pairformer
+comparison already defaults to `--p-drop 0.25`.
+
+The resolved `dropout` probability is written in both each CSV row and its config
+sidecar. The production forward generates a fresh broadcast dropout mask inside
+every timed step, so random generation, scale application and backward are included.
+Explicit `dropout=0` is available for diagnostics; those numbers are not the default
+training workload. Nonzero dropout with inference, with a module that has no dropout,
+or with training CUDA Graph capture is rejected rather than silently ignored.
+
+For trimul numerical comparisons only, both implementations temporarily receive
+identical per-layer dropout scales with the measured dtype's rounding. The original
+generators are restored before measurement warmup and timing. A shared random seed
+alone cannot align compiled BF16 and FP32 reference RNG streams. Triangle-attention
+benchmarks use reproducible nonzero projections so dropout affects the output and
+the upstream gradients are exercised.
+
 ## Hard Rule: Follow The Team-GM Bench Harness
 
 Do **not** invent ad hoc benchmark methodology for this repo unless the user
@@ -187,6 +214,15 @@ Rules baked into the module:
 - **Use the shared style** (`miniworld_engine.viz`) for every figure — never
   ad-hoc colours.
 - **Both inference and training** when the op is used in training.
+- **CUDA Graph timing regime:** `cudagraph=auto` selects `manual` for inference and
+  `disabled` for training, including SWA attention and SWA DiT. Memory measurements
+  remain ungraphed. Explicit graph requests never silently fall back to disabled.
+  On A6000/FA2, SWA no-grad forward uses fixed-capacity packed buffers with true
+  sequence lengths; padding cannot receive softmax probability. This includes the
+  no-grad forward inside a training custom op; its backward recomputation retains
+  the existing differentiable unpad path. FA2 inference capture/replay and downstream
+  training have GPU regression coverage. FA4 uses its existing seqused path; these
+  A6000 tests do not establish FA4 GPU capture support.
 - Latency plots use "lower is better"; speedup plots use "higher is better".
 - Report numerical agreement (max abs error, relative Frobenius error, cosine)
   alongside latency — never just speed.
@@ -260,3 +296,28 @@ them to the canonical `MiniWorld` backend before drawing.
 Benchmark output and runtime dispatch caches are separate. Generated benchmark
 files stay under target-local `artifacts/`; runtime dispatch caches stay outside
 the repo by default. See `operations/dispatch-cache.md`.
+
+
+Module benchmark augmentation defaults follow the execution mode: `n_augment: auto`
+resolves to **5 for inference** and **48 for training**. An explicit positive integer
+overrides the default for shape sweeps. CSV `n_augment` records the resolved count;
+`input_shapes` records whether that module actually has an augmentation axis.
+Pairformer triangle operations and Transition do not acquire a batch/augmentation
+dimension from this setting. Inference timing uses CUDA Graphs and training timing
+disables them through `cudagraph: auto`.
+
+
+TriangleMultiplication direction is explicit in `trimul_direction` and in each CSV row:
+`outgoing`, `incoming`, or `alternating`. Use `n_layers=2 trimul_direction=alternating`
+to measure an outgoing module followed by an incoming module, including both residuals.
+The bidirectional target computes both contractions from one normalized input and
+normalizes their concatenation once; it is a different architecture from that sequential pair.
+Its cuEquivariance backend composes vendor normalization/gated-projection primitives with
+the same shared output normalization; its output projection/gate use torch because the vendor
+dual-input GEMM requires equal input widths. It is a composition, not a native fused bidirectional API.
+
+`implementation=pytorch` must use torch operations throughout, with FlashAttention the explicit
+exception for SWA attention. SWA now propagates the implementation through its attention core:
+PyTorch uses torch RMSNorm, RoPE, and sigmoid gating; MiniWorld keeps its fused kernels.
+This applies to standalone SWA Attention and SWA DiT. Inductor-generated kernels for torch
+operations are part of the compiled PyTorch baseline, not imported MiniWorld kernels.

@@ -142,12 +142,18 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
               "rmsnorm_adamod": {"token", "atom"},
               "layernorm": {"pair", "token", "atom"},
               "layernorm_linear": {"pair", "token", "atom"},
-              "gated_projection": {"pair", "token", "atom"}}
+              "gated_projection": {"pair", "token", "atom"},
+              # Q/K RMSNorm+RoPE is called by SWAAtomAttention only. Its tuning
+              # axis is flattened head rows; the model stream remains atom-only.
+              "rope": {"atom"}}
     bad = []
     for r in registry_rows():
         if r["level"] != "both":
             continue
-        want = expect.get(r["family"])
+        # This specialized projection is called only by the SWA atom module;
+        # the older shared sigmoid kernels still serve all three streams.
+        want = ({"atom"} if r["kernel"] == "swa_gate_out_fwd_triton"
+                else expect.get(r["family"]))
         got = {x for x in (r.get("sides") or "").split("|") if x}
         if want is None:
             bad.append(f"{r['kernel']}: family {r['family']!r} is level=both and this test has no "
@@ -250,7 +256,10 @@ def test_the_coverage_check_compares_buckets_not_lengths():
 def test_a_token_or_atom_unit_buckets_on_its_length():
     units = [u for u in op_units() if not u.side]
     assert units
-    assert all(u.bucket == u.length for u in units)
+    from miniworld_engine.autotune.shape_key import atom_key, token_key
+    levels = cache._levels()
+    assert all(u.bucket == (atom_key(u.length) if levels[u.op] == "atom"
+                            else token_key(u.length)) for u in units)
 
 
 def test_a_shard_records_the_scheme_its_buckets_are_in(tmp_path, monkeypatch):
@@ -273,15 +282,18 @@ def test_the_merge_skips_a_shard_from_an_older_scheme(tmp_path, monkeypatch):
     """
     import json
 
-    from miniworld_engine.autotune import capture
+    from miniworld_engine.autotune import cache_status, capture
+    from miniworld_engine.autotune.shard import provenance
+
+    monkeypatch.setattr(cache_status, "_current_op_identity", lambda op: "x")
 
     op = "transition_expand_swiglu_triton"                     # level=both
     entry = [{"kwargs": {"BLOCK_M1": 64}, "num_warps": 4, "num_stages": 2, "ms": 1.0}]
     old = tmp_path / "old.json"
-    old.write_text(json.dumps({op: {"grid": entry, "entries": {"bfloat16|shape_key=256": entry},
+    old.write_text(json.dumps({"_provenance": provenance("g"), op: {"grid": entry, "entries": {"bfloat16|shape_key=256": entry},
                                     "op_id": "x"}}))            # no _key_scheme = scheme 1
     new = tmp_path / "new.json"
-    new.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME,
+    new.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME, "_provenance": provenance("g"),
                                op: {"grid": entry, "entries": {"bfloat16|shape_key=256": entry},
                                     "op_id": "x"}}))
 

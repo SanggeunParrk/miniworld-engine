@@ -13,11 +13,14 @@ satisfy a fake that the real call shape would break. Capture hooks ``CustomOpDef
 nothing at all), because a ``custom_op`` with a Python implementation is dispatched through the
 CustomOpDef wrapper before any dispatch-mode key is consulted.
 
-Ops this card never reaches -- the sm90/sm100 CuTeDSL paths -- are reported, not asserted on.
-Their fakes are genuinely unverified and this test says so out loud instead of implying coverage
-it does not have.
+Ops outside these cases are reported, not asserted on. They include alternative A6000 paths
+as well as sm90/sm100 CuTeDSL paths; absence alone does not establish an architecture restriction.
+The cases include inference and training, current token/atom widths, and SWA preprocessing.
 """
 from __future__ import annotations
+
+import json
+from dataclasses import asdict
 
 import pytest
 
@@ -32,9 +35,6 @@ from torch._library.custom_ops import CustomOpDef
 
 from miniworld_engine import settings
 from miniworld_engine.modules import (
-    AdaptiveLayerNorm,
-    AugmentedAttentionPairBias,
-    ConditionedTransition,
     ImplementationType,
     MSAPairWeightedAveraging,
     OuterProductMean,
@@ -44,6 +44,11 @@ from miniworld_engine.modules import (
     TriangleAttention,
     TriangleMultiplication,
 )
+from miniworld_engine.modules.dit import DiTBlock
+from miniworld_engine.modules.swa_atom_attention.module import (
+    build_attention_params,
+)
+from miniworld_engine.modules.swa_dit import SWADiTBlock
 
 DEV, DT = "cuda", torch.bfloat16
 L, D = 384, 128
@@ -54,25 +59,62 @@ def _t(*shape):
     return torch.randn(*shape, device=DEV, dtype=DT, requires_grad=True)
 
 
-def _cases():
+def _pair_cases():
     yield Transition(d_hidden=D, n=4, implementation=OURS), (_t(1, L, L, D),)
     yield (TriangleMultiplication(d_pair=D, d_hidden=D, outgoing=True, implementation=OURS,
                                   p_drop=0.0), (_t(1, L, L, D),))
     yield (TriangleAttention(d_pair=D, d_hidden=128, n_head=4, starting=True,
                              implementation=OURS), (_t(1, L, L, D),))
-    yield (AugmentedAttentionPairBias(d_single=384, d_cond=384, d_pair=D, n_head=16,
-                                      implementation=OURS),
-           (_t(1, 1, L, 384), _t(1, 1, L, 384), _t(1, L, L, D)))
-    yield (ConditionedTransition(d_hidden=D, d_cond=384, n=2, implementation=OURS),
-           (_t(1, L, D), _t(1, L, 384)))
-    yield (AdaptiveLayerNorm(d_hidden=D, d_cond=384, implementation=OURS),
-           (_t(1, L, D), _t(1, L, 384)))
     yield (OuterProductMean(d_msa=D, d_pair=D, d_hidden=32, implementation=OURS),
            (_t(1, 8, L, D),))
     yield (MSAPairWeightedAveraging(d_msa=D, d_pair=D, d_hidden=32, n_head=8,
                                     implementation=OURS), (_t(1, 8, L, D), _t(1, L, L, D)))
     yield (PairformerBlock(PairformerConfig(d_pair=D, n_block=1, p_drop=0.0),
                            implementation=OURS), (_t(1, L, L, D),))
+
+
+class _RMSRoPE(torch.nn.Module):
+    """Exercise the standalone public fallback operations as well as fused SWA Q/K."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(32))
+
+    def forward(self, x, cos, sin):
+        from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
+        from miniworld_engine.kernels.rope.interface import triton_rope_3d
+
+        return triton_rope_3d(triton_rmsnorm(x, self.weight), cos, sin)
+
+
+def _cases():
+    # Keep the established pair/MSA cases, and exercise their inference branches too.
+    for training in (True, False):
+        for model, inputs in _pair_cases():
+            yield model, inputs, training
+        augmentation = 48 if training else 5
+        # Current production widths; atom256*A48 also reaches the >=8192-row fused tail.
+        for width, cond_width, pair_width, heads, length in (
+            (768, 384, 128, 16, 64), (128, 128, 16, 4, 256),
+        ):
+            model = DiTBlock(d_single=width, d_cond=cond_width, d_pair=pair_width,
+                             n_head=heads, implementation=OURS)
+            mask = torch.ones(1, length, device=DEV, dtype=torch.bool)
+            mask[:, -7:] = False
+            yield model, (_t(augmentation, 1, length, width),
+                          _t(augmentation, 1, length, cond_width),
+                          _t(1, length, length, pair_width), mask), training
+        length = 256
+        angles = torch.randn(1, length, 16, device=DEV)
+        valid = torch.ones(augmentation, length, device=DEV, dtype=torch.bool)
+        valid[:, -7:] = False
+        attention_params = build_attention_params(
+            angles.cos(), angles.sin(), valid, num_aug=augmentation)
+        yield (SWADiTBlock(128, 128, 4, implementation=OURS),
+               (_t(augmentation, length, 128), _t(augmentation, length, 128),
+                attention_params), training)
+        angles = torch.randn(augmentation, 128, 16, device=DEV)
+        yield _RMSRoPE(), (_t(augmentation, 128, 4, 32), angles.cos(), angles.sin()), training
 
 
 @pytest.fixture(scope="module")
@@ -91,28 +133,41 @@ def captured():
         return original(self, *args, **kwargs)
 
     CustomOpDef.__call__ = recording
+    previous = settings.configure(autotune_miss_cap=1)
     try:
-        for model, inputs in _cases():
-            model = model.to(DEV, DT)
-            out = model(*inputs)
-            out = out[0] if isinstance(out, tuple) else out
-            out.float().pow(2).mean().backward()
-            del model
+        for model, inputs, training in _cases():
+            model = model.to(DEV, DT).train(training)
+            with torch.set_grad_enabled(training):
+                out = model(*inputs)
+                out = out[0] if isinstance(out, tuple) else out
+                if training:
+                    out.float().pow(2).mean().backward()
+            del model, out
             torch.cuda.empty_cache()
     finally:
         CustomOpDef.__call__ = original
+        settings.configure(**asdict(previous))
     return calls
 
 
 def test_capture_saw_ops(captured):
     """Guard the guard: a capture that silently records nothing would make every check vacuous."""
+    required = {"qk_norm_rope_fwd", "qk_norm_rope_bwd", "swa_gate_out_fwd",
+                "swa_atom_attention_flash_window", "rmsnorm_fwd", "rmsnorm_bwd", "rope_3d"}
+    if torch.cuda.get_device_capability(0) == (8, 6):
+        required |= {"adaln_inference_fused", "adaln_gemm_gate", "adaln_cond_affine",
+                     "adaln_dgrad_condln", "conditioned_transition_inference",
+                     "conditioned_transition_composed_expand_swiglu",
+                     "conditioned_transition_composed_squeeze_gate",
+                     "conditioned_transition_b2b_fwd_train"}
+    assert {f"miniworld_engine::{name}" for name in required} <= captured.keys()
     assert len(captured) >= 15, (
         f"only {len(captured)} ops captured -- the hook is not seeing calls, so the opcheck "
         f"below would pass by doing nothing")
 
 
 #: `opcheck`'s default set includes `test_aot_dispatch_static` / `_dynamic`, which compile the op
-#: forward AND BACKWARD through AOTAutograd. Every op here is a launch wrapper called from inside an
+#: forward AND BACKWARD through AOTAutograd. Except for the public FlashWindow op, these are launch wrappers inside an
 #: `autograd.Function.forward`, and `kernels/_compile.py` says why `register_autograd` is
 #: deliberately not used: `setup_context` can only save the op's inputs and outputs, so every
 #: intermediate a backward needs (LN stats, the normalised activation) would have to become a
@@ -126,6 +181,8 @@ def test_capture_saw_ops(captured):
 #: The compile path is NOT dropped along with it. The aot tests run with the arguments detached,
 #: which is the shape these ops are really compiled in, so they still cover what they are worth
 #: covering: that the fake's metadata survives a traced forward.
+# FlashWindow is a public autograd op; the lower-level launch wrappers use enclosing Functions.
+_AUTOGRAD_OPS = {"miniworld_engine::swa_atom_attention_flash_window"}
 _GRAD_FREE = ("test_schema", "test_faketensor")
 _COMPILED = ("test_aot_dispatch_static", "test_aot_dispatch_dynamic")
 
@@ -147,6 +204,8 @@ def test_every_exercised_op_satisfies_its_contract(captured):
     for name, (op, args, kwargs) in sorted(captured.items()):
         try:
             torch.library.opcheck(op, args, kwargs, test_utils=_GRAD_FREE)
+            if name in _AUTOGRAD_OPS:
+                torch.library.opcheck(op, args, kwargs, test_utils=("test_autograd_registration",))
         except Exception as e:  # noqa: PERF203 -- every op is checked; one failure is not the end
             failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
     assert not failures, "op contract violations:\n  " + "\n  ".join(failures)
@@ -163,25 +222,16 @@ def test_every_exercised_op_survives_a_traced_forward(captured):
     assert not failures, "ops that do not survive a traced forward:\n  " + "\n  ".join(failures)
 
 
-def test_no_op_is_directly_differentiable(captured):
-    """The design invariant behind the split above, asserted rather than assumed.
+def test_autograd_registration_matches_the_public_contract(captured):
+    """Only the public FlashWindow op registers autograd directly.
 
-    `kernels/_compile.py` states that `register_autograd` is deliberately unused. That is what
-    makes excluding the grad half of `opcheck` honest rather than convenient -- so it is checked
-    here, positively: backward through one of these ops must RAISE.
-
-    Not by inspecting the dispatcher: `custom_op` installs a not-implemented Autograd fallback for
-    every op, so `_dispatch_has_kernel_for_dispatch_key(name, "Autograd")` is True either way and
-    cannot tell a real formula from the fallback. Verified against both shapes on a probe pair --
-    plain raises "no autograd formula", `register_autograd` succeeds -- so the backward attempt is
-    the discriminator.
-
-    If this ever passes, someone added a formula and the `test_utils` split above needs revisiting.
+    All other captured ops are launch wrappers whose enclosing autograd.Function owns backward.
+    A real backward proves the exception works, and detects accidental registrations elsewhere.
     """
     differentiable, unchecked = [], []
     for name, (op, args, kwargs) in sorted(captured.items()):
         grad_args, seeded = [], False
-        for a in args:
+        for a in _detach(args):
             if not seeded and isinstance(a, torch.Tensor) and a.is_floating_point():
                 grad_args.append(a.detach().clone().requires_grad_(True))
                 seeded = True
@@ -206,8 +256,8 @@ def test_no_op_is_directly_differentiable(captured):
             unchecked.append(f"{name} ({type(e).__name__})")
             continue
         differentiable.append(name)
-    assert not differentiable, (
-        f"{differentiable} now have an autograd formula. kernels/_compile.py says "
+    assert set(differentiable) == _AUTOGRAD_OPS, (
+        f"Expected only {_AUTOGRAD_OPS} to register autograd; got {differentiable}; unchecked={unchecked}. "
         f"register_autograd is deliberately unused (setup_context cannot save the intermediates a "
         f"backward needs); if that changed, the test_utils split in this file needs revisiting.")
     # Not an assertion: an op with no float input, or one this card cannot run, is simply outside
@@ -218,7 +268,7 @@ def test_no_op_is_directly_differentiable(captured):
 
 
 def test_unexercised_ops_are_reported(captured, capsys):
-    """Name the ops this card cannot reach, so their fakes are known-unverified, not assumed-good."""
+    """Name ops outside these cases; absence does not imply the card cannot execute them."""
     registered = {f"miniworld_engine::{n}" for n in dir(torch.ops.miniworld_engine)
                   if not n.startswith("_")} - {"miniworld_engine::name"}
     never = sorted(registered - set(captured))
@@ -227,3 +277,4 @@ def test_unexercised_ops_are_reported(captured, capsys):
               f"{len(never)} never reached here (fakes UNVERIFIED):")
         for n in never:
             print(f"    {n}")
+        print("OPCHECK_COVERAGE " + json.dumps({"verified": sorted(captured), "unexercised": never}))

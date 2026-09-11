@@ -1,3 +1,6 @@
+raise SystemExit("RETIRED benchmark: the graph-failure fallback includes module construction "
+                 "inside timed iterations, making the baseline incomparable. "
+                 "Use benchmarks/runners/bench.py instead.")
 import sys, torch, torch.nn as nn, warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0,"/home/snu_hwle/psk/miniworld-engine/src")

@@ -30,6 +30,8 @@ reached is a claim about work nobody did.
 from __future__ import annotations
 
 import ast
+import contextlib
+import contextvars
 import functools
 import hashlib
 import json
@@ -575,8 +577,81 @@ def _entries_survive(data: dict, configs) -> bool:
     return True
 
 
+# All registered Triton families share the same physical-workload compatibility
+# contract. Legacy entries still supply runtime candidates, never attributed timing
+# evidence for a new build. The registry enforces the `_triton` naming suffix.
+
+
+def implementation_identity(autotuner):
+    """Triton's dependency hash includes JIT helpers called by the entry kernel."""
+    fn = getattr(autotuner, "fn", None)
+    for _ in range(8):
+        if fn is None:
+            return None
+        if hasattr(fn, "src"):
+            return getattr(fn, "cache_key", None)
+        fn = getattr(fn, "fn", None)
+    return None
+
+
+def measurement_workload(op, autotuner, nargs=None, meta=None):
+    """Serializable physical workload, independent of a bucket's logical length."""
+    if not op or not op.endswith("_triton"):
+        return None
+    bound = {**(getattr(autotuner, "nargs", None) or {}), **(nargs or {}), **(meta or {})}
+    args = {}
+    for name in autotuner.arg_names:
+        value = bound.get(name)
+        if isinstance(value, torch.Tensor):
+            args[name] = {"shape": list(value.shape), "stride": list(value.stride()),
+                          "dtype": str(value.dtype)}
+        elif isinstance(value, (int, float, str, bool)):
+            args[name] = value
+    return {"scheme": 1, "arguments": args,
+            "implementation": implementation_identity(autotuner)}
+
+
+def workload_id(measurement):
+    import hashlib
+    return hashlib.sha256(json.dumps(measurement, sort_keys=True).encode()).hexdigest()[:20]
+
+
+def workload_record(data, entry_key, measurement):
+    if measurement is None:
+        return None
+    return data.get("measurements", {}).get(entry_key, {}).get(workload_id(measurement))
+
+
+def runtime_candidates(data, entry_key, implementation=None):
+    """Profiled winners are authoritative, even if an old writer edits the flat view."""
+    profiles = data.get("measurements", {}).get(entry_key)
+    if not profiles:
+        return data.get("entries", {}).get(entry_key)
+    candidates = {}
+    for record in profiles.values():
+        recorded = record["workload"].get("implementation")
+        if implementation is not None and recorded is not None and recorded != implementation:
+            continue
+        for config in record["entries"]:
+            candidates.setdefault(_sig_from_dict(config), config)
+    return list(candidates.values())
+
+
+def measurement_mismatch(op: str, data: dict, op_id: str | None = None) -> str:
+    """Validity shared by planning and runtime; a grid edit preserves old measurements."""
+    if _stored_rev(data) != build_rev(op):
+        return "build revision changed"
+    if _scheme_stale(op, data.get("key_scheme")):
+        return "bucket scheme changed"
+    if data.get("env_identity") != env_identity():
+        return "compiler environment changed"
+    if op_id is not None and data.get("op_identity") != op_id:
+        return "kernel source/key identity changed or absent"
+    return ""
+
+
 def configs_to_bench(op: str, gk: str, configs, *, entry_key: str | None = None,
-                     op_id: str = "") -> list:
+                     op_id: str = "", measurement=None) -> list:
     """The configs a build still has to MEASURE -- the current grid minus the space already searched.
 
     ``entry_key`` is ``"<dtype>|<bucket>"``, the same key ``store_ranked_configs`` files an entry
@@ -621,6 +696,12 @@ def configs_to_bench(op: str, gk: str, configs, *, entry_key: str | None = None,
         return configs                      # about to be reset: everything needs re-measuring
     if op_id and data.get("op_identity") not in (None, op_id):
         return configs                      # another kernel: every stored time is about other code
+    if measurement is not None:
+        record = workload_record(data, entry_key, measurement)
+        if record is None:
+            return configs
+        seen = set(record.get("searched", []))
+        return [c for c in configs if repr(_sig(c)) not in seen]
     if entry_key is None:
         searched = data.get("config_space")
         seen = set(searched) if isinstance(searched, list) else None
@@ -670,7 +751,7 @@ def entry_space(data: dict, entry_key: str) -> set | None:
 def store_ranked_configs(
     op: str, gk: str, dtype: str, bucket: str, ranked: list[tuple[object, float]],
     config_space_h: str, *, top_k: int = 5, op_id: str = "", env_id: str = "",
-    configs=None, entry_configs=None,
+    configs=None, entry_configs=None, measurement=None,
 ) -> Path:
     """Persist the top-K (config, ms) for (op, gpu, dtype, bucket) to the in-repo cache.
 
@@ -763,6 +844,13 @@ def store_ranked_configs(
     # on a tie because they were taken now; anything the current grid no longer contains is
     # dropped, since it is no longer a config this kernel can be launched with.
     key = f"{dtype}|{bucket}"
+    # A legacy shard cannot put incomparable times back after workload-aware repair.
+    # Preserve the repaired entry; other buckets in that shard can still be published.
+    if measurement is None and data.get("measurements", {}).get(key):
+        return fp
+    if measurement is not None and not data.get("measurements", {}).get(key):
+        data.get("entries", {}).pop(key, None)
+        data.get("entry_grids", {}).pop(key, None)
     if configs is not None:
         # Which grid THIS entry was swept under -- the only granularity an incremental build can
         # act on, since the file-level `config_space` above says which grid the build held, not
@@ -794,6 +882,41 @@ def store_ranked_configs(
         wanted = {h for hs in refs.values() for h in ([hs] if isinstance(hs, str) else hs)}
         data["grids"] = {h: v for h, v in data["grids"].items() if h in wanted}
     live = {_sig(c) for c in configs} if configs else None
+    if measurement is not None:
+        records = data.setdefault("measurements", {}).setdefault(key, {})
+        implementation = measurement.get("implementation")
+        if implementation is not None:
+            # A helper edit is a code change even when the entry JIT source is
+            # unchanged. Unattributed and other-implementation times cannot mix.
+            stale = [mid for mid, item in records.items()
+                     if item["workload"].get("implementation") != implementation]
+            for mid in stale:
+                del records[mid]
+        mid = workload_id(measurement)
+        record = records.setdefault(mid, {"workload": measurement, "entries": [], "searched": []})
+        merged = {_sig_from_dict(c): c for c in record["entries"]
+                  if live is None or _sig_from_dict(c) in live}
+        for c, ms in ranked:
+            merged[_sig(c)] = config_to_dict(c, ms)
+        record["entries"] = sorted(merged.values(), key=lambda c: (
+            c.get("ms") is None, c.get("ms", float("inf"))))[:top_k]
+        searched = configs if entry_configs is None else entry_configs
+        record["searched"] = sorted(set(record["searched"]) |
+                                     {repr(_sig(c)) for c in (searched or [])})
+        # Keep each workload's top-K as runtime candidates. Never rank a 512-row
+        # time against an 18432-row time. Runtime retimes this bounded union.
+        candidates = {}
+        for item in records.values():
+            for c in item["entries"]:
+                sig = _sig_from_dict(c)
+                if live is None or sig in live:
+                    candidates.setdefault(sig, c)
+        # Preserve legacy display ordering, but do not truncate this union by ms:
+        # candidate admission happened separately inside each workload above.
+        data["entries"][key] = sorted(candidates.values(), key=lambda c: c.get("ms", float("inf")))
+        write_json(fp, data, indent=2, sort_keys=True)
+        _load_cache.pop((op, gk), None)
+        return fp
     merged: dict[tuple, dict] = {}
     if not reset:
         for cfg in data["entries"].get(key, []):
@@ -1183,7 +1306,7 @@ def _cached_subset(autotuner, configs, nargs, meta):
     # dragging their import-time env-var surface into a consumer process, and (b) fail CLOSED: the
     # helper returns None on any import error, and `stored and stored != None` would then declare
     # every stamped cache stale and silently drop every launch to the heuristic subset.
-    entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
+    entry = runtime_candidates(data, f"{dtype}|{bucket}", implementation_identity(autotuner))
     if not entry:
         return _miss(op, gk, f"{dtype}|{bucket}",
                      "no tuned autotune cache entry for this shape", configs)
@@ -1198,6 +1321,19 @@ def _cached_subset(autotuner, configs, nargs, meta):
         return _miss(op, gk, f"{dtype}|{bucket}",
                      "every tuned config for this shape was removed from the config grid", configs)
     return keep
+
+
+_BYPASS_CACHED_SUBSET = contextvars.ContextVar("miniworld_bypass_cached_subset", default=False)
+
+
+@contextlib.contextmanager
+def without_cached_subset():
+    """Expose the original shape/resource prune while verifying this thread's uncertain results."""
+    token = _BYPASS_CACHED_SUBSET.set(True)
+    try:
+        yield
+    finally:
+        _BYPASS_CACHED_SUBSET.reset(token)
 
 
 def install_cache_reader() -> None:
@@ -1236,7 +1372,7 @@ def install_cache_reader() -> None:
             cfgs = list(base(configs, nargs, **meta)) if base else list(configs)
             from miniworld_engine import settings
             cur = settings.current()
-            if not cfgs or (cur.run_autotune and not cur.fill_gaps):
+            if not cfgs or _BYPASS_CACHED_SUBSET.get() or (cur.run_autotune and not cur.fill_gaps):
                 return cfgs                          # a BUILD re-benches the whole grid on purpose
             try:
                 hit = _cached_subset(self, cfgs, nargs, meta)
@@ -1287,7 +1423,7 @@ def select_config(
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (bucket keys mean something "
                                   "else now; see cache.KEY_SCHEME)")
         return None
-    entry = data.get("entries", {}).get(f"{dtype}|{bucket}")
+    entry = runtime_candidates(data, f"{dtype}|{bucket}")
     if not entry:
         _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
         return None

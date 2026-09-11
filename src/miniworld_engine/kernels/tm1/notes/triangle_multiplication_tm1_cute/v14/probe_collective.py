@@ -23,6 +23,7 @@ configs = [
     ((128, 128), (2, 1), False),
 ]
 
+failures = 0
 for mma_tiler_mn, cluster, use_2cta in configs:
     try:
         t_us = refp.run(
@@ -36,4 +37,7 @@ for mma_tiler_mn, cluster, use_2cta in configs:
         )
         print(f"RESULT tiler={mma_tiler_mn} cluster={cluster} 2cta={use_2cta}: {t_us/1000:.4f} ms/side", flush=True)
     except Exception as e:
+        failures += 1
         print(f"FAIL   tiler={mma_tiler_mn} cluster={cluster} 2cta={use_2cta}: {type(e).__name__}: {str(e)[:120]}", flush=True)
+
+raise SystemExit(1 if failures else 0)

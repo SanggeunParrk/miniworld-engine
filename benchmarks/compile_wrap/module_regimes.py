@@ -95,6 +95,7 @@ TARGETS = {
 
 
 def timed(model, inputs, train: bool) -> float:
+    model.train(train)
     fn = torch.compile(model)
 
     def step():
@@ -126,15 +127,22 @@ def timed(model, inputs, train: bool) -> float:
     return statistics.median(times)
 
 
+failures = 0
 for name, build in TARGETS.items():
     for mode, train in (("inference", False), ("training", True)):
         try:
             model, inputs = build()
+            parameter_dtypes = ",".join(sorted({str(p.dtype) for p in model.parameters()}))
             ms = timed(model, inputs, train)
-            print(f"wrap={args.wrap} target={name} mode={mode} seq_len={L} time={ms:.4f} ms",
+            print(f"wrap={args.wrap} target={name} mode={mode} seq_len={L} d_pair={D} "
+                  f"compile_requested=true cudagraph=disabled input_dtype={DT} "
+                  f"parameter_dtypes={parameter_dtypes} time={ms:.4f} ms",
                   flush=True)
         except Exception as e:  # noqa: PERF203 -- one target's OOM must not end the sweep
+            failures += 1
             print(f"wrap={args.wrap} target={name} mode={mode} FAILED "
                   f"{type(e).__name__}: {str(e)[:160]}", flush=True)
         finally:
             torch.cuda.empty_cache()
+
+raise SystemExit(1 if failures else 0)

@@ -26,6 +26,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 import triton
+from benchmarks.runners.measurement import (
+    UnsupportedBenchmark,
+    benchmark_source_hash,
+    check_execution_outputs,
+    check_finite_outputs,
+    compile_for_benchmark,
+    compile_module_for_benchmark,
+    input_shapes_of,
+    make_run_provenance,
+    observe_execution,
+    parameter_dtype_of,
+    require_compile_evidence,
+    require_source_identity,
+    snapshot_outputs,
+)
 from omegaconf import DictConfig
 from pydantic import BaseModel, model_validator
 from triton.runtime.autotuner import Autotuner
@@ -69,10 +84,9 @@ DEVICE = torch.device("cuda")
 FP32_PRECISION = 32
 
 
-#: Targets whose block reaches `SWA3DRoPEAttention`, and therefore FlashAttention's
-#: non-capturable varlen path. `swa_dit` is `SWADiTBlock`, which holds one; `cli.MODULE_TARGETS`
-#: spells the same containment out in its own entry for it.
-_NO_GRAPH_TARGETS = frozenset({"swa_atom_attention", "swa_dit"})
+#: Kept for callers inspecting benchmark support. FA2 no-grad packing now has static
+#: shapes, so SWA no longer requires a target-specific graph exception.
+_NO_GRAPH_TARGETS: frozenset[str] = frozenset()
 
 
 class BenchConfig(BaseModel):
@@ -83,6 +97,7 @@ class BenchConfig(BaseModel):
     d_pair_atom: int = 16
 
     n_layers: int = 1
+    trimul_direction: Literal["outgoing", "incoming", "alternating"] = "outgoing"
     n_augment: int = 32
     mask_prob: float = 0.2
     min_seq_len: int = 64
@@ -107,11 +122,8 @@ class BenchConfig(BaseModel):
     # get captured -- yet they still run in production at other shapes, with no cached
     # configs at all. A build sweeps each side explicitly. "" = let the engine decide.
     pin_gate_backend: str = ""
-    # Row-broadcast dropout probability for the trimul residual epilogue. USE_DROPOUT is part of
-    # those kernels' autotune KEY, so `dropout=0` and `dropout>0` are different cache buckets and
-    # neither substitutes for the other. A cache built entirely at 0 leaves training -- the only
-    # place dropout is live -- with no entry, and the runtime falls back to the full grid, which
-    # looks like a hang. Builds must sweep both.
+    # Resolved before validation: dropout-bearing training modules default to .25;
+    # inference and modules without dropout use 0. Explicit 0 supports diagnostic runs.
     dropout: float = 0.0
     #: Worker processes for parallel pre-compilation of each autotune round (0 = auto).
     compile_jobs: int = 0
@@ -138,43 +150,13 @@ class BenchConfig(BaseModel):
     mode: Literal["inference", "training"]
     metric: Literal["time", "memory"]
     compile: bool = False
-    # CUDA-graph the benched MODULE (host/launch overhead removed — the deployment regime for
-    # graph-break cute/triton kernels). Module-scoped (optimizer/loss stay outside). Overrides
-    # `compile` (capture is on the eager module). Modes:
-    #   "manual"  — manual torch.cuda.graph capture of one static shape; what BUCKETED training
-    #               uses (one graph/bucket + per-step input copy_). Works for any impl. DEFAULT.
-    #
-    #               The default's ORIGINAL justification was "this is the deployment regime for
-    #               the graph-breaking cute/triton kernels". That premise is gone: with
-    #               compile_wrap="custom_op" nothing graph-breaks, and measured at L=384 on an
-    #               A6000 the compile-only regime BEATS eager+manual-graph on the module that has
-    #               unfused work around its kernels — augmented_attention_atom inference 6.86 ms
-    #               vs 30.55 ms (4.46x), token training 9.21 vs 11.69 (1.27x) — while the
-    #               already-fused pair track is a wash (transition training 1.04x). A captured
-    #               graph removes LAUNCH overhead; it does not fuse, so it replays whatever eager
-    #               work there is. Which regime is "representative" therefore depends on the
-    #               module AND on being launch-bound, and MiniWorld's main config (n_recycle_max
-    #               > 1) cannot capture a graph at all.
-    #
-    #               The default is kept only so the 350 committed tables stay reproducible. Pick
-    #               the regime deliberately; do not read this default as a recommendation.
-    #   "disabled" — no graph (compile or eager); host/launch overhead included (diagnostic).
-    #   "graphed" — torch.cuda.make_graphed_callables (auto static buffers + input copy); the
-    #               PAD-TO-MAX single-shape regime (e.g. fixed 384 crops / multi-GPU max-len).
-    #               Training only; fabric-wrapped baselines (dtv1) may fail here (raw backward).
-    #   "auto" — the empirically-best regime by MODE, resolved below. Measured across every module at
-    #            its real seq_len: TRAINING is backward-dominated (compute-bound), so a captured graph
-    #            removes no meaningful launch overhead and its copy/replay only adds cost -- no-graph
-    #            wins for every module. INFERENCE is launch-bound for the small/many-launch modules, so
-    #            manual capture wins (triangle_multiplication -12%, bidirectional -10%; transition and
-    #            the layernorm-ish modules a little); the heavy-GEMM attention modules (attention_pair_
-    #            bias, triangle_attention, augmented_attention_token) are compute-bound even in
-    #            inference and want no-graph, but the ~2-3% cost of manual there is kept for a simple
-    #            mode-only rule. (swa_atom_attention is NOT special-cased: its earlier -51%/-21% was a
-    #            smallest-bucket + SDPA-fallback artifact; at its real seq it is a wash.)
+    # Manual graph capture wraps the measured callable after requested compilation.
+    # Auto uses graphs for inference timing and no graph for training or memory.
     cudagraph: Literal["disabled", "manual", "graphed", "auto"] = "auto"
     allow_tf32: bool = True
     precision: Literal[32, "bf16", "bf16-mixed"] = 32
+    #: LayerNorm backward affine dtype; None preserves the input dtype.
+    layernorm_weight_precision: Literal[32, "bf16"] | None = None
     #: Opt-in escape hatch for the "ref1" eager floor: an uncompiled, un-graphed baseline is
     #: normally refused (a raw eager number must never be mistaken for the shipped kernel), but the
     #: two-reference methodology wants exactly that point (ref1 = compile off + no graph, ref2 =
@@ -182,27 +164,57 @@ class BenchConfig(BaseModel):
     allow_eager: bool = False
     name_suffix: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_module_augmentation(cls, values: Any) -> Any:
+        # Resolve before int validation so all consumers and CSVs see a concrete count.
+        # Explicit counts remain usable for sweeps; module defaults follow the workload.
+        if (isinstance(values, (dict, DictConfig)) and values.get("level") == "module"
+                and values.get("n_augment", "auto") == "auto"):
+            values = dict(values)
+            values["n_augment"] = 5 if values.get("mode") == "inference" else 48
+        if isinstance(values, (dict, DictConfig)):
+            values = dict(values)
+            if values.get("dropout", "auto") == "auto":
+                active = (values.get("level") == "module"
+                          and values.get("mode") != "inference"
+                          and values.get("target") in {
+                              "triangle_multiplication", "triangle_multiplication_bidirectional",
+                              "triangle_attention"})
+                values["dropout"] = 0.25 if active else 0.0
+        return values
+
     @model_validator(mode="after")
     def _resolve_auto_cudagraph(self) -> "BenchConfig":
         if self.cudagraph == "auto":
-            # The FlashAttention path is NOT CUDA-graph capturable: it bumps a philox RNG offset
-            # outside the capture ("Offset increment outside graph capture") and its varlen setup
-            # hits an aten.nonzero graph break. Manual/graphed both fail there, so any target whose
-            # block CONTAINS that attention stays no-graph in BOTH modes.
-            #
-            # By containment, not by name. This was `self.target == "swa_atom_attention"`, and
-            # `swa_dit` is the atom-track DiT block built AROUND the same `SWA3DRoPEAttention` --
-            # so it took `manual` in inference and died on exactly the error this comment
-            # describes, every implementation, at every length: the target produced no number at
-            # all until `--cudagraph disabled` was passed by hand. It has no dropout of its own;
-            # the RNG being advanced is flash-attention's, at dropout_p=0.
-            #
-            # Every other module: inference is launch-bound (manual capture), training is
-            # backward-dominated (no-graph).
-            if self.target in _NO_GRAPH_TARGETS:
+            # All inference timing targets, including SWA, capture the actual measured call.
+            # A capture failure is reported; it never silently changes this request to OFF.
+            if self.metric == "memory":
                 self.cudagraph = "disabled"
             else:
                 self.cudagraph = "manual" if is_inference_mode(self.mode) else "disabled"
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if self.level == "module" and self.dropout:
+            if self.target not in {"triangle_multiplication", "triangle_multiplication_bidirectional",
+                                   "triangle_attention"}:
+                raise ValueError(f"{self.target} has no module dropout")
+            if is_inference_mode(self.mode):
+                raise ValueError("inference requires dropout=0 (or auto)")
+            if self.cudagraph != "disabled":
+                raise ValueError("training with dropout requires cudagraph=disabled")
+        if not self.implementations:
+            raise ValueError("implementations must not be empty")
+        if self.n_layers < 1 or self.n_augment < 1:
+            raise ValueError("n_layers and n_augment must be positive")
+        if self.sweep_axis == "seq_len":
+            if self.min_seq_len < 1 or self.max_seq_len < self.min_seq_len or self.seq_len_step < 1:
+                raise ValueError("seq_len sweep must contain at least one positive point")
+        elif self.d_pair_values is not None:
+            if not self.d_pair_values or any(value < 1 for value in self.d_pair_values):
+                raise ValueError("d_pair_values must contain positive points")
+        elif self.min_d_pair < 1 or self.max_d_pair < self.min_d_pair or self.d_pair_step < 1:
+            raise ValueError("d_pair sweep must contain at least one positive point")
         return self
 
 
@@ -263,6 +275,13 @@ class BenchResult(NamedTuple):
     grad_max_abs: float | None = None
     grad_rel_frob: float | None = None
     grad_cosine: float | None = None
+    compiled: bool | None = None
+    cudagraph: str = ""
+    compile_scope: str = ""
+    compiled_graphs: int = 0
+    measurement_scope: str = ""
+    input_shapes: str = ""
+    execution_validation: str = ""
 
 
 def module_miniworld_spec(raw: str) -> ImplementationSpec:
@@ -357,75 +376,107 @@ def bench_time(
 
 
 def measured_result(
-    *,
-    conf: BenchConfig,
-    func: Callable,
-    grad_to_none: list,
-    params: list,
-    is_train: bool,
-    input_dtype: str,
-    parameter_dtype: str,
-    execution_path: str,
-    reference: str,
+    *, conf: BenchConfig, func: Callable, grad_to_none: list, params: list,
+    is_train: bool, input_dtype: str, parameter_dtype: str,
+    execution_path: str, reference: str,
 ) -> BenchResult:
-    # reduce-overhead (inductor cudagraph-trees) reuses static output buffers across replays and
-    # requires the caller to mark a new step before each invocation, else it raises "accessing tensor
-    # output of CUDAGraphs that has been overwritten". The direct-call paths below (metric=memory and
-    # the cudagraph=="disabled" else) loop func() with no such mark; opt in via BENCH_MARK_STEP=1.
-    # Inference runs under no_grad, ALWAYS -- production inference builds no autograd graph, and a
-    # grad-enabled forward makes grad-keyed dispatch (e.g. trimul/triangle_attention/transition)
-    # take the save-activation TRAINING kernels and pay the graph-build overhead, so a bench that
-    # forgot to wrap its inference_step measured the training forward mislabelled as inference.
-    # Enforce it here, centrally, so no per-bench wrapper can be forgotten (nested no_grad in the
-    # benches that already do it is harmless).
+    """Measure one callable and attach observed execution, never copied request flags."""
+    if conf.metric == "memory" and conf.cudagraph != "disabled":
+        raise UnsupportedBenchmark("graph memory measurement is not implemented; select cudagraph=disabled")
+    if conf.cudagraph == "graphed" and is_train:
+        raise UnsupportedBenchmark(
+            "graphed training requires tensor-returning callables, but this harness times backward closures; "
+            "select cudagraph=manual")
+    scope = ("backward" if conf.target.endswith("_bwd") else "forward") if conf.level == "kernel" else (
+        "forward_backward" if is_train else "forward")
+    import json
+
+    actual_shapes = input_shapes_of(func)
+    execution_checks = {}
+    # For pure kernels, compare the newly compiled callable with the exact eager
+    # callable whose target-specific reference metrics were computed above.
+    eager_snapshot = None
+    if conf.level == "kernel" and conf.compile:
+        original = getattr(func, "_torchdynamo_orig_callable", func)
+        with torch.no_grad() if not is_train else contextlib.nullcontext():
+            eager_snapshot = snapshot_outputs(original())
+    # Module forwards were compiled before construction of their timed training/inference step.
+    # Pure kernel launchers must compile the actual timed callable here.
+    if conf.level == "kernel" and conf.compile and not hasattr(func, "_benchmark_compile_probe"):
+        func = compile_for_benchmark(func)
+    if is_train and grad_to_none:
+        training_func = func
+
+        def func():
+            # Capture the same fresh-gradient step that eager timing performs.
+            # Clearing outside graph.replay would not change the captured accumulation ops.
+            for tensor in grad_to_none:
+                tensor.grad = None
+            return training_func()
+
     if not is_train:
-        _fwd_only = func
+        inner = func
 
         def func():
             with torch.no_grad():
-                return _fwd_only()
+                return inner()
 
     if os.environ.get("BENCH_MARK_STEP") == "1":
-        _inner_func = func
+        inner_step = func
 
         def func():
             torch.compiler.cudagraph_mark_step_begin()
-            return _inner_func()
+            return inner_step()
 
-    if conf.metric == "memory":
-        value = bench_memory(func)["median_mb"]
-    elif conf.cudagraph == "manual":
-        graph = capture_cudagraph(func, params, is_train=is_train)
-        value = bench_time(graph.replay, grad_to_none=grad_to_none)["median_ms"]
-    elif conf.cudagraph == "graphed":
-        if is_train:
-            graphed = torch.cuda.make_graphed_callables(func, ())
-            value = bench_time(graphed, grad_to_none=grad_to_none)["median_ms"]
+    # Probe outside the timing window. Compile tracing/reference calls do not count;
+    # evidence is supplied only by an executed Inductor executable in this scope.
+    captured_outputs = [None]
+
+    def checked_step():
+        output = func()
+        captured_outputs[0] = ({"result": output, "gradients": tuple(t.grad for t in grad_to_none)}
+                               if is_train else output)
+        return output
+
+    with observe_execution() as evidence:
+        checked_step()
+        execution_checks["finite_tensors"] = check_finite_outputs(captured_outputs[0])
+        if eager_snapshot is not None:
+            execution_checks["compiled_vs_eager"] = check_execution_outputs(captured_outputs[0], eager_snapshot)
+            del eager_snapshot
+        if conf.cudagraph in {"manual", "graphed"}:
+            before_capture = snapshot_outputs(captured_outputs[0])
+            graph = capture_cudagraph(checked_step, params, is_train=is_train)
+            graph.replay()
+            torch.cuda.synchronize()
+            execution_checks["graph_replay"] = check_execution_outputs(captured_outputs[0], before_capture)
+            del before_capture
+            timed = graph.replay
+            actual_graph = "manual"
         else:
-            graph = capture_cudagraph(func, [], is_train=False)
-            value = bench_time(graph.replay, grad_to_none=grad_to_none)["median_ms"]
+            timed = func
+            actual_graph = "disabled"
+    require_compile_evidence(conf.compile, evidence)
+    if actual_graph == "disabled":
+        captured_outputs[0] = None
+        for tensor in grad_to_none:
+            tensor.grad = None
+    if conf.metric == "memory":
+        value = bench_memory(timed)["median_mb"]
     else:
-        value = bench_time(func, grad_to_none=grad_to_none)["median_ms"]
+        value = bench_time(timed, grad_to_none=[] if actual_graph != "disabled" else grad_to_none)["median_ms"]
     return BenchResult(
-        value=value,
-        input_dtype=input_dtype,
-        parameter_dtype=parameter_dtype,
-        execution_path=execution_path,
-        reference=reference,
+        value=value, input_dtype=input_dtype, parameter_dtype=parameter_dtype,
+        execution_path=execution_path, reference=reference, compiled=evidence.compiled,
+        cudagraph=actual_graph, compile_scope="+".join(sorted(evidence.scopes)),
+        compiled_graphs=len(evidence.graphs), measurement_scope=scope, input_shapes=actual_shapes,
+        execution_validation=json.dumps(execution_checks, sort_keys=True),
     )
 
 
-def actual_compiled_flag(conf: BenchConfig) -> bool:
-    """Was the module under test COMPILED? Now unconditional: every bench compiles its module when
-    ``conf.compile`` is set, whatever the cudagraph regime, so the recorded flag is exactly it.
-
-    It used to differ from the request: four module benches guarded ``model.compile()`` with
-    ``and conf.cudagraph == "disabled"`` -- a manual capture over a compiled module crashed under
-    the old ``compile_wrap="disable"`` -- so ``compile=true cudagraph=manual`` measured eager code
-    labelled compiled. The default wrap is ``custom_op`` now (no breaks), the gates are gone, and
-    the flag no longer has to detect them.
-    """
-    return conf.compile
+def actual_compiled_flag(result: BenchResult | None) -> bool | None:
+    """Unknown or failed executions cannot inherit a requested compile flag."""
+    return None if result is None else result.compiled
 
 
 _CAPTURE_STREAM: "torch.cuda.Stream | None" = None
@@ -718,6 +769,31 @@ def triangle_multiplication_path(implementation: str, mode: str, d_pair: int) ->
     return implementation
 
 
+@contextlib.contextmanager
+def _paired_trimul_dropout(model, reference, pair, probability):
+    """Give accuracy calls identical representable scales; never used by the timer.
+
+    A common seed cannot align FP32 reference and compiled BF16 RNG streams. Bind
+    the same per-layer scale temporarily, then restore the production generators
+    before measurement warmup/compilation and all timed calls.
+    """
+    from unittest.mock import patch
+
+    with contextlib.ExitStack() as stack:
+        if probability:
+            for actual_layer, reference_layer in zip(model.layers, reference.layers, strict=True):
+                shape = (pair.shape[0], 1, pair.shape[2], pair.shape[3])
+                keep = torch.rand(shape, device=pair.device, dtype=pair.dtype) > probability
+                scale = keep.to(pair.dtype) / (1.0 - probability)
+
+                def generate(x, p, scale=scale):
+                    return scale.to(x.dtype)
+
+                for layer in (actual_layer, reference_layer):
+                    stack.enter_context(patch.object(layer, "_make_drop_row_scale", generate))
+        yield
+
+
 def bench_module_triangle_multiplication(
     conf: BenchConfig,
     seq_len: int,
@@ -728,11 +804,23 @@ def bench_module_triangle_multiplication(
     # single-dir TriangleMultiplication, or the bidirectional (outgoing+incoming) variant — the
     # only differences are the base module, the dt-v1 baseline fn, and the miniworld layer class;
     # the whole correctness + timing (incl. CUDA-graph) tail below is shared.
+    if implementation == DTV1_IMPL:
+        # DTv1's input LN calls torch.ops directly, before its output LN imports
+        # the vendor wrapper that registers these operators in a fresh process.
+        importlib.import_module("cuequivariance_ops_torch.fused_layer_norm_torch")
     base_cls = BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
+    if bidirectional and conf.trimul_direction != "outgoing":
+        raise UnsupportedBenchmark("bidirectional already includes both directions")
+
+    def make_layer(index, **kwargs):
+        if not bidirectional:
+            kwargs["outgoing"] = (index % 2 == 0 if conf.trimul_direction == "alternating"
+                                  else conf.trimul_direction == "outgoing")
+        return base_cls(conf.d_pair, **kwargs)
     torch.manual_seed(0)
     layer_states = []
-    for _ in range(conf.n_layers):
-        base = base_cls(conf.d_pair)
+    for layer_index in range(conf.n_layers):
+        base = make_layer(layer_index)
         for linear in (
             base.to_left,
             base.to_left_gate,
@@ -750,7 +838,7 @@ def bench_module_triangle_multiplication(
             self.raw_implementation = raw_implementation
             if raw_implementation == DTV1_IMPL:
                 self.layers = nn.ModuleList(
-                    [base_cls(conf.d_pair) for _ in layer_states],
+                    [make_layer(layer_index, p_drop=conf.dropout) for layer_index in range(len(layer_states))],
                 )
                 for layer, state in zip(self.layers, layer_states, strict=True):
                     layer.load_state_dict(state)
@@ -766,14 +854,14 @@ def bench_module_triangle_multiplication(
                 # old wrappers did. load_state_dict casts the fp32 reference state.
                 self.layers = nn.ModuleList(
                     [
-                        base_cls(
-                            conf.d_pair,
+                        make_layer(
+                            layer_index,
                             implementation=ImplementationType.MINIWORLD,
-                            p_drop=float(getattr(conf, "dropout", 0.0) or 0.0),
+                            p_drop=conf.dropout,
                         ).to(
                             torch.bfloat16,
                         )
-                        for _ in layer_states
+                        for layer_index in range(len(layer_states))
                     ],
                 )
                 for layer, state in zip(self.layers, layer_states, strict=True):
@@ -783,17 +871,19 @@ def bench_module_triangle_multiplication(
             spec = parse_implementation_spec(raw_implementation)
             if bidirectional:
                 self.layers = nn.ModuleList(
-                    [base_cls(conf.d_pair, implementation=spec.impl) for _ in layer_states],
+                    [make_layer(layer_index, implementation=spec.impl, p_drop=conf.dropout)
+                     for layer_index in range(len(layer_states))],
                 )
             else:
                 self.layers = nn.ModuleList(
                     [
-                        TriangleMultiplication(
-                            conf.d_pair,
+                        make_layer(
+                            layer_index,
                             implementation=spec.impl,
                             ln_implementation=spec.ln_impl or ImplementationType.PYTORCH,
+                            p_drop=conf.dropout,
                         )
-                        for _ in layer_states
+                        for layer_index in range(len(layer_states))
                     ],
                 )
             for layer, state in zip(self.layers, layer_states, strict=True):
@@ -823,7 +913,7 @@ def bench_module_triangle_multiplication(
                 # residual explicitly here to keep the per-layer stack semantics identical for a
                 # fair speed/correctness comparison against the residual-inclusive pytorch ref.
                 if bidirectional:
-                    pair = pair + fused_bidirectional_dtv1(
+                    update = fused_bidirectional_dtv1(
                         pair, mask_2d,
                         norm_in_weight=tm.ln_pair.weight, norm_in_bias=tm.ln_pair.bias,
                         p_in_weight=p_in, g_in_weight=g_in,
@@ -832,14 +922,17 @@ def bench_module_triangle_multiplication(
                         h=tm.d_hidden, eps=tm.ln_pair.eps,
                     )
                 else:
-                    pair = pair + fused_triangle_multiplicative_update_dtv1(
-                        pair, direction="outgoing", mask=mask_2d,
+                    update = fused_triangle_multiplicative_update_dtv1(
+                        pair, direction="outgoing" if tm.outgoing else "incoming", mask=mask_2d,
                         norm_in_weight=tm.ln_pair.weight, norm_in_bias=tm.ln_pair.bias,
                         p_in_weight=p_in, g_in_weight=g_in,
                         norm_out_weight=tm.ln_out.weight, norm_out_bias=tm.ln_out.bias,
                         p_out_weight=tm.to_out.weight, g_out_weight=tm.to_gate.weight,
                         eps=tm.ln_pair.eps,
                     )
+                if self.training and tm.p_drop > 0:
+                    update = update * tm._make_drop_row_scale(pair, tm.p_drop)
+                pair = pair + update
             return pair
 
     # Full bf16 for EVERY impl. The old code fed only miniworld a bf16 `pair` and left the others at
@@ -853,21 +946,22 @@ def bench_module_triangle_multiplication(
     # `parameter_dtype` still records float32. Trunk weights become bf16; norm gammas stay fp32.
     bf16 = conf.precision != FP32_PRECISION
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
-    if bf16:
-        model = model.to(torch.bfloat16)
+    model = model.to(torch.bfloat16 if bf16 else torch.float32)
+    model.train(not is_inference_mode(conf.mode))
     # Real deployment = compiled kernels, then graph-captured. The old guard compiled the model ONLY
     # when cudagraph=="disabled" and captured the EAGER model under a graph -- a leftover from
     # compile_wrap="disable", where a graph break crashed manual capture mid-stream. The default wrap
     # is custom_op now (no breaks), so compile+capture is the regime that actually ships; compile
     # whenever asked and let the capture below wrap the compiled module.
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     if implementation != MINIWORLD_IMPL:
         model = fabric.setup_module(model)
 
     ref_model = MultiTriangleMultiplication(ImplementationType.PYTORCH.value).to(DEVICE)
+    ref_model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        ref_model.compile()
+        compile_module_for_benchmark(ref_model)
     ref_model = fabric.setup_module(ref_model)
 
     pair_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -887,9 +981,10 @@ def bench_module_triangle_multiplication(
     def inference_step() -> torch.Tensor:
         return model(pair, mask)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         y = inference_step()
         fabric.backward(y, dy)
+        return y
 
     def correctness() -> AccuracyFields:
         pair_impl = pair.detach().clone().requires_grad_(not is_inference_mode(conf.mode))
@@ -923,7 +1018,8 @@ def bench_module_triangle_multiplication(
             "grad_cosine": grad_cos,
         }
 
-    accuracy = correctness()
+    with _paired_trimul_dropout(model, ref_model, pair, conf.dropout):
+        accuracy = correctness()
     for item in [pair, *list(model.parameters()), *list(ref_model.parameters())]:
         item.grad = None
     # Inference under no_grad (this bench does its own capture, so it can't lean on
@@ -937,39 +1033,19 @@ def bench_module_triangle_multiplication(
     else:
         func = training_step
     grad_to_none = [pair, *list(model.parameters())]
-    if conf.metric == "time" and conf.cudagraph == "manual":
-        # manual capture of one static shape (bucketed-training regime); replay timed.
-        graph = capture_cudagraph(
-            func, [p for p in model.parameters() if p.requires_grad],
-            is_train=not is_inference_mode(conf.mode),
-        )
-        value = bench_time(graph.replay, grad_to_none=[])["median_ms"]
-    elif conf.metric == "time" and conf.cudagraph == "graphed":
-        # make_graphed_callables (pad-to-max single-shape regime): auto static buffers + copy.
-        if is_inference_mode(conf.mode):                       # fwd-only: manual no-grad capture
-            graph = capture_cudagraph(func, [], is_train=False)
-            value = bench_time(graph.replay, grad_to_none=[])["median_ms"]
-        else:
-            # Types as `object` in torch's stubs; for a Module in, a callable Module comes out.
-            graphed = cast("nn.Module", torch.cuda.make_graphed_callables(model, (pair, mask)))
-
-            def graphed_step() -> None:
-                graphed(pair, mask).backward(dy)
-
-            value = bench_time(graphed_step, grad_to_none=[])["median_ms"]
-    elif conf.metric == "time":
-        value = bench_time(func, grad_to_none=grad_to_none)["median_ms"]
-    else:
-        value = bench_memory(func)["median_mb"]
-    parameter = next(model.parameters(), None)
-    return BenchResult(
-        value=value,
+    return measured_result(
+        conf=conf, func=func, grad_to_none=grad_to_none,
+        params=list(model.parameters()), is_train=not is_inference_mode(conf.mode),
         input_dtype=str(pair.dtype).replace("torch.", ""),
-        parameter_dtype="" if parameter is None else str(parameter.dtype).replace("torch.", ""),
-        execution_path=triangle_multiplication_path(implementation, conf.mode, conf.d_pair),
+        parameter_dtype=parameter_dtype_of(model),
+        execution_path=("dtv1.fused_bidirectional_triangle_multiplicative_update"
+                        if bidirectional and implementation == DTV1_IMPL else
+                        "dtv1.fused_triangle_multiplicative_update"
+                        if implementation == DTV1_IMPL else
+                        "modules.triangle_multiplication.bidirectional.BidirectionalTriangleMultiplication"
+                        if bidirectional else "modules.triangle_multiplication.module.TriangleMultiplication"),
         reference=ImplementationType.PYTORCH.value,
-        **accuracy,
-    )
+    )._replace(**accuracy)
 
 
 def bench_module_triangle_attention(
@@ -984,7 +1060,7 @@ def bench_module_triangle_attention(
         # raise `TypeError: __new__() got an unexpected keyword argument 'status'` -- the check
         # for an unsupported implementation was itself the crash. NaN is how every other bench
         # in this file reports "not applicable".
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark("triangle_attention has no old_triton implementation")
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -997,6 +1073,7 @@ def bench_module_triangle_attention(
                         conf.d_pair,
                         implementation=spec.impl,
                         use_self_attention=True,
+                        p_drop=conf.dropout,
                     )
                     for _ in range(conf.n_layers)
                 ],
@@ -1011,9 +1088,18 @@ def bench_module_triangle_attention(
                 pair = layer(pair, mask)
             return pair
 
-    model = MultiTriangleAttention().to(device=DEVICE, dtype=dtype)
+    # A zero output projection hides dropout's effect and gives zero upstream
+    # gradients. Use reproducible nonzero weights, as the trimul comparison does.
+    torch.manual_seed(0)
+    model = MultiTriangleAttention()
+    for layer in model.layers:
+        for linear in layer.modules():
+            if isinstance(linear, nn.Linear):
+                nn.init.normal_(linear.weight, std=conf.d_pair**-0.5)
+    model = model.to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
@@ -1024,9 +1110,10 @@ def bench_module_triangle_attention(
     def inference_step() -> torch.Tensor:
         return model(pair, mask)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         y = inference_step()
         fabric.backward(y, dy)
+        return y
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     execution_path = {
@@ -1044,7 +1131,7 @@ def bench_module_triangle_attention(
         params=list(model.parameters()),
         is_train=not is_inference_mode(conf.mode),
         input_dtype=str(pair.dtype).replace("torch.", ""),
-        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
         execution_path=execution_path,
         reference="module.reference.torch",
     )
@@ -1058,7 +1145,7 @@ def bench_module_transition(
 ):
     spec = module_miniworld_spec(implementation)
     is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
-    dtype = torch.bfloat16
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class OldTritonTransition(Transition):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1106,18 +1193,20 @@ def bench_module_transition(
     model = MultiTransition(spec, use_old_triton=is_old_triton).to(DEVICE)
     for layer, state in zip(model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
+    model.to(dtype=dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:  # compile the kernels, then capture (real regime); custom_op has no breaks
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     ref_spec = ImplementationSpec(ImplementationType.PYTORCH, None, "pytorch")
     ref_model = MultiTransition(ref_spec).to(DEVICE)
     for layer, state in zip(ref_model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
+    ref_model.to(dtype=dtype)
     ref_model.train(not is_inference_mode(conf.mode))
     if conf.compile:  # ref compiled too, regardless of graph, so the comparison is apples-to-apples
-        ref_model.compile()
+        compile_module_for_benchmark(ref_model)
     ref_model = fabric.setup_module(ref_model)
 
     torch.manual_seed(1)
@@ -1128,9 +1217,10 @@ def bench_module_transition(
     def inference_step() -> torch.Tensor:
         return model(x)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         y = inference_step()
         fabric.backward(y, dy)
+        return y
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, *list(model.parameters())]
@@ -1171,38 +1261,12 @@ def bench_module_transition(
     for item in [x, *list(model.parameters()), *list(ref_model.parameters())]:
         item.grad = None
 
-    if spec.impl == ImplementationType.CUEQUIVARIANCE:
-        # transition has no cuequivariance kernel; MiniWorld dispatches to the fastest per d.
-        # NOTE: these labels must track modules/transition/module.py's actual routing, not just
-        # the Hopper/Blackwell assumption. On pre-Hopper (sm_80 / A100) MINIWORLD routes large d
-        # (>=256) to the shape-general split (_old_triton_forward -> kernels.transition.triton.main),
-        # NOT the cute fused path (cute is sm_90+ only and never runs here). d=128 stays fused.
-        _cap0 = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
-        if _cap0 < 9 and conf.d_pair >= 256:  # pre-Hopper large-d -> split
-            execution_path = "kernels.transition.triton.main"
-        elif not is_inference_mode(conf.mode) and conf.d_pair >= 512:
-            execution_path = "kernels.transition.cute.forward+triton.backward"
-        elif not is_inference_mode(conf.mode) and conf.d_pair >= 256:
-            execution_path = "kernels.transition.triton.fused"
-        else:
-            execution_path = (
-                "kernels.transition.cute.fused"
-                if conf.d_pair >= 256
-                else "kernels.transition.triton.fused"
-            )
-    else:
-        execution_path = {
-            ImplementationType.PYTORCH: "module.reference.torch",
-            ImplementationType.TRITON: "kernels.transition.triton.fused",
-            ImplementationType.CUDA: "kernels.transition.cuda",
-            ImplementationType.CUTE: (
-                "kernels.transition.cute.forward+triton.backward"
-                if not is_inference_mode(conf.mode)
-                else "kernels.transition.cute.fused"
-            ),
-        }.get(spec.impl, spec.impl.value)
-    if is_old_triton:
-        execution_path = "kernels.transition.triton.main"
+    execution_path = (
+        "module.reference.torch"
+        if spec.impl in {ImplementationType.PYTORCH, ImplementationType.CUEQUIVARIANCE}
+        else "kernels.transition.triton.main" if is_old_triton
+        else "modules.transition.module.Transition"
+    )
     return measured_result(
         conf=conf,
         func=func,
@@ -1210,7 +1274,7 @@ def bench_module_transition(
         params=list(model.parameters()),
         is_train=not is_inference_mode(conf.mode),
         input_dtype=str(x.dtype).replace("torch.", ""),
-        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
         execution_path=execution_path,
         reference="module.reference.torch",
     )._replace(**accuracy)
@@ -1229,7 +1293,7 @@ def bench_module_conditioned_transition(
         ImplementationType.CUEQUIVARIANCE,
         ImplementationType.MINIWORLD,
     }:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"conditioned_transition does not implement {implementation!r}")
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -1258,8 +1322,9 @@ def bench_module_conditioned_transition(
             return x
 
     model = MultiConditionedTransition().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     # requires_grad ONLY when the mode is training. AdaptiveLayerNorm and ConditionedTransition
@@ -1302,13 +1367,14 @@ def bench_module_conditioned_transition(
         with torch.no_grad():
             return model(x, cond)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         y = model(x, cond)
         fabric.backward(y, dy)
+        return y
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, cond, *list(model.parameters())]
-    if spec.impl in {ImplementationType.TRITON, ImplementationType.CUEQUIVARIANCE,
+    if spec.impl in {ImplementationType.TRITON,
                      ImplementationType.MINIWORLD}:
         if is_inference_mode(conf.mode):
             # The dispatch reads d_hidden, and d_hidden is `d_single_token`. This branched on
@@ -1336,7 +1402,7 @@ def bench_module_conditioned_transition(
         params=list(model.parameters()),
         is_train=not is_inference_mode(conf.mode),
         input_dtype=str(x.dtype).replace("torch.", ""),
-        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
         execution_path=execution_path,
         reference="module.reference.torch",
     )
@@ -1354,7 +1420,7 @@ def bench_module_adaptive_layernorm(
         ImplementationType.PYTORCH,
         ImplementationType.TRITON,
     }:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"adaptive_layernorm does not implement {implementation!r}")
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -1383,8 +1449,9 @@ def bench_module_adaptive_layernorm(
             return x
 
     model = MultiAdaptiveLayerNorm().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     # requires_grad ONLY when the mode is training. AdaptiveLayerNorm and ConditionedTransition
@@ -1423,36 +1490,34 @@ def bench_module_adaptive_layernorm(
         with torch.no_grad():
             return model(x, cond)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         y = model(x, cond)
         fabric.backward(y, dy)
+        return y
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, cond, *list(model.parameters())]
-    try:
-        return measured_result(
-            conf=conf,
-            func=func,
-            grad_to_none=grad_to_none,
-            params=list(model.parameters()),
-            is_train=not is_inference_mode(conf.mode),
-            input_dtype=str(x.dtype).replace("torch.", ""),
-            parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
-            # What the module ACTUALLY dispatches to. `kernels.adaln.triton.main` named a file
-            # that no longer exists (it was split into inference.py / ln_strided.py), and it named
-            # one path where the module picks between two: AdaptiveLayerNorm.forward calls
-            # `adaln_train` when anything in the graph carries a gradient and `adaln_inference`
-            # otherwise, and those are two different kernel files with different kernels.
-            execution_path=(
-                "module.reference.torch"
-                if implementation_type == ImplementationType.PYTORCH
-                else ("kernels.adaln.triton.inference" if is_inference_mode(conf.mode)
-                      else "kernels.adaln.triton.training")
-            ),
-            reference="module.reference.torch",
-        )
-    except torch.cuda.OutOfMemoryError:
-        return as_bench_result(float("nan"))
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=grad_to_none,
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(x.dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
+        # What the module ACTUALLY dispatches to. `kernels.adaln.triton.main` named a file
+        # that no longer exists (it was split into inference.py / ln_strided.py), and it named
+        # one path where the module picks between two: AdaptiveLayerNorm.forward calls
+        # `adaln_train` when anything in the graph carries a gradient and `adaln_inference`
+        # otherwise, and those are two different kernel files with different kernels.
+        execution_path=(
+            "module.reference.torch"
+            if implementation_type == ImplementationType.PYTORCH
+            else ("kernels.adaln.triton.inference" if is_inference_mode(conf.mode)
+                  else "kernels.adaln.triton.training")
+        ),
+        reference="module.reference.torch",
+    )
 
 
 def bench_module_augmented_attention_token(
@@ -1485,7 +1550,10 @@ def bench_module_augmented_attention_token(
             value = value.view(n_aug, batch, len_res, self.n_head, hidden)
             # No `a` on the bias side of the einsum: the softmax is computed once and reused
             # across the augmentation samples, where the full path computes one per sample.
-            attention = torch.softmax(bias.permute(0, 3, 1, 2), dim=-1)  # (B, H, L, L)
+            logits = bias.permute(0, 3, 1, 2)
+            if mask is not None:
+                logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
+            attention = torch.softmax(logits, dim=-1)  # (B, H, L, L)
             out = torch.einsum("bhij,abjhd->abihd", attention, value)
             out = out.flatten(-2)                                        # (A, B, L, H*D)
             out = sigmoid_gate(gate, out)
@@ -1494,16 +1562,26 @@ def bench_module_augmented_attention_token(
 
     cls = (BiasOnlyValue if implementation.strip().lower() == BIAS_ONLY_V_IMPL
            else AugmentedAttentionPairBias)
-    model = cls(
-        d_single=conf.d_single_token,
-        d_cond=conf.d_single_token,
-        d_pair=conf.d_pair,
-        n_head=16,
-        implementation=spec.impl,
-    ).to(device=DEVICE, dtype=dtype)
+
+    class MultiTokenAttention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([
+                cls(d_single=conf.d_single_token, d_cond=conf.d_single,
+                    d_pair=conf.d_pair, n_head=16, implementation=spec.impl)
+                for _ in range(conf.n_layers)
+            ])
+
+        def forward(self, single, cond, pair, mask):
+            for layer in self.layers:
+                single = layer(single, cond, pair, mask)
+            return single
+
+    model = MultiTokenAttention().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
 
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
@@ -1511,7 +1589,7 @@ def bench_module_augmented_attention_token(
         conf.n_augment, 1, seq_len, conf.d_single_token, device=DEVICE, dtype=dtype
     )
     cond = torch.randn(
-        conf.n_augment, 1, seq_len, conf.d_single_token, device=DEVICE, dtype=dtype
+        conf.n_augment, 1, seq_len, conf.d_single, device=DEVICE, dtype=dtype
     )
     dy_single = torch.randn_like(single)
     pair.requires_grad = True
@@ -1522,9 +1600,10 @@ def bench_module_augmented_attention_token(
     def inference_step() -> torch.Tensor:
         return model(single, cond, pair, mask)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         out_single = inference_step()
         fabric.backward(out_single, dy_single)
+        return out_single
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [pair, single, cond, *list(model.parameters())]
@@ -1535,11 +1614,11 @@ def bench_module_augmented_attention_token(
         params=list(model.parameters()),
         is_train=not is_inference_mode(conf.mode),
         input_dtype=str(single.dtype).replace("torch.", ""),
-        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
         execution_path=(
             "module.reference.torch"
-            if spec.impl == ImplementationType.PYTORCH
-            else "kernels.augmented_attention.triton.main"
+            if spec.impl in {ImplementationType.PYTORCH, ImplementationType.CUEQUIVARIANCE}
+            else "modules.augmented_attention.module.AugmentedAttentionPairBias"
         ),
         reference="module.reference.torch",
     )
@@ -1559,14 +1638,29 @@ def bench_module_swa_atom_attention(
     windowed attention needs a flash backend to run at that length -- SDPA's [N, S, S] band mask
     is 24 GiB at S=8192 -- so on a card/install without one this reports NaN rather than OOM.
     """
-    spec = triton_miniworld_spec(implementation)
+    if implementation.strip().lower() not in {MINIWORLD_IMPL, "pytorch"}:
+        raise UnsupportedBenchmark("swa_atom_attention implements pytorch and miniworld")
+    swa_impl = ImplementationType(implementation.strip().lower())
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     n_head = 4
-    model = SWA3DRoPEAttention(
-        conf.d_single_atom, n_head, half_window=64,
-    ).to(device=DEVICE, dtype=dtype)
+
+    class MultiSWA(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([
+                SWA3DRoPEAttention(conf.d_single_atom, n_head, half_window=64, implementation=swa_impl)
+                for _ in range(conf.n_layers)
+            ])
+
+        def forward(self, x, ap):
+            for layer in self.layers:
+                x = layer(x, ap)
+            return x
+
+    model = MultiSWA().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     atom_len = seq_len * 8
@@ -1578,7 +1672,8 @@ def bench_module_swa_atom_attention(
     # the shapes drive the kernels, and the perf does not depend on the angles.
     cos = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
     sin = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
-    valid = torch.ones(n, atom_len, dtype=torch.bool, device=DEVICE)
+    valid_lengths = (torch.rand(n, atom_len, device=DEVICE) > conf.mask_prob).sum(-1)
+    valid = torch.arange(atom_len, device=DEVICE)[None, :] < valid_lengths[:, None]
     ap = build_attention_params(cos, sin, valid, num_aug=n)
     dy = torch.randn_like(x)
     x.requires_grad = True
@@ -1586,18 +1681,16 @@ def bench_module_swa_atom_attention(
     def inference_step() -> torch.Tensor:
         return model(x, ap)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         y = inference_step()
         fabric.backward(y, dy)
+        return y
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
 
     backend = _flash_backend(DEVICE)
-    execution_path = (
-        f"modules.swa_atom_attention.SWA3DRoPEAttention[{backend or 'sdpa_band'}]"
-        if spec.impl in {ImplementationType.TRITON, ImplementationType.MINIWORLD}
-        else "module.reference.torch")
+    execution_path = f"modules.swa_atom_attention.SWA3DRoPEAttention[{backend or 'unavailable'}]"
     return measured_result(
         conf=conf,
         func=func,
@@ -1605,9 +1698,9 @@ def bench_module_swa_atom_attention(
         params=list(model.parameters()),
         is_train=not is_inference_mode(conf.mode),
         input_dtype=str(x.dtype).replace("torch.", ""),
-        parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
         execution_path=execution_path,
-        reference="module.reference.torch",
+        reference="",
     )
 
 
@@ -1619,16 +1712,27 @@ def bench_module_augmented_attention_atom(
 ):
     spec = triton_miniworld_spec(implementation)
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
-    model = AugmentedAttentionPairBias(
-        d_single=conf.d_single_atom,
-        d_cond=conf.d_single_atom,
-        d_pair=conf.d_pair_atom,
-        n_head=4,
-        implementation=spec.impl,
-    ).to(device=DEVICE, dtype=dtype)
+
+    class MultiAtomAttention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([
+                AugmentedAttentionPairBias(
+                    d_single=conf.d_single_atom, d_cond=conf.d_single_atom,
+                    d_pair=conf.d_pair_atom, n_head=4, implementation=spec.impl,
+                ) for _ in range(conf.n_layers)
+            ])
+
+        def forward(self, single, cond, pair, mask):
+            for layer in self.layers:
+                single = layer(single, cond, pair, mask)
+            return single
+
+    model = MultiAtomAttention().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
 
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     atom_len = seq_len * 8
@@ -1648,30 +1752,28 @@ def bench_module_augmented_attention_atom(
     def inference_step() -> torch.Tensor:
         return model(single, cond, pair, mask)
 
-    def training_step() -> None:
+    def training_step() -> torch.Tensor:
         out_single = inference_step()
         fabric.backward(out_single, dy_single)
+        return out_single
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [pair, single, cond, *list(model.parameters())]
-    try:
-        return measured_result(
-            conf=conf,
-            func=func,
-            grad_to_none=grad_to_none,
-            params=list(model.parameters()),
-            is_train=not is_inference_mode(conf.mode),
-            input_dtype=str(single.dtype).replace("torch.", ""),
-            parameter_dtype=str(next(model.parameters()).dtype).replace("torch.", ""),
-            execution_path=(
-                "module.reference.torch"
-                if spec.impl == ImplementationType.PYTORCH
-                else "kernels.augmented_attention.triton.main"
-            ),
-            reference="module.reference.torch",
-        )
-    except torch.cuda.OutOfMemoryError:
-        return as_bench_result(float("nan"))
+    return measured_result(
+        conf=conf,
+        func=func,
+        grad_to_none=grad_to_none,
+        params=list(model.parameters()),
+        is_train=not is_inference_mode(conf.mode),
+        input_dtype=str(single.dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
+        execution_path=(
+            "module.reference.torch"
+            if spec.impl in {ImplementationType.PYTORCH, ImplementationType.CUEQUIVARIANCE}
+            else "modules.augmented_attention.module.AugmentedAttentionPairBias"
+        ),
+        reference="module.reference.torch",
+    )
 
 
 def bench_module_triangle_multiplication_bidirectional(conf, seq_len, implementation, fabric):
@@ -1706,25 +1808,35 @@ def _flat(items: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat([t.detach().reshape(-1).float() for t in items])
 
 
-def _fwd_result(conf, kfn, args, *, acc, path, ref, dtype):
+def _fwd_result(conf, kfn, args, *, acc, path, ref, dtype, parameter_dtype=None):
     """Time a pure forward launcher ``kfn(*args)`` (is_train=False) + attach correctness ``acc``."""
+    import json
+
+    shapes = json.dumps({f"arg{i}": list(arg.shape) for i, arg in enumerate(args)
+                         if isinstance(arg, torch.Tensor)})
     return measured_result(
         conf=conf, func=lambda: kfn(*args), grad_to_none=[], params=[], is_train=False,
-        input_dtype=dtype, parameter_dtype=dtype, execution_path=path, reference=ref,
-    )._replace(**acc)
+        input_dtype=dtype, parameter_dtype=dtype if parameter_dtype is None else parameter_dtype, execution_path=path, reference=ref,
+    )._replace(**acc, input_shapes=shapes)
 
 
-def _bwd_autograd_result(conf, out, leaves, dy, ref_grad, *, path, ref, dtype):
+def _bwd_autograd_result(conf, out, leaves, dy, ref_grads, *, path, ref, dtype):
     """Backward-only timing via ``torch.autograd.grad`` on a pre-built forward graph ``out``.
-    Cosine of leaves[0]'s grad vs ``ref_grad``. is_train=True so cudagraph capture keeps grad on."""
+    Compare every requested gradient. is_train=True so capture keeps grad on."""
+    import json
+
+    if conf.compile:
+        raise UnsupportedBenchmark("compiled backward over a prebuilt eager graph is unsupported")
     def kfn():
         return torch.autograd.grad(out, leaves, dy, retain_graph=True)
-    g = kfn()[0]
-    acc = _acc_grad(g, ref_grad)
+    grads = kfn()
+    acc = _acc_grad(_flat(list(grads)), _flat(list(ref_grads)))
+    shapes = json.dumps({"grad_output": list(dy.shape),
+                         "leaves": [list(leaf.shape) for leaf in leaves]})
     return measured_result(
         conf=conf, func=kfn, grad_to_none=[], params=[], is_train=True,
         input_dtype=dtype, parameter_dtype=dtype, execution_path=path, reference=ref,
-    )._replace(**acc)
+    )._replace(**acc, input_shapes=shapes)
 
 
 # ---- FORWARD operations -----------------------------------------------------------------------
@@ -1736,17 +1848,22 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
     `trimul_front_triton` and `trimul_front_sm100` are gone: 38575f1a deleted the five fronts
     nothing reaches, and their modules with them, so both rows raised ModuleNotFoundError on every
     shape of every sweep -- 18 rows a run, reported as ordinary bench failures."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
 
     def _w():
-        return (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()
+        return (torch.randn(D, D, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous()
 
     wl, wlg, wr, wrg, wg = _w(), _w(), _w(), _w(), _w()
 
     def _x():
         torch.manual_seed(1)
-        return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16).contiguous()
+        return torch.randn(1, L, L, D, device=DEVICE, dtype=dtype).contiguous()
 
     def ref_lr(x):
         xf = x.reshape(L * L, D)
@@ -1791,7 +1908,7 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
             return left.reshape(L * L, D), right.reshape(L * L, D)
         path = "kernels.tm1.triton.main"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     xc = _x()
     res = run(xc)
@@ -1800,19 +1917,24 @@ def bench_kernel_dual_gemm_epilogue(conf, seq_len, implementation, fabric):
         outs_a.append(res[2])
         outs_e.append(ref_gate(xc))
     acc = _acc_fwd(_flat(outs_a), _flat(outs_e))
-    return _fwd_result(conf, run, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(conf, run, (_x(),), acc=acc, path=path, ref="pytorch", dtype=tname)
 
 
 def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
     """Fused LayerNorm+Linear (GEMM w/ LN epilogue): Y = LN(x) @ W^T. N=K=d. Rows: pytorch,
     layernorm_linear_triton, layernorm_linear_cute(M1), layernorm_linear_cute_fused(M2), layernorm_linear_te."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     import torch.nn.functional as F
 
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    lw = torch.randn(D, device=DEVICE, dtype=BF16)
-    lb = torch.randn(D, device=DEVICE, dtype=BF16)
-    w = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()
+    lw = torch.randn(D, device=DEVICE, dtype=dtype)
+    lb = torch.randn(D, device=DEVICE, dtype=dtype)
+    w = (torch.randn(D, D, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous()
     eps = 1e-5
 
     def _x():
@@ -1823,7 +1945,7 @@ def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
         # the same numbers on the same data. drivers/layernorm_linear's `layernorm_linear_fwd_triton` carries
         # the same note.
         torch.manual_seed(1)
-        return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16).contiguous()
+        return torch.randn(1, L, L, D, device=DEVICE, dtype=dtype).contiguous()
 
     def ref(x):
         return F.linear(F.layer_norm(x, (D,), lw, lb, eps), w)
@@ -1860,21 +1982,30 @@ def bench_kernel_gemm_epilogue(conf, seq_len, implementation, fabric):
             x.reshape(-1, D), lw, lb, w, None, eps, length=L).reshape(x.shape)
         path = "kernels.layernorm_linear.triton.te_style"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(_x()), ref(_x()))
-    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="pytorch", dtype=tname)
 
 
 def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
     """SwiGLU MLP (transition, back-to-back): out = squeeze(silu(LN(x)@Wa)*(LN(x)@Wb)). Rows: pytorch,
     triton_transition_fused, cute_transition_fused, transition_b2b_ktiled(unverified)."""
+    if conf.compile and implementation == "transition_b2b_ktiled":
+        raise UnsupportedBenchmark(
+            "transition_b2b_ktiled has no opaque compile entry; its direct Triton launcher "
+            "fails Dynamo tracing. Use compile=False for this exact implementation")
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.transition import Transition
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
-    ref_mod = Transition(D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(BF16)
+    ref_mod = Transition(D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(dtype)
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
     lw, lb = ref_mod.ln_in.weight, ref_mod.ln_in.bias
@@ -1883,7 +2014,7 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
 
     def _x():
         torch.manual_seed(1)
-        return torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
+        return torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
 
     # The Transition op INCLUDES the residual -- `triton_transition_fused` folds `+x` into its
     # squeeze epilogue and there is no flag to turn that off. So the reference has to include it
@@ -1909,10 +2040,10 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
             x.reshape(L * L, D), lw, lb, wa, wb, wsq, eps).reshape(1, L, L, D) + x
         path = "kernels.transition.triton.fused.b2b_ktiled"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(_x()), ref_fn(_x()))
-    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="module.reference.torch", dtype="bfloat16")
+    return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path, ref="module.reference.torch", dtype=tname)
 
 
 def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
@@ -1958,7 +2089,7 @@ def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
         kfn = lambda x: triton_layernorm_lowreg(x, w, b, eps)
         path = "kernels.layernorm.triton.lowreg"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(_x()), ref(_x()))
     return _fwd_result(conf, kfn, (_x(),), acc=acc, path=path,
@@ -2030,7 +2161,7 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
             x, c, clw, sw, sb, bw, ex, ec, weight_cat=_wcat, bias_cat=_bcat, prefolded=_pf)
         path = "kernels.adaln.triton.inference.lnfold"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     xc, cc = _xc()
     acc = _acc_fwd(kfn(xc, cc), ref_mod(xc, cc))
@@ -2040,6 +2171,13 @@ def bench_kernel_adaln(conf, seq_len, implementation, fabric):
 def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
     """Triangle self-attention: softmax(QK^T*d^-0.5 + pair_bias)*V. q,k,v:(1,H,L,L,dh) bias:(1,H,L,L).
     Rows: pytorch(SDPA), triton_triangle_attention, triton_triangle_attention_miniworld(dep), triton_triangle_attention_perf(dep)."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
+    if conf.d_pair < 32 or conf.d_pair % 32:
+        raise UnsupportedBenchmark("attention width must be a positive multiple of head width 32")
     import torch.nn.functional as F
 
     L, dh = seq_len, 32
@@ -2047,10 +2185,10 @@ def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
 
     def mk():
         torch.manual_seed(1)
-        q = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=BF16)
-        k = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=BF16)
-        v = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=BF16)
-        bias = torch.randn(1, H, L, L, device=DEVICE, dtype=BF16)
+        q = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=dtype)
+        k = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=dtype)
+        v = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=dtype)
+        bias = torch.randn(1, H, L, L, device=DEVICE, dtype=dtype)
         return q, k, v, bias
 
     def ref(q, k, v, bias):
@@ -2071,7 +2209,7 @@ def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
         kfn = lambda q, k, v, b: fn(q, k, v, b)
         path = "kernels.triangle_attention.triton.atomic"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = {}
     try:
@@ -2079,12 +2217,20 @@ def bench_kernel_triangle_attention(conf, seq_len, implementation, fabric):
         acc = _acc_fwd(kfn(*qc), ref(*qc))
     except torch.cuda.OutOfMemoryError:
         torch.cuda.empty_cache()
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.sdpa", dtype="bfloat16")
+        raise
+    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.sdpa", dtype=tname, parameter_dtype="")
 
 
 def bench_kernel_bias_only_attention(conf, seq_len, implementation, fabric):
     """Bias-only attention: out[i,j,d]=sum_k softmax_k(bias[j,k])*v[i,k,d]. v:(1,H,L,L,dh) bias:(1,H,L,L).
     Rows: pytorch, triton_bias_only_attention."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
+    if conf.d_pair < 32 or conf.d_pair % 32:
+        raise UnsupportedBenchmark("attention width must be a positive multiple of head width 32")
     import torch.nn.functional as F
 
     L, dh = seq_len, 32
@@ -2092,8 +2238,8 @@ def bench_kernel_bias_only_attention(conf, seq_len, implementation, fabric):
 
     def mk():
         torch.manual_seed(1)
-        v = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=BF16)
-        bias = torch.randn(1, H, L, L, device=DEVICE, dtype=BF16)
+        v = torch.randn(1, H, L, L, dh, device=DEVICE, dtype=dtype)
+        bias = torch.randn(1, H, L, L, device=DEVICE, dtype=dtype)
         return v, bias
 
     def ref(v, bias):
@@ -2107,25 +2253,32 @@ def bench_kernel_bias_only_attention(conf, seq_len, implementation, fabric):
         kfn = lambda v, b: triton_bias_only_attention(v, b)
         path = "kernels.bias_only_attention.triton.main"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16")
+    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype=tname, parameter_dtype="")
 
 
 def bench_kernel_augmented_attention(conf, seq_len, implementation, fabric):
     """Augmented pair-bias attention: softmax(q.k*d^-0.5 + bias)*v. q,k,v:(A,1,L,H,dh) bias:(1,L,L,H).
     Rows: pytorch, triton_augmented_attention, augmented_attention_memory_efficient."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
+    if conf.d_pair < 32 or conf.d_pair % 32:
+        raise UnsupportedBenchmark("attention width must be a positive multiple of head width 32")
     import torch.nn.functional as F
 
-    L, A, H, dh = seq_len, 8, 4, 32
+    L, A, H, dh = seq_len, conf.n_augment, conf.d_pair // 32, 32
 
     def mk():
         torch.manual_seed(1)
-        q = torch.randn(A, 1, L, H, dh, device=DEVICE, dtype=BF16)
-        k = torch.randn(A, 1, L, H, dh, device=DEVICE, dtype=BF16)
-        v = torch.randn(A, 1, L, H, dh, device=DEVICE, dtype=BF16)
-        bias = torch.randn(1, L, L, H, device=DEVICE, dtype=BF16)
+        q = torch.randn(A, 1, L, H, dh, device=DEVICE, dtype=dtype)
+        k = torch.randn(A, 1, L, H, dh, device=DEVICE, dtype=dtype)
+        v = torch.randn(A, 1, L, H, dh, device=DEVICE, dtype=dtype)
+        bias = torch.randn(1, L, L, H, device=DEVICE, dtype=dtype)
         return q, k, v, bias
 
     def ref(q, k, v, bias):
@@ -2149,26 +2302,31 @@ def bench_kernel_augmented_attention(conf, seq_len, implementation, fabric):
         kfn = lambda q, k, v, b: fn(q, k, v, b)
         path = "kernels.augmented_attention.triton.memory_efficient"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype="bfloat16")
+    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch.einsum", dtype=tname, parameter_dtype="")
 
 
 def bench_kernel_fused_ln_mask(conf, seq_len, implementation, fabric):
     """Fused LayerNorm+mask: out = LN(x)*mask (per-row scale). Rows: pytorch, fused_ln_mask."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     import torch.nn.functional as F
 
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    w = torch.randn(D, device=DEVICE, dtype=BF16)
-    b = torch.randn(D, device=DEVICE, dtype=BF16)
+    w = torch.randn(D, device=DEVICE, dtype=dtype)
+    b = torch.randn(D, device=DEVICE, dtype=dtype)
     eps = 1e-5
 
     def mk():
         torch.manual_seed(1)
-        x = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
-        mask = (torch.rand(1, L, L, device=DEVICE) > 0.1).to(BF16)
+        x = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
+        mask = (torch.rand(1, L, L, device=DEVICE) > conf.mask_prob).to(dtype)
         return x, mask
 
     def ref(x, mask):
@@ -2183,24 +2341,29 @@ def bench_kernel_fused_ln_mask(conf, seq_len, implementation, fabric):
         kfn = lambda x, m: fused_ln_mask(x, w, b, m, eps)
         path = "kernels.fused_ln_mask.cute"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype=tname)
 
 
 def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
     """Gated output projection (tm2 back half): out = sigma(xg@Wg^T)*(xo@Wp^T). Rows: pytorch,
     tm2_cute, triton_tm2."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    wg = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()  # (N,K)
-    wp = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()
+    wg = (torch.randn(D, D, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous()  # (N,K)
+    wp = (torch.randn(D, D, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous()
 
     def mk():
         torch.manual_seed(1)
-        return (torch.randn(1, L, L, D, device=DEVICE, dtype=BF16),
-                torch.randn(1, L, L, D, device=DEVICE, dtype=BF16))
+        return (torch.randn(1, L, L, D, device=DEVICE, dtype=dtype),
+                torch.randn(1, L, L, D, device=DEVICE, dtype=dtype))
 
     def ref(xg, xo):
         return torch.sigmoid(xg @ wg.t()) * (xo @ wp.t())
@@ -2221,10 +2384,10 @@ def bench_kernel_gemm_gate(conf, seq_len, implementation, fabric):
         kfn = lambda xg, xo: triton_tm2(xg, xo, wgt, wpt).reshape(1, L, L, D)
         path = "kernels.tm2.triton.main"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     acc = _acc_fwd(kfn(*mk()), ref(*mk()))
-    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype="bfloat16")
+    return _fwd_result(conf, kfn, mk(), acc=acc, path=path, ref="pytorch", dtype=tname)
 
 
 def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabric):
@@ -2269,7 +2432,7 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
 
     # The kernel is the POST-AdaLN tail: ConditionedTransition.forward runs `ada_ln_in` first and
     # only then calls it. Normalize once here so both sides see the same input.
-    ref_fn = lambda x, c: ref_mod._reference(ref_mod.ada_ln_in(x, c), c)
+    ref_fn = lambda x, c: ref_mod._reference(x, c)
     if implementation == "pytorch":
         kfn, path = ref_fn, "module.reference.torch"
     elif implementation == "triton_cond_transition":
@@ -2278,26 +2441,35 @@ def bench_kernel_conditioned_transition_tail(conf, seq_len, implementation, fabr
         # caller has already flattened to (M, K). Omitting it left the inner path calling
         # `length_of` on a 2-D shape, which the guard refuses.
         kfn = lambda x, c: raw(
-            ref_mod.ada_ln_in(x, c).reshape(-1, D), c.reshape(-1, D),
+            x.reshape(-1, D), c.reshape(-1, D),
             wa, wb, ws, wsc, bsc, length=L).reshape(conf.n_augment, 1, L, D)
         path = "kernels.conditioned_transition.triton"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
 
     xc, cc = _xc()
-    acc = _acc_fwd(kfn(xc, cc), ref_fn(xc, cc))
-    return _fwd_result(conf, kfn, _xc(), acc=acc, path=path, ref="module.reference.torch", dtype=tname)
+    with torch.no_grad():
+        normalized = ref_mod.ada_ln_in(xc, cc).detach()
+    acc = _acc_fwd(kfn(normalized, cc), ref_fn(normalized, cc))
+    return _fwd_result(conf, kfn, (normalized, cc), acc=acc, path=path, ref="module.reference.torch", dtype=tname)
 
 
 # ---- BACKWARD operations (pure-function launchers; cudagraph-safe) ----------------------------
 def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
     """LayerNorm backward: (dy,x,w,mean,rstd)->(dx,dw,db). Rows: pytorch(pure), triton_atomic,
-    triton_persistent. Cosine on dx vs the pure-torch LN backward."""
+    triton_persistent. CSV metrics cover dx/dw/db together; logs also report each gradient."""
+    import json
+
+    from miniworld_engine import settings
     D, L = conf.d_pair, seq_len
     dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    weight_precision = conf.layernorm_weight_precision
+    weight_dtype = (dtype if weight_precision is None else
+                    torch.float32 if weight_precision == FP32_PRECISION else BF16)
     tname = str(dtype).replace("torch.", "")
+    wname = str(weight_dtype).replace("torch.", "")
     torch.manual_seed(0)
-    w = torch.randn(D, device=DEVICE, dtype=dtype)
+    w = torch.randn(D, device=DEVICE, dtype=weight_dtype)
     torch.manual_seed(1)
     # The pair activation (1, L, L, D), NOT its (M, D) flattening. `_bwd_*_impl` reshapes
     # internally and reads `both_key(length_of(x.shape))` off the 4-D shape, so a pre-flattened
@@ -2318,7 +2490,7 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
                               - xhat * (dxhat * xhat).mean(-1, keepdim=True))
         dwt = (dyf.float() * xhat).sum(0)
         dbt = dyf.float().sum(0)
-        return dx.to(dtype), dwt.to(dtype), dbt.to(dtype)
+        return dx.to(dtype), dwt.to(weight_dtype), dbt.to(weight_dtype)
 
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
@@ -2326,43 +2498,69 @@ def bench_kernel_layernorm_bwd(conf, seq_len, implementation, fabric):
         # No `triton_partial`: 3d5a0a2c deleted the partial backward path and `_bwd_partial_impl`
         # with it -- `_VALID_BWD_PATHS` is {"persistent", "atomic", "cuda"}. The import named it
         # anyway, so all three rows died on the import, not just the one that no longer exists.
-        from miniworld_engine.kernels.layernorm.compile_native import (
-            _bwd_atomic_impl,
-            _bwd_persistent_impl,
-        )
-        impl_fn = {"triton_atomic": _bwd_atomic_impl,
-                   "triton_persistent": _bwd_persistent_impl}[implementation]
-        kfn = lambda: impl_fn(dy, x, w, mean, rstd)
-        path = f"kernels.layernorm.compile_native.{implementation}"
+        from miniworld_engine.kernels.layernorm.compile_native import _dispatch_bwd
+
+        # Use the same opaque entry as production autograd in every execution regime.
+        # Tracing the private launchers enters shape-key construction and graph-breaks.
+        kfn = lambda: _dispatch_bwd(dy, x, w, mean, rstd)
+        path = f"kernels.layernorm.compile_native._dispatch_bwd[{implementation}]"
     elif implementation == "cuda":
         # Hand-CUDA vectorized backward; the shipped dispatch routes bf16 128<=N<=512 here.
         # Outside that gate the dispatch keeps triton, so report NaN (not applicable).
-        if dtype is not BF16 or not (128 <= D <= 512):
-            return as_bench_result(float("nan"))
-        from miniworld_engine.kernels.layernorm.cuda import layer_norm_bwd_cuda
-        kfn = lambda: layer_norm_bwd_cuda(dy, x, w, mean, rstd)
-        path = "kernels.layernorm.cuda.layer_norm_bwd_cuda"
-    else:
-        return as_bench_result(float("nan"))
+        if dtype is not BF16 or weight_dtype is not BF16 or not (128 <= D <= 512):
+            raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
+        from miniworld_engine.kernels.layernorm.compile_native import _dispatch_bwd
 
-    acc = _acc_grad(kfn()[0], torch_bwd()[0])
-    return measured_result(
-        conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
-        input_dtype=tname, parameter_dtype=tname, execution_path=path, reference="pytorch",
-    )._replace(**acc)
+        kfn = lambda: _dispatch_bwd(dy, x, w, mean, rstd)
+        path = "kernels.layernorm.compile_native._dispatch_bwd[cuda]"
+    else:
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
+
+    pinned_path = {"triton_atomic": "atomic", "triton_persistent": "persistent",
+                   "cuda": "cuda"}.get(implementation)
+    previous_path = settings.current().layernorm_bwd_path
+    if pinned_path is not None:
+        settings.configure(layernorm_bwd_path=pinned_path)
+    try:
+        if conf.compile:
+            kfn = compile_for_benchmark(kfn, fullgraph=True)
+        actual, expected = kfn(), torch_bwd()
+        gradients = {}
+        for name, got, want in zip(("dx", "dw", "db"), actual, expected, strict=True):
+            maximum, relative, cosine = tensor_metrics(got, want)
+            gradients[name] = {"max_abs": maximum, "rel_frob": relative, "cosine": cosine,
+                               "dtype": str(got.dtype).replace("torch.", ""),
+                               "reference_dtype": str(want.dtype).replace("torch.", "")}
+        print("LAYERNORM_BWD_GRADIENTS " + json.dumps({
+            "implementation": implementation, "seq_len": L, "d_pair": D,
+            "input_dtype": tname, "parameter_dtype": wname, "compiled": conf.compile,
+            "cudagraph": conf.cudagraph, "gradients": gradients}), flush=True)
+        acc = _acc_grad(_flat(list(actual)), _flat(list(expected)))
+        return measured_result(
+            conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
+            input_dtype=tname, parameter_dtype=wname, execution_path=path, reference="pytorch",
+        )._replace(**acc)
+    finally:
+        if pinned_path is not None:
+            settings.configure(layernorm_bwd_path=previous_path)
 
 
 def bench_kernel_gemm_gate_bwd(conf, seq_len, implementation, fabric):
     """Gate-elementwise backward: bwd of y=sigma(x_n@Wg)*proj -> (d_proj, dx_n, dWg). Rows: pytorch(pure),
     gate_elem_bwd. Cosine on concatenated grads."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     D, L = conf.d_pair, seq_len
     torch.manual_seed(0)
-    wg = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()  # (K,N)
+    wg = (torch.randn(D, D, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous()  # (K,N)
     torch.manual_seed(1)
-    x_n = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
-    proj = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
-    dy = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
-    gate = torch.sigmoid(x_n.float() @ wg.float()).to(BF16)
+    x_n = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
+    proj = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
+    dy = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
+    gate = torch.sigmoid(x_n.float() @ wg.float()).to(dtype)
 
     def torch_bwd():
         g, dyf, pf = gate.float(), dy.float(), proj.float()
@@ -2370,7 +2568,7 @@ def bench_kernel_gemm_gate_bwd(conf, seq_len, implementation, fabric):
         d_glog = dyf * pf * g * (1 - g)
         dx = d_glog @ wg.float().t()
         dwg = x_n.float().t() @ d_glog
-        return d_proj.to(BF16), dx.to(BF16), dwg.to(BF16)
+        return d_proj.to(dtype), dx.to(dtype), dwg.to(dtype)
 
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
@@ -2378,32 +2576,43 @@ def bench_kernel_gemm_gate_bwd(conf, seq_len, implementation, fabric):
         from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
             gate_elem_bwd,
         )
-        kfn = lambda: gate_elem_bwd(dy, x_n, proj, gate, wg)
+        # This isolated gate benchmark has no dropout; the production custom op
+        # requires an explicit row scale and sequence length even for p_drop=0.
+        dropscale = torch.ones((L, D), device=DEVICE, dtype=dtype)
+        kfn = lambda: gate_elem_bwd(dy, x_n, proj, gate, wg, dropscale, L)
         path = "kernels.trimul_inproj.triton.gate_elem"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
+
+    import json
 
     acc = _acc_grad(_flat(list(kfn())), _flat(list(torch_bwd())))
+    shapes = json.dumps({"dy": list(dy.shape), "x_n": list(x_n.shape), "proj": list(proj.shape), "weight": list(wg.shape)})
     return measured_result(
         conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
-        input_dtype="bfloat16", parameter_dtype="bfloat16", execution_path=path, reference="pytorch",
-    )._replace(**acc)
+        input_dtype=tname, parameter_dtype=tname, execution_path=path, reference="pytorch",
+    )._replace(**acc, input_shapes=shapes)
 
 
 def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     """Gated dual-GEMM front backward: (d_left,d_right)->dx_n + 4 weight grads. Rows: pytorch(pure),
     front_bwd_fused. Cosine on concatenated (dx_n|dWL|dWLg|dWR|dWRg)."""
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     D, L, H = conf.d_pair, seq_len, conf.d_pair
     torch.manual_seed(0)
 
     def _w():
-        return (torch.randn(D, H, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous()
+        return (torch.randn(D, H, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous()
 
     WL, WLg, WR, WRg = _w(), _w(), _w(), _w()
     torch.manual_seed(1)
-    x_n = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
-    d_left = torch.randn(1, L, L, H, device=DEVICE, dtype=BF16)
-    d_right = torch.randn(1, L, L, H, device=DEVICE, dtype=BF16)
+    x_n = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
+    d_left = torch.randn(1, L, L, H, device=DEVICE, dtype=dtype)
+    d_right = torch.randn(1, L, L, H, device=DEVICE, dtype=dtype)
 
     def torch_bwd():
         xf = x_n.reshape(L * L, D).float()
@@ -2414,8 +2623,8 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
         d_pR, d_gR = dr * gR, dr * pR * gR * (1 - gR)
         dxn = (d_pL @ WL.float().t() + d_gL @ WLg.float().t()
                + d_pR @ WR.float().t() + d_gR @ WRg.float().t())
-        return (dxn.reshape(1, L, L, D).to(BF16), (xf.t() @ d_pL).to(BF16), (xf.t() @ d_gL).to(BF16),
-                (xf.t() @ d_pR).to(BF16), (xf.t() @ d_gR).to(BF16))
+        return (dxn.reshape(1, L, L, D).to(dtype), (xf.t() @ d_pL).to(dtype), (xf.t() @ d_gL).to(dtype),
+                (xf.t() @ d_pR).to(dtype), (xf.t() @ d_gR).to(dtype))
 
     if implementation == "pytorch":
         kfn, path = torch_bwd, "pytorch"
@@ -2435,13 +2644,16 @@ def bench_kernel_dual_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
         kfn = lambda: front_bwd_fused(dlb, drb, preact, x_n, WL, WLg, WR, WRg)
         path = "kernels.trimul_inproj.triton.back_fused"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
+
+    import json
 
     acc = _acc_grad(_flat(list(kfn())), _flat(list(torch_bwd())))
+    shapes = json.dumps({"x_n": list(x_n.shape), "d_left": list(d_left.shape), "d_right": list(d_right.shape)})
     return measured_result(
         conf=conf, func=kfn, grad_to_none=[], params=[], is_train=False,
-        input_dtype="bfloat16", parameter_dtype="bfloat16", execution_path=path, reference="pytorch",
-    )._replace(**acc)
+        input_dtype=tname, parameter_dtype=tname, execution_path=path, reference="pytorch",
+    )._replace(**acc, input_shapes=shapes)
 
 
 # ---- BACKWARD operations (autograd; backward-only timing via autograd.grad) -------------------
@@ -2470,6 +2682,9 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
 
     Roughly half the "2x loss" was the pruning; the rest is host dispatch -- see the return.
     """
+    if conf.compile:
+        raise UnsupportedBenchmark(
+            "backward-only autograd uses a prebuilt eager graph; compiled backward is unsupported")
     from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
     from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -2496,7 +2711,14 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     dy = torch.randn(conf.n_augment, 1, L, D, device=DEVICE, dtype=dtype)
     xr, cr = x0.clone().requires_grad_(True), c0.clone().requires_grad_(True)
     ref_mod(xr, cr).backward(dy)
-    ref_dx = xr.grad
+    ref_grads = []
+    for tensor in (xr, cr, clw, sw, sb, bw):
+        if tensor is None:
+            continue
+        gradient = tensor.grad
+        if gradient is None:
+            raise RuntimeError("reference backward did not produce every requested gradient")
+        ref_grads.append(gradient.detach().clone())
 
     x, c = x0.clone().requires_grad_(True), c0.clone().requires_grad_(True)
     if implementation == "pytorch":
@@ -2506,7 +2728,7 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
         out = adaln_train(x, c, clw, sw, sb, bw, ex, ec)
         path = "kernels.adaln.triton.training"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
     # Every leaf `adaln_train`'s node differentiates, so both rows are asked for the same six
     # gradients. `ln_in` is `elementwise_affine=False` and `ln_cond`/`to_bias` are bias-free, so
     # these four ARE the module's whole parameter set -- the reference is not being charged for
@@ -2521,34 +2743,49 @@ def bench_kernel_adaln_bwd(conf, seq_len, implementation, fabric):
     # ~15 C++ autograd nodes. `--cudagraph manual` would remove it from both sides, but a graph
     # capture of `autograd.grad` fails here (`cudaErrorStreamCaptureInvalidated`; every row of
     # the committed a6000 adaln_bwd table is that failure), so there is no graphed variant yet.
-    return _bwd_autograd_result(conf, out, leaves, dy, ref_dx, path=path,
+    return _bwd_autograd_result(conf, out, leaves, dy, ref_grads, path=path,
                                 ref="module.reference.torch", dtype=tname)
 
 
 def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
     """Transition backward (autograd, backward-only). Rows: pytorch, triton_transition_fused,
     cute_transition_fused. Cosine on dx vs pytorch autograd."""
+    if conf.compile:
+        raise UnsupportedBenchmark(
+            "backward-only autograd uses a prebuilt eager graph; compiled backward is unsupported")
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.transition import Transition
 
     D, L, n = conf.d_pair, seq_len, 4
     torch.manual_seed(0)
-    ref_mod = Transition(D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(BF16)
+    ref_mod = Transition(D, n=n, implementation=ImplementationType.PYTORCH).to(DEVICE).to(dtype)
     for lin in (ref_mod.expand_a, ref_mod.expand_b, ref_mod.squeeze):
         torch.nn.init.normal_(lin.weight, std=D**-0.5)
     lw, lb = ref_mod.ln_in.weight, ref_mod.ln_in.bias
     wa, wb, wsq = ref_mod.expand_a.weight, ref_mod.expand_b.weight, ref_mod.squeeze.weight
     eps = ref_mod.ln_in.eps
     torch.manual_seed(1)
-    x0 = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
-    dy = torch.randn(1, L, L, D, device=DEVICE, dtype=BF16)
+    x0 = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
+    dy = torch.randn(1, L, L, D, device=DEVICE, dtype=dtype)
     # Residual on both sides: the Transition op includes `+x` and there is no flag to turn it
     # off, so the reference carries it too. It contributes an identity `+dy` to ref_dx, which is
     # exactly what the fused backward's `_finalize_dx` adds -- comparing a residual kernel to a
     # residual-free reference would score that identity as error.
     xr = x0.clone().requires_grad_(True)
     (ref_mod._torch_forward(xr) + xr).backward(dy)
-    ref_dx = xr.grad
+    ref_grads = []
+    for tensor in (xr, lw, lb, wa, wb, wsq):
+        if tensor is None:
+            continue
+        gradient = tensor.grad
+        if gradient is None:
+            raise RuntimeError("reference backward did not produce every requested gradient")
+        ref_grads.append(gradient.detach().clone())
 
     x = x0.clone().requires_grad_(True)
     if implementation == "pytorch":
@@ -2562,7 +2799,7 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
         out = cute_transition_fused(x, lw, lb, wa, wb, wsq, n, eps) + x
         path = "kernels.transition.cute.fused"
     else:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
     # EVERY leaf, not just x. `torch.autograd.grad(out, leaves, ...)` prunes what no leaf needs,
     # and the two sides prune differently: `TritonTransitionFusedFunction.backward` is ONE autograd
     # node, so it always returns dx, dgamma, dbeta, dWa, dWb, dWs -- autograd cannot reach inside a
@@ -2570,13 +2807,21 @@ def bench_kernel_transition_b2b_bwd(conf, seq_len, implementation, fabric):
     # weight is a leaf. Asking for `[x]` charged us for six gradients and the reference for one,
     # and reported the difference as our kernel being slow. Same defect, same fix, as
     # bench_kernel_adaln_bwd, where it cost 0.40x -> 0.77x.
-    return _bwd_autograd_result(conf, out, [x, lw, lb, wa, wb, wsq], dy, ref_dx, path=path,
-                                ref="module.reference.torch", dtype="bfloat16")
+    return _bwd_autograd_result(conf, out, [x, lw, lb, wa, wb, wsq], dy, ref_grads, path=path,
+                                ref="module.reference.torch", dtype=tname)
 
 
 def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     """LayerNorm+Linear backward (autograd, backward-only). Rows: pytorch, layernorm_linear_te,
     layernorm_linear_cute. Cosine on dx vs pytorch autograd."""
+    if conf.compile:
+        raise UnsupportedBenchmark(
+            "backward-only autograd uses a prebuilt eager graph; compiled backward is unsupported")
+    if conf.precision == FP32_PRECISION and implementation != "pytorch":
+        raise UnsupportedBenchmark(
+            f"{conf.target}/{implementation}: this benchmark backend supports BF16 inputs only")
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else BF16
+    tname = str(dtype).replace("torch.", "")
     import torch.nn.functional as F
 
     D, L = conf.d_pair, seq_len
@@ -2585,16 +2830,23 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
     # computes NO weight gradient at all, while `LayerNormLinearTEFn.backward` -- one autograd
     # node -- always produces dW, dgamma and dbeta. The bench timed our three extra outputs
     # against a reference excused from them. See bench_kernel_adaln_bwd.
-    lw = torch.randn(D, device=DEVICE, dtype=BF16, requires_grad=True)
-    lb = torch.randn(D, device=DEVICE, dtype=BF16, requires_grad=True)
-    w = (torch.randn(D, D, device=DEVICE, dtype=BF16) * (D**-0.5)).contiguous().requires_grad_(True)
+    lw = torch.randn(D, device=DEVICE, dtype=dtype, requires_grad=True)
+    lb = torch.randn(D, device=DEVICE, dtype=dtype, requires_grad=True)
+    w = (torch.randn(D, D, device=DEVICE, dtype=dtype) * (D**-0.5)).contiguous().requires_grad_(True)
     eps = 1e-5
     torch.manual_seed(1)
-    x0 = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
-    dy = torch.randn(L * L, D, device=DEVICE, dtype=BF16)
+    x0 = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
+    dy = torch.randn(L * L, D, device=DEVICE, dtype=dtype)
     xr = x0.clone().requires_grad_(True)
     F.linear(F.layer_norm(xr, (D,), lw, lb, eps), w).backward(dy)
-    ref_dx = xr.grad
+    ref_grads = []
+    for tensor in (xr, lw, lb, w):
+        if tensor is None:
+            continue
+        gradient = tensor.grad
+        if gradient is None:
+            raise RuntimeError("reference backward did not produce every requested gradient")
+        ref_grads.append(gradient.detach().clone())
 
     x = x0.clone().requires_grad_(True)
     if implementation == "pytorch":
@@ -2612,9 +2864,9 @@ def bench_kernel_gemm_epilogue_bwd(conf, seq_len, implementation, fabric):
         out = layernorm_linear_fn(x, lw, lb, w, None, eps, length=L)  # x is (L*L, D)
         path = "kernels.layernorm_linear.autograd.cute"
     else:
-        return as_bench_result(float("nan"))
-    return _bwd_autograd_result(conf, out, [x, lw, lb, w], dy, ref_dx, path=path,
-                                ref="pytorch.autograd", dtype="bfloat16")
+        raise UnsupportedBenchmark(f"{conf.target}/{implementation}: unsupported configuration")
+    return _bwd_autograd_result(conf, out, [x, lw, lb, w], dy, ref_grads, path=path,
+                                ref="pytorch.autograd", dtype=tname)
 
 
 # A kernel target is named after the kernel FAMILY in `src/miniworld_engine/kernels/registry.csv`
@@ -2649,7 +2901,7 @@ KERNEL_TARGETS = {
 }
 
 def bench_module_dit(conf, seq_len, implementation, fabric):
-    """TOKEN-track DiT block: augmented attention (pair bias) + conditioned transition, both
+    """Pair-bias DiT block (token by default, atom for the dit_atom target): augmented attention (pair bias) + conditioned transition, both
     residuals explicit. `modules/dit`.
 
     A block, not a part, because a per-part result does not compose: every kernel here is an
@@ -2659,18 +2911,25 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     """
     from miniworld_engine.modules.dit import DiTBlock
 
+    atom = conf.target == "dit_atom"
+    length = seq_len * 8 if atom else seq_len
+    d_single = conf.d_single_atom if atom else conf.d_single_token
+    d_cond = conf.d_single_atom if atom else conf.d_single
+    d_pair = conf.d_pair_atom if atom else conf.d_pair
+    n_head = 4 if atom else 16
+
     spec = triton_miniworld_spec(implementation)
     if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
                          ImplementationType.MINIWORLD}:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"dit does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class MultiDiT(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.layers = nn.ModuleList([
-                DiTBlock(d_single=conf.d_single_token, d_cond=conf.d_single,
-                         d_pair=conf.d_pair, implementation=spec.impl)
+                DiTBlock(d_single=d_single, d_cond=d_cond,
+                         d_pair=d_pair, n_head=n_head, implementation=spec.impl)
                 for _ in range(conf.n_layers)])
 
         def forward(self, single, cond, pair, mask=None):
@@ -2679,37 +2938,47 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
             return single
 
     model = MultiDiT().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     wants_grad = not is_inference_mode(conf.mode)
-    single = torch.randn(conf.n_augment, 1, seq_len, conf.d_single_token,
+    single = torch.randn(conf.n_augment, 1, length, d_single,
                          device=DEVICE, dtype=dtype, requires_grad=wants_grad)
-    cond = torch.randn(conf.n_augment, 1, seq_len, conf.d_single,
+    cond = torch.randn(conf.n_augment, 1, length, d_cond,
                        device=DEVICE, dtype=dtype, requires_grad=wants_grad)
-    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    pair = torch.randn(1, length, length, d_pair, device=DEVICE, dtype=dtype,
+                       requires_grad=wants_grad)
+    mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
 
     def inference_step():
         with torch.no_grad():
-            return model(single, cond, pair)
+            return model(single, cond, pair, mask)
 
-    def training_step() -> None:
-        fabric.backward(model(single, cond, pair), dy)
+    def training_step() -> torch.Tensor:
+        y = model(single, cond, pair, mask)
+        fabric.backward(y, dy)
+        return y
 
     return measured_result(
         conf=conf,
         func=inference_step if is_inference_mode(conf.mode) else training_step,
-        grad_to_none=[single, cond, *list(model.parameters())],
+        grad_to_none=[single, cond, pair, *list(model.parameters())],
         params=list(model.parameters()),
         is_train=wants_grad,
         input_dtype=str(dtype).replace("torch.", ""),
-        parameter_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
         execution_path=("modules.dit.DiTBlock" if spec.impl != ImplementationType.PYTORCH
                         else "module.reference.torch"),
         reference="module.reference.torch",
     )
+
+
+def bench_module_dit_atom(conf, seq_len, implementation, fabric):
+    """Full pair-bias atom DiT, at 8 * seq_len and atom widths; shares the token algorithm."""
+    return bench_module_dit(conf, seq_len, implementation, fabric)
 
 
 def bench_module_swa_dit(conf, seq_len, implementation, fabric):
@@ -2725,7 +2994,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     spec = triton_miniworld_spec(implementation)
     if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON,
                          ImplementationType.MINIWORLD}:
-        return as_bench_result(float("nan"))
+        raise UnsupportedBenchmark(f"swa_dit does not implement {implementation!r}")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     n_head = 4
 
@@ -2743,8 +3012,9 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
             return x
 
     model = MultiSWADiT().to(device=DEVICE, dtype=dtype)
+    model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        model.compile()
+        compile_module_for_benchmark(model)
     model = fabric.setup_module(model)
 
     atom_len, n = seq_len * 8, conf.n_augment
@@ -2756,7 +3026,8 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                        requires_grad=wants_grad)
     cos = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
     sin = torch.randn(1, atom_len, half, device=DEVICE, dtype=torch.float32)
-    valid = torch.ones(n, atom_len, dtype=torch.bool, device=DEVICE)
+    valid_lengths = (torch.rand(n, atom_len, device=DEVICE) > conf.mask_prob).sum(-1)
+    valid = torch.arange(atom_len, device=DEVICE)[None, :] < valid_lengths[:, None]
     ap = build_attention_params(cos, sin, valid, num_aug=n)
     dy = torch.randn_like(x)
 
@@ -2764,8 +3035,10 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         with torch.no_grad():
             return model(x, cond, ap)
 
-    def training_step() -> None:
-        fabric.backward(model(x, cond, ap), dy)
+    def training_step() -> torch.Tensor:
+        y = model(x, cond, ap)
+        fabric.backward(y, dy)
+        return y
 
     from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
 
@@ -2777,9 +3050,8 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         params=list(model.parameters()),
         is_train=wants_grad,
         input_dtype=str(dtype).replace("torch.", ""),
-        parameter_dtype=str(dtype).replace("torch.", ""),
-        execution_path=(f"modules.swa_dit.SWADiTBlock[{backend or 'sdpa_band'}]"
-                        if spec.impl != ImplementationType.PYTORCH else "module.reference.torch"),
+        parameter_dtype=parameter_dtype_of(model),
+        execution_path=f"modules.swa_dit.SWADiTBlock[{backend or 'unavailable'}]",
         reference="module.reference.torch",
     )
 
@@ -2799,6 +3071,7 @@ MODULE_TARGETS = {
     "augmented_attention_token": bench_module_augmented_attention_token,
     "augmented_attention_atom": bench_module_augmented_attention_atom,
     "dit": bench_module_dit,
+    "dit_atom": bench_module_dit_atom,
     "swa_dit": bench_module_swa_dit,
 }
 
@@ -2841,6 +3114,26 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
     import ast as _ast
     import inspect as _inspect
 
+    # A module enum is not a support matrix: advertising all enum values caused
+    # unsupported labels and duplicate reference implementations in ordinary `all` runs.
+    if level == "module":
+        supported = {
+            "triangle_multiplication": ("pytorch", "triton", "miniworld", "cuequivariance", "cute", "dtv1"),
+            "triangle_multiplication_bidirectional": ("pytorch", "triton", "miniworld", "cuequivariance", "cute", "dtv1"),
+            "triangle_attention": ("pytorch", "triton", "miniworld", "cuequivariance"),
+            "transition": ("pytorch", "triton", "miniworld", "old_triton", "cute"),
+            "conditioned_transition": ("pytorch", "triton", "miniworld"),
+            "adaptive_layernorm": ("pytorch", "triton", "miniworld"),
+            "augmented_attention_token": ("pytorch", "triton", "miniworld"),
+            "augmented_attention_atom": ("pytorch", "triton", "miniworld"),
+            "swa_atom_attention": ("pytorch", "miniworld"),
+            "dit": ("pytorch", "triton", "miniworld"),
+            "dit_atom": ("pytorch", "triton", "miniworld"),
+            "swa_dit": ("pytorch", "triton", "miniworld"),
+        }
+        if set(supported) != set(MODULE_TARGETS):
+            raise RuntimeError("module benchmark implementation matrix is incomplete")
+        return supported.get(target, ())
     fn = targets_for(level).get(target)
     if fn is None:
         return ()
@@ -2903,6 +3196,9 @@ IMPL_MIN_ARCH: dict[tuple[str, str], str] = {
     # NotImplementedError: Gemm Sm80 is not implemented yet
     ("dual_gemm_epilogue", "tm1_cute"): "sm90",
     ("dual_gemm_epilogue", "trimul_inproj_cute"): "sm90",
+    # Both module variants reach the CuTe GEMM path; Ampere reports
+    # NotImplementedError: Gemm Sm80 is not implemented yet.
+    ("triangle_multiplication", "cute"): "sm90",
     ("triangle_multiplication_bidirectional", "cute"): "sm90",
 }
 
@@ -3135,6 +3431,10 @@ def _compile_wrap_now() -> str:
 
 CSV_FIELDS = [
     "run_name",
+    "measurement_schema",
+    "run_id",
+    "config_hash",
+    "source_hash",
     "target_kind",
     "target",
     "device",
@@ -3144,7 +3444,15 @@ CSV_FIELDS = [
     "unit",
     "mode",
     "compiled",
+    "compile_requested",
     "cudagraph",
+    "cudagraph_requested",
+    "compile_scope",
+    "compiled_graphs",
+    "measurement_scope",
+    "mode_requested",
+    "input_shapes",
+    "execution_validation",
     # WHICH compile_wrap produced the row. Every table committed before this column existed was
     # measured with "disable" -- a graph break at every kernel entry -- and nothing said so, which
     # is the same defect the `compiled` column had: a number whose regime is not recorded cannot
@@ -3168,8 +3476,11 @@ CSV_FIELDS = [
     "grad_rel_frob",
     "grad_cosine",
     "n_layers",
+    "n_layers_requested",
+    "trimul_direction",
     "n_augment",
     "mask_prob",
+    "dropout",
     "seq_len",
     "tokens",
     "batch_size",
@@ -3216,6 +3527,18 @@ def csv_row(
             spec = parse_implementation_spec(implementation)
         except ValueError:
             spec = None  # kernel-bench variant label, not a module ImplementationType
+    import math
+    if status == "ok" and (result is None or not math.isfinite(result.value)):
+        status, error = "failed", "benchmark returned no finite measurement"
+        result = None
+    if status == "ok" and result is not None and (
+        result.compiled is None or result.cudagraph not in {"disabled", "manual", "graphed"}
+        or result.measurement_scope not in {"forward", "backward", "forward_backward"}
+        or result.compiled != (result.compiled_graphs > 0)
+        or (result.compiled and not result.compile_scope)
+    ):
+        status, error = "failed", "measurement lacks observed execution evidence"
+        result = None
     implementation_type = spec.impl.value if spec is not None else implementation
     if implementation == MINIWORLD_IMPL:
         implementation_type = MINIWORLD_IMPL
@@ -3223,6 +3546,10 @@ def csv_row(
         implementation_type = OLD_TRITON_IMPL
     return {
         "run_name": run_name,
+        "measurement_schema": 2,
+        "run_id": getattr(conf, "_benchmark_provenance", {}).get("run_id", ""),
+        "config_hash": getattr(conf, "_benchmark_provenance", {}).get("config_hash", ""),
+        "source_hash": getattr(conf, "_benchmark_provenance", {}).get("source_hash", ""),
         "target_kind": conf.level,
         "target": conf.target,
         "device": device_name,
@@ -3230,9 +3557,18 @@ def csv_row(
         "cuda_version": torch.version.cuda,
         "metric": conf.metric,
         "unit": result_unit(conf.metric),
-        "mode": mode_label(conf.mode),
-        "compiled": actual_compiled_flag(conf),
-        "cudagraph": conf.cudagraph,
+        "mode": ("backward" if conf.target.endswith("_bwd") else "inference")
+                if conf.level == "kernel" else mode_label(conf.mode),
+        "mode_requested": mode_label(conf.mode),
+        "compiled": actual_compiled_flag(result),
+        "compile_requested": conf.compile,
+        "cudagraph": "" if result is None else result.cudagraph,
+        "cudagraph_requested": conf.cudagraph,
+        "compile_scope": "" if result is None else result.compile_scope,
+        "compiled_graphs": 0 if result is None else result.compiled_graphs,
+        "measurement_scope": "" if result is None else result.measurement_scope,
+        "input_shapes": "" if result is None else result.input_shapes,
+        "execution_validation": "" if result is None else result.execution_validation,
         "compile_wrap": _compile_wrap_now(),
         "precision": conf.precision,
         "allow_tf32": conf.allow_tf32,
@@ -3250,12 +3586,17 @@ def csv_row(
         "grad_max_abs": None if result is None else result.grad_max_abs,
         "grad_rel_frob": None if result is None else result.grad_rel_frob,
         "grad_cosine": None if result is None else result.grad_cosine,
-        "n_layers": conf.n_layers,
+        "n_layers": conf.n_layers if conf.level == "module" else 1,
+        "n_layers_requested": conf.n_layers,
+        "trimul_direction": ("bidirectional" if conf.target == "triangle_multiplication_bidirectional"
+                             else conf.trimul_direction if conf.target == "triangle_multiplication" else ""),
         "n_augment": conf.n_augment,
         "mask_prob": conf.mask_prob,
+        "dropout": conf.dropout,
         "seq_len": seq_len,
-        "tokens": seq_len * seq_len,
-        "batch_size": 1,
+        # Different targets flatten/augment different axes. input_shapes records actual tensors.
+        "tokens": None,
+        "batch_size": None,
         "d_pair": conf.d_pair,
         "d_single": conf.d_single,
         "d_single_token": conf.d_single_token,
@@ -3336,15 +3677,13 @@ def main(cfg: DictConfig) -> None:
     # outside that set measures a fallback -- an fp32 run of a bf16-only fused op silently lands on
     # the torch reference and gets reported under the kernel's name -- so say so loudly rather than
     # publishing it. A warning, not an error: an exploratory run is legitimate, a silent one is not.
-    try:
-        from bench_policy import declared_precisions
-        _allowed = declared_precisions(conf.level, conf.target)
-    except Exception:
-        _allowed = None
-    if _allowed is not None and conf.precision not in _allowed:
-        print(f"WARNING: {conf.level}/{conf.target} declares dtypes {_allowed} in registry.csv, "
-              f"but this run is precision={conf.precision!r}. The kernels for the missing dtype do "
-              f"not exist, so those rows measure a fallback under the kernel's name.", flush=True)
+    from benchmarks.runners.bench_policy import declared_precisions
+    allowed = declared_precisions(conf.level, conf.target)
+    requested_input_precision = 32 if conf.precision == 32 else "bf16"
+    if requested_input_precision not in allowed:
+        print(f"NOTE: {conf.level}/{conf.target} default precision policy is {allowed}; "
+              f"this exploratory run requests {conf.precision!r}. Actual dtype and execution path "
+              "are recorded per implementation.", flush=True)
     if not conf.compile and conf.cudagraph == "disabled" and not conf.allow_eager:
         msg = ("Final benchmarks must run compiled or cudagraph'd. Use compile=true or "
                "cudagraph=manual|graphed, or allow_eager=true for the ref1 eager floor.")
@@ -3414,6 +3753,10 @@ def main(cfg: DictConfig) -> None:
               + ", ".join(f"{k.removeprefix('pin_')}={v}" for k, v in _pins.items()), flush=True)
         _capture.install()
 
+    provenance = make_run_provenance(
+        {"benchmark": conf.model_dump(), "settings": vars(_settings.current()),
+         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "")}, benchmark_source_hash())
+    object.__setattr__(conf, "_benchmark_provenance", provenance)
     bench_args = [
         conf.target,
         f"n_layers={conf.n_layers}",
@@ -3423,6 +3766,8 @@ def main(cfg: DictConfig) -> None:
     ]
     if conf.compile:
         bench_args.append("compile")
+    if conf.layernorm_weight_precision is not None:
+        bench_args.append(f"affine-{conf.layernorm_weight_precision}")
     if conf.cudagraph != "disabled":
         bench_args.append(f"cudagraph-{conf.cudagraph}")
     # ...and in the NAME too, not just the column: the run name is the CSV filename, so without
@@ -3431,6 +3776,7 @@ def main(cfg: DictConfig) -> None:
     if _wrap != "disable":
         bench_args.append(f"wrap-{_wrap}")
     bench_args.append(conf.sweep_axis)
+    bench_args.append(f"cfg-{provenance['config_hash'][:8]}-src-{provenance['source_hash'][:8]}-run-{provenance['run_id'][:12]}")
     if conf.name_suffix:
         bench_args.append(conf.name_suffix)
     run_name = "_".join(bench_args)
@@ -3440,6 +3786,8 @@ def main(cfg: DictConfig) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
     csv_path = results_dir / f"{run_name}.csv"
     tmp_csv_path = csv_path.with_suffix(f"{csv_path.suffix}.tmp")
+    import json
+    csv_path.with_suffix(".run.json").write_text(json.dumps(provenance, indent=2, default=str))
     autotune_cache_records: dict[str, dict[tuple, triton.Config]] = {}
     autotune_single_config_records: dict[str, triton.Config] = {}
     seen_autotuners: set[str] = set()
@@ -3454,19 +3802,25 @@ def main(cfg: DictConfig) -> None:
             range(conf.min_d_pair, conf.max_d_pair + 1, conf.d_pair_step),
         )
         sweep_points = [(conf.sweep_seq_len, d_pair) for d_pair in d_pair_values]
+    if not sweep_points or not conf.implementations:
+        raise ValueError("benchmark request produced no measurements")
+    unsuccessful_rows = 0
     with tmp_csv_path.open("w", newline="", encoding="ascii") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for seq_len, d_pair in sweep_points:
             conf.d_pair = d_pair
             for implementation in conf.implementations:
+                torch.manual_seed(0)
                 torch._dynamo.reset()
                 torch.cuda.empty_cache()
                 status = "ok"
                 error = ""
                 try:
+                    require_source_identity(provenance["source_hash"])
                     with forward_stream(conf):
                         result = bench_func(conf, seq_len, implementation, fabric)
+                    require_source_identity(provenance["source_hash"])
                     capture_autotune_state(
                         conf.level,
                         conf.target,
@@ -3476,7 +3830,7 @@ def main(cfg: DictConfig) -> None:
                     )
                 except Exception as exc:
                     result = None
-                    status = "failed"
+                    status = "unsupported" if isinstance(exc, UnsupportedBenchmark) else "failed"
                     error = ascii_safe(f"{type(exc).__name__}: {exc}")
                 row = csv_row(
                     conf=conf,
@@ -3488,14 +3842,17 @@ def main(cfg: DictConfig) -> None:
                     status=status,
                     error=error,
                 )
+                unsuccessful_rows += int(row["status"] != "ok")
                 writer.writerow(row)
-                if result is None:
+                if row["status"] != "ok":
+                    error = row["error"]
                     print(
                         f"{conf.target} seq_len={seq_len} d_pair={d_pair} "
                         f"implementation={implementation} failed: {error}",
                         flush=True,
                     )
                 else:
+                    assert result is not None
                     print(
                         f"{conf.target} seq_len={seq_len} d_pair={d_pair} "
                         f"implementation={implementation} {conf.metric}={result.value:.6g} "
@@ -3540,6 +3897,8 @@ def main(cfg: DictConfig) -> None:
         (results_dir / f"{run_name}.ops").write_text("\n".join(sorted(_lo)) + "\n")
     if autotune_summary is None:
         print("\nNo Triton autotune configs were captured during this run.")
+        if unsuccessful_rows:
+            raise SystemExit(1)
         return
 
     print(f"\n{autotune_summary}")
@@ -3553,6 +3912,8 @@ def main(cfg: DictConfig) -> None:
         encoding="ascii",
     )
     print(f"wrote {summary_path}")
+    if unsuccessful_rows:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import math
 from pathlib import Path
 
 from miniworld_engine.autotune.cache import _scheme_stale as _scheme_stale
@@ -732,6 +733,31 @@ def _worker_compile_keyed(chunk: list) -> list:
     return [(k, *row) for k, row in zip(keys, rows, strict=False)]
 
 
+def _kill_compile_process_group(pid: int) -> None:
+    """Kill an unreaped compile child and its assembler descendants, then reap it.
+
+    Children call setsid before compiling, so their PID is also their private PGID.
+    Never use the caller's process group (which also contains pool workers). If the
+    deadline beats setsid, kill the child directly and retry its private group to
+    cover setsid racing with the first lookup. Reap only after both signals, so
+    the PID cannot be recycled between them.
+    """
+    import os
+    import signal
+
+    if pid <= 0 or pid in (os.getpid(), os.getpgrp()):
+        raise ValueError("expected an isolated compile child's PID")
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(pid, 0)
+
+
 def _compile_chunk(chunk: list) -> list:
     """Compile a CHUNK of configs in ONE forked child; returns ``(ok, seconds)`` per config.
 
@@ -758,7 +784,6 @@ def _compile_chunk(chunk: list) -> list:
     the two would produce different caches from the same inputs.
     """
     import os
-    import signal
     import time
 
     if not chunk:
@@ -781,6 +806,7 @@ def _compile_chunk(chunk: list) -> list:
     if pid == 0:
         os.close(rfd)
         try:
+            os.setsid()  # assembler children inherit this private group
             for payload, pre in zip(chunk, prefetched, strict=False):
                 try:
                     _compile_payload(payload, pre)
@@ -832,11 +858,7 @@ def _compile_chunk(chunk: list) -> list:
             # Stalled on the config right after the last byte. Kill, record it failed, and hand
             # the untouched remainder back for a fresh chunk -- one monster must not condemn 31
             # configs that were never attempted.
-            try:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-            except OSError:
-                pass
+            _kill_compile_process_group(pid)
             killed_at = len(results)
             break
         # Adaptive backoff: most compiles here are warm on-disk cache hits finishing in single-digit
@@ -1513,6 +1535,37 @@ def _entry_key(autotuner, meta, nargs=None) -> str:
     return "|".join(_entry_parts(autotuner, meta, nargs))
 
 
+def _prepare_workload(autotuner, measurement):
+    """Triton's in-process logical-key cache must not skip a new physical workload."""
+    if measurement is None:
+        return
+    from miniworld_engine.autotune.cache import workload_id
+    mid = workload_id(measurement)
+    if getattr(autotuner, "_miniworld_measurement_id", None) != mid:
+        winners = getattr(autotuner, "cache", None)
+        if winners is not None:
+            winners.clear()
+        autotuner._miniworld_measurement_id = mid
+
+
+def _measurement_slot(op, autotuner, meta, nargs, slot, key):
+    from miniworld_engine.autotune import cache
+    measurement = cache.measurement_workload(op, autotuner, nargs, meta)
+    if measurement is None:
+        return slot
+    mid = cache.workload_id(measurement)
+    return slot.setdefault("profiles", {}).setdefault((key, mid), {
+        "measurement": measurement, "entries": {}, "searched": {}})
+
+
+def _captured_entries(slot):
+    for key, ent in sorted(slot["entries"].items()):
+        yield key, ent, slot.get("searched", {}).get(key, set()), None
+    for (key, _mid), item in sorted(slot.get("profiles", {}).items()):
+        for ent in item["entries"].values():
+            yield key, ent, item["searched"].get(key, set()), item["measurement"]
+
+
 def _record_searched(autotuner, config, meta, nargs, op: str) -> None:
     """Note that this config was TIMED for this shape, whatever it scored.
 
@@ -1535,16 +1588,22 @@ def _record_searched(autotuner, config, meta, nargs, op: str) -> None:
     try:
         key = _entry_parts(autotuner, meta, nargs)
         slot = _CAPTURE.setdefault(op, {"grid": None, "op_id": "", "entries": {}, "searched": {}})
-        slot.setdefault("searched", {}).setdefault(key, set()).add(_sig(config))
+        destination = _measurement_slot(op, autotuner, meta, nargs, slot, key)
+        destination.setdefault("searched", {}).setdefault(key, set()).add(_sig(config))
     except Exception:   # accounting must never take a measurement down
         return
 
 
-def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=None) -> None:
+def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=None,
+                searched: bool = True) -> None:
     op = _op_name(autotuner)
     if not op:
         return
-    _record_searched(autotuner, config, meta, nargs, op)
+    if searched:
+        _record_searched(autotuner, config, meta, nargs, op)
+    elif not math.isfinite(ms):
+        # A prediction or a legacy infinity with no provenance is not an observed failure.
+        return
     # inf is how a FAILED config scores and must never be stored. NaN reaches here from exactly
     # one place and on purpose: an op with a single config runs no tuning loop, so the sole config
     # is the winner by default and there is no measurement to record (`unmeasured=True`). That is
@@ -1583,7 +1642,8 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
         # The autotuner is the ONLY place the kernel source and the key list are both reachable;
         # the writer runs long after it is gone, so snapshot the identity here.
         slot["op_id"] = op_identity(autotuner)
-    ent = slot["entries"].setdefault((dtype, bucket), {})
+    destination = _measurement_slot(op, autotuner, meta, nargs, slot, (dtype, bucket))
+    ent = destination["entries"].setdefault((dtype, bucket), {})
     sig = _sig(config)
     prev = ent.get(sig)
     if prev is None or ms < prev[1]:   # keep the fastest reading for this config
@@ -1597,6 +1657,53 @@ def _record_one(autotuner, config, meta, ms, *, unmeasured: bool = False, nargs=
 _SKIPPED: dict[str, int] = {}
 #: Off only for `build --rebuild-cached`, the deliberate "measure it all again" escape hatch.
 _INCREMENTAL = True
+_ROUND_CACHE_DIR = ""
+_REUSED_TIMINGS: dict[int, dict[str, float]] = {}
+_ROUND_OUTCOMES: dict[int, dict[str, str]] = {}
+_ROUND_RETRY: dict[int, set[str]] = {}
+
+
+class _PredictedSkip(RuntimeError):
+    """A config excluded by the model, before compilation or measurement."""
+
+
+def _fatal_cuda_error(exc: Exception) -> bool:
+    """A poisoned CUDA context cannot provide failures or timings for later candidates."""
+    message = str(exc).lower()
+    if "cuda" not in message:
+        return False
+    return any(reason in message for reason in (
+        "an illegal memory access was encountered", "device-side assert triggered",
+        "misaligned address", "unspecified launch failure", "an illegal instruction",
+        "cuda_error_illegal_address", "cuda_error_assert", "cuda_error_misaligned_address",
+        "cuda_error_launch_failed", "cuda_error_illegal_instruction"))
+
+
+def set_round_cache(directory: str) -> None:
+    global _ROUND_CACHE_DIR
+    _ROUND_CACHE_DIR = directory
+
+
+def _known_timings(autotuner, kwargs, nargs=None) -> dict[str, float]:
+    """Only reuse finite measurements belonging to this code, device and entry."""
+    import math
+
+    from miniworld_engine.autotune import cache
+
+    if not _INCREMENTAL:
+        return {}
+    op = _op_name(autotuner)
+    data = cache._load(op, gpu_key()) if op else None
+    if not op or not data or cache.measurement_mismatch(op, data, op_identity(autotuner)):
+        return {}
+    key = _entry_key(autotuner, kwargs, nargs)
+    measurement = cache.measurement_workload(op, autotuner, nargs, kwargs)
+    rows = data.get("entries", {}).get(key, [])
+    if measurement is not None:
+        rows = (cache.workload_record(data, key, measurement) or {}).get("entries", [])
+    return {repr(_sig_from_dict(c)): float(c["ms"])
+            for c in rows
+            if isinstance(c.get("ms"), (int, float)) and math.isfinite(c["ms"])}
 
 
 def set_incremental(on: bool) -> None:
@@ -1616,12 +1723,12 @@ def _skip_measured(autotuner, kwargs, pruned):
     Never returns empty. Triton's ``run`` does ``min(timings, key=timings.get)`` over whatever
     comes back, and an empty dict makes that a ``ValueError`` that takes the shard down -- so when
     there is genuinely nothing new to time, this hands back the single cheapest config the cache
-    already knows. One bench instead of a full grid IS the saving; zero benches is not available.
+    already knows. The patched bench returns its stored timing without measuring it again.
 
     Fails open on anything unexpected: measuring a config twice costs time, skipping one that was
     never measured costs a wrong winner, and only one of those is recoverable.
     """
-    if not _INCREMENTAL or len(pruned) <= 1:
+    if not _INCREMENTAL:
         return pruned
     try:
         op = _op_name(autotuner)
@@ -1631,17 +1738,26 @@ def _skip_measured(autotuner, kwargs, pruned):
         # Exactly the key `_record_one` will file the result under -- the same function, so the
         # two cannot drift.
         key = _entry_key(autotuner, kwargs)
+        from miniworld_engine.autotune import cache
+        measurement = cache.measurement_workload(op, autotuner, meta=kwargs)
         todo = configs_to_bench(op, gk, pruned, entry_key=key,
-                                op_id=op_identity(autotuner))
+                                op_id=op_identity(autotuner), measurement=measurement)
+        retry = _ROUND_RETRY.get(id(autotuner), set())
+        if retry:
+            wanted = {repr(_sig(c)) for c in todo} | retry
+            todo = [c for c in pruned if repr(_sig(c)) in wanted]
     except Exception:
         return pruned
-    if len(todo) == len(pruned):
+    known = {**_known_timings(autotuner, kwargs), **_REUSED_TIMINGS.get(id(autotuner), {})}
+    _REUSED_TIMINGS.setdefault(id(autotuner), {}).update(known)
+    fresh = [c for c in todo if repr(_sig(c)) not in known]
+    winners = [c for c in pruned if known.get(repr(_sig(c)), float("inf")) < float("inf")]
+    if not winners:
+        # Without a measured surviving winner, subtraction cannot select the best live config.
         return pruned
-    _SKIPPED[op] = _SKIPPED.get(op, 0) + (len(pruned) - len(todo))
-    if todo:
-        return todo
-    best = _cheapest_known(op, gk, key, pruned)
-    return best or pruned
+    best = min(winners, key=lambda c: known[repr(_sig(c))])
+    _SKIPPED[op] = _SKIPPED.get(op, 0) + len(pruned) - len(fresh)
+    return [*fresh, best]
 
 
 def _cheapest_known(op: str, gk: str, key: str, pruned: list) -> list:
@@ -1677,7 +1793,6 @@ def install() -> None:
     if _orig_bench is not None:
         return
     import os
-    import signal
     import time
 
     import triton.compiler as _tc
@@ -1707,11 +1822,11 @@ def install() -> None:
             name = getattr(getattr(src, "fn", None), "__name__", None)
             if name:
                 settled = f"{name}\t{_CURRENT.get('round', '')}\t{_sig_line(_CURRENT_CFG)}"
-        if settled is not None and settled in _PREDICTED_BAD:
+        if settled is not None and settled in _PREDICTED_BAD and _predict_enabled():
             # Not a measurement: a probe pass predicted this one cannot pay off. Raising here is
             # the same path a pool FAILURE takes -- _bench catches it and the config scores +inf.
             _COMPILE_T["predicted_bad"] += 1
-            raise RuntimeError("a probe pass ruled this config out; not compiled")
+            raise _PredictedSkip("a probe pass ruled this config out; not compiled")
         if settled is not None and settled in _COMPILE_BAD:
             _COMPILE_T["known_bad"] += 1
             raise RuntimeError("triton compile failed in the precompile pool; config skipped")
@@ -1727,6 +1842,7 @@ def install() -> None:
         pid = os.fork()
         if pid == 0:  # child: compile into the on-disk cache, no torch/CUDA touched, then exit
             try:
+                os.setsid()  # include assembler children in timeout cleanup
                 _orig_compile(*args, **kwargs)
                 os._exit(0)
             except BaseException:  # any failure -> parent treats config as unusable
@@ -1739,11 +1855,7 @@ def install() -> None:
             if w == pid:
                 break
             if time.monotonic() > deadline:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                    os.waitpid(pid, 0)
-                except OSError:
-                    pass
+                _kill_compile_process_group(pid)
                 raise RuntimeError(
                     f"triton compile exceeded {_COMPILE_BUDGET_S}s (register-spill config); skipped")
             # Adaptive backoff, not a flat 50ms. Almost every compile here is an on-disk cache
@@ -1795,6 +1907,17 @@ def install() -> None:
 
     def prune_configs(self, kwargs):
         pruned = _orig_prune(self, kwargs)
+        retry = _ROUND_RETRY.get(id(self), set())
+        if retry:
+            # fill_gaps may have reduced this round to the committed top-K before capture gets
+            # to see it. Recover only the unproven exclusions under verification; the original
+            # shape/resource prune still runs, and unrelated measured configs stay omitted.
+            from miniworld_engine.autotune import cache
+
+            with cache.without_cached_subset():
+                eligible = _orig_prune(self, kwargs)
+            retained = {repr(_sig(c)) for c in pruned} | retry
+            pruned = [c for c in eligible if repr(_sig(c)) in retained]
         # Incremental: drop the configs this card has ALREADY measured for this exact
         # (dtype, bucket). `config_space` used to be recorded per FILE while this hook runs per
         # bucket, so subtracting it handed a never-measured bucket the delta and called it tuned
@@ -1821,6 +1944,20 @@ def install() -> None:
     _orig_bench = Autotuner._bench
 
     def _bench(self, *args, config, **meta):
+        known = _REUSED_TIMINGS.get(id(self), {})
+        sig = repr(_sig(config))
+        if _INCREMENTAL and sig in known:
+            ms = known[sig]
+            observed = (math.isfinite(ms)
+                        or _ROUND_OUTCOMES.get(id(self), {}).get(sig) == "observed_failure")
+            _record_one(self, config, meta, ms, searched=observed)
+            if id(self) in _ROUND_LEFT:
+                _ROUND_LEFT[id(self)] -= 1
+                if _ROUND_LEFT[id(self)] <= 0:
+                    del _ROUND_LEFT[id(self)]
+                    _ROUND.pop(id(self), None)
+                    _bench_lock_release()
+            return [ms, ms, ms]
         # Tell the compile hook which round it is servicing: the first config that actually
         # compiles triggers the fan-out for the whole round.
         previous = _CURRENT.get("id")
@@ -1837,9 +1974,17 @@ def install() -> None:
         _CURRENT_CFG["num_warps"] = config.num_warps
         _CURRENT_CFG["num_stages"] = config.num_stages
         _t_bench = time.monotonic()
+        predicted = False
         try:
             res = _orig_bench(self, *args, config=config, **meta)
-        except Exception:  # a config that fails to compile/run simply loses
+        except _PredictedSkip:
+            predicted = True
+            res = [float("inf")] * 3
+        except Exception as exc:  # a recoverable config failure simply loses
+            if _fatal_cuda_error(exc):
+                # Do not turn a poisoned context into hundreds of permanent observed failures.
+                # Escaping the round transaction preserves its previous file and provenance.
+                raise
             # Match triton's own sentinel SHAPE, not just its value: do_bench(quantiles=...) hands
             # back [median, q20, q80], and triton returns [inf, inf, inf] for a config it could not
             # build. Returning a bare float mixes scalars and lists in the timings dict, and the
@@ -1861,8 +2006,16 @@ def install() -> None:
                 else:
                     _ROUND_LEFT[id(self)] = left
         med = _median(res)
+        _REUSED_TIMINGS.setdefault(id(self), {})[sig] = med
+        outcomes = _ROUND_OUTCOMES.setdefault(id(self), {})
+        if predicted:
+            outcomes[sig] = "predicted_skip"
+        elif math.isinf(med):
+            outcomes[sig] = "observed_failure"
+        else:
+            outcomes.pop(sig, None)
         try:
-            _record_one(self, config, meta, med)
+            _record_one(self, config, meta, med, searched=not predicted)
         except Exception as exc:  # capture must never perturb a real bench
             # ...but it must not fail SILENTLY either. Swallowing without a word is how a
             # recorder that raised on every single call produced an empty shard from a build
@@ -1881,7 +2034,7 @@ def install() -> None:
     if _orig_run is None:
         _orig_run = Autotuner.run
 
-    def run(self, *args, **kwargs):
+    def run_unlocked(self, *args, **kwargs):
         # triton gates its whole tuning path on len(configs) > 1, so a pinned single config never
         # reaches prune_configs -- which is where a round is armed for the compile hook. Arm it
         # here instead, or the one compile that matters runs serially in-process with no timeout.
@@ -1908,8 +2061,9 @@ def install() -> None:
                 _CURRENT["round"] = previous_round
         cfgs = getattr(self, "configs", None) or []
         if len(cfgs) == 1:
-            mark = (id(self), tuple(sorted((k, str(v)) for k, v in kwargs.items()
-                                           if isinstance(v, (int, float, str, bool)))))
+            mark = (id(self), getattr(self, "_miniworld_measurement_id", None),
+                    tuple(sorted((k, str(v)) for k, v in kwargs.items()
+                                 if isinstance(v, (int, float, str, bool)))))
             if mark not in _SINGLE_SEEN:
                 _SINGLE_SEEN.add(mark)
                 try:
@@ -1918,6 +2072,52 @@ def install() -> None:
                 except Exception as exc:  # must not perturb a real run
                     _record_failed(exc)
         return out
+
+    def run(self, *args, **kwargs):
+        from miniworld_engine.autotune import cache, round_cache
+
+        op = _op_name(self)
+        if not op:
+            return run_unlocked(self, *args, **kwargs)
+        nargs = dict(zip(getattr(self, "arg_names", ()) or (), args, strict=False))
+        key = _entry_key(self, kwargs, nargs)
+        identity = (gpu_key(), op, op_identity(self), cache.env_identity(),
+                    cache.KEY_SCHEME, cache.build_rev(op), key)
+        measurement = cache.measurement_workload(op, self, nargs, kwargs)
+        if measurement is not None:
+            identity += (cache.workload_id(measurement),)
+            _prepare_workload(self, measurement)
+        outcomes: dict[str, str] = {}
+        with round_cache.transaction(_ROUND_CACHE_DIR, identity, outcomes=outcomes) as shared:
+            previous = _REUSED_TIMINGS.get(id(self))
+            previous_outcomes = _ROUND_OUTCOMES.get(id(self))
+            previous_retry = _ROUND_RETRY.get(id(self))
+            reused, retry = round_cache.reusable_timings(shared, outcomes,
+                                                         predict=_predict_enabled())
+            # A stored finite winner must not be displaced by an old unproven infinity.
+            known = _known_timings(self, kwargs, nargs)
+            _REUSED_TIMINGS[id(self)] = {
+                **(reused if _INCREMENTAL else {}), **known}
+            _ROUND_OUTCOMES[id(self)] = outcomes
+            _ROUND_RETRY[id(self)] = retry if _INCREMENTAL else set()
+            for config in self.configs:
+                sig = repr(_sig(config))
+                ms = _REUSED_TIMINGS[id(self)].get(sig)
+                if ms is not None and (math.isfinite(ms)
+                                       or outcomes.get(sig) == "observed_failure"):
+                    _record_searched(self, config, kwargs, nargs, op)
+            try:
+                return run_unlocked(self, *args, **kwargs)
+            finally:
+                shared.update(_REUSED_TIMINGS.pop(id(self), {}))
+                _ROUND_OUTCOMES.pop(id(self), None)
+                _ROUND_RETRY.pop(id(self), None)
+                if previous is not None:
+                    _REUSED_TIMINGS[id(self)] = previous
+                if previous_outcomes is not None:
+                    _ROUND_OUTCOMES[id(self)] = previous_outcomes
+                if previous_retry is not None:
+                    _ROUND_RETRY[id(self)] = previous_retry
 
     Autotuner.run = run
 
@@ -1970,10 +2170,12 @@ def flush(top_k: int = 5, gpu: str | None = None) -> list:
         if not grid:
             continue
         csh = config_space_hash(grid)
-        for (dtype, bucket), ent in sorted(slot["entries"].items()):
+        for (dtype, bucket), ent, searched, measurement in _captured_entries(slot):
             ranked = _rank(ent.values())
             fp = store_ranked_configs(op, gk, dtype, bucket, ranked, csh, top_k=top_k,
-                                      op_id=slot.get("op_id", ""))
+                                      op_id=slot.get("op_id", ""), configs=grid,
+                                      entry_configs=[c for c in grid if _sig(c) in
+                                                     searched], measurement=measurement)
             written.append((op, dtype, bucket, len(ranked), str(fp)))
     return written
 
@@ -1997,7 +2199,10 @@ def dump_shard(path: str) -> int:
     # 1,163 shards cost ~0.5 s each to open on this shared filesystem, which is 35 minutes of a
     # build doing nothing. The data is 0.3 GB; the cost is per-file latency, so the fix is to read
     # fewer files rather than to parse them faster.
-    out: dict = {"_key_scheme": KEY_SCHEME, "_has_entries": False}
+    from miniworld_engine.autotune.shard import provenance
+
+    out: dict = {"_key_scheme": KEY_SCHEME, "_has_entries": False,
+                 "_provenance": provenance(gpu_key())}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]
@@ -2008,8 +2213,20 @@ def dump_shard(path: str) -> int:
         by_sig = {_sig(c): c for c in grid}
         searched = {f"{d}|{b}": [config_to_dict(by_sig[g]) for g in sigs if g in by_sig]
                     for (d, b), sigs in (slot.get("searched") or {}).items()}
+        measurements = {}
+        for (d, b), ent, measured, measurement in _captured_entries(slot):
+            if measurement is None:
+                continue
+            from miniworld_engine.autotune.cache import workload_id
+            bk = f"{d}|{b}"
+            rows = [config_to_dict(c, ms) for c, ms in ent.values()]
+            measurements.setdefault(bk, {})[workload_id(measurement)] = {
+                "workload": measurement, "entries": rows,
+                "searched": [config_to_dict(by_sig[g]) for g in measured if g in by_sig]}
+            entries.setdefault(bk, []).extend(rows)
         out[op] = {"grid": [config_to_dict(c) for c in grid], "entries": entries,
-                   "searched": searched, "op_id": slot.get("op_id", "")}
+                   "searched": searched, "op_id": slot.get("op_id", ""),
+                   "measurements": measurements}
     out["_has_entries"] = any(
         isinstance(v, dict) and v.get("entries") for k, v in out.items() if not k.startswith("_"))
     p = Path(path)
@@ -2030,6 +2247,21 @@ _MERGE_SKIPPED: list = []
 
 
 def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=None) -> list:
+    """Serialize publishers from separate build jobs so their read/merge/write cannot race."""
+    import fcntl
+
+    from miniworld_engine.autotune import cache
+
+    cache._CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    with (cache._CACHE_ROOT / ".merge.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return _merge_shards_unlocked(shard_paths, top_k, gpu, only_ops)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _merge_shards_unlocked(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=None) -> list:
     """Fold shard files (from ``dump_shard``) into the in-repo cache as the SOLE writer.
 
     Unions buckets across shards, keeping the fastest reading per config. ``only_ops`` (a set)
@@ -2039,6 +2271,9 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
     gk = gpu or gpu_key()
     _MERGE_SKIPPED.clear()
     agg: dict = {}
+    identities: dict[str, str | None] = {}
+    from miniworld_engine.autotune.cache_status import _current_op_identity
+
     for sp in shard_paths:
         try:
             d = json.loads(Path(sp).read_text())
@@ -2046,6 +2281,12 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
             # Never silent: a dropped shard is a whole unit's measurement missing from the cache,
             # and it used to look identical to a unit that was never run.
             _MERGE_SKIPPED.append((str(sp), f"{type(exc).__name__}: {exc}"))
+            continue
+        from miniworld_engine.autotune.shard import provenance_error
+
+        reason = provenance_error(d, gk)
+        if reason is not None:
+            _MERGE_SKIPPED.append((str(sp), reason))
             continue
         shard_scheme = d.get("_key_scheme")
         for op, slot in d.items():
@@ -2061,8 +2302,26 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
                     (f"{sp}::{op}", f"key scheme {shard_scheme} predates the bump that re-based "
                                     f"this op's buckets"))
                 continue
-            a = agg.setdefault(op, {"grid": {}, "entries": {}, "op_id": "", "searched": {}})
-            a["op_id"] = a["op_id"] or (slot.get("op_id") or "")
+            if not isinstance(slot, dict):
+                _MERGE_SKIPPED.append((f"{sp}::{op}", "invalid op measurement record"))
+                continue
+            if not slot.get("entries") and not slot.get("measurements"):
+                continue
+            if op not in identities:
+                identities[op] = _current_op_identity(op)
+            current_id = identities[op]
+            recorded_id = slot.get("op_id")
+            if not current_id or recorded_id != current_id:
+                reason = ("cannot resolve current kernel source/key identity" if not current_id else
+                          f"kernel source/key identity mismatch: measured {recorded_id!r}, "
+                          f"current {current_id!r}; remeasure this op")
+                _MERGE_SKIPPED.append((f"{sp}::{op}", reason))
+                continue
+            # GPU/compiler provenance alone cannot separate two kernel revisions
+            # measured into the same shard directory. Admit only current-source
+            # timings before combining grids or choosing the fastest config.
+            a = agg.setdefault(op, {"grid": {}, "entries": {}, "op_id": current_id,
+                                    "searched": {}})
             # UNION the grids, do not take the first shard's. Shards that split by SHAPE all carry
             # the same full grid, so taking one was harmless. Shards that split the CONFIG SET
             # carry DIFFERENT slices, and then the first shard's slice hashes to something no later
@@ -2072,6 +2331,19 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
             for cd in slot.get("grid", []):
                 a["grid"].setdefault(_sig_from_dict(cd), cd)
             for bk, lst in slot.get("entries", {}).items():
+                profiles = slot.get("measurements", {}).get(bk)
+                if profiles:
+                    for mid, item in profiles.items():
+                        dest = a.setdefault("profiles", {}).setdefault((bk, mid), {
+                            "measurement": item["workload"], "entries": {}, "searched": {}})
+                        dest["searched"].update({_sig_from_dict(c): c for c in item["searched"]})
+                        for c in item["entries"]:
+                            sig = _sig_from_dict(c)
+                            ms = float(c.get("ms", float("inf")))
+                            prev = dest["entries"].get(sig)
+                            if prev is None or ms < prev[1] or prev[1] != prev[1]:
+                                dest["entries"][sig] = (c, ms)
+                    continue
                 # The space THIS shard searched for THIS bucket, which is the shard's own grid --
                 # not the union above. A bucket measured by a shard whose grid held one config is
                 # not a bucket that has seen the three the union holds, and recording the union
@@ -2108,13 +2380,22 @@ def merge_shards(shard_paths, top_k: int = 5, gpu: str | None = None, only_ops=N
                                       op_id=a.get("op_id", ""), configs=grid,
                                       entry_configs=searched)
             written.append((op, bk, len(ranked), str(fp)))
+        for (bk, _mid), item in sorted(a.get("profiles", {}).items()):
+            dtype, bucket = bk.split("|", 1)
+            ranked = _rank(item["entries"].values())
+            fp = store_ranked_configs(op, gk, dtype, bucket, ranked, csh, top_k=top_k,
+                                     op_id=a.get("op_id", ""), configs=grid,
+                                     entry_configs=list(item["searched"].values()),
+                                     measurement=item["measurement"])
+            written.append((op, bk, len(ranked), str(fp)))
     return written
 
 
 def summary() -> str:
     lines = []
     for op, slot in sorted(_CAPTURE.items()):
-        n_buckets = len(slot["entries"])
+        captured = list(_captured_entries(slot))
+        n_buckets = len(captured)
         n_grid = len(slot["grid"] or [])
         bad = _UNUSABLE.get(op, 0)
         # "unusable" is stated even when 0: a reader has to be able to tell "nothing was dropped"
@@ -2122,7 +2403,7 @@ def summary() -> str:
         lines.append(f"  {op}: grid={n_grid} buckets={n_buckets} unusable={bad}"
                      + (f" ({bad * 100 // max(n_grid * n_buckets, 1)}% of the searched space "
                         f"could not run on this card)" if bad else ""))
-        for (dtype, bucket), ent in sorted(slot["entries"].items()):
+        for (dtype, bucket), ent, _searched, _measurement in captured:
             best = min(ent.values(), key=lambda cm: cm[1]) if ent else None
             tag = f"{dtype}|{bucket}"
             if best:

@@ -37,8 +37,11 @@ implementations:
   - all
 mode: inference        # inference | training
 metric: time           # time | memory
-compile: true
-cudagraph: disabled    # disabled | manual (bucketed capture) | graphed (make_graphed_callables, pad-to-max)
+# Backward over a prebuilt eager graph: compile=True is explicitly unsupported.
+compile: false
+cudagraph: manual    # disabled | manual (bucketed capture) | graphed (make_graphed_callables, pad-to-max)
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""
+dropout: auto
+trimul_direction: outgoing

@@ -2,6 +2,10 @@
 vs cuequiv, through TriangleMultiplication. Honest: eager cos/relmean/maxabs vs fp32
 ref + graph time with replay-cos check."""
 from __future__ import annotations
+if __name__ == "__main__":
+    raise SystemExit("RETIRED benchmark: MINIWORLD_TRIMUL_CUEQUIV_FREE no longer selects "
+                     "different implementations, so free/old-cute is not a valid comparison. "
+                     "Use benchmarks/runners/bench.py instead.")
 import sys, os
 from pathlib import Path
 sys.path.insert(0, "/home/snu_hwle/psk/miniworld-engine/src")
@@ -61,6 +65,7 @@ def graph_time(fn):
     return bench(lambda: g.replay()), cos
 
 def main():
+    raise RuntimeError("RETIRED: the free/old-cute selector was removed; use the official bench.py")
     Ls=[int(x) for x in os.environ.get("LS","384,768,1024").split(",")]
     D=int(os.environ.get("D","128"))
     for L in Ls:

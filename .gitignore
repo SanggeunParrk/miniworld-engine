@@ -110,3 +110,6 @@ benchmarks/*/*/results/*/plots/
 # login node's scratchpad, so a script srun has to read must sit on a shared path.
 bands_*.json
 .scratch/
+
+# Cache merge synchronization; contents are runtime state.
+src/miniworld_engine/autotune/data/.merge.lock

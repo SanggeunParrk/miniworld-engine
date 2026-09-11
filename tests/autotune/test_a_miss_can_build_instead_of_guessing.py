@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from miniworld_engine import settings
-from miniworld_engine.autotune import cache
+from miniworld_engine.autotune import cache, capture
 
 
 class _Cfg:
@@ -29,12 +29,15 @@ class _Cfg:
 
 @pytest.fixture(autouse=True)
 def _clean():
+    capture_was_installed = capture._orig_bench is not None
     cache._WARNED.clear() if hasattr(cache, "_WARNED") else None
     prev = settings.configure()
     cache._ON_MISS_ARMED = False
     yield
     settings.configure(**{f: getattr(prev, f) for f in prev.__dataclass_fields__}) \
         if hasattr(prev, "__dataclass_fields__") else settings.configure()
+    if not capture_was_installed:
+        capture.uninstall()
     cache._ON_MISS_ARMED = False
 
 
@@ -45,7 +48,8 @@ def _miss(configs):
 def test_by_default_a_miss_is_bounded_and_forgotten() -> None:
     """The shipped behaviour: a small search, and nothing written."""
     got = _miss([_Cfg(BLOCK_M1=b) for b in range(64)])
-    assert got is not None and len(got) == settings.current().autotune_miss_cap
+    assert got is not None
+    assert len(got) == settings.current().autotune_miss_cap
     assert not cache._ON_MISS_ARMED, "nothing should have been armed"
 
 

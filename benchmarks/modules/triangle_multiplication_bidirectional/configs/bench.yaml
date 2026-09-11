@@ -8,7 +8,8 @@ d_single_atom: 128
 d_pair_atom: 16
 
 n_layers: 1
-n_augment: 48
+trimul_direction: outgoing  # single-direction: outgoing | incoming | alternating
+n_augment: auto  # inference: 5; training: 48
 mask_prob: 0.0
 min_seq_len: 384
 max_seq_len: 1024
@@ -31,16 +32,19 @@ sweep_seq_len: 384
 # namespace: `triangle_attention` exists at both levels).
 target: triangle_multiplication_bidirectional
 level: module
+# cuEquivariance composition shares the same 2h output LayerNorm as MiniWorld.
 implementations:
   - pytorch
+  - cuequivariance
   - miniworld
 # miniworld auto-routes to the triton path on A100 (sm_80) and the cute path on Hopper+
 # (see modules/dispatch.py). TriangleMultiplication also accepts, explicitly:
 #   triton | dtv1 | triton_pytorch_ln | triton_ln | cute
 mode: inference        # inference | training
+dropout: auto  # training: 0.25; inference: 0
 metric: time           # time | memory
 compile: true
-cudagraph: disabled
+cudagraph: auto  # inference: manual graph; training: disabled
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""

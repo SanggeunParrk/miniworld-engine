@@ -21,6 +21,7 @@ dependencies = [
   "einops",
   "jaxtyping",
   "numpy",
+  "scipy",  # module parameter initialization uses scipy.stats.truncnorm
 ]
 
 [project.optional-dependencies]
@@ -35,7 +36,7 @@ dependencies = [
 cute = ["nvidia-cutlass-dsl==4.5.2", "quack-kernels==0.5.0"]
 # Comparison baselines only (CUEQUIVARIANCE impl path + reference helpers).
 # NOT required to use the miniworld kernels.
-baselines = ["cuequivariance-torch>=0.9,<0.10", "scipy"]
+baselines = ["cuequivariance-torch>=0.9,<0.10"]
 # Benchmark harness (benchmarks/runners/bench.py, team-gm hydra style) + plots.
 bench = ["hydra-core", "lightning", "omegaconf", "pydantic", "matplotlib"]
 # Dev: tests, lint, static typing. `ty`, not pyright -- pyright cannot parse jaxtyping shape
@@ -68,7 +69,7 @@ where = ["src"]
 # directory of a package that IS found -- so a kernel family's optimization log shipped in the
 # wheel (20 files) until this excluded it. The log is a record of how a kernel got here; a
 # consumer installs the kernel, not its history.
-exclude = ["*.notes", "*.notes.*"]
+exclude = ["*.notes", "*.notes.*", "*.autotune.plans", "*.autotune.plans.*"]
 
 [tool.setuptools.package-data]
 # Ship the non-.py assets the RUNTIME needs in a non-editable (pip / wheel) install. Editable
@@ -97,7 +98,8 @@ miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", 
 # from a parent package's tree. tests/layout/test_notes_stay_out_of_the_wheel.py checks the result.
 
 [tool.setuptools.exclude-package-data]
-miniworld_engine = ["kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
+miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebuilt in user cache
+                    "kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
                     # The A/B config sets. `grid` is the default and ships; accuracy/blk*/
                     # warp*/mixed* exist to compare tilings during a sweep and a consumer
                     # never selects one, so 819 CSVs stay out of the wheel.
@@ -351,7 +353,7 @@ python-version = "3.10"
 # into `src/miniworld_engine/build`, leaving a sentence that stops mid-clause and one unresolved
 # import that made `ty check` non-empty -- which is what a gate documented as "runs clean, so a
 # new finding fails the build" cannot afford: a standing finding hides the next real one.
-extra-paths = ["benchmarks/runners"]
+extra-paths = ["benchmarks/runners", "tests", "tests/layout"]
 
 # ----------------------------------------------------------------------------
 # pixi — single unified environment for the whole repo (triton + Transformer

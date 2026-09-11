@@ -167,6 +167,8 @@ OP_FAMILIES = (
     "rmsnorm",
     "rope",           # covers rmsnorm_adamod_* too: same prefix
     "swa_atom_attention",
+    "qk_norm_rope",    # paired RMSNorm/RoPE preprocessing, distinct from standalone rope
+    "swa_gate_out",    # SWA-specific row-keyed gated output projection
     "tm1",
     "tm2",
     "transition",

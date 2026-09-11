@@ -1549,7 +1549,7 @@ def _fused_bwd(
             # transition_b2b_sm100_ln); a torch stats-formula recompute is ~15x slower
             # (fp32 intermediates + many passes).
             from miniworld_engine.kernels.layernorm.interface import layernorm_kernel
-            xn = layernorm_kernel(x2, ln_weight, ln_bias, eps)
+            xn = layernorm_kernel(x2.reshape(orig_shape), ln_weight, ln_bias, eps).reshape_as(x2)
             h, dA, dB = transition_expand_gatebwd_sm100(
                 xn, expand_a_weight.contiguous(), expand_b_weight.contiguous(),
                 grad_expand, shape_key=shape_key,

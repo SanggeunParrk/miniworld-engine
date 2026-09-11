@@ -10,7 +10,7 @@
 원칙: **이름은 그 커널이 계산하는 것을 말한다.** 파일이 어디 있는지, 어느 경로가 부르는지,
 누가 먼저 썼는지는 이름이 아니다.
 
-## 1. `<func>` — 맨 앞. 이 커널이 구현하는 연산 (13개)
+## 1. `<func>` — 맨 앞. 이 커널이 구현하는 연산
 
     layernorm            LN 통계 리덕션을 커널 안에서 수행하는 LayerNorm 계열
     layernorm_linear     LN + Linear GEMM을 한 커널에서 수행
@@ -20,6 +20,8 @@
     trimul               TriangleMultiplication in-projection 스테이지
     trimul_outproj       TriangleMultiplication out 스테이지 (LN + 게이티드 출력 투영)
     triangle_attention   Triangle Attention
+    qk_norm_rope         Fused Q/K RMSNorm and rotary preprocessing
+    swa_gate_out         SWA sigmoid gate multiplication with output projection
     rope                 Rotary position embedding (3D-RoPE for the SWA atom block)
     augmented_attention  Augmented (atom) Attention
     bias_only_attention  Bias-only Attention

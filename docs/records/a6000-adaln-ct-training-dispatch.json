@@ -1,0 +1,4313 @@
+{
+  "records": {
+    "adaptive_layernorm-fwd_cublas": {
+      "target": "adaptive_layernorm",
+      "implementation": "miniworld",
+      "diagnostic_variant": "fwd_cublas",
+      "gpu_name": "NVIDIA RTX A6000",
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 1.2759040594100952,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.adaln.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        },
+        {
+          "value": 1.2789759635925293,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.adaln.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        },
+        {
+          "value": 1.2789759635925293,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.adaln.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        }
+      ],
+      "gpu": [
+        {
+          "name": "_bwd_x_kernel",
+          "ms": 0.24131899999999973,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_tn",
+          "ms": 0.24050589999999977,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8::Params)",
+          "ms": 0.22286130000000004,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_epilogue_train_kernel",
+          "ms": 0.1975814000000002,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+          "ms": 0.180567,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_bwd_kernel",
+          "ms": 0.08056350000000012,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_slice_sum_0",
+          "ms": 0.0411326,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_mat_kernel",
+          "ms": 0.040467400000000014,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms": 0.008009600000000183,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_cat_1",
+          "ms": 0.004691199999999844,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "ms": 0.0028958999999998468,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused__to_copy_1",
+          "ms": 0.001593600000000106,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_layernorm_linear_materialize_new_zeros_view_0",
+          "ms": 0.0012609000000002198,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_sum_ms": 1.2634493,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ]
+          ],
+          "device_ms": 0.4845068000000001,
+          "cpu_ms": 0.5167796000000002,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_materialize",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              384
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.04046740000000002,
+          "cpu_ms": 0.10878609999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ]
+          ],
+          "device_ms": 0.24050589999999977,
+          "cpu_ms": 0.025810999999999966,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_epilogue_train",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              1536
+            ],
+            [],
+            [
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.1975814000000002,
+          "cpu_ms": 0.09388879999999963,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 0.7789425000000001,
+          "cpu_ms": 0.5010575000000002,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 0.7789425000000001,
+          "cpu_ms": 0.4896220000000001,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_bwd_x",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.24131899999999976,
+          "cpu_ms": 0.10925939999999987,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              1536,
+              384
+            ]
+          ],
+          "device_ms": 0.2308709000000002,
+          "cpu_ms": 0.036693999999999734,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.180567,
+          "cpu_ms": 0.01460159999999978,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_bwd_mmajor",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.08345939999999996,
+          "cpu_ms": 0.1307184999999999,
+          "calls": 1.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "adaptive_layernorm",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 1.2789759635925293
+    },
+    "adaptive_layernorm-miniworld": {
+      "target": "adaptive_layernorm",
+      "implementation": "miniworld",
+      "gpu": [
+        {
+          "name": "_adaln_fwd_gate_kernel",
+          "ms": 0.7198119000000001,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_bwd_x_kernel",
+          "ms": 0.24048319999999956,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8::Params)",
+          "ms": 0.22434899999999983,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+          "ms": 0.1819232000000001,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_bwd_kernel",
+          "ms": 0.08082869999999966,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_stats_kernel",
+          "ms": 0.04467210000000004,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_slice_sum_0",
+          "ms": 0.04116159999999999,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_mat_kernel",
+          "ms": 0.04047669999999987,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms": 0.008019200000000273,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_adaln_fwd_gate_clone_t_view_1",
+          "ms": 0.00541449999999984,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused_cat_1",
+          "ms": 0.0030689999999999147,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "ms": 0.002934200000000555,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused_div_2",
+          "ms": 0.002118400000000156,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__to_copy_2",
+          "ms": 0.0015933999999998378,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_layernorm_linear_materialize_new_zeros_view_0",
+          "ms": 0.0012767000000000277,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 1.6128000020980835,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.adaln.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        },
+        {
+          "value": 1.6138240098953247,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.adaln.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        },
+        {
+          "value": 1.6117759943008423,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.adaln.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        }
+      ],
+      "gpu_sum_ms": 1.5981317999999998,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ]
+          ],
+          "device_ms": 0.8137703000000001,
+          "cpu_ms": 0.6087200999999999,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_materialize",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              384
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.04047669999999987,
+          "cpu_ms": 0.10976450000000001,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_stats",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.04467210000000005,
+          "cpu_ms": 0.0696315,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_fwd_gate",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              768
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            []
+          ],
+          "device_ms": 0.7198119000000001,
+          "cpu_ms": 0.08464089999999964,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 0.7843614999999998,
+          "cpu_ms": 0.7129322999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 0.7843614999999998,
+          "cpu_ms": 0.6944157000000002,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_bwd_x",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.2404831999999996,
+          "cpu_ms": 0.16903489999999988,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              1536,
+              384
+            ]
+          ],
+          "device_ms": 0.2323682000000001,
+          "cpu_ms": 0.041265300000000345,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.1819232000000001,
+          "cpu_ms": 0.015085899999999855,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_bwd_mmajor",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.08376290000000022,
+          "cpu_ms": 0.15183900000000009,
+          "calls": 1.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "adaptive_layernorm",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 1.6128000020980835
+    },
+    "adaptive_layernorm-pytorch": {
+      "target": "adaptive_layernorm",
+      "implementation": "pytorch",
+      "gpu": [
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_nt",
+          "ms": 0.20727390000000032,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms": 0.2038336999999996,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_per_fused_mul_native_layer_norm_native_layer_norm_backward_sigmoid_sigmoid_backward_view_0",
+          "ms": 0.19851850000000004,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused__unsafe_view_add_mul_native_layer_norm_sigmoid_view_1",
+          "ms": 0.1549150000000002,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+          "ms": 0.13406730000000053,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "ms": 0.11571839999999997,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused_add_native_layer_norm_native_layer_norm_backward_view_1",
+          "ms": 0.08355509999999972,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_mul_native_layer_norm_sigmoid_sigmoid_backward_sum_view_3",
+          "ms": 0.0421568000000003,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused_native_layer_norm_0",
+          "ms": 0.03847679999999978,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+          "ms": 0.009152100000000062,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_mul_native_layer_norm_sigmoid_sigmoid_backward_sum_view_4",
+          "ms": 0.0017760000000003853,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_native_layer_norm_backward_2",
+          "ms": 0.0014113000000001194,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "Memset (Device)",
+          "ms": 0.0013308999999999294,
+          "calls": 3.0000000000000013
+        }
+      ],
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 1.2349439859390259,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        },
+        {
+          "value": 1.2113920450210571,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        },
+        {
+          "value": 1.2113920450210571,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 7}"
+        }
+      ],
+      "gpu_sum_ms": 1.192185800000001,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.44317750000000045,
+          "cpu_ms": 0.4025864999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.11571839999999996,
+          "cpu_ms": 0.03351710000000078,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              768
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [],
+            [],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.13406730000000053,
+          "cpu_ms": 0.026330400000000302,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 0.7490083000000004,
+          "cpu_ms": 1.8692934000000005,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 0.7490083000000004,
+          "cpu_ms": 1.8510208999999995,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.20383369999999953,
+          "cpu_ms": 0.06927840000000027,
+          "calls": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.20815369999999986,
+          "cpu_ms": 0.04915219999999954,
+          "calls": 2.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "adaptive_layernorm",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 1.2113920450210571
+    },
+    "conditioned_transition-ada_pytorch": {
+      "target": "conditioned_transition",
+      "implementation": "miniworld",
+      "diagnostic_variant": "ada_pytorch",
+      "gpu_name": "NVIDIA RTX A6000",
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 5.772287845611572,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 5.766143798828125,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 5.766655921936035,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        }
+      ],
+      "gpu": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8::Params)",
+          "ms": 0.8062314000000006,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_tn",
+          "ms": 0.7428202999999998,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8::Params)",
+          "ms": 0.6961898999999993,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+          "ms": 0.6416165999999996,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "_dh_swiglu_bwd_kernel",
+          "ms": 0.4954693999999984,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8::Params)",
+          "ms": 0.33649010000000024,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_nt",
+          "ms": 0.327667400000001,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms": 0.31247049999999876,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "_swiglu_fwd_kernel",
+          "ms": 0.2356419999999995,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_sigmul_bwd",
+          "ms": 0.19831720000000144,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused_mul_native_layer_norm_native_layer_norm_backward_sigmoid_sigmoid_backward_view_2",
+          "ms": 0.19816010000000095,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused__unsafe_view_add_mul_native_layer_norm_sigmoid_view_1",
+          "ms": 0.15494110000000072,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_sigmul_fwd",
+          "ms": 0.11778589999999936,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "ms": 0.11772820000000117,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused_add_native_layer_norm_native_layer_norm_backward_view_3",
+          "ms": 0.09811529999999893,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_sum_0",
+          "ms": 0.075917200000001,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_per_fused_native_layer_norm_0",
+          "ms": 0.03876470000000026,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_cat_2",
+          "ms": 0.014444700000000603,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+          "ms": 0.009795300000001499,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "Memset (Device)",
+          "ms": 0.00653749999999832,
+          "calls": 5.999999999999995
+        },
+        {
+          "name": "triton_red_fused_sum_1",
+          "ms": 0.004217499999999882,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused_native_layer_norm_backward_4",
+          "ms": 0.0014752000000014052,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_sum_ms": 5.630797500000003,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ]
+          ],
+          "device_ms": 2.063743500000001,
+          "cpu_ms": 0.6441992,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.11772820000000117,
+          "cpu_ms": 0.02732849999999985,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              768
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [],
+            [],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.27313639999999995,
+          "cpu_ms": 0.03461909999999978,
+          "calls": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              3072
+            ],
+            [
+              18432,
+              3072
+            ]
+          ],
+          "device_ms": 0.7428202999999998,
+          "cpu_ms": 0.014510200000000237,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_swiglu_fwd",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            []
+          ],
+          "device_ms": 0.23564199999999946,
+          "cpu_ms": 0.10188230000000058,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.3684801999999998,
+          "cpu_ms": 0.013993900000000009,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_gate_fwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.11778589999999936,
+          "cpu_ms": 0.06148530000000019,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 3.5670540000000015,
+          "cpu_ms": 0.8793142999999999,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 3.5670540000000015,
+          "cpu_ms": 0.8594603999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_gate_bwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.19831720000000147,
+          "cpu_ms": 0.1334988999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.31247049999999876,
+          "cpu_ms": 0.05086899999999996,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.3309311999999998,
+          "cpu_ms": 0.04101850000000004,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              768,
+              1536
+            ]
+          ],
+          "device_ms": 0.3364901000000002,
+          "cpu_ms": 0.016747199999999702,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_dh_swiglu_bwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            []
+          ],
+          "device_ms": 0.4954693999999984,
+          "cpu_ms": 0.10187720000000004,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              3072
+            ],
+            [
+              3072,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.6961898999999991,
+          "cpu_ms": 0.014141900000000032,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              1536,
+              768
+            ]
+          ],
+          "device_ms": 0.8084395000000011,
+          "cpu_ms": 0.02691310000000021,
+          "calls": 2.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "conditioned_transition",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 5.766655921936035
+    },
+    "conditioned_transition-fwd_cublas": {
+      "target": "conditioned_transition",
+      "implementation": "miniworld",
+      "diagnostic_variant": "fwd_cublas",
+      "gpu_name": "NVIDIA RTX A6000",
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 5.908480167388916,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 5.882368087768555,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 5.8869757652282715,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        }
+      ],
+      "gpu": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8::Params)",
+          "ms": 0.8089544000000006,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_tn",
+          "ms": 0.7466312000000013,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8::Params)",
+          "ms": 0.6966280999999996,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+          "ms": 0.5071206999999994,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "_dh_swiglu_bwd_kernel",
+          "ms": 0.4954406,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8::Params)",
+          "ms": 0.33842620000000034,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_tn",
+          "ms": 0.24761610000000026,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_bwd_x_kernel",
+          "ms": 0.23992999999999956,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_swiglu_fwd_kernel",
+          "ms": 0.2357409000000014,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8::Params)",
+          "ms": 0.22984979999999963,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_sigmul_bwd",
+          "ms": 0.19837750000000093,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_epilogue_train_kernel",
+          "ms": 0.19737649999999962,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+          "ms": 0.18695700000000062,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_sigmul_fwd",
+          "ms": 0.1181698000000008,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_nt",
+          "ms": 0.10974720000000052,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms": 0.10476819999999902,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_bwd_kernel",
+          "ms": 0.08341439999999975,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_add_view_4",
+          "ms": 0.05943999999999951,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_mat_kernel",
+          "ms": 0.041891199999999566,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_slice_sum_2",
+          "ms": 0.04126100000000042,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_sum_0",
+          "ms": 0.03791670000000003,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_cat_2",
+          "ms": 0.015091200000000526,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms": 0.008182300000000396,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_cat_1",
+          "ms": 0.004838400000000638,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "Memset (Device)",
+          "ms": 0.003350300000000017,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "ms": 0.003026999999998133,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_red_fused_sum_1",
+          "ms": 0.002124700000000212,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__to_copy_3",
+          "ms": 0.0016288000000013198,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_layernorm_linear_materialize_new_zeros_view_0",
+          "ms": 0.0014591999999994188,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_sum_ms": 5.765359400000004,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ]
+          ],
+          "device_ms": 2.1159352000000027,
+          "cpu_ms": 0.8244486000000004,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_materialize",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              384
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.04189119999999957,
+          "cpu_ms": 0.12754309999999974,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ]
+          ],
+          "device_ms": 0.24761610000000028,
+          "cpu_ms": 0.026312799999999675,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_epilogue_train",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              1536
+            ],
+            [],
+            [
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.19737649999999957,
+          "cpu_ms": 0.09831280000000045,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              3072
+            ],
+            [
+              18432,
+              3072
+            ]
+          ],
+          "device_ms": 0.7466312000000013,
+          "cpu_ms": 0.018387399999999936,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_swiglu_fwd",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            []
+          ],
+          "device_ms": 0.2357409000000014,
+          "cpu_ms": 0.06644240000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.37106949999999983,
+          "cpu_ms": 0.017145499999999946,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              768
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [],
+            [],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.13605119999999965,
+          "cpu_ms": 0.01786359999999968,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_gate_fwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.11816980000000081,
+          "cpu_ms": 0.0581917000000001,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 3.6494242000000012,
+          "cpu_ms": 1.0118132999999998,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 3.6494242000000012,
+          "cpu_ms": 0.9916416000000001,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_gate_bwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.19837750000000096,
+          "cpu_ms": 0.13824040000000026,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.10476819999999902,
+          "cpu_ms": 0.03568900000000026,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.11086070000000077,
+          "cpu_ms": 0.018394899999999825,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              768,
+              1536
+            ]
+          ],
+          "device_ms": 0.33842620000000034,
+          "cpu_ms": 0.017054599999999573,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_dh_swiglu_bwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            []
+          ],
+          "device_ms": 0.49544059999999995,
+          "cpu_ms": 0.10207879999999978,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              3072
+            ],
+            [
+              3072,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.6966280999999996,
+          "cpu_ms": 0.014296299999999974,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              1536,
+              768
+            ]
+          ],
+          "device_ms": 0.8111912000000006,
+          "cpu_ms": 0.026610299999999504,
+          "calls": 2.0
+        },
+        {
+          "name": "miniworld_engine::adaln_bwd_x",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.2399299999999996,
+          "cpu_ms": 0.09118780000000001,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              1536,
+              384
+            ]
+          ],
+          "device_ms": 0.2380321,
+          "cpu_ms": 0.018124800000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.18695700000000062,
+          "cpu_ms": 0.011262800000000243,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_bwd_mmajor",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.08644139999999788,
+          "cpu_ms": 0.13506120000000002,
+          "calls": 1.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "conditioned_transition",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 5.8869757652282715
+    },
+    "conditioned_transition-miniworld": {
+      "target": "conditioned_transition",
+      "implementation": "miniworld",
+      "gpu": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8::Params)",
+          "ms": 0.8003209000000003,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_tn",
+          "ms": 0.7476969999999986,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_adaln_fwd_gate_kernel",
+          "ms": 0.7337290000000002,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_256x128_32x3_nn_align8::Params)",
+          "ms": 0.6950824000000007,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+          "ms": 0.5084553000000006,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "_dh_swiglu_bwd_kernel",
+          "ms": 0.49393009999999943,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8::Params)",
+          "ms": 0.3390533999999996,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_bwd_x_kernel",
+          "ms": 0.24034909999999957,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_swiglu_fwd_kernel",
+          "ms": 0.2358369999999996,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8::Params)",
+          "ms": 0.23058910000000035,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_sigmul_bwd",
+          "ms": 0.19808039999999974,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+          "ms": 0.1877567999999991,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_sigmul_fwd",
+          "ms": 0.11832320000000146,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_nt",
+          "ms": 0.1088320000000004,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms": 0.10447989999999938,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_bwd_kernel",
+          "ms": 0.0839967999999998,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_add_view_5",
+          "ms": 0.05941759999999931,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_stats_kernel",
+          "ms": 0.044716900000000066,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_mat_kernel",
+          "ms": 0.041993700000000175,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_slice_sum_2",
+          "ms": 0.04125430000000115,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_sum_0",
+          "ms": 0.03792650000000076,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_cat_3",
+          "ms": 0.017558599999998474,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms": 0.008191900000000168,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_adaln_fwd_gate_clone_t_view_1",
+          "ms": 0.005471700000001555,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "Memset (Device)",
+          "ms": 0.003312199999999757,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "ms": 0.003004700000000503,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused_div_2",
+          "ms": 0.0021793000000002393,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_sum_1",
+          "ms": 0.0020958000000005084,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__to_copy_4",
+          "ms": 0.001663999999999578,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_layernorm_linear_materialize_new_zeros_view_0",
+          "ms": 0.0014685999999999014,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 6.198272228240967,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 6.204415798187256,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 6.204415798187256,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        }
+      ],
+      "gpu_sum_ms": 6.096768200000001,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ]
+          ],
+          "device_ms": 2.4542559000000015,
+          "cpu_ms": 0.8731680999999993,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_materialize",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              384
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.041993700000000175,
+          "cpu_ms": 0.11390060000000049,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_stats",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.04471690000000005,
+          "cpu_ms": 0.0694086999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_fwd_gate",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              768
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            []
+          ],
+          "device_ms": 0.7337290000000002,
+          "cpu_ms": 0.08771990000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              3072
+            ],
+            [
+              18432,
+              3072
+            ]
+          ],
+          "device_ms": 0.7476969999999985,
+          "cpu_ms": 0.03283699999999949,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_swiglu_fwd",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            []
+          ],
+          "device_ms": 0.23583699999999963,
+          "cpu_ms": 0.06295020000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.3717861000000001,
+          "cpu_ms": 0.018747199999999794,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              768
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [],
+            [],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.13666920000000043,
+          "cpu_ms": 0.018067699999999513,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_gate_fwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.11832320000000145,
+          "cpu_ms": 0.05640099999999966,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 3.642512299999999,
+          "cpu_ms": 0.9086112999999993,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 3.642512299999999,
+          "cpu_ms": 0.8919831,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_gate_bwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.19808039999999974,
+          "cpu_ms": 0.09577270000000049,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.10447989999999936,
+          "cpu_ms": 0.029713399999999817,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.10992949999999972,
+          "cpu_ms": 0.021213900000000056,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              768,
+              1536
+            ]
+          ],
+          "device_ms": 0.3390533999999997,
+          "cpu_ms": 0.01699559999999956,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::conditioned_transition_dh_swiglu_bwd",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ],
+            []
+          ],
+          "device_ms": 0.49393009999999943,
+          "cpu_ms": 0.08816260000000016,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              3072
+            ],
+            [
+              3072,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.6950824000000007,
+          "cpu_ms": 0.014141999999999644,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              1536,
+              768
+            ]
+          ],
+          "device_ms": 0.8025356000000008,
+          "cpu_ms": 0.027111499999999844,
+          "calls": 2.0
+        },
+        {
+          "name": "miniworld_engine::adaln_bwd_x",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.24034909999999954,
+          "cpu_ms": 0.08779140000000016,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              1536,
+              384
+            ]
+          ],
+          "device_ms": 0.2387810000000005,
+          "cpu_ms": 0.018153099999999495,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.1877567999999991,
+          "cpu_ms": 0.01248860000000036,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_bwd_mmajor",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.08700150000000031,
+          "cpu_ms": 0.13593099999999966,
+          "calls": 1.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "conditioned_transition",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 6.204415798187256
+    },
+    "conditioned_transition-pytorch": {
+      "target": "conditioned_transition",
+      "implementation": "pytorch",
+      "gpu": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8::Params)",
+          "ms": 0.7828006999999993,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_tn",
+          "ms": 0.7479719999999999,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8::Params)",
+          "ms": 0.6897126999999992,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+          "ms": 0.6359304999999976,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_silu_silu_backward_view_3",
+          "ms": 0.39510760000000056,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8::Params)",
+          "ms": 0.3768580999999988,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8::Params)",
+          "ms": 0.3334595000000003,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_nt",
+          "ms": 0.32319040000000193,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms": 0.3100709999999996,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "triton_per_fused_add_mul_native_layer_norm_native_layer_norm_backward_sigmoid_sigmoid_backward_view_4",
+          "ms": 0.2762566000000004,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_silu_2",
+          "ms": 0.23643549999999958,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_sigmoid_sigmoid_backward_view_0",
+          "ms": 0.19837780000000027,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused__unsafe_view_add_mul_native_layer_norm_sigmoid_view_1",
+          "ms": 0.15489930000000063,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_sigmoid_view_3",
+          "ms": 0.11930560000000032,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+          "ms": 0.11701139999999965,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_per_fused_add_native_layer_norm_native_layer_norm_backward_view_5",
+          "ms": 0.09844499999999926,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused__unsafe_view_mul_sigmoid_sigmoid_backward_sum_view_1",
+          "ms": 0.07558729999999923,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_per_fused_native_layer_norm_0",
+          "ms": 0.03907510000000009,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void at::native::reduce_kernel<128, 4, at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4> >(at::native::ReduceOp<float, at::native::func_wrapper_t<float, at::native::sum_functor<float, float, float>::operator()(at::TensorIterator&)::{lambda(float, float)#1}>, unsigned int, float, 4, 4>)",
+          "ms": 0.009580800000000455,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "Memset (Device)",
+          "ms": 0.006287999999998466,
+          "calls": 5.999999999999995
+        },
+        {
+          "name": "triton_red_fused__unsafe_view_mul_sigmoid_sigmoid_backward_sum_view_2",
+          "ms": 0.004211399999999138,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused_native_layer_norm_backward_6",
+          "ms": 0.0014529999999997926,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 6.043647766113281,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 6.060031890869141,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 6.061056137084961,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "module.reference.torch",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        }
+      ],
+      "gpu_sum_ms": 5.932029299999995,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ]
+          ],
+          "device_ms": 2.0506293999999974,
+          "cpu_ms": 0.6895260000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.11701139999999965,
+          "cpu_ms": 0.041444499999999676,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              768
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [],
+            [],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.2719812999999999,
+          "cpu_ms": 0.05519229999999953,
+          "calls": 2.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ]
+          ],
+          "device_ms": 1.1248300999999985,
+          "cpu_ms": 0.0412262000000002,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 1.0536618999999967,
+          "cpu_ms": 0.035733199999999896,
+          "calls": 3.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 3.881399899999997,
+          "cpu_ms": 0.7028605999999998,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 3.881399899999997,
+          "cpu_ms": 0.6819058000000005,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.31007099999999965,
+          "cpu_ms": 0.04978679999999949,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.32635830000000077,
+          "cpu_ms": 0.04140690000000036,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              768,
+              1536
+            ]
+          ],
+          "device_ms": 0.3334595000000003,
+          "cpu_ms": 0.016515300000000024,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              1536,
+              768
+            ]
+          ],
+          "device_ms": 0.7849896000000001,
+          "cpu_ms": 0.02508040000000015,
+          "calls": 2.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "conditioned_transition",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 6.060031890869141
+    },
+    "conditioned_transition-tail_pytorch": {
+      "target": "conditioned_transition",
+      "implementation": "miniworld",
+      "diagnostic_variant": "tail_pytorch",
+      "gpu_name": "NVIDIA RTX A6000",
+      "gpu_uuid": "be7e377a-4994-4692-b5dc-f915732cc395",
+      "source_identity": "c9efae662eafdecfdba517cab6b6c399da73f195b7665b7b2a4e67ce7b2fd2f8",
+      "native_samples": [
+        {
+          "value": 6.489599943161011,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 6.50547194480896,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        },
+        {
+          "value": 6.502399921417236,
+          "input_dtype": "bfloat16",
+          "parameter_dtype": "bfloat16",
+          "execution_path": "kernels.conditioned_transition.triton.training",
+          "reference": "module.reference.torch",
+          "output_max_abs": null,
+          "output_rel_frob": null,
+          "output_cosine": null,
+          "grad_max_abs": null,
+          "grad_rel_frob": null,
+          "grad_cosine": null,
+          "compiled": true,
+          "cudagraph": "disabled",
+          "compile_scope": "module_forward:partial_allowed",
+          "compiled_graphs": 1,
+          "measurement_scope": "forward_backward",
+          "input_shapes": "{\"cond\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 384]}, \"dy\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}, \"x\": {\"dtype\": \"bfloat16\", \"shape\": [48, 1, 384, 768]}}",
+          "execution_validation": "{\"finite_tensors\": 12}"
+        }
+      ],
+      "gpu": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x4_nn_align8::Params)",
+          "ms": 0.914315100000001,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x256_32x4_nt_align8::Params)",
+          "ms": 0.7777669999999999,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_tn",
+          "ms": 0.7467624000000002,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "_adaln_fwd_gate_kernel",
+          "ms": 0.7289320999999995,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8::Params)",
+          "ms": 0.500726999999998,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_silu_silu_backward_view_3",
+          "ms": 0.39467889999999944,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_nn_align8::Params)",
+          "ms": 0.3750658000000008,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x128_32x5_nt_align8::Params)",
+          "ms": 0.3328580999999998,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_bwd_x_kernel",
+          "ms": 0.24038719999999997,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_silu_3",
+          "ms": 0.23664659999999968,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_sigmoid_sigmoid_backward_view_0",
+          "ms": 0.1992673000000006,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x256_ldg8_f2f_stages_32x1_nt",
+          "ms": 0.18453169999999958,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__unsafe_view_mul_sigmoid_view_4",
+          "ms": 0.11917120000000044,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_adaln_bwd_x_add_view_4",
+          "ms": 0.11838080000000037,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_nt",
+          "ms": 0.10635879999999934,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_nn",
+          "ms": 0.10286729999999947,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_bwd_kernel",
+          "ms": 0.08244800000000196,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_add_view_8",
+          "ms": 0.059596800000000894,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_stats_kernel",
+          "ms": 0.04473610000000019,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "_ln_mat_kernel",
+          "ms": 0.04175679999999993,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused_slice_sum_5",
+          "ms": 0.0414242999999994,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused__unsafe_view_mul_sigmoid_sigmoid_backward_sum_view_1",
+          "ms": 0.03783709999999937,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+          "ms": 0.008214600000000792,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_adaln_fwd_gate_clone_t_view_1",
+          "ms": 0.005385700000000338,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "Memset (Device)",
+          "ms": 0.003308600000000116,
+          "calls": 3.0000000000000013
+        },
+        {
+          "name": "triton_poi_fused_cat_6",
+          "ms": 0.0030749999999991813,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "ms": 0.002988699999999881,
+          "calls": 2.0000000000000004
+        },
+        {
+          "name": "triton_poi_fused_div_2",
+          "ms": 0.0021087999999993374,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_red_fused__unsafe_view_mul_sigmoid_sigmoid_backward_sum_view_2",
+          "ms": 0.0020735000000011495,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused__to_copy_7",
+          "ms": 0.0016095999999991362,
+          "calls": 0.9999999999999999
+        },
+        {
+          "name": "triton_poi_fused_layernorm_linear_materialize_new_zeros_view_0",
+          "ms": 0.0014495000000006486,
+          "calls": 0.9999999999999999
+        }
+      ],
+      "gpu_sum_ms": 6.4167304000000005,
+      "operators": [
+        {
+          "name": "CompiledFunction",
+          "shapes": [
+            [
+              384
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              48,
+              1,
+              384,
+              768
+            ],
+            [
+              48,
+              1,
+              384,
+              384
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              768
+            ]
+          ],
+          "device_ms": 2.4276761999999983,
+          "cpu_ms": 0.7351205999999997,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_materialize",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              384
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.041756799999999934,
+          "cpu_ms": 0.1190728999999999,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_stats",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.04473610000000019,
+          "cpu_ms": 0.06998070000000012,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::adaln_fwd_gate",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              768
+            ],
+            [
+              384,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            []
+          ],
+          "device_ms": 0.7289320999999995,
+          "cpu_ms": 0.08765940000000055,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              1536
+            ],
+            [
+              18432,
+              1536
+            ]
+          ],
+          "device_ms": 1.121828200000001,
+          "cpu_ms": 0.04660259999999994,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              768
+            ],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 1.054801799999999,
+          "cpu_ms": 0.033828699999999705,
+          "calls": 3.0
+        },
+        {
+          "name": "aten::addmm",
+          "shapes": [
+            [
+              768
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384,
+              768
+            ],
+            [],
+            [],
+            [
+              18432,
+              768
+            ]
+          ],
+          "device_ms": 0.13461759999999923,
+          "cpu_ms": 0.017629899999999588,
+          "calls": 1.0
+        },
+        {
+          "name": "autograd::engine::evaluate_function: CompiledFunctionBackward",
+          "shapes": [],
+          "device_ms": 3.9890542000000018,
+          "cpu_ms": 0.9620689000000002,
+          "calls": 1.0
+        },
+        {
+          "name": "CompiledFunctionBackward",
+          "shapes": [
+            [
+              48,
+              1,
+              384,
+              768
+            ]
+          ],
+          "device_ms": 3.9890542000000018,
+          "cpu_ms": 0.9420719000000002,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              768,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.10286729999999948,
+          "cpu_ms": 0.03443400000000006,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              768,
+              384
+            ]
+          ],
+          "device_ms": 0.10746919999999927,
+          "cpu_ms": 0.018542700000000287,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              768,
+              18432
+            ],
+            [
+              18432,
+              1536
+            ],
+            [
+              768,
+              1536
+            ]
+          ],
+          "device_ms": 0.3328580999999998,
+          "cpu_ms": 0.016914099999999828,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              1536,
+              768
+            ]
+          ],
+          "device_ms": 0.7799652,
+          "cpu_ms": 0.024736199999999688,
+          "calls": 2.0
+        },
+        {
+          "name": "miniworld_engine::adaln_bwd_x",
+          "shapes": [
+            [
+              18432,
+              768
+            ],
+            [
+              18432,
+              768
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [
+              18432,
+              768
+            ],
+            []
+          ],
+          "device_ms": 0.24038719999999994,
+          "cpu_ms": 0.14056530000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              1536,
+              18432
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              1536,
+              384
+            ]
+          ],
+          "device_ms": 0.2338373000000013,
+          "cpu_ms": 0.018982599999999912,
+          "calls": 1.0
+        },
+        {
+          "name": "aten::mm",
+          "shapes": [
+            [
+              18432,
+              1536
+            ],
+            [
+              1536,
+              384
+            ],
+            [
+              18432,
+              384
+            ]
+          ],
+          "device_ms": 0.18453169999999955,
+          "cpu_ms": 0.01174970000000003,
+          "calls": 1.0
+        },
+        {
+          "name": "miniworld_engine::layernorm_linear_bwd_mmajor",
+          "shapes": [
+            [
+              18432,
+              384
+            ],
+            [
+              18432,
+              384
+            ],
+            [
+              384
+            ],
+            [
+              18432
+            ],
+            [
+              18432
+            ],
+            [],
+            []
+          ],
+          "device_ms": 0.08543670000000184,
+          "cpu_ms": 0.1387694000000004,
+          "calls": 1.0
+        }
+      ],
+      "compiled_graphs": 1,
+      "configuration": {
+        "d_single": 384,
+        "d_pair": 128,
+        "d_single_token": 768,
+        "d_single_atom": 128,
+        "d_pair_atom": 16,
+        "n_layers": 1,
+        "trimul_direction": "outgoing",
+        "n_augment": 48,
+        "mask_prob": 0.125,
+        "min_seq_len": 64,
+        "max_seq_len": 384,
+        "seq_len_step": 64,
+        "min_d_pair": 64,
+        "max_d_pair": 256,
+        "d_pair_step": 64,
+        "d_pair_values": null,
+        "sweep_axis": "seq_len",
+        "sweep_seq_len": 512,
+        "autotune_shard": "",
+        "config_dir": "",
+        "pin_gate_backend": "",
+        "dropout": 0.0,
+        "compile_jobs": 0,
+        "pin_infer_concat": null,
+        "pin_transition_cuda_b2b": null,
+        "target": "conditioned_transition",
+        "level": "module",
+        "implementations": [
+          "pytorch",
+          "triton"
+        ],
+        "mode": "training",
+        "metric": "time",
+        "compile": true,
+        "cudagraph": "disabled",
+        "allow_tf32": false,
+        "precision": "bf16-mixed",
+        "layernorm_weight_precision": null,
+        "allow_eager": false,
+        "name_suffix": ""
+      },
+      "tile_cache_unchanged": true,
+      "median_ms": 6.502399921417236
+    }
+  },
+  "notes": "Same physical A6000, native benchmark functions and unchanged timer. Three samples per process; profiles collected separately. Hybrid variants are diagnostic, not shipped implementations. No production source/cache edits."
+}

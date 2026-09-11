@@ -6,5 +6,6 @@
 from __future__ import annotations
 
 from miniworld_engine.kernels.rope.triton.main import triton_rope_3d
+from miniworld_engine.kernels.rope.triton.qk_norm import qk_norm_rope_3d
 
-__all__ = ["triton_rope_3d"]
+__all__ = ["qk_norm_rope_3d", "triton_rope_3d"]

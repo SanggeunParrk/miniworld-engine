@@ -52,6 +52,23 @@ EXTRA_KWARG_AXES = ("GROUP_M",)
 #: config nothing measured.
 LADDER_SETS = ("grid",)
 
+# Fixed launch metadata remains in configs so the shared JIT body receives a
+# complete configuration. These values are structural or measured, not untuned axes.
+FIXED_AXES = {
+    ("qk_norm_rope_fwd_triton", "num_stages"): ([1], "single-pass row reduction has no pipeline loop"),
+    ("qk_norm_rope_bwd_triton", "num_stages"): ([1], "single-pass row reduction has no pipeline loop"),
+    ("swa_gate_out_fwd_triton", "BLOCK_N"): ([128], "production guard fixes output width to 128"),
+    ("swa_gate_out_fwd_triton", "BLOCK_K"): ([32], "A6000 108-candidate probe selected K32; gate fusion record"),
+    ("swa_gate_out_fwd_triton", "GROUP_M"): ([1], "one N tile means tile grouping cannot reorder programs"),
+}
+
+# A heuristic neighbour is not measured performance evidence. This axis already
+# offers every recorded winner; adding warp1 would start an unrequested rebuild.
+MEASURED_AXES = {
+    ("gated_projection_bwd_dx_triton", "num_warps"): [2, 4, 8],
+}
+
+
 
 def _superseded(op: str, data: dict) -> bool:
     """Has the cache policy already declared these measurements invalid?
@@ -202,6 +219,12 @@ def test_every_ladder_has_something_to_choose(setname: str) -> None:
     thin = []
     for f in sorted((CONFIGS / setname).glob("*.csv")):
         for a, vals in _ladders(f).items():
+            fixed = FIXED_AXES.get((f.stem, a))
+            if fixed:
+                expected, reason = fixed
+                assert vals == expected
+                assert reason
+                continue
             if len(vals) < 2:
                 thin.append(f"{f.stem}: {a}={vals}")
     assert not thin, "\n  ".join(["single-value ladders:", *thin])
@@ -343,6 +366,14 @@ def test_a_fully_measured_kernel_carries_its_own_ladder(won) -> None:
         ax = _ladders(f)
         for a, rungs in RUNGS.items():
             if a not in ax:
+                continue
+            if (f.stem, a) in MEASURED_AXES:
+                assert ax[a] == MEASURED_AXES[(f.stem, a)]
+                assert set(won[f.stem][a]) <= set(ax[a])
+                continue
+            if (f.stem, a) in FIXED_AXES:
+                assert ax[a] == FIXED_AXES[(f.stem, a)][0]
+                assert set(won[f.stem][a]) <= set(ax[a])
                 continue
             want = _derive(won[f.stem][a], rungs)
             if want and ax[a] != want:

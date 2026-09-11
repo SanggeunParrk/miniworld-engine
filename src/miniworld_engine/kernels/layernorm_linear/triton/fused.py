@@ -65,7 +65,20 @@ def _prefer_covering_lnl(configs, nargs, **_):
     if not cov:
         return list(configs)
     kmin = min(c.kwargs["BLOCK_K"] for c in cov)
-    return [c for c in cov if c.kwargs["BLOCK_K"] == kmin]
+    selected = [c for c in cov if c.kwargs["BLOCK_K"] == kmin]
+    x = nargs.get("x_ptr")
+    if (k == 128 and nargs.get("N") == 520 and x is not None
+            and x.dtype == torch.bfloat16 and x.device.type == "cuda"
+            and torch.cuda.get_device_capability(x.device) == (8, 6)
+            and torch.cuda.get_device_name(x.device) == "NVIDIA RTX A6000"):
+        # Reproduced at M=128 and M=147456 on A6000: this exact schedule makes
+        # tl.dot write outside shared memory (compute-sanitizer). Adjacent N=512,
+        # stages=2, warps>=2 and BLOCK_N=256 schedules pass. Keep that evidence's
+        # scope; changing the JIT body or grid would invalidate valid measurements.
+        selected = [c for c in selected if not (
+            c.kwargs["BLOCK_K"] == 128 and c.kwargs["BLOCK_M1"] == 64
+            and c.kwargs["BLOCK_N"] == 128 and c.num_warps == 1 and c.num_stages == 1)]
+    return selected
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_triton"),

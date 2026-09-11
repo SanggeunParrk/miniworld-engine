@@ -38,10 +38,8 @@ def _trunc_normal_init(
         msg = f"Invalid fan option: {fan}. Choose from 'in', 'out', 'avg'."
         raise ValueError(msg)
 
-    # Imported here, not at module scope: scipy is in the `baselines` extra, not the lean
-    # core, and this is the only thing in `miniworld_engine.modules` that wants it. At
-    # module scope it made `import miniworld_engine.modules.primitives` -- and so every
-    # module built on it -- fail outright on a core-only install.
+    # SciPy is a core dependency because ordinary modules use this initializer.
+    # Import lazily so importing kernels alone does not load scipy.stats.
     from scipy.stats import truncnorm
 
     scale = scale / max(1, f)

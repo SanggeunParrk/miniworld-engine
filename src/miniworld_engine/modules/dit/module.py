@@ -1,12 +1,11 @@
-"""The TOKEN-track diffusion transformer block (AF3 Alg. 23).
+"""The full pair-bias diffusion transformer block (AF3 Alg. 23).
 
     a = a + AugmentedAttentionPairBias(a, s, z, mask)
     a = a + ConditionedTransition(a, s)
 
-A different algorithm from the atom track's, which is why it is a different folder: this one
-attends over the whole token sequence with a PAIR BIAS (the trunk's z feeding the logits), and
-its attention owns the adaLN conditioning internally. The atom track is windowed, 3D-RoPE, and
-has no pair term at all -- see ``modules/swa_dit``.
+Token and ordinary atom DiT share this algorithm, with different widths and head counts.
+Attention covers the full sequence with a pair bias, and owns its AdaLN conditioning.
+The separate ``modules/swa_dit`` block uses windowed 3D-RoPE attention without a pair term.
 
 WHY A BLOCK IS BENCHED AT ALL, when its parts already are: a per-part result does not compose.
 Every kernel here is an opaque ``custom_op``, so each launch carries CPU overhead that a per-part
@@ -32,7 +31,7 @@ from miniworld_engine.modules.exceptions import ImplementationType
 
 
 class DiTBlock(nn.Module):
-    """Token-track DiT block: augmented attention with pair bias, then conditioned transition.
+    """Token or ordinary atom DiT: pair-bias attention, then conditioned transition.
 
     ``forward(single, cond, pair, mask)`` -> ``single``'s shape. ``single`` and ``cond`` carry the
     augmentation axis (``A, B, L, d``); ``pair`` does not (``B, L, L, d_pair``), because the pair

@@ -57,6 +57,7 @@ def _median(step) -> float:
 
 
 def timed(model, train: bool, compile_it: bool, cudagraph: bool) -> float:
+    model.train(train)
     pair = torch.randn(1, L, L, D, device=DEV, dtype=DT, requires_grad=train)
     fn = torch.compile(model) if compile_it else model
 
@@ -97,18 +98,24 @@ def timed(model, train: bool, compile_it: bool, cudagraph: bool) -> float:
     return _median(graph.replay)
 
 
+failures = 0
 for impl_name, impl in (("pytorch", ImplementationType.PYTORCH),
                         ("miniworld", ImplementationType.MINIWORLD)):
     for mode, train in (("inference", False), ("training", True)):
         # The two regimes MiniWorld actually runs, plus the two "what if" corners.
         for compile_it, cudagraph in ((False, True), (True, False), (False, False), (True, True)):
             label = (f"wrap={args.wrap} impl={impl_name} mode={mode} "
-                     f"compile={str(compile_it).lower()} cudagraph={str(cudagraph).lower()}")
+                     f"compile_requested={str(compile_it).lower()} cudagraph={str(cudagraph).lower()}")
             try:
                 model = build(impl)
+                parameter_dtypes = ",".join(sorted({str(p.dtype) for p in model.parameters()}))
                 ms = timed(model, train, compile_it, cudagraph)
-                print(f"{label} blocks={args.blocks} seq_len={L} time={ms:.4f} ms", flush=True)
+                print(f"{label} blocks={args.blocks} seq_len={L} d_pair={D} input_dtype={DT} "
+                      f"parameter_dtypes={parameter_dtypes} time={ms:.4f} ms", flush=True)
             except Exception as e:
+                failures += 1
                 print(f"{label} FAILED {type(e).__name__}: {str(e)[:160]}", flush=True)
             finally:
                 torch.cuda.empty_cache()
+
+raise SystemExit(1 if failures else 0)

@@ -62,8 +62,19 @@ import zlib as _zlib
 #: Channel width. Exact -- a kernel is compiled for one of these and no other.
 DIM_BUCKETS: tuple[int, ...] = (64, 128, 256, 384, 512, 768)
 
-#: Token/pair-level sequence lengths.
-TOKEN_SHAPES: tuple[int, ...] = (128, 256, 384, 512)
+#: Token/pair-level sequence lengths: `bucket_token_size` 128 through the crop's 768.
+#:
+#: This stopped at 512, and the note below (measurement 1) argued 640 and 896 away as "two lengths
+#: the model never runs -- they are bench sweep points". The first half of that is wrong. The
+#: trunk runs to 768 tokens, and MiniWorld's collate pads to a multiple of `bucket_token_size`
+#: 128, so 640 is a length the dataloader produces like any other. `CropConfig.max_tokens` is 384
+#: in the committed data configs and reading it as the ceiling is what made 512 look like the top:
+#: the crop bounds TRAINING, and inference runs the trunk at whatever the target is.
+#:
+#: The COST in that note stands -- roughly +9% of a sweep for two rungs -- and it is paid now,
+#: because a rung the model reaches is not granularity, it is coverage: without it a 640-token
+#: launch floor-clamps onto 512 and runs a config tuned for 61% of its tiles.
+TOKEN_SHAPES: tuple[int, ...] = (128, 256, 384, 512, 640, 768)
 
 #: Atom-level counts. Starts at 1024: an atom activation is the whole molecule's atoms, thousands
 #: of them (`max_atoms: 5000` in the model's data config -- that file is not in this repository, so
@@ -97,7 +108,9 @@ ATOM_SHAPES: tuple[int, ...] = (1024, 2048, 4096, 8192)
 #: config tuned for twice the tile count, which is the one direction this module's own docstring
 #: says never to round. 128 is a declared token count for every other token kernel (TOKEN_SHAPES),
 #: so it is one here too.
-DIT_TOKEN_LENGTHS: tuple[int, ...] = (128, 256, 384, 512, 768)
+#: 640 is here for the same reason 128 is: `_floor_clamp` would otherwise send a 640-token DiT
+#: launch onto the 512 rung, and the DiT token side is 24 of the model's 27 blocks.
+DIT_TOKEN_LENGTHS: tuple[int, ...] = (128, 256, 384, 512, 640, 768)
 DIT_ATOM_LENGTHS: tuple[int, ...] = (1024, 2048, 4096, 8192)
 
 #: What `atom_key` floor-clamps into: the atom work list plus the token lengths above. Widening the

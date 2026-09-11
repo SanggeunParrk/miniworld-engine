@@ -42,6 +42,10 @@ from jaxtyping import Bool, Float, Int
 from miniworld_engine import settings
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.modules.exceptions import (
+    ImplementationType,
+    InvalidImplementationError,
+)
 from miniworld_engine.modules.primitives import Linear, MPLinear
 
 
@@ -135,17 +139,7 @@ def _flash_window_core(
     seqused and the unpad paths, all without reimplementing flash's backward.
     """
     backend = _flash_backend(q.device)
-    if backend == "fa4":
-        from flash_attn.cute import (  # ty: ignore[unresolved-import]  # optional extra
-            flash_attn_varlen_func,  # lazy — pulls CUTLASS
-        )
-    elif backend == "fa2":
-        # FA2's varlen entry point is a different module from FA4's; the argument names below
-        # are the ones both accept.
-        from flash_attn.flash_attn_interface import (  # ty: ignore[unresolved-import]
-            flash_attn_varlen_func,
-        )
-    else:  # pragma: no cover - the caller checks first
+    if backend not in {"fa4", "fa2"}:  # pragma: no cover - the caller checks first
         msg = "no usable flash backend for this device; the caller should have taken _sdpa_band"
         raise RuntimeError(msg)
 
@@ -167,21 +161,19 @@ def _flash_window_core(
     # BOTH seqused_q and seqused_k are required: with a sliding window, passing only
     # seqused_k misaligns the window against the fixed-stride sequence (verified: it
     # diverges from the packed/SDPA reference; passing both matches to bf16 tol).
-    # BOTH seqused_q and seqused_k where they exist. FA2 gained them at different releases, so
-    # pass only what this build's signature declares rather than assuming: a missing keyword is a
-    # TypeError, and silently dropping seqused_k would let padding keys take probability mass.
-    import inspect
+    # FA4 has seqused but no max_seqlen_q/k arguments. FA2 uses the packed path
+    # below, whose API requires explicit maximum sequence lengths instead.
+    if backend == "fa4":
+        from flash_attn.cute import (  # lazy — pulls CUTLASS
+            flash_attn_varlen_func as fa4_varlen,
+        )
 
-    accepted = inspect.signature(flash_attn_varlen_func).parameters
-    kw = {name: seqused for name in ("seqused_q", "seqused_k") if name in accepted}
-    if "seqused_k" in kw:
-        out = flash_attn_varlen_func(
+        out = fa4_varlen(
             q, k, v,
             cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen,
+            seqused_q=seqused, seqused_k=seqused,
             softmax_scale=scale,
             window_size=window,
-            **kw,
         )
         if isinstance(out, tuple):  # return_lse / aux outputs
             out = out[0]
@@ -197,23 +189,38 @@ def _flash_window_core(
         # scatter back. A padding key cannot take mass because it is not there, and the window
         # is measured inside each real sequence rather than across a padded stride.
         #
-        # The cost is the property the FA4 path exists to keep. `unpad_input` calls
-        # `torch.nonzero`, so this is a data-dependent shape: it syncs, it is NOT CUDA-graph
-        # capturable, and a compiled region around it re-traces when the valid count moves.
-        # That is the price of an sm80 card, and it is still the fast path -- `_sdpa_band`
-        # materialises an [N, S, S] mask, which is 24 GiB at the shape this block runs.
-        from flash_attn.bert_padding import (  # ty: ignore[unresolved-import]
-            index_first_axis,
-            pad_input,
-            unpad_input,
+        from flash_attn.flash_attn_interface import (
+            flash_attn_varlen_func as fa2_varlen,
         )
 
-        q4 = q.reshape(n, s, nh, hd)
-        q_un, indices, cu_var, max_var = unpad_input(q4, valid)[:4]
-        flat = (n * s, nh, hd)
-        k_un = index_first_axis(k.reshape(*flat), indices)
-        v_un = index_first_axis(v.reshape(*flat), indices)
-        out = flash_attn_varlen_func(
+        if torch.is_grad_enabled():
+            # Preserve FA2's existing differentiable packing for backward recomputation.
+            from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+
+            q_un, indices, cu_var, max_var = unpad_input(q.reshape(n, s, nh, hd), valid)[:4]
+            k_un = index_first_axis(k, indices)
+            v_un = index_first_axis(v, indices)
+        else:
+            # A graph cannot capture nonzero() or a host read of max(sequence length).
+            # Keep N*S storage, but use true lengths in cu_var: trailing capacity is NOT
+            # an attention key. Rank valid tokens within each row, preserving arbitrary
+            # masks and the original packed-window ordering, including empty sequences.
+            counts = valid.sum(-1, dtype=torch.int32)
+            cu_var = torch.cat([counts.new_zeros(1), counts.cumsum(0, dtype=torch.int32)])
+            flat_valid = valid.reshape(n * s)
+            rank = flat_valid.to(torch.long).cumsum(0)
+            # Map padding to unique trailing slots too: the whole mapping is a
+            # permutation, so packing needs no atomic additions at a shared zero slot.
+            positions = torch.arange(n * s, device=q.device)
+            packed_row = torch.where(flat_valid, rank - 1, rank[-1] + positions - rank)
+            indices = packed_row[:, None, None].expand(n * s, nh, hd)
+
+            def _pack(t):
+                return torch.empty_like(t).scatter(0, indices, t)
+
+            q_un, k_un, v_un = _pack(q), _pack(k), _pack(v)
+            max_var = s  # static upper bound; cu_var carries the actual lengths
+        out = fa2_varlen(
             q_un, k_un, v_un,
             cu_seqlens_q=cu_var, cu_seqlens_k=cu_var,
             max_seqlen_q=max_var, max_seqlen_k=max_var,
@@ -222,8 +229,10 @@ def _flash_window_core(
         )
         if isinstance(out, tuple):
             out = out[0]
-        # pad_input writes zeros at the padding rows, which is what the `where` below wants.
-        out = pad_input(out, indices, n, s).reshape(n, s, nh, hd)
+        if torch.is_grad_enabled():
+            out = pad_input(out, indices, n, s).reshape(n, s, nh, hd)
+        else:
+            out = out.gather(0, indices).reshape(n, s, nh, hd)
     # seqused_q skips padding-query rows (position >= seqused), leaving them
     # uninitialized (can be NaN). SELECT with where (not multiply) so that garbage
     # is discarded rather than turned into NaN*0=NaN; matches the old pad_input zeros.
@@ -563,6 +572,7 @@ class SWA3DRoPEAttention(nn.Module):
         n_heads: int,
         half_window: int = 64,
         *,
+        implementation: ImplementationType = ImplementationType.MINIWORLD,
         magnitude_preserving: bool = False,
         mp_full: bool = False,
     ) -> None:
@@ -570,6 +580,9 @@ class SWA3DRoPEAttention(nn.Module):
         if d_model % n_heads != 0:
             msg = f"d_model ({d_model}) must be divisible by n_heads ({n_heads})."
             raise ValueError(msg)
+        self.implementation = ImplementationType(implementation)
+        if self.implementation not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD, ImplementationType.TRITON}:
+            raise InvalidImplementationError(self.implementation)
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.scale = self.head_dim**-0.5
@@ -593,12 +606,13 @@ class SWA3DRoPEAttention(nn.Module):
 
         qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
-        q, k = _qk_norm(q), _qk_norm(k)
-        if q.is_cuda:
-            from miniworld_engine import kernels
-            q = kernels.triton_rope_3d(q, cos, sin)
-            k = kernels.triton_rope_3d(k, cos, sin)
-        else:  # the kernel is CUDA-only; the module's unit tests are not
+        if q.is_cuda and self.implementation != ImplementationType.PYTORCH:
+            from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
+            q, k = qk_norm_rope_3d(q, k, cos, sin)
+        else:
+            eps = torch.finfo(torch.float32).eps
+            q = F.rms_norm(q.float(), (self.head_dim,), eps=eps).to(q.dtype)
+            k = F.rms_norm(k.float(), (self.head_dim,), eps=eps).to(k.dtype)
             q = apply_rotary_emb_3d(q, cos, sin)
             k = apply_rotary_emb_3d(k, cos, sin)
 
@@ -621,7 +635,13 @@ class SWA3DRoPEAttention(nn.Module):
 
         out = out.reshape(n, s, -1)
         gate = self.gate_proj(x)
-        if out.is_cuda:
+        if self._can_fuse_output_projection(gate, out):
+            from miniworld_engine.kernels.gated_projection.triton.swa import (
+                swa_gate_out_inference,
+            )
+
+            return swa_gate_out_inference(gate, out, self.out_proj.weight)
+        if out.is_cuda and self.implementation != ImplementationType.PYTORCH:
             # `sigmoid(gate) * out` in ONE triton pass instead of torch's sigmoid-then-multiply,
             # which reads and writes the whole [N, S, d] twice. The kernel is gated_projection's
             # `_sigmul`, already public as `kernels.sigmoid_gate_fused` and already tuned on this
@@ -631,8 +651,26 @@ class SWA3DRoPEAttention(nn.Module):
 
             out = kernels.sigmoid_gate_fused(gate, out)
         else:
-            out = out * torch.sigmoid(gate)   # CPU unit tests: no triton
+            out = out * torch.sigmoid(gate)
         return self.out_proj(out)
+
+    def _can_fuse_output_projection(self, gate, out):
+        # A6000 BF16/128 inference is measured; training keeps the existing
+        # autograd path. MPLinear and hooked/subclassed projections must run
+        # their own forward, including weight normalization and module hooks.
+        return (
+            self.implementation != ImplementationType.PYTORCH
+            and not torch.is_grad_enabled()
+            and out.is_cuda
+            and gate.dtype == out.dtype == torch.bfloat16
+            and out.shape[-1] == 128
+            and type(self.out_proj) is Linear
+            and self.out_proj.out_features == 128
+            and self.out_proj.weight.dtype == torch.bfloat16
+            and self.out_proj.bias is None
+            and not self.out_proj._forward_hooks
+            and not self.out_proj._forward_pre_hooks
+        )
 
     def _flash_window(
         self,

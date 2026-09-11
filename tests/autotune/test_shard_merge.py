@@ -11,8 +11,12 @@ stable between two merges of the same shards.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from miniworld_engine.autotune import cache, capture
+import pytest
+
+from miniworld_engine.autotune import cache, cache_status, capture
+from miniworld_engine.autotune.shard import provenance
 
 
 class _Cfg:
@@ -37,11 +41,17 @@ FULL = [_cfg(m, w) for m in (32, 64, 128, 256) for w in (4, 8)]
 OP = "triangle_attention_fwd_triton"
 
 
+@pytest.fixture(autouse=True)
+def current_source(monkeypatch):
+    monkeypatch.setattr(cache_status, "_current_op_identity", lambda op: "current-source")
+
+
 def _write_shards(tmp_path, slices):
     paths = []
     for i, sl in enumerate(slices):
         p = tmp_path / f"shard{i}.json"
-        p.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME, OP: {
+        p.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME, "_provenance": provenance("TEST"), OP: {
+            "op_id": "current-source",
             "grid": sl,
             "entries": {"bfloat16|N=128": [dict(c, ms=1.0 + i) for c in sl]},
         }}))
@@ -111,7 +121,7 @@ def test_an_unparseable_shard_is_reported_not_swallowed(tmp_path, monkeypatch):
     from miniworld_engine.autotune import cache, capture
     monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path / "data")
     good = tmp_path / "good.json"
-    good.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME,
+    good.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME, "_provenance": provenance(),
                                 OP: {"grid": [], "entries": {}, "op_id": ""}}))
     bad = tmp_path / "bad.json"
     bad.write_text('{"a": {}}{"a": {}}')          # two documents, as the real corruption was
@@ -129,7 +139,70 @@ def test_merge_skipped_resets_between_runs(tmp_path, monkeypatch):
     capture.merge_shards([str(bad)])
     assert capture._MERGE_SKIPPED
     good = tmp_path / "good.json"
-    good.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME,
+    good.write_text(json.dumps({"_key_scheme": cache.KEY_SCHEME, "_provenance": provenance(),
                                 OP: {"grid": [], "entries": {}, "op_id": ""}}))
     capture.merge_shards([str(good)])
     assert not capture._MERGE_SKIPPED
+
+
+def test_merge_rejects_foreign_gpu_compiler_and_unattributed_shards(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path / "data")
+    writes = []
+    monkeypatch.setattr(capture, "store_ranked_configs", lambda *a, **k: writes.append(a))
+    original = json.loads(Path(_write_shards(tmp_path, [FULL])[0]).read_text())
+    for bad_provenance in (None, provenance("ANOTHER GPU"),
+                           dict(provenance("TEST"), env_identity="old compiler")):
+        data = dict(original)
+        if bad_provenance is None:
+            data.pop("_provenance")
+        else:
+            data["_provenance"] = bad_provenance
+        path = tmp_path / "foreign.json"
+        path.write_text(json.dumps(data))
+        assert capture.merge_shards([path], gpu="TEST") == []
+        assert capture._MERGE_SKIPPED
+    assert not writes
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_old_source_cannot_win_by_being_faster_or_read_first(tmp_path, monkeypatch, reverse):
+    writes = []
+    monkeypatch.setattr(capture, "store_ranked_configs",
+                        lambda *args, **kwargs: writes.append((args, kwargs)))
+    current = Path(_write_shards(tmp_path, [FULL[:1]])[0])
+    old_data = json.loads(current.read_text())
+    old_data[OP]["op_id"] = "previous-source"
+    old_data[OP]["entries"]["bfloat16|N=128"][0]["ms"] = 0.001
+    old_data[OP]["grid"].append(_cfg(1024, 8))
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps(old_data))
+    paths = [old, current]
+    capture.merge_shards(paths[::-1] if reverse else paths, gpu="TEST")
+    assert len(writes) == 1
+    args, kwargs = writes[0]
+    assert kwargs["op_id"] == "current-source"
+    assert args[4][0][1] == 1.0, "old-source timing must not enter the ranking"
+    assert len(kwargs["configs"]) == 1, "old-source grid must not enter the union"
+    assert len(capture._MERGE_SKIPPED) == 1
+    assert "old.json" in capture._MERGE_SKIPPED[0][0]
+    assert "source/key identity mismatch" in capture._MERGE_SKIPPED[0][1]
+
+
+@pytest.mark.parametrize("identity", [None, "", "previous-source"])
+def test_missing_or_old_source_is_not_relabelled(tmp_path, monkeypatch, identity):
+    writes = []
+    monkeypatch.setattr(capture, "store_ranked_configs", lambda *a, **kw: writes.append(a))
+    path = Path(_write_shards(tmp_path, [FULL[:1]])[0])
+    data = json.loads(path.read_text())
+    data[OP]["op_id"] = identity
+    path.write_text(json.dumps(data))
+    assert capture.merge_shards([path], gpu="TEST") == []
+    assert not writes
+    assert "source/key identity mismatch" in capture._MERGE_SKIPPED[0][1]
+
+
+def test_unresolvable_source_cannot_be_certified(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache_status, "_current_op_identity", lambda op: None)
+    paths = _write_shards(tmp_path, [FULL[:1]])
+    assert capture.merge_shards(paths, gpu="TEST") == []
+    assert "cannot resolve current kernel" in capture._MERGE_SKIPPED[0][1]

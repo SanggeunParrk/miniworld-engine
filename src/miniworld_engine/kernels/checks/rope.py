@@ -32,3 +32,23 @@ def rope_fwd_triton():
     gr = grads_of(lambda t: rope_3d_reference(t, cos, sin), [x], da)
     out["dx"] = (gk[0], gr[0])
     return out
+
+
+def _qk_check(backward):
+    from miniworld_engine.kernels.drivers.rope import _qk_args
+    from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
+    from miniworld_engine.modules.swa_atom_attention.module import apply_rotary_emb_3d
+    q,k,cos,sin=_qk_args()
+    def reference(x):
+        n=torch.nn.functional.rms_norm(x.float(),(x.shape[-1],),eps=torch.finfo(torch.float32).eps).to(x.dtype)
+        return apply_rotary_emb_3d(n,cos,sin)
+    yq,yk=qk_norm_rope_3d(q,k,cos,sin)
+    rq,rk=reference(q),reference(k)
+    if not backward:return {"q":(yq,rq),"k":(yk,rk)}
+    gq,gk=torch.randn_like(q),torch.randn_like(k)
+    actual=torch.autograd.grad((yq,yk),(q,k),(gq,gk))
+    expected=torch.autograd.grad((rq,rk),(q,k),(gq,gk))
+    return {"dq":(actual[0],expected[0]),"dk":(actual[1],expected[1])}
+
+def qk_norm_rope_fwd():return _qk_check(False)
+def qk_norm_rope_bwd():return _qk_check(True)

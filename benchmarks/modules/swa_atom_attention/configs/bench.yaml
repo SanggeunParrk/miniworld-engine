@@ -5,7 +5,7 @@ d_single_atom: 128
 d_pair_atom: 16
 
 n_layers: 1
-n_augment: 32
+n_augment: auto  # inference: 5; training: 48
 mask_prob: 0.0
 min_seq_len: 128
 max_seq_len: 384
@@ -21,22 +21,20 @@ sweep_axis: seq_len
 sweep_seq_len: 384
 
 # ESMFold2 SWA atom attention core (Wqkv -> qk-RMSNorm -> 3D RoPE -> windowed attention ->
-# sigmoid gate -> out_proj). Runs at atom length = seq_len*8. Only `miniworld` -- the module has
-# no eager variant; every piece is a kernel on CUDA (with a CPU eager fallback for unit tests),
-# and the windowed attention needs a flash backend (FA4/FA2) at these lengths, since SDPA's band
-# mask is 24 GiB at S=8192.
+# sigmoid gate -> out_proj). Runs at atom length = seq_len*8.
+# PyTorch uses torch normalization, RoPE and gating; both variants use FlashAttention.
 target: swa_atom_attention
 level: module
 implementations:
+  - pytorch
   - miniworld
 mode: inference
 metric: time
-# compile leaves a graph break at the flash op (its unpad path calls torch.nonzero,
-# data-dependent); harmless. cudagraph must be DISABLED on sm80: FA2's unpad is not
-# CUDA-graph capturable, so `--cudagraph manual` (the CLI default) errors. sm90's FA4
-# static-seqused path IS capturable.
+# Both variants compile; inference uses graph replay, training disables graphs.
 compile: true
-cudagraph: disabled
+cudagraph: auto  # inference: manual graph; training: disabled
 allow_tf32: true
 precision: "bf16-mixed"
 name_suffix: ""
+dropout: auto
+trimul_direction: outgoing

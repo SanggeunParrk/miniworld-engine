@@ -153,7 +153,8 @@ def test_every_runtime_data_extension_is_declared_as_package_data():
                pkg / "build", pkg / "kernels" / "registry.csv"]
     # Scaffolding and prose, not data the runtime reads.
     skip = {".py", ".pyc"}
-    skip_names = {".gitkeep", "README.md"}
+    # The writer creates a process synchronization lock; it is not a shipped cache asset.
+    skip_names = {".gitkeep", "README.md", ".merge.lock"}
     missed = []
     for target in runtime:
         files = [target] if target.is_file() else [p for p in target.rglob("*") if p.is_file()]

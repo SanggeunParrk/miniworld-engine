@@ -80,9 +80,8 @@ def apply_stability_workarounds() -> list[str]:
 
 def build(impl: ImplementationType, cfg: PairformerConfig) -> Pairformer:
     torch.manual_seed(0)  # identical init across impls (same seed each build)
-    # bf16 params: our cute/triton kernels require the weight dtype to match the
-    # bf16 activations; also the deployment regime. All three impls use bf16 for
-    # a fair comparison.
+    # BF16 activations and projection weights; normalization modules retain
+    # their FP32 affine parameters through their _apply override.
     return Pairformer(cfg, implementation=impl).to(DEVICE, dtype=torch.bfloat16)
 
 
@@ -173,7 +172,8 @@ def infer_out(model: nn.Module, pair, mask) -> torch.Tensor:
     return model(pair, mask).float()
 
 
-def run_table(mode: str, args, cfg: PairformerConfig) -> None:
+def run_table(mode: str, args, cfg: PairformerConfig) -> int:
+    failures = 0
     timer = TIMERS[mode]
     print(f"\n### {mode.upper()}  (variant={args.variant})")
     speedup_bases = [k for k in args.impls if k != "ours"] if "ours" in args.impls else []
@@ -189,6 +189,11 @@ def run_table(mode: str, args, cfg: PairformerConfig) -> None:
         ref = None
         for label in args.impls:
             model = build(IMPLS[label], cfg)
+            parameter_dtypes = sorted({str(p.dtype) for p in model.parameters()})
+            print(f"    [regime] L={L} impl={label} compile_requested={args.compile} "
+                  f"cudagraph={args.cudagraph} input_dtype={pair.dtype} "
+                  f"parameter_dtypes={','.join(parameter_dtypes)} "
+                  f"input_grad={pair.requires_grad} mask=None p_drop={args.p_drop}")
             if args.compile:
                 # Raise dynamo's recompile ceiling: the manual-autograd + warmup/capture flow
                 # churns guards (requires_grad / shape) and hits the default limit (8) -> eager
@@ -213,6 +218,7 @@ def run_table(mode: str, args, cfg: PairformerConfig) -> None:
             try:
                 times[label] = timer(model, pair, mask, args.cudagraph)
             except Exception as e:
+                failures += 1
                 times[label] = float("nan")
                 print(f"    [warn] L={L} {mode} {label} failed: {type(e).__name__}: {str(e)[:100]}")
             del model
@@ -224,6 +230,7 @@ def run_table(mode: str, args, cfg: PairformerConfig) -> None:
             spd = times[b] / ours if ours == ours and ours else float("nan")
             row += f" | {spd:>13.2f}x"
         print(row)
+    return failures
 
 
 def main() -> None:
@@ -249,7 +256,9 @@ def main() -> None:
         raise SystemExit("CUDA required.")
     print(f"GPU: {torch.cuda.get_device_name(0)}  cap={torch.cuda.get_device_capability(0)}")
     print(f"B={args.B} d_pair={args.d_pair} n_block={args.n_block} "
-          f"variant={args.variant} cudagraph={args.cudagraph}")
+          f"variant={args.variant} cudagraph={args.cudagraph} compile_requested={args.compile} "
+          f"compile_wrap={settings.current().compile_wrap} input_dtype=bf16 "
+          f"input_grad=False mask=None p_drop={args.p_drop}")
     if args.cudagraph:
         for note in apply_stability_workarounds():
             print(f"  note: {note}")
@@ -263,9 +272,10 @@ def main() -> None:
         use_triangle_attention=(args.variant == "full"),
         bidirectional_trimul=(args.variant == "trimul_only"),
     )
-    for mode in args.modes:
-        run_table(mode, args, cfg)
+    failures = sum(run_table(mode, args, cfg) for mode in args.modes)
     print("\n(times = median ms over the n_block stack; lower is better)")
+    if failures:
+        raise SystemExit(f"{failures} benchmark measurement(s) failed")
 
 
 if __name__ == "__main__":

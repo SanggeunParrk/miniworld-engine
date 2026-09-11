@@ -50,7 +50,7 @@ def bidirectional_trimul_sm100(
     (== masking left/right). Lets the fast free path serve masked/padded inputs."""
     b, l1, l2, d = pair.shape
     x = triton_layernorm(
-        pair.reshape(b * l1 * l2, d), ln_in_w, ln_in_b, eps_in, row_scale=row_scale
+        pair, ln_in_w, ln_in_b, eps_in, row_scale=row_scale
     ).view(b, l1, l2, d)
 
     def _front(sl):

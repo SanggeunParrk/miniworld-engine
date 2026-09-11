@@ -24,7 +24,7 @@ import csv
 from paths import REGISTRY as REG
 
 from miniworld_engine.autotune.builder import op_units
-from miniworld_engine.autotune.module_registry import module_rows
+from miniworld_engine.autotune.module_registry import STREAM_LADDERS, module_rows
 from miniworld_engine.autotune.shape_key import (
     ATOM_KEY_BUCKETS,
     DIT_ATOM_LENGTHS,
@@ -90,9 +90,9 @@ def test_each_is_driven_from_both_streams_with_that_streams_widths() -> None:
             bad.append(f"{module}: streams {sorted(by_stream)}, want token_single + atom_single")
             continue
         atom = by_stream["atom_single"]
-        if set(atom.lengths) != set(DIT_ATOM_LENGTHS):
+        if set(atom.lengths) != set(STREAM_LADDERS["atom_single"]):
             bad.append(f"{module} atom side runs at {sorted(atom.lengths)}, "
-                       f"want {sorted(DIT_ATOM_LENGTHS)}")
+                       f"want {sorted(STREAM_LADDERS['atom_single'])}")
         if set(atom.dims.values()) - {ATOM_WIDTH, 16, 4}:
             bad.append(f"{module} atom side widths {atom.dims}; c_atom is {ATOM_WIDTH}")
         token = by_stream["token_single"]
@@ -124,7 +124,7 @@ def test_a_token_length_gets_its_own_bucket() -> None:
     for L in DIT_TOKEN_LENGTHS:
         assert unpack_base(atom_key(L), 0) == L, (
             f"token length {L} does not key to itself; ATOM_KEY_BUCKETS={ATOM_KEY_BUCKETS}")
-    assert not (set(DIT_TOKEN_LENGTHS) & set(DIT_ATOM_LENGTHS)), (
+    assert not (set(DIT_TOKEN_LENGTHS) & set(STREAM_LADDERS["atom_single"])), (
         "the two sides share a length, so one floor-clamp cannot tell them apart and the key "
         "would have to move to row counts the way level=both did")
 
