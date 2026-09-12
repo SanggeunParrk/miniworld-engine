@@ -720,8 +720,11 @@ def _bench_build_first(args: argparse.Namespace, targets: tuple[str, ...], repo:
                                 predict=getattr(args, "predict_unusable", False),
                                 bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                 bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                unit_timeout_seconds=getattr(args, "unit_timeout_seconds",
+                                                          builder.DEFAULT_UNIT_TIMEOUT_SECONDS),
                                 pin_cores=getattr(args, "pin_cores", False))
-    return _merge_built_shards(args, results)
+    rc = _merge_built_shards(args, results)
+    return rc or int(any(row.get("timed_out") for row in results))
 
 
 #: A shard with no measurements is `{"_key_scheme": <n>}` and nothing else -- 18 bytes on the
@@ -965,6 +968,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                                       predict=getattr(args, "predict_unusable", False),
                                       bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                       bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                      unit_timeout_seconds=getattr(args, "unit_timeout_seconds",
+                                                                builder.DEFAULT_UNIT_TIMEOUT_SECONDS),
                                       pin_cores=getattr(args, "pin_cores", False),
                                       # --fill-gaps has to reach the units too: the unit-level
                                       # skip drops any op whose cache answers at ANY bucket,
@@ -984,6 +989,8 @@ def cmd_build(args: argparse.Namespace) -> int:
                                      predict=getattr(args, "predict_unusable", False),
                                      bench_clear_mb=getattr(args, "bench_clear_mb", 0),
                                      bench_rep_ms=getattr(args, "bench_rep_ms", 0),
+                                     unit_timeout_seconds=getattr(args, "unit_timeout_seconds",
+                                                               builder.DEFAULT_UNIT_TIMEOUT_SECONDS),
                                      pin_cores=getattr(args, "pin_cores", False),
                                      skip_cached=False)
     held = [r for r in results if r.get("claimed_elsewhere")]
@@ -1019,7 +1026,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     rc = _merge_built_shards(args, results)
     # AFTER the merge, never before: the shipped output is the JSON the merge writes, and until it
     # is written the triton cache is the only place the build's work exists.
-    if not rc and _should_prune(args):
+    if not rc and not failed and not held and _should_prune(args):
         _empty_triton_cache(dry_run=False)
     # After the merge, so a build that half-worked still ships what it measured -- the same rule
     # the merge itself follows. The exit code is the only thing a batch job's caller sees.
@@ -1756,6 +1763,9 @@ def build_parser() -> argparse.ArgumentParser:
                           "triton, a changed bench setting) -- not to fill a gap")
     bld.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
     bld.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
+    bld.add_argument("--unit-timeout-seconds", type=float, default=7200.0,
+                         help="maximum wall seconds per cache-build unit, including compilation "
+                              "(default 7200); timed-out units release their GPU slot and retry on resume")
     bld.add_argument("--units-per-gpu", type=int, default=1,
                      help="units to run on each card at once (default 1). A unit alternates "
                           "between compiling and measuring; >1 lets one unit's compile overlap "
@@ -1841,6 +1851,9 @@ def build_parser() -> argparse.ArgumentParser:
                              help="dir for the shards")
         parser_.add_argument("--gpus", default="all", help="count, comma list, or 'all'")
         parser_.add_argument("--compile-jobs", type=int, default=0, help="0 = one per core")
+        parser_.add_argument("--unit-timeout-seconds", type=float, default=7200.0,
+                             help="maximum wall seconds per cache-build unit, including compilation "
+                                  "(default 7200); timed-out units release their GPU slot and retry on resume")
         parser_.add_argument("--resume", action="store_true",
                              help="pre-bench build skips units whose shard already has entries")
         parser_.add_argument("--no-build", action="store_true",

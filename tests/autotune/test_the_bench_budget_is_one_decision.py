@@ -117,7 +117,7 @@ def test_it_reaches_the_unit_on_its_command_line(tmp_path, monkeypatch):
         returncode = 0
 
     from miniworld_engine.autotune import builder
-    monkeypatch.setattr(builder.subprocess, "run",
+    monkeypatch.setattr(builder, "_run_unit_process",
                         lambda cmd, **kw: (seen.clear(), seen.extend(cmd), _Proc())[-1])
     unit = builder.OpUnit(op="layernorm_stats_triton", dtype="bfloat16", length=256)
     d = tmp_path / "a"
@@ -135,7 +135,7 @@ def test_half_the_decision_never_reaches_the_unit(tmp_path, monkeypatch):
         returncode = 0
 
     from miniworld_engine.autotune import builder
-    monkeypatch.setattr(builder.subprocess, "run",
+    monkeypatch.setattr(builder, "_run_unit_process",
                         lambda cmd, **kw: (seen.clear(), seen.extend(cmd), _Proc())[-1])
     unit = builder.OpUnit(op="layernorm_stats_triton", dtype="bfloat16", length=256)
     d = tmp_path / "b"

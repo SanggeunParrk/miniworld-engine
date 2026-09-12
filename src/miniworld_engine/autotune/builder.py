@@ -25,7 +25,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import math
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -1558,7 +1560,7 @@ def _shard_reusable(path: Path) -> bool:
     """A completed file can resume work only on its recorded GPU/compiler."""
     from miniworld_engine.autotune.shard import provenance_error
 
-    if not _shard_has_entries(path):
+    if path.with_suffix(".failed").exists() or not _shard_has_entries(path):
         return False
     try:
         data = json.loads(path.read_text())
@@ -1700,14 +1702,90 @@ def visible_device(device: int) -> str:
     return tokens[device]
 
 
+DEFAULT_UNIT_TIMEOUT_SECONDS = 7200.0
+
+
+def _kill_unit_tree(pid: int) -> None:
+    """Stop and kill this Linux unit's descendants, including setsid compilers.
+
+    capture's compile guards create private sessions, so killpg alone misses them.
+    Freeze parents before enumerating children (including thread children), keeping
+    them from forking or reaping while we traverse. Check process start times before
+    signalling again. This works on cluster Python builds without os.pidfd_open.
+    No node-wide process scan or signalling of other build slots is needed.
+    """
+    frozen = []
+
+    def stat(current: int) -> list[str]:
+        return Path(f"/proc/{current}/stat").read_text().rsplit(") ", 1)[1].split()
+
+    def freeze(current: int, parent: int | None = None) -> None:
+        try:
+            state = stat(current)
+            if parent is not None and int(state[1]) != parent:
+                return
+            frozen.append((current, state[19]))  # starttime, /proc stat field 22
+            os.kill(current, signal.SIGSTOP)
+            deadline = time.monotonic() + 0.2
+            while stat(current)[0] not in ("T", "t", "Z") and time.monotonic() < deadline:
+                time.sleep(0.001)
+            children = set()
+            for task in Path(f"/proc/{current}/task").iterdir():
+                with contextlib.suppress(FileNotFoundError, ProcessLookupError):
+                    children.update(map(int, (task / "children").read_text().split()))
+            for child in children:
+                freeze(child, current)
+        except (FileNotFoundError, ProcessLookupError):
+            return
+
+    try:
+        freeze(pid)
+    finally:
+        # Child-first: keep ancestry intact until every detached compiler is found.
+        for current, started in reversed(frozen):
+            with contextlib.suppress(FileNotFoundError, ProcessLookupError):
+                if stat(current)[19] == started:
+                    os.kill(current, signal.SIGKILL)
+
+
+def _run_unit_process(cmd, *, cwd, stdout, stderr, check, env, timeout):
+    """Bound the whole unit, including external compilers, in its own process group.
+
+    subprocess.run(timeout=...) kills only the leader. A compiler descendant can
+    otherwise keep the CUDA context / file descriptors alive after the slot is freed.
+    """
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=stdout, stderr=stderr, env=env,
+                            start_new_session=True)
+    stdout.write(f"[unit] pid={proc.pid} pgid={proc.pid}\n")
+    stdout.flush()
+    try:
+        proc.wait(timeout=timeout)
+    except BaseException:
+        try:
+            _kill_unit_tree(proc.pid)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        raise
+    # Also reap any lingering compile workers from an otherwise completed unit.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    return subprocess.CompletedProcess(cmd, proc.returncode)
+
+
 def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo: Path,
                          compile_jobs: int, config_dir: Path | None = None,
                          fill_gaps: bool = False, share_card: bool = False,
                          keep_ir: bool = False, predict: bool = False,
                          bench_clear_mb: int = 0, bench_rep_ms: int = 0,
-                         cores: str = "", rebuild_cached: bool = False) -> dict:
+                         cores: str = "", rebuild_cached: bool = False,
+                         unit_timeout_seconds: float = DEFAULT_UNIT_TIMEOUT_SECONDS) -> dict:
     """One unit, in its own process on one card. Subprocess rather than thread: a capture can take
     the CUDA context down with it, and one dead unit must not end the build."""
+    if not math.isfinite(unit_timeout_seconds) or unit_timeout_seconds <= 0:
+        raise ValueError("unit_timeout_seconds must be finite and positive")
+    physical_device = visible_device(device)
     shard = shard_dir / f"{unit.stem}.json"
     # Claim the unit by creating its marker exclusively. --resume alone only filters at startup, so
     # two builds pointed at one shard dir would each take the whole list and run every unit twice;
@@ -1722,7 +1800,7 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     log = shard_dir / "logs" / f"gpu{device}-{unit.stem}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = visible_device(device)
+    env["CUDA_VISIBLE_DEVICES"] = physical_device
     # Write cubin + metadata and not the five IR levels: 187 KB an entry becomes 71, and the A6000
     # rebuild's cache was 40 GB of a shared filesystem. See autotune/triton_cache.py.
     triton_cache.store_binary_only_env(env, keep_ir)
@@ -1763,9 +1841,25 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
         cmd += ["--fill-gaps"]
     env.update(unit.env())
     started = time.monotonic()
-    with log.open("w") as handle:
-        proc = subprocess.run(cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT,
-                              check=False, env=env)
+    timed_out = False
+    with log.open("a") as handle:
+        handle.write(f"\n[unit] START timeout={unit_timeout_seconds:g}s argv={cmd!r}\n")
+        handle.flush()
+        attempt_offset = handle.tell()
+        try:
+            proc = _run_unit_process(cmd, cwd=repo, stdout=handle, stderr=subprocess.STDOUT,
+                                     check=False, env=env, timeout=unit_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc = subprocess.CompletedProcess(cmd, 124)
+            handle.write(f"\n[unit] TIMEOUT after {unit_timeout_seconds:g}s; "
+                         "unit process group killed; claim released for resume\n")
+        except OSError as exc:
+            proc = subprocess.CompletedProcess(cmd, 127)
+            handle.write(f"\n[unit] LAUNCH-ERROR {exc}\n")
+        except BaseException:
+            claim.unlink(missing_ok=True)
+            raise
     ops = 0
     if shard.exists():
         try:
@@ -1781,15 +1875,27 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     # correctly: `augmented_attention_bwd_split_triton[float32] L=4096` wants 153,600 B of shared
     # memory and an A6000 has 101,376.
     try:
-        skipped = "[unit] SKIPPED-PERMANENT" in log.read_text()
+        with log.open() as handle:
+            handle.seek(attempt_offset)
+            skipped = not timed_out and "[unit] SKIPPED-PERMANENT" in handle.read()
     except OSError:
         skipped = False
-    if not ops and not skipped:
-        claim.unlink(missing_ok=True)  # nothing produced: let a later run retry this unit
+    failed_marker = shard.with_suffix(".failed")
+    if proc.returncode != 0 and not skipped:
+        # Do not rewrite partial measurements. This also prevents an older complete
+        # shard from satisfying resume after a forced rebuild timed out.
+        failed_marker.write_text(f"rc={proc.returncode} timed_out={timed_out}\n")
+    else:
+        failed_marker.unlink(missing_ok=True)
+    if not skipped and (proc.returncode != 0 or not _shard_reusable(shard)):
+        # A failed module can still have timings from its earlier kernels. Preserve those
+        # timings, but release the claim so resume retries the unfinished module.
+        claim.unlink(missing_ok=True)
     # a permanent skip KEEPS its claim: the shape will not fit on the next attempt either, and
     # releasing it made every resumed job re-claim the same OOMing units and produce nothing.
     return {"label": unit.label, "gpu": device, "rc": proc.returncode, "ops": ops,
-            "skipped": skipped,
+            "skipped": skipped, "timed_out": timed_out,
+            "unit_timeout_seconds": unit_timeout_seconds,
             "seconds": round(time.monotonic() - started, 1), "shard": str(shard), "log": str(log)}
 
 
@@ -1845,7 +1951,8 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
               config_dir: Path | None = None, fill_gaps: bool = False,
               units_per_gpu: int = 1, keep_ir: bool = False, predict: bool = False,
               bench_clear_mb: int = 0, bench_rep_ms: int = 0,
-              pin_cores: bool = False, skip_cached: bool = True) -> list[dict]:
+              pin_cores: bool = False, skip_cached: bool = True,
+              unit_timeout_seconds: float = DEFAULT_UNIT_TIMEOUT_SECONDS) -> list[dict]:
     """Run every unit of ``selected`` across ``gpus``. Returns one result record per unit.
 
     ``units_per_gpu`` > 1 puts that many units on each card so their phases interleave. A unit
@@ -1875,6 +1982,8 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     """
     import concurrent.futures as cf
 
+    if not math.isfinite(unit_timeout_seconds) or unit_timeout_seconds <= 0:
+        raise ValueError("unit_timeout_seconds must be finite and positive")
     validate_build_gpus(gpus)
     repo = Path(__file__).resolve().parents[3]
     shard_dir.mkdir(parents=True, exist_ok=True)
@@ -2009,7 +2118,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
                                        config_dir, fill_gaps, share_card=units_per_gpu > 1,
                                        keep_ir=keep_ir, predict=predict,
                                        bench_clear_mb=bench_clear_mb, bench_rep_ms=bench_rep_ms,
-                                       cores=cores,
+                                       cores=cores, unit_timeout_seconds=unit_timeout_seconds,
                                        # `--rebuild-cached` on the CHILD means "re-measure the
                                        # configs the cache already searched for this shape". That
                                        # is not what disabling the unit-level skip is for, and the
@@ -2023,7 +2132,7 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
             if res.get("claimed_elsewhere"):
                 got.append(res)
                 continue
-            status = ("ok" if res["rc"] == 0 and res["ops"] else
+            status = ("TIMEOUT" if res.get("timed_out") else "ok" if res["rc"] == 0 and res["ops"] else
                       "skip" if res.get("skipped") else
                       "EMPTY" if res["rc"] == 0 else "FAIL")
             print(f"  [gpu{device}] {status:5s} {res['label']}  {res['seconds']}s  {res['ops']} ops",

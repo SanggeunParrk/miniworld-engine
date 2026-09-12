@@ -35,7 +35,6 @@ def _run(tmp_path: Path, monkeypatch, *, rc: int, shard_ops: int, log_text: str)
     (shard_dir / "logs").mkdir(parents=True)
     unit = UNIT
     shard = shard_dir / f"{unit.stem}.json"
-    log = shard_dir / "logs" / f"gpu0-{unit.stem}.log"
 
     class _Proc:
         returncode = rc
@@ -44,10 +43,11 @@ def _run(tmp_path: Path, monkeypatch, *, rc: int, shard_ops: int, log_text: str)
         if shard_ops:
             shard.write_text(json.dumps({f"op{i}": {"entries": {"bfloat16|k": []}}
                                          for i in range(shard_ops)}))
-        log.write_text(log_text)
+        kw["stdout"].write(log_text)
+        kw["stdout"].flush()
         return _Proc()
 
-    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    monkeypatch.setattr(builder, "_run_unit_process", fake_run)
     return builder._run_unit_subprocess(unit, 0, shard_dir, tmp_path, compile_jobs=1)
 
 

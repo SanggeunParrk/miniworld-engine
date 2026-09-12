@@ -172,7 +172,7 @@ def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:
         seen["cmd"] = cmd
         raise SystemExit(0)          # stop before anything launches
 
-    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    monkeypatch.setattr(builder, "_run_unit_process", fake_run)
     unit = builder.op_units({"gated_projection_gate_triton"})[0]
     for want in (True, False):
         seen.clear()

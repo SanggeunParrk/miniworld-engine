@@ -1,8 +1,6 @@
-"""Build-time policy: what the autotune-cache builder is allowed to build, per GPU.
+"""GPU support policy shared by the cache builder and internal backend dispatch.
 
-Separate from ``autotune/`` on purpose. ``autotune`` is runtime -- it is imported by every forward
-that consults the cache. This package is consulted only while BUILDING the cache, so nothing here
-belongs on the hot import path.
+The CSV parser is lightweight; importing it does not import the builder or query CUDA.
 """
 
 from miniworld_engine.build.matrix import (

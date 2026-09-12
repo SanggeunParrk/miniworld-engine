@@ -131,7 +131,9 @@ class BidirBackHalf(torch.autograd.Function):
 
         # dispatch: cuBLAS wins small L (quack launch overhead), cute ≈/wins large L.
         dx_n = dispatch.pick("dxn", (M, 4 * H + D, D),
-                             [("cute", _dxn_cute), ("cublas", _dxn_cublas)]).reshape(B, L, L, D)
+                             [("cute", _dxn_cute), ("cublas", _dxn_cublas)],
+                             operands=(dconcT, W_stack, d_glogit, Wg_t),
+                             case="triangle_multiplication_bidirectional").reshape(B, L, L, D)
         d_residual = gy.reshape(B, L, L, D)
         del gy
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
