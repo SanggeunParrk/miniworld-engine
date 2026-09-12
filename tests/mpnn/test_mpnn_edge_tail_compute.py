@@ -199,3 +199,57 @@ def _two_row_configs() -> list:
         triton.Config({"BLOCK_M1": 32}, num_warps=4, num_stages=1),
         triton.Config({"BLOCK_M1": 64}, num_warps=4, num_stages=2),
     ]
+
+
+@pytest.mark.parametrize("rows", [1, 31, 65])
+@pytest.mark.parametrize("probability", [0.0, 0.25, 0.9])
+def test_compute_tail_packed_mask_matches_philox(rows, probability):
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def draws(seed_ptr, out_ptr, n: tl.constexpr, probability: tl.constexpr):
+        offsets = tl.program_id(0) * 256 + tl.arange(0, 256)
+        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < probability
+        tl.store(out_ptr + offsets, keep, offsets < n)
+
+    width = 128
+    seed = torch.tensor(123456789, device="cuda", dtype=torch.int64)
+    values = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+    weight = torch.eye(width, device="cuda", dtype=torch.bfloat16)
+    zero = torch.zeros(width, device="cuda")
+    one = torch.ones(width, device="cuda")
+    out, saved = torch.empty_like(values), torch.empty_like(values)
+    packed = torch.empty(rows * 4, device="cuda", dtype=torch.int32)
+    compute._project_output.fn[(triton.cdiv(rows, 32),)](
+        values, weight, zero, values, one, zero, seed, out, saved, packed,
+        rows, 0, probability, 1.0, 1e-5,
+        WIDTH=width, BLOCK_M1=32, BLOCK_K=32, DROPOUT=True,
+        num_warps=4, num_stages=1,
+    )
+    expected = torch.empty(rows * width, device="cuda", dtype=torch.bool)
+    draws[(triton.cdiv(expected.numel(), 256),)](seed, expected, expected.numel(), probability)
+    words = packed.to(torch.int64) & 0xFFFFFFFF
+    decoded = ((words[:, None] >> torch.arange(32, device="cuda")) & 1).bool().flatten()
+    assert torch.equal(decoded, expected)
+    assert packed.numel() * packed.element_size() * 8 == expected.numel()
+
+    grad_out = torch.randn_like(values)
+    grad_values, grad_update = torch.empty_like(values), torch.empty_like(values)
+    dg, db, du = (torch.zeros_like(one) for _ in range(3))
+    compute._norm_backward.fn[(triton.cdiv(rows, 32),)](
+        grad_out, saved, packed, one, grad_values, grad_update, dg, db, du,
+        rows, 0, 1.0, 1e-5, WIDTH=128, BLOCK_M1=32, DROPOUT=True,
+        num_warps=4, num_stages=1,
+    )
+    torch.testing.assert_close(
+        grad_update, torch.where(expected.view(rows, width), grad_values, 0),
+        atol=0, rtol=0,
+    )
+
+
+def test_packed_mask_has_a_distinct_compiled_abi():
+    # Cached AOT graphs for v1 expect one INT8 element per dropout decision.
+    # The packed shape/dtype is incompatible even though the schema says Tensor.
+    assert compute._launch_forward._name == "mpnn_edge_tail_compute_fwd_v2"
+    assert compute._launch_backward._name == "mpnn_edge_tail_compute_bwd_v2"

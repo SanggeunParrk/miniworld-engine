@@ -257,15 +257,16 @@ def test_backbone_features_expose_explicit_neighbor_graph_contract() -> None:
     )
 
 
+@pytest.mark.parametrize("backend", ["recompute", "memory"])
 @pytest.mark.parametrize("coordinate_grad", [False, True])
 def test_feature_recompute_backend_preserves_outputs_and_gradients(
-    coordinate_grad: bool,
+    coordinate_grad: bool, backend: str,
 ) -> None:
     _, reference = _models()
     _, candidate = _models()
     candidate.load_state_dict(reference.state_dict(), strict=True)
     reference.backbone_features.feature_backend = "pytorch"
-    candidate.backbone_features.feature_backend = "recompute"
+    candidate.backbone_features.feature_backend = backend
     common = _inputs(length=8)
     reference_backbone = common[0].detach().clone().requires_grad_(coordinate_grad)
     candidate_backbone = common[0].detach().clone().requires_grad_(coordinate_grad)

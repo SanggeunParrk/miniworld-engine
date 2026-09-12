@@ -312,7 +312,10 @@ def _project_output(
     if DROPOUT:
         keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < keep_probability
         update = tl.where(keep, update * dropout_scale, 0.0)
-        tl.store(keep_ptr + offsets, keep.to(tl.int8), mask=valid[:, None])
+        bits = tl.reshape(keep, (BLOCK_M1, WIDTH // 32, 32)).to(tl.uint32)
+        words = tl.sum(bits << tl.arange(0, 32)[None, None, :], axis=2)
+        word_offsets = row_block[:, None] * (WIDTH // 32) + tl.arange(0, WIDTH // 32)[None, :]
+        tl.store(keep_ptr + word_offsets, words, mask=valid[:, None])
     edge = tl.load(edge_ptr + offsets, mask=valid[:, None], other=0.0).to(tl.float32)
     values = (edge + update).to(tl.bfloat16)
     tl.store(values_ptr + offsets, values, mask=valid[:, None])
@@ -378,7 +381,9 @@ def _norm_backward(
         - normalized * (tl.sum(scaled * normalized, axis=1) / WIDTH)[:, None]
     )
     if DROPOUT:
-        keep = tl.load(keep_ptr + offsets, mask=valid[:, None], other=0).to(tl.int1)
+        word_offsets = row_block[:, None] * (WIDTH // 32) + columns[None, :] // 32
+        words = tl.load(keep_ptr + word_offsets, mask=valid[:, None], other=0).to(tl.uint32)
+        keep = ((words >> (columns[None, :] % 32)) & 1) != 0
         grad_update = tl.where(keep, grad_values * dropout_scale, 0.0)
     else:
         grad_update = grad_values
@@ -558,20 +563,22 @@ def _launch_forward_fake(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """``out`` and three saved activations shaped like ``edge``, then the keep mask.
 
-    The mask is INT8 and its extent comes from `dropout_probability`, not from a tensor: with
-    dropout off it is a one-element placeholder, because nothing behind the `DROPOUT` constexpr
-    reads it and 0.4 GiB of untouched memory is the alternative.
+    The mask packs 32 decisions into each INT32 word. Its extent comes from
+    `dropout_probability`, not from a tensor. With dropout off it is a one-element
+    placeholder because both accesses are guarded by the `DROPOUT` constexpr.
     """
     rows, width = edge.shape
     empty = lambda: torch.empty_like(edge)
-    keep_elements = rows * width if dropout_probability > 0.0 else 1
+    keep_elements = rows * (width // 32) if dropout_probability > 0.0 else 1
     return (
         empty(), empty(), empty(), empty(),
-        edge.new_empty((keep_elements,), dtype=torch.int8),
+        edge.new_empty((keep_elements,), dtype=torch.int32),
     )
 
 
-@opaque(fake=_launch_forward_fake, name="mpnn_edge_tail_compute_fwd_v1")
+# v2 changes the saved mask ABI from INT8 elements to packed INT32 words. AOT
+# caches can outlive this source upgrade, so reusing v1 would reuse byte-mask shapes.
+@opaque(fake=_launch_forward_fake, name="mpnn_edge_tail_compute_fwd_v2")
 def _launch_forward(
     edge: torch.Tensor, query: torch.Tensor, table: torch.Tensor, index: torch.Tensor,
     w1: torch.Tensor, w2: torch.Tensor, b2: torch.Tensor, w3: torch.Tensor, b3: torch.Tensor,
@@ -584,12 +591,10 @@ def _launch_forward(
     empty = lambda: torch.empty_like(edge)
     out, preactivation, activated = empty(), empty(), empty()
     hidden, activated_hidden, values = empty(), empty(), empty()
-    # One byte per element rather than a redraw: the Philox draw measured 12% of a
-    # comparable kernel and a byte read is well under that.  With dropout off nothing
-    # touches it -- both accesses sit behind the DROPOUT constexpr -- so it shrinks to a
-    # placeholder instead of 0.4 GiB of untouched memory at the sweep point.
+    # Keep the exact forward Philox decisions, at one bit per element. Backward
+    # reads these bits without redrawing RNG. Dropout-off needs only a placeholder.
     keep = torch.empty(
-        rows * width if dropout else 1, device=edge.device, dtype=torch.int8
+        rows * (width // 32) if dropout else 1, device=edge.device, dtype=torch.int32
     )
 
     neighbors = _neighbors_of(rows, query.shape[0])
@@ -651,7 +656,7 @@ def _launch_backward_fake(
     )
 
 
-@opaque(fake=_launch_backward_fake, name="mpnn_edge_tail_compute_bwd_v1")
+@opaque(fake=_launch_backward_fake, name="mpnn_edge_tail_compute_bwd_v2")
 def _launch_backward(
     grad_out: torch.Tensor, preactivation: torch.Tensor, hidden: torch.Tensor,
     values: torch.Tensor, keep: torch.Tensor, edge: torch.Tensor, index: torch.Tensor,

@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.mpnn_edge_layernorm import (
     EdgeNormBackend,
     edge_layer_norm,
@@ -21,8 +22,83 @@ from miniworld_engine.kernels.mpnn_relative_position import (
 )
 from miniworld_engine.modules.mpnn._functional import gather_neighbors
 
-FeatureBackend = Literal["auto", "pytorch", "recompute"]
+FeatureBackend = Literal["auto", "pytorch", "recompute", "memory"]
 KNNBackend = Literal["cdist", "chunked", "grid_cutoff", "segment"]
+
+
+def _radial_features(distances: torch.Tensor, num_rbf: int) -> torch.Tensor:
+    centers = torch.linspace(2.0, 22.0, num_rbf, device=distances.device)
+    return torch.exp(
+        -(((distances.unsqueeze(-1) - centers) / (20.0 / num_rbf)) ** 2)
+    ).flatten(-2)
+
+
+@torch.compile(fullgraph=True, options={"triton.cudagraphs": False})
+def _radial_weight_gradient(
+    distances: torch.Tensor,
+    grad_output: torch.Tensor,
+    num_rbf: int,
+) -> torch.Tensor:
+    radial = _radial_features(distances, num_rbf).to(grad_output.dtype)
+    return grad_output.reshape(-1, grad_output.shape[-1]).T @ radial.reshape(
+        -1, radial.shape[-1]
+    )
+
+
+def _radial_weight_gradient_op_fake(
+    distances: torch.Tensor,
+    grad_output: torch.Tensor,
+    num_rbf: int,
+) -> torch.Tensor:
+    """Fresh [output_width, atom_pairs * num_rbf] gradient in GEMM operand dtype."""
+    return grad_output.new_empty((grad_output.shape[-1], distances.shape[-1] * num_rbf))
+
+
+@opaque(fake=_radial_weight_gradient_op_fake, name="mpnn_features_radial_dw_v1")
+def _radial_weight_gradient_op(
+    distances: torch.Tensor,
+    grad_output: torch.Tensor,
+    num_rbf: int,
+) -> torch.Tensor:
+    """Compute dW while keeping RBF expansion outside the forward saved tensors."""
+    # This boundary enforces the saved-tensor contract: AOT otherwise merges the
+    # identical forward/backward RBF expressions and saves the expanded tensor.
+    # Compile this backward-only region independently to preserve pointwise fusion.
+    return _radial_weight_gradient(distances, grad_output, num_rbf)
+
+
+class _FixedGeometryRadialProjection(torch.autograd.Function):
+    """Save distances instead of the expanded RBF for the projection's dW.
+
+    The RBF is a transient forward/backward GEMM operand. No model layer or
+    checkpoint API is invoked again. The backward region compiles separately to
+    prevent AOT from hoisting its RBF expansion into forward saves. Both regions retain
+    pointwise fusion and the native matrix multiplication. Coordinate gradients
+    deliberately use the ordinary feature path instead.
+    """
+
+    @staticmethod
+    def forward(ctx, distances, weight, num_rbf):
+        ctx.save_for_backward(distances)
+        ctx.num_rbf = num_rbf
+        radial = _radial_features(distances, num_rbf).to(weight.dtype)
+        return F.linear(radial, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (distances,) = ctx.saved_tensors
+        grad_weight = _radial_weight_gradient_op(distances, grad_output, ctx.num_rbf)
+        return None, grad_weight, None
+
+
+def _fixed_geometry_radial_projection(
+    distances: torch.Tensor,
+    weight: torch.Tensor,
+    num_rbf: int,
+) -> torch.Tensor:
+    if torch.is_autocast_enabled(distances.device.type):
+        weight = weight.to(torch.get_autocast_dtype(distances.device.type))
+    return _FixedGeometryRadialProjection.apply(distances, weight, num_rbf)
 
 
 @dataclass(frozen=True)
@@ -211,7 +287,7 @@ class BackboneFeatures(nn.Module):
         self.num_rbf = num_rbf
         self.k_neighbors = k_neighbors
         self.coordinate_noise = coordinate_noise
-        if feature_backend not in {"auto", "pytorch", "recompute"}:
+        if feature_backend not in {"auto", "pytorch", "recompute", "memory"}:
             raise ValueError(f"unknown MPNN feature backend: {feature_backend!r}")
         self.feature_backend = feature_backend
         if knn_backend not in {"cdist", "chunked", "grid_cutoff", "segment"}:
@@ -378,15 +454,18 @@ class BackboneFeatures(nn.Module):
         # 5.5e-3 on distances of order 10. `cdist` is the default backend precisely
         # because it reproduces the frozen reference bit for bit, so the mode is pinned
         # to whatever the FLATTENED length would have chosen, not to whatever is better.
-        distances = torch.cdist(
-            coordinates,
-            coordinates,
-            compute_mode=(
-                "use_mm_for_euclid_dist"
-                if total > 25
-                else "donot_use_mm_for_euclid_dist"
-            ),
-        ) * pair_mask
+        distances = (
+            torch.cdist(
+                coordinates,
+                coordinates,
+                compute_mode=(
+                    "use_mm_for_euclid_dist"
+                    if total > 25
+                    else "donot_use_mm_for_euclid_dist"
+                ),
+            )
+            * pair_mask
+        )
         row_max = distances.max(dim=-1, keepdim=True).values
         adjusted = distances + (1.0 - pair_mask) * (row_max + 100.0)
         neighbors = min(self.k_neighbors, length)
@@ -394,9 +473,9 @@ class BackboneFeatures(nn.Module):
             adjusted, neighbors, dim=-1, largest=False
         )
         edge_mask = torch.gather(pair_mask, 2, local_indices)
-        offsets = (
-            torch.arange(segments, device=alpha_carbon.device) * length
-        )[:, None, None]
+        offsets = (torch.arange(segments, device=alpha_carbon.device) * length)[
+            :, None, None
+        ]
         return (
             distances.reshape(1, total, neighbors),
             (local_indices + offsets).reshape(1, total, neighbors),
@@ -644,7 +723,15 @@ class BackboneFeatures(nn.Module):
             position_features.requires_grad and not pair_distances.requires_grad
         )
         recompute = self.feature_backend == "recompute" and torch.is_grad_enabled()
-        if recompute and split_projection:
+        if self.feature_backend == "memory" and not pair_distances.requires_grad:
+            edge_features = F.linear(
+                position_features,
+                weight[:, : self.position_width],
+                self.edge_projection.bias,
+            ) + _fixed_geometry_radial_projection(
+                pair_distances, weight[:, self.position_width :], self.num_rbf
+            )
+        elif recompute and split_projection:
             edge_features = F.linear(
                 position_features,
                 weight[:, : self.position_width],

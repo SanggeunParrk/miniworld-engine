@@ -167,6 +167,8 @@ OP_FAMILIES = (
     "mpnn_message",
     "mpnn_node_message",
     "mpnn_relative_position",
+    "mpnn_features",  # fixed-geometry RBF dW boundary enforces activation lifetime under AOT
+
     "augmented_attention",
     "bias_only_attention",
     "conditioned_transition",

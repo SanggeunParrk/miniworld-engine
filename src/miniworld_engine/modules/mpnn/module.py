@@ -116,9 +116,9 @@ class ProteinMPNNConfig:
             raise ValueError(
                 "edge_dropout_backend must be one of 'auto', 'pytorch', or 'bitpack'"
             )
-        if self.feature_backend not in {"auto", "pytorch", "recompute"}:
+        if self.feature_backend not in {"auto", "pytorch", "recompute", "memory"}:
             raise ValueError(
-                "feature_backend must be one of 'auto', 'pytorch', or 'recompute'"
+                "feature_backend must be one of 'auto', 'pytorch', 'recompute', or 'memory'"
             )
         if self.relative_position_backend not in {"off", "index_add", "triton"}:
             raise ValueError(
