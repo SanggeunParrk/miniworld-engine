@@ -104,11 +104,13 @@ def test_no_reset_to_zero_buffer_is_shared_between_launches() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_every_gradient_survives_autotuning(monkeypatch: pytest.MonkeyPatch) -> None:
     """More than one config, so every launch really tunes and really resets."""
-    two = list(_two_configs())
     for kernel in (
         compute._project_edge, compute._project_hidden, compute._project_output,
         compute._project_backward, compute._edge_backward,
     ):
+        # The output projection fuses LayerNorm across the full width; the
+        # other GEMMs expose a column tile and a grouped visitation order.
+        two = _two_configs(column_tiled=kernel is not compute._project_output)
         monkeypatch.setattr(kernel, "configs", two, raising=False)
         monkeypatch.setattr(kernel, "cache", {}, raising=False)
     monkeypatch.setattr(compute._norm_backward, "configs", _two_row_configs())
@@ -155,7 +157,9 @@ def test_every_gradient_survives_autotuning(monkeypatch: pytest.MonkeyPatch) -> 
     reference(*expected_leaves).backward(dy)
     actual_leaves = leaves()
     compute.edge_tail_compute(
-        *actual_leaves[:3], index, *actual_leaves[3:], eps, 0.0
+        actual_leaves[0], actual_leaves[1], actual_leaves[2], index,
+        actual_leaves[3], actual_leaves[4], actual_leaves[5], actual_leaves[6],
+        actual_leaves[7], actual_leaves[8], actual_leaves[9], eps, 0.0
     ).backward(dy)
 
     for name, actual, expected in zip(
@@ -163,6 +167,7 @@ def test_every_gradient_survives_autotuning(monkeypatch: pytest.MonkeyPatch) -> 
     ):
         got, want = actual.grad, expected.grad
         assert got is not None, f"{name} received no gradient at all"
+        assert want is not None, f"{name} reference received no gradient at all"
         # The sharp form of the bug: a wiped accumulator is identically zero while the
         # reference's is not. Checked before the tolerance so the failure names itself.
         assert not (got.abs().max() == 0 and want.abs().max() > 0), (
@@ -175,19 +180,22 @@ def test_every_gradient_survives_autotuning(monkeypatch: pytest.MonkeyPatch) -> 
         assert relative < 5e-2, f"{name} gradient differs by {relative:.3e}"
 
 
-def _two_configs() -> list:
+def _two_configs(*, column_tiled: bool) -> list:
     import triton
 
-    return [
-        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, num_warps=4, num_stages=1),
-        triton.Config({"BLOCK_M": 64, "BLOCK_K": 128}, num_warps=4, num_stages=2),
-    ]
+    configs = []
+    for rows, reduction, stages in ((32, 64, 1), (64, 128, 2)):
+        kwargs = {"BLOCK_M1": rows, "BLOCK_K": reduction}
+        if column_tiled:
+            kwargs.update(BLOCK_N=64, GROUP_M=1)
+        configs.append(triton.Config(kwargs, num_warps=4, num_stages=stages))
+    return configs
 
 
 def _two_row_configs() -> list:
     import triton
 
     return [
-        triton.Config({"BLOCK_M": 32}, num_warps=4, num_stages=1),
-        triton.Config({"BLOCK_M": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M1": 32}, num_warps=4, num_stages=1),
+        triton.Config({"BLOCK_M1": 64}, num_warps=4, num_stages=2),
     ]
