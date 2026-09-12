@@ -174,17 +174,16 @@ class ProteinMPNNConfig:
             raise ValueError(
                 "edge_tail_backend must be one of 'off', 'triton', or 'triton_compute'"
             )
-        if self.node_message_backend not in {"off", "triton"}:
-            raise ValueError("node_message_backend must be one of 'off' or 'triton'")
+        if self.node_message_backend not in {"off", "triton", "triton_compute"}:
+            raise ValueError("node_message_backend must be off, triton, or triton_compute")
         if (
-            self.node_message_backend == "triton"
+            self.node_message_backend != "off"
             and self.encoder_node_w1_recompute != "off"
         ):
-            # The fused node message replays its whole chain in backward, so a
-            # checkpoint around part of it would be dead configuration that silently
-            # never engages.
+            # Both fused policies own the complete projection, so a checkpoint
+            # around the separate projection would never engage.
             raise ValueError(
-                "node_message_backend='triton' subsumes encoder_node_w1_recompute; "
+                f"node_message_backend={self.node_message_backend!r} subsumes encoder_node_w1_recompute; "
                 "set encoder_node_w1_recompute='off'"
             )
         if self.edge_tail_backend != "off" and self.edge_w1_recompute != "off":

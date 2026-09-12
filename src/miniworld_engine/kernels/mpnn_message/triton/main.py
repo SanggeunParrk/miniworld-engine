@@ -196,16 +196,17 @@ def _gelu_reduce_db_bwd_kernel(
     ).to(tl.float32)
     grad_bias_partial = tl.zeros((BLOCK_N,), tl.float32)
 
-    # dP is already live here, so reduce its 48-neighbor bias contribution
+    # dP is already live here, so reduce its neighbor bias contribution
     # before leaving the CTA. The deterministic path stores one value per
     # group; the default path atomically accumulates the same FP32 partial.
     for neighbor_start in tl.static_range(0, NEIGHBORS, 16):
         neighbors = neighbor_start + tl.arange(0, 16)
+        neighbor_valid = group_valid & (neighbors < NEIGHBORS)
         rows = group * NEIGHBORS + neighbors
         offsets = rows[:, None] * HIDDEN + output_columns[None, :]
         edge_weight = tl.load(
             mask_ptr + rows,
-            mask=group_valid,
+            mask=neighbor_valid,
             other=0.0,
         ).to(tl.float32)
         grad_hidden = (grad[None, :] * edge_weight[:, None] / neighbor_scale).to(
@@ -213,7 +214,7 @@ def _gelu_reduce_db_bwd_kernel(
         )
         projected = tl.load(
             projected_ptr + offsets,
-            mask=group_valid & output_valid[None, :],
+            mask=neighbor_valid[:, None] & output_valid[None, :],
             other=0.0,
         ).to(tl.float32)
         grad_projected = (grad_hidden.to(tl.float32) * _gelu_grad(projected)).to(
@@ -222,7 +223,7 @@ def _gelu_reduce_db_bwd_kernel(
         tl.store(
             grad_projected_ptr + offsets,
             grad_projected,
-            mask=group_valid & output_valid[None, :],
+            mask=neighbor_valid[:, None] & output_valid[None, :],
         )
         grad_bias_partial += tl.sum(grad_projected.to(tl.float32), axis=0)
 

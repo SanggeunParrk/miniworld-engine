@@ -387,7 +387,20 @@ def test_mpnn_message_inference_fusion_is_fullgraph_compilable() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("backend", ["triton", "triton_memory"])
-def test_mpnn_message_backend_matches_full_model_gradients(backend: str) -> None:
+@pytest.mark.parametrize("node_backend", ["off", "triton_compute"])
+def test_mpnn_message_backend_matches_full_model_gradients(
+    backend: str, node_backend: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from miniworld_engine.kernels.mpnn_node_message.triton import main as node_main
+
+    calls = []
+    original = node_main._compute_forward_op
+
+    def witnessed_compute(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(node_main, "_compute_forward_op", witnessed_compute)
     common = {
         "node_width": 128,
         "edge_width": 128,
@@ -412,6 +425,7 @@ def test_mpnn_message_backend_matches_full_model_gradients(backend: str) -> None
         ProteinMPNNConfig(
             **common,
             message_backend=backend,
+            node_message_backend=node_backend,
             edge_mlp_backend="pytorch",
         )
     ).cuda()
@@ -447,6 +461,7 @@ def test_mpnn_message_backend_matches_full_model_gradients(backend: str) -> None
     candidate_backbone = backbone.detach().clone().requires_grad_(True)
     expected = run(reference, reference_backbone)
     actual = run(candidate, candidate_backbone)
+    assert bool(calls) == (node_backend == "triton_compute")
     upstream = torch.randn_like(expected)
     expected.backward(upstream)
     actual.backward(upstream)

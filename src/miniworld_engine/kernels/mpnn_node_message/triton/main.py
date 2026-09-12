@@ -1,4 +1,7 @@
-"""One-launch ProteinMPNN encoder node message.
+"""One-launch ProteinMPNN encoder node message with memory and compute policies.
+
+The compute policy saves two projection results and reuses the message family's
+backward kernels. The memory policy described below saves no edge intermediates.
 
 The node half of an encoder layer contracts an edge tensor down to a node tensor::
 
@@ -109,7 +112,7 @@ def _shape_key(groups: int, **axes: int) -> int:
 
 @triton.autotune(
     configs=configs_for("mpnn_node_message_fwd_gemm_triton"),
-    key=["shape_key"],
+    key=["shape_key", "SAVE_PREACT"],
 )
 @triton.jit
 def _node_message_fwd_kernel(
@@ -122,6 +125,8 @@ def _node_message_fwd_kernel(
     hidden_bias_ptr,
     mask_ptr,
     reduced_ptr,
+    preactivation_ptr,
+    hidden_ptr,
     groups_total,
     shape_key,
     neighbor_scale,
@@ -130,6 +135,7 @@ def _node_message_fwd_kernel(
     WIDTH: tl.constexpr,
     BLOCK_M1: tl.constexpr,
     GROUPS: tl.constexpr,
+    SAVE_PREACT: tl.constexpr,
 ):
     columns = tl.arange(0, WIDTH)
     window = tl.arange(0, BLOCK_M1)
@@ -168,6 +174,9 @@ def _node_message_fwd_kernel(
         hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(
             tl.bfloat16
         )
+        if SAVE_PREACT:
+            tl.store(preactivation_ptr + offsets, preactivation, mask=valid[:, None])
+            tl.store(hidden_ptr + offsets, hidden, mask=valid[:, None])
         # The separate reduction kernel rounds the second GELU to BF16 before the
         # FP32 accumulation; keep that boundary.
         gated = _gelu(hidden.to(tl.float32)).to(tl.bfloat16).to(tl.float32)
@@ -439,6 +448,8 @@ def _forward_op(
         hidden_bias,
         edge_mask,
         reduced,
+        edge_states,
+        edge_states,
         groups,
         _shape_key(groups, NEIGHBORS=neighbors),
         neighbor_scale,
@@ -446,6 +457,7 @@ def _forward_op(
         NEIGHBORS=neighbors,
         WIDTH=width,
         BLOCK_M1=_block_rows(neighbors),
+        SAVE_PREACT=False,
     )
     return reduced
 
@@ -721,4 +733,87 @@ def triton_node_message_reduce(
     )
 
 
-__all__ = ["triton_node_message_reduce"]
+__all__ = ["triton_node_message_reduce", "triton_node_message_reduce_compute"]
+
+
+def _compute_forward_op_fake(
+    edge_states: torch.Tensor, query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor, hidden_weight: torch.Tensor, hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor, neighbor_scale: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """FP32 reduced nodes and two BF16 edge-shaped saved projection results."""
+    return (torch.empty_like(query_projection, dtype=torch.float32),
+            torch.empty_like(edge_states), torch.empty_like(edge_states))
+
+
+@opaque(fake=_compute_forward_op_fake, name="mpnn_node_message_compute_fwd_v1")
+def _compute_forward_op(
+    edge_states: torch.Tensor, query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor, hidden_weight: torch.Tensor, hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor, neighbor_scale: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse the forward while saving GEMM results needed by the compute backward."""
+    width, neighbors = edge_states.shape[-1], edge_states.shape[-2]
+    groups = edge_states.numel() // (neighbors * width)
+    reduced = torch.empty_like(query_projection, dtype=torch.float32)
+    preactivation, hidden = torch.empty_like(edge_states), torch.empty_like(edge_states)
+    _node_message_fwd_kernel[lambda meta: (triton.cdiv(groups, meta["GROUPS"]),)](
+        edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
+        edge_weight, hidden_weight, hidden_bias, edge_mask, reduced, preactivation, hidden,
+        groups, _shape_key(groups, NEIGHBORS=neighbors), neighbor_scale,
+        EDGE_WEIGHT_STRIDE=edge_weight.stride(0), NEIGHBORS=neighbors, WIDTH=width,
+        BLOCK_M1=_block_rows(neighbors), SAVE_PREACT=True,
+    )
+    return reduced, preactivation, hidden
+
+
+class _NodeMessageCompute(torch.autograd.Function):
+    """Save two projection results and expose native backward operations to AOTAutograd."""
+
+    @staticmethod
+    def forward(ctx, edge, query, neighbor, index, w1, w2, bias, mask, scale):
+        reduced, preactivation, hidden = _compute_forward_op(
+            edge, query, neighbor, index, w1, w2, bias, mask, scale,
+        )
+        ctx.save_for_backward(edge, index, w1, w2, mask, preactivation, hidden)
+        ctx.neighbor_shape = neighbor.shape
+        ctx.query_dtype, ctx.neighbor_dtype, ctx.bias_dtype = query.dtype, neighbor.dtype, bias.dtype
+        ctx.scale = scale
+        return reduced
+
+    @staticmethod
+    def backward(ctx, grad_reduced):
+        from miniworld_engine.kernels.mpnn_message.triton.main import _backward_from_projected
+
+        edge, index, w1, w2, mask, preactivation, hidden = ctx.saved_tensors
+        grad_preactivation, grad_w2, grad_bias, _, _ = _backward_from_projected(
+            preactivation, w2, hidden, mask, grad_reduced.contiguous(), ctx.scale, torch.bfloat16,
+        )
+        width = edge.shape[-1]
+        flat_grad = grad_preactivation.reshape(-1, width)
+        grad_edge = torch.mm(flat_grad, w1.to(flat_grad.dtype)).view_as(edge)
+        grad_w1 = torch.mm(flat_grad.t(), edge.reshape(-1, width)).to(w1.dtype)
+        grad_query = grad_preactivation.sum(-2, dtype=torch.float32).to(ctx.query_dtype)
+        grad_neighbor = torch.ops.aten.embedding_dense_backward(
+            flat_grad, index.reshape(-1), ctx.neighbor_shape[0] * ctx.neighbor_shape[1], -1, False,
+        ).view(ctx.neighbor_shape).to(ctx.neighbor_dtype)
+        return (grad_edge, grad_query, grad_neighbor, None, grad_w1, grad_w2,
+                grad_bias.to(ctx.bias_dtype), None, None)
+
+
+def triton_node_message_reduce_compute(
+    edge_states: torch.Tensor, query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor, hidden_weight: torch.Tensor, hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor, neighbor_scale: int,
+) -> torch.Tensor:
+    """Use the saved-projection training policy, sharing no-save inference with memory."""
+    if not torch.is_grad_enabled():
+        return _forward_op(edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
+                           edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale)
+    return _NodeMessageCompute.apply(
+        edge_states, query_projection, neighbor_projection, flat_neighbor_indices,
+        edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale,
+    )

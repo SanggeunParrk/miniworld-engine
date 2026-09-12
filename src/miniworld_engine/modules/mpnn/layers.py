@@ -623,7 +623,7 @@ class EncoderLayer(nn.Module):
         execution_path: EncoderExecutionPath = "block",
         allow_transition_recompute: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.node_message_backend == "triton" and execution_path != "dense_training":
+        if self.node_message_backend != "off" and execution_path != "dense_training":
             reduced_hidden = self._fused_node_message(
                 node_states, edge_states, neighbor_indices, neighbor_mask
             )
@@ -988,6 +988,7 @@ class EncoderLayer(nn.Module):
             hidden.bias,
             neighbor_mask,
             self.neighbor_scale,
+            backend=self.node_message_backend,
         )
 
     def _fused_edge_tail(

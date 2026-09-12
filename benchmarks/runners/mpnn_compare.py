@@ -34,7 +34,10 @@ from miniworld_engine.kernels.mpnn_edge_layernorm import (
 from miniworld_engine.kernels.mpnn_edge_mlp import EdgeMLPBackend, edge_mlp_update
 from miniworld_engine.kernels.mpnn_edge_tail import EdgeTailBackend, edge_tail_update
 from miniworld_engine.kernels.mpnn_message import MessageBackend, message_hidden_reduce
-from miniworld_engine.kernels.mpnn_node_message import node_message_reduce
+from miniworld_engine.kernels.mpnn_node_message import (
+    NodeMessageBackend,
+    node_message_reduce,
+)
 from miniworld_engine.kernels.mpnn_node_message.reference import (
     node_message_reduce_pytorch,
 )
@@ -48,7 +51,7 @@ BACKENDS = {
     "edge_mlp": ("pytorch", "triton_compute", "triton_memory"),
     "edge_tail": ("pytorch", "triton_compute", "triton"),
     "edge_layernorm": ("pytorch", "memory"),
-    "node_message": ("pytorch", "triton"),
+    "node_message": ("pytorch", "triton", "triton_compute"),
     "relative_position": ("pytorch", "triton", "index_add"),
     "edge_dropout": ("pytorch", "bitpack"),
 }
@@ -102,8 +105,10 @@ def make_case(family: str, nodes: int, backend: str, training: bool):
                 return relative_position_embed(bucket, table, position_bias,
                                                cast(RelativePositionBackend, "off" if impl == "pytorch" else impl))
             if family == "node_message":
-                fn = node_message_reduce_pytorch if impl == "pytorch" else node_message_reduce
-                return fn(x, q, neighbor, index, weights[0], weights[1], biases[0], mask, 48)
+                arguments = (x, q, neighbor, index, weights[0], weights[1], biases[0], mask, 48)
+                if impl == "pytorch":
+                    return node_message_reduce_pytorch(*arguments)
+                return node_message_reduce(*arguments, backend=cast(NodeMessageBackend, impl))
             if family == "edge_tail" and impl != "pytorch":
                 return edge_tail_update(x, q, neighbor, index, weights[0], weights[1], biases[0],
                                         weights[2], biases[1], gamma, beta, seed, 1e-5, p,

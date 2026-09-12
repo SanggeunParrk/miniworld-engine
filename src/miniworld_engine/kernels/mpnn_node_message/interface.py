@@ -6,10 +6,9 @@ from typing import Literal
 
 import torch
 
-# There is no ``auto``: the fused path replays the whole message in backward and
-# reduces in a different order from the two-kernel form, so it is reached only from
-# an explicit policy.  ``off`` keeps the existing separate-operation node message.
-NodeMessageBackend = Literal["off", "triton"]
+# ``triton`` recomputes in backward; ``triton_compute`` saves projection results.
+# Both are explicit policies. ``off`` selects the separate-operation model path.
+NodeMessageBackend = Literal["off", "triton", "triton_compute"]
 
 _WIDTH = 128
 _INT32_MAX = 2**31 - 1
@@ -90,8 +89,11 @@ def node_message_reduce(
     hidden_bias: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
+    *, backend: NodeMessageBackend = "triton",
 ) -> torch.Tensor:
-    """Run the whole node message through the fused Triton kernel."""
+    """Run the memory or saved-projection compute policy of the fused node message."""
+    if backend not in {"triton", "triton_compute"}:
+        raise ValueError("node_message_reduce requires triton or triton_compute")
     if not node_message_supported(
         edge_states,
         query_projection,
@@ -110,11 +112,13 @@ def node_message_reduce(
             "BF16 or all FP32 under BF16 autocast, and an edge tensor addressable "
             "in signed 32-bit indexing"
         )
-    from miniworld_engine.kernels.mpnn_node_message.triton import (
+    from miniworld_engine.kernels.mpnn_node_message.triton.main import (
         triton_node_message_reduce,
+        triton_node_message_reduce_compute,
     )
 
-    return triton_node_message_reduce(
+    fn = triton_node_message_reduce_compute if backend == "triton_compute" else triton_node_message_reduce
+    return fn(
         edge_states,
         query_projection,
         neighbor_projection,

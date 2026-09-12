@@ -6,6 +6,7 @@ to no single kernel.
 
 | | what it records |
 |---|---|
+| [mpnn-node-compute-a6000.md](mpnn-node-compute-a6000.md) | Saved-projection node-message training, A6000 latency and memory tradeoff, tail-mask fix and build-driver coverage. |
 | [mpnn-a6000-optimization.md](mpnn-a6000-optimization.md) | MPNN cold-autotune gradient and inference compile fixes, A6000 seven-family comparison, before/after performance and saved-storage tradeoffs. |
 | [a6000-production-audit.md](a6000-production-audit.md) | Current A6000 final audit: corrected DiT dispatch, strict build/shard checks, package validation and repeated measurements. |
 | [a6000-atom-dit-4096.md](a6000-atom-dit-4096.md) | Historical ordinary pair-bias atom DiT at 4096 atoms (superseded above), A5 graph inference and A48 no-graph training on one A6000. |
