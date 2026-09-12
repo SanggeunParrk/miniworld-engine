@@ -11,8 +11,9 @@ Every row here is backed by an artifact in the repo: a device manifest under
 ## GPU
 
 A kernel is run at the PRECISIONS it declares (`registry.csv`'s `dtypes`), so a card has a result
-per precision and the manifest has a row per (kernel, precision). 84 of the 86 declared kernels
-declare bf16 and 42 declare fp32; the two sets overlap, which is why they do not add to 91.
+per precision and the manifest has a row per (kernel, precision). The registry describes the
+current source; the manifests below record historical runs and do not certify every kernel
+in the current checkout.
 
 | card | precision | torch | CUDA | triton | Python | result | evidence |
 |---|---|---|---|---|---|---|---|
@@ -21,9 +22,10 @@ declare bf16 and 42 declare fp32; the two sets overlap, which is why they do not
 | RTX A5000 (sm86) | bf16 | 2.10.0+cu128 | 12.8 | 3.6.0 | 3.12 | `driven 101, ok 94, failed 7, skipped 6` | `manifests/NVIDIA RTX A5000 (sm86).csv` |
 | RTX A5000 (sm86) | fp32 | — | — | — | — | **not run** | no fp32 pass has been made on this card |
 
-The seven bf16 failures are the newly registered mpnn kernels, and neither cause is the kernel being
-wrong: five are outside the default 5e-02 band with no `rtol` declared, and two would not launch
-because every config the untuned reader offered exceeded this card's shared memory. The fp32 count
+The seven bf16 failures are the newly registered mpnn kernels, from those recorded runs: five are outside the
+default 5e-02 band with no `rtol` declared, and two would not launch
+because every config the untuned reader offered exceeded this card's shared memory. These
+records alone do not establish numerical correctness or successful launch on the current source. The fp32 count
 fell from 40 because seven kernels stopped declaring fp32 — `layernorm_*_foldstats` and five
 `transition_*` rows are `bf16` only now, so their fp32 records were a precision nothing claims and
 `devices.record` dropped them.
@@ -44,11 +46,11 @@ the manifest it cites, so this table cannot age past its evidence again.
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 87 | yes, on sm86 (which satisfies sm80) |
+| sm80 | 109 | yes, on sm86 (which satisfies sm80) |
 | sm90 | 7 | **no** |
 | sm100 | 4 | **no** |
 
-Six kernels are declared for hardware nothing in this repository has ever run them on. They may
+11 kernels are declared for hardware nothing in this repository has ever run them on. They may
 work; the point is that nobody knows, and `arch` should be read as "written for", not "verified
 on", until a manifest for that card exists here.
 

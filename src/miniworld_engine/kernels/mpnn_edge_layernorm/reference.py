@@ -14,8 +14,8 @@ import torch.nn.functional as F
 
 def edge_layer_norm_pytorch(
     values: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
     eps: float,
 ) -> torch.Tensor:
     """LayerNorm over the last dimension, the shape ProteinMPNN's edge tensors carry.

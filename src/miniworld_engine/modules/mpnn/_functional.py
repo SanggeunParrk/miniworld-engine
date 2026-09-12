@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.utils.weak import WeakTensorKeyDictionary
 
 
-def lecun_normal_(module: nn.Module, scale: float = 1.0) -> None:
+def lecun_normal_(module: nn.Linear | nn.Embedding, scale: float = 1.0) -> None:
     """Initialize ``module.weight`` with the truncated LeCun distribution."""
     normal = torch.distributions.normal.Normal(0, 1)
     lower_cdf = normal.cdf(torch.tensor(-2.0))

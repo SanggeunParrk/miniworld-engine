@@ -9,9 +9,10 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import _graph
+from miniworld_engine.kernels.mpnn_edge_mlp import EdgeMLPBackend
 
 
-def _edge_mlp(backend: str) -> None:
+def _edge_mlp(backend: EdgeMLPBackend) -> None:
     from miniworld_engine.kernels.mpnn_edge_mlp.interface import edge_mlp_update
 
     t = _graph()

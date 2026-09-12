@@ -1013,7 +1013,7 @@ class EncoderLayer(nn.Module):
         edge_width = edge_projection.edge_width
         weight = edge_projection.weight
         edge_weight = weight[:, node_width : node_width + edge_width]
-        dropout = cast(nn.Dropout, self.edge_message.dropout)
+        dropout = self.edge_message.dropout
         norm = self.edge_message.norm
         query_projection = F.linear(
             node_states, weight[:, :node_width], edge_projection.bias

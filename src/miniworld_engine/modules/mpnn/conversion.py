@@ -6,6 +6,7 @@ import operator
 import re
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping
+from typing import SupportsIndex, cast
 
 import torch
 import torch.nn as nn
@@ -133,7 +134,7 @@ def convert_cssb_state_dict(
 
 def _positive_integer(value: object, *, name: str) -> int:
     try:
-        converted = operator.index(value)
+        converted = operator.index(cast(SupportsIndex, value))
     except TypeError as error:
         raise ValueError(f"{name} must be a positive integer, got {value!r}") from error
     if converted <= 0:

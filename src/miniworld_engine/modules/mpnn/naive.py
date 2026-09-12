@@ -12,6 +12,8 @@ will live outside the numerical core and be added as a separate reference path.
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,7 +22,10 @@ import torch.utils.checkpoint
 NUM_AMINO_ACID_TYPES = 21
 
 
-def _init_lecun_normal(module: nn.Module, scale: float = 1.0) -> nn.Module:
+_WeightedModule = TypeVar("_WeightedModule", nn.Linear, nn.Embedding)
+
+
+def _init_lecun_normal(module: _WeightedModule, scale: float = 1.0) -> _WeightedModule:
     """Preserve the source repository's truncated LeCun initialization."""
 
     def truncated_normal(
@@ -422,6 +427,7 @@ class NaiveProteinMPNN(nn.Module):
     def reset_parameter(self) -> None:
         self.W_e = _init_lecun_normal(self.W_e)
         self.W_s = _init_lecun_normal(self.W_s)
+        assert self.W_e.bias is not None
         nn.init.zeros_(self.W_e.bias)
         nn.init.zeros_(self.W_out.weight)
         nn.init.zeros_(self.W_out.bias)

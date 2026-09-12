@@ -105,6 +105,7 @@ def edge_layer_norm(
             edge_layer_norm_memory,
         )
 
+        assert weight is not None and bias is not None
         return edge_layer_norm_memory(values, weight, bias, eps)
     return edge_layer_norm_pytorch(values, weight, bias, eps)
 

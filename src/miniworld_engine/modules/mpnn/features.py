@@ -133,6 +133,9 @@ class RelativePositionEmbedding(nn.Module):
 class BackboneFeatures(nn.Module):
     """KNN-first geometric features with O(B*L*K) atom-pair work."""
 
+    _pair_a: torch.Tensor
+    _pair_b: torch.Tensor
+
     _PAIR_A = (
         1,
         0,

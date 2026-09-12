@@ -31,7 +31,8 @@ def _node_message_pair():
     out = triton_node_message_reduce(
         args[0], args[1], args[2], index, args[3], args[4], args[5], mask, _NEIGHBORS)
     ref = node_message_reduce_pytorch(
-        *(a.float() for a in args[:3]), index, *(a.float() for a in args[3:]),
+        args[0].float(), args[1].float(), args[2].float(), index,
+        args[3].float(), args[4].float(), args[5].float(),
         mask.float(), _NEIGHBORS)
     return out, ref
 

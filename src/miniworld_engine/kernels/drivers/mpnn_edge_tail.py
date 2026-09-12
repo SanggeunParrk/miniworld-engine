@@ -18,6 +18,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels.drivers import BF16, DRIVER_LENGTH, dev
+from miniworld_engine.kernels.mpnn_edge_tail import EdgeTailBackend
 
 #: ProteinMPNN's hidden/node/edge dimension. 128 in every shipped configuration, and the kernels
 #: read it as a `_WIDTH` constant rather than an argument.
@@ -64,7 +65,7 @@ def _graph(nodes: int | None = None, *, grad: bool = False):
     }
 
 
-def _edge_tail(backend: str, *, backward: bool) -> None:
+def _edge_tail(backend: EdgeTailBackend, *, backward: bool) -> None:
     """Run one encoder edge tail, forward or forward+backward, on one of the two policies."""
     from miniworld_engine.kernels.mpnn_edge_tail.interface import edge_tail_update
 

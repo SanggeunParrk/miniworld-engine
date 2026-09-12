@@ -18,9 +18,10 @@ from __future__ import annotations
 
 from miniworld_engine.kernels.checks import _EPS, _fixed, _grads
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import _graph
+from miniworld_engine.kernels.mpnn_edge_tail import EdgeTailBackend
 
 
-def _edge_tail_pair(backend: str):
+def _edge_tail_pair(backend: EdgeTailBackend):
     """(kernel output, fp32 reference) for one encoder edge tail at `backend`'s policy."""
     _fixed()
     from miniworld_engine.kernels.mpnn_edge_tail.interface import edge_tail_update
@@ -31,17 +32,17 @@ def _edge_tail_pair(backend: str):
     t = _graph()
     out = edge_tail_update(**t, eps=_EPS, dropout_probability=0.0, backend=backend)
     ref = edge_tail_update_pytorch(
-        *(v.float() if v.is_floating_point() else v for v in (
-            t["edge_states"], t["query_projection"], t["neighbor_projection"],
-            t["flat_neighbor_indices"], t["edge_weight"], t["hidden_weight"],
-            t["hidden_bias"], t["output_weight"], t["output_bias"],
-            t["norm_weight"], t["norm_bias"])),
+        t["edge_states"].float(), t["query_projection"].float(),
+        t["neighbor_projection"].float(), t["flat_neighbor_indices"],
+        t["edge_weight"].float(), t["hidden_weight"].float(),
+        t["hidden_bias"].float(), t["output_weight"].float(),
+        t["output_bias"].float(), t["norm_weight"].float(), t["norm_bias"].float(),
         None, _EPS, 0.0,
     )
     return out, ref
 
 
-def _edge_tail_grads(backend: str):
+def _edge_tail_grads(backend: EdgeTailBackend):
     """Every gradient of one encoder edge tail against fp32 autograd on the same values."""
     _fixed()
     from miniworld_engine.kernels.mpnn_edge_tail.interface import edge_tail_update

@@ -36,12 +36,14 @@ def _gradients():
     preactivation, weight, bias, mask = _inputs(grad=True)
     names = ("preactivation", "weight", "bias")
 
-    def kernel(*a):
+    def kernel(preactivation, weight, bias):
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            return message_hidden_reduce(*a, mask, _NEIGHBORS, backend="triton")
+            return message_hidden_reduce(
+                preactivation, weight, bias, mask, _NEIGHBORS, backend="triton")
 
-    def reference(*a):
-        return message_hidden_reduce_pytorch(*a, mask, _NEIGHBORS)
+    def reference(preactivation, weight, bias):
+        return message_hidden_reduce_pytorch(
+            preactivation, weight, bias, mask, _NEIGHBORS)
 
     return _grads(kernel, [preactivation, weight, bias], reference, names)
 

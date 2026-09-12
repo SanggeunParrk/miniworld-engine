@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -336,7 +337,8 @@ class MPNNDecoder(nn.Module):
             encoder_context = future_mask * gather_neighbors(
                 encoder_nodes, neighbor_indices
             )
-            for layer in self.layers:
+            for decoder_layer in self.layers:
+                layer = cast(DecoderLayer, decoder_layer)
                 if checkpoint_layers:
                     node_states = torch.utils.checkpoint.checkpoint(
                         layer.forward_dense_training,

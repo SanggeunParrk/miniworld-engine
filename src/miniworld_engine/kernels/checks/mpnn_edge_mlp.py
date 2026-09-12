@@ -5,9 +5,10 @@ import torch
 
 from miniworld_engine.kernels.checks import _fixed
 from miniworld_engine.kernels.drivers.mpnn_edge_tail import _graph
+from miniworld_engine.kernels.mpnn_edge_mlp import EdgeMLPBackend
 
 
-def _pair(backend: str):
+def _pair(backend: EdgeMLPBackend):
     from miniworld_engine.kernels.mpnn_edge_mlp.interface import edge_mlp_update
     from miniworld_engine.kernels.mpnn_edge_mlp.reference import edge_mlp_update_pytorch
 
