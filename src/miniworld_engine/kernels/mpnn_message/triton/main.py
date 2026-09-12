@@ -107,9 +107,12 @@ def _gelu_reduce_fwd_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
+    pid = tl.program_id(0)
+    if USE_I64:
+        pid = pid.to(tl.int64)
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    group, output_block = tile_order(tl.program_id(0).to(tl.int64),
+    group, output_block = tile_order(pid,
                           groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         group = group.to(tl.int64)
@@ -154,6 +157,7 @@ def _gelu_reduce_fwd_kernel(
 @triton.autotune(
     configs=configs_for("mpnn_message_bwd_reduce_dbias_triton"),
     key=["shape_key"],
+    reset_to_zero=["grad_bias_output_ptr"],
 )
 @triton.jit
 def _gelu_reduce_db_bwd_kernel(
@@ -172,9 +176,12 @@ def _gelu_reduce_db_bwd_kernel(
     GROUP_M: tl.constexpr,
     ATOMIC_BIAS: tl.constexpr = False,
 ):
+    pid = tl.program_id(0)
+    if USE_I64:
+        pid = pid.to(tl.int64)
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    group, output_block = tile_order(tl.program_id(0).to(tl.int64),
+    group, output_block = tile_order(pid,
                           groups, tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         group = group.to(tl.int64)
@@ -263,9 +270,12 @@ def _projection_dx_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
 ):
+    pid = tl.program_id(0)
+    if USE_I64:
+        pid = pid.to(tl.int64)
     # One 1-D grid and a tuned visit order, not a 2-D grid: CUDA varies axis 0 fastest, so
     # the two-axis form is pinned at the row-first end of the axis `_tiles.py` measures.
-    row_block, input_block = tile_order(tl.program_id(0).to(tl.int64),
+    row_block, input_block = tile_order(pid,
                           tl.cdiv(rows, BLOCK_M1), tl.cdiv(HIDDEN, BLOCK_N), GROUP_M)
     if USE_I64:
         row_block = row_block.to(tl.int64)
@@ -490,8 +500,9 @@ def _reduce_backward_atomic_op(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The reduction's backward with the bias gradient accumulated atomically in one buffer.
 
-    Zeroed by its own launch rather than by ``reset_to_zero``, so the pass owns its own
-    precondition instead of depending on a tuner hook having fired.
+    The explicit zero handles cached and single-config launches. ``reset_to_zero``
+    also clears the accumulator before every autotune trial and before the final
+    selected launch: clearing only once would add every trial into the first dBias.
     """
     grad_reduced = grad_reduced.contiguous()
     grad_projected = torch.empty_like(projected)
@@ -614,7 +625,10 @@ def _projection_dx_weight_op(
     hidden = preactivation.shape[-1]
     rows = preactivation.numel() // hidden
     grad_preactivation = torch.empty_like(preactivation)
-    grad_weight = torch.zeros(hidden, hidden, device=weight.device, dtype=torch.float32)
+    # Most graphs fit in one block. Its GEMM already supplies the whole dW;
+    # allocating/zeroing another matrix and adding it launches two unnecessary
+    # GPU operations. Subsequent blocks still accumulate in the same FP32 order.
+    grad_weight = None
     flat_grad_projected = grad_projected.reshape(rows, hidden)
     flat_preactivation = preactivation.reshape(rows, hidden)
     flat_grad_preactivation = grad_preactivation.reshape(rows, hidden)
@@ -642,9 +656,14 @@ def _projection_dx_weight_op(
         # matmul produced -- and accumulate the small [128, 128] partials in FP32.
         # Casting the operands would allocate a block-sized FP32 pair and undo the
         # saving this function exists for.
-        grad_weight += torch.mm(
+        partial_weight = torch.mm(
             flat_grad_projected[start:stop].t(), activated[:span]
         ).to(torch.float32)
+        if grad_weight is None:
+            grad_weight = partial_weight
+        else:
+            grad_weight.add_(partial_weight)
+    assert grad_weight is not None
     return grad_preactivation, grad_weight
 
 

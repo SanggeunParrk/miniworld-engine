@@ -423,10 +423,13 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     """
     #: kernel -> why it launches with a pinned config. The mpnn families arrived from a branch that
     #: predates the autotune machinery; porting them is in progress and this is the checklist.
-    #: One kernel, and it is not a decision deferred: `_zero_bias_grad_kernel` fills a buffer with
-    #: zeros in a single program. One block, one warp, one stage is the only shape the work has.
-    #: The other nine that used to be here are registered and tuned.
-    NOT_TUNED = {"_zero_bias_grad_kernel"}
+    #: `_zero_bias_grad_kernel` fills a buffer with zeros in one program.
+    #: `_message_inference_kernel` is the pre-existing forward-only 48x128 fusion,
+    #: with two measured A5000 configurations selected by group count. It is not
+    #: registered/cache-built. Its old wrap_triton(kernel)[grid] launch escaped this
+    #: direct-launch scan; switching to an opaque boundary exposes the existing gap.
+    #: Keep it explicit until it has a driver, checker and autotune ladder.
+    NOT_TUNED = {"_zero_bias_grad_kernel", "_message_inference_kernel"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:

@@ -6,6 +6,7 @@ to no single kernel.
 
 | | what it records |
 |---|---|
+| [mpnn-a6000-optimization.md](mpnn-a6000-optimization.md) | MPNN cold-autotune gradient and inference compile fixes, A6000 seven-family comparison, before/after performance and saved-storage tradeoffs. |
 | [a6000-production-audit.md](a6000-production-audit.md) | Current A6000 final audit: corrected DiT dispatch, strict build/shard checks, package validation and repeated measurements. |
 | [a6000-atom-dit-4096.md](a6000-atom-dit-4096.md) | Historical ordinary pair-bias atom DiT at 4096 atoms (superseded above), A5 graph inference and A48 no-graph training on one A6000. |
 | [workspace-artifact-relocation.md](workspace-artifact-relocation.md) | Team-GM cleanup: 1,067 MiniWorld work entries relocated into engine scratch; provenance paths and movement manifest. |

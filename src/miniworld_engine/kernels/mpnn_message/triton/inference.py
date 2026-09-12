@@ -8,6 +8,8 @@ selected only while autograd is disabled.
 from __future__ import annotations
 
 import torch
+
+from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
@@ -97,10 +99,18 @@ def _int32_offsets_supported(preactivation: torch.Tensor) -> bool:
     return _inference_int32_elements_supported(preactivation.numel())
 
 
-@torch.library.triton_op(
-    "miniworld_engine::mpnn_message_inference",
-    mutates_args={},
-)
+def _inference_op_fake(
+    preactivation: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
+    """One contiguous FP32 vector per group; the neighbor dimension is reduced."""
+    return preactivation.new_empty(*preactivation.shape[:-2], _HIDDEN, dtype=torch.float32)
+
+
+@opaque(fake=_inference_op_fake, name="mpnn_message_inference")
 def _inference_op(
     preactivation: torch.Tensor,
     weight: torch.Tensor,
@@ -108,6 +118,7 @@ def _inference_op(
     edge_mask: torch.Tensor,
     neighbor_scale: int,
 ) -> torch.Tensor:
+    """Launch the fixed-policy BF16 message fusion and return FP32 group sums."""
     groups = preactivation.numel() // (_NEIGHBORS * _HIDDEN)
     reduced = torch.empty(
         groups,
@@ -131,7 +142,7 @@ def _inference_op(
         coalesced_weight_load = False
 
     grid = lambda meta: (triton.cdiv(groups, groups_per_cta),)  # noqa: E731
-    torch.library.wrap_triton(_message_inference_kernel)[grid](
+    _message_inference_kernel[grid](
         preactivation,
         weight,
         bias,
