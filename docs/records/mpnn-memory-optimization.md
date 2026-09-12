@@ -137,4 +137,6 @@ actual-device verification, not inferred from the A6000 allocator cap.
 
 ## A5000 follow-up
 
-Pending job **1680997** was updated in place to `mw-mpnn-memory-opt` (90-minute limit), preserving its queue position. It now executes the verified frozen snapshot in `.scratch/mpnn-memory-opt/a5000-source`. It compares the previous full-memory/mixed baselines with six new node policies (7, 3, 1, 2, 4, 0), confirms the three fastest passing new policies in reverse order, and checks the winner against PyTorch. OOM cases are retained and skipped; other errors stop the search. Results will be written to `.scratch/mpnn-memory-opt/a5000-1680997/summary.json`. The A5000 cache builder **1680274** was not changed. **Actual A5000 qualification is pending GPU allocation.**
+Job **1680997 completed successfully** on A5000 gpu02. B8/L8192 without any checkpoint API calls passed seven timing samples and twenty additional optimizer steps. The selected first-encoder-node memory policy measured **546.61 ms/step**, with **21.846 GiB allocated / 21.973 GiB reserved** peak training memory. The all-compute candidate OOMed on A5000 during backward. A separate B2/L256 PyTorch comparison gave gradient relative L2 **0.0047508** and cosine **0.99999552**.
+
+The final same-source A6000 policy comparison is recorded in [mpnn-a5000-a6000-comparison.md](mpnn-a5000-a6000-comparison.md). It compares the current policy, all compute layers, and all compute with retained RBF on one allocated A6000. Historical A6000 measurements above remain as the original screening evidence.
