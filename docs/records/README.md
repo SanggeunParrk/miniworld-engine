@@ -6,6 +6,7 @@ to no single kernel.
 
 | | what it records |
 |---|---|
+| [mpnn-batch-accumulation-a6000.md](mpnn-batch-accumulation-a6000.md) | Fixed-effective-batch A6000 experiment: full ProteinMPNN and node-message throughput, real accumulation, peak memory, and compiled-gradient parity. |
 | [mpnn-node-compute-a6000.md](mpnn-node-compute-a6000.md) | Saved-projection node-message training, A6000 latency and memory tradeoff, tail-mask fix and build-driver coverage. |
 | [mpnn-a6000-optimization.md](mpnn-a6000-optimization.md) | MPNN cold-autotune gradient and inference compile fixes, A6000 seven-family comparison, before/after performance and saved-storage tradeoffs. |
 | [a6000-production-audit.md](a6000-production-audit.md) | Current A6000 final audit: corrected DiT dispatch, strict build/shard checks, package validation and repeated measurements. |
