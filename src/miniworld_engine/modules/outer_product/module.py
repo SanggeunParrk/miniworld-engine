@@ -58,6 +58,10 @@ class OuterProductMean(nn.Module):
     small epsilon, following the Boltz approach.  AlphaFold3 and Protenix add
     ``eps`` (1e-3) to the denominator.
 
+    ``normalize_before_proj=False`` matches ESMFold2: divide after the output
+    projection so that its learned bias is divided by the valid-pair count too.
+    The default preserves the AF3 ordering and checkpoint behavior.
+
     Parameters
     ----------
     d_msa : int
@@ -76,11 +80,13 @@ class OuterProductMean(nn.Module):
         d_hidden: int = 32,
         *,
         mask_interchain: bool = False,
+        normalize_before_proj: bool = True,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
 
         self.mask_interchain = mask_interchain
+        self.normalize_before_proj = normalize_before_proj
         # LN over the MSA feature dim — route to the fused miniworld_engine LN (bf16) under
         # MINIWORLD_ENGINE; a raw nn.LayerNorm runs fp32-native under autocast and,
         # at MSA depth 2048, is the single biggest kernel in the MSA module.
@@ -119,9 +125,12 @@ class OuterProductMean(nn.Module):
         # norm stays fp32 for count precision (>256 counts aren't bf16-exact), but cast the
         # normalized result back to the projection dtype so to_out runs in native bf16
         # (no autocast in the distogram trunk; a bf16/fp32 mismatch would otherwise crash).
-        out = (out / norm.clamp(min=1)[..., None]).to(left.dtype)
-
-        pair = self.to_out(out)
+        norm = norm.clamp(min=1)[..., None]
+        if self.normalize_before_proj:
+            pair = self.to_out((out / norm).to(left.dtype))
+        else:
+            # ESMFold2 normalizes AFTER projection, including its learned bias.
+            pair = (self.to_out(out) / norm).to(left.dtype)
         if self.mask_interchain and token_asym_id is not None:
             same_chain = token_asym_id[:, :, None] == token_asym_id[:, None, :]
             pair = pair * same_chain[..., None].to(pair.dtype)
