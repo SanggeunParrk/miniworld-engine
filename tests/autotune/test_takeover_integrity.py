@@ -176,3 +176,26 @@ def test_plan_keeps_every_missing_key_and_rejects_unreachable(monkeypatch):
     assert plan.select(work, cases, evidence, set()) == []
     with pytest.raises(ValueError, match="no runnable"):
         plan.select(work, cases, evidence, {"d"})
+
+
+def test_launch_budget_does_not_retry_a_poisoned_context(monkeypatch):
+    import torch
+
+    fatal = RuntimeError("CUDA error: an illegal memory access was encountered")
+    calls = []
+
+    def launch():
+        calls.append("launch")
+        raise fatal
+
+    def inner(*args, **kwargs):
+        calls.append("benchmark")
+        raise AssertionError("must not benchmark a poisoned context")
+
+    tuner = SimpleNamespace(_do_bench=inner)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    capture._install_launch_budget(tuner)
+    with pytest.raises(RuntimeError) as caught:
+        tuner._do_bench(launch, quantiles=[0.5, 0.2, 0.8])
+    assert caught.value is fatal
+    assert calls == ["launch"]

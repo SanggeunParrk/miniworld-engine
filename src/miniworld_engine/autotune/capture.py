@@ -402,7 +402,11 @@ def _install_launch_budget(autotuner) -> None:
             kernel_call()
             torch.cuda.synchronize()
             took = time.monotonic() - t0
-        except Exception:
+        except Exception as exc:
+            if _fatal_cuda_error(exc):
+                # A poisoned CUDA context cannot be warmed up or benchmarked again.
+                # Keep the first fault and let the outer recorder name its config.
+                raise
             # A config that RAISES is triton's own business: `_bench` catches OutOfResources and
             # friends and scores +inf. Hand it back the call it expected to make.
             return inner(kernel_call, quantiles=quantiles)
@@ -1984,6 +1988,8 @@ def install() -> None:
             if _fatal_cuda_error(exc):
                 # Do not turn a poisoned context into hundreds of permanent observed failures.
                 # Escaping the round transaction preserves its previous file and provenance.
+                print(f"  [fatal-cuda] op={_op_name(self)} config={config} "
+                      f"key={_entry_key(self, meta)}: {exc}", flush=True)
                 raise
             # Match triton's own sentinel SHAPE, not just its value: do_bench(quantiles=...) hands
             # back [median, q20, q80], and triton returns [inf, inf, inf] for a config it could not
@@ -2180,7 +2186,7 @@ def flush(top_k: int = 5, gpu: str | None = None) -> list:
     return written
 
 
-def dump_shard(path: str) -> int:
+def dump_shard(path: str, *, unit_complete: bool = False) -> int:
     """Serialize this process's captured timings to a standalone JSON SHARD file (NOT the
     in-repo cache). Parallel capture jobs each ``dump_shard`` to their OWN file; a single
     ``merge_shards`` writer folds them into the committed cache — so no env var and no
@@ -2202,7 +2208,7 @@ def dump_shard(path: str) -> int:
     from miniworld_engine.autotune.shard import provenance
 
     out: dict = {"_key_scheme": KEY_SCHEME, "_has_entries": False,
-                 "_provenance": provenance(gpu_key())}
+                 "_provenance": provenance(gpu_key()), "_unit_complete": unit_complete}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]

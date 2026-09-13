@@ -1,4 +1,4 @@
-"""Keep the proven A6000 shared-memory fault out of tuning without widening its scope."""
+"""Keep the proven A5000/A6000 shared-memory fault out of tuning without widening its scope."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -22,10 +22,10 @@ def _args(**overrides):
     return args
 
 
-@pytest.fixture(autouse=True)
-def a6000(monkeypatch):
+@pytest.fixture(autouse=True, params=["NVIDIA RTX A5000", "NVIDIA RTX A6000"])
+def ampere_card(monkeypatch, request):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (8, 6))
-    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "NVIDIA RTX A6000")
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: request.param)
 
 
 @pytest.mark.parametrize("rows", [128, 147456])
@@ -37,7 +37,7 @@ def test_only_faulting_schedule_is_removed(rows):
 
 
 @pytest.mark.parametrize("change", ["n512", "n528", "k64", "fp32", "fp16", "cpu",
-                                    "sm80", "sm89", "sm90", "a5000", "missing_x"])
+                                    "sm80", "sm89", "sm90", "unverified_sm86", "missing_x"])
 def test_other_inputs_and_devices_keep_the_candidate(change, monkeypatch):
     args = _args()
     if change.startswith("n"):
@@ -51,8 +51,8 @@ def test_other_inputs_and_devices_keep_the_candidate(change, monkeypatch):
     elif change.startswith("sm"):
         cap = (int(change[2]), int(change[3]))
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: cap)
-    elif change == "a5000":
-        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "NVIDIA RTX A5000")
+    elif change == "unverified_sm86":
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "NVIDIA GeForce RTX 3090")
     else:
         args.pop("x_ptr")
     candidate = _config()

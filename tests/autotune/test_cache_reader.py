@@ -346,4 +346,5 @@ def test_shape_pruning_never_resurrects_excluded_only_winner(tmp_path, monkeypat
 
     monkeypatch.setattr(cache, "_miss", miss)
     assert cache._cached_subset(at, allowed, at.nargs, {}) == allowed
-    assert len(seen) == 1 and "every tuned config" in seen[0]
+    assert len(seen) == 1
+    assert "every tuned config" in seen[0]

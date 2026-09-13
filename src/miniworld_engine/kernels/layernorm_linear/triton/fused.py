@@ -70,8 +70,8 @@ def _prefer_covering_lnl(configs, nargs, **_):
     if (k == 128 and nargs.get("N") == 520 and x is not None
             and x.dtype == torch.bfloat16 and x.device.type == "cuda"
             and torch.cuda.get_device_capability(x.device) == (8, 6)
-            and torch.cuda.get_device_name(x.device) == "NVIDIA RTX A6000"):
-        # Reproduced at M=128 and M=147456 on A6000: this exact schedule makes
+            and torch.cuda.get_device_name(x.device) in {"NVIDIA RTX A5000", "NVIDIA RTX A6000"}):
+        # Reproduced on A5000 and A6000: this exact schedule makes
         # tl.dot write outside shared memory (compute-sanitizer). Adjacent N=512,
         # stages=2, warps>=2 and BLOCK_N=256 schedules pass. Keep that evidence's
         # scope; changing the JIT body or grid would invalidate valid measurements.

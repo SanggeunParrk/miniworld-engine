@@ -24,6 +24,7 @@ not on time, because structure is what is reproducible on a shared cluster.
 """
 from __future__ import annotations
 
+import gc
 import os
 
 import pytest
@@ -47,6 +48,15 @@ from miniworld_engine.modules import (
 
 DEV, DT = "cuda", torch.bfloat16
 L, D = 384, 128       # the real crop: max_tokens 384, d_pair 128
+
+
+@pytest.fixture(autouse=True)
+def _release_explain_graphs():
+    """FX interpreter cycles must not retain previous training activations."""
+    yield
+    dynamo.reset()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 def _requires_custom_op():
@@ -124,12 +134,30 @@ def test_varying_recycle_depth_recompiles_but_never_breaks():
             x = model(x)
         return x.float().pow(2).mean()
 
+    graphs = []
+
+    from torch._dynamo.backends.registry import lookup_backend
+
+    aot_eager = lookup_backend("aot_eager")
+
+    def backend(graph, example_inputs):
+        graphs.append(graph)
+        return aot_eager(graph, example_inputs)
+
+    # explain() resets Dynamo on every call: it cannot test reuse across
+    # recycle depths. Execute real training steps so backward also releases
+    # saved activations before the next depth (important on 24 GB cards).
     dynamo.reset()
-    for n in (1, 2, 3, 4, 2, 1):                 # a depth schedule, repeats included
-        explanation = dynamo.explain(trunk)(pair, n)
-        assert explanation.graph_break_count == 0, (
-            f"depth {n} broke the graph: "
-            + "; ".join(str(getattr(r, "reason", r))[:160] for r in explanation.break_reasons))
+    compiled = torch.compile(trunk, backend=backend, fullgraph=True, dynamic=False)
+    for n in (1, 2, 3, 4, 2, 1):
+        loss = compiled(pair, n)
+        loss.backward()
+        model.zero_grad(set_to_none=True)
+        pair.grad = None
+        del loss
+        gc.collect()
+    assert len(graphs) == 4, f"expected one graph per distinct depth, got {len(graphs)}"
+    assert all(len(graph.graph.nodes) > 50 for graph in graphs)
 
 
 def test_ddp_breaks_are_only_the_bucket_split(tmp_path):

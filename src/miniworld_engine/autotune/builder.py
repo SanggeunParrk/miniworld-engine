@@ -1564,7 +1564,8 @@ def _shard_reusable(path: Path) -> bool:
         return False
     try:
         data = json.loads(path.read_text())
-        return isinstance(data, dict) and provenance_error(data) is None
+        return (isinstance(data, dict) and data.get("_unit_complete") is True
+                and provenance_error(data) is None)
     except (OSError, ValueError, TypeError):
         return False
 
@@ -1658,7 +1659,7 @@ def _cache_answers(unit: OpUnit, ok_ops: set[str]) -> bool:
 
 
 def reclaim_orphans(shard_dir: Path) -> list[str]:
-    """Delete claims whose unit produced nothing, so a restarted build can run them again.
+    """Delete claims without a verified completed unit, so a restart can retry them.
 
     A claim is created with O_EXCL before a unit runs and removed if it produced no ops -- but a
     build that is KILLED (time limit, scancel, node failure) leaves one claim per in-flight unit,
@@ -1673,7 +1674,7 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
     """
     freed = []
     for claim in sorted(shard_dir.glob("*.claim")):
-        if not _shard_has_entries(shard_dir / f"{claim.stem}.json"):
+        if not _shard_reusable(shard_dir / f"{claim.stem}.json"):
             claim.unlink(missing_ok=True)
             freed.append(claim.stem)
     return freed
@@ -2078,9 +2079,9 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     # and never reported. Say it: the alternative is a build that looks complete and quietly
     # covers less than the last one did.
     orphans = [c.stem for c in sorted(shard_dir.glob("*.claim"))
-               if not _shard_has_entries(shard_dir / f"{c.stem}.json")]
+               if not _shard_reusable(shard_dir / f"{c.stem}.json")]
     if orphans and not reclaim:
-        print(f"WARNING: {len(orphans)} claim(s) here have no shard -- units a killed build left "
+        print(f"WARNING: {len(orphans)} claim(s) have no verified completed shard -- units a killed build left "
               f"in flight. They are being SKIPPED. Re-run with --reclaim once no other build is "
               f"using this directory:", flush=True)
         for stem in orphans[:10]:
@@ -2250,7 +2251,7 @@ def _run_one_driver(op: str) -> int:
     return 1
 
 
-def _report_unit(shard: str) -> int:
+def _report_unit(shard: str, *, complete: bool = False) -> int:
     """Print everything a finished unit knows, then dump its shard. Returns ops dumped.
 
     ONE reporter for both unit kinds. They had diverged: each path was missing a different half of
@@ -2275,8 +2276,8 @@ def _report_unit(shard: str) -> int:
         # most expensive property of a build is invisible until it is over.
         print(f"  [incremental] reused {sum(skipped.values())} already-measured config(s): "
               + ", ".join(f"{op}={n}" for op, n in sorted(skipped.items())), flush=True)
-    n = capture.dump_shard(shard)
     errs = capture.record_errors()
+    n = capture.dump_shard(shard, unit_complete=complete and not errs)
     if errs:
         print(f"  [capture] recording failures: {errs}", flush=True)
     return n
@@ -2370,6 +2371,11 @@ def _child_main(argv: list[str] | None = None) -> int:
                        predict_unusable=args.predict_unusable,
                        bench_lock=args.bench_lock,
                        bench_clear_mb=args.bench_clear_mb, bench_rep_ms=args.bench_rep_ms)
+    # Match derive.install_no_calibration: a cached runtime choice must not redirect
+    # the unit away from the keys its verified plan promises to measure. Explicit
+    # backend pins below still build the declared alternatives. Production callers
+    # retain automatic dispatch; this setting belongs only to the build child.
+    settings.configure(layernorm_dispatch="off", biasonly_dispatch="off")
     p_drop = 0.0
     if args.switch == "p_drop":
         p_drop = float(args.value)          # a module argument, not a settings pin
@@ -2389,13 +2395,16 @@ def _child_main(argv: list[str] | None = None) -> int:
         # environment, before any of them imported. `--side` is on the command line so the unit is
         # reproducible from it; the env var is what the drivers actually read.
         capture.install()
-        n_done = capture.load_compile_state(args.shard)
-        if n_done:
-            print(f"  [resume] {n_done} compile(s) replayable", flush=True)
-        ran = _run_one_driver(args.op)
-        n = _report_unit(args.shard)
-        print(f"unit ran={ran} ops={n}", flush=True)
-        return 0 if ran else 1
+        try:
+            n_done = capture.load_compile_state(args.shard)
+            if n_done:
+                print(f"  [resume] {n_done} compile(s) replayable", flush=True)
+            ran = _run_one_driver(args.op)
+            n = _report_unit(args.shard, complete=bool(ran))
+            print(f"unit ran={ran} ops={n}", flush=True)
+            return 0 if ran else 1
+        finally:
+            capture.shutdown_precompile()
 
     case = next((c for c in cases() if c.name == args.case), None)
     if case is None:
@@ -2403,15 +2412,18 @@ def _child_main(argv: list[str] | None = None) -> int:
         return 2
 
     capture.install()
-    n_done = capture.load_compile_state(args.shard)
-    if n_done:
-        print(f"  [resume] {n_done} compile(s) replayable from an earlier attempt", flush=True)
-    ran = run_case(case, args.length, args.dims, train=(args.mode == "train"), p_drop=p_drop,
-                   impl=args.impl, dtype=getattr(torch, args.dtype),
-                   compute_dtype=getattr(torch, args.compute_dtype) if args.compute_dtype else None)
-    n = _report_unit(args.shard)
-    print(f"unit ran={ran} ops={n}", flush=True)
-    return 0 if ran else 1
+    try:
+        n_done = capture.load_compile_state(args.shard)
+        if n_done:
+            print(f"  [resume] {n_done} compile(s) replayable from an earlier attempt", flush=True)
+        ran = run_case(case, args.length, args.dims, train=(args.mode == "train"), p_drop=p_drop,
+                       impl=args.impl, dtype=getattr(torch, args.dtype),
+                       compute_dtype=getattr(torch, args.compute_dtype) if args.compute_dtype else None)
+        n = _report_unit(args.shard, complete=bool(ran))
+        print(f"unit ran={ran} ops={n}", flush=True)
+        return 0 if ran else 1
+    finally:
+        capture.shutdown_precompile()
 
 
 if __name__ == "__main__":

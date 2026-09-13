@@ -1024,10 +1024,6 @@ def cmd_build(args: argparse.Namespace) -> int:
     # and left `data/` untouched -- the build looked complete and shipped nothing. Same policy as
     # the other two: merge what succeeded, name the holes, fail only if nothing succeeded.
     rc = _merge_built_shards(args, results)
-    # AFTER the merge, never before: the shipped output is the JSON the merge writes, and until it
-    # is written the triton cache is the only place the build's work exists.
-    if not rc and not failed and not held and _should_prune(args):
-        _empty_triton_cache(dry_run=False)
     # After the merge, so a build that half-worked still ships what it measured -- the same rule
     # the merge itself follows. The exit code is the only thing a batch job's caller sees.
     sm = builder.device_sm()
@@ -1056,7 +1052,12 @@ def cmd_build(args: argparse.Namespace) -> int:
                            "by this invocation")
         print(f"Build incomplete: {'; '.join(reasons)}; successful measurements were preserved.",
               file=sys.stderr)
-    return rc or (1 if dead or incomplete else 0)
+    status = rc or (1 if dead or incomplete else 0)
+    # Failed coverage or units need these compiled artifacts on resume. Merge alone
+    # proves only that partial timings were saved, not that the build is complete.
+    if not status and _should_prune(args):
+        _empty_triton_cache(dry_run=False)
+    return status
 
 
 def _ops_that_measured_nothing(results: list) -> dict:

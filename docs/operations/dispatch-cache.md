@@ -38,7 +38,7 @@ unshipped optimization notes do not change the dispatch identity.
 
 Code:
 
-- `src/miniworld_engine/kernels/layernorm/dispatch_cache.py`
+- `src/miniworld_engine/kernels/layernorm/dispatch.py`
 - `src/miniworld_engine/kernels/layernorm/compile_native.py`
 
 `miniworld` LayerNorm has three correct backward implementations and picks the
@@ -47,35 +47,38 @@ measure once and cache the winner instead of guessing.
 
 ## The three backward paths
 
-| path | what it does | wins when |
-|---|---|---|
-| `atomic` | `atomic_add` into `dw`/`db` | small `d` (cheap atomics) |
-| `partial` | `[cdiv(M, block_m), d]` partials → reduce | `d == 256`, large `M` |
-| `persistent` | persistent `NUM_SM*waves` grid, vectorized 2D tiles, `[grid, d]` partials | `d >= 384` (grows with `d`) |
+| path | implementation |
+|---|---|
+| `atomic` | Triton backward with atomic accumulation into weight and bias gradients |
+| `persistent` | Triton grid-stride backward with partial gradients and a reduction |
+| `cuda` | Native CUDA backward for matching activation and weight dtypes |
 
-All three are **plain Triton** — they recompile per arch and Triton autotunes their
-inner config (BLOCK_M / warps / stages). The persistent kernel reads the live SM
-count and uses **no Hopper-only features** (no clusters / DSMEM / TMA). So every
-path is correct and self-tuning on Ampere / Ada / Hopper / future archs; only the
-*choice between them* is hardware-dependent.
+The two Triton paths tune their tile configurations per GPU. Persistent backward
+uses the running device's SM count. The path selector accepts `atomic`,
+`persistent`, and `cuda`; `partial` is no longer a selectable path.
 
 ## Resolution order
 
 `_resolve_bwd_path(m, n, …)` decides per backward call:
 
-1. **Explicit pin** `settings.layernorm_bwd_path = "persistent"|"partial"|"atomic"|"cuda"`
-   → use it (debug / manual pin), bypassing everything below.
-2. **`settings.layernorm_dispatch = "off"`** → static H100 heuristic, no measuring.
-3. **H100 (sm_90)** and mode ≠ `force` → static heuristic directly (already
-   measured; calibration on H100 reproduces it exactly).
-4. **Cache hit** for `(d, M-bucket)` on this GPU → use the cached path.
-5. **CUDA-graph capturing** → static heuristic (never time inside a capture).
-6. **Otherwise → calibrate:** time the three paths on the *real* tensors with
-   `triton.testing.do_bench`, pick the winner, persist it, use it.
+1. An explicit `settings.layernorm_bwd_path` pin bypasses calibration. A CUDA pin
+   with mixed activation/weight dtypes falls back to a compatible Triton path.
+2. `settings.layernorm_dispatch = "off"` uses the static heuristic.
+3. H100 (sm90), unless mode is `force`, uses the static heuristic.
+4. A compatible per-GPU cache hit selects the recorded path.
+5. During CUDA graph capture, a miss uses the static heuristic.
+6. Otherwise, calibration times compatible paths on the actual tensors and stores
+   the fastest result.
 
-The static heuristic (also the universal fallback) is:
-`d >= 384 → persistent`; `d == 256 → partial` (M ≥ 262144) else `atomic`;
-`d < 256 → atomic`.
+The current static heuristic chooses CUDA for matching BF16 activations and
+weights at widths 128 through 512. Otherwise it chooses persistent for widths
+at least 384, and atomic for smaller widths.
+
+Module cache-build children set both `layernorm_dispatch` and `biasonly_dispatch`
+to `"off"`, matching the verified derivation. Explicit backend pins still build
+the declared alternatives. This prevents a stored runtime choice from redirecting
+a successful build unit away from its planned keys. Production execution retains
+automatic dispatch.
 
 ## LayerNorm Cache Format
 
@@ -90,7 +93,7 @@ The static heuristic (also the universal fallback) is:
   ```json
   {
     "768|131072": { "path": "persistent",
-                    "ms": { "atomic": 0.514, "partial": 0.352, "persistent": 0.267 } }
+                    "ms": { "atomic": 0.514, "persistent": 0.267 } }
   }
   ```
 
@@ -131,7 +134,7 @@ Set with `settings.configure(field=value)`; `settings.reset()` puts them back. T
 | field | values | effect |
 |---|---|---|
 | `layernorm_dispatch` | `"auto"` (default) / `"off"` / `"force"` | `off`: static only; `force`: calibrate even on H100 |
-| `layernorm_bwd_path` | `"persistent"` / `"partial"` / `"atomic"` / `"cuda"` / `None` | hard override, bypasses cache + heuristic |
+| `layernorm_bwd_path` | `"persistent"` / `"atomic"` / `"cuda"` / `None` | hard override, bypasses cache + heuristic |
 
 ## Using it on a new GPU
 
@@ -484,6 +487,10 @@ keys are separate quantities; read the command's current counts rather than a fi
     miniworld-engine dev audit                  # build-system contract checks
 
 `--resume` reuses completed nonempty measurement shards with compatible provenance.
+Completion requires the shard's `_unit_complete` marker. A failed module may leave useful
+partial timings; those can still be merged, but do not count as a completed unit. Shards
+written before this marker also require a successful rerun to skip the unit. Failed children
+release their claims even when they captured partial timings.
 Work generations include the current source, configuration and GPU/compiler identity;
 a claim file alone does not make work complete. Claim files coordinate concurrent workers,
 and `--reclaim` handles orphaned claims. `--no-resume` disables completed-shard reuse;
@@ -497,8 +504,9 @@ shared with the rest of the lab.
     export TRITON_CACHE_DIR=/scratch/$USER/build-cache
     miniworld-engine build all --gpus 8 --prune-cache
 
-`--prune-cache` empties it after a SUCCESSFUL merge and never before -- until the merge writes,
-compiled files may still be needed by unfinished work; measured timings are stored in shards. `miniworld-engine dev prune-cache` does it by
+`--prune-cache` empties it only after the merge, required-key coverage and planned-unit
+checks succeed. An incomplete build retains its compiled artifacts for resume; measured timings
+are stored in shards. `miniworld-engine dev prune-cache` does it by
 hand, `--dry-run` says what would go. Both refuse a directory that is not unmistakably a triton
 cache, and both refuse outright when `TRITON_CACHE_DIR` is unset, because then the build is
 sharing `~/.triton/cache` with everything else on the machine.
