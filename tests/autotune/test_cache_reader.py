@@ -320,3 +320,30 @@ def test_the_identity_changes_when_ptxas_does(monkeypatch):
     b = cache.env_identity()
     cache._env_identity_cache = None
     assert a != b
+
+
+def test_shape_pruning_preserves_cache_identity_and_filters_winners(tmp_path, monkeypatch):
+    """A safety exclusion must neither invalidate the full-grid cache nor be restored."""
+    at = _Autotuner(GRID, ["shape_key"], {
+        "x": torch.empty(2, 2, dtype=torch.bfloat16), "shape_key": 256,
+    })
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch)
+    allowed = [GRID[0], GRID[2], GRID[3]]
+    assert cache._cached_subset(at, allowed, at.nargs, {}) == [GRID[2]]
+
+
+def test_shape_pruning_never_resurrects_excluded_only_winner(tmp_path, monkeypatch):
+    at = _Autotuner(GRID, ["shape_key"], {
+        "x": torch.empty(2, 2, dtype=torch.bfloat16), "shape_key": 256,
+    })
+    _entry_for(at, [GRID[1]], tmp_path, monkeypatch)
+    allowed = [GRID[0], GRID[2], GRID[3]]
+    seen = []
+
+    def miss(op, gpu, key, reason, configs):
+        seen.append(reason)
+        return list(configs)
+
+    monkeypatch.setattr(cache, "_miss", miss)
+    assert cache._cached_subset(at, allowed, at.nargs, {}) == allowed
+    assert len(seen) == 1 and "every tuned config" in seen[0]
