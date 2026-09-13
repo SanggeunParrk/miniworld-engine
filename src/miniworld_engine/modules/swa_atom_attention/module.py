@@ -95,6 +95,8 @@ _FA2_SPEC = _has_submodule("flash_attn", "flash_attn_interface")
 
 def _flash_backend(device: torch.device | None = None) -> str | None:
     """"fa4" | "fa2" | None for `device` (default: the current CUDA device)."""
+    if device is not None and device.type != "cuda":
+        return None
     if not torch.cuda.is_available():
         return None
     major = torch.cuda.get_device_capability(device)[0]
