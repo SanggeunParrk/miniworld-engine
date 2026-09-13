@@ -1,0 +1,1222 @@
+{
+  "updated": "2026-09-12T01:54:27.888226+00:00",
+  "diagnostic_job": 1680273,
+  "resumed_build_job": 1680274,
+  "allocation": {
+    "job": "1680273",
+    "gpus": [
+      [
+        "0",
+        "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada"
+      ],
+      [
+        "1",
+        "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535"
+      ]
+    ]
+  },
+  "process_checks": 40,
+  "forced_kernel_launches": 1838,
+  "max_relative_l2_vs_cached_winner": 0.0,
+  "matching_original_workloads": 51,
+  "status": [
+    {
+      "name": "gpu0-module-transition-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 31.0,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-transition-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 31.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-transition-w1s5",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 31.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-backward-w2s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 28.8,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-backward-w2s2",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 28.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-trimul-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-trimul-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.5,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-adaln-w2s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 17.9,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-adaln-w4s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 18.5,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-transition-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-transition-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-transition-w1s5",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-backward-w2s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-backward-w2s2",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-trimul-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-trimul-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-adaln-w2s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 17.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-adaln-w4s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 17.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-transition-w1s3-target-only",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 36.2,
+      "status": "pass",
+      "retry_of": "gpu0-sanitizer-transition-w1s3"
+    },
+    {
+      "name": "gpu0-sanitizer-transition-w1s4-target-only",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 36.1,
+      "status": "pass",
+      "retry_of": "gpu0-sanitizer-transition-w1s4"
+    },
+    {
+      "name": "gpu0-sanitizer-transition-w1s5-target-only",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 36.2,
+      "status": "pass",
+      "retry_of": "gpu0-sanitizer-transition-w1s5"
+    },
+    {
+      "name": "gpu0-sanitizer-backward-w2s1-target-only",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 28.4,
+      "status": "pass",
+      "retry_of": "gpu0-sanitizer-backward-w2s1"
+    },
+    {
+      "name": "gpu0-sanitizer-backward-w2s2-target-only",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 28.5,
+      "status": "pass",
+      "retry_of": "gpu0-sanitizer-backward-w2s2"
+    },
+    {
+      "name": "gpu0-sanitizer-trimul-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 25.9,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-trimul-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 26.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-adaln-w2s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 29.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-adaln-w4s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 29.0,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-transition-w1s3",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 30.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-transition-w1s4",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 31.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-transition-w1s5",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 31.2,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-backward-w2s1",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 28.9,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-backward-w2s2",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 28.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-trimul-w1s3",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 15.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-trimul-w1s4",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 15.5,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-adaln-w2s4",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 17.8,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-adaln-w4s1",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 18.1,
+      "status": "pass"
+    }
+  ],
+  "initial_status": [
+    {
+      "name": "gpu0-module-transition-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 31.0,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-transition-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 31.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-transition-w1s5",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 31.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-backward-w2s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 28.8,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-backward-w2s2",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 28.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-trimul-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-trimul-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.5,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-adaln-w2s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 17.9,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-module-adaln-w4s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 18.5,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-transition-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-transition-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-transition-w1s5",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-backward-w2s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-backward-w2s2",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 27.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-trimul-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-trimul-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 15.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-adaln-w2s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 17.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-pressure-adaln-w4s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 17.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-transition-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 88,
+      "seconds": 36.2,
+      "status": "resource_limit"
+    },
+    {
+      "name": "gpu0-sanitizer-transition-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 88,
+      "seconds": 36.1,
+      "status": "resource_limit"
+    },
+    {
+      "name": "gpu0-sanitizer-transition-w1s5",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 88,
+      "seconds": 36.2,
+      "status": "resource_limit"
+    },
+    {
+      "name": "gpu0-sanitizer-backward-w2s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 88,
+      "seconds": 28.4,
+      "status": "resource_limit"
+    },
+    {
+      "name": "gpu0-sanitizer-backward-w2s2",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 88,
+      "seconds": 28.5,
+      "status": "resource_limit"
+    },
+    {
+      "name": "gpu0-sanitizer-trimul-w1s3",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 25.9,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-trimul-w1s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 26.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-adaln-w2s4",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 29.1,
+      "status": "pass"
+    },
+    {
+      "name": "gpu0-sanitizer-adaln-w4s1",
+      "uuid": "GPU-bbfd1018-c7ea-a60c-5567-ec618e5dcada",
+      "rc": 0,
+      "seconds": 29.0,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-transition-w1s3",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 30.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-transition-w1s4",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 31.3,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-transition-w1s5",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 31.2,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-backward-w2s1",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 28.9,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-backward-w2s2",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 28.7,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-trimul-w1s3",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 15.6,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-trimul-w1s4",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 15.5,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-adaln-w2s4",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 17.8,
+      "status": "pass"
+    },
+    {
+      "name": "gpu1-module-adaln-w4s1",
+      "uuid": "GPU-4124b909-d7ce-3bdd-53f0-64cac0c27535",
+      "rc": 0,
+      "seconds": 18.1,
+      "status": "pass"
+    }
+  ],
+  "multicontext": [
+    {
+      "name": "gpu0-multicontext-transition-w1s3",
+      "rc": 0
+    },
+    {
+      "name": "gpu0-multicontext-backward-w2s1",
+      "rc": 0
+    },
+    {
+      "name": "gpu0-multicontext-trimul-w1s3",
+      "rc": 0
+    },
+    {
+      "name": "gpu0-multicontext-adaln-w2s4",
+      "rc": 0
+    }
+  ],
+  "workload_comparison": [
+    {
+      "file": "gpu0-module-adaln-w2s4.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        24496898048,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-adaln-w4s1.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        24496898048,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-backward-w2s1.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        21988704256,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-backward-w2s2.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        21988704256,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23804837888,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23479779328,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23804837888,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-module-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23454613504,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-multicontext-adaln-w2s4.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        24258740224,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-multicontext-backward-w2s1.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        21750546432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-multicontext-transition-w1s3.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        21037514752,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-multicontext-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23566680064,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-multicontext-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23241621504,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-adaln-w2s4.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-adaln-w4s1.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-backward-w2s1.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-backward-w2s2.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-transition-w1s3.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-transition-w1s4.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-transition-w1s5.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-pressure-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        2145452032,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-adaln-w2s4.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        19354681344,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-adaln-w4s1.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        19354681344,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-backward-w2s1-target-only.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        5849022464,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-backward-w2s1.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        5849022464,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-backward-w2s2-target-only.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        5849022464,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-backward-w2s2.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        5849022464,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-transition-w1s3-target-only.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        7283474432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-transition-w1s3.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        7283474432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-transition-w1s4-target-only.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        7283474432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-transition-w1s4.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        7283474432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-transition-w1s5-target-only.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        7283474432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-transition-w1s5.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        7283474432,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        21428764672,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        20428423168,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        21428764672,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu0-sanitizer-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {},
+      "memory_before": [
+        20405354496,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-adaln-w2s4.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        24496898048,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-adaln-w4s1.json",
+      "id": "1cb5be8b1d967d2b1a87",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "Y": 0.0,
+        "Gate": 0.0
+      },
+      "memory_before": [
+        24496898048,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-backward-w2s1.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        21988704256,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-backward-w2s2.json",
+      "id": "4ae06f6808156fd3b85e",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "h_ptr": 0.0,
+        "dAB_ptr": 0.0
+      },
+      "memory_before": [
+        21988704256,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-transition-w1s3.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        21275672576,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-transition-w1s4.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        21275672576,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-transition-w1s5.json",
+      "id": "167183c588d7742abf11",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "out_ptr": 0.0
+      },
+      "memory_before": [
+        21275672576,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23804837888,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-trimul-w1s3.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23479779328,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23804837888,
+        25294995456
+      ]
+    },
+    {
+      "file": "gpu1-module-trimul-w1s4.json",
+      "id": "25075244975f2c91bda2",
+      "matches_original": true,
+      "same_arguments": true,
+      "relative_l2": {
+        "y_ptr": 0.0
+      },
+      "memory_before": [
+        23454613504,
+        25294995456
+      ]
+    }
+  ],
+  "pressure_free_bytes": [
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032,
+    2145452032
+  ],
+  "conclusion": "Original four Xid 31 faults not reproduced. No confirmed root cause. Hardware failure is not established.",
+  "limitations": [
+    "Suspect configs inferred from incomplete original logs, not proven faulting configs.",
+    "Five full-module sanitizer trials reached and completed the target, then OOMed later; target-only retries are reported separately.",
+    "Numerical comparisons use the first 65536 output elements and a cached winner, not an independent module reference.",
+    "Sanitizer filters to the named suspect kernel; all other module kernels execute but are not instrumented.",
+    "ECC disabled, so lack of ECC counters does not demonstrate healthy hardware.",
+    "The two-context test keeps a parent context resident; it does not reproduce every original build scheduling or module-load event."
+  ]
+}
