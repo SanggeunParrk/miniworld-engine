@@ -105,8 +105,10 @@ class _MemoryLayerNorm(torch.autograd.Function):
     ) -> torch.Tensor:
         # Calling native_layer_norm under the active autocast context is exactly
         # the operation used by nn.LayerNorm/F.layer_norm in this model.
+        native_norm = (values.dtype == torch.bfloat16 and weight.dtype == torch.float32
+                       and not torch.is_autocast_enabled(values.device.type))
         output, mean, rstd = torch.native_layer_norm(
-            values,
+            values.float() if native_norm else values,
             (values.shape[-1],),
             weight,
             bias,
@@ -114,7 +116,7 @@ class _MemoryLayerNorm(torch.autograd.Function):
         )
         ctx.save_for_backward(values.to(torch.bfloat16), weight, mean, rstd)
         ctx.input_dtype = values.dtype
-        return output
+        return output.to(values.dtype) if native_norm else output
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):

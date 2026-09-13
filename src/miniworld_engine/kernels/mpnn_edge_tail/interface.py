@@ -53,10 +53,13 @@ def edge_tail_supported(
         return False
     if not all(tensor.dtype == torch.bfloat16 for tensor in activations):
         return False
-    # Every parameter is either natively BF16 or an FP32 master weight under BF16
-    # autocast.  The kernel casts on load either way, but a mixture would make the
-    # replayed forward disagree with the one the graph already ran.
-    parameter_dtypes = {tensor.dtype for tensor in (*parameters, *normalization)}
+    # Projection parameters must agree; normalization independently uses FP32
+    # loads/accumulation and supports FP32 affine with native BF16 projections.
+    parameter_dtypes = {tensor.dtype for tensor in parameters}
+    if len({tensor.dtype for tensor in normalization}) != 1:
+        return False
+    if norm_weight.dtype not in {torch.float32, torch.bfloat16}:
+        return False
     autocast_bf16 = (
         torch.is_autocast_enabled("cuda")
         and torch.get_autocast_dtype("cuda") == torch.bfloat16
@@ -131,8 +134,9 @@ def edge_tail_update(
             "the Triton MPNN edge tail requires contiguous CUDA BF16 "
             "[B, T, K, 128] edge states, [B, T, 128] node projections, a "
             "contiguous INT64 neighbor index of matching shape, row-major "
-            "[128, 128]/[128] parameters that are all BF16 or all FP32 under BF16 "
-            "autocast, and an edge tensor addressable in signed 32-bit indexing"
+            "[128, 128]/[128] projection parameters all BF16 or all FP32 under BF16 "
+            "autocast, matching BF16 or FP32 norm affine parameters, and an edge "
+            "tensor addressable in signed 32-bit indexing"
         )
     if backend == "triton_compute":
         # The compute path is written against a flat [rows, 128] view; the contract

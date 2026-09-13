@@ -25,6 +25,36 @@ def lecun_normal_(module: nn.Linear | nn.Embedding, scale: float = 1.0) -> None:
         module.weight.copy_(stddev * values)
 
 
+class MPNNLayerNorm(nn.LayerNorm):
+    """Keep affine parameters FP32 for low-precision training, preserving FP64 tests."""
+
+    def _apply(self, fn, *args, **kwargs):
+        def keep_norm_precision(tensor):
+            converted = fn(tensor)
+            if converted.dtype in {torch.bfloat16, torch.float16}:
+                # Do not round an existing FP32 gamma through BF16 on repeated casts.
+                return tensor.to(device=converted.device, dtype=torch.float32)
+            return converted
+
+        return super()._apply(keep_norm_precision, *args, **kwargs)
+
+    def forward(self, input):
+        if input.dtype in {torch.bfloat16, torch.float16} and not torch.is_autocast_enabled(input.device.type):
+            return F.layer_norm(
+                input.float(), self.normalized_shape, self.weight, self.bias, self.eps
+            ).to(input.dtype)
+        return super().forward(input)
+
+
+def projection_input(values: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Match native low-precision GEMMs without changing the autocast path."""
+    if not torch.is_autocast_enabled(values.device.type) and weight.dtype in {
+        torch.bfloat16, torch.float16,
+    }:
+        return values.to(weight.dtype)
+    return values
+
+
 _FLAT_NEIGHBOR_CACHE: WeakTensorKeyDictionary = WeakTensorKeyDictionary()
 
 

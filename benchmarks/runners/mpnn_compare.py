@@ -2,7 +2,8 @@
 
 Run on a GPU node: python -m benchmarks.runners.mpnn_compare --out results.json
 Inference uses manual CUDA graphs; training measures forward/backward without graphs.
-Parameters are FP32, activations BF16, CUDA BF16 autocast, width 128, 48 neighbors.
+Native BF16 parameters/activations with FP32 norm affine, no autocast, width 128,
+48 neighbors. --precision bf16-mixed explicitly restores the historical autocast mode.
 Dropout-bearing training operations use p=0.25. Accuracy probes use p=0 so independent
 random masks are not mistaken for arithmetic error. No optimizer step is measured.
 """
@@ -57,11 +58,12 @@ BACKENDS = {
 }
 
 
-def make_case(family: str, nodes: int, backend: str, training: bool):
+def make_case(family: str, nodes: int, backend: str, training: bool, precision="bf16"):
+    mixed = precision == "bf16-mixed"
     torch.manual_seed(20260912)
 
     def tensor(*shape, parameter=False, scale=1.0):
-        dtype = torch.float32 if parameter else torch.bfloat16
+        dtype = torch.float32 if parameter and mixed else torch.bfloat16
         return (torch.randn(*shape, device="cuda", dtype=dtype) * scale).requires_grad_(training)
 
     x = tensor(1, nodes, 48, 128, parameter=family == "edge_layernorm")
@@ -90,7 +92,7 @@ def make_case(family: str, nodes: int, backend: str, training: bool):
     leaves = leaves_by_family[family] if training else []
 
     def forward(p=probability, impl=backend):
-        with torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.autocast("cuda", dtype=torch.bfloat16) if mixed else contextlib.nullcontext():
             if family == "message":
                 return message_hidden_reduce(x, weights[1], biases[0], mask, 48,
                                              backend=cast(MessageBackend, impl))
@@ -121,19 +123,35 @@ def make_case(family: str, nodes: int, backend: str, training: bool):
             update = F.dropout(update, p=p, training=training)
             return F.layer_norm((x + update).float(), (128,), gamma, beta, 1e-5).to(x.dtype)
 
-    return forward, leaves, probability
+    parameters_by_family = {
+        "message": [weights[1], biases[0]],
+        "edge_mlp": [weights[1], biases[0], weights[2], biases[1]],
+        "edge_tail": [*weights, *biases, gamma, beta],
+        "edge_layernorm": [gamma, beta],
+        "node_message": [weights[0], weights[1], biases[0]],
+        "relative_position": [table, position_bias],
+        "edge_dropout": [],
+    }
+    dtypes = {
+        "input_dtype": "int64" if family == "relative_position" else str(x.dtype).removeprefix("torch."),
+        "parameter_dtype": "+".join(sorted({
+            str(p.dtype).removeprefix("torch.") for p in parameters_by_family[family]
+        })),
+        "autocast_enabled": mixed,
+    }
+    return forward, leaves, probability, dtypes
 
 
 def relative_error(actual, reference):
     return float((actual.float() - reference.float()).norm() / reference.float().norm().clamp_min(1e-30))
 
 
-def evaluate(family, nodes, backend, training, repeats, compiled, source, metric):
+def evaluate(family, nodes, backend, training, repeats, compiled, source, metric, precision="bf16"):
     if family == "edge_dropout" and not training:
         return {"status": "not_applicable", "reason": "evaluation dropout is the identity", "samples": []}
     if family == "edge_layernorm" and not training and backend != "pytorch":
         return {"status": "not_applicable", "reason": "compressed saves are training-only; inference uses PyTorch", "samples": []}
-    forward, leaves, probability = make_case(family, nodes, backend, training)
+    forward, leaves, probability, dtypes = make_case(family, nodes, backend, training, precision)
     guard = contextlib.nullcontext if training else torch.no_grad
     with guard():
         reference = forward(0.0, "pytorch")
@@ -160,22 +178,21 @@ def evaluate(family, nodes, backend, training, repeats, compiled, source, metric
         # dropout belongs to the forward above and is recorded explicitly below.
         conf = BenchConfig(target=f"mpnn_{family}", level="module", compile=compiled,
                            mode="training" if training else "inference", metric=metric,
-                           precision="bf16-mixed", cudagraph="disabled" if training or metric == "memory" else "manual")
+                           precision=precision, cudagraph="disabled" if training or metric == "memory" else "manual")
         samples = []
         for _ in range(repeats):
             require_source_identity(source)
             result = measured_result(conf=conf, func=step, grad_to_none=leaves, params=[],
                                      is_train=training,
-                                     input_dtype=("int64" if family == "relative_position" else
-                                                  "float32" if family == "edge_layernorm" else "bfloat16"),
-                                     parameter_dtype="" if family == "edge_dropout" else "float32",
+                                     input_dtype=dtypes["input_dtype"],
+                                     parameter_dtype=dtypes["parameter_dtype"],
                                      execution_path=backend, reference="pytorch")
             require_source_identity(source)
             samples.append(result._asdict())
         if training and any(t.grad is None or not torch.isfinite(t.grad).all() for t in leaves):
             raise ValueError("missing or nonfinite gradient")
-    limit = 1e-4 if family == "relative_position" else 0.05
-    return {"status": "ok", "dropout": probability, "accuracy_dropout": 0.0,
+    limit = 1e-4 if family == "relative_position" and precision == "bf16-mixed" else 0.05
+    return {"status": "ok", **dtypes, "precision": precision, "dropout": probability, "accuracy_dropout": 0.0,
             "accuracy": accuracy, "accuracy_limit": limit,
             "accuracy_pass": all(value <= limit for value in accuracy.values()), "samples": samples}
 
@@ -189,6 +206,8 @@ def main():
     parser.add_argument("--modes", nargs="+", choices=["training", "inference"], default=["inference", "training"])
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--metric", choices=["time", "memory"], default="time")
+    parser.add_argument("--precision", choices=["bf16", "bf16-mixed"], default="bf16",
+                        help="bf16: native weights, FP32 norm, no autocast; bf16-mixed: historical FP32 weights with autocast")
     parser.add_argument("--eager", action="store_true", help="explicit uncompiled diagnostic")
     args = parser.parse_args()
     if args.out.exists():
@@ -219,7 +238,7 @@ def main():
                     row: dict[str, Any] = {"family": family, "nodes": nodes, "mode": mode, "backend": backend}
                     try:
                         row.update(evaluate(family, nodes, backend, mode == "training",
-                                            args.repeats, not args.eager, source, args.metric))
+                                            args.repeats, not args.eager, source, args.metric, args.precision))
                     except Exception as exc:
                         row.update(status="error", error=f"{type(exc).__name__}: {exc}"[:1800])
                     row["elapsed_seconds"] = time.monotonic() - started

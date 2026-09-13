@@ -6,6 +6,7 @@ to no single kernel.
 
 | | what it records |
 |---|---|
+| [mpnn-handoff-20260913.md](mpnn-handoff-20260913.md) | MPNN stopping point: native BF16, exact A6000 cache, latest benchmark links, rejected experiments and remaining scope. |
 | [mpnn-b8-l8192-memory-fit.md](mpnn-b8-l8192-memory-fit.md) | B8/L8192 full-model training with checkpoint API forbidden: capped-A6000 memory-fit proxy, two AdamW steps, and compute-policy capacity limits; A5000 direct validation not performed. |
 | [mpnn-batch-accumulation-a6000.md](mpnn-batch-accumulation-a6000.md) | Fixed-effective-batch A6000 experiment: full ProteinMPNN and node-message throughput, real accumulation, peak memory, and compiled-gradient parity. |
 | [mpnn-node-compute-a6000.md](mpnn-node-compute-a6000.md) | Saved-projection node-message training, A6000 latency and memory tradeoff, tail-mask fix and build-driver coverage. |

@@ -29,8 +29,8 @@ def _memory_supported(
         return False
     bf16_math = (
         values.dtype == torch.bfloat16
-        and weight.dtype == torch.bfloat16
-        and bias.dtype == torch.bfloat16
+        and weight.dtype in {torch.bfloat16, torch.float32}
+        and bias.dtype == weight.dtype
     ) or (
         torch.is_autocast_enabled("cuda")
         and torch.get_autocast_dtype("cuda") == torch.bfloat16

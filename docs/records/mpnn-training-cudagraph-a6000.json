@@ -1,0 +1,1818 @@
+{
+  "status": "complete",
+  "job": 1682429,
+  "excluded_jobs": {
+    "1682423": "Stopped to align dropout RNG at optimizer/timing start and clarify graph memory counters.",
+    "1682426": "Stopped after detecting an AccumulateGrad cross-stream warning caused by live warmup loss references; OFF warmup stream and detached loss lifetime fixed."
+  },
+  "summary": [
+    {
+      "policy": "pytorch",
+      "off": {
+        "step_ms": 448.6947784423828,
+        "repeat_ms": [
+          448.1853332519531,
+          449.2042236328125
+        ],
+        "peak_reserved_gib": 34.75,
+        "peak_allocated_including_capture_gib": 34.740800857543945
+      },
+      "on": {
+        "step_ms": 447.24786376953125,
+        "repeat_ms": [
+          446.7906494140625,
+          447.705078125
+        ],
+        "peak_reserved_gib": 34.8125,
+        "peak_allocated_including_capture_gib": 34.73458003997803
+      },
+      "speedup": 1.0032351516688232,
+      "time_reduction_pct": 0.322471921307943
+    },
+    {
+      "policy": "all_compute",
+      "off": {
+        "step_ms": 406.2248992919922,
+        "repeat_ms": [
+          405.5152587890625,
+          406.9345397949219
+        ],
+        "peak_reserved_gib": 25.84375,
+        "peak_allocated_including_capture_gib": 24.942662715911865
+      },
+      "on": {
+        "step_ms": 406.0405731201172,
+        "repeat_ms": [
+          405.7282409667969,
+          406.3529052734375
+        ],
+        "peak_reserved_gib": 25.88671875,
+        "peak_allocated_including_capture_gib": 24.936441898345947
+      },
+      "speedup": 1.0004539599835025,
+      "time_reduction_pct": 0.045375399734548516
+    },
+    {
+      "policy": "current",
+      "off": {
+        "step_ms": 417.4448699951172,
+        "repeat_ms": [
+          416.3297424316406,
+          418.55999755859375
+        ],
+        "peak_reserved_gib": 22.34765625,
+        "peak_allocated_including_capture_gib": 21.427037715911865
+      },
+      "on": {
+        "step_ms": 416.14796447753906,
+        "repeat_ms": [
+          415.8586730957031,
+          416.437255859375
+        ],
+        "peak_reserved_gib": 21.74609375,
+        "peak_allocated_including_capture_gib": 21.420816898345947
+      },
+      "speedup": 1.0031164528684078,
+      "time_reduction_pct": 0.31067707637496556
+    }
+  ],
+  "records": {
+    "pytorch-off-a": {
+      "status": "ok",
+      "policy": "pytorch",
+      "mode": "off",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "disabled",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "off",
+          "off",
+          "off"
+        ],
+        "encoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "tail": [
+          "off",
+          "off",
+          "off"
+        ],
+        "edge_mlp": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "decoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "position": "off",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 447.76654052734375,
+          "p20_ms": 447.76654052734375,
+          "p80_ms": 447.76654052734375
+        },
+        {
+          "median_ms": 448.14642333984375,
+          "p20_ms": 448.14642333984375,
+          "p80_ms": 448.14642333984375
+        },
+        {
+          "median_ms": 448.0532531738281,
+          "p20_ms": 448.0532531738281,
+          "p80_ms": 448.0532531738281
+        },
+        {
+          "median_ms": 448.5724182128906,
+          "p20_ms": 448.5724182128906,
+          "p80_ms": 448.5724182128906
+        },
+        {
+          "median_ms": 448.1853332519531,
+          "p20_ms": 448.1853332519531,
+          "p80_ms": 448.1853332519531
+        },
+        {
+          "median_ms": 448.8581237792969,
+          "p20_ms": 448.8581237792969,
+          "p80_ms": 448.8581237792969
+        },
+        {
+          "median_ms": 448.33587646484375,
+          "p20_ms": 448.33587646484375,
+          "p80_ms": 448.33587646484375
+        }
+      ],
+      "median_step_ms": 448.1853332519531,
+      "memory": [
+        {
+          "loss": 3.065511465072632,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.0673365592956543,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.063913345336914,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.064863443374634,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.0651538372039795,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 34.740800857543945,
+      "peak_allocated_including_capture_gib": 34.740800857543945,
+      "peak_reserved_gib": 34.75,
+      "cache_misses": [],
+      "graph_replay_observed": false
+    },
+    "pytorch-off-b": {
+      "status": "ok",
+      "policy": "pytorch",
+      "mode": "off",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "disabled",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "off",
+          "off",
+          "off"
+        ],
+        "encoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "tail": [
+          "off",
+          "off",
+          "off"
+        ],
+        "edge_mlp": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "decoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "position": "off",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 448.88165283203125,
+          "p20_ms": 448.88165283203125,
+          "p80_ms": 448.88165283203125
+        },
+        {
+          "median_ms": 449.1284484863281,
+          "p20_ms": 449.1284484863281,
+          "p80_ms": 449.1284484863281
+        },
+        {
+          "median_ms": 449.2042236328125,
+          "p20_ms": 449.2042236328125,
+          "p80_ms": 449.2042236328125
+        },
+        {
+          "median_ms": 449.1980895996094,
+          "p20_ms": 449.1980895996094,
+          "p80_ms": 449.1980895996094
+        },
+        {
+          "median_ms": 449.58001708984375,
+          "p20_ms": 449.58001708984375,
+          "p80_ms": 449.58001708984375
+        },
+        {
+          "median_ms": 449.7315979003906,
+          "p20_ms": 449.7315979003906,
+          "p80_ms": 449.7315979003906
+        },
+        {
+          "median_ms": 449.8319396972656,
+          "p20_ms": 449.8319396972656,
+          "p80_ms": 449.8319396972656
+        }
+      ],
+      "median_step_ms": 449.2042236328125,
+      "memory": [
+        {
+          "loss": 3.065493583679199,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.067317008972168,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.063908815383911,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.064835548400879,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        },
+        {
+          "loss": 3.0651652812957764,
+          "allocated_gib": 34.740800857543945,
+          "reserved_gib": 34.75,
+          "device_used_after_step_gib": 35.07940673828125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 34.740800857543945,
+      "peak_allocated_including_capture_gib": 34.740800857543945,
+      "peak_reserved_gib": 34.75,
+      "cache_misses": [],
+      "graph_replay_observed": false
+    },
+    "pytorch-on-a": {
+      "status": "ok",
+      "policy": "pytorch",
+      "mode": "on",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "forward+loss+backward",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "off",
+          "off",
+          "off"
+        ],
+        "encoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "tail": [
+          "off",
+          "off",
+          "off"
+        ],
+        "edge_mlp": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "decoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "position": "off",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "capture_seconds": 0.13266701996326447,
+      "capture_peak_allocated_gib": 34.73458003997803,
+      "capture_peak_reserved_gib": 34.8046875,
+      "graph_vs_compiled": {
+        "loss_off": 3.45395565032959,
+        "loss_on": 3.45395565032959,
+        "gradient_relative_l2": 0.0005805654073737273
+      },
+      "replay_validation": {
+        "reseed_gradient_relative_l2": 0.0005870197285228877,
+        "successive_dropout_gradient_difference": 0.03148316359328791,
+        "loss_before": 3.45395565032959,
+        "loss_next": 3.4546453952789307,
+        "loss_reseed": 3.45395565032959,
+        "loss_changed_labels": 3.4536423683166504,
+        "static_input_update_observed": true,
+        "gradient_overwrite_verified": true
+      },
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 446.4158630371094,
+          "p20_ms": 446.4158630371094,
+          "p80_ms": 446.4158630371094
+        },
+        {
+          "median_ms": 446.3687744140625,
+          "p20_ms": 446.3687744140625,
+          "p80_ms": 446.3687744140625
+        },
+        {
+          "median_ms": 446.7906494140625,
+          "p20_ms": 446.7906494140625,
+          "p80_ms": 446.7906494140625
+        },
+        {
+          "median_ms": 446.8305969238281,
+          "p20_ms": 446.8305969238281,
+          "p80_ms": 446.8305969238281
+        },
+        {
+          "median_ms": 446.77734375,
+          "p20_ms": 446.77734375,
+          "p80_ms": 446.77734375
+        },
+        {
+          "median_ms": 447.3036804199219,
+          "p20_ms": 447.3036804199219,
+          "p80_ms": 447.3036804199219
+        },
+        {
+          "median_ms": 448.16998291015625,
+          "p20_ms": 448.16998291015625,
+          "p80_ms": 448.16998291015625
+        }
+      ],
+      "median_step_ms": 446.7906494140625,
+      "memory": [
+        {
+          "loss": 3.065495252609253,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.0673086643218994,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.0639090538024902,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.064846992492676,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.065164566040039,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 0.03801536560058594,
+      "peak_allocated_including_capture_gib": 34.73458003997803,
+      "peak_reserved_gib": 34.8125,
+      "cache_misses": [],
+      "graph_replay_observed": true
+    },
+    "pytorch-on-b": {
+      "status": "ok",
+      "policy": "pytorch",
+      "mode": "on",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "e1054d59-b429-c2a3-2b82-dad9e3512734",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "forward+loss+backward",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "off",
+          "off",
+          "off"
+        ],
+        "encoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "tail": [
+          "off",
+          "off",
+          "off"
+        ],
+        "edge_mlp": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "decoder_message": [
+          "pytorch",
+          "pytorch",
+          "pytorch"
+        ],
+        "position": "off",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "capture_seconds": 0.13402410596609116,
+      "capture_peak_allocated_gib": 34.73458003997803,
+      "capture_peak_reserved_gib": 34.8046875,
+      "graph_vs_compiled": {
+        "loss_off": 3.45395565032959,
+        "loss_on": 3.45395565032959,
+        "gradient_relative_l2": 0.0005996324100225625
+      },
+      "replay_validation": {
+        "reseed_gradient_relative_l2": 0.0005997861811493539,
+        "successive_dropout_gradient_difference": 0.03148391148091008,
+        "loss_before": 3.45395565032959,
+        "loss_next": 3.4546453952789307,
+        "loss_reseed": 3.45395565032959,
+        "loss_changed_labels": 3.4536423683166504,
+        "static_input_update_observed": true,
+        "gradient_overwrite_verified": true
+      },
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 447.5371398925781,
+          "p20_ms": 447.5371398925781,
+          "p80_ms": 447.5371398925781
+        },
+        {
+          "median_ms": 447.36614990234375,
+          "p20_ms": 447.36614990234375,
+          "p80_ms": 447.36614990234375
+        },
+        {
+          "median_ms": 447.705078125,
+          "p20_ms": 447.705078125,
+          "p80_ms": 447.705078125
+        },
+        {
+          "median_ms": 447.7163391113281,
+          "p20_ms": 447.7163391113281,
+          "p80_ms": 447.7163391113281
+        },
+        {
+          "median_ms": 447.2340393066406,
+          "p20_ms": 447.2340393066406,
+          "p80_ms": 447.2340393066406
+        },
+        {
+          "median_ms": 448.3205261230469,
+          "p20_ms": 448.3205261230469,
+          "p80_ms": 448.3205261230469
+        },
+        {
+          "median_ms": 447.9068298339844,
+          "p20_ms": 447.9068298339844,
+          "p80_ms": 447.9068298339844
+        }
+      ],
+      "median_step_ms": 447.705078125,
+      "memory": [
+        {
+          "loss": 3.0654921531677246,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.0673203468322754,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.06392240524292,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.0648460388183594,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        },
+        {
+          "loss": 3.065143585205078,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 34.8125,
+          "device_used_after_step_gib": 35.16729736328125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 0.03801536560058594,
+      "peak_allocated_including_capture_gib": 34.73458003997803,
+      "peak_reserved_gib": 34.8125,
+      "cache_misses": [],
+      "graph_replay_observed": true
+    },
+    "all_compute-off-a": {
+      "status": "ok",
+      "policy": "all_compute",
+      "mode": "off",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "disabled",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 404.4615783691406,
+          "p20_ms": 404.4615783691406,
+          "p80_ms": 404.4615783691406
+        },
+        {
+          "median_ms": 404.7605895996094,
+          "p20_ms": 404.7605895996094,
+          "p80_ms": 404.7605895996094
+        },
+        {
+          "median_ms": 405.0411376953125,
+          "p20_ms": 405.0411376953125,
+          "p80_ms": 405.0411376953125
+        },
+        {
+          "median_ms": 405.5152587890625,
+          "p20_ms": 405.5152587890625,
+          "p80_ms": 405.5152587890625
+        },
+        {
+          "median_ms": 405.57464599609375,
+          "p20_ms": 405.57464599609375,
+          "p80_ms": 405.57464599609375
+        },
+        {
+          "median_ms": 405.9914245605469,
+          "p20_ms": 405.9914245605469,
+          "p80_ms": 405.9914245605469
+        },
+        {
+          "median_ms": 405.8163146972656,
+          "p20_ms": 405.8163146972656,
+          "p80_ms": 405.8163146972656
+        }
+      ],
+      "median_step_ms": 405.5152587890625,
+      "memory": [
+        {
+          "loss": 3.0656814575195312,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.0674209594726562,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.0639541149139404,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.0647852420806885,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.0651957988739014,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 24.942662715911865,
+      "peak_allocated_including_capture_gib": 24.942662715911865,
+      "peak_reserved_gib": 25.84375,
+      "cache_misses": [],
+      "graph_replay_observed": false
+    },
+    "all_compute-off-b": {
+      "status": "ok",
+      "policy": "all_compute",
+      "mode": "off",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "disabled",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 406.57305908203125,
+          "p20_ms": 406.57305908203125,
+          "p80_ms": 406.57305908203125
+        },
+        {
+          "median_ms": 406.64678955078125,
+          "p20_ms": 406.64678955078125,
+          "p80_ms": 406.64678955078125
+        },
+        {
+          "median_ms": 406.42559814453125,
+          "p20_ms": 406.42559814453125,
+          "p80_ms": 406.42559814453125
+        },
+        {
+          "median_ms": 406.9662780761719,
+          "p20_ms": 406.9662780761719,
+          "p80_ms": 406.9662780761719
+        },
+        {
+          "median_ms": 406.9345397949219,
+          "p20_ms": 406.9345397949219,
+          "p80_ms": 406.9345397949219
+        },
+        {
+          "median_ms": 407.0758361816406,
+          "p20_ms": 407.0758361816406,
+          "p80_ms": 407.0758361816406
+        },
+        {
+          "median_ms": 408.17767333984375,
+          "p20_ms": 408.17767333984375,
+          "p80_ms": 408.17767333984375
+        }
+      ],
+      "median_step_ms": 406.9345397949219,
+      "memory": [
+        {
+          "loss": 3.065676689147949,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.067429542541504,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.063948154449463,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.064791202545166,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        },
+        {
+          "loss": 3.0651938915252686,
+          "allocated_gib": 24.942662715911865,
+          "reserved_gib": 25.84375,
+          "device_used_after_step_gib": 26.17706298828125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 24.942662715911865,
+      "peak_allocated_including_capture_gib": 24.942662715911865,
+      "peak_reserved_gib": 25.84375,
+      "cache_misses": [],
+      "graph_replay_observed": false
+    },
+    "all_compute-on-a": {
+      "status": "ok",
+      "policy": "all_compute",
+      "mode": "on",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "forward+loss+backward",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "capture_seconds": 0.11168553307652473,
+      "capture_peak_allocated_gib": 24.936441898345947,
+      "capture_peak_reserved_gib": 25.87890625,
+      "graph_vs_compiled": {
+        "loss_off": 3.4538259506225586,
+        "loss_on": 3.4538259506225586,
+        "gradient_relative_l2": 1.516632641122147e-08
+      },
+      "replay_validation": {
+        "reseed_gradient_relative_l2": 1.4437864077325826e-08,
+        "successive_dropout_gradient_difference": 0.03148304724559887,
+        "loss_before": 3.4538259506225586,
+        "loss_next": 3.45473575592041,
+        "loss_reseed": 3.4538259506225586,
+        "loss_changed_labels": 3.4534988403320312,
+        "static_input_update_observed": true,
+        "gradient_overwrite_verified": true
+      },
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 404.4083251953125,
+          "p20_ms": 404.4083251953125,
+          "p80_ms": 404.4083251953125
+        },
+        {
+          "median_ms": 404.8752746582031,
+          "p20_ms": 404.8752746582031,
+          "p80_ms": 404.8752746582031
+        },
+        {
+          "median_ms": 405.5828552246094,
+          "p20_ms": 405.5828552246094,
+          "p80_ms": 405.5828552246094
+        },
+        {
+          "median_ms": 405.7282409667969,
+          "p20_ms": 405.7282409667969,
+          "p80_ms": 405.7282409667969
+        },
+        {
+          "median_ms": 405.8470458984375,
+          "p20_ms": 405.8470458984375,
+          "p80_ms": 405.8470458984375
+        },
+        {
+          "median_ms": 406.076416015625,
+          "p20_ms": 406.076416015625,
+          "p80_ms": 406.076416015625
+        },
+        {
+          "median_ms": 406.3631286621094,
+          "p20_ms": 406.3631286621094,
+          "p80_ms": 406.3631286621094
+        }
+      ],
+      "median_step_ms": 405.7282409667969,
+      "memory": [
+        {
+          "loss": 3.0656821727752686,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.0674142837524414,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.0639543533325195,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.064781427383423,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.065181016921997,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 0.03801536560058594,
+      "peak_allocated_including_capture_gib": 24.936441898345947,
+      "peak_reserved_gib": 25.88671875,
+      "cache_misses": [],
+      "graph_replay_observed": true
+    },
+    "all_compute-on-b": {
+      "status": "ok",
+      "policy": "all_compute",
+      "mode": "on",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "ff295d93-3acc-0b21-ca80-6b90531154e9",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "forward+loss+backward",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "pytorch"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "capture_seconds": 0.1120448149740696,
+      "capture_peak_allocated_gib": 24.936441898345947,
+      "capture_peak_reserved_gib": 25.87890625,
+      "graph_vs_compiled": {
+        "loss_off": 3.4538259506225586,
+        "loss_on": 3.4538259506225586,
+        "gradient_relative_l2": 1.3940424086282787e-08
+      },
+      "replay_validation": {
+        "reseed_gradient_relative_l2": 1.4474870213653788e-08,
+        "successive_dropout_gradient_difference": 0.031483039090921386,
+        "loss_before": 3.4538259506225586,
+        "loss_next": 3.45473575592041,
+        "loss_reseed": 3.4538259506225586,
+        "loss_changed_labels": 3.4534988403320312,
+        "static_input_update_observed": true,
+        "gradient_overwrite_verified": true
+      },
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 405.85113525390625,
+          "p20_ms": 405.85113525390625,
+          "p80_ms": 405.85113525390625
+        },
+        {
+          "median_ms": 406.1337585449219,
+          "p20_ms": 406.1337585449219,
+          "p80_ms": 406.1337585449219
+        },
+        {
+          "median_ms": 406.3529052734375,
+          "p20_ms": 406.3529052734375,
+          "p80_ms": 406.3529052734375
+        },
+        {
+          "median_ms": 406.2986145019531,
+          "p20_ms": 406.2986145019531,
+          "p80_ms": 406.2986145019531
+        },
+        {
+          "median_ms": 406.3825988769531,
+          "p20_ms": 406.3825988769531,
+          "p80_ms": 406.3825988769531
+        },
+        {
+          "median_ms": 406.624267578125,
+          "p20_ms": 406.624267578125,
+          "p80_ms": 406.624267578125
+        },
+        {
+          "median_ms": 407.23455810546875,
+          "p20_ms": 407.23455810546875,
+          "p80_ms": 407.23455810546875
+        }
+      ],
+      "median_step_ms": 406.3529052734375,
+      "memory": [
+        {
+          "loss": 3.0656909942626953,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.067420482635498,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.063967227935791,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.0647854804992676,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        },
+        {
+          "loss": 3.0651726722717285,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 25.88671875,
+          "device_used_after_step_gib": 26.24932861328125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 0.03801536560058594,
+      "peak_allocated_including_capture_gib": 24.936441898345947,
+      "peak_reserved_gib": 25.88671875,
+      "cache_misses": [],
+      "graph_replay_observed": true
+    },
+    "current-off-a": {
+      "status": "ok",
+      "policy": "current",
+      "mode": "off",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "40e6429b-fc40-3f79-7b81-ffc1a1bd6482",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "disabled",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "memory"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 416.14337158203125,
+          "p20_ms": 416.14337158203125,
+          "p80_ms": 416.14337158203125
+        },
+        {
+          "median_ms": 416.1136779785156,
+          "p20_ms": 416.1136779785156,
+          "p80_ms": 416.1136779785156
+        },
+        {
+          "median_ms": 416.3297424316406,
+          "p20_ms": 416.3297424316406,
+          "p80_ms": 416.3297424316406
+        },
+        {
+          "median_ms": 416.2048034667969,
+          "p20_ms": 416.2048034667969,
+          "p80_ms": 416.2048034667969
+        },
+        {
+          "median_ms": 417.3250427246094,
+          "p20_ms": 417.3250427246094,
+          "p80_ms": 417.3250427246094
+        },
+        {
+          "median_ms": 416.6922302246094,
+          "p20_ms": 416.6922302246094,
+          "p80_ms": 416.6922302246094
+        },
+        {
+          "median_ms": 416.9400329589844,
+          "p20_ms": 416.9400329589844,
+          "p80_ms": 416.9400329589844
+        }
+      ],
+      "median_step_ms": 416.3297424316406,
+      "memory": [
+        {
+          "loss": 3.0656886100769043,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.067424774169922,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.063959836959839,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.064791202545166,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.0651791095733643,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 21.427037715911865,
+      "peak_allocated_including_capture_gib": 21.427037715911865,
+      "peak_reserved_gib": 22.34765625,
+      "cache_misses": [],
+      "graph_replay_observed": false
+    },
+    "current-off-b": {
+      "status": "ok",
+      "policy": "current",
+      "mode": "off",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "40e6429b-fc40-3f79-7b81-ffc1a1bd6482",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "disabled",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "memory"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 417.8216857910156,
+          "p20_ms": 417.8216857910156,
+          "p80_ms": 417.8216857910156
+        },
+        {
+          "median_ms": 418.4371337890625,
+          "p20_ms": 418.4371337890625,
+          "p80_ms": 418.4371337890625
+        },
+        {
+          "median_ms": 418.55999755859375,
+          "p20_ms": 418.55999755859375,
+          "p80_ms": 418.55999755859375
+        },
+        {
+          "median_ms": 418.7043762207031,
+          "p20_ms": 418.7043762207031,
+          "p80_ms": 418.7043762207031
+        },
+        {
+          "median_ms": 418.123779296875,
+          "p20_ms": 418.123779296875,
+          "p80_ms": 418.123779296875
+        },
+        {
+          "median_ms": 419.29931640625,
+          "p20_ms": 419.29931640625,
+          "p80_ms": 419.29931640625
+        },
+        {
+          "median_ms": 419.9782409667969,
+          "p20_ms": 419.9782409667969,
+          "p80_ms": 419.9782409667969
+        }
+      ],
+      "median_step_ms": 418.55999755859375,
+      "memory": [
+        {
+          "loss": 3.065683364868164,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.0674049854278564,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.0639514923095703,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.0647826194763184,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        },
+        {
+          "loss": 3.0651912689208984,
+          "allocated_gib": 21.427037715911865,
+          "reserved_gib": 22.34765625,
+          "device_used_after_step_gib": 22.68096923828125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 21.427037715911865,
+      "peak_allocated_including_capture_gib": 21.427037715911865,
+      "peak_reserved_gib": 22.34765625,
+      "cache_misses": [],
+      "graph_replay_observed": false
+    },
+    "current-on-a": {
+      "status": "ok",
+      "policy": "current",
+      "mode": "on",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "40e6429b-fc40-3f79-7b81-ffc1a1bd6482",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "forward+loss+backward",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "memory"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "capture_seconds": 0.10078782960772514,
+      "capture_peak_allocated_gib": 21.420816898345947,
+      "capture_peak_reserved_gib": 21.73828125,
+      "graph_vs_compiled": {
+        "loss_off": 3.4538259506225586,
+        "loss_on": 3.4538259506225586,
+        "gradient_relative_l2": 1.51563805612695e-08
+      },
+      "replay_validation": {
+        "reseed_gradient_relative_l2": 1.5150312192452325e-08,
+        "successive_dropout_gradient_difference": 0.031451535683482815,
+        "loss_before": 3.4538259506225586,
+        "loss_next": 3.45473575592041,
+        "loss_reseed": 3.4538259506225586,
+        "loss_changed_labels": 3.4534988403320312,
+        "static_input_update_observed": true,
+        "gradient_overwrite_verified": true
+      },
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 415.1930847167969,
+          "p20_ms": 415.1930847167969,
+          "p80_ms": 415.1930847167969
+        },
+        {
+          "median_ms": 415.1193542480469,
+          "p20_ms": 415.1193542480469,
+          "p80_ms": 415.1193542480469
+        },
+        {
+          "median_ms": 415.8586730957031,
+          "p20_ms": 415.8586730957031,
+          "p80_ms": 415.8586730957031
+        },
+        {
+          "median_ms": 415.43988037109375,
+          "p20_ms": 415.43988037109375,
+          "p80_ms": 415.43988037109375
+        },
+        {
+          "median_ms": 416.06451416015625,
+          "p20_ms": 416.06451416015625,
+          "p80_ms": 416.06451416015625
+        },
+        {
+          "median_ms": 417.0403747558594,
+          "p20_ms": 417.0403747558594,
+          "p80_ms": 417.0403747558594
+        },
+        {
+          "median_ms": 416.7424011230469,
+          "p20_ms": 416.7424011230469,
+          "p80_ms": 416.7424011230469
+        }
+      ],
+      "median_step_ms": 415.8586730957031,
+      "memory": [
+        {
+          "loss": 3.0656867027282715,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.0674195289611816,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.0639705657958984,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.064786911010742,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.065187692642212,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 0.03801536560058594,
+      "peak_allocated_including_capture_gib": 21.420816898345947,
+      "peak_reserved_gib": 21.74609375,
+      "cache_misses": [],
+      "graph_replay_observed": true
+    },
+    "current-on-b": {
+      "status": "ok",
+      "policy": "current",
+      "mode": "on",
+      "source_hash": "64903f6d1ad3189393f7e9ca4e97a2cdc4f5353fdbacd618a59578e5714c2fed",
+      "runner_sha256": "92409e4831da31092e805aaea478bc610105c823d7b234ddd3eac7a3cb64bae3",
+      "device": "NVIDIA RTX A6000",
+      "uuid": "40e6429b-fc40-3f79-7b81-ffc1a1bd6482",
+      "batch": 8,
+      "length": 8192,
+      "neighbors": 48,
+      "width": 128,
+      "dropout": 0.25,
+      "precision": "native_bf16_fp32_layernorm",
+      "autocast": false,
+      "checkpoint": false,
+      "compile_requested": true,
+      "graph_scope": "forward+loss+backward",
+      "optimizer": "same eager AdamW in both modes",
+      "timing_scope": "fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded",
+      "parameter_counts": {
+        "bfloat16": 1656389,
+        "float32": 4096
+      },
+      "resolved_policy": {
+        "node": [
+          "triton",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "encoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "tail": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "edge_mlp": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "decoder_message": [
+          "triton_compute",
+          "triton_compute",
+          "triton_compute"
+        ],
+        "position": "triton",
+        "feature": "memory"
+      },
+      "phase": "done",
+      "compile_observed": true,
+      "compile_scopes": [
+        "callable:fullgraph"
+      ],
+      "capture_seconds": 0.10211485624313354,
+      "capture_peak_allocated_gib": 21.420816898345947,
+      "capture_peak_reserved_gib": 21.73828125,
+      "graph_vs_compiled": {
+        "loss_off": 3.4538259506225586,
+        "loss_on": 3.4538259506225586,
+        "gradient_relative_l2": 1.3446150391023234e-08
+      },
+      "replay_validation": {
+        "reseed_gradient_relative_l2": 1.3126401633867792e-08,
+        "successive_dropout_gradient_difference": 0.031451313686577186,
+        "loss_before": 3.4538259506225586,
+        "loss_next": 3.45473575592041,
+        "loss_reseed": 3.4538259506225586,
+        "loss_changed_labels": 3.4534988403320312,
+        "static_input_update_observed": true,
+        "gradient_overwrite_verified": true
+      },
+      "optimizer_update_verified": true,
+      "samples": [
+        {
+          "median_ms": 415.6334228515625,
+          "p20_ms": 415.6334228515625,
+          "p80_ms": 415.6334228515625
+        },
+        {
+          "median_ms": 416.0624694824219,
+          "p20_ms": 416.0624694824219,
+          "p80_ms": 416.0624694824219
+        },
+        {
+          "median_ms": 415.899658203125,
+          "p20_ms": 415.899658203125,
+          "p80_ms": 415.899658203125
+        },
+        {
+          "median_ms": 416.437255859375,
+          "p20_ms": 416.437255859375,
+          "p80_ms": 416.437255859375
+        },
+        {
+          "median_ms": 416.4669494628906,
+          "p20_ms": 416.4669494628906,
+          "p80_ms": 416.4669494628906
+        },
+        {
+          "median_ms": 416.7772216796875,
+          "p20_ms": 416.7772216796875,
+          "p80_ms": 416.7772216796875
+        },
+        {
+          "median_ms": 416.9861145019531,
+          "p20_ms": 416.9861145019531,
+          "p80_ms": 416.9861145019531
+        }
+      ],
+      "median_step_ms": 416.437255859375,
+      "memory": [
+        {
+          "loss": 3.0656795501708984,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.0674190521240234,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.0639586448669434,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.064764976501465,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        },
+        {
+          "loss": 3.0651822090148926,
+          "allocated_gib": 0.03801536560058594,
+          "reserved_gib": 21.74609375,
+          "device_used_after_step_gib": 22.10870361328125
+        }
+      ],
+      "replay_phase_allocator_peak_gib": 0.03801536560058594,
+      "peak_allocated_including_capture_gib": 21.420816898345947,
+      "peak_reserved_gib": 21.74609375,
+      "cache_misses": [],
+      "graph_replay_observed": true
+    }
+  },
+  "reproduction": {
+    "run.py": "\"\"\"Opt-in training CUDA Graph experiment, allocated GPU only.\"\"\"\nimport argparse\nimport gc\nimport hashlib\nimport json\nfrom pathlib import Path\nimport statistics\nimport time\nimport torch\nimport torch.nn.functional as F\nimport torch.utils.checkpoint\nfrom benchmarks.runners.bench import bench_time\nfrom benchmarks.runners.measurement import benchmark_source_hash, compile_for_benchmark, observe_execution\nfrom benchmarks.runners.mpnn_attribution import model_for\nfrom benchmarks.runners.mpnn_training import logits_for, make_inputs, param_audit\nfrom miniworld_engine.autotune import cache\n\np=argparse.ArgumentParser()\np.add_argument('--policy',choices=['pytorch','all_compute','current'],required=True)\np.add_argument('--mode',choices=['off','on'],required=True)\np.add_argument('--out',type=Path,required=True)\na=p.parse_args()\nassert not a.out.exists()\na.out.parent.mkdir(parents=True,exist_ok=True)\nassert 'A6000' in torch.cuda.get_device_name()\nassert not torch.is_autocast_enabled('cuda')\ntorch.backends.cuda.matmul.allow_tf32=True\nsource=benchmark_source_hash()\nrecord=dict(status='running',policy=a.policy,mode=a.mode,source_hash=source,runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),device=torch.cuda.get_device_name(),uuid=str(torch.cuda.get_device_properties(0).uuid),batch=8,length=8192,neighbors=48,width=128,dropout=.25,precision='native_bf16_fp32_layernorm',autocast=False,checkpoint=False,compile_requested=True,graph_scope='forward+loss+backward' if a.mode=='on' else 'disabled',optimizer='same eager AdamW in both modes',timing_scope='fresh-gradient forward+loss+backward+eager AdamW; resident static inputs; input transfer excluded')\ndef save():\n    a.out.write_text(json.dumps(record,indent=2)+'\\n')\n    print(json.dumps({k:record[k] for k in ['status','policy','mode','phase'] if k in record}),flush=True)\ndef forbidden(*args,**kwargs):\n    raise AssertionError('checkpoint API not allowed')\ntorch.utils.checkpoint.checkpoint=forbidden\ncache.clear_cache_misses()\nsave()\ntry:\n    model,resolved=model_for(a.policy,.25)\n    record['parameter_counts']=param_audit(model)\n    record['resolved_policy']=resolved\n    inputs=make_inputs(8,8192)\n    params=list(model.parameters())\n    optimizer=torch.optim.AdamW(params,lr=1e-4)\n    def loss_fn():\n        logits=logits_for(model,inputs)\n        assert logits.dtype==torch.bfloat16\n        return F.cross_entropy(logits.float(),inputs[1])\n    forward=compile_for_benchmark(loss_fn,fullgraph=True)\n    def forward_backward():\n        optimizer.zero_grad(set_to_none=True)\n        loss=forward()\n        loss.backward()\n        return loss.detach()\n    side=torch.cuda.current_stream() if a.mode=='off' else torch.cuda.Stream()\n    side.wait_stream(torch.cuda.current_stream())\n    record['phase']='compile_warmup';save()\n    with torch.cuda.stream(side),observe_execution() as evidence:\n        for _ in range(2):\n            loss=forward_backward()\n    torch.cuda.current_stream().wait_stream(side)\n    torch.cuda.synchronize()\n    assert evidence.compiled\n    record['compile_observed']=evidence.compiled\n    record['compile_scopes']=sorted(evidence.scopes)\n    param_audit(model,True)\n    if a.mode=='on':\n        record['phase']='capture';save()\n        # Same weights and seeded dropout for the compiled, uncaptured reference.\n        torch.manual_seed(20260920)\n        with torch.cuda.stream(side):\n            reference_loss=forward_backward()\n        torch.cuda.current_stream().wait_stream(side)\n        torch.cuda.synchronize()\n        expected_loss=float(reference_loss.detach())\n        expected_grad=torch.cat([x.grad.detach().flatten().cpu().double() for x in params])\n        del loss,reference_loss\n        optimizer.zero_grad(set_to_none=True)\n        gc.collect();torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats()\n        graph=torch.cuda.CUDAGraph()\n        start=time.monotonic()\n        with torch.cuda.graph(graph,stream=side):\n            graph_loss=forward_backward()\n        torch.cuda.synchronize()\n        record['capture_seconds']=time.monotonic()-start\n        record['capture_peak_allocated_gib']=torch.cuda.max_memory_allocated()/2**30\n        record['capture_peak_reserved_gib']=torch.cuda.max_memory_reserved()/2**30\n        static_grad=tuple(x.grad for x in params)\n        assert all(x is not None for x in static_grad)\n        def snapshot(seed=None):\n            if seed is not None:\n                torch.manual_seed(seed)\n            graph.replay();torch.cuda.synchronize()\n            return float(graph_loss.detach()),torch.cat([x.grad.detach().flatten().cpu().double() for x in params])\n        value,grad=snapshot(20260920)\n        relative=float((grad-expected_grad).norm()/expected_grad.norm().clamp_min(1e-30))\n        record['graph_vs_compiled']={'loss_off':expected_loss,'loss_on':value,'gradient_relative_l2':relative}\n        save()\n        assert abs(value-expected_loss)<1e-5 and relative<.002,record['graph_vs_compiled']\n        # A fresh replay must overwrite gradients, advance dropout, and honor seed reset.\n        value2,grad2=snapshot()\n        value3,grad3=snapshot(20260920)\n        repeat=float((grad3-grad).norm()/grad.norm().clamp_min(1e-30))\n        dropout_difference=float((grad2-grad).norm()/grad.norm().clamp_min(1e-30))\n        assert abs(value3-value)<1e-5 and repeat<.002,(value3,value,repeat)\n        assert dropout_difference>1e-4,dropout_difference\n        # Resident input buffers remain writable between graph replays.\n        old_labels=inputs[1].clone()\n        inputs[1].copy_((old_labels+1)%21)\n        changed_value,_=snapshot(20260920)\n        assert abs(changed_value-value)>1e-5,(changed_value,value)\n        inputs[1].copy_(old_labels)\n        del old_labels,expected_grad,grad,grad2,grad3\n        record['replay_validation']=dict(reseed_gradient_relative_l2=repeat,successive_dropout_gradient_difference=dropout_difference,loss_before=value,loss_next=value2,loss_reseed=value3,loss_changed_labels=changed_value,static_input_update_observed=True,gradient_overwrite_verified=True)\n        def step():\n            graph.replay()\n            optimizer.step()\n            return graph_loss\n    else:\n        def step():\n            loss=forward_backward()\n            optimizer.step()\n            return loss.detach()\n    record['phase']='optimizer_warmup';save()\n    torch.manual_seed(20260921)  # Align optimizer/timing dropout after mode-specific validation.\n    for _ in range(2):\n        result=step();torch.cuda.synchronize()\n        assert torch.isfinite(result)\n        param_audit(model,True)\n    assert all(s['exp_avg'].dtype==p.dtype==s['exp_avg_sq'].dtype for p,s in optimizer.state.items())\n    before=next(iter(optimizer.state.values()))['step'].item()\n    weight_before=[p.detach().cpu().clone() for p in params]\n    step();torch.cuda.synchronize()\n    assert next(iter(optimizer.state.values()))['step'].item()==before+1\n    assert any(not torch.equal(old,p.detach().cpu()) for old,p in zip(weight_before,params))\n    del weight_before\n    record['optimizer_update_verified']=True\n    record['phase']='timing';save()\n    samples=[bench_time(step) for _ in range(7)]\n    record.update(samples=samples,median_step_ms=statistics.median(x['median_ms'] for x in samples))\n    record['phase']='memory_validation';save()\n    memories=[]\n    for _ in range(5):\n        if a.mode=='off':\n            optimizer.zero_grad(set_to_none=True)\n        gc.collect();torch.cuda.empty_cache();torch.cuda.reset_peak_memory_stats()\n        result=step();torch.cuda.synchronize()\n        param_audit(model,True)\n        assert torch.isfinite(result)\n        if a.mode=='on':\n            assert all(p.grad is g for p,g in zip(params,static_grad))\n        free,total=torch.cuda.mem_get_info()\n        memories.append(dict(loss=float(result.detach()),allocated_gib=torch.cuda.max_memory_allocated()/2**30,reserved_gib=torch.cuda.max_memory_reserved()/2**30,device_used_after_step_gib=(total-free)/2**30))\n    assert not cache.cache_misses(),cache.cache_misses()\n    assert benchmark_source_hash()==source\n    record.update(status='ok',phase='done',memory=memories,replay_phase_allocator_peak_gib=max(x['allocated_gib'] for x in memories),peak_allocated_including_capture_gib=max(record.get('capture_peak_allocated_gib',0),max(x['allocated_gib'] for x in memories)),peak_reserved_gib=max(x['reserved_gib'] for x in memories),cache_misses=[],graph_replay_observed=a.mode=='on')\n    save()\nexcept Exception as exc:\n    record.update(status='oom' if isinstance(exc,torch.cuda.OutOfMemoryError) else 'error',error=f'{type(exc).__name__}: {exc}')\n    save()\n    raise\n",
+    "compare.sbatch": "#!/bin/bash\n#SBATCH --partition=gpu\n#SBATCH --nodelist=gpu04\n#SBATCH --gres=gpu:A6000:1\n#SBATCH --cpus-per-task=16\n#SBATCH --mem=96G\n#SBATCH --time=00:30:00\n#SBATCH --job-name=mpnn-graph-pilot\n#SBATCH --output=/home/psk6950/practice/mw-mpnn-rebase/.scratch/mpnn-native-bf16/graph-study-20260913/pilot-%j.log\nset -euo pipefail\ncd /home/psk6950/practice/mw-mpnn-rebase\nexport PATH=\"/home/psk6950/practice/miniworld-engine/.pixi/envs/default/bin:$PATH\"\nexport PYTHONPATH=\"$PWD/src:$PWD\"\nexport LD_LIBRARY_PATH=\"/home/psk6950/practice/miniworld-engine/.pixi/envs/default/lib:${LD_LIBRARY_PATH:-}\"\nexport OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 TORCHINDUCTOR_COMPILE_THREADS=4\nexport PYTORCH_ALLOC_CONF=expandable_segments:True\nexport TRITON_CACHE_DIR=\"$PWD/.scratch/rebase-checks/triton\"\npolicies=(pytorch all_compute current)\npolicy=${policies[$SLURM_ARRAY_TASK_ID]}\nfor spec in 'off a' 'on a' 'on b' 'off b'; do\n    read -r mode repeat <<< \"$spec\"\n    python -u .scratch/mpnn-native-bf16/graph-study-20260913/run.py --policy \"$policy\" --mode \"$mode\" --out \".scratch/mpnn-native-bf16/graph-study-20260913/final/$policy-$mode-$repeat.json\" > \".scratch/mpnn-native-bf16/graph-study-20260913/final/$policy-$mode-$repeat.log\" 2>&1\ndone\n"
+  },
+  "decision": {
+    "default": "retain training CUDA Graph OFF",
+    "reason": "At this fixed B8/L8192 workload, observed whole-step reductions are only 0.05-0.32%; no material speed benefit is established. Graph replay is functional and passes the recorded training checks.",
+    "interpretation": "Small graph gains suggest host dispatch is not the dominant whole-step cost at this size. This is an inference for the measured workload; smaller shapes and captured-optimizer variants were not tested."
+  }
+}

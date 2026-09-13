@@ -20,7 +20,11 @@ from miniworld_engine.kernels.mpnn_relative_position import (
     RelativePositionBackend,
     relative_position_embed,
 )
-from miniworld_engine.modules.mpnn._functional import gather_neighbors
+from miniworld_engine.modules.mpnn._functional import (
+    MPNNLayerNorm,
+    gather_neighbors,
+    projection_input,
+)
 
 FeatureBackend = Literal["auto", "pytorch", "recompute", "memory"]
 KNNBackend = Literal["cdist", "chunked", "grid_cutoff", "segment"]
@@ -310,7 +314,7 @@ class BackboneFeatures(nn.Module):
             edge_width,
             bias=False,
         )
-        self.edge_norm = nn.LayerNorm(edge_width)
+        self.edge_norm = MPNNLayerNorm(edge_width)
         self.register_buffer(
             "_pair_a", torch.tensor(self._PAIR_A, dtype=torch.long), persistent=False
         )
@@ -664,7 +668,7 @@ class BackboneFeatures(nn.Module):
         radial_weight: torch.Tensor,
     ) -> torch.Tensor:
         radial_features = self._radial_basis(pair_distances).flatten(start_dim=-2)
-        return F.linear(radial_features, radial_weight)
+        return F.linear(projection_input(radial_features, radial_weight), radial_weight)
 
     def _project_combined(
         self,
@@ -673,7 +677,10 @@ class BackboneFeatures(nn.Module):
         weight: torch.Tensor,
     ) -> torch.Tensor:
         radial_features = self._radial_basis(pair_distances).flatten(start_dim=-2)
-        return F.linear(torch.cat((position_features, radial_features), dim=-1), weight)
+        return F.linear(
+            projection_input(torch.cat((position_features, radial_features), dim=-1), weight),
+            weight,
+        )
 
     def build_graph(
         self,
@@ -763,17 +770,16 @@ class BackboneFeatures(nn.Module):
                     self.edge_projection.bias,
                 )
                 edge_features = edge_features + F.linear(
-                    radial_features, weight[:, self.position_width :]
+                    projection_input(radial_features, weight), weight[:, self.position_width :]
                 )
             else:
                 edge_features = self.edge_projection(
-                    torch.cat((position_features, radial_features), dim=-1)
+                    projection_input(torch.cat((position_features, radial_features), dim=-1), weight)
                 )
         if self.edge_norm_backend == "memory":
-            # Autocast promotes layer_norm to FP32, so the ordinary module retains a
-            # full-width FP32 edge tensor here -- twice the size of everything else
-            # on the tape. The memory boundary keeps the same native forward and
-            # stores a BF16 copy for backward instead.
+            # The explicit memory policy stores a BF16 copy for backward. Actual
+            # saved dtypes on the ordinary path depend on compilation and precision;
+            # they must be measured rather than inferred from autocast alone.
             edge_features = edge_layer_norm(
                 edge_features,
                 self.edge_norm.weight,

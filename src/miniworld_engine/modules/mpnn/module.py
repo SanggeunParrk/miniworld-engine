@@ -329,11 +329,11 @@ class MPNNDecoder(nn.Module):
     ) -> torch.Tensor:
         node_states = encoder_nodes
         if training_messages and not block_linear:
-            edge_context = (future_mask + past_mask) * edge_states
-            sequence_context = past_mask * gather_neighbors(
+            edge_context = (future_mask + past_mask).to(edge_states.dtype) * edge_states
+            sequence_context = past_mask.to(sequence_features.dtype) * gather_neighbors(
                 sequence_features, neighbor_indices
             )
-            encoder_context = future_mask * gather_neighbors(
+            encoder_context = future_mask.to(encoder_nodes.dtype) * gather_neighbors(
                 encoder_nodes, neighbor_indices
             )
             for decoder_layer in self.layers:

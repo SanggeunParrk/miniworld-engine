@@ -34,10 +34,12 @@ from miniworld_engine.kernels.mpnn_node_message import (
     node_message_supported,
 )
 from miniworld_engine.modules.mpnn._functional import (
+    MPNNLayerNorm,
     _flat_neighbor_indices,
     gather_neighbors,
     lecun_normal_,
     project_packed_neighbor_inputs,
+    projection_input,
 )
 from miniworld_engine.modules.mpnn.dropout import EdgeDropout
 
@@ -392,7 +394,9 @@ class PackedDecoderProjection(nn.Linear):
         past_mask: torch.Tensor,
     ) -> torch.Tensor:
         queries = query_nodes.unsqueeze(2).expand(-1, -1, edge_context.shape[2], -1)
-        current_context = past_mask * gather_neighbors(query_nodes, neighbor_indices)
+        current_context = past_mask.to(query_nodes.dtype) * gather_neighbors(
+            query_nodes, neighbor_indices
+        )
         neighbor_context = current_context + encoder_context
         packed = torch.cat(
             (queries, edge_context, sequence_context, neighbor_context), dim=-1
@@ -418,7 +422,7 @@ class MessageUpdate(nn.Module):
         self.input_projection = input_projection
         self.hidden_projection = nn.Linear(hidden_width, hidden_width, bias=True)
         self.output_projection = nn.Linear(hidden_width, output_width, bias=True)
-        self.norm = nn.LayerNorm(output_width)
+        self.norm = MPNNLayerNorm(output_width)
         if edge_dropout_backend is None:
             self.dropout = nn.Dropout(dropout)
         else:
@@ -459,6 +463,9 @@ class MessageUpdate(nn.Module):
         reduced_hidden: torch.Tensor,
         bias_scale: torch.Tensor | float,
     ) -> torch.Tensor:
+        reduced_hidden = projection_input(reduced_hidden, self.output_projection.weight)
+        if isinstance(bias_scale, torch.Tensor):
+            bias_scale = projection_input(bias_scale, self.output_projection.weight)
         update = F.linear(reduced_hidden, self.output_projection.weight).to(
             reduced_hidden.dtype
         )
@@ -528,7 +535,7 @@ class ResidualTransition(nn.Module):
         self.transition_recompute = transition_recompute
         self.expand_projection = nn.Linear(width, width * 4, bias=True)
         self.output_projection = nn.Linear(width * 4, width, bias=True)
-        self.norm = nn.LayerNorm(width)
+        self.norm = MPNNLayerNorm(width)
         self.dropout = nn.Dropout(dropout)
         self.activation = nn.GELU()
         nn.init.kaiming_normal_(self.expand_projection.weight, nonlinearity="relu")
@@ -1094,7 +1101,7 @@ class EncoderLayer(nn.Module):
             allow_recompute=allow_transition_recompute,
         )
         if residue_mask is not None:
-            node_states = residue_mask.unsqueeze(-1) * node_states
+            node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
 
         edge_projection = cast(
             PackedEncoderProjection, self.edge_message.input_projection
@@ -1368,5 +1375,5 @@ class DecoderLayer(nn.Module):
             allow_recompute=allow_transition_recompute,
         )
         if residue_mask is not None:
-            node_states = residue_mask.unsqueeze(-1) * node_states
+            node_states = residue_mask.unsqueeze(-1).to(node_states.dtype) * node_states
         return node_states

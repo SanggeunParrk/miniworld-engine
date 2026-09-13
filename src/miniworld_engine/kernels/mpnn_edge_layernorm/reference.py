@@ -24,6 +24,9 @@ def edge_layer_norm_pytorch(
     edge tensor in this family normalises its feature axis and nothing else, so a caller that
     could pass something else could only pass something wrong.
     """
+    if (values.dtype == torch.bfloat16 and weight is not None and weight.dtype == torch.float32
+            and not torch.is_autocast_enabled(values.device.type)):
+        return F.layer_norm(values.float(), values.shape[-1:], weight, bias, eps).to(values.dtype)
     return F.layer_norm(values, values.shape[-1:], weight, bias, eps)
 
 

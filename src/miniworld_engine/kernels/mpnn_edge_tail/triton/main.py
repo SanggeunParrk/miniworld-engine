@@ -435,15 +435,20 @@ def _edge_tail_replay_kernel(
     measured 7.45 ms per 262144-row chunk against 2.09 ms without it.
     """
     columns = tl.arange(0, WIDTH)
-    edge_weight = tl.load(
-        edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
-    ).to(tl.bfloat16)
-    hidden_weight = tl.load(
-        hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-    ).to(tl.bfloat16)
-    output_weight = tl.load(
-        output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
-    ).to(tl.bfloat16)
+    # Native BF16 loads can stage all three 128x128 weights simultaneously
+    # (96 KiB plus row buffers exceeds sm86's 99 KiB budget). Load each at its
+    # use inside the loop and prevent LICM from extending those lifetimes.
+    NATIVE_BF16: tl.constexpr = edge_weight_ptr.dtype.element_ty == tl.bfloat16
+    if not NATIVE_BF16:
+        edge_weight = tl.load(
+            edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
+        ).to(tl.bfloat16)
+        hidden_weight = tl.load(
+            hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
+        ).to(tl.bfloat16)
+        output_weight = tl.load(
+            output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
+        ).to(tl.bfloat16)
     hidden_bias = tl.load(hidden_bias_ptr + columns).to(tl.bfloat16)
     output_bias = tl.load(output_bias_ptr + columns).to(tl.bfloat16)
     norm_weight = tl.load(norm_weight_ptr + columns).to(tl.float32)
@@ -454,7 +459,7 @@ def _edge_tail_replay_kernel(
     grad_norm_bias = tl.zeros((WIDTH,), tl.float32)
 
     first_tile = tl.program_id(0) * TILES
-    for tile in range(TILES):
+    for tile in tl.range(TILES, disable_licm=NATIVE_BF16):
         local_rows = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_indices = local_rows + row_offset
         row_valid = (local_rows < chunk_rows) & (row_indices < rows)
@@ -477,14 +482,26 @@ def _edge_tail_replay_kernel(
             mask=row_valid[:, None],
             other=0.0,
         ).to(tl.float32)
+        if NATIVE_BF16:
+            edge_weight = tl.load(
+                edge_weight_ptr + columns[:, None] + columns[None, :] * EDGE_WEIGHT_STRIDE
+            ).to(tl.bfloat16)
         projected = tl.dot(edge, edge_weight).to(tl.bfloat16).to(tl.float32)
         preactivation = (query + projected).to(tl.bfloat16).to(tl.float32)
         preactivation = (preactivation + neighbor).to(tl.bfloat16)
         activated = _gelu(preactivation.to(tl.float32)).to(tl.bfloat16)
+        if NATIVE_BF16:
+            hidden_weight = tl.load(
+                hidden_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
+            ).to(tl.bfloat16)
         hidden = (tl.dot(activated, hidden_weight) + hidden_bias[None, :]).to(
             tl.bfloat16
         )
         activated_hidden = _gelu(hidden.to(tl.float32)).to(tl.bfloat16)
+        if NATIVE_BF16:
+            output_weight = tl.load(
+                output_weight_ptr + columns[:, None] + columns[None, :] * WIDTH
+            ).to(tl.bfloat16)
         update = (tl.dot(activated_hidden, output_weight) + output_bias[None, :]).to(
             tl.bfloat16
         )
@@ -584,19 +601,24 @@ def _edge_tail_dx_kernel(
     278 KiB of staging against a 100 KiB limit on sm_86.
     """
     columns = tl.arange(0, WIDTH)
-    edge_weight = tl.load(
-        edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
-    ).to(tl.bfloat16)
-    hidden_weight = tl.load(
-        hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-    ).to(tl.bfloat16)
-    output_weight = tl.load(
-        output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
-    ).to(tl.bfloat16)
+    # Native BF16 loads can stage all three 128x128 weights simultaneously
+    # (96 KiB plus row buffers exceeds sm86's 99 KiB budget). Load each at its
+    # use inside the loop and prevent LICM from extending those lifetimes.
+    NATIVE_BF16: tl.constexpr = edge_weight_ptr.dtype.element_ty == tl.bfloat16
+    if not NATIVE_BF16:
+        edge_weight = tl.load(
+            edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
+        ).to(tl.bfloat16)
+        hidden_weight = tl.load(
+            hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
+        ).to(tl.bfloat16)
+        output_weight = tl.load(
+            output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
+        ).to(tl.bfloat16)
     grad_hidden_bias = tl.zeros((WIDTH,), tl.float32)
 
     first_tile = tl.program_id(0) * TILES
-    for tile in range(TILES):
+    for tile in tl.range(TILES, disable_licm=NATIVE_BF16):
         local_rows = (first_tile + tile) * BLOCK_M1 + tl.arange(0, BLOCK_M1)
         row_indices = local_rows + row_offset
         row_valid = (local_rows < chunk_rows) & (row_indices < rows)
@@ -614,6 +636,10 @@ def _edge_tail_dx_kernel(
         # erf evaluations were recomputation.  Hoisting the shared term is bit for bit
         # identical; see the note on the helpers.
         hidden_erf = _gelu_erf(hidden)
+        if NATIVE_BF16:
+            output_weight = tl.load(
+                output_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
+            ).to(tl.bfloat16)
         grad_hidden = tl.dot(grad_update, output_weight) * _gelu_grad_from_erf(
             hidden, hidden_erf
         )
@@ -636,6 +662,10 @@ def _edge_tail_dx_kernel(
             preactivation_ptr + local_offsets, mask=row_valid[:, None], other=0.0
         ).to(tl.float32)
         preactivation_erf = _gelu_erf(preactivation)
+        if NATIVE_BF16:
+            hidden_weight = tl.load(
+                hidden_weight_ptr + columns[:, None] * WIDTH + columns[None, :]
+            ).to(tl.bfloat16)
         grad_preactivation = (
             tl.dot(grad_hidden_bf16, hidden_weight)
             * _gelu_grad_from_erf(preactivation, preactivation_erf)
@@ -646,6 +676,10 @@ def _edge_tail_dx_kernel(
             mask=row_valid[:, None],
         )
 
+        if NATIVE_BF16:
+            edge_weight = tl.load(
+                edge_weight_ptr + columns[:, None] * EDGE_WEIGHT_STRIDE + columns[None, :]
+            ).to(tl.bfloat16)
         # The residual branch's gradient arrives through an FP32 chunk buffer, so this
         # is a plain overwrite: the pass stays idempotent and the two contributions
         # round to BF16 exactly once, here.
