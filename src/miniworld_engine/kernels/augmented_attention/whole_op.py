@@ -2,7 +2,7 @@
 
 Exposes :func:`augmented_attention_pair_bias` — the pair-biased multi-head attention
 core (``softmax(qkᵀ·scale + bias)·v``) as a single autograd-transparent call, with the
-fused Triton kernel inside and the bf16 cast/restore handled here.
+fused Triton kernel inside and the layout conversion handled here.
 
 Boundary note: the q/k/v/gate/out projections and the adaptive conditioning are model
 concerns (they carry EDM2 magnitude-preserving research variants that normalize weights
@@ -31,8 +31,8 @@ def augmented_attention_pair_bias(
     ``(A,B,H,L,D)`` / ``(B,H,L,L)`` layout; the internal token-major kernel layout
     (``(A,B,L,H,D)`` / ``(B,L,L,H)``) translation is absorbed here.
 
-    Autograd-transparent. Runs the attention core in bf16 (Triton) and restores the
-    caller's dtype on output, so it stays bf16 even when the surrounding forward is fp32.
+    Autograd-transparent. Preserve the caller's precision: native BF16 stays BF16,
+    while an FP32 caller does not silently run a quantized attention core.
     """
     if kernel_type == "compute_efficient":
         from miniworld_engine.kernels.augmented_attention.triton.main import (
@@ -48,9 +48,9 @@ def augmented_attention_pair_bias(
 
     in_dtype = query.dtype
     # (A,B,H,L,D) -> (A,B,L,H,D); (B,H,L,L) -> (B,L,L,H)
-    q = query.transpose(2, 3).bfloat16()
-    k = key.transpose(2, 3).bfloat16()
-    v = value.transpose(2, 3).bfloat16()
-    b = bias.permute(0, 2, 3, 1).bfloat16()
+    q = query.transpose(2, 3)
+    k = key.transpose(2, 3)
+    v = value.transpose(2, 3)
+    b = bias.permute(0, 2, 3, 1)
     out = _fn(q, k, v, b, mask)           # (A,B,L,H,D)
     return out.transpose(2, 3).to(in_dtype)  # -> (A,B,H,L,D)
