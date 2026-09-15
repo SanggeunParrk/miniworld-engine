@@ -154,8 +154,9 @@ def test_the_unit_count_is_not_quietly_collapsing(units, rows):
     # filter bug would make, so the guard could not tell the two apart. Derived from the registry
     # it cannot rot: holding a kernel out means setting developed=no AND writing its reason in
     # kernels/undeveloped.csv, and dropping one by accident fails here.
+    from miniworld_engine.autotune.native import BUILD_OPS
     want = {r["kernel"] for r in rows
-            if r["backend"] == "triton" and (r.get("driver") or "").strip()
+            if (r["backend"] == "triton" or r["kernel"] in BUILD_OPS) and (r.get("driver") or "").strip()
             and (r.get("developed") or "yes").strip() != "no"}
     assert ops == want, (
         f"the op sweep drives {len(ops)} of the {len(want)} developed triton kernels with a "

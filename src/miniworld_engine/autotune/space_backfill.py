@@ -261,8 +261,8 @@ def format_report(rows: list[Recovered], *, applied: bool) -> str:
     verb = "recorded" if applied else "would record"
     keys = sum(r.keys for r in rows)
     unres = sum(r.unresolved for r in rows)
-    lines = [f"entry_grids backfill: {verb} the searched config space for {keys} cache entrie(s) "
-             f"across {len(rows)} file(s), recovered from git history"]
+    lines = [(f"entry_grids backfill: {verb} the searched config space for {keys} cache entrie(s) "
+              f"across {len(rows)} file(s), recovered from git history")]
     if unres:
         lines.append(f"  {unres} entrie(s) left unresolved -- their grid hash matches no version "
                      f"of the op's CSV, so they keep re-measuring the full grid")

@@ -40,7 +40,7 @@ class BidirBackHalf(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, b_lr, eps, h,
-                residual, dropscale=None):
+                residual, dropscale=None, pair_mask=None):
         # residual [B,L,L,D] (== module input pair) + dropscale [1,1,L,D] (drop_row mask/(1-p),
         # broadcast over i) fuse the pairformer residual+dropout into the gate; bwd returns d_residual=gy.
         B, L, _, D = x_n.shape
@@ -49,6 +49,12 @@ class BidirBackHalf(torch.autograd.Function):
         left, right, preact = trimul_inproj_cute_forward(
             x_n, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False,
             b_lr=b_lr, out_hidden=H, return_preact=True)
+        # Mask only contraction operands; the output gate must see the unmasked LN input.
+        if pair_mask is not None:
+            scale = pair_mask.reshape(B, 1, L, L).to(left.dtype)
+            left = left * scale
+            right = right * scale
+        ctx.pair_mask = pair_mask
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
         o_out = dispatch.bmm("contr_o_fwd", lf[:h], rf[:h].transpose(1, 2))   # outgoing
@@ -110,7 +116,7 @@ class BidirBackHalf(torch.autograd.Function):
 
         # front bwd: d_concat + dW (cuBLAS) + W_stack; dxn fused with the gate add.
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
-            d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+            d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.pair_mask)
         del d_left, d_right
         dconcT = dconc.t()
         del dconc
@@ -130,12 +136,12 @@ class BidirBackHalf(torch.autograd.Function):
             return dx
 
         # dispatch: cuBLAS wins small L (quack launch overhead), cute ≈/wins large L.
-        dx_n = dispatch.pick("dxn", (M, 4 * H + D, D),
+        dx_n = dispatch.pick("dxn", dispatch._operand_key(dconcT, W_stack, d_glogit, Wg_t),
                              [("cute", _dxn_cute), ("cublas", _dxn_cublas)]).reshape(B, L, L, D)
         d_residual = gy.reshape(B, L, L, D)
         del gy
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
-                d_residual, None)
+                d_residual, None, None)
 
 
 # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
@@ -143,20 +149,19 @@ class BidirBackHalf(torch.autograd.Function):
 # ``kernels._compile`` -- but it does not need to be.
 def bidir_forward(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
                   ln_out_w, ln_out_b, eps, b_lr, h, row_scale=None,
-                  dropscale=None):
+                  dropscale=None, eps_out=None):
     _bdll_patch.apply()
     _gate_mul_patch.apply()
-    # AF pair-mask folded into LN_in (FREE): x_n = LN(pair)*rs -> masked left/right=0; the rs grad
-    # folds into the LN backward (no separate (M,D) multiply). rs=None -> plain LN.
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps, row_scale=row_scale)
+    # Keep LN/output gate unmasked; mask front outputs and their gradients instead.
+    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps)
     # `pair` is passed BOTH as the LN input and as the residual (which is never absent) ->
     # autograd accumulates its grad from both paths.
     # A training entry always carries a drop scale, ones when p_drop is 0 -- that is what
     # keeps `gate_elem_train` and `gate_elem_bwd_ew` flagless. Measured cost 0.2%.
     if dropscale is None:
         dropscale = ones_dropscale(pair.shape[1], pair.shape[-1], pair)
-    return BidirBackHalf.apply(x_n, WL, WLg, WR, WRg, Wg, Wp_nn, ln_out_w, ln_out_b, b_lr, eps, h,
-                               pair, dropscale)
+    return BidirBackHalf.apply(x_n, WL, WLg, WR, WRg, Wg, Wp_nn, ln_out_w, ln_out_b, b_lr, eps if eps_out is None else eps_out, h,
+                               pair, dropscale, row_scale)
 
 
 class BidirV6TriMul(nn.Module):
@@ -178,6 +183,7 @@ class BidirV6TriMul(nn.Module):
         self.ln_out_w = nn.Parameter(b.ln_out.weight.detach().clone())   # (2h,)
         self.ln_out_b = nn.Parameter(b.ln_out.bias.detach().clone())
         self.eps = b.ln_pair.eps
+        self.eps_out = b.ln_out.eps
 
     def forward(self, pair, mask=None, dropscale=None):
         b_lr = prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg)
@@ -188,4 +194,4 @@ class BidirV6TriMul(nn.Module):
         return bidir_forward(pair, self.WL, self.WLg, self.WR, self.WRg, self.Wg, self.Wp_nn,
                              self.ln_in_w, self.ln_in_b, self.ln_out_w, self.ln_out_b,
                              self.eps, b_lr, self.h, row_scale,
-                             dropscale=dropscale)
+                             dropscale=dropscale, eps_out=self.eps_out)

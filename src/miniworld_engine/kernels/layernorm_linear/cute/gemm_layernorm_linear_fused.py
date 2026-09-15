@@ -36,7 +36,7 @@ from quack.cute_dsl_utils import (
 )
 from quack.gemm_sm90 import GemmSm90
 from quack.gemm_default_epi import GemmDefaultEpiMixin
-from quack.epi_ops import ColVecLoad, RowVecLoad, Scalar
+from quack.epi_ops import ColVecLoad, EpiSmemBytes, RowVecLoad, Scalar
 from quack.rounding import RoundingMode
 from quack.gemm_config import GemmConfig
 from quack.compile_utils import make_fake_tensor as fake_tensor
@@ -60,7 +60,6 @@ from miniworld_engine import settings
 # because it selects a real code path; these two only decided whether to print.
 _DEBUG_MODE = 0
 _WS_DEBUG = 0  # warp-specialized stats bring-up
-_WS = settings.current().lnl_ws  # warp-specialized stats PRODUCTION path
 
 
 @cute.jit
@@ -227,6 +226,28 @@ class _LNLEpiMixin(GemmDefaultEpiMixin):
         ("eps", Float32, Float32(1e-5)), ("mX", object, None), ("mDbg", object, None),
     )
 
+    def _filter_epi_ops(self, args):
+        # Quack 0.5 filters absent external inputs. These two vectors instead come
+        # from the kernel's stats producer, so None is not an inactive operation.
+        self._epi_ops = tuple(
+            op for op in type(self)._epi_ops
+            if isinstance(op, SmemColVec) or getattr(args, op.name, None) is not None
+        )
+
+    @classmethod
+    def epi_smem_bytes(cls, args, cta_tile_shape_mnk, epi_tile, warp_shape_mnk=None):
+        budget = EpiSmemBytes()
+        for op in cls._epi_ops:
+            if isinstance(op, SmemColVec):
+                # Stage selection has no pingpong flag. Reserve both warpgroup
+                # halves conservatively, including for non-pingpong launches.
+                budget += EpiSmemBytes(unstaged=2 * cta_tile_shape_mnk[0] * 4)
+            else:
+                arg = getattr(args, op.name, None)
+                if arg is not None:
+                    budget += op.smem_bytes(arg, cta_tile_shape_mnk, epi_tile, warp_shape_mnk)
+        return budget
+
     @mlir_namedtuple
     class EpilogueArguments(NamedTuple):
         mS: Optional[cute.Tensor] = None
@@ -359,8 +380,9 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
         epi_pipeline = None
         if const_expr(has_C):
             epi_pipeline = self.make_epi_pipeline(
-                c_smem_layout=cute.slice_(epi_c_smem_layout, (None, None, 0)),
                 epi_pipeline_mbar_ptr=storage.epi_pipeline_array_ptr.data_ptr(),
+                tx_count=cute.size_in_bytes(
+                    self.c_dtype, cute.slice_(epi_c_smem_layout, (None, None, 0))),
             )
         sched_pipeline = None
         sched_data = None
@@ -371,7 +393,7 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 varlen_k=varlen_k,
             )
             sched_data = storage.sched_data.get_tensor((4, self.sched_stage))
-        if const_expr(_WS):
+        if const_expr(self.warp_specialized_stats):
             # init the stats handshake mbarriers (Full[g], Empty[g]) as part of the main
             # barrier-init protocol: ONE thread per barrier (thread t inits slot t), then
             # fence; the cluster pipeline_init_wait below publishes them. (All 32 threads
@@ -403,7 +425,7 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
             TileSchedulerCls.create, tile_sched_params, sched_data, sched_pipeline
         )
         pipeline_init_wait(cluster_shape_mn=self.cluster_shape_mnk[:-1])
-        if const_expr(_WS):
+        if const_expr(self.warp_specialized_stats):
             # Empty[g] is now live (published by pipeline_init_wait). Pre-arrive it (ONE
             # thread per barrier: thread g arrives Empty[g]) so the producer's first
             # acquire passes; the producer's wait acquires this cross-warp via the mbar.
@@ -459,7 +481,7 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                     ab_pipeline.producer_tail(ab_producer_state)
                 if is_scheduler_warp:
                     tile_scheduler.producer_tail()
-            elif const_expr(_WS_DEBUG or _WS):
+            elif const_expr(_WS_DEBUG or self.warp_specialized_stats):
                 # STATS WARPS (the idle load-WG warps 9-11): independently replicate the
                 # STATIC tile sequence (work_idx = cluster_idx, += grid.z; _delinearize
                 # handles the swizzle) and reduce X[m-tile] from gmem ON THESE WARPS, in
@@ -482,7 +504,7 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 while s_wt.is_valid_tile:
                     s_mc = s_wt.tile_idx
                     s_lenk = varlen_manager.len_k(s_mc[3])
-                    if const_expr(_WS):
+                    if const_expr(self.warp_specialized_stats):
                         g = s_count % MWG               # which math WG owns this tile
                         ph = (s_count // MWG) % 2        # handshake phase for this g
                         cute.arch.mbarrier_wait(sStat_mbar + MWG + g, ph)   # Empty[g]
@@ -583,7 +605,7 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                 # (wrong stats, right shape). Reducing every tile is the correct-by-construction
                 # version, and this line is where to start if someone measures that it costs.
                 do_reduce = Boolean(True)
-                if const_expr(_WS):
+                if const_expr(self.warp_specialized_stats):
                     # WARP-SPECIALIZED: stats are produced by the idle load-WG warps and
                     # land in s_rstd/s_c1[wg half] via the Full[g] mbarrier. The math WG
                     # does a PLAIN GEMM (full WGMMA pipelining, no reduction stealing
@@ -669,7 +691,7 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
                     copy_D, copy_C,
                     tile_coord_mnkl, varlen_manager, self.epilogue_barrier, tile_scheduler, tidx, is_tma_warp,
                 )
-                if const_expr(_WS):
+                if const_expr(self.warp_specialized_stats):
                     # epilogue done reading s_rstd[wg half] -> free the stage (Empty[g])
                     # for the producer's next tile; advance this WG's handshake phase.
                     if tidx == 0:
@@ -805,14 +827,13 @@ class GemmLNLFusedSm90(_LNLEpiMixin, GemmSm90):
 # red_sum register pressure spills the 128-row acc; that's the open optimization.
 # (non-pingpong+persistent is a quack acc-reuse hazard; non-pingpong+NON-persistent also
 # works via the gmem-reduction fallback below but loses everywhere — see git history.)
-_FUSED_CONFIG = dict(tile_m=128, tile_n=128, cluster_m=1, cluster_n=1, pingpong=True)
 
 
 @jit_cache
 def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dtype,
-                   device_capacity, cfg, c_dtype=None, c_major=None):
+                   device_capacity, cfg, c_dtype=None, c_major=None, warp_specialized_stats=False):
     # cfg = (tile_m, tile_n, cluster_m, cluster_n, pingpong) — part of the jit_cache key so
-    # the tuner can compile/run many configs without collision (default = _FUSED_CONFIG).
+    # the tuner can compile/run many configs without collision (including the selected tile).
     # c_dtype/c_major non-None enables the optional C input = a fused gate-mul tensor.
     tile_m, tile_n, cluster_m, cluster_n, pingpong = cfg
     mA, mB, mD, mC, m, n, k, l = make_fake_gemm_tensors(
@@ -837,19 +858,32 @@ def _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, vec_dty
         (cluster_m, cluster_n, 1),
         pingpong, pingpong, False, False, device_capacity,  # persistent tied to pingpong
         mA, mB, mD, mC, epi_args, scheduler_args, varlen_args,
+        post_init=lambda obj: setattr(obj, "warp_specialized_stats", warp_specialized_stats),
     )
-
-
-def _cfg_tuple(config):
-    """Normalize a config (dict or None) into the hashable cfg tuple for _compile_fused."""
-    c = config if config is not None else _FUSED_CONFIG
-    return (c["tile_m"], c["tile_n"], c["cluster_m"], c["cluster_n"], c["pingpong"])
 
 
 def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None, gate=None):
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "SM90 (H100) only"
-    cfg = _cfg_tuple(config)
+    from miniworld_engine.autotune.cute_config import (
+        config_to_kwargs, fused_lnl_candidates, kwargs_to_config, resolve_config,
+        validate_hopper_config,
+    )
+    from miniworld_engine.autotune.native import tensor_key
+    ws = bool(settings.current().lnl_ws)
+    if config is None:
+        config = resolve_config(
+            "layernorm_linear_fwd_sm90_cute", fused_lnl_candidates(), dtype=str(A.dtype),
+            bucket=tensor_key(A, B, D, S, B2, gate, mDbg, extra=(ws, eps)),
+            device_index=A.device.index,
+            run=lambda c: gemm_lnl_fused(A, B, D, S, B2, eps, mDbg, config=c, gate=gate),
+        )
+    if isinstance(config, dict):
+        config = kwargs_to_config({**config_to_kwargs(fused_lnl_candidates()[0]), **config})
+    validate_hopper_config(config)
+    if config.swap_ab or config.is_dynamic_persistent:
+        raise ValueError("M2 requires unswapped operands and static scheduling")
+    cfg = (config.tile_m, config.tile_n, config.cluster_m, config.cluster_n, config.pingpong)
     A3, B3, D3 = A.unsqueeze(0), B.unsqueeze(0), D.unsqueeze(0)
     C3 = gate.unsqueeze(0) if gate is not None else None  # gate (M,N) as the C input
     A_p, B_p, D_p, C_p = perm3d(A3, B3, D3, C3)
@@ -857,7 +891,7 @@ def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None,
     a_dtype, b_dtype, d_dtype, c_dtype = get_dtypes(A, B, D, gate)
     vec_dtype = torch2cute_dtype_map[S.dtype]
     compiled_fn = _compile_fused(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major,
-                                 vec_dtype, device_capacity, cfg, c_dtype, c_major)
+                                 vec_dtype, device_capacity, cfg, c_dtype, c_major, ws)
     from miniworld_engine.kernels._quack_compat import is_compile_only
     if is_compile_only():
         return
@@ -872,7 +906,7 @@ def gemm_lnl_fused(A, B, D, S, B2, eps: float = 1e-5, mDbg=None, *, config=None,
     # reuse is currently a no-op and the reduction runs once per (m,n) tile. Eliminating
     # that redundancy needs cross-CTA sharing (gmem + sync) — left as future work. swizzle
     # kept at the GEMM default (8) for L2 reuse (disabling it gave no speedup here).
-    scheduler_args = make_scheduler_args(max_active_clusters, 8, None)
+    scheduler_args = make_scheduler_args(max_active_clusters, config.max_swizzle_size, None)
     varlen_args = make_varlen_args(None, None, None)
     compiled_fn(A_p, B_p, D_p, C_p, epi_args, scheduler_args, varlen_args, None)
 
@@ -882,7 +916,7 @@ def layernorm_linear_cute_fused(x, ln_weight, ln_bias, weight, bias, eps: float 
     """Fused forward LayerNormLinear — stats computed inside the GEMM (Milestone 2).
 
     ``config`` (dict with tile_m/tile_n/cluster_m/cluster_n/pingpong) overrides the shipping
-    ``_FUSED_CONFIG`` — used by the tuner to sweep tile shapes.
+    declared candidate space — used by the builder to sweep tile shapes.
     ``gate`` (M, N) — optional fused gate-mul: returns ``(LN(x)@W) ⊙ gate`` in one
     kernel (carried through the C input), for the trimul fused back-half."""
     from .gemm_layernorm_linear import fold_for_gemm

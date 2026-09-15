@@ -68,7 +68,11 @@ def test_the_lazy_names_are_reachable(init: Path) -> None:
 
     module = importlib.import_module(
         f"miniworld_engine.kernels.{init.parent.parent.name}.cuda")
-    assert hasattr(module, "__getattr__"), f"{module.__name__} has no lazy accessor"
+    exports = ({"layernorm": ("layer_norm_fwd_cuda", "layer_norm_bwd_cuda"),
+                "transition": ("transition_b2b_fwd", "transition_expand_gate_fwd",
+                               "transition_expand_gatebwd_wgmma")}).get(init.parent.parent.name, ())
+    for name in exports:
+        assert callable(getattr(module, name)), f"{module.__name__}.{name} is not reachable"
     with pytest.raises(AttributeError):
         module.definitely_not_an_export        # noqa: B018 -- the raise IS the assertion
 

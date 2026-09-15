@@ -59,7 +59,6 @@ from quack.gemm_default_epi import GemmDefaultEpiMixin
 from quack.rounding import RoundingMode
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from miniworld_engine.kernels._quack_compat import jit_cache
-from miniworld_engine.kernels._quack_compat import default_config
 from quack.gemm_tvm_ffi_utils import (
     get_majors, get_dtypes, perm3d, make_scheduler_args, make_varlen_args,
     make_fake_scheduler_args, make_fake_varlen_args, make_fake_gemm_tensors, compile_gemm_kernel,
@@ -193,23 +192,8 @@ def _compile(a_dtype, b_dtype, d_dtype, c_dtype, a_major, b_major, d_major, c_ma
     )
 
 
-# Pingpong tile_N_max per tile_m on SM90 (gemm_sm90 __init__): 64->256, 128->208, 192->128.
-# The single full-N LN-reduction subtile needs tile_n=K AND atom_layout 1×1; PINGPONG is atom
-# 1×1 for ALL of tile_m in {64,128,192} (only *cooperative* forces atom 2×1). So any of these is
-# numerically correct as long as its tile_N_max >= K — freeing the old tile_m=64 pin. (FIX B)
-_DGRAD_PP_TILE_N_MAX = {64: 256, 128: 208, 192: 128}
-
-
-def _dgrad_default_tile_m(K: int) -> int:
-    """Cache-miss fallback tile_m. The H100 sweep found tile_m=64 FASTEST at every shape (128/192
-    are numerically fine — see the family above — but slower), and 64 hosts tile_n=K for all K<=256,
-    so it's the best default. The tile_m knob + tuned cache can still pick 128/192 where a future
-    shape/GPU prefers them."""
-    return 64
-
-
 def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: Tensor,
-                     *, tile_m: int | None = None, cluster_m: int | None = None):
+                     *, tile_m: int | None = None, cluster_m: int | None = None, config=None):
     """dx (M,K) = LN-backward(dY@W). dY (M,N), W (N,K), xhat=(x-mean)*rstd (M,K), gamma (K,), rstd (M,).
 
     ``tile_m`` (pingpong atom-1×1 tile in {64,128,192}) and ``cluster_m`` ({1,2}) are autotune knobs;
@@ -218,28 +202,19 @@ def dgrad_lnbwd_cute(dY: Tensor, W: Tensor, xhat: Tensor, _gamma: Tensor, rstd: 
     assert dev[0] == 9, "SM90 only"
     M, N = dY.shape
     K = W.shape[1]
-    cfg = default_config(dY.device)
-    if tile_m is None or cluster_m is None:
-        # Brute-force autotuned over the pingpong atom-1×1 family (tile_m × cluster_m); cache miss
-        # falls back to the largest-tile_m-that-fits-K, cluster_m=1. Config is performance-only.
-        from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_pp_candidates
-        from miniworld_engine.autotune.buckets import bucket_mixed
-        _dflt = lnbwd_pp_candidates()[0].__class__(
-            tile_m=_dgrad_default_tile_m(K), tile_n=128, pingpong=True, cluster_m=1, cluster_n=1,
-            device_capacity=9)
-        _c = resolve_config("dgrad_lnbwd", lnbwd_pp_candidates(), dtype=str(dY.dtype),
-                            bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt)
-        if K > _DGRAD_PP_TILE_N_MAX.get(_c.tile_m, 0):   # cached tile_m doesn't fit this K -> safe default
-            _c = _dflt
-        if tile_m is None:
-            tile_m = _c.tile_m
-        if cluster_m is None:
-            cluster_m = _c.cluster_m
-    # Algorithmic invariants (keep config performance-only): tile_n = K (single full-N reduction),
-    # atom_layout 1×1 via pingpong, and tile_m's pingpong tile_n cap must host K.
-    assert tile_m in _DGRAD_PP_TILE_N_MAX, "dgrad tile_m must be a pingpong atom-1×1 tile (64/128/192)"
-    assert K <= _DGRAD_PP_TILE_N_MAX[tile_m], (
-        f"tile_m={tile_m} pingpong caps tile_n at {_DGRAD_PP_TILE_N_MAX[tile_m]} < K={K}")
+    from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_candidates
+    from miniworld_engine.autotune.native import tensor_key
+    candidates = lnbwd_candidates(K, tile_m=tile_m, cluster_m=cluster_m)
+    cfg = config
+    if cfg is None:
+        cfg = resolve_config(
+            "layernorm_linear_bwd_dx_sm90_cute", candidates, dtype=str(dY.dtype),
+            bucket=tensor_key(dY, W, xhat, _gamma, rstd), device_index=dY.device.index,
+            run=lambda c: dgrad_lnbwd_cute(dY, W, xhat, _gamma, rstd, config=c),
+        )
+    if cfg not in candidates:
+        raise ValueError("LN backward configuration violates the full-width reduction layout")
+    tile_m, cluster_m = cfg.tile_m, cfg.cluster_m
     tile_mn = (tile_m, K)
     pingpong = True   # pingpong => atom_layout 1×1 => the single full-N epi subtile holds
     dx = torch.empty(M, K, device=dY.device, dtype=dY.dtype)

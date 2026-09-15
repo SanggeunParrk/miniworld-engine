@@ -35,6 +35,7 @@ import contextvars
 import functools
 import hashlib
 import json
+import math
 import warnings
 from pathlib import Path
 from typing import Any
@@ -486,6 +487,8 @@ def _load(op: str, gk: str) -> dict | None:
     if fp.exists():
         try:
             result = json.loads(fp.read_text())
+            if not isinstance(result, dict):
+                result = None
         except Exception:  # corrupt cache -> treat as miss
             result = None
     _load_cache[key] = result
@@ -1391,6 +1394,7 @@ def install_cache_reader() -> None:
 # --------------------------------------------------------------------------- #
 def select_config(
     op: str, *, dtype: str, bucket: str, candidates=None, device_index: int | None = None,
+    op_id: str = "",
 ) -> dict | None:
     """Return the cached **best** config (``{kwargs, num_warps, num_stages}``) for the running
     ``(gpu, dtype, shape-bucket)``, or ``None`` (warn-once) on a miss/stale cache.
@@ -1416,15 +1420,27 @@ def select_config(
     if data is None:
         _warn_once(op, gk, dtype, "no tuned autotune cache")
         return None
-    if candidates is not None and data.get("config_space_hash") != config_space_hash(candidates):
+    if _stored_rev(data) != build_rev(op):
+        _warn_once(op, gk, dtype, "tuned autotune cache is STALE (build revision changed)",
+                   fallback="the declared native default")
+        return None
+    if op_id and (data.get("op_identity") != op_id
+                  or data.get("env_identity") != env_identity()):
+        _warn_once(op, gk, dtype, "native cache source/environment changed",
+                   fallback="the declared native default")
+        return None
+    if not op_id and candidates is not None and data.get("config_space_hash") != config_space_hash(candidates):
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
         return None
     if _scheme_stale(op, data.get("key_scheme")):
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (bucket keys mean something "
                                   "else now; see cache.KEY_SCHEME)")
         return None
-    entry = runtime_candidates(data, f"{dtype}|{bucket}")
-    if not entry:
+    try:
+        entry = runtime_candidates(data, f"{dtype}|{bucket}")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        entry = None  # partial/corrupt entry or measurement maps are a cache miss
+    if not isinstance(entry, list) or not entry:
         _warn_once(op, gk, f"{dtype}|{bucket}", "no tuned autotune cache entry for this shape")
         return None
     # Intersect with the live candidate space, exactly as the triton reader does. This used to be
@@ -1435,12 +1451,29 @@ def select_config(
     # `candidates` arrives as cache dicts (`cute_config._as_cache_dicts`), so one shape only.
     live = {_sig_from_dict(c) for c in (candidates or [])}
     for cfg in entry:
-        if not live or _sig_from_dict(cfg) in live:
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("kwargs"), dict):
+            continue
+        try:
+            sig = _sig_from_dict(cfg)
+            # Native entries must have an actual positive, finite measurement.
+            # Keep the legacy selector's optional-ms format, but never accept
+            # an explicitly invalid timing from either backend.
+            if op_id or "ms" in cfg:
+                ms = cfg.get("ms")
+                if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+                    continue
+                if not math.isfinite(ms) or ms <= 0:
+                    continue
+            supported = not live or sig in live
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if supported:
             best = dict(cfg)
             best.pop("ms", None)
             best["kwargs"] = {k: (tuple(v) if isinstance(v, list) else v)
                               for k, v in best["kwargs"].items()}
             return best
     _warn_once(op, gk, f"{dtype}|{bucket}",
-               "every tuned config for this shape is outside the current candidate space")
+               "no valid measured config for this shape remains in the current candidate space",
+               fallback="the declared native default")
     return None

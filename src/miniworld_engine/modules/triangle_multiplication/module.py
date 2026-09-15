@@ -395,6 +395,23 @@ class TriangleMultiplication(nn.Module):
         (no fused path yet) they are applied explicitly."""
         _require_square_widths(
             type(self).__name__, pair.shape[-1], self.d_hidden)
+        if _dispatch.is_sm90(pair.device):
+            from miniworld_engine.kernels.trimul_inproj.cute.launch import (
+                prepack_lr_operand,
+            )
+            from miniworld_engine.kernels.trimul_inproj.cute.v6_training_merged import (
+                v6_forward_merged,
+            )
+
+            wl, wlg = self.to_left.weight.t(), self.to_left_gate.weight.t()
+            wr, wrg = self.to_right.weight.t(), self.to_right_gate.weight.t()
+            row_scale = None if mask is None else (mask.unsqueeze(-1) & mask.unsqueeze(-2)).reshape(-1)
+            return v6_forward_merged(
+                pair, wl, wlg, wr, wrg, self.to_gate.weight.t(), self.to_out.weight,
+                self.ln_pair.weight, self.ln_pair.bias, self.ln_out.weight, self.ln_out.bias,
+                self.ln_pair.eps, prepack_lr_operand(wl, wlg, wr, wrg),
+                "out" if self.outgoing else "in", row_scale, dropscale=dropscale,
+                eps_out=self.ln_out.eps)
         impl = getattr(self, "_train_impl", None)
         if impl is None:
             direction = "out" if self.outgoing else "in"
@@ -467,17 +484,10 @@ class TriangleMultiplication(nn.Module):
         _require_square_widths(
             type(self).__name__, pair.shape[-1], self.d_hidden)
         from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
-        tm1_cute_forward, fused_ln_mask, _lnt = _load_cute_fns()
-        b, l1, l2, d = pair.shape
+        tm1_cute_forward, _fused_ln_mask, _lnt = _load_cute_fns()
 
-        if mask is not None:
-            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-            x_normed = fused_ln_mask(pair, self.ln_pair.weight, self.ln_pair.bias, mask_2d)
-        else:
-            x_normed = triton_layernorm(
-                pair.reshape(b * l1 * l2, d), self.ln_pair.weight, self.ln_pair.bias,
-                self.ln_pair.eps,
-            ).view(b, l1, l2, d)
+        x_normed = triton_layernorm(
+            pair, self.ln_pair.weight, self.ln_pair.bias, self.ln_pair.eps)
 
         left_bdll, right_bdll = tm1_cute_forward(
             x_normed,
@@ -487,6 +497,9 @@ class TriangleMultiplication(nn.Module):
             self.to_right_gate.weight.T,
             out_layout=_resolve_trimul_out_layout(pair.device),
         )
+        if mask is not None:
+            scale = (mask.unsqueeze(-1) & mask.unsqueeze(-2))[:, None]
+            left_bdll, right_bdll = left_bdll * scale, right_bdll * scale
         if self.outgoing:
             tri = torch.einsum("bdik,bdjk->bdij", left_bdll, right_bdll)  # (B,D,L,L)
         else:

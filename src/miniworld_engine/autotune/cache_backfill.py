@@ -169,8 +169,8 @@ def backfill(*, apply: bool = False) -> list[Backfilled]:
 def format_report(rows: list[Backfilled], *, applied: bool) -> str:
     drift = [r for r in rows if r.drifted]
     verb = "stamped" if applied else "would stamp"
-    lines = [f"driver_identity backfill: {verb} {len(rows)} caches from git history; "
-             f"{len(drift)} were built by a driver that has since changed"]
+    lines = [(f"driver_identity backfill: {verb} {len(rows)} caches from git history; "
+              f"{len(drift)} were built by a driver that has since changed")]
     if drift:
         lines.append("\nDRIFTED (these become STALE once stamped -- rebuild them):")
         for op in sorted({r.op for r in drift}):

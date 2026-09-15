@@ -28,7 +28,6 @@ from quack.cute_dsl_utils import (
 )
 from quack.epi_ops import ColVecLoad, ColVecReduce, RowVecLoad, colvec_reduce_accumulate
 from quack.gemm_default_epi import GemmDefaultEpiMixin
-from miniworld_engine.kernels._quack_compat import default_config
 from quack.gemm_sm90 import GemmSm90
 from quack.gemm_tvm_ffi_utils import (
     compile_gemm_kernel,
@@ -223,18 +222,6 @@ def _compile(
     )
 
 
-# Same as dgrad: the single full-N LN-reduction subtile needs tile_n=K + atom_layout 1×1;
-# PINGPONG is atom 1×1 for all tile_m in {64,128,192} (only cooperative forces 2×1). tile_N_max
-# per tile_m: 64->256, 128->208, 192->128. Any that hosts tile_n=K is numerically identical. (FIX B)
-_DAB_PP_TILE_N_MAX = {64: 256, 128: 208, 192: 128}
-
-
-def _dab_default_tile_m(K: int) -> int:
-    # Cache-miss fallback. H100 sweep: tile_m=64 fastest at every shape (128/192 valid but slower);
-    # 64 also hosts tile_n=K for all K<=256. The tile_m knob + cache can still pick 128/192.
-    return 64
-
-
 def transition_dab_lnbwd_cute(
     dAB: Tensor,
     w_ab: Tensor,
@@ -245,6 +232,7 @@ def transition_dab_lnbwd_cute(
     *,
     tile_m: int | None = None,
     cluster_m: int | None = None,
+    config=None,
 ) -> Tensor:
     """Return dx = LNBackward(dAB @ w_ab), without materializing d_xn.
 
@@ -254,24 +242,19 @@ def transition_dab_lnbwd_cute(
     assert dev[0] == 9, "SM90 only"
     M, _n = dAB.shape
     K = w_ab.shape[1]
-    cfg = default_config(dAB.device)
-    if tile_m is None or cluster_m is None:
-        from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_pp_candidates
-        from miniworld_engine.autotune.buckets import bucket_mixed
-        _dflt = lnbwd_pp_candidates()[0].__class__(
-            tile_m=_dab_default_tile_m(K), tile_n=128, pingpong=True, cluster_m=1, cluster_n=1,
-            device_capacity=9)
-        _c = resolve_config("dab_lnbwd", lnbwd_pp_candidates(), dtype=str(dAB.dtype),
-                            bucket=f"{bucket_mixed(M)}|k{K}", default=_dflt)
-        if K > _DAB_PP_TILE_N_MAX.get(_c.tile_m, 0):
-            _c = _dflt
-        if tile_m is None:
-            tile_m = _c.tile_m
-        if cluster_m is None:
-            cluster_m = _c.cluster_m
-    assert tile_m in _DAB_PP_TILE_N_MAX, "dab tile_m must be a pingpong atom-1×1 tile (64/128/192)"
-    assert K <= _DAB_PP_TILE_N_MAX[tile_m], (
-        f"tile_m={tile_m} pingpong caps tile_n at {_DAB_PP_TILE_N_MAX[tile_m]} < K={K}")
+    from miniworld_engine.autotune.cute_config import resolve_config, lnbwd_candidates
+    from miniworld_engine.autotune.native import tensor_key
+    candidates = lnbwd_candidates(K, tile_m=tile_m, cluster_m=cluster_m)
+    cfg = config
+    if cfg is None:
+        cfg = resolve_config(
+            "transition_bwd_dx_sm90_cute", candidates, dtype=str(dAB.dtype),
+            bucket=tensor_key(dAB, w_ab, x, gamma, rstd, c1), device_index=dAB.device.index,
+            run=lambda c: transition_dab_lnbwd_cute(dAB, w_ab, x, gamma, rstd, c1, config=c),
+        )
+    if cfg not in candidates:
+        raise ValueError("LN backward configuration violates the full-width reduction layout")
+    tile_m, cluster_m = cfg.tile_m, cfg.cluster_m
     tile_mn = (tile_m, K)
     pingpong = True
     dx = torch.empty(M, K, device=dAB.device, dtype=dAB.dtype)

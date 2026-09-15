@@ -16,14 +16,11 @@ Env: TRIMUL_DISPATCH=0 disables (always uses candidate[0]); TRIMUL_DISPATCH_LOG=
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 from miniworld_engine import settings
 
 _CACHE: dict[str, dict] = {}
-_ENABLED = settings.current().trimul_cute_dispatch
 _LOG = False  # was settings.trimul_dispatch_log: a print toggle nothing set
 
 
@@ -43,8 +40,9 @@ def pick(name, key, candidates):
     found by tests/compile/test_compile_regimes_gpu.py: with a cold cache a pairformer block traced to 6
     graphs, with a warm one to 1, and the whole difference was this function.
     """
-    if not _ENABLED or len(candidates) == 1:
+    if not settings.current().trimul_cute_dispatch or len(candidates) == 1:
         return candidates[0][1]()
+    key = (torch.cuda.current_device(), tuple(label for label, _ in candidates), key)
     idx = _CACHE.get(name, {}).get(key)          # plain read: no setdefault, no mutation
     if idx is None:
         if torch.compiler.is_compiling():
@@ -83,12 +81,16 @@ def reset():
 # scores inf and cuBLAS is chosen. dW huge-K reductions reliably pick cuBLAS; M-major input-grad
 # GEMMs can pick quack. Keys include the operand shapes so each distinct matmul caches its own.
 
+def _operand_key(*tensors):
+    return tuple((tuple(t.shape), tuple(t.stride()), str(t.dtype), str(t.device)) for t in tensors)
+
+
 def mm(name, A, B):
     """A @ B, dispatched cuBLAS vs quack."""
     def _q():
         from miniworld_engine.kernels._quack_compat import gemm as qg
         return qg(A, B)
-    return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
+    return pick(name, _operand_key(A, B),
                 [("cublas", lambda: A @ B), ("quack", _q)])
 
 
@@ -97,7 +99,7 @@ def addmm(name, C, A, B):
     def _q():
         from miniworld_engine.kernels._quack_compat import gemm_act as qga
         return qga(A, B, C=C, activation=None, store_preact=False)[1]
-    return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
+    return pick(name, _operand_key(C, A, B),
                 [("cublas", lambda: torch.addmm(C, A, B)), ("quack", _q)])
 
 
@@ -106,5 +108,5 @@ def bmm(name, A, B):
     def _q():
         from miniworld_engine.kernels._quack_compat import gemm as qg
         return qg(A, B)
-    return pick(name, (A.shape[0], A.shape[-2], A.shape[-1], B.shape[-1]),
+    return pick(name, _operand_key(A, B),
                 [("cublas", lambda: torch.bmm(A, B)), ("quack", _q)])

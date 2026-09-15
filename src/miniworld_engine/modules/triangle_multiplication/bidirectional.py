@@ -20,6 +20,7 @@ import torch.nn as nn
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
 )
@@ -284,7 +285,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 self.ln_pair.weight, self.ln_pair.bias,
                 self.ln_out.weight, self.ln_out.bias,
                 self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
-                dropscale=dropscale,  # ty: ignore[unknown-argument]
+                dropscale=dropscale, eps_out=self.ln_out.eps,  # ty: ignore[unknown-argument]
             )
         out = _fwd(
             pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
@@ -313,17 +314,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         by the incoming einsum (no input transpose needed since we control the einsum).
         Same math as the pytorch reference; bf16 in / fp32 acc / bf16 out.
         """
-        import os as _os
-        major = (
-            torch.cuda.get_device_capability(pair.device)[0]
-            if torch.cuda.is_available() else 0
-        )
-        _free_default = "1" if major >= 10 else "0"
-        if _os.environ.get(
-            "MINIWORLD_TRIMUL_CUEQUIV_FREE", _free_default
-        ) != "0":
-            # free path now folds the pair-mask into LN_in (row_scale), so it serves
-            # masked/padded inputs too — no longer gated on `mask is None`.
+        # The free inference implementation is SM100-only. Hopper retains its own stack;
+        # process environment must not silently select a foreign architecture's kernels.
+        if _dispatch.is_sm100(pair.device):
             return self._forward_cute_free(pair, mask)
 
         from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
@@ -333,22 +326,18 @@ class BidirectionalTriangleMultiplication(nn.Module):
             _load_cute_fns,
         )
 
-        tm1_cute_forward, fused_ln_mask, layer_norm_transpose = _load_cute_fns()
+        tm1_cute_forward, _fused_ln_mask, layer_norm_transpose = _load_cute_fns()
         b, l1, l2, d = pair.shape
         h = self.d_hidden
         M = b * l1 * l2
 
-        if mask is not None:
-            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-            x = fused_ln_mask(pair, self.ln_pair.weight, self.ln_pair.bias, mask_2d)
-        else:
-            o = layer_norm_transpose(
-                pair.reshape(M, d), self.ln_pair.weight, self.ln_pair.bias,
-                eps=self.ln_pair.eps, layout="nd->nd")
-            x = (o[0] if isinstance(o, tuple) else o).view(b, l1, l2, d)
+        from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+
+        x = triton_layernorm(pair, self.ln_pair.weight, self.ln_pair.bias, self.ln_pair.eps)
+        pair_scale = None if mask is None else (mask.unsqueeze(-1) & mask.unsqueeze(-2))[:, None]
 
         def _front(sl: slice):
-            return tm1_cute_forward(
+            left, right = tm1_cute_forward(
                 x,
                 self.to_left.weight[sl].T.contiguous(),
                 self.to_left_gate.weight[sl].T.contiguous(),
@@ -356,6 +345,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 self.to_right_gate.weight[sl].T.contiguous(),
                 out_layout=_resolve_trimul_out_layout(pair.device),
             )
+            if pair_scale is not None:
+                left, right = left * pair_scale, right * pair_scale
+            return left, right
 
         left_out, right_out = _front(slice(0, h))          # outgoing half, [B,h,L,L]
         left_in, right_in = _front(slice(h, 2 * h))        # incoming half, [B,h,L,L]

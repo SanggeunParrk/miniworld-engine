@@ -410,3 +410,33 @@ def transition_bwd_cuda() -> None:
     ext = _transition_cuda_ext()
     x, wa, wb, ws = _transition_cuda_operands(BF16)
     ext.backward(torch.randn_like(x).contiguous(), x, wa, wb, ws, _CUDA_N)
+
+
+def transition_swiglu_fwd():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.transition_swiglu_fwd()
+
+
+def transition_gate_bwd():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.transition_gate_bwd()
+
+
+def dab_lnbwd():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.dab_lnbwd()
+
+
+def transition_fwd_b2b_sm90_cuda():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.transition_fwd_b2b_sm90_cuda()
+
+
+def transition_expand_gate_sm90_cuda():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.transition_expand_gate_sm90_cuda()
+
+
+def transition_bwd_gate_sm90_cuda():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.transition_bwd_gate_sm90_cuda()

@@ -149,6 +149,32 @@ def test_the_guard_is_relative_not_a_fixed_number_of_seconds() -> None:
     assert 0 < X._LAUNCH_BUDGET_FLOOR_S <= 0.5
 
 
+@pytest.mark.parametrize("phase", ["launch", "synchronize"])
+@pytest.mark.parametrize("reason", ["an illegal memory access was encountered", "misaligned address"])
+def test_fatal_warmup_is_not_retried(monkeypatch, now, phase, reason):
+    import sys
+
+    at, inner = _install(monkeypatch, ms=0.1, secs_per_launch=0.0001, now=now)
+    calls = []
+    error = RuntimeError(f"CUDA error: {reason}")
+
+    def fail():
+        raise error
+
+    def launch():
+        calls.append(1)
+        if phase == "launch":
+            fail()
+
+    if phase == "synchronize":
+        monkeypatch.setattr(sys.modules["torch"].cuda, "synchronize", fail)
+    with pytest.raises(RuntimeError) as caught:
+        at._do_bench(launch, quantiles=(0.5, 0.2, 0.8))
+    assert caught.value is error
+    assert calls == [1]
+    assert not inner
+
+
 # --------------------------------------------------------------------------- #
 # the other half: a tile no winner has ever been is not generated
 # --------------------------------------------------------------------------- #

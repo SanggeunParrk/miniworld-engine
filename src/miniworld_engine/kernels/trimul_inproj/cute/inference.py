@@ -10,7 +10,7 @@ tensors its backward consumes, and *what* it saves changes the backward algorith
 and speed (save-vs-recompute). Keep the two paths separate — do NOT use this for
 training (no autograd is attached).
 
-Pipeline (outgoing): triton LN_in(+mask fold) -> trimul_inproj front (one gated
+Pipeline (outgoing): unmasked triton LN_in -> trimul_inproj front (one gated
 GEMM, bdll) -> torch.bmm contraction -> triton fused back. bf16, B=1, D=128.
 All weights are in x@W form (= nn.Linear weight .T).
 """
@@ -22,14 +22,14 @@ from miniworld_engine.kernels._compile import opaque
 import torch
 
 from miniworld_engine.kernels.layernorm.triton.main import (
-    triton_layernorm, triton_layernorm_masked,
+    triton_layernorm,
 )
 from miniworld_engine.kernels.trimul_inproj.cute.launch import trimul_inproj_cute_forward
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 
 
 def _trimul_inproj_inference_fake(pair, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w,
-                                  ln_out_b, eps, b_lr, rmask=None):
+                                  ln_out_b, eps, b_lr, rmask=None, eps_out=None):
     """y [B, L, L, D]: the whole trimul is shape-preserving, so it matches `pair`."""
     return torch.empty_like(pair)
 
@@ -55,23 +55,23 @@ def trimul_inproj_inference(
     eps: float,
     b_lr: torch.Tensor,
     rmask: torch.Tensor | None = None,
+    eps_out: float | None = None,
 ) -> torch.Tensor:
     """Whole trimul (outgoing) forward, inference-only. Returns the RESIDUAL form
     ``pair + trimul(pair)``, [B,L,L,D] -- the add is fused into the back half's store epilogue,
     which is what makes it free (the tile is already in registers).
 
-    rmask: [M] AF pair-mask, folded into LN_in for free (proj(0)=0 -> left/right
-    zeroed at masked positions, == AF's mask*projection at every valid position).
+    rmask: [M] AF pair-mask applied to left/right projections. The output
+    gate consumes the unmasked normalized input.
     None -> no mask. Saves nothing.
     """
     B, L, _, D = pair.shape
-    xf = pair.reshape(B * L * L, D)
-    if rmask is None:
-        xn = triton_layernorm(xf, ln_in_w, ln_in_b, eps)
-    else:
-        xn = triton_layernorm_masked(xf, ln_in_w, ln_in_b, eps, rmask)
-    xn = xn.view(B, L, L, D)
+    xn = triton_layernorm(pair, ln_in_w, ln_in_b, eps)
     left, right, _ = trimul_inproj_cute_forward(
         xn, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False, b_lr=b_lr)
+    if rmask is not None:
+        pair_mask = rmask.reshape(B, 1, L, L).to(left.dtype)
+        left, right = left * pair_mask, right * pair_mask
     tri = torch.einsum("bdik,bdjk->bdij", left, right)        # (B,D,L,L)
-    return trimul_back_triton(tri, xn, Wp, Wg, ln_out_w, ln_out_b, eps, residual=pair)
+    return trimul_back_triton(tri, xn, Wp, Wg, ln_out_w, ln_out_b,
+                              eps if eps_out is None else eps_out, residual=pair)

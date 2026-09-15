@@ -6,126 +6,64 @@ from pathlib import Path
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension, mathdx_includes
 
 _dir = Path(__file__).parent
-
-def _build_transition_b2b_cuda():
-    return load_extension(
-    name="transition_b2b_cuda",
-    sources=[str(_dir / "transition_b2b_kernel.cu")],
-    extra_cuda_cflags=[
-        *host_flags(),
-        "-std=c++17",
-        "-O3",
-        "--use_fast_math",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        *gencodes("90a"),
-        *mathdx_includes(),
-        "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-    ],
-    extra_cflags=["-std=c++17"],
-    verbose=False,
-    )
-
-def _build_transition_expand_gate_cuda():
-    return load_extension(
-    name="transition_expand_gate_cuda",
-    sources=[str(_dir / "transition_expand_gate_kernel.cu")],
-    extra_cuda_cflags=[
-        *host_flags(),
-        "-std=c++17",
-        "-O3",
-        "--use_fast_math",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        *gencodes("90a"),
-        *mathdx_includes(),
-        "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-    ],
-    extra_cflags=["-std=c++17"],
-    verbose=False,
-    )
+_EXTENSIONS = {}
 
 
-def _build_transition_gatebwd_cuda():
-    return load_extension(
-    name="transition_gatebwd_cuda",
-    sources=[str(_dir / "transition_gatebwd_kernel.cu")],
-    extra_cuda_cflags=[
-        *host_flags(),
-        "-std=c++17",
-        "-O3",
-        "--use_fast_math",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        *gencodes("90a"),
-        *mathdx_includes(),
-        "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-    ],
-    extra_cflags=["-std=c++17"],
-    verbose=False,
-    )
+def _ext(kind, width, config):
+    from miniworld_engine.autotune.hopper_cuda_config import defines
+    flags = defines(kind, width, config)
+    key = (kind, width, tuple(sorted(config.items())))
+    if key not in _EXTENSIONS:
+        ensure_cuda_home()
+        suffix = "_".join(f"{k}{v}" for k, v in sorted(config.items()))
+        _EXTENSIONS[key] = load_extension(
+            name=f"transition_{kind}_cuda_k{width}_{suffix}",
+            sources=[str(_dir / f"transition_{kind}_kernel.cu")],
+            extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "--use_fast_math",
+                               "--expt-relaxed-constexpr", "--expt-extended-lambda",
+                               *gencodes("90a"), *mathdx_includes(), *flags,
+                               "-DCUBLASDX_IGNORE_NVBUG_5218000_ASSERT",
+                               "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
+                               "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",
+                               "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__"],
+            extra_cflags=["-std=c++17"], verbose=False,
+        )
+    return _EXTENSIONS[key]
 
 
-
-_BUILDERS = {n: globals()[f"_build_{n}"] for n in
-             ("transition_b2b_cuda", "transition_expand_gate_cuda", "transition_gatebwd_cuda")}
-
-
-def _ext(name: str):
-    """One of the three extensions, built on first use and cached in globals().
-
-    Functions in THIS module must call this, not the bare name. A module-level `__getattr__` is
-    consulted for `module.attr` from outside; a bare global lookup inside the module is not, so
-    `return _ext("transition_b2b_cuda").f(...)` would raise NameError at call time.
-    """
-    ext = globals().get(name)
-    if ext is None:
-        ensure_cuda_home()   # mutates os.environ; belongs with the build, not with the import
-        ext = globals()[name] = _BUILDERS[name]()
-    return ext
-
-
-def __getattr__(name: str):
-    """PEP 562: compile on first use, not at import.
-
-    This package built THREE extensions at import time, one of them (`transition_b2b_cuda`)
-    compiled for `sm_90a`. So importing it on an sm_86 card raised "Error building extension"
-    outright -- and `dev audit`'s import check, which walks every package, reported
-    `import: 0 OK, 2 not OK` on every A6000 run for a reason having nothing to do with the cache.
-    """
-    if name not in _BUILDERS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return _ext(name)
+def _run_configured(kind, symbol, tensors, *, config=None, residual=False):
+    from miniworld_engine.autotune.hopper_cuda_config import candidates
+    from miniworld_engine.autotune.native import choose_config, tensor_key
+    x = tensors[0]
+    width = x.shape[-1]
+    grid = candidates(kind, width)
+    # Current CUDA kernels require a whole warpgroup tile of rows. Configs
+    # must also divide the actual workload, not just a coarse cache bucket.
+    grid = [c for c in grid if x.shape[0] % (64 * c["warpgroups"]) == 0]
+    if config is None:
+        config = choose_config(
+            {"b2b": "transition_fwd_b2b_sm90_cuda", "gatebwd": "transition_bwd_gate_sm90_cuda",
+             "expand_gate": "transition_expand_gate_sm90_cuda"}[kind], grid, dtype=str(x.dtype),
+            bucket=tensor_key(*tensors, extra=(residual,)), device_index=x.device.index,
+            run=lambda c: _run_configured(kind, symbol, tensors, config=c, residual=residual),
+        )
+    if config not in grid:
+        raise ValueError("CUDA transition config does not support the input row count")
+    fn = getattr(_ext(kind, width, config), symbol)
+    return fn(*tensors, True) if residual else fn(*tensors)
 
 
-def transition_expand_gatebwd_wgmma(x, rstd, c1, g, beta, wa, wb, grad_expand):
+def transition_expand_gatebwd_wgmma(x, rstd, c1, g, beta, wa, wb, grad_expand, *, config=None):
     """Hopper WGMMA fused expand + SwiGLU gate backward. Returns (h, dAB, xn):
     h=(M,ND) silu(a)*b, dAB=(M,2ND) [dA|dB], xn=(M,K). Matches the Triton
     ``_transition_expand_gatebwd_stacked`` (Version A) for sm90 K in {128,256,512}."""
-    return _ext("transition_gatebwd_cuda").transition_expand_gatebwd_wgmma(
-        x, rstd, c1, g.contiguous(), beta.contiguous(),
-        wa.contiguous(), wb.contiguous(), grad_expand.contiguous(),
-    )
+    return _run_configured("gatebwd", "transition_expand_gatebwd_wgmma",
+                           (x, rstd, c1, g.contiguous(), beta.contiguous(),
+                            wa.contiguous(), wb.contiguous(), grad_expand.contiguous()),
+                           config=config)
 
 
-def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws):
+def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws, *, config=None):
     """Fused LN + SwiGLU expand + squeeze forward for fixed AF3 transition shapes.
     Returns ``y = transition(x) + x``.
 
@@ -134,14 +72,14 @@ def transition_b2b_fwd(x, rstd, c1, g, beta, wa, wb, ws):
     takes the flag -- it is one `bool` in `transition_b2b_kernel.cu` -- but nothing can pass
     False through here, which is what "no variable" means for a Python caller.
     """
-    return _ext("transition_b2b_cuda").transition_b2b_fwd(
-        x, rstd, c1, g, beta, wa, wb, ws, True
-    )
+    return _run_configured("b2b", "transition_b2b_fwd",
+                           (x, rstd, c1, g, beta, wa, wb, ws), config=config, residual=True)
 
 
-def transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb):
+def transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb, *, config=None):
     """Fused LN + SwiGLU expand/gate forward returning h[M, ND]."""
-    return _ext("transition_expand_gate_cuda").transition_expand_gate_fwd(x, rstd, c1, g, beta, wa, wb)
+    return _run_configured("expand_gate", "transition_expand_gate_fwd",
+                           (x, rstd, c1, g, beta, wa, wb), config=config)
 
 
 def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps):
@@ -162,7 +100,7 @@ def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps):
     k = x.shape[-1]
     x2 = x.reshape(-1, k).contiguous()
     rstd, c1 = stats_triton(x2, eps)
-    out = _ext("transition_b2b_cuda").transition_b2b_fwd(
+    out = transition_b2b_fwd(
         x2,
         rstd,
         c1,
@@ -171,7 +109,6 @@ def cuda_transition_b2b(x, ln_weight, ln_bias, wa, wb, ws, eps):
         wa.contiguous(),
         wb.contiguous(),
         ws.contiguous(),
-        True,           # the residual is part of the Transition op, not an option on it
     )
     return out.reshape(*x.shape[:-1], out.shape[-1])
 
@@ -187,7 +124,7 @@ def cuda_transition_expand_gate(x, ln_weight, ln_bias, wa, wb, eps):
     k = x.shape[-1]
     x2 = x.reshape(-1, k).contiguous()
     rstd, c1 = stats_triton(x2, eps)
-    h = _ext("transition_expand_gate_cuda").transition_expand_gate_fwd(
+    h = transition_expand_gate_fwd(
         x2,
         rstd,
         c1,

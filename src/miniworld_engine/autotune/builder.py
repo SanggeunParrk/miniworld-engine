@@ -1142,8 +1142,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: read once, not once per row -- 91 rows would open the same file 91 times.
     evidence = width_evidence.load()
     out = []
+    from miniworld_engine.autotune.native import BUILD_OPS, native_shape_supported
     for r in csv.DictReader(reg.open()):
-        if r["backend"] != "triton" or not (r["driver"] or "").strip():
+        if (r["backend"] != "triton" and r["kernel"] not in BUILD_OPS) or not (r["driver"] or "").strip():
             continue
         # `developed` is a HAND-MAINTAINED judgement, not a rule derived from the benchmark tables,
         # and it has to be: bias_only_attention loses on time on every committed card and uses half
@@ -1155,7 +1156,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             continue
         if stack and r.get("stack") not in (stack, "both"):
             continue
-        if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
+        if (r["kernel"] not in BUILD_OPS and config_dir is not None
+                and not (config_dir / f"{r['kernel']}.csv").is_file()):
             continue          # this config set declares no grid for it
         # A `level=both` kernel is TWO work lists, not one. It keys on rows (shape_key.BOTH_ROWS),
         # so a pair L and an atom A of the same value are different buckets -- pair L=256 is
@@ -1233,7 +1235,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                      + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
             sided = [("", L) for L in SHAPES_BY_LEVEL[r["level"]]]
-        if not _keys_on_shape(Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
+        if r["kernel"] not in BUILD_OPS and not _keys_on_shape(
+                Path(__file__).resolve().parents[2] / r["file"], r["symbol"]):
             # A kernel that does not key on shape_key has no per-shape cache to build, so driving
             # it at every length would tune one identical bucket N times. transition_fold_triton is
             # the only one today, and correctly so: it reads the WEIGHTS (Wa, Wb (N,K), gamma,
@@ -1396,7 +1399,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
 
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w, heads=h)
                     for dt in dtypes for side, length in sided
-                    for w, h in _axes(side)])
+                    for w, h in _axes(side)
+                    if r["kernel"] not in BUILD_OPS or native_shape_supported(r["kernel"], w, dt)])
     # INTERLEAVE by op: emit every op's first shape, then every op's second, and so on.
     #
     # Grouped by op -- the obvious order -- is the worst possible one here. The runner hands
@@ -1558,11 +1562,12 @@ def _shard_reusable(path: Path) -> bool:
     """A completed file can resume work only on its recorded GPU/compiler."""
     from miniworld_engine.autotune.shard import provenance_error
 
-    if not _shard_has_entries(path):
+    if path.with_suffix(".failed").exists() or not _shard_has_entries(path):
         return False
     try:
         data = json.loads(path.read_text())
-        return isinstance(data, dict) and provenance_error(data) is None
+        return (isinstance(data, dict) and data.get("_unit_complete") is True
+                and provenance_error(data) is None)
     except (OSError, ValueError, TypeError):
         return False
 
@@ -1572,10 +1577,16 @@ def _generation_for_work(config_dir: Path | None) -> str:
     import hashlib
 
     from miniworld_engine.autotune import plan
+    from miniworld_engine.autotune.native import (
+        source_identity as native_source_identity,
+    )
     from miniworld_engine.autotune.shard import provenance
 
     digest = hashlib.sha256()
     digest.update(plan.source_identity().encode())
+    # CuTe policies and hand-CUDA .cu bodies are outside the derivation hash.
+    # Their edits must invalidate completed native unit shards as well.
+    digest.update(native_source_identity().encode())
     digest.update(json.dumps(provenance(), sort_keys=True).encode())
     if config_dir is not None:
         for path in sorted(config_dir.glob("*.csv")):
@@ -1645,7 +1656,11 @@ def _cache_answers(unit: OpUnit, ok_ops: set[str]) -> bool:
     bucket, so a hole in one of them survives a plain `build all`; `--rebuild-cached` re-tunes the
     op from scratch and `dev audit` is what finds such holes.
     """
-    if unit.op not in ok_ops:
+    from miniworld_engine.autotune.native import BUILD_OPS
+    # One native shape cannot certify another shape/layout/optional epilogue.
+    # Completed unit shards provide exact resume coverage; this coarse op/dtype
+    # shortcut does not. Keep native drivers scheduled when such proof is absent.
+    if unit.op in BUILD_OPS or unit.op not in ok_ops:
         return False
     from miniworld_engine.autotune.cache import _load, gpu_key
 
@@ -1656,7 +1671,7 @@ def _cache_answers(unit: OpUnit, ok_ops: set[str]) -> bool:
 
 
 def reclaim_orphans(shard_dir: Path) -> list[str]:
-    """Delete claims whose unit produced nothing, so a restarted build can run them again.
+    """Delete claims without a verified completed unit, so a restart can retry them.
 
     A claim is created with O_EXCL before a unit runs and removed if it produced no ops -- but a
     build that is KILLED (time limit, scancel, node failure) leaves one claim per in-flight unit,
@@ -1671,7 +1686,7 @@ def reclaim_orphans(shard_dir: Path) -> list[str]:
     """
     freed = []
     for claim in sorted(shard_dir.glob("*.claim")):
-        if not _shard_has_entries(shard_dir / f"{claim.stem}.json"):
+        if not _shard_reusable(shard_dir / f"{claim.stem}.json"):
             claim.unlink(missing_ok=True)
             freed.append(claim.stem)
     return freed
@@ -1723,6 +1738,9 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
     log.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = visible_device(device)
+    # Native nvcc extensions use Ninja, which otherwise ignores our per-unit
+    # compile budget and can oversubscribe a four-GPU / 112-CPU allocation.
+    env["MAX_JOBS"] = str(max(1, compile_jobs))
     # Write cubin + metadata and not the five IR levels: 187 KB an entry becomes 71, and the A6000
     # rebuild's cache was 40 GB of a shared filesystem. See autotune/triton_cache.py.
     triton_cache.store_binary_only_env(env, keep_ir)
@@ -1784,8 +1802,15 @@ def _run_unit_subprocess(unit: Unit | OpUnit, device: int, shard_dir: Path, repo
         skipped = "[unit] SKIPPED-PERMANENT" in log.read_text()
     except OSError:
         skipped = False
-    if not ops and not skipped:
-        claim.unlink(missing_ok=True)  # nothing produced: let a later run retry this unit
+    failed_marker = shard.with_suffix(".failed")
+    if proc.returncode != 0 and not skipped:
+        failed_marker.write_text(f"rc={proc.returncode}\n")
+    else:
+        failed_marker.unlink(missing_ok=True)
+    if not skipped and (proc.returncode != 0 or not _shard_reusable(shard)):
+        # Earlier kernels can leave useful timings even when this unit faults.
+        # Preserve those measurements, but let resume retry the unfinished unit.
+        claim.unlink(missing_ok=True)
     # a permanent skip KEEPS its claim: the shape will not fit on the next attempt either, and
     # releasing it made every resumed job re-claim the same OOMing units and produce nothing.
     return {"label": unit.label, "gpu": device, "rc": proc.returncode, "ops": ops,
@@ -1969,9 +1994,9 @@ def build_all(selected: list, shard_dir: Path, gpus: list[int], compile_jobs: in
     # and never reported. Say it: the alternative is a build that looks complete and quietly
     # covers less than the last one did.
     orphans = [c.stem for c in sorted(shard_dir.glob("*.claim"))
-               if not _shard_has_entries(shard_dir / f"{c.stem}.json")]
+               if not _shard_reusable(shard_dir / f"{c.stem}.json")]
     if orphans and not reclaim:
-        print(f"WARNING: {len(orphans)} claim(s) here have no shard -- units a killed build left "
+        print(f"WARNING: {len(orphans)} claim(s) here have no complete shard -- units a killed build left "
               f"in flight. They are being SKIPPED. Re-run with --reclaim once no other build is "
               f"using this directory:", flush=True)
         for stem in orphans[:10]:
@@ -2141,7 +2166,7 @@ def _run_one_driver(op: str) -> int:
     return 1
 
 
-def _report_unit(shard: str) -> int:
+def _report_unit(shard: str, *, complete: bool = False) -> int:
     """Print everything a finished unit knows, then dump its shard. Returns ops dumped.
 
     ONE reporter for both unit kinds. They had diverged: each path was missing a different half of
@@ -2166,8 +2191,8 @@ def _report_unit(shard: str) -> int:
         # most expensive property of a build is invisible until it is over.
         print(f"  [incremental] reused {sum(skipped.values())} already-measured config(s): "
               + ", ".join(f"{op}={n}" for op, n in sorted(skipped.items())), flush=True)
-    n = capture.dump_shard(shard)
     errs = capture.record_errors()
+    n = capture.dump_shard(shard, unit_complete=complete and not bool(errs))
     if errs:
         print(f"  [capture] recording failures: {errs}", flush=True)
     return n
@@ -2284,7 +2309,7 @@ def _child_main(argv: list[str] | None = None) -> int:
         if n_done:
             print(f"  [resume] {n_done} compile(s) replayable", flush=True)
         ran = _run_one_driver(args.op)
-        n = _report_unit(args.shard)
+        n = _report_unit(args.shard, complete=bool(ran))
         print(f"unit ran={ran} ops={n}", flush=True)
         return 0 if ran else 1
 
@@ -2300,7 +2325,7 @@ def _child_main(argv: list[str] | None = None) -> int:
     ran = run_case(case, args.length, args.dims, train=(args.mode == "train"), p_drop=p_drop,
                    impl=args.impl, dtype=getattr(torch, args.dtype),
                    compute_dtype=getattr(torch, args.compute_dtype) if args.compute_dtype else None)
-    n = _report_unit(args.shard)
+    n = _report_unit(args.shard, complete=bool(ran))
     print(f"unit ran={ran} ops={n}", flush=True)
     return 0 if ran else 1
 

@@ -85,7 +85,7 @@ def _trimul_cute(
 
     grad = torch.is_grad_enabled() and any(
         t is not None and t.requires_grad
-        for t in (x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_out_w)
+        for t in (x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b)
     )
     if grad:
         # Capability dispatch: the merged v6 training whole-op has two arch variants.
@@ -114,33 +114,32 @@ def _trimul_cute(
             eps, b_lr, direction, row_scale,
         )
 
-    # inference (no-grad): the fast bdll_sm100 front + tcgen05 back-split
-    from miniworld_engine.kernels.fused_ln_mask.cute.fused_ln_mask import fused_ln_mask
+    # Inference: select the back half for the actual architecture.
     from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
     from miniworld_engine.kernels.tm1.cute.launch import tm1_cute_forward
-    from miniworld_engine.kernels.trimul_inproj.cute.back_split_sm100 import (
-        trimul_back_split_sm100,
-    )
     from miniworld_engine.modules.triangle_multiplication.dispatch import (
         resolve_out_layout,
     )
 
-    b, l1, l2, d = x.shape
-    if mask is not None:
-        x_n = fused_ln_mask(x, ln_in_w, ln_in_b, _mask_2d(mask, x))
-    else:
-        x_n = triton_layernorm(
-            x.reshape(b * l1 * l2, d), ln_in_w, ln_in_b, eps
-        ).view(b, l1, l2, d)
+    x_n = triton_layernorm(x, ln_in_w, ln_in_b, eps)
     left, right = tm1_cute_forward(
         x_n, WL, WLg, WR, WRg, out_layout=resolve_out_layout(x.device)
     )
+    if mask is not None:
+        scale = _mask_2d(mask, x)[:, None]
+        left, right = left * scale, right * scale
     tri = (
         torch.einsum("bdik,bdjk->bdij", left, right)
         if outgoing
         else torch.einsum("bdki,bdkj->bdij", left, right)
     )
-    return trimul_back_split_sm100(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps, residual=x)
+    if torch.cuda.get_device_capability(x.device)[0] >= 10:
+        from miniworld_engine.kernels.trimul_inproj.cute.back_split_sm100 import (
+            trimul_back_split_sm100,
+        )
+        return trimul_back_split_sm100(tri, x_n, Wp, Wg, ln_out_w, ln_out_b, eps, residual=x)
+    from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
+    return trimul_back_triton(tri, x_n, Wp.t(), Wg, ln_out_w, ln_out_b, eps, residual=x)
 
 
 def _bidir_cute(
@@ -163,14 +162,25 @@ def _bidir_cute(
     WRg = to_right_gate_w.t().contiguous()
     Wg = to_gate_w.t().contiguous()   # to_gate.weight.T (d, d)
     Wp = to_out_w                     # to_out.weight (d, 2h) nn.Linear form
-    from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
-        bidir_forward_sm100,
-        prepack_lr_operand_sm100,
-    )
+    if torch.cuda.get_device_capability(x.device)[0] >= 10:
+        from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
+            bidir_forward_sm100 as forward,
+        )
+        from miniworld_engine.kernels.trimul_inproj.cute.bidir_training_sm100 import (
+            prepack_lr_operand_sm100 as prepack,
+        )
+    else:
+        from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (
+            bidir_forward as forward,
+        )
+        from miniworld_engine.kernels.trimul_inproj.cute.launch import (
+            prepack_lr_operand as prepack,
+        )
 
-    b_lr = prepack_lr_operand_sm100(WL, WLg, WR, WRg)
+
+    b_lr = prepack(WL, WLg, WR, WRg)
     row_scale = _mask_2d(mask, x).reshape(-1).to(x.dtype) if mask is not None else None
-    return bidir_forward_sm100(
+    return forward(
         x, WL, WLg, WR, WRg, Wg, Wp, ln_in_w, ln_in_b, ln_out_w, ln_out_b,
         eps, b_lr, h, row_scale,
     )

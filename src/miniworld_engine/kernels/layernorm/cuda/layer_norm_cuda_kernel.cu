@@ -18,6 +18,7 @@
 #include <cuda_bf16.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 #include <cstdlib>
 #include <type_traits>
@@ -127,19 +128,12 @@ __global__ void layer_norm_fwd_kernel(
 // 3.  Host-side launcher
 // ─────────────────────────────────────────────
 
-// Next power of two, clamped to [32, 1024]
-static int choose_block_size(int N) {
-    int t = 32;
-    while (t < N && t < 1024) t <<= 1;
-    return t;
-}
-
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 layer_norm_cuda_fwd(
     torch::Tensor x,        // [..., N]  – any leading dims
     torch::Tensor weight,   // [N]
     torch::Tensor bias,     // [N]
-    float eps)
+    float eps, int block)
 {
     TORCH_CHECK(x.is_cuda(),      "x must be a CUDA tensor");
     TORCH_CHECK(weight.is_cuda(), "weight must be a CUDA tensor");
@@ -153,7 +147,9 @@ layer_norm_cuda_fwd(
     auto mean = torch::empty({M}, x.options().dtype(torch::kFloat32));
     auto rstd = torch::empty({M}, x.options().dtype(torch::kFloat32));
 
-    const int block = choose_block_size(N);
+    c10::cuda::CUDAGuard device_guard(x.device());
+    TORCH_CHECK(block >= 32 && block <= 1024 && (block & (block - 1)) == 0,
+                "LayerNorm block must be a power of two in [32, 1024]");
     const int grid  = M;
     // smem: one float per warp
     const int smem_bytes = ((block + 31) / 32) * sizeof(float);
@@ -191,24 +187,14 @@ __inline__ __device__ float warp_reduce_sum_xor(float val) {
     return val;
 }
 
-constexpr int LN_BWD_WARPS_PER_BLOCK = 4;
+constexpr int LN_BWD_WARPS_PER_BLOCK = MW_LN_WARPS;
 constexpr int LN_BWD_BLOCK_THREADS = LN_BWD_WARPS_PER_BLOCK * 32;
 
-static int choose_bwd_grid(int N) {
-    static int sm_count = []() {
-        int device = 0;
-        int count = 0;
-        cudaGetDevice(&device);
-        cudaDeviceGetAttribute(&count, cudaDevAttrMultiProcessorCount, device);
-        return count;
-    }();
-    static int env_waves = []() {
-        const char* e = getenv("LNBWD_WAVES");
-        return e ? std::max(1, atoi(e)) : 0;
-    }();
-    // d<=128 has tiny rows (4 cols/lane) -> needs more waves than the D512 sweet spot (4).
-    const int waves = env_waves > 0 ? env_waves : ((N <= 128) ? 8 : 4);
-    return std::max(1, sm_count * waves);
+static int choose_bwd_grid(int waves) {
+    int device = 0, count = 0;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&count, cudaDevAttrMultiProcessorCount, device);
+    return std::max(1, count * waves);
 }
 
 // Vectorized backward main kernel.
@@ -222,7 +208,7 @@ static int choose_bwd_grid(int N) {
 //   The register-column-partial design is unchanged: each lane still privately owns its
 //   K = N/32 columns in acc_dw[K]/acc_db[K] (no atomics / no shared / no spill).
 template <typename scalar_t, int MAX_K, int TX_BYTES>
-__launch_bounds__(LN_BWD_BLOCK_THREADS, 2)
+__launch_bounds__(LN_BWD_BLOCK_THREADS, MW_LN_MIN_BLOCKS)
 __global__ void layer_norm_bwd_main_kernel(
     const scalar_t* __restrict__ DY,       // [M, N]
     const scalar_t* __restrict__ X,        // [M, N]
@@ -408,7 +394,7 @@ layer_norm_cuda_bwd(
     torch::Tensor weight,   // [N]
     torch::Tensor mean,     // [M], fp32
     torch::Tensor rstd,     // [M], fp32
-    c10::optional<torch::Tensor> rowscale)  // [M], fp32, or None (per-row mask fold)
+    c10::optional<torch::Tensor> rowscale, int waves, int reduce_block, int tx_bytes)
 {
     TORCH_CHECK(dy.is_cuda(),     "dy must be a CUDA tensor");
     TORCH_CHECK(x.is_cuda(),      "x must be a CUDA tensor");
@@ -423,6 +409,9 @@ layer_norm_cuda_bwd(
     TORCH_CHECK(weight.numel() == x.size(-1), "weight must have shape [N]");
     TORCH_CHECK(x.numel() == dy.numel(), "x and dy must have the same number of elements");
 
+    c10::cuda::CUDAGuard device_guard(x.device());
+    TORCH_CHECK(waves > 0 && reduce_block >= 32 && reduce_block <= 1024 &&
+                (reduce_block & (reduce_block - 1)) == 0, "invalid LayerNorm launch configuration");
     const auto out_sizes = dy.sizes().vec();
     auto x_contig = x.contiguous();
     auto dy_contig = dy.contiguous();
@@ -450,7 +439,7 @@ layer_norm_cuda_bwd(
     auto db = torch::empty_like(w_contig);
 
     constexpr int block = LN_BWD_BLOCK_THREADS;
-    const int grid = choose_bwd_grid(N);
+    const int grid = choose_bwd_grid(waves);
     const int total_warps = grid * LN_BWD_WARPS_PER_BLOCK;
     auto partial_opts = x_contig.options().dtype(torch::kFloat32);
     auto partial_dw = torch::empty({total_warps, N}, partial_opts);
@@ -471,7 +460,9 @@ layer_norm_cuda_bwd(
             // Widest coalesced vector transaction that still tiles the row with a full warp:
             // uint4 (16B) needs N % (32 * 16/elt) == 0, else fall back to uint2 (8B).
             const int elt = (int)sizeof(scalar_t);
-            const int txb = (N % (32 * (16 / elt)) == 0) ? 16 : 8;
+            const int txb = tx_bytes;
+            TORCH_CHECK((txb == 8 || txb == 16) && N % (32 * (txb / elt)) == 0 && N <= 1024,
+                        "vectorized LayerNorm backward requires aligned width <= 1024");
             auto launch = [&](auto mk, auto tx) {
                 constexpr int MK = decltype(mk)::value;
                 constexpr int TX = decltype(tx)::value;
@@ -498,7 +489,6 @@ layer_norm_cuda_bwd(
         });
     TORCH_CHECK(cudaGetLastError() == cudaSuccess, "layer_norm_bwd_cuda main kernel failed");
 
-    constexpr int reduce_block = 256;
     const int reduce_smem = 2 * reduce_block * sizeof(float);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half,
@@ -531,7 +521,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("x"),
         py::arg("weight"),
         py::arg("bias"),
-        py::arg("eps") = 1e-5f);
+        py::arg("eps"), py::arg("block"));
     m.def(
         "layer_norm_bwd",
         &layer_norm_cuda_bwd,
@@ -541,5 +531,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("weight"),
         py::arg("mean"),
         py::arg("rstd"),
-        py::arg("rowscale") = c10::optional<torch::Tensor>());
+        py::arg("rowscale"), py::arg("waves"), py::arg("reduce_block"), py::arg("tx_bytes"));
 }

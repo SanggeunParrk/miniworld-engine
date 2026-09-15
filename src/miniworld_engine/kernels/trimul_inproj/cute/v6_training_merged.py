@@ -40,7 +40,7 @@ class _SingleBackHalf(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w, ln_out_b, b_lr, eps,
-                direction_flag, residual, dropscale=None):
+                direction_flag, residual, dropscale=None, pair_mask=None):
         # residual [B,L,L,D] (== module input pair) and dropscale [1,1,L,D] (== drop_row
         # mask/(1-p), broadcast over the i-index) fuse the pairformer residual+dropout into the
         # gate store: y = residual + dropscale ⊙ trimul(pair). Backward returns d_residual = gy.
@@ -49,6 +49,12 @@ class _SingleBackHalf(torch.autograd.Function):
         left, right, preact = trimul_inproj_cute_forward(
             x_n, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False,
             b_lr=b_lr, return_preact=True)
+        # Mask only contraction operands; the output gate must see the unmasked LN input.
+        if pair_mask is not None:
+            scale = pair_mask.reshape(B, 1, L, L).to(left.dtype)
+            left = left * scale
+            right = right * scale
+        ctx.pair_mask = pair_mask
         lf = left.reshape(D, L, L)
         rf = right.reshape(D, L, L)
         if direction_flag == 0:                       # outgoing: O = L @ Rᵀ
@@ -109,7 +115,7 @@ class _SingleBackHalf(torch.autograd.Function):
         # cost cancels the saved launch at small L and regresses ~16% at large L. addmm = sweet
         # spot: fuse only the cheap add. dW stays cuBLAS.)
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
-            d_left, d_right, preact, x_n, WL, WLg, WR, WRg)
+            d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.pair_mask)
         # d_left/d_right are reshape VIEWS of d_lf/d_rf, so the bmm outputs go with them
         del d_left, d_right, d_lf, d_rf
         # dx_n = dconcᵀ@W_stack + d_glogit@Wgᵀ. Compute the gate term into a fresh (M,D) buffer,
@@ -125,7 +131,7 @@ class _SingleBackHalf(torch.autograd.Function):
         d_residual = gy.reshape(B, L, L, D)
         del gy
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
-                d_residual, None)
+                d_residual, None, None)
 
 
 # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
@@ -133,13 +139,11 @@ class _SingleBackHalf(torch.autograd.Function):
 # ``kernels._compile`` -- but it does not need to be.
 def v6_forward_merged(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
                       ln_out_w, ln_out_b, eps, b_lr, direction="out", row_scale=None,
-                      dropscale=None):
+                      dropscale=None, eps_out=None):
     _bdll_patch.apply()
     _gate_mul_patch.apply()
-    # AF pair-mask folded into LN_in as a row_scale (FREE — no separate (M,D) multiply): x_n =
-    # LN(pair)*rs, so proj(0)=0 -> left/right=0 at masked positions (== AF's mask*projection); the
-    # masked grad is folded into the LN backward. rs=None -> plain LN.
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps, row_scale=row_scale)
+    # Keep LN/output gate unmasked; mask front outputs and their gradients instead.
+    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps)
     flag = 0 if direction == "out" else 1
     # Fuse the pairformer residual+dropout: `pair` is passed BOTH as the LN input (x_n) and as
     # the residual (never absent), so autograd accumulates pair's grad from the trimul path
@@ -149,7 +153,7 @@ def v6_forward_merged(pair, WL, WLg, WR, WRg, Wg, Wp_nn, ln_in_w, ln_in_b,
     if dropscale is None:
         dropscale = ones_dropscale(pair.shape[1], pair.shape[-1], pair)
     return _SingleBackHalf.apply(x_n, WL, WLg, WR, WRg, Wg, Wp_nn, ln_out_w, ln_out_b,
-                                 b_lr, eps, flag, pair, dropscale)
+                                 b_lr, eps if eps_out is None else eps_out, flag, pair, dropscale, row_scale)
 
 
 class V6TriMulMerged(nn.Module):
@@ -170,6 +174,7 @@ class V6TriMulMerged(nn.Module):
         self.ln_out_w = nn.Parameter(b.ln_out.weight.detach().clone())
         self.ln_out_b = nn.Parameter(b.ln_out.bias.detach().clone())
         self.eps = b.ln_pair.eps
+        self.eps_out = b.ln_out.eps
 
     def forward(self, pair, mask=None, dropscale=None):
         b_lr = prepack_lr_operand(self.WL, self.WLg, self.WR, self.WRg)
@@ -181,4 +186,4 @@ class V6TriMulMerged(nn.Module):
         return v6_forward_merged(pair, self.WL, self.WLg, self.WR, self.WRg, self.Wg, self.Wp_nn,
                                  self.ln_in_w, self.ln_in_b, self.ln_out_w, self.ln_out_b,
                                  self.eps, b_lr, self.direction, row_scale,
-                                 dropscale=dropscale)
+                                 dropscale=dropscale, eps_out=self.eps_out)

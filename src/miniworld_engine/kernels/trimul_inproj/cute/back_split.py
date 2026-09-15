@@ -30,13 +30,6 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 )
 
 
-def default_lnl_config(N):
-    """tile_n tiles the OUTPUT N (= d_pair): tile_n=128 covers N∈{128,256,512}; N=64 -> 64.
-    (K, the LN'd contraction dim, is handled by the GEMM K-loop — not tile_n.)"""
-    tile_n = 64 if N < 128 else 128
-    return dict(tile_m=128, tile_n=tile_n, cluster_m=1, cluster_n=1, pingpong=True)
-
-
 def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, residual, eps=1e-5,
                       lnl_config=None):
     """tri_bdll:(B,K,L,L) with K=hidden (=D for square trimul, =2*d_hidden for bidir),
@@ -52,16 +45,20 @@ def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, residual, eps=1e-5
     assert B == 1 and L == L2
     N = Wp_nn.shape[0]                                             # output width = d_pair
     M = L * L
-    del lnl_config  # M2 fused is a broken quack-0.5.0 port (see todo); use correct autotuned M1.
+    if isinstance(lnl_config, dict):
+        from miniworld_engine.autotune.cute_config import (
+            config_to_kwargs, kwargs_to_config, plain_sm90_candidates,
+        )
+        lnl_config = kwargs_to_config({**config_to_kwargs(plain_sm90_candidates()[0]), **lnl_config})
     # ① cute LayerNormLinear: M-major view of tri (channel strided by M), no copy.
     #    LN over K channels, then @Wp (K -> N). K may differ from N (bidirectional).
     view = tri_bdll.reshape(B, K, M)[0].t()                       # (M, K)
     proj = layernorm_linear_cute(view, ln_w, ln_b, Wp_nn, None, eps=eps,
-                                 config=None)                      # (M, N) — M1, brute-force autotuned
+                                 config=lnl_config)                 # (M, N), M1
     # ② gate: dispatch fused-quack (act(A@B)⊙C, one launch) vs triton (cuBLAS gemm + ew),
     #    cache the per-shape winner (fused wins large L; triton can win tiny L).
     res_flat = residual.reshape(M, N)
-    y = dispatch.pick("gate_infer", (M, N),
+    y = dispatch.pick("gate_infer", dispatch._operand_key(x_n, proj, Wg_t, res_flat),
                       [("fused", lambda: gate_elem_quack_fused(x_n, proj, Wg_t) + res_flat),
                        ("triton", lambda: gate_elem_infer(x_n, proj, Wg_t, res_flat))])
     return y.view(B, L, L, N)

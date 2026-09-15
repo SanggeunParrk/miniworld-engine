@@ -30,7 +30,7 @@ SRC = Path("src")
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 
 GEMM = ((r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
-        (r"\btcgen05\b|\bwgmma\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b", "mma"))
+        (r"\btcgen05\b|\bwgmma\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b|\bSM90_\d+x\d+x\d+_", "mma"))
 REDUCE = ((r"\btl\.(sum|max|min)\b", "tl.reduce"), (r"__shfl\w*", "shfl"),
           (r"\batomic_add\b|\batomicAdd\b|\btl\.atomic_\w+", "atomic"))
 
@@ -79,6 +79,8 @@ def _py_bodies(text: str) -> dict[str, tuple[str, set[str]]]:
 
 def _cu_bodies(text: str) -> dict[str, tuple[str, set[str]]]:
     """Same for a .cu/.cuh: split on function definitions found by a brace scan."""
+    # This attribute has parentheses but is not the function's name/signature.
+    text = re.sub(r"__launch_bounds__\s*\([^)]*\)", "", text)
     out: dict[str, tuple[str, set[str]]] = {}
     for m in re.finditer(r"(?:__global__|__device__|__inline__|\bvoid\b|\bstd::vector<[^>]+>|"
                          r"\btorch::Tensor\b)[^;{]*?\b(\w+)\s*\(", text):

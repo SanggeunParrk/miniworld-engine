@@ -24,8 +24,12 @@ using namespace cute;
 
 using BF = cutlass::bfloat16_t;
 
+// Performance configuration is supplied by hopper_cuda_config.py via nvcc.
+#ifndef MW_TRANSITION_WIDTH
+#error "Build this kernel through the configured Python launcher"
+#endif
 constexpr int kWarpgroupM = 64;
-constexpr int kWarpgroups = 2;
+constexpr int kWarpgroups = MW_TRANSITION_WARPGROUPS;
 constexpr int kBlockM = kWarpgroups * kWarpgroupM;
 constexpr int kWarpgroupThreads = 128;
 constexpr int kThreads = kWarpgroups * kWarpgroupThreads;
@@ -139,7 +143,7 @@ template <
     int KT,
     class TmaWa,
     class TmaWb>
-__global__ __launch_bounds__(256, 1) void transition_expand_gate_rs_wgmma_kernel(
+__global__ __launch_bounds__(kThreads, MW_TRANSITION_MIN_BLOCKS) void transition_expand_gate_rs_wgmma_kernel(
     const __nv_bfloat16* __restrict__ x_raw,
     const float* __restrict__ rstd,
     const float* __restrict__ c1,
@@ -586,21 +590,10 @@ torch::Tensor transition_expand_gate_fwd(
                 "transition_expand_gate CUDA path requires M to be divisible by 128");
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    if (K == 128 && ND == 512) {
-        launch_transition_expand_gate_kernel<128, 512, kBlockM, kWarpgroupM, 128, 3, 128>(
-            x, rstd, c1, g, beta, wa, wb, h, M, stream
-        );
-    } else if (K == 256 && ND == 1024) {
-        launch_transition_expand_gate_kernel<256, 1024, kBlockM, kWarpgroupM, 128, 2, 128>(
-            x, rstd, c1, g, beta, wa, wb, h, M, stream
-        );
-    } else if (K == 512 && ND == 2048) {
-        launch_transition_expand_gate_kernel<512, 2048, kBlockM, kWarpgroupM, 64, 2, 64>(
-            x, rstd, c1, g, beta, wa, wb, h, M, stream
-        );
-    } else {
-        TORCH_CHECK(false, "unsupported transition_expand_gate CUDA shape");
-    }
+    TORCH_CHECK(K == MW_TRANSITION_WIDTH && ND == 4 * MW_TRANSITION_WIDTH,
+                "extension configuration does not match input shape");
+    launch_transition_expand_gate_kernel<MW_TRANSITION_WIDTH, 4 * MW_TRANSITION_WIDTH, kBlockM, kWarpgroupM, MW_TRANSITION_BN, MW_TRANSITION_STAGES, MW_TRANSITION_KT>(
+        x, rstd, c1, g, beta, wa, wb, h, M, stream);
     return h;
 }
 

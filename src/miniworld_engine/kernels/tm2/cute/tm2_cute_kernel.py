@@ -47,8 +47,10 @@ from cutlass.utils import LayoutEnum
 from quack import copy_utils as quack_copy
 
 
-_NUM_THREADS = 128  # one warpgroup
+_WARP_GROUP_THREADS = 128  # SM90 WGMMA instruction contract
 _TILE_K = 64        # K-stage size — matches K_SW128 atom for bf16
+_OUTPUT_ALIGNMENT = 16  # bf16 SW32/STSM output layout (32 bytes), stricter than MMA N%8
+_MAX_MMA_N = 256        # Largest SM90 bf16 WGMMA instruction N
 
 
 class TM2DualKernel:
@@ -60,12 +62,14 @@ class TM2DualKernel:
     dynamic ``%`` operand.
     """
 
-    def __init__(self, N: int, K: int, tile_m: int = 64):
+    def __init__(self, N: int, K: int, tile_m: int):
         # Multi-atom M: one m64 WGMMA atom per warpgroup, tile_m//64 warpgroups (was pinned to a
         # single m64 atom). The tiled_mma is already built with atom_layout=(tile_m//64,1,1), so
         # generalizing is just scaling the warpgroup count. tile_m=64 is the 1-warpgroup subset.
         assert tile_m in (64, 128, 192, 256), "tile_m must be a multiple of 64 in {64,128,192,256}"
         assert K % _TILE_K == 0, f"K={K} must be divisible by TILE_K={_TILE_K}"
+        if N <= 0 or N > _MAX_MMA_N or N % _OUTPUT_ALIGNMENT:
+            raise ValueError("TM2 output tile must fit the WGMMA N range and SW32/STSM alignment")
         self.N = N
         self.K = K
         self.tile_m = tile_m
@@ -73,7 +77,7 @@ class TM2DualKernel:
         self.tile_k = _TILE_K
         self.k_loop = K // _TILE_K
         self.num_warpgroups = tile_m // 64
-        self.num_threads = 128 * self.num_warpgroups
+        self.num_threads = _WARP_GROUP_THREADS * self.num_warpgroups
         self.shared_storage = None
 
     # ----------------------------------------------------------------- kernel
@@ -407,11 +411,38 @@ def tm2_dual_from_scratch(
     N, K2 = int(Wg_nk.shape[0]), int(Wg_nk.shape[1])
     assert K == K2
 
-    # tile_m: multi-atom M knob in {64,128,192,256} (each is tile_m//64 m64 WGMMA warpgroups).
-    # None -> largest that divides M (falls to 64). All numerically identical (performance-only).
+    from miniworld_engine.autotune.cute_config import tm2_candidates
+    from miniworld_engine.autotune.native import choose_config, tensor_key
+    # TMA/WGMMA descriptors require full instruction tiles. Pad all three tails,
+    # then crop the result; masked rows must never become an unguarded memory read.
+    import torch.nn.functional as F
+    kp = ((K + _TILE_K - 1) // _TILE_K) * _TILE_K
+    npad = ((N + _OUTPUT_ALIGNMENT - 1) // _OUTPUT_ALIGNMENT) * _OUTPUT_ALIGNMENT
+    if N <= 0 or npad > _MAX_MMA_N:
+        raise ValueError("TM2 supports output widths from 1 to 256")
+    limit = torch.cuda.get_device_properties(x1.device).shared_memory_per_block_optin
+    def fits(tm):
+        # Four input buffers, output staging, barrier and allocator alignment.
+        return (2 * (tm + npad) * kp + tm * npad) * x1.element_size() + 4096 <= limit
+    candidates = [{"tile_m": c.tile_m} for c in tm2_candidates() if fits(c.tile_m)]
     if tile_m is None:
-        tile_m = next((tm for tm in (256, 192, 128, 64) if M % tm == 0), 64)
-    assert M % tile_m == 0, f"M={M} must be divisible by tile_m={tile_m}"
+        cfg = choose_config(
+            "trimul_outproj_gemm_gate_sm90_cute", candidates, dtype=str(x1.dtype),
+            bucket=tensor_key(x1, x2, Wg_nk, Wp_nk), device_index=x1.device.index,
+            run=lambda c: tm2_dual_from_scratch(x1, x2, Wg_nk, Wp_nk, **c),
+        )
+        tile_m = cfg["tile_m"]
+    if {"tile_m": tile_m} not in candidates:
+        raise ValueError("tm2 configuration exceeds this device's shared memory")
+    mp = ((M + tile_m - 1) // tile_m) * tile_m
+    if (mp, kp, npad) != (M, K, N):
+        padded = tm2_dual_from_scratch(
+            F.pad(x1.reshape(M, K), (0, kp - K, 0, mp - M)),
+            F.pad(x2.reshape(M, K), (0, kp - K, 0, mp - M)),
+            F.pad(Wg_nk, (0, kp - K, 0, npad - N)),
+            F.pad(Wp_nk, (0, kp - K, 0, npad - N)), tile_m=tile_m,
+        )
+        return padded[:M, :N].reshape(*orig_shape[:-1], N).contiguous()
 
     x1_flat = x1.reshape(M, K)
     x2_flat = x2.reshape(M, K)
@@ -424,7 +455,7 @@ def tm2_dual_from_scratch(
     mW2 = from_dlpack(Wp_nk, assumed_align=16).mark_layout_dynamic(leading_dim=1)
     mO = from_dlpack(out_flat, assumed_align=16).mark_layout_dynamic(leading_dim=1)
 
-    key = (M, N, K, x1.dtype, tile_m)
+    key = (str(x1.device), torch.cuda.get_device_capability(x1.device), M, N, K, x1.dtype, tile_m)
     if key not in _COMPILE_CACHE:
         kernel = TM2DualKernel(N=N, K=K, tile_m=tile_m)
         _COMPILE_CACHE[key] = cute.compile(kernel, mX1, mX2, mW1, mW2, mO)

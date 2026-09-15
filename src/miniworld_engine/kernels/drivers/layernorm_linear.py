@@ -193,4 +193,18 @@ def gemm_lnl_fused_sm90_kernel() -> None:
     )
 
     w = (torch.randn(_D, _D, device=dev(), dtype=BF16) * (_D**-0.5)).contiguous()  # (N, K)
-    layernorm_linear_cute_fused(rows2d(_M, _D), vec(_D), vec(_D), w, None, 1e-5)
+    x, gamma, beta = rows2d(_M, _D), vec(_D), vec(_D)
+    gate = torch.randn_like(x)
+    for view in (x, x.t().contiguous().t()):
+        for gate_arg in (None, gate):
+            layernorm_linear_cute_fused(view, gamma, beta, w, None, 1e-5, gate=gate_arg)
+
+
+def layernorm_linear_m1():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.layernorm_linear_m1()
+
+
+def dgrad_lnbwd():
+    from miniworld_engine.kernels.drivers import hopper
+    return hopper.dgrad_lnbwd()

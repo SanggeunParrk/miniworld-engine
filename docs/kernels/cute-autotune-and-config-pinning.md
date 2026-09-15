@@ -1,178 +1,170 @@
-# cute autotune bypass, and configs pinned for correctness
+# Hopper native configuration audit
 
-> **A record of open kernel work, moved here from the repo root (was `todo.md`).** Nothing was
-> removed: 13 items are checked off and 14 are open, and every open one is cute / CUTLASS work on
-> sm90 or sm100 — several explicitly blocked on hardware ("no B200 to verify"). It lives under
-> `docs/` because a library's root is not the place for a working notebook
-> (`docs/library-standards.md` F5); the open items are tracked from `plan.md` P12, which points
-> back here rather than duplicating them.
->
-> Dates in the section headings are the dates of the findings, not of this move.
+Updated 2026-09-12. Scope: maintained SM90 execution paths and the shared CUDA
+LayerNorm they call. Historical `notes/` prototypes and SM100 implementations
+are outside this audit.
 
+Performance configuration belongs to `autotune/cute_config.py` or
+`autotune/hopper_cuda_config.py`, with explicit configuration arguments at the
+launchers. Kernel bodies no longer choose a hand-tuned block, cluster or stage
+count. A cache miss uses the first declared candidate; it is a default, not a
+claim that the configuration has been measured on the current device.
 
-## Cute kernels bypass autotune entirely (the real "hardcoding") — 2026-08-04
-**Root finding:** NO cute/CUTLASS kernel uses the autotune system. Each hardcodes ONE
-hand-picked `GemmConfig` in its `if config is None:` branch (`grep -L select_config` over
-`kernels/*/cute/*` = all of them). The `select_config` cache mechanism exists but zero cute
-kernels call it. THIS is what "only tile_m / hardcoding everywhere / not brute-forced" means —
-not the config *space* (quack's `GemmConfig` is rich: tile_m/n, cluster_m/n, pingpong/coop,
-swap_ab, max_swizzle; `_get_sm90_configs("gated")` already sweeps 18 configs, plain 44).
-Note on Triton-style knobs: on SM90 `num_warps` is NOT a free knob (WGMMA warps are
-warpgroup-bound; the analogue is pingpong-vs-coop, already swept), and `num_stages`
-(ab/epi) is auto-MAXIMIZED from smem (strictly better than Triton's manual num_stages).
+| Path | Configurable performance parameters | Structural constraints |
+| --- | --- | --- |
+| LayerNormLinear M1 | tile M/N, cluster M/N, pingpong/cooperative, scheduler, swizzle | Custom epilogue does not implement swapped A/B |
+| LayerNormLinear M2 | tile M/N, cluster M/N, pingpong/cooperative, swizzle; live `lnl_ws` setting | Static scheduling; stats handshake belongs to this implementation |
+| Transition SwiGLU / gate backward | tile M/N, clusters, pingpong/cooperative, scheduler, swizzle | Gate/up interleave; unswapped A/B |
+| dgrad / dAB + LN backward | tile M, cluster M | Full output-width reduction, one MMA atom in N, pingpong register limits |
+| TM2 dual GEMM | tile M / consumer warpgroup count | K_SW128 descriptor, m64 WGMMA atoms, all input buffers resident in shared memory |
+| CUDA transition B2B | BN, stages, minimum resident blocks | Two cooperating consumers and the m64n128 squeeze atom |
+| CUDA transition expand / gate backward | BN, KT, stages, consumer warpgroups, minimum resident blocks | WGMMA instruction tiles and shared-memory/layout assertions |
+| CUDA LayerNorm forward | block threads | Warp-sized, power-of-two block |
+| CUDA LayerNorm backward | warps, waves, reduction block, vector transaction, minimum resident blocks | Vector alignment and maximum supported register width; scalar fallback for other widths |
+| Triton helpers in CuTe pipelines | Existing registry CSV grids | Reduction/packing math |
+| quack GEMM/GLU and normalization adapters | Upstream library configuration/tuning | Library-owned kernels |
 
-**Fix built (2026-08-04):** `autotune/cute_config.py` — brute-force sweep of the FULL sm90
-config space + cache-select, the cute counterpart of the Triton grid capture:
-- `gated_sm90_candidates()` / `plain_sm90_candidates()` = `_get_sm90_configs(epilogue)` (sm90).
-- `resolve_config(op, candidates, dtype, bucket, default)` — cache-select fastest, else default.
-- `sweep_and_cache(op, dtype, cases, candidates)` — `do_bench` every candidate per shape bucket,
-  write ranked cache (reuses `store_ranked_configs`; config space hash guards staleness).
-- WIRED: `transition/cute/gemm_transition_swiglu.py` (fwd swiglu) — reference pattern; resolves
-  by `(gpu, dtype, bucket_mixed(M)|kK)`, falls back to the K-aware default on miss. Verified.
+Warp size 32, WGMMA warpgroup size 128, instruction shapes, descriptor alignment,
+barrier identities, mathematical coefficients and dtype sizes are not arbitrary
+performance constants. They remain explicit. The configuration policy necessarily
+contains numeric candidate values; moving a single constant to another file would
+not constitute a search space.
 
-**RESOLVED (2026-08-04) — gated cute epilogue fixed; the "second drift" was a STALE CACHE:**
-The GATED cute paths produced all-zero (then garbage) output. TWO real fixes, both now verified:
-- **FIX 1 — gated postact field rename (`mPostAct` -> `mAuxOut`).** quack 0.5.0 renamed the gated
-  postact field and its attrs (`postact_dtype/postact_layout/cta_tile_shape_postact_mn` ->
-  `aux_out_dtype/aux_out_layout/cta_tile_shape_aux_out_mn`). Our 3 gated kernels used the old names,
-  so `GemmGatedMixin._epi_ops`' `TileStore("mAuxOut")` resolved to None -> the postact store was
-  SKIPPED -> zeros. Fixed in `gemm_transition_swiglu.py`, `backward_gatebwd.py`, `gemm_gated_ln.py`.
-- **FIX 2 (CRITICAL infra) — register our source in `quack.cache.EXTRA_SOURCE_DIRS`
-  (`kernels/_quack_compat.py`).** quack's jit disk-cache keys `.o` by `(qualname, *args)` + a hash of
-  QUACK's source, NOT ours. So editing a `.cute` kernel does NOT invalidate its cached `.o`: a stale
-  (broken) binary from `/tmp/<user>/quack_cache` is silently reused. This masked FIX 1 for an entire
-  debug session — every "still broken / garbage / tile_m=256 corrupts" result was a stale `.o`, not a
-  real bug. (So the earlier `#3` "tm256 corrupts h" and "atom_layout_m=2 dual-store" theories were
-  ALL stale-cache artifacts — disregard them.) Registering our pkg root makes edits bust the key.
-- **VERIFIED with clean/enabled cache:** forward `transition_expand_swiglu_cute` = cos 1.0 vs torch
-  for ALL 18 gated configs (incl. tm256 coop); `transition_gate_bwd` h + dAB = cos 1.0; plain
-  `layernorm_linear` = cos 1.0 vs torch. Config is performance-only across the gated space.
-- Restores the recorded transition-forward CuTe win (~1.1x K=128 → 2.6x K=512 vs triton) that the
-  MINIWORLD route selects for large d_pair. → re-capture + ship swiglu_fwd / gate_bwd caches.
+## Build behavior
 
-**STATUS 2026-08-04 — sm90 condition (no hardcoded/correctness-pinned cute config) MET:**
-- [x] `layernorm_linear` M1, `transition` swiglu-fwd + gate-bwd, `dgrad_lnbwd`, `dab_lnbwd` — wired
-      to `resolve_config`, swept, caches SHIPPED, all verified cos=1.0 (config performance-only).
-- [x] `trimul_inproj` main forward (`launch.py`) — uses quack's tuned `gemm_act` custom op (auto
-      config), no hardcode.
-- [x] `dualgemm_kernel` — made config-driven (was hardcoded `_CFG`); dead (no callers), _CFG fallback.
-- [x] `gemm_gated_ln` (trimul front) — config is a required param already; dead (no callers).
-- [~] **M2 fused `layernorm_linear_cute_fused` — broken quack-0.5.0 port, DEFERRED.** Partial fixes
-      landed (load_AB->load_tma, _epi_smem_map->name-keyed dict); remaining: the kernel-filled
-      `SmemColVec` op is dropped by 0.5.0's None-arg active-op filter (+ likely more downstream). It's
-      an INFERENCE-only optimization (n<=256 fwd); both consumers (dispatcher, trimul back_split) now
-      route to the correct M1 path, so nothing is broken in production. Revive M2 when someone needs
-      the inference perf (~0.062 vs M1 0.094 ms) — needs a full epi-composable port.
-- [ ] sm100 (B200) kernels — deferred (no B200 to verify). `_blackwell_dense_gemm` `_compute_stages`
-      and the `*_sm100` launch/stream ABI (see quack-0.5.0-cute-port-plan.md Phase 4).
-- [ ] Wire remaining cute GEMMs to `resolve_config` + their candidate space, dropping the
-      hardcoded single-config default (keep it only as the cache-miss fallback):
-      `backward_gatebwd.py`, `trimul_inproj/cute/gemm_gated_ln.py` (front, gated),
-      `layernorm_linear/cute/*` (replace the hand-baked `_tuned.py` table with a swept cache),
-      `back_split.py`, `tm1/tm2` (custom-CuTe: expose their tile params or document the atom limit).
-- [ ] Build a capture driver that calls `sweep_and_cache` for each op across representative
-      shapes on H100, writes `data/.../autotune/<op>/<gpu>.json`, commit.
-- [x] `dgrad_lnbwd.py` / `dab_lnbwd.py` — tile_m FREED + brute-forced (FIX B, 2026-08-04, `02039d1`).
-      The tile_m=64 pin was overly conservative: the reduction needs atom_layout 1×1, and PINGPONG is
-      atom 1×1 for ALL tile_m in {64,128,192} (only cooperative forces 2×1) — NO gmem-x̂ rewrite
-      needed. Now a config knob swept over that family (tile_n=K must fit the pingpong tile_n cap),
-      cache-selected. Verified cos=1.0 at 64/128/192; sweep found 64 fastest everywhere (measured, not
-      pinned). Cooperative (atom 2×1) stays unusable — that alone would need the gmem-x̂ rewrite, moot
-      since pingpong-64 wins.
+`native.choose_config` measures the declared native candidates when
+`settings.run_autotune` is enabled. Normal execution only reads a cache or uses
+the declared default. Explicit configs bypass selection. Unsupported fields are
+rejected rather than silently discarded.
 
-## Config fix — eliminate correctness-pinned constants
+Native timings and searched candidates enter `capture` and the ordinary unit
+shards. The existing single publisher merges shards; timing workers do not write
+to the committed cache. Failed candidates appear in logs and coverage, nonfinite
+timings cannot win, and an entirely failed round raises. Completed unit shards
+use the builder's existing resume mechanism. In-process repeat calls reuse a
+winner for the exact workload. Native precompilation now uses isolated CPU
+subprocesses before acquiring the GPU timing lock. `--compile-jobs` bounds this
+pool as well as Triton compilation; each native subprocess hides CUDA devices
+and limits its compiler and numerical-library thread counts to one. Crashes and
+timeouts reject individual candidates, with their requests and logs retained.
+CuTe persistent objects and CUDA extensions share the launcher's cache and
+compile ABI. TM2 still compiles in the timing process because its callable cache
+is process-local; its candidates can nevertheless be compiled in the CPU audit.
 
-**Goal:** an autotune config must be *performance-only* — like the Triton kernels, where any
-launchable config gives the correct result and the tuner is free to pick the fastest. Today
-several CuTe/CUTLASS GEMM kernels **pin `tile_m` / `cluster_m` / `pingpong` for correctness**:
-some configs produce numerically wrong output (races, half-writes, corrupt epilogues), so the
-implementation hard-codes a "safe" value. That is an implementation bug, not a tuning limit.
-Fix the implementations so **no config affects numerics** (a genuinely algorithmic constraint
-is fine *only if a comment states why* — e.g. LN-backward needs a full-N reduction subtile,
-SwiGLU gate needs `tile_n % 32`). What we do NOT want is `tile_m` (and friends) pinned because
-the kernel is buggy at other values.
+Native cache keys include exact tensor shapes, strides, dtypes and relevant
+options. Reads validate the declared build revision and native source/environment
+identity and intersect with the live candidate space. `build all` explicitly
+includes native drivers even when a module reaches their default; Triton
+derivation alone does not prove native
+configuration coverage. A Triton `--config-dir` does not exclude native drivers.
 
-> Note: brute-force Triton retuning showed ~no speedup (optimal config saturates by L~256), so
-> the payoff here is correctness hygiene + freeing the config space, not raw speed.
+The historical M1/M2 `_tuned.py` winner tables were removed. M2 compilation was
+repaired for quack 0.5: internally produced shared-memory statistics must survive
+None-argument filtering and count toward the epilogue shared-memory budget; the
+C-input pipeline now uses quack's current transaction-byte interface. `lnl_ws`
+is read per launch and is part of the compiled variant's key. Production dispatch
+still selects M1 until M2 is numerically qualified on a GPU.
 
-### sm90 (H100) — fixable on this cluster
-- [x] **#1 layernorm_linear — `cluster_m=1` / `pingpong=True` pin** (`cute/_tuned.py`,
-      `gemm_layernorm_linear_fused.py` `_FUSED_CONFIG`). Was: `cluster_m=2` / non-pingpong
-      *coop* reported cos 0.96–0.999 (timing-dependent). **VERIFIED 2026-08-04: does NOT
-      reproduce** — 480 cos runs across 32 config×shape combos all cos=1.0, and
-      `compute-sanitizer racecheck` = 0 hazards on `cluster_m=2 + coop`. Warning is **stale
-      (already fixed)** → remove the safe-subset restriction and include `cluster_m=2`/coop in
-      the config space. (Caveat: racecheck doesn't fully cover async TMA/mbarrier hazards.)
-- [x] **dgrad + dab LN-backward — were BROKEN on quack 0.5.0, FIXED 2026-08-04** (`cute/dgrad_lnbwd.py`,
-      `transition/cute/dab_lnbwd.py`). Three API drifts in their custom epilogue overrides (both used
-      in production backward): (1) `_compute_stages` gained `warp_shape_mnk=None`; (2)
-      `epi_smem_bytes_per_stage`→`epi_smem_bytes(...).{unstaged,d_stage,c_stage}`; (3) the tile-shape
-      override `_sm90_compute_tile_shape_or_override`→`_compute_tile_shape_or_override` (old name never
-      called → partial LN reduction, dx cos 0.48). Fixed all → dgrad cos=1.0, dab cos=1.0 vs torch. [a4dee06]
-- [x] **#2 layernorm_linear dgrad — `tile_m=64` / atom-1×1** (`cute/dgrad_lnbwd.py`).
-      NOT a correctness bug (reviewed 2026-08-04): `dgrad_lnbwd_cute` takes **no config** — it
-      hardcodes tile_m=64 and *asserts* the atom_layout-1×1 invariant
-      (`_sm90_compute_tile_shape_or_override`), so no caller config can yield wrong numerics. The
-      `tile_n = K` single-subtile is a genuine algorithmic constraint (LN-bwd single-pass full-N
-      reduction), already commented (module docstring + the assert). Compliant with the
-      "constraint OK if commented" rule → no correctness fix needed.
-      **Optional perf follow-up (not correctness):** the tile_m=64/atom-1×1 pin is only a d=256
-      *speed* ceiling (can't use the cooperative tile_m=128). To rescue d=256, load x̂ from gmem in
-      the epilogue (M2's per-element pattern) instead of as the C operand → frees ~64KB epi-C smem
-      → cooperative tile. Low priority (configs saturate → ~no speedup; d=128 already wins/ties).
-- [x] **#3 transition gate-bwd — postact `h` — FIXED 2026-08-04.** Root cause = the gated postact
-      field rename (`mPostAct`->`mAuxOut`, FIX 1 above) + stale jit cache (FIX 2 above), NOT tile_m.
-      With the rename + a clean/enabled cache, `h` cos=1.0 and `dAB` cos=1.0 vs torch across all
-      gated configs (incl. tm256 coop). The earlier "tm256 corrupts h / garbage / denormals" reports
-      were ALL stale `.o` (the edit never recompiled). Config is performance-only; the removed
-      `_safe_gated_bwd_config` clamp stays removed. dswiglu math + the dual D=[dA|dB]+postact=h
-      epilogue are correct.
-- [ ] **transition swiglu / dab_lnbwd — hardcoded per-K configs** (`cute/gemm_transition_swiglu.py`,
-      `cute/dab_lnbwd.py`). These are mostly *perf* hardcodes (not wrong) → replaced by proper
-      tuning, not a correctness fix. Keep the `tile_n % 32` gate constraint (algorithmic) with a
-      comment.
-- [ ] side: **M2 fused path is currently BROKEN** — `layernorm_linear_cute_fused` raises
-      `AttributeError: 'GemmLNLFusedSm90' object has no attribute 'load_AB'` (quack version
-      drift?). `layernorm_linear` dispatches to it for N<=256. Fix or re-pin the quack GEMM base.
+The unreferenced, unregistered ConditionedTransition TF32 `b2b_fwd.cu` prototype
+was removed from the runtime source tree. Its fixed launch and unmasked tail
+were not a supported execution path; its history remains in Git.
 
-### sm100 (B200) — BLOCKED: no B200 GPU on this cluster (H100-only)
-These pin config for correctness on sm100 and **cannot be reproduced / fixed / verified here** —
-they need a Blackwell (B200) node. Do when B200 access exists:
-- [ ] **#5 trimul front — M-major bdll TMA store half-writes** (`cute/front_sm100.py`,
-      `front_train_sm100.py`, `v6_training_merged_sm100.py`). The M-major bdll postact store
-      writes only half of each tile (cos ~0.05–0.5); only the `[M, 2D]` N-major layout is
-      bit-correct. Pins `cluster_m=2,cluster_n=1,pingpong=False` + a per-shape swap_ab table.
-      Fix the store atom / layout so the store is correct for any tile → free the config.
-- [ ] `layernorm_linear/cute/dgrad_lnbwd_sm100.py` — `tile_m=128` pin (4-subtile → cos~0.5).
-- [ ] `transition/cute/{b2b_fused_sm100,b2b_fwd_sm100,gatebwd_sm100}.py`
-- [ ] `trimul_inproj/cute/{front_sm100_fused,front_fused_gemm_sm100,back_split_sm100,`
-      `bidirectional_sm100,bidir_training_sm100,gatebwd_sm100,training_b200}.py`
-- [ ] `tm1/cute/sm100_gate_gemm_collective.py`
-- [ ] `ln_linear_sm100.py`
+## Behavior corrections
 
-### Audited 2026-08-04 — no sm90 correctness exposure beyond #3
-- [x] `tm2/cute/tm2_cute_kernel.py` — `tile_m=64` is **hard-asserted** (`assert tile_m == 64,
-      "currently only TILE_M=64 (single m64 atom) is supported"`), so no config can select a
-      wrong value. It's a custom-CuTe implementation-scope limit (one m64 MMA atom), reason in the
-      assert msg → no correctness hazard. (Nice-to-have: widen to multi-atom for larger tiles — perf only.)
-- [x] `trimul_inproj/cute/back_split.py` — delegates to the layernorm_linear (`lnl`) plain-D GEMM
-      (`default_lnl_config`), NOT a gated dual-store; same family as #1 (already stale/clean). No exposure.
-- [x] `tm1/cute/*` — not gated (no `GemmGated`/postact), plain GEMM. No dual-store exposure.
-- [x] `transition/cute/gemm_transition_swiglu.py` (fwd) & `trimul_inproj/cute/gemm_gated_ln.py`
-      (front) — gated but **postact-ONLY** (no D operand: `make_fake_gemm_tensors(...,None,None)`),
-      so no D+postact dual-store interaction; the fwd swiglu is verified correct at tile_m=256.
-      Their `tile_n % 32` gate is algorithmic + asserted. No exposure.
-> Conclusion: on sm90 the D + gated-postact dual store (the #3 hazard) exists ONLY in
-> `backward_gatebwd.py`, now clamped to the proven-correct tile_m set. Every other config-accepting
-> sm90 wrapper is either plain-D, postact-only, or hard-asserts its tile_m. sm100 items below remain
-> (B200-blocked). Remaining sm90 work is perf-only (transition swiglu/dab_lnbwd hardcodes → tuning).
+Hopper trimul normalizes the original input without a mask, applies pair masks
+to left/right projection outputs, and gives the output gate the unmasked
+normalized input. This includes the separate inference entry point. Input and
+output LayerNorm epsilons remain separate. Main module training uses the module's
+original parameters. The back-half honors its supplied LayerNormLinear config.
 
-## Follow-ups from the gated-postact fix (2026-08-04)
-- [ ] **Verify `trimul_inproj/cute/dualgemm_kernel.py`** (used by tm2/trimul): it defines its OWN
-      `TileStore("mPostAct")` (self-named, not the base `mAuxOut`). The base epilogue's
-      `epi_setup_aux_out` stores the op named `mAuxOut` — a `mPostAct`-named TileStore may not be
-      stored (same zeros symptom). Test vs torch on H100 (cache OFF); if broken, rename to `mAuxOut`.
-- [ ] Re-check `dab_lnbwd` / other cute kernels for the same `mPostAct`/`postact_*` drift.
-- [ ] Now that the CUTE transition forward works (cos=1.0 end-to-end incl. `cute_transition_fused`),
-      re-evaluate the `implementation=triton` pin advice in `docs/design/quack-0.5.0-cute-port.md` for
-      the MINIWORLD/large-d_pair route on sm90.
+TM2 pads partial M/K/N instruction tiles and crops the result. Its compile cache
+includes the device and architecture. CUDA LayerNorm no longer reads
+`LNBWD_WAVES` or permanently caches the first device's SM count. Its vectorized
+backward rejects unsupported alignments; the wrapper supplies a scalar fallback
+whose row-scale and affine gradients match the mathematical reference.
+
+## Qualification
+
+CPU unit tests exercise actual configuration selection/capture, failure handling,
+exact workload keys, build-plan inclusion, mask gradients, and epilogue setup.
+CPU-only nvcc/CuTe compilation checks are in `scripts/check-hopper-*-compile.py`
+and `scripts/check-hopper-config-variants.py`. They do not launch GPU kernels.
+
+GPU numerical comparisons, synchronization/race checks and measured winning
+configs for this revision remain pending. CPU compilation cannot establish those
+properties. No GPU job was submitted for this audit.
+
+## Second review (2026-09-12)
+
+The follow-up review found integration defects that the initial selection tests
+did not cover. Eight launchers recorded historical operation aliases instead of
+their registry names, and the shard publisher only resolved Triton identities.
+Native measurements now use registry names throughout selection, capture,
+publication and runtime lookup. Cache status handles native policies without
+registering nonexistent Triton CSVs. The resume generation includes native CUDA
+source and configuration policy, and one cached shape cannot skip all remaining
+native shapes through the builder's coarse op/dtype shortcut.
+
+The CUDA LayerNorm backward driver now uses the requested feature width instead
+of always driving 128. The M2 driver covers both input layouts and presence/absence
+of its gate input. M2 rejects ignored architecture fields and includes its debug
+output in selection keys and benchmark calls. Dispatch keys include the addmm
+addend and the actual gate/backward operands' layouts and dtypes.
+
+The shared trimul gate backward launcher now materializes broadcast/transposed
+gradients, projections, gates and dropout scales before its row-major Triton
+kernel. Its fake outputs declare the same contiguous layout. This fixes the
+out-of-bounds risk from zero-stride gradients such as `output.sum().backward()`.
+
+Regression tests exercise actual native capture -> shard -> filtered merge ->
+runtime lookup for all twelve registered native operations, native staleness and
+resume invalidation, requested driver widths, and gradient layout handling.
+`scripts/check-hopper-family-compile.py` additionally lowers the maintained CuTe
+families using fake tensors without launching GPU work.
+
+That compilation audit reproduced a compiler abort at TM2 output tile N=24.
+MMA's N%8 rule alone was insufficient for this output store layout. The launcher
+now pads N to the bf16 SW32/STSM alignment of 16 elements and rejects output tiles
+outside the WGMMA N<=256 instruction range before lowering. Logical ragged output
+widths are cropped after the padded launch; this is a layout constraint rather
+than an autotune tile preference.
+
+Second-review validation: 131 distinct CPU tests passed (126 in the combined
+suite, then 39 native tests including five additional TM2 cases); fifteen CuTe
+family compilation variants passed after the TM2 fix. The latter include M1
+K/M-major, cooperative and pingpong SwiGLU/gate backward, two LN backward widths,
+and TM2 output widths 16/32/48/128. These are compile results, not GPU numerical
+or race-check results.
+
+## CPU follow-up (2026-09-12)
+
+The maintained candidate matrix compiled successfully without a GPU: 320 CuTe
+variants and 259 CUDA extension variants. This covers declared tile/cluster/
+stage grids, M2 gate/layout/live-workspace branches, supported CUDA transition
+widths, LN launch bounds and padded TM2 widths. It is not an exhaustive numerical
+test over tensor shapes or dtypes. Eighteen invalid CUDA output-shuffle layouts
+found during compilation are now excluded by structural constraints.
+
+The CPU worker tests verify the exact runtime compiler signatures, concurrent
+execution, crash/timeout isolation and failed-candidate capture without launch.
+Forty-eight trimul autograd reference cases and 72 real Triton helper body cases
+(CPU interpreter, FP32) also passed. Runtime GPU arithmetic remains unqualified.
+
+Use the project environment with `PYTHONNOUSERSITE=1` and `PYTHONPATH="$PWD/src"`
+on a CPU compute node. The audit entry points are
+`scripts/check-hopper-candidate-matrix.py --backend all --jobs 32 --output <dir>`
+and `scripts/check-hopper-triton-helpers-cpu.py`. Matrix logs/results are in
+`.scratch/hopper-cpu-cute-final/` and `.scratch/hopper-cpu-cuda-final/`.
+
+The final full CPU suite passed 2,818 tests (32 skipped, 222 GPU tests deselected).
+Ruff passed. Project-environment type checking retains two unresolved optional
+FA2 imports in the attention module because this environment installs FA4; it
+reported no other diagnostics. Detailed evidence and environment requirements
+are recorded in `docs/records/h100-build-preparation.md`.
+
+The subsequent cache lifecycle review passed 2,825 CPU tests and thirteen real
+cross-process object-cache reuse checks with compilation disabled in the reader.
+It added build-revision validation to runtime lookup and aligned native timing
+with Triton's paired benchmark-budget policy, including restoring the original
+cache-eviction provider when that policy is disabled. These checks exercise
+cache/control behavior, not GPU kernel execution.

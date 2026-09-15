@@ -25,15 +25,16 @@ using namespace cute;
 
 using BF = cutlass::bfloat16_t;
 
+// Performance configuration is supplied by hopper_cuda_config.py via nvcc.
+#ifndef MW_TRANSITION_WIDTH
+#error "Build this kernel through the configured Python launcher"
+#endif
 constexpr int kWarpgroupM = 64;
-constexpr int kWarpgroups = 2;
+constexpr int kWarpgroups = MW_TRANSITION_WARPGROUPS;
 constexpr int kBlockM = kWarpgroups * kWarpgroupM;
-constexpr int kBn = 128;
 constexpr int kDn = 128;
 constexpr int kWarpgroupThreads = 128;
 constexpr int kThreads = kWarpgroups * kWarpgroupThreads;
-constexpr int kPipelineStages = 2;
-constexpr int kPipelineStagesD256 = 1;
 
 constexpr int align_up(int value, int alignment) {
     return ((value + alignment - 1) / alignment) * alignment;
@@ -175,94 +176,6 @@ __device__ __forceinline__ void cp_async_bf16_tile(GTensor const& g, STensor con
     copy(thr_copy.partition_S(g), thr_copy.partition_D(s));
 }
 
-template <int BLOCK_M>
-__global__ __launch_bounds__(128, 4) void transition_b2b_scalar_kernel(
-    const __nv_bfloat16* __restrict__ x,
-    const float* __restrict__ rstd,
-    const float* __restrict__ c1,
-    const __nv_bfloat16* __restrict__ g,
-    const __nv_bfloat16* __restrict__ beta,
-    const __nv_bfloat16* __restrict__ wa,
-    const __nv_bfloat16* __restrict__ wb,
-    const __nv_bfloat16* __restrict__ ws,
-    __nv_bfloat16* __restrict__ out,
-    const int64_t row_start,
-    const int64_t M
-) {
-#if 0
-    const int tid = threadIdx.x;
-    const int64_t row0 = row_start + static_cast<int64_t>(blockIdx.x) * BLOCK_M;
-    __shared__ __nv_bfloat16 xn_s[BLOCK_M][kK];
-    __shared__ float partial_a_s[BLOCK_M][kK];
-    __shared__ float partial_b_s[BLOCK_M][kK];
-    float out_acc[BLOCK_M];
-#pragma unroll
-    for (int bm = 0; bm < BLOCK_M; ++bm) {
-        out_acc[bm] = 0.0f;
-    }
-    const float gamma = bf16_to_float(g[tid]);
-    const float bias = bf16_to_float(beta[tid]);
-#pragma unroll
-    for (int bm = 0; bm < BLOCK_M; ++bm) {
-        const int64_t row = row0 + bm;
-        float xn = 0.0f;
-        if (row < M) {
-            xn = (bf16_to_float(x[row * kK + tid]) * rstd[row] - c1[row]) * gamma + bias;
-        }
-        xn_s[bm][tid] = float_to_bf16(xn);
-    }
-    __syncthreads();
-    for (int nd = 0; nd < kND; ++nd) {
-        const float wa_v = bf16_to_float(wa[nd * kK + tid]);
-        const float wb_v = bf16_to_float(wb[nd * kK + tid]);
-#pragma unroll
-        for (int bm = 0; bm < BLOCK_M; ++bm) {
-            const float xn = bf16_to_float(xn_s[bm][tid]);
-            partial_a_s[bm][tid] = xn * wa_v;
-            partial_b_s[bm][tid] = xn * wb_v;
-        }
-        __syncthreads();
-        for (int stride = kK / 2; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-#pragma unroll
-                for (int bm = 0; bm < BLOCK_M; ++bm) {
-                    partial_a_s[bm][tid] += partial_a_s[bm][tid + stride];
-                    partial_b_s[bm][tid] += partial_b_s[bm][tid + stride];
-                }
-            }
-            __syncthreads();
-        }
-        const float ws_v = bf16_to_float(ws[tid * kND + nd]);
-#pragma unroll
-        for (int bm = 0; bm < BLOCK_M; ++bm) {
-            const float a = partial_a_s[bm][0];
-            const float b = partial_b_s[bm][0];
-            out_acc[bm] += bf16_to_float(float_to_bf16(a * sigmoidf_fast(a) * b)) * ws_v;
-        }
-        __syncthreads();
-    }
-#pragma unroll
-    for (int bm = 0; bm < BLOCK_M; ++bm) {
-        const int64_t row = row0 + bm;
-        if (row < M) {
-            out[row * kD + tid] = float_to_bf16(out_acc[bm]);
-        }
-    }
-#else
-    (void)x;
-    (void)rstd;
-    (void)c1;
-    (void)g;
-    (void)beta;
-    (void)wa;
-    (void)wb;
-    (void)ws;
-    (void)out;
-    (void)row_start;
-    (void)M;
-#endif
-}
-
 template <
     int CTA_M,
     int WG_M,
@@ -275,7 +188,7 @@ template <
     class TmaWa,
     class TmaWb,
     class TmaWs>
-__global__ __launch_bounds__(256, 1) void transition_b2b_rs_wgmma_kernel(
+__global__ __launch_bounds__(kThreads, MW_TRANSITION_MIN_BLOCKS) void transition_b2b_rs_wgmma_kernel(
     const __nv_bfloat16* __restrict__ x_raw,
     const float* __restrict__ rstd,
     const float* __restrict__ c1,
@@ -832,19 +745,10 @@ torch::Tensor transition_b2b_fwd(
     TORCH_CHECK(M % kBlockM == 0, "transition_b2b CUDA path requires M to be divisible by 128");
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    if (K == 128 && ND == 512 && D == 128) {
-        launch_transition_b2b_kernel<
-            128, 512, 128, kBlockM, kWarpgroupM, kBn, kDn, kPipelineStages>(
-            x, rstd, c1, g, beta, wa, wb, ws, out, M, add_residual, stream
-        );
-    } else if (K == 256 && ND == 1024 && D == 256) {
-        launch_transition_b2b_kernel<
-            256, 1024, 256, kBlockM, kWarpgroupM, 64, kDn, kPipelineStagesD256>(
-            x, rstd, c1, g, beta, wa, wb, ws, out, M, add_residual, stream
-        );
-    } else {
-        TORCH_CHECK(false, "unsupported transition_b2b CUDA shape");
-    }
+    TORCH_CHECK(K == MW_TRANSITION_WIDTH && ND == 4 * MW_TRANSITION_WIDTH && D == MW_TRANSITION_WIDTH,
+                "extension configuration does not match input shape");
+    launch_transition_b2b_kernel<MW_TRANSITION_WIDTH, 4 * MW_TRANSITION_WIDTH, MW_TRANSITION_WIDTH, kBlockM, kWarpgroupM, MW_TRANSITION_BN, kDn, MW_TRANSITION_STAGES>(
+        x, rstd, c1, g, beta, wa, wb, ws, out, M, add_residual, stream);
     return out;
 }
 

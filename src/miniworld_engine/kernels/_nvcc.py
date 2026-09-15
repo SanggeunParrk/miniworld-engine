@@ -97,10 +97,17 @@ def gencodes(*arches: str, ptx: tuple[str, ...] = ()) -> list[str]:
     """
     ensure_cuda_home()
     have = supported_arches()
+    def supported(a):
+        # nvcc 12.8's listing omits architecture-specific variants even though
+        # it accepts compute_90a/sm_90a. Dropping that flag silently enabled
+        # torch's GPU autodetection, which fails on a CPU-only compiler worker.
+        return (not have or f"compute_{a}" in have
+                or (a.endswith("a") and a[:-1].isdigit() and int(a[:-1]) >= 90
+                    and f"compute_{a[:-1]}" in have))
     out = [f"-gencode=arch=compute_{a},code=sm_{a}"
-           for a in arches if not have or f"compute_{a}" in have]
+           for a in arches if supported(a)]
     out += [f"-gencode=arch=compute_{a},code=compute_{a}"
-            for a in ptx if not have or f"compute_{a}" in have]
+            for a in ptx if supported(a)]
     return out
 
 

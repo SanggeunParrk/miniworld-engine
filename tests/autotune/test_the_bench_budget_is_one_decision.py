@@ -64,6 +64,21 @@ def test_the_default_leaves_triton_alone():
     assert not capture._BENCH_T["budget"]
 
 
+@pytest.mark.parametrize(("clear", "rep"), [(0, 0), (16, 0), (0, 10)])
+def test_returning_to_default_or_incomplete_budget_restores_cache_eviction(clear, rep):
+    original = object()
+    _DRIVER.get_empty_cache_for_benchmark = original
+    settings.configure(bench_clear_mb=16, bench_rep_ms=10)
+    capture._use_a_smaller_bench_budget(_Autotuner())
+    assert _DRIVER.get_empty_cache_for_benchmark is capture._bench_clear_buffer
+    settings.configure(bench_clear_mb=clear, bench_rep_ms=rep)
+    autotuner = _Autotuner()
+    capture._use_a_smaller_bench_budget(autotuner)
+    assert _DRIVER.get_empty_cache_for_benchmark is original
+    assert autotuner._do_bench == "triton's own"
+    assert not capture._BENCH_T["budget"]
+
+
 def test_half_the_decision_is_refused(capsys):
     """A smaller clear at triton's budget ran 4,243 launches against 348 -- slower, not faster.
     Taking it as an instruction would be doing the wrong thing carefully."""

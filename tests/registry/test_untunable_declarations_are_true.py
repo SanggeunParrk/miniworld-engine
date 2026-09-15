@@ -125,7 +125,7 @@ def test_the_exemption_actually_removes_the_pair_from_coverage():
         pytest.skip("no bucket-scoped exemptions declared")
 
     for op, buckets in scoped.items():
-        bucket = int(sorted(buckets)[0])
+        bucket = int(min(buckets))
         want = {op: {("bfloat16", bucket), ("float32", bucket), ("bfloat16", 128)}}
         # the same expression check_cache_coverage uses
         drop = {(dt, b) for dt, b in want[op] if b is not None and str(b) in buckets}

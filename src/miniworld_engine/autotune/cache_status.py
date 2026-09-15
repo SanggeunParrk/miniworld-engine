@@ -60,6 +60,9 @@ def _registry_symbols() -> dict[str, tuple[str, str]]:
 def _current_op_identity(op: str) -> str | None:
     """The live source/key fingerprint for ``op``, or None if it has no registry autotuner (a
     dispatch-only cache) or cannot be imported on this machine."""
+    from miniworld_engine.autotune.native import BUILD_OPS, source_identity
+    if op in BUILD_OPS:
+        return source_identity()
     sym = _registry_symbols().get(op)
     if sym is None:
         return None
@@ -127,6 +130,20 @@ def scan(gpu_substr: str | None = None) -> list[CacheStatus]:
             if "config_space_hash" not in data:
                 out.append(CacheStatus(op, gpu, "UNKNOWN", "runtime-dispatch cache (no config grid)",
                                        None))
+                continue
+            from miniworld_engine.autotune.native import BUILD_OPS
+            if op in BUILD_OPS:
+                # Native grids depend on the workload and live in Python policies,
+                # not Triton CSVs. Calling configs_for would strand these names.
+                if _stored_rev(data) != build_rev(op):
+                    verdict, reason = "STALE", "native build revision changed"
+                elif _scheme_stale(op, data.get("key_scheme")):
+                    verdict, reason = "STALE", "native cache key scheme changed"
+                elif data.get("op_identity") != _current_op_identity(op):
+                    verdict, reason = "STALE", "native source/configuration changed"
+                env_stored = data.get("env_identity")
+                out.append(CacheStatus(op, gpu, verdict, reason,
+                                       None if env_stored is None else env_stored == cur_env))
                 continue
             try:
                 cur_grid = config_space_hash(configs_for(op))

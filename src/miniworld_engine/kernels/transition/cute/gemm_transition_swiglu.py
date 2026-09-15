@@ -186,30 +186,17 @@ def gemm_ln_swiglu(
     device_capacity = get_device_capacity(A.device)
     assert device_capacity[0] == 9, "SM90 (H100) only"
     if config is None:
-        # Brute-force autotuned over the FULL sm90 gated config space (tile_m×tile_n × cluster ×
-        # pingpong/coop — see cute_config.gated_sm90_candidates), cache-selected per
-        # (gpu, dtype, M-bucket, K). On a cache miss we fall back to the K-aware hand default
-        # below (the win the K-sweep found: K<=128 -> 256x128 coop; K>=256 -> 192x128 pingpong).
-        # Verified 2026-08-04 (post quack-0.5.0 mPostAct->mAuxOut fix): all 18 gated configs give
-        # cos=1.0 vs torch — config is performance-only.
-        K = A.shape[-1]
-        M = A.shape[0] if A.dim() == 2 else A.shape[0] * A.shape[1]
-        if K <= 128:
-            _default = GemmConfig(
-                tile_m=256, tile_n=128, pingpong=False, is_dynamic_persistent=False,
-                cluster_m=1, cluster_n=2, swap_ab=False, max_swizzle_size=8, device_capacity=9,
-            )
-        else:
-            _default = GemmConfig(
-                tile_m=192, tile_n=128, pingpong=True, is_dynamic_persistent=False,
-                cluster_m=1, cluster_n=2, swap_ab=False, max_swizzle_size=8, device_capacity=9,
-            )
         from miniworld_engine.autotune.cute_config import resolve_config, gated_sm90_candidates
-        from miniworld_engine.autotune.buckets import bucket_mixed
+        from miniworld_engine.autotune.native import tensor_key
         config = resolve_config(
-            "transition_swiglu_fwd", gated_sm90_candidates(),
-            dtype=str(A.dtype), bucket=f"{bucket_mixed(M)}|k{K}", default=_default,
+            "transition_swiglu_fwd_sm90_cute", gated_sm90_candidates(), dtype=str(A.dtype),
+            bucket=tensor_key(A, B, PostAct, rstd, c1, S, B2, extra=(str(act_fn),)), device_index=A.device.index,
+            run=lambda c: gemm_ln_swiglu(A, B, PostAct, rstd, c1, S, B2, config=c, act_fn=act_fn),
         )
+
+    if device_capacity[0] == 9:
+        from miniworld_engine.autotune.cute_config import validate_hopper_config
+        validate_hopper_config(config)
 
     A3 = A.unsqueeze(0) if A.dim() == 2 else A
     B3 = B.unsqueeze(0) if B.dim() == 2 else B

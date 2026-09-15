@@ -139,6 +139,7 @@ _ROUND_ID: dict = {}
 #: The open, flock-held file for this card's bench lock, plus what it cost. See
 #: :func:`_bench_lock_acquire`.
 _BENCH_LOCK: dict = {"fh": None, "waited": 0.0, "held": 0.0, "since": 0.0, "rounds": 0}
+_NATIVE_LOCK_HELD: bool = False
 
 #: Time inside ``Autotuner._bench`` -- do_bench's launches AND the synchronize that waits for the
 #: device. Reported on its own because inferring it cost a wrong answer: the only bench-shaped
@@ -146,6 +147,7 @@ _BENCH_LOCK: dict = {"fh": None, "waited": 0.0, "held": 0.0, "since": 0.0, "roun
 #: fn.run, so fn.run was carrying the whole precompile pool. Read as "bench", it said the GPU was
 #: 1.2% of the build; measured here it is 20%.
 _BENCH_T: dict = {"calls": 0, "seconds": 0.0, "budget": ""}
+_BENCH_DRIVER_PATCH: dict = {}
 
 #: Where a compile() call actually spends its time. The guard forks a child, waits for it, and then
 #: recompiles in-process expecting a cache hit -- three costs that look like one. They have
@@ -302,6 +304,15 @@ def _bench_driver():
     return triton.runtime.driver.active
 
 
+def _restore_bench_driver() -> None:
+    if _BENCH_DRIVER_PATCH:
+        driver = _BENCH_DRIVER_PATCH["driver"]
+        if driver.get_empty_cache_for_benchmark is _bench_clear_buffer:
+            driver.get_empty_cache_for_benchmark = _BENCH_DRIVER_PATCH["provider"]
+        _BENCH_DRIVER_PATCH.clear()
+    _BENCH_T["budget"] = ""
+
+
 def _use_a_smaller_bench_budget(autotuner) -> None:
     """Point one autotuner at a cheaper `do_bench`, if the build asked for one.
 
@@ -313,6 +324,9 @@ def _use_a_smaller_bench_budget(autotuner) -> None:
 
     Never raises: a build that cannot install this benches the way it always did.
     """
+    # Switching back to defaults must not leave a provider whose live setting
+    # now allocates zero bytes, silently turning L2 eviction off.
+    _restore_bench_driver()
     cur = settings_now()
     mb, rep = int(cur.bench_clear_mb), int(cur.bench_rep_ms)
     if not mb and not rep:
@@ -327,12 +341,15 @@ def _use_a_smaller_bench_budget(autotuner) -> None:
         # A monkeypatch on a third-party object, like the two above it: the buffer belongs to the
         # backend driver and triton offers no knob for it. Both halves land or neither does -- the
         # budget alone is the row of the table that came out SLOWER.
-        _bench_driver().get_empty_cache_for_benchmark = _bench_clear_buffer
+        driver = _bench_driver()
+        _BENCH_DRIVER_PATCH.update(driver=driver, provider=driver.get_empty_cache_for_benchmark)
+        driver.get_empty_cache_for_benchmark = _bench_clear_buffer
         warmup = max(1, rep // 4)      # triton's own 25:100 ratio, kept
-        autotuner._do_bench = lambda call, quantiles: triton.testing.do_bench(
-            call, warmup=warmup, rep=rep, quantiles=quantiles)
+        autotuner._do_bench = lambda call, quantiles, **kwargs: triton.testing.do_bench(
+            call, warmup=warmup, rep=rep, quantiles=quantiles, **kwargs)
         _BENCH_T["budget"] = f"{mb} MB clear, {warmup}/{rep} ms"
     except Exception as exc:
+        _restore_bench_driver()
         print(f"  [bench] could not install the smaller budget ({type(exc).__name__}: {exc}); "
               f"benching unchanged", flush=True)
 
@@ -380,7 +397,8 @@ def _install_launch_budget(autotuner) -> None:
     whose steady state is fast. What is timed is the launch AFTER the warmup, which is what
     `do_bench` would be repeating.
 
-    Never raises: an autotuner this cannot wrap benches the way it always did.
+    An autotuner this cannot wrap benches the way it always did. Fatal CUDA faults
+    propagate immediately: retrying a poisoned context hides the first failing launch.
     """
     import time
 
@@ -402,7 +420,9 @@ def _install_launch_budget(autotuner) -> None:
             kernel_call()
             torch.cuda.synchronize()
             took = time.monotonic() - t0
-        except Exception:
+        except Exception as exc:
+            if _fatal_cuda_error(exc):
+                raise
             # A config that RAISES is triton's own business: `_bench` catches OutOfResources and
             # friends and scores +inf. Hand it back the call it expected to make.
             return inner(kernel_call, quantiles=quantiles)
@@ -468,6 +488,9 @@ def _bench_lock_acquire() -> None:
 
 def _bench_lock_release() -> None:
     import time
+
+    if _NATIVE_LOCK_HELD:
+        return
 
     fh = _BENCH_LOCK["fh"]
     if fh is None:
@@ -1984,6 +2007,8 @@ def install() -> None:
             if _fatal_cuda_error(exc):
                 # Do not turn a poisoned context into hundreds of permanent observed failures.
                 # Escaping the round transaction preserves its previous file and provenance.
+                print(f"  [fatal-cuda] op={_op_name(self)} config={config} "
+                      f"key={_entry_key(self, meta)}: {exc}", flush=True)
                 raise
             # Match triton's own sentinel SHAPE, not just its value: do_bench(quantiles=...) hands
             # back [median, q20, q80], and triton returns [inf, inf, inf] for a config it could not
@@ -2125,6 +2150,7 @@ def install() -> None:
 def uninstall() -> None:
     global _orig_bench, _orig_compile, _orig_prune, _orig_run
     shutdown_precompile()
+    _restore_bench_driver()
     if _orig_bench is not None:
         from triton.runtime.autotuner import Autotuner
         Autotuner._bench = _orig_bench
@@ -2145,7 +2171,27 @@ def uninstall() -> None:
         _orig_compile = None
 
 
+def record_native(op, grid, dtype, bucket, config, ms, op_id):
+    """Record a native candidate in the same shard/coverage format as Triton."""
+    grid = [as_cfg_dict(c) for c in grid]
+    cfg = as_cfg_dict({"kwargs": dict(config)})
+    sig = _sig_from_dict(cfg)
+    slot = _CAPTURE.setdefault(op, {"grid": grid, "op_id": op_id,
+                                    "entries": {}, "searched": {}})
+    # Shape constraints may remove candidates; preserve the union as the op grid.
+    existing = {_sig_from_dict(c) for c in slot["grid"]}
+    slot["grid"].extend(c for c in grid if _sig_from_dict(c) not in existing)
+    key = (dtype, bucket)
+    slot["searched"].setdefault(key, set()).add(sig)
+    if not math.isfinite(ms):
+        _UNUSABLE[op] = _UNUSABLE.get(op, 0) + 1
+        return
+    slot["entries"].setdefault(key, {})[sig] = (cfg, ms)
+
+
 def reset() -> None:
+    from miniworld_engine.autotune.native import reset as reset_native
+    reset_native()
     _CAPTURE.clear()
     _UNUSABLE.clear()
 
@@ -2180,7 +2226,7 @@ def flush(top_k: int = 5, gpu: str | None = None) -> list:
     return written
 
 
-def dump_shard(path: str) -> int:
+def dump_shard(path: str, *, unit_complete: bool = False) -> int:
     """Serialize this process's captured timings to a standalone JSON SHARD file (NOT the
     in-repo cache). Parallel capture jobs each ``dump_shard`` to their OWN file; a single
     ``merge_shards`` writer folds them into the committed cache — so no env var and no
@@ -2202,6 +2248,7 @@ def dump_shard(path: str) -> int:
     from miniworld_engine.autotune.shard import provenance
 
     out: dict = {"_key_scheme": KEY_SCHEME, "_has_entries": False,
+                 "_unit_complete": unit_complete,
                  "_provenance": provenance(gpu_key())}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
@@ -2299,8 +2346,8 @@ def _merge_shards_unlocked(shard_paths, top_k: int = 5, gpu: str | None = None, 
                 # that re-based THIS op's keys describes buckets that no longer mean what they
                 # say; merging it would put them back in the file the bump just cleaned.
                 _MERGE_SKIPPED.append(
-                    (f"{sp}::{op}", f"key scheme {shard_scheme} predates the bump that re-based "
-                                    f"this op's buckets"))
+                    (f"{sp}::{op}", (f"key scheme {shard_scheme} predates the bump that re-based "
+                                     "this op's buckets")))
                 continue
             if not isinstance(slot, dict):
                 _MERGE_SKIPPED.append((f"{sp}::{op}", "invalid op measurement record"))

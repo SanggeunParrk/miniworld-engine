@@ -375,8 +375,8 @@ def install_native_recorders() -> None:
             nd = wa.shape[0]
             return x.new_empty((m, nd)), x.new_empty((m, 2 * nd)), x.new_empty((m, k))
 
-    def transition_extension(name: str):
-        if name not in transition_cuda._BUILDERS:
+    def transition_extension(name: str, width, config):
+        if name not in ("b2b", "expand_gate", "gatebwd"):
             raise ValueError(f"no native derivation contract for {name}")
         return TransitionExtension()
 
@@ -747,15 +747,19 @@ def uncovered_kernels(arch: str, registry: Path | None = None) -> set[str]:
     same shapes in the first place.
     """
     reg = registry or (Path(__file__).resolve().parents[1] / "kernels" / "registry.csv")
+    from miniworld_engine.autotune.native import build_ops_for_arch
+    native = build_ops_for_arch(normalise_arch(arch))
     ceiling = _ARCH_ORDER.index(normalise_arch(arch))
     with reg.open(newline="") as fh:
         buildable = {
             r["kernel"] for r in csv.DictReader(fh)
-            if r["backend"] == "triton"
+            if (r["backend"] == "triton" or r["kernel"] in native)
             and (r.get("driver") or "").strip()
-            and (r.get("developed") or "").strip() == "yes"
+            and ((r.get("developed") or "").strip() == "yes" or r["kernel"] in native)
             and _ARCH_ORDER.index(normalise_arch((r.get("arch") or "sm80").strip()
                                                  or "sm80")) <= ceiling
         }
     reached = {r["kernel"] for r in kernel_rows(arch)}
-    return buildable - reached
+    # Triton derivation does not certify native config coverage. Their drivers
+    # must run even when a module happens to call a native default.
+    return (buildable - reached) | (buildable & native)

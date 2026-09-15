@@ -20,7 +20,7 @@ def environment(monkeypatch):
     {"gpu": "current-gpu", "env_identity": "current-compiler"},
 ])
 def test_only_matching_shard_can_skip_work(tmp_path, environment, stamp):
-    data = {"_has_entries": True, "op": {"entries": {"bf16|128": [
+    data = {"_unit_complete": True, "_has_entries": True, "op": {"entries": {"bf16|128": [
         {"kwargs": {"BLOCK": 128}, "num_warps": 4, "ms": 1.0}]}}}
     if stamp is not None:
         data["_provenance"] = stamp
@@ -50,3 +50,39 @@ def test_driver_claims_are_separated_by_generation():
     first = builder.OpUnit("example_triton", 128, generation="gpu1")
     second = builder.OpUnit("example_triton", 128, generation="gpu2")
     assert first.stem != second.stem
+
+
+@pytest.mark.parametrize("complete", [None, False, True])
+def test_partial_timings_do_not_mark_a_module_complete(tmp_path, environment, complete):
+    data = {"_has_entries": True, "_provenance": shard.provenance(),
+            "op": {"entries": {"bf16|128": [{"ms": 1.0}]}}}
+    if complete is not None:
+        data["_unit_complete"] = complete
+    path = tmp_path / "unit.json"
+    path.write_text(json.dumps(data))
+    claim = path.with_suffix(".claim")
+    claim.touch()
+    assert builder._shard_has_entries(path)
+    assert builder._shard_reusable(path) is (complete is True)
+    assert builder.reclaim_orphans(tmp_path) == ([] if complete else ["unit"])
+    assert claim.exists() is (complete is True)
+    assert json.loads(path.read_text()) == data
+
+
+def test_failed_rebuild_does_not_reuse_an_old_complete_shard(tmp_path, environment, monkeypatch):
+    from types import SimpleNamespace
+
+    unit = builder.OpUnit("example_triton", 128)
+    path = tmp_path / f"{unit.stem}.json"
+    data = {"_has_entries": True, "_provenance": shard.provenance(),
+            "_unit_complete": True, "op": {"entries": {"bf16|128": [{"ms": 1.0}]}}}
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(builder, "visible_device", lambda device: "0")
+    result = builder._run_unit_subprocess(unit, 0, tmp_path, tmp_path, 1)
+    assert result["rc"] == 1
+    assert result["ops"] == 1
+    assert not path.with_suffix(".claim").exists()
+    assert path.with_suffix(".failed").exists()
+    assert not builder._shard_reusable(path)
+    assert json.loads(path.read_text()) == data

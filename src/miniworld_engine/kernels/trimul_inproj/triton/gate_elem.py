@@ -300,8 +300,8 @@ def gate_elem_quack_fused(x_n, proj, Wg, *, return_preact: bool = False):
 
 def _gate_elem_bwd_ew_fake(dy, proj, gate, dropscale, seq_len, from_preact=False):
     """(d_proj, d_glogit), both (M, N) == dy flattened over its last dim."""
-    return (torch.empty_like(dy.reshape(-1, dy.shape[-1])),
-            torch.empty_like(dy.reshape(-1, dy.shape[-1])))
+    shape = (dy.numel() // dy.shape[-1], dy.shape[-1])
+    return (dy.new_empty(shape), dy.new_empty(shape))
 
 
 @opaque(fake=_gate_elem_bwd_ew_fake, name="trimul_gate_elem_bwd_ew")
@@ -320,11 +320,13 @@ def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
     from -- every argument here is already flattened to (M, N), so it is the only place L can
     come from."""
     M, N = dy.reshape(-1, dy.shape[-1]).shape
-    dy, proj, gate = dy.reshape(M, N), proj.reshape(M, N), gate.reshape(M, N)
+    # The kernel uses row-major pointer arithmetic, including for gradients from
+    # reductions (stride zero) and transposed views supplied by autograd.
+    dy, proj, gate = (t.reshape(M, N).contiguous() for t in (dy, proj, gate))
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
     L = int(seq_len)
-    ds_flat = dropscale.reshape(L, N)
+    ds_flat = dropscale.reshape(L, N).contiguous()
     grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit, ds_flat, L, M, N=N,
                                    shape_key=pack(_shape_key(seq_len), N=N),
@@ -334,7 +336,7 @@ def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor,
 
 def _gate_elem_bwd_fake(dy, x_n, proj, gate, Wg, dropscale, seq_len):
     """(d_proj (M, N), dx_gate (M, K), dWg (K, N)); M is dy flattened over its last dim."""
-    return (torch.empty_like(dy.reshape(-1, dy.shape[-1])),
+    return (dy.new_empty((dy.numel() // dy.shape[-1], dy.shape[-1])),
             x_n.new_empty((dy.numel() // dy.shape[-1], x_n.shape[-1])),
             Wg.new_empty(Wg.shape))
 
@@ -348,9 +350,9 @@ def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate:
     grad into x_n (sum it with the front/LN contributions upstream); dWg:(K,N).
     ``dropscale`` [L,N] and ``seq_len`` are required, as on the forward -- ones when p_drop=0."""
     M, N = dy.reshape(-1, dy.shape[-1]).shape
-    dy = dy.reshape(M, N)
-    proj = proj.reshape(M, N)
-    gate = gate.reshape(M, N)
+    dy = dy.reshape(M, N).contiguous()
+    proj = proj.reshape(M, N).contiguous()
+    gate = gate.reshape(M, N).contiguous()
     xn_flat = x_n.reshape(M, -1)
     d_proj = torch.empty_like(dy)
     d_glogit = torch.empty_like(dy)
@@ -358,7 +360,7 @@ def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate:
     # gate_elem_bwd is the 2-D-only ``GateElem`` autograd path: x_n arrives already flattened
     # to (M, K), so L has to come from ``seq_len``.
     _gate_elem_bwd_ew_kernel[grid](dy, proj, gate, d_proj, d_glogit,
-                                   dropscale.reshape(int(seq_len), N), int(seq_len), M, N=N,
+                                   dropscale.reshape(int(seq_len), N).contiguous(), int(seq_len), M, N=N,
                                    shape_key=pack(_shape_key(seq_len), N=N))
     dx_gate = d_glogit @ Wg.t()            # (M, K)  cuBLAS
     dWg = xn_flat.t() @ d_glogit           # (K, N)  cuBLAS

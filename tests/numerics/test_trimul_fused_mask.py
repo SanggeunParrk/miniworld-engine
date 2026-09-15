@@ -71,3 +71,40 @@ def test_inference_fused_mask_preserves_reference(kind,length,mask_kind):
     with torch.no_grad():y,yr=actual(x,mask),ref(x.float(),mask)
     check("output",y,yr)
     if mask_kind=="all_invalid":torch.testing.assert_close(y,x,rtol=0,atol=0)
+
+
+@pytest.mark.parametrize("kind", ["outgoing", "incoming", "bidir"])
+@pytest.mark.parametrize("training", [False, True])
+def test_hopper_mask_keeps_output_gate_and_custom_eps(kind, training):
+    """A nonzero output-LN bias exposes masking the gate input by mistake."""
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("Hopper qualification")
+    torch.manual_seed(710)
+    actual, ref = models(kind)
+    actual.train(training)
+    ref.train(training)
+    with torch.no_grad():
+        for model in (actual, ref):
+            model.ln_pair.eps = .03
+            model.ln_out.eps = .07
+        actual.ln_pair.bias.fill_(.2)
+        actual.ln_out.bias.fill_(.4)
+    ref.load_state_dict(actual.state_dict())
+    x = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16,
+                    requires_grad=training)
+    xr = x.detach().float().requires_grad_(training)
+    mask = torch.ones(1, 128, device="cuda", dtype=torch.bool)
+    mask[:, ::3] = False
+    parameters_before = dict(actual.named_parameters())
+    with torch.set_grad_enabled(training):
+        y, yr = actual(x, mask), ref(xr, mask)
+    check("masked output", y, yr)
+    assert dict(actual.named_parameters()).keys() == parameters_before.keys()
+    if training:
+        dy = torch.randn_like(y)
+        y.backward(dy)
+        yr.backward(dy.float())
+        check("input", x.grad, xr.grad)
+        for name, param in parameters_before.items():
+            assert dict(actual.named_parameters())[name] is param
+            check(name, param.grad, dict(ref.named_parameters())[name].grad)
