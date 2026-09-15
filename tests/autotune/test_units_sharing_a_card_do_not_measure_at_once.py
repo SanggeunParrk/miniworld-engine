@@ -111,7 +111,7 @@ def test_the_lock_reaches_the_unit_on_its_command_line(tmp_path, monkeypatch):
         return _Proc()
 
     from miniworld_engine.autotune import builder
-    monkeypatch.setattr(builder.subprocess, "run", _run)
+    monkeypatch.setattr(builder, "_run_unit_process", _run)
     unit = builder.OpUnit(op="layernorm_stats_triton", dtype="bfloat16", length=256)
     for share, want in ((False, False), (True, True)):
         shard_dir = tmp_path / f"share{share}"
@@ -130,7 +130,7 @@ def test_the_probe_pass_reaches_the_unit_the_same_way(tmp_path, monkeypatch):
         returncode = 0
 
     from miniworld_engine.autotune import builder
-    monkeypatch.setattr(builder.subprocess, "run",
+    monkeypatch.setattr(builder, "_run_unit_process",
                         lambda cmd, **kw: (seen.clear(), seen.extend(cmd), _Proc())[-1])
     unit = builder.OpUnit(op="layernorm_stats_triton", dtype="bfloat16", length=256)
     for predict, want in ((False, False), (True, True)):

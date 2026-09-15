@@ -22,7 +22,7 @@ def test_worker_inherits_allocated_device(tmp_path, monkeypatch, mask, device, e
         seen.update(kwargs["env"])
         raise SystemExit
 
-    monkeypatch.setattr(builder.subprocess, "run", stop_before_launch)
+    monkeypatch.setattr(builder, "_run_unit_process", stop_before_launch)
     unit = builder.OpUnit("example_triton", 128)
     with pytest.raises(SystemExit):
         builder._run_unit_subprocess(unit, device, tmp_path, tmp_path, 1)

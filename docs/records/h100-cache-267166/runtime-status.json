@@ -1,0 +1,513 @@
+{
+  "runtime_operations": 72,
+  "runtime_verdicts": {
+    "OK": 72
+  },
+  "archived_native_operations": 12,
+  "runtime_status": [
+    {
+      "op": "adaln_bwd_dx_dlnw_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "adaln_bwd_pre_dx_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "adaln_epilogue_saveact_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "adaln_epilogue_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "adaln_fwd_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "adaln_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "adaln_gemm_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "augmented_attention_bwd_pre_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "augmented_attention_bwd_reduce_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "augmented_attention_bwd_split_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "augmented_attention_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_bwd_gemm_swiglu_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_bwd_swiglu_flat_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_expand_swiglu_saveact_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_expand_swiglu_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_fwd_b2b_saveact_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_fwd_b2b_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_squeeze_gate_saveact_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_squeeze_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "cond_transition_swiglu_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_bwd_dx_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_bwd_gate_dropres_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_bwd_gate_flat_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_bwd_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_dropres_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_flat_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_gemm_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_inplace_flat_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_packed_flat_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_res_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "gated_projection_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_bwd_atomic_strided_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_bwd_atomic_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_bwd_foldstats_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_bwd_split_mmajor_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_bwd_split_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_fwd_mmajor_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_fwd_recompute_foldstats_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_fwd_rowscale_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_fwd_saveact_strided_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_fwd_saveact_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_fwd_strided_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_linear_bwd_fp32_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_linear_fwd_fp32_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_linear_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "layernorm_stats_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "qk_norm_rope_bwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "qk_norm_rope_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "rmsnorm_adamod_bwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "rmsnorm_adamod_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "rmsnorm_bwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "rmsnorm_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "rope_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "swa_gate_out_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_bwd_swiglu_recompute_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_bwd_transpose_packed_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_expand_swiglu_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_fold_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_fwd_b2b_ktiled_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_fwd_b2b_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "transition_layernorm_expand_swiglu_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "triangle_attention_bwd_dkdv_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "triangle_attention_bwd_dq_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "triangle_attention_bwd_pre_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "triangle_attention_fwd_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_bwd_gate_packed_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_bwd_gate_recompute_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_gemm_gate_mmajor_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_gemm_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_outproj_bwd_gate_recompute_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_outproj_gemm_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    },
+    {
+      "op": "trimul_outproj_layernorm_gemm_gate_triton",
+      "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+      "verdict": "OK",
+      "reason": "",
+      "env_matches": true
+    }
+  ]
+}

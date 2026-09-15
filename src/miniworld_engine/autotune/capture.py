@@ -422,6 +422,8 @@ def _install_launch_budget(autotuner) -> None:
             took = time.monotonic() - t0
         except Exception as exc:
             if _fatal_cuda_error(exc):
+                # A poisoned CUDA context cannot be warmed up or benchmarked again.
+                # Keep the first fault and let the outer recorder name its config.
                 raise
             # A config that RAISES is triton's own business: `_bench` catches OutOfResources and
             # friends and scores +inf. Hand it back the call it expected to make.
@@ -2248,8 +2250,7 @@ def dump_shard(path: str, *, unit_complete: bool = False) -> int:
     from miniworld_engine.autotune.shard import provenance
 
     out: dict = {"_key_scheme": KEY_SCHEME, "_has_entries": False,
-                 "_unit_complete": unit_complete,
-                 "_provenance": provenance(gpu_key())}
+                 "_provenance": provenance(gpu_key()), "_unit_complete": unit_complete}
     for op, slot in _CAPTURE.items():
         grid = slot["grid"] or []
         entries = {f"{d}|{b}": [config_to_dict(c, ms) for c, ms in ent.values()]

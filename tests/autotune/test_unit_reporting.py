@@ -55,3 +55,39 @@ def test_completion_requires_a_successful_run_and_capture(monkeypatch, tmp_path,
                         lambda path, **kw: seen.append(kw["unit_complete"]) or 1)
     builder._report_unit(str(tmp_path / "s.json"), complete=ran)
     assert seen == [expected]
+
+
+@pytest.mark.parametrize("pin", [None, "atomic", "persistent"])
+def test_module_child_matches_derived_dispatch(monkeypatch, tmp_path, pin):
+    from types import SimpleNamespace
+
+    import torch
+
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.layernorm import compile_native, dispatch
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.Settings())
+    monkeypatch.setattr(builder, "cases", lambda: [SimpleNamespace(name="transition")])
+    monkeypatch.setattr(capture, "install", lambda: None)
+    monkeypatch.setattr(capture, "load_compile_state", lambda path: 0)
+    monkeypatch.setattr(capture, "set_incremental", lambda value: None)
+    monkeypatch.setattr(capture, "set_round_cache", lambda path: None)
+    monkeypatch.setattr(capture, "shutdown_precompile", lambda: None)
+    monkeypatch.setattr(builder, "_report_unit", lambda *a, **kw: 1)
+    monkeypatch.setattr(dispatch, "lookup", lambda *a: "atomic")
+    observed = []
+
+    def run(*args, **kwargs):
+        x = torch.empty(2, 768, dtype=torch.bfloat16)
+        w = torch.empty(768, dtype=torch.float32)
+        observed.append(compile_native._resolve_bwd_path(2, 768, x, x, w, w, w))
+        assert settings.current().layernorm_dispatch == "off"
+        assert settings.current().biasonly_dispatch == "off"
+        return 1
+
+    monkeypatch.setattr(builder, "run_case", run)
+    argv = ["--case", "transition", "--mode", "train", "--shard", str(tmp_path / "s.json")]
+    if pin:
+        argv += ["--switch", "ln_bwd_path", "--value", pin]
+    assert builder._child_main(argv) == 0
+    assert observed == [pin or "persistent"]

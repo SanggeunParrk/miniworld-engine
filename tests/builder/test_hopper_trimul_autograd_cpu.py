@@ -76,7 +76,7 @@ def test_hopper_trimul_all_gradient_slots_on_cpu(monkeypatch, kind, mask_kind, l
     monkeypatch.setattr(module, "gate_elem_bwd_ew", gate_backward)
     monkeypatch.setattr(bi.dispatch, "bmm", lambda name, a, b: torch.bmm(a, b))
     monkeypatch.setattr(bi.dispatch, "mm", lambda name, a, b: a @ b)
-    monkeypatch.setattr(bi.dispatch, "pick", lambda name, key, cs: dict(cs)["cublas"]())
+    monkeypatch.setattr(bi.dispatch, "pick", lambda name, key, cs, **kw: dict(cs)["cublas"]())
     torch.manual_seed(73)
     d, h = 4, 6 if kind == "bidir" else 4
     shapes = [(1, length, length, d), *[(d, h)] * 4, (d, d), (d, h),

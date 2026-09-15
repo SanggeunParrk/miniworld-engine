@@ -172,7 +172,7 @@ def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:
         seen["cmd"] = cmd
         raise SystemExit(0)          # stop before anything launches
 
-    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    monkeypatch.setattr(builder, "_run_unit_process", fake_run)
     unit = builder.op_units({"gated_projection_gate_triton"})[0]
     for want in (True, False):
         seen.clear()
@@ -277,3 +277,32 @@ def test_build_summary_distinguishes_completed_skipped_and_held(
     else:
         assert "failed or produced no measurements" not in output.err
         assert "failed and" not in output.err
+
+
+@pytest.mark.parametrize("failure", ["none", "coverage", "unit", "merge", "stale"])
+def test_compiled_cache_is_pruned_only_after_certification(spy, tmp_path, monkeypatch, failure):
+    from miniworld_engine.autotune import builder, derive, plan
+
+    events = []
+    monkeypatch.setattr(cli, "_should_prune", lambda args: True)
+    monkeypatch.setattr(cli, "_empty_triton_cache", lambda **kw: events.append("prune") or 0)
+    monkeypatch.setattr(cli, "_merge_built_shards",
+                        lambda *a: events.append("merge") or int(failure == "merge"))
+
+    def coverage(*a):
+        events.append("coverage")
+        return {"missing": [("op", "key")] if failure == "coverage" else []}
+
+    monkeypatch.setattr(derive, "coverage", coverage)
+    if failure == "unit":
+        monkeypatch.setattr(builder, "build_all", lambda *a, **kw: [
+            {"label": "module[miniworld/bfloat16]", "rc": 1, "ops": 1, "log": ""}])
+    if failure == "stale":
+        def stale(*a):
+            raise ValueError("stale plan")
+        monkeypatch.setattr(plan, "load", stale)
+    assert cli.cmd_build(_args(tmp_path)) == int(failure != "none")
+    if failure == "none":
+        assert events == ["merge", "coverage", "prune"]
+    else:
+        assert "prune" not in events

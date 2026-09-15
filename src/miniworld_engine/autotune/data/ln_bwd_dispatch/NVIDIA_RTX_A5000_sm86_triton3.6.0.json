@@ -1,4 +1,11 @@
 {
+  "128|1024": {
+    "ms": {
+      "atomic": 79.498238,
+      "persistent": 22.647808
+    },
+    "path": "persistent"
+  },
   "128|1048576": {
     "ms": {
       "atomic": 1.121657,
@@ -12,6 +19,13 @@
       "persistent": 0.176449
     },
     "path": "atomic"
+  },
+  "128|16384": {
+    "ms": {
+      "atomic": 156.101639,
+      "persistent": 37.496834
+    },
+    "path": "persistent"
   },
   "128|2048": {
     "ms": {
@@ -62,6 +76,13 @@
     },
     "path": "atomic"
   },
+  "256|16384": {
+    "ms": {
+      "atomic": 81.25235,
+      "persistent": 22.322176
+    },
+    "path": "persistent"
+  },
   "256|262144": {
     "ms": {
       "atomic": 0.586547,
@@ -97,12 +118,26 @@
     },
     "path": "atomic"
   },
+  "384|256": {
+    "ms": {
+      "atomic": 79.135742,
+      "persistent": 21.512192
+    },
+    "path": "persistent"
+  },
   "384|262144": {
     "ms": {
       "atomic": 1.388845,
       "persistent": 2.92864
     },
     "path": "atomic"
+  },
+  "384|512": {
+    "ms": {
+      "atomic": 141.109253,
+      "persistent": 21.689344
+    },
+    "path": "persistent"
   },
   "384|524288": {
     "ms": {
@@ -125,6 +160,13 @@
     },
     "path": "atomic"
   },
+  "512|16384": {
+    "ms": {
+      "atomic": 77.593597,
+      "persistent": 20.059135
+    },
+    "path": "persistent"
+  },
   "512|262144": {
     "ms": {
       "atomic": 1.848793,
@@ -146,6 +188,13 @@
     },
     "path": "atomic"
   },
+  "64|1024": {
+    "ms": {
+      "atomic": 133.346298,
+      "persistent": 21.21216
+    },
+    "path": "persistent"
+  },
   "64|2048": {
     "ms": {
       "atomic": 0.012429,
@@ -159,5 +208,26 @@
       "persistent": 0.016243
     },
     "path": "atomic"
+  },
+  "768|128": {
+    "ms": {
+      "atomic": 75.883522,
+      "persistent": 36.124672
+    },
+    "path": "persistent"
+  },
+  "768|256": {
+    "ms": {
+      "atomic": 79.157249,
+      "persistent": 34.030594
+    },
+    "path": "persistent"
+  },
+  "768|512": {
+    "ms": {
+      "atomic": 73.555969,
+      "persistent": 20.227072
+    },
+    "path": "persistent"
   }
 }

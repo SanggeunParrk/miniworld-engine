@@ -58,7 +58,8 @@ def trimul_back_split(tri_bdll, x_n, Wp_nn, Wg_t, ln_w, ln_b, residual, eps=1e-5
     # ② gate: dispatch fused-quack (act(A@B)⊙C, one launch) vs triton (cuBLAS gemm + ew),
     #    cache the per-shape winner (fused wins large L; triton can win tiny L).
     res_flat = residual.reshape(M, N)
-    y = dispatch.pick("gate_infer", dispatch._operand_key(x_n, proj, Wg_t, res_flat),
-                      [("fused", lambda: gate_elem_quack_fused(x_n, proj, Wg_t) + res_flat),
-                       ("triton", lambda: gate_elem_infer(x_n, proj, Wg_t, res_flat))])
+    y = dispatch.pick("gate_infer", (M, N),
+                      [("quack", lambda: gate_elem_quack_fused(x_n, proj, Wg_t) + res_flat),
+                       ("triton", lambda: gate_elem_infer(x_n, proj, Wg_t, res_flat))],
+                      operands=(x_n, proj, Wg_t, res_flat))
     return y.view(B, L, L, N)

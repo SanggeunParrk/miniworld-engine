@@ -1287,7 +1287,10 @@ def _cached_subset(autotuner, configs, nargs, meta):
     data = _load(op, gk)
     if data is None:
         return _miss(op, gk, dtype, "no tuned autotune cache", configs)
-    if data.get("config_space_hash") != config_space_hash(configs):
+    # Capture records the declared grid; shape/device pruning only limits which
+    # of its winners may launch. Comparing the pruned subset falsely invalidates
+    # a valid cache whenever an early prune removes even one unsafe schedule.
+    if data.get("config_space_hash") != config_space_hash(autotuner.configs):
         return _miss(op, gk, dtype,
                      "tuned autotune cache is STALE (kernel config grid changed)", configs)
     if _scheme_stale(op, data.get("key_scheme")):

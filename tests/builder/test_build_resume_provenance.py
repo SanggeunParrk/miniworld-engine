@@ -69,15 +69,17 @@ def test_partial_timings_do_not_mark_a_module_complete(tmp_path, environment, co
     assert json.loads(path.read_text()) == data
 
 
-def test_failed_rebuild_does_not_reuse_an_old_complete_shard(tmp_path, environment, monkeypatch):
+@pytest.mark.parametrize("complete", [False, True])
+def test_failed_rebuild_does_not_reuse_an_old_complete_shard(tmp_path, environment, monkeypatch,
+                                                          complete):
     from types import SimpleNamespace
 
     unit = builder.OpUnit("example_triton", 128)
     path = tmp_path / f"{unit.stem}.json"
     data = {"_has_entries": True, "_provenance": shard.provenance(),
-            "_unit_complete": True, "op": {"entries": {"bf16|128": [{"ms": 1.0}]}}}
+            "_unit_complete": complete, "op": {"entries": {"bf16|128": [{"ms": 1.0}]}}}
     path.write_text(json.dumps(data))
-    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(builder, "_run_unit_process", lambda *a, **kw: SimpleNamespace(returncode=1))
     monkeypatch.setattr(builder, "visible_device", lambda device: "0")
     result = builder._run_unit_subprocess(unit, 0, tmp_path, tmp_path, 1)
     assert result["rc"] == 1

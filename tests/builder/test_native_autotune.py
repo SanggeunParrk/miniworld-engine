@@ -251,7 +251,7 @@ def test_back_half_honors_legacy_config_dictionary(monkeypatch):
         seen.append(kwargs["config"])
         return torch.zeros_like(view)
     monkeypatch.setattr(back_split, "layernorm_linear_cute", lnl)
-    monkeypatch.setattr(back_split.dispatch, "pick", lambda *args: torch.zeros(9, 4))
+    monkeypatch.setattr(back_split.dispatch, "pick", lambda *args, **kwargs: torch.zeros(9, 4))
     pair, w = torch.zeros(1, 3, 3, 4), torch.eye(4)
     back_split.trimul_back_split(pair.permute(0, 3, 1, 2), pair, w, w,
                                 torch.ones(4), torch.zeros(4), pair,

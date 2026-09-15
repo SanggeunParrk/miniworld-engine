@@ -64,10 +64,6 @@ ONE_SIDED: dict[tuple[str, str], str] = {
     ("transition_fwd_b2b_triton", "FUSE_STATS"):
         "settings.py:201 `transition_fuse_stats: bool = False`; read only at fused.py:1412, and "
         "its only setter is builder.SWITCHES, which the per-op `build all` pass never consults",
-    ("layernorm_bwd_foldstats_triton", "PRIVATIZE_DGDB"):
-        "settings.py:213 defaults True and nothing in production sets it; =0 is reachable only "
-        "from a build-harness pin (builder.SWITCHES, module pass only). NOTE fused.py:1141-1143 "
-        "still claims the builder sweeps the False side -- true of that pass, not of `build all`",
     # ---- flags with no caller for the other value --------------------------------------------
     ("transition_fwd_b2b_triton", "SAVE_XN"):
         "every caller passes save_xn=False: modules/transition/module.py:265, :326, "

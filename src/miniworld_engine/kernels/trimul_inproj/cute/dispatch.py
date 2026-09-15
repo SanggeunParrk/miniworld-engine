@@ -11,7 +11,7 @@ benchmarks the candidates ONCE per shape (first call) and caches the winner.
   result. On a HIT: just run the cached winner. Pure thunks only (no input mutation) — the
   losers' outputs are discarded. In-process cache (amortized over a training/inference run).
 
-Env: TRIMUL_DISPATCH=0 disables (always uses candidate[0]); TRIMUL_DISPATCH_LOG=1 prints picks.
+settings.trimul_cute_dispatch=False disables calibration after GPU policy filtering.
 """
 
 from __future__ import annotations
@@ -19,12 +19,23 @@ from __future__ import annotations
 import torch
 import triton
 from miniworld_engine import settings
+from miniworld_engine.build import matrix
+from miniworld_engine.kernels._compile import device_constant
 
 _CACHE: dict[str, dict] = {}
 _LOG = False  # was settings.trimul_dispatch_log: a print toggle nothing set
 
 
-def pick(name, key, candidates):
+@device_constant
+def _cute_allowed(device, dtype, case):
+    """Use the builder's policy before importing or calibrating a CuTe candidate."""
+    if device.type != "cuda":
+        return False
+    sm = matrix.sm_tag(torch.cuda.get_device_capability(device))
+    return matrix.allows(sm, case, "cute", str(dtype).removeprefix("torch."))
+
+
+def pick(name, key, candidates, *, operands, case="triangle_multiplication"):
     """Run the fastest of `candidates` for `key`, caching the choice. candidates: list of
     (label, thunk()->result).
 
@@ -40,9 +51,17 @@ def pick(name, key, candidates):
     found by tests/compile/test_compile_regimes_gpu.py: with a cold cache a pairformer block traced to 6
     graphs, with a warm one to 1, and the whole difference was this function.
     """
+    if not _cute_allowed(operands[0].device, operands[0].dtype, case):
+        candidates = [(label, thunk) for label, thunk in candidates
+                      if label not in ("quack", "cute")]
+    if not candidates:
+        raise RuntimeError(f"{name}: GPU policy excludes every dispatch candidate")
+    # Indices refer to THIS candidate list. A warm winner on another card, dtype,
+    # layout or policy must never select a different (possibly unsupported) backend.
+    key = (key, tuple((t.device, t.dtype, tuple(t.shape), tuple(t.stride())) for t in operands),
+           tuple(label for label, _ in candidates))
     if not settings.current().trimul_cute_dispatch or len(candidates) == 1:
         return candidates[0][1]()
-    key = (torch.cuda.current_device(), tuple(label for label, _ in candidates), key)
     idx = _CACHE.get(name, {}).get(key)          # plain read: no setdefault, no mutation
     if idx is None:
         if torch.compiler.is_compiling():
@@ -76,22 +95,18 @@ def reset():
 
 
 # --- GEMM/bmm primitives that dispatch cuBLAS vs quack (cute) per shape ----------------------
-# Generic so EVERY matmul in the pipeline can autotune its backend. quack candidates lazy-import
-# and are guarded by pick()'s try/except — a shape quack can't take (e.g. odd strides) just
-# scores inf and cuBLAS is chosen. dW huge-K reductions reliably pick cuBLAS; M-major input-grad
+# Generic so EVERY matmul in the pipeline can autotune its backend. Policy filtering precedes
+# Quack import; _calibrate() handles failures of supported candidates (e.g. odd strides).
+# A failing candidate scores inf and cuBLAS is chosen. dW huge-K reductions reliably pick cuBLAS; M-major input-grad
 # GEMMs can pick quack. Keys include the operand shapes so each distinct matmul caches its own.
-
-def _operand_key(*tensors):
-    return tuple((tuple(t.shape), tuple(t.stride()), str(t.dtype), str(t.device)) for t in tensors)
-
 
 def mm(name, A, B):
     """A @ B, dispatched cuBLAS vs quack."""
     def _q():
         from miniworld_engine.kernels._quack_compat import gemm as qg
         return qg(A, B)
-    return pick(name, _operand_key(A, B),
-                [("cublas", lambda: A @ B), ("quack", _q)])
+    return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
+                [("cublas", lambda: A @ B), ("quack", _q)], operands=(A, B))
 
 
 def addmm(name, C, A, B):
@@ -99,8 +114,8 @@ def addmm(name, C, A, B):
     def _q():
         from miniworld_engine.kernels._quack_compat import gemm_act as qga
         return qga(A, B, C=C, activation=None, store_preact=False)[1]
-    return pick(name, _operand_key(C, A, B),
-                [("cublas", lambda: torch.addmm(C, A, B)), ("quack", _q)])
+    return pick(name, (A.shape[-2], A.shape[-1], B.shape[-1]),
+                [("cublas", lambda: torch.addmm(C, A, B)), ("quack", _q)], operands=(A, B, C))
 
 
 def bmm(name, A, B):
@@ -108,5 +123,5 @@ def bmm(name, A, B):
     def _q():
         from miniworld_engine.kernels._quack_compat import gemm as qg
         return qg(A, B)
-    return pick(name, _operand_key(A, B),
-                [("cublas", lambda: torch.bmm(A, B)), ("quack", _q)])
+    return pick(name, (A.shape[0], A.shape[-2], A.shape[-1], B.shape[-1]),
+                [("cublas", lambda: torch.bmm(A, B)), ("quack", _q)], operands=(A, B))
