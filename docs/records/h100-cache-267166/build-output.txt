@@ -1,0 +1,1491 @@
+Sat Sep 12 19:39:40 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.65.06              Driver Version: 580.65.06      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  |   00000000:9B:00.0 Off |                    0 |
+| N/A   70C    P0            159W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H100 80GB HBM3          On  |   00000000:BB:00.0 Off |                    0 |
+| N/A   26C    P0             68W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H100 80GB HBM3          On  |   00000000:CB:00.0 Off |                    0 |
+| N/A   28C    P0             69W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H100 80GB HBM3          On  |   00000000:DB:00.0 Off |                    0 |
+| N/A   24C    P0             68W /  700W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+..........................................                               [100%]
+=============================== warnings summary ===============================
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 800 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_saveact_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'gated_projection_gate_dropres_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'gated_projection_bwd_gate_dropres_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_atomic_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 288 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_bwd_gate_packed_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 210 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_training_fused_mask_output_and_all_gradients[none-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_atomic_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_inference_fused_mask_preserves_reference[holes-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'gated_projection_gate_packed_flat_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 84 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_inference_fused_mask_preserves_reference[holes-128-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_outproj_layernorm_gemm_gate_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 432 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_inference_fused_mask_preserves_reference[holes-128-bidir]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_mmajor_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 640 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_trimul_fused_mask.py::test_inference_fused_mask_preserves_reference[holes-128-bidir]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'gated_projection_gate_res_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+42 passed, 11 warnings in 929.94s (0:15:29)
+...                                                                      [100%]
+=============================== warnings summary ===============================
+tests/numerics/test_training_dropout.py: 14 warnings
+  /home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 800 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_saveact_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'gated_projection_gate_dropres_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'gated_projection_bwd_gate_dropres_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_atomic_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 288 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_bwd_gate_packed_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 210 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_training_dropout.py::test_compiled_dropout_matches_full_reference_gradient_and_restores_rng[miniworld-outgoing]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_atomic_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 7 deselected, 21 warnings in 44.33s
+................................s...................                     [100%]
+=============================== warnings summary ===============================
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_bwd_gemm_swiglu_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_bwd_gemm_swiglu_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 2880 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_bwd_swiglu_flat_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_bwd_swiglu_flat_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 112 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_expand_swiglu_saveact_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_expand_swiglu_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 360 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_expand_swiglu_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_expand_swiglu_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 540 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_fwd_b2b_saveact_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_fwd_b2b_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 2160 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_fwd_b2b_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_fwd_b2b_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 1296 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_squeeze_gate_saveact_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_squeeze_gate_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 960 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_squeeze_gate_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_squeeze_gate_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 960 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[cond_transition_swiglu_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'cond_transition_swiglu_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 105 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_atomic_strided_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_atomic_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 288 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_atomic_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_atomic_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_foldstats_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_stats_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_foldstats_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_foldstats_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 512 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_reduce_cuda]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/kernels/layernorm/cuda/__init__.py:88: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_split_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    config = choose_config("layernorm_bwd_split_cuda", grid, dtype=str(x.dtype),
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_split_mmajor_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_split_mmajor_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_bwd_split_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_bwd_split_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 400 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_cuda]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/kernels/layernorm/cuda/__init__.py:59: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    config = choose_config("layernorm_fwd_cuda", grid, dtype=str(x.dtype),
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_mmajor_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_mmajor_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 640 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_recompute_foldstats_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_recompute_foldstats_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 360 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_recompute_noaffine_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_recompute_noaffine_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 720 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_recompute_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_recompute_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 480 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_rowscale_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_rowscale_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 640 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_saveact_strided_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_saveact_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1440 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_saveact_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 800 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_fwd_strided_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_fwd_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 320 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_linear_bwd_fp32_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_fp32_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1134 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_linear_bwd_fp32_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_bwd_fp32_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1134 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_linear_fwd_sm90_cute]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[layernorm_linear_fwd_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 240 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_bwd_epilogue_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_epilogue_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 168 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_bwd_swiglu_gate_sm100_cute]
+  /home/psk6950/miniworld-engine/.pixi/envs/default/lib/python3.12/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/base_dsl/_mlir_helpers/op.py:121: DeprecationWarning: make_trivial_tiled_mma with ab_dtype is deprecated, use the overload with separate a_dtype and b_dtype instead
+    res_or_list = opFunc(*args, **kwargs, loc=loc)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_bwd_swiglu_recompute_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_swiglu_recompute_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1080 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_bwd_transpose_packed_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_transpose_packed_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 720 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_expand_swiglu_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_expand_swiglu_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 1296 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_fold_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fold_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 576 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_fwd_b2b_ktiled_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fwd_b2b_ktiled_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1134 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_fwd_b2b_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fwd_b2b_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 560 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[transition_layernorm_expand_swiglu_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_layernorm_expand_swiglu_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 864 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_bwd_gate_packed_recompute_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_bwd_gate_packed_recompute_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 84 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_bwd_gate_packed_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_bwd_gate_packed_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 210 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_bwd_gate_recompute_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_bwd_gate_recompute_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 576 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_gemm_gate_mmajor_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_gemm_gate_mmajor_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 864 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_gemm_gate_saveact_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_gemm_gate_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 1296 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_gemm_gate_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_gemm_gate_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 576 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_outproj_bwd_gate_recompute_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_outproj_bwd_gate_recompute_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 864 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_outproj_gemm_gate_saveact_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_outproj_gemm_gate_saveact_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32). Falling back to a heuristic 24 of 864 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_outproj_gemm_gate_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_outproj_gemm_gate_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 1080 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/numerics/test_numerical.py::test_kernel_matches_its_reference[trimul_outproj_layernorm_gemm_gate_triton]
+  /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cache.py:1381: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'trimul_outproj_layernorm_gemm_gate_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to a heuristic 24 of 432 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+51 passed, 1 skipped, 43 deselected, 48 warnings in 506.05s (0:08:26)
+config set /home/psk6950/miniworld-engine/src/miniworld_engine/autotune/configs/grid: 83/83 ops covered
+Refreshing kernel plan for sm_90; no tuning runs until it is verified.
+53 module rows -> 5750 invocations to record
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/transition/cuda/__init__.py:44: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fwd_b2b_sm90_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  config = choose_config(
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/adaln/triton/inference.py:427: UserWarning: Accessing the data pointer of FakeTensor is deprecated and will error in PyTorch 2.5. This is almost definitely a bug in your code and will cause undefined behavior with subsystems like torch.compile. Please wrap calls to tensor.data_ptr() in an opaque custom op; If all else fails, you can guard accesses to tensor.data_ptr() on isinstance(tensor, FakeTensor). (Triggered internally at /pytorch/c10/core/StorageImpl.cpp:34.)
+  key = (tuple((t.data_ptr(), t._version) for t in srcs), x.dtype)
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_foldstats_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_dx_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/transition/cuda/__init__.py:44: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fwd_b2b_sm90_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  config = choose_config(
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_dx_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_swiglu_fwd_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_gate_bwd_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_swiglu_fwd_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/transition/cuda/__init__.py:44: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_gate_sm90_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  config = choose_config(
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/transition/cuda/__init__.py:44: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fwd_b2b_sm90_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  config = choose_config(
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_swiglu_fwd_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/transition/cuda/__init__.py:44: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_bwd_gate_sm90_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  config = choose_config(
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/adaln/triton/inference.py:427: UserWarning: Accessing the data pointer of FakeTensor is deprecated and will error in PyTorch 2.5. This is almost definitely a bug in your code and will cause undefined behavior with subsystems like torch.compile. Please wrap calls to tensor.data_ptr() in an opaque custom op; If all else fails, you can guard accesses to tensor.data_ptr() on isinstance(tensor, FakeTensor). (Triggered internally at /pytorch/c10/core/StorageImpl.cpp:34.)
+  key = (tuple((t.data_ptr(), t._version) for t in srcs), x.dtype)
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_foldstats_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_swiglu_fwd_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/adaln/triton/inference.py:427: UserWarning: Accessing the data pointer of FakeTensor is deprecated and will error in PyTorch 2.5. This is almost definitely a bug in your code and will cause undefined behavior with subsystems like torch.compile. Please wrap calls to tensor.data_ptr() in an opaque custom op; If all else fails, you can guard accesses to tensor.data_ptr() on isinstance(tensor, FakeTensor). (Triggered internally at /pytorch/c10/core/StorageImpl.cpp:34.)
+  key = (tuple((t.data_ptr(), t._version) for t in srcs), x.dtype)
+/home/psk6950/miniworld-engine/src/miniworld_engine/autotune/cute_config.py:93: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_foldstats_sm90_cute' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+derive: 1344 invocations recorded, 0 errors
+derive: 3050 invocations recorded, 0 errors
+derive: 4400 invocations recorded, 0 errors
+derive: 5750 invocations recorded, 0 errors
+
+1149 rows written to /home/psk6950/miniworld-engine/.scratch/h100-build/plans/sm90/aac9e0461fb7695a36aa07548cc0b33f5c4695c8d9fd7f1f8158be3875d6ea61/derive-zbnt87ey/registry_kernel.csv
+  62 kernels, arch sm_90
+driver sweep: 2048 (op, shape, width) items — 22 kernel(s) no module dispatches to
+/home/psk6950/miniworld-engine/src/miniworld_engine/kernels/transition/cuda/__init__.py:44: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'transition_fwd_b2b_sm90_cuda' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  config = choose_config(
+verified cache plan: 411 of 5750 module units cover 1149 missing keys
+build: 21 case(s), 411 unit(s), 4 gpu(s) -> /home/psk6950/miniworld-engine/.scratch/h100-build/shards
+  sm_90: 3 case/impl/dtype combination(s) not built here (build/gpu_to_kernels/sm_90.csv)
+    - triangle_multiplication[cute/float32]: the trimul fused path is bf16-only, same miss: 180 fp32 units produced 0 ops (builds 1628031/1628032).
+    - triangle_multiplication[miniworld/float32]: the trimul fused path is bf16-only, same miss: 180 fp32 units produced 0 ops (builds 1628031/1628032).
+    - triangle_multiplication[triton/float32]: the trimul fused path is bf16-only, same miss: 180 fp32 units produced 0 ops (builds 1628031/1628032).
+  [cores] 4 slot(s), 28 core(s) each, shared with no other slot
+  [gpu1] ok    pairformer_block[miniworld/bfloat16] dims#1 L=512 train trimul_impl=triton  1647.4s  18 ops
+  [gpu0] ok    pairformer_block[miniworld/bfloat16] dims#0 L=384 train trimul_impl=triton  2527.3s  18 ops
+  [gpu1] ok    pairformer_block[miniworld/bfloat16] dims#0 L=128 train trimul_impl=triton  1258.7s  16 ops
+  [gpu2] ok    pairformer_block[miniworld/bfloat16] dims#0 L=640 train trimul_impl=triton  2919.1s  18 ops
+  [gpu3] ok    pairformer_block[miniworld/bfloat16] dims#0 L=768 train trimul_impl=triton  2942.2s  18 ops
+  [gpu0] ok    pairformer_block[miniworld/bfloat16] dims#0 L=256 train trimul_impl=triton  1270.4s  16 ops
+  [gpu2] ok    pairformer_block[miniworld/bfloat16] dims#1 L=640 train trimul_impl=triton  1183.2s  18 ops
+  [gpu1] ok    pairformer_block[miniworld/bfloat16] dims#0 L=512 train trimul_impl=triton  1685.3s  18 ops
+  [gpu3] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=128 train  1813.3s  9 ops
+  [gpu0] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=256 train  1257.5s  9 ops
+  [gpu2] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=384 train  1267.1s  9 ops
+  [gpu1] ok    pairformer_block[miniworld/bfloat16] dims#1 L=384 train trimul_impl=triton  976.7s  18 ops
+  [gpu3] ok    pairformer_block[miniworld/bfloat16] dims#1 L=768 train trimul_impl=triton  1216.4s  18 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=128 train  975.1s  8 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=128 train trimul_impl=triton  1498.9s  8 ops
+  [gpu3] ok    conditioned_transition[miniworld/float32] dims#1 L=256 train  811.0s  8 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=256 train trimul_impl=triton  1432.5s  8 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=384 train  761.9s  8 ops
+  [gpu2] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#0 L=8192 train  490.8s  4 ops
+  [gpu0] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#0 L=1024 train  1054.8s  8 ops
+  [gpu3] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#0 L=2048 train  854.2s  8 ops
+  [gpu1] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#0 L=4096 train  990.2s  8 ops
+  [gpu0] ok    pairformer_block[miniworld/bfloat16] dims#1 L=128 train trimul_impl=triton  887.1s  16 ops
+  [gpu1] ok    pairformer_block[miniworld/bfloat16] dims#1 L=256 train trimul_impl=triton  935.2s  16 ops
+  [gpu0] ok    triangle_attention_heads[miniworld/bfloat16] dims#0 L=384 train ln_bwd_path=persistent  923.7s  8 ops
+  [gpu0] ok    triangle_attention_heads[miniworld/bfloat16] dims#0 L=512 train ln_bwd_path=persistent  576.6s  8 ops
+  [gpu2] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=128 train  2507.5s  9 ops
+  [gpu3] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=256 train  2470.5s  9 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=384 train  1578.1s  9 ops
+  [gpu3] ok    triangle_attention_heads[miniworld/bfloat16] dims#0 L=640 train ln_bwd_path=persistent  485.9s  8 ops
+  [gpu0] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=512 train  1288.4s  9 ops
+  [gpu2] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=640 train trimul_impl=triton  1413.3s  8 ops
+  [gpu1] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=640 train  1300.3s  9 ops
+  [gpu0] ok    triangle_attention_heads[miniworld/bfloat16] dims#0 L=768 train ln_bwd_path=persistent  600.8s  8 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->float32] dims#0 L=1024 train  834.8s  8 ops
+  [gpu0] ok    augmented_attention[miniworld/float32->float32] dims#0 L=2048 train  758.9s  8 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=768 train trimul_impl=triton  2158.1s  8 ops
+  [gpu2] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=768 train  1322.9s  9 ops
+  [gpu0] FAIL  augmented_attention[miniworld/float32->float32] dims#0 L=8192 train  689.4s  4 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->float32] dims#0 L=4096 train  925.8s  8 ops
+  [gpu3] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=384 train trimul_impl=triton  1134.5s  8 ops
+  [gpu0] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#2 L=512 train  702.9s  6 ops
+  [gpu2] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=512 train trimul_impl=triton  1215.8s  8 ops
+  [gpu1] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#2 L=640 train  658.9s  6 ops
+  [gpu3] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#2 L=768 train  679.1s  6 ops
+  [gpu0] ok    augmented_attention[miniworld/float32->float32] dims#1 L=128 train  705.0s  8 ops
+  [gpu2] ok    augmented_attention[miniworld/float32->float32] dims#1 L=256 train  687.8s  8 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->float32] dims#1 L=384 train  522.7s  8 ops
+  [gpu3] ok    augmented_attention[miniworld/float32->float32] dims#1 L=512 train  747.7s  8 ops
+  [gpu0] ok    augmented_attention[miniworld/float32->float32] dims#2 L=512 train  700.0s  8 ops
+  [gpu2] ok    augmented_attention[miniworld/float32->float32] dims#1 L=640 train  762.4s  8 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->float32] dims#2 L=640 train  848.2s  8 ops
+  [gpu3] ok    augmented_attention[miniworld/float32->float32] dims#1 L=768 train  789.3s  8 ops
+  [gpu0] ok    augmented_attention[miniworld/float32->float32] dims#2 L=768 train  768.2s  8 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#2 L=128 train transition_lnbwd_cuda=False  732.2s  4 ops
+  [gpu1] ok    triangle_attention_heads[miniworld/bfloat16] dims#0 L=128 train  60.5s  4 ops
+  [gpu1] ok    triangle_attention_heads[miniworld/bfloat16] dims#2 L=128 train  96.6s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#2 L=128 train transition_force_split=True  1123.4s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#3 L=128 train transition_force_split=True  631.6s  4 ops
+  [gpu1] ok    conditioned_transition[miniworld/float32] dims#1 L=128 eval  470.6s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=128 train  890.9s  6 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#2 L=256 train transition_force_split=True  780.2s  4 ops
+  [gpu2] ok    triangle_attention_heads[miniworld/bfloat16] dims#0 L=256 train  68.5s  4 ops
+  [gpu2] ok    triangle_attention_heads[miniworld/bfloat16] dims#2 L=256 train  68.5s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#3 L=256 train transition_force_split=True  623.6s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#2 L=256 train transition_lnbwd_cuda=False  1060.7s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=256 eval  397.5s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=256 train transition_force_split=True  1005.7s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#2 L=384 train transition_force_split=True  963.8s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#3 L=384 train transition_force_split=True  628.5s  4 ops
+  [gpu1] ok    triangle_attention_heads[miniworld/bfloat16] dims#2 L=384 train  75.3s  8 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=384 train transition_force_split=True  743.4s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=384 eval  403.9s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#2 L=384 train transition_lnbwd_cuda=False  1707.7s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#3 L=512 train transition_force_split=True  623.5s  4 ops
+  [gpu2] ok    triangle_attention_heads[miniworld/bfloat16] dims#2 L=512 train  92.4s  8 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#2 L=512 train transition_force_split=True  1256.1s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=512 eval  403.1s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#4 L=512 train transition_force_split=True  745.4s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#3 L=640 train transition_force_split=True  623.0s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#2 L=640 train transition_force_split=True  1644.5s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#4 L=640 train transition_force_split=True  746.0s  4 ops
+  [gpu1] ok    triangle_attention_heads[miniworld/bfloat16] dims#2 L=640 train  126.5s  8 ops
+  [gpu3] ok    conditioned_transition[miniworld/float32] dims#1 L=640 eval  405.9s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#2 L=512 train transition_lnbwd_cuda=False  4218.9s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#3 L=768 train transition_force_split=True  618.0s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#2 L=768 train transition_force_split=True  2116.5s  4 ops
+  [gpu1] ok    triangle_attention_heads[miniworld/bfloat16] dims#2 L=768 train  171.8s  8 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#2 L=640 train transition_lnbwd_cuda=False  3899.7s  4 ops
+  [gpu2] ok    swa_atom_attention[miniworld/bfloat16] dims#0 L=2048 train  53.3s  4 ops
+  [gpu1] ok    conditioned_transition[miniworld/float32] dims#1 L=768 eval  407.6s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=768 train transition_force_split=True  750.8s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#3 L=128 train transition_lnbwd_cuda=False  593.4s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=128 eval  259.2s  4 ops
+  [gpu0] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#0 L=128 train ln_bwd_path=persistent  333.1s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#4 L=128 train transition_force_split=True  741.3s  4 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=128 eval trimul_out_layout=bdll_direct  449.6s  4 ops
+  [gpu1] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#2 L=128 train  70.7s  6 ops
+  [gpu2] ok    augmented_attention[miniworld/bfloat16->float32] dims#2 L=128 train  101.0s  9 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=128 eval  424.2s  4 ops
+  [gpu0] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=128 train gate_backend=fused  754.4s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#3 L=256 train transition_lnbwd_cuda=False  600.1s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#4 L=256 train transition_large_d_training=cute  371.9s  7 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=256 eval  175.6s  4 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=256 eval trimul_out_layout=bdll_direct  303.5s  4 ops
+  [gpu2] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#2 L=256 train  71.1s  6 ops
+  [gpu2] ok    augmented_attention[miniworld/bfloat16->float32] dims#2 L=256 train  112.2s  9 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#0 L=256 train ln_bwd_path=persistent  347.2s  4 ops
+  [gpu0] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=256 train gate_backend=fused  469.0s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=256 eval  370.5s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=384 train transition_large_d_training=cute  349.2s  7 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=384 eval  172.9s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#3 L=384 train transition_lnbwd_cuda=False  596.8s  4 ops
+  [gpu1] FAIL  augmented_attention[miniworld/bfloat16->bfloat16] dims#2 L=384 train  74.7s  6 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=384 eval trimul_out_layout=bdll_direct  306.7s  4 ops
+  [gpu1] ok    augmented_attention[miniworld/bfloat16->float32] dims#2 L=384 train  130.7s  9 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=384 train gate_backend=fused  514.9s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#2 L=768 train transition_lnbwd_cuda=False  5373.8s  4 ops
+  [gpu0] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=384 eval  373.9s  4 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=512 eval  183.9s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#3 L=512 train transition_lnbwd_cuda=False  596.2s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#4 L=512 train transition_large_d_training=cute  357.5s  7 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=512 eval trimul_out_layout=bdll_direct  315.1s  4 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=512 eval  371.8s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=640 train transition_large_d_training=cute  349.3s  7 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=512 train gate_backend=fused  607.3s  4 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=640 eval  186.7s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#3 L=640 train transition_lnbwd_cuda=False  597.2s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=640 eval trimul_out_layout=bdll_direct  322.3s  4 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=640 eval  372.3s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=768 train transition_large_d_training=cute  349.9s  7 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=768 eval  189.9s  4 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#3 L=768 train transition_lnbwd_cuda=False  599.9s  4 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=640 train gate_backend=fused  734.8s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=768 eval trimul_out_layout=bdll_direct  331.8s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=768 eval  374.6s  4 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=768 train gate_backend=fused  894.5s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#0 L=128 train transition_force_split=True  646.4s  4 ops
+  [gpu3] ok    conditioned_transition[miniworld/float32] dims#0 L=2048 train  1848.7s  7 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=128 train transition_force_split=True  641.6s  4 ops
+  [gpu3] ok    triangle_multiplication[miniworld/bfloat16] dims#0 L=128 eval trimul_impl=triton  275.4s  3 ops
+  [gpu0] ok    conditioned_transition[miniworld/float32] dims#0 L=4096 train  2116.5s  7 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#1 L=128 eval trimul_impl=triton  325.9s  3 ops
+  [gpu3] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=128 eval trimul_impl=triton  442.3s  3 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=128 eval trimul_impl=triton  276.4s  3 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#0 L=8192 train  2346.4s  7 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=128 eval trimul_impl=triton  344.1s  3 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=128 eval  336.7s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=128 eval trimul_impl=triton  437.7s  3 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=128 train trimul_impl=triton  574.8s  8 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=128 train gate_backend=fused  612.5s  4 ops
+  [gpu2] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#0 L=128 train  296.0s  2 ops
+  [gpu0] ok    adaptive_layernorm[miniworld/float32] dims#1 L=128 train  616.0s  4 ops
+  [gpu1] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#1 L=128 train  497.1s  2 ops
+  [gpu2] ok    tm1[miniworld/bfloat16] dims#0 L=128 train  385.1s  2 ops
+  [gpu3] ok    adaptive_layernorm[miniworld/bfloat16] dims#1 L=128 train  1078.9s  5 ops
+  [gpu0] ok    tm1[miniworld/bfloat16] dims#1 L=128 train  395.7s  2 ops
+  [gpu3] ok    gated_projection[miniworld/bfloat16] dims#0 L=128 train  319.8s  2 ops
+  [gpu0] ok    gated_projection[miniworld/bfloat16] dims#1 L=128 train  321.7s  2 ops
+  [gpu1] ok    tm2[miniworld/bfloat16] dims#0 L=128 train  568.1s  2 ops
+  [gpu2] ok    tm2[miniworld/bfloat16] dims#1 L=128 train  560.3s  2 ops
+  [gpu3] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#0 L=128 train  403.7s  2 ops
+  [gpu0] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#1 L=128 train  439.9s  2 ops
+  [gpu3] ok    triangle_multiplication[miniworld/bfloat16] dims#0 L=256 eval trimul_impl=triton  180.7s  3 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#0 L=256 train transition_force_split=True  567.5s  4 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#1 L=256 eval trimul_impl=triton  194.7s  3 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#1 L=256 train transition_force_split=True  610.6s  4 ops
+  [gpu3] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=256 eval trimul_impl=triton  266.2s  3 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=256 eval trimul_impl=triton  190.6s  3 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=256 eval trimul_impl=triton  199.7s  3 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=256 eval  298.4s  4 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=256 train trimul_impl=triton  475.0s  8 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=256 eval trimul_impl=triton  316.2s  3 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=256 train gate_backend=fused  353.5s  4 ops
+  [gpu0] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#0 L=256 train  283.8s  2 ops
+  [gpu2] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#1 L=256 train  291.4s  2 ops
+  [gpu0] ok    tm1[miniworld/bfloat16] dims#0 L=256 train  217.5s  2 ops
+  [gpu1] ok    adaptive_layernorm[miniworld/float32] dims#1 L=256 train  620.7s  4 ops
+  [gpu2] ok    tm1[miniworld/bfloat16] dims#1 L=256 train  224.8s  2 ops
+  [gpu0] ok    tm2[miniworld/bfloat16] dims#0 L=256 train  367.9s  2 ops
+  [gpu2] ok    gated_projection[miniworld/bfloat16] dims#0 L=256 train  214.8s  2 ops
+  [gpu1] ok    tm2[miniworld/bfloat16] dims#1 L=256 train  373.5s  2 ops
+  [gpu3] ok    adaptive_layernorm[miniworld/bfloat16] dims#1 L=256 train  1075.0s  5 ops
+  [gpu0] ok    gated_projection[miniworld/bfloat16] dims#1 L=256 train  216.4s  2 ops
+  [gpu2] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#0 L=256 train  301.0s  2 ops
+  [gpu1] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#1 L=256 train  311.8s  2 ops
+  [gpu2] ok    triangle_multiplication[miniworld/bfloat16] dims#0 L=384 eval trimul_impl=triton  186.0s  3 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#1 L=384 eval trimul_impl=triton  200.9s  3 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#0 L=384 train transition_force_split=True  529.4s  4 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=384 eval trimul_impl=triton  191.4s  3 ops
+  [gpu2] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=384 eval trimul_impl=triton  297.8s  3 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=384 eval trimul_impl=triton  216.1s  3 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#1 L=384 train transition_force_split=True  783.0s  4 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=384 eval  306.6s  4 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=384 eval trimul_impl=triton  345.3s  3 ops
+  [gpu0] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=384 train gate_backend=fused  344.8s  4 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=384 train trimul_impl=triton  700.1s  8 ops
+  [gpu2] ok    adaptive_layernorm[miniworld/float32] dims#1 L=384 train  621.3s  4 ops
+  [gpu3] ok    tm1[miniworld/bfloat16] dims#0 L=384 train  223.6s  2 ops
+  [gpu2] ok    tm1[miniworld/bfloat16] dims#1 L=384 train  191.8s  2 ops
+  [gpu0] ok    pairformer_block[miniworld/bfloat16] dims#1 L=384 train gate_backend=fused  639.2s  17 ops
+  [gpu3] ok    tm2[miniworld/bfloat16] dims#0 L=384 train  320.1s  2 ops
+  [gpu1] ok    adaptive_layernorm[miniworld/bfloat16] dims#1 L=384 train  1073.6s  5 ops
+  [gpu0] ok    gated_projection[miniworld/bfloat16] dims#0 L=384 train  217.4s  2 ops
+  [gpu3] ok    gated_projection[miniworld/bfloat16] dims#1 L=384 train  221.6s  2 ops
+  [gpu2] ok    tm2[miniworld/bfloat16] dims#1 L=384 train  394.8s  2 ops
+  [gpu1] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#0 L=384 train  309.4s  2 ops
+  [gpu0] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#1 L=384 train  328.9s  2 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#0 L=512 eval trimul_impl=triton  191.9s  3 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#1 L=512 eval trimul_impl=triton  233.3s  3 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#0 L=512 train transition_force_split=True  515.8s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=512 eval trimul_impl=triton  210.1s  3 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=512 eval trimul_impl=triton  346.6s  3 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=512 eval trimul_impl=triton  237.9s  3 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#1 L=512 train transition_force_split=True  818.3s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=512 eval  329.8s  4 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=512 eval trimul_impl=triton  436.1s  3 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=512 train gate_backend=fused  353.0s  4 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=512 train trimul_impl=triton  810.6s  8 ops
+  [gpu3] ok    conditioned_transition[miniworld/float32] dims#1 L=512 train  65.8s  8 ops
+  [gpu1] ok    adaptive_layernorm[miniworld/float32] dims#1 L=512 train  622.2s  4 ops
+  [gpu3] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#0 L=512 train  292.7s  2 ops
+  [gpu1] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#1 L=512 train  292.3s  2 ops
+  [gpu0] ok    adaptive_layernorm[miniworld/bfloat16] dims#1 L=512 train  1069.4s  5 ops
+  [gpu2] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=512 train  1044.9s  9 ops
+  [gpu1] ok    tm1[miniworld/bfloat16] dims#0 L=512 train  237.5s  2 ops
+  [gpu0] ok    tm1[miniworld/bfloat16] dims#1 L=512 train  257.9s  2 ops
+  [gpu3] ok    pairformer_block[miniworld/bfloat16] dims#1 L=512 train gate_backend=fused  356.7s  17 ops
+  [gpu0] ok    gated_projection[miniworld/bfloat16] dims#0 L=512 train  222.0s  2 ops
+  [gpu3] ok    gated_projection[miniworld/bfloat16] dims#1 L=512 train  225.3s  2 ops
+  [gpu2] ok    tm2[miniworld/bfloat16] dims#0 L=512 train  330.1s  2 ops
+  [gpu1] ok    tm2[miniworld/bfloat16] dims#1 L=512 train  356.6s  2 ops
+  [gpu0] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#0 L=512 train  318.9s  2 ops
+  [gpu3] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#1 L=512 train  338.0s  2 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#0 L=640 eval trimul_impl=triton  208.9s  3 ops
+  [gpu3] ok    triangle_multiplication[miniworld/bfloat16] dims#1 L=640 eval trimul_impl=triton  231.2s  3 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#0 L=640 train transition_force_split=True  570.1s  4 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=640 eval trimul_impl=triton  210.1s  3 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=640 eval trimul_impl=triton  269.1s  3 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=640 eval trimul_impl=triton  535.9s  3 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=640 train transition_force_split=True  979.7s  4 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=640 eval  325.2s  4 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=640 eval trimul_impl=triton  569.2s  3 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=640 train gate_backend=fused  390.5s  4 ops
+  [gpu2] ok    adaptive_layernorm[miniworld/float32] dims#1 L=640 train  617.4s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=640 train  65.7s  8 ops
+  [gpu3] ok    adaptive_layernorm[miniworld/bfloat16] dims#1 L=640 train  1072.0s  5 ops
+  [gpu3] ok    tm1[miniworld/bfloat16] dims#0 L=640 train  246.6s  2 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=640 train trimul_impl=triton  1428.9s  8 ops
+  [gpu2] ok    pairformer_block[miniworld/bfloat16] dims#1 L=640 train gate_backend=fused  368.8s  17 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=640 train  1064.0s  9 ops
+  [gpu3] ok    tm1[miniworld/bfloat16] dims#1 L=640 train  254.9s  2 ops
+  [gpu1] ok    gated_projection[miniworld/bfloat16] dims#0 L=640 train  226.0s  2 ops
+  [gpu0] ok    tm2[miniworld/bfloat16] dims#0 L=640 train  361.0s  2 ops
+  [gpu2] ok    tm2[miniworld/bfloat16] dims#1 L=640 train  380.8s  2 ops
+  [gpu3] ok    gated_projection[miniworld/bfloat16] dims#1 L=640 train  228.1s  2 ops
+  [gpu1] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#0 L=640 train  323.5s  2 ops
+  [gpu0] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#1 L=640 train  368.7s  2 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#0 L=768 eval trimul_impl=triton  204.8s  3 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#1 L=768 eval trimul_impl=triton  295.8s  3 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#0 L=768 train transition_force_split=True  635.4s  4 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=768 eval trimul_impl=triton  221.3s  3 ops
+  [gpu1] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=768 eval trimul_impl=triton  501.6s  3 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=768 eval trimul_impl=triton  307.4s  3 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#1 L=768 train transition_force_split=True  1209.5s  4 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=768 eval  338.5s  4 ops
+  [gpu0] ok    triangle_multiplication[miniworld/bfloat16] dims#2 L=768 train trimul_impl=triton  1010.2s  8 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=768 train gate_backend=fused  434.7s  4 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#2 L=768 eval trimul_impl=triton  714.8s  3 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#1 L=768 train  66.5s  8 ops
+  [gpu0] ok    adaptive_layernorm[miniworld/float32] dims#1 L=768 train  612.5s  4 ops
+  [gpu1] ok    adaptive_layernorm[miniworld/bfloat16] dims#1 L=768 train  1073.5s  5 ops
+  [gpu2] ok    pairformer_block[miniworld/bfloat16] dims#1 L=768 train gate_backend=fused  382.7s  17 ops
+  [gpu0] ok    tm1[miniworld/bfloat16] dims#0 L=768 train  284.5s  2 ops
+  [gpu1] ok    tm1[miniworld/bfloat16] dims#1 L=768 train  302.1s  2 ops
+  [gpu2] ok    tm2[miniworld/bfloat16] dims#0 L=768 train  359.2s  2 ops
+  [gpu3] ok    conditioned_transition[miniworld/bfloat16] dims#1 L=768 train  1084.1s  9 ops
+  [gpu1] ok    gated_projection[miniworld/bfloat16] dims#0 L=768 train  226.2s  2 ops
+  [gpu2] ok    gated_projection[miniworld/bfloat16] dims#1 L=768 train  230.5s  2 ops
+  [gpu0] ok    tm2[miniworld/bfloat16] dims#1 L=768 train  490.5s  2 ops
+  [gpu3] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#0 L=768 train  332.7s  2 ops
+  [gpu2] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=1024 eval  249.7s  2 ops
+  [gpu1] ok    layernorm_linear_pair_bias[miniworld/bfloat16] dims#1 L=768 train  377.8s  2 ops
+  [gpu1] ok    swa_atom_attention[miniworld/bfloat16] dims#0 L=1024 eval  17.0s  2 ops
+  [gpu1] ok    swa_atom_attention[miniworld/bfloat16] dims#0 L=1024 train  51.4s  4 ops
+  [gpu3] ok    conditioned_transition[miniworld/float32] dims#0 L=1024 eval  261.5s  2 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=2048 eval  215.3s  2 ops
+  [gpu1] ok    conditioned_transition[miniworld/float32] dims#0 L=2048 eval  218.4s  2 ops
+  [gpu1] ok    swa_atom_attention[miniworld/bfloat16] dims#0 L=3072 train  57.0s  4 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=4096 eval  221.1s  2 ops
+  [gpu3] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=2048 train  1525.0s  7 ops
+  [gpu0] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=1024 train  1862.9s  7 ops
+  [gpu0] ok    swa_atom_attention[miniworld/bfloat16] dims#0 L=4096 eval  16.1s  2 ops
+  [gpu2] ok    conditioned_transition[miniworld/float32] dims#0 L=1024 train  1741.1s  7 ops
+  [gpu1] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=4096 train  1090.9s  7 ops
+  [gpu3] ok    conditioned_transition[miniworld/float32] dims#0 L=4096 eval  220.7s  2 ops
+  [gpu0] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=8192 eval  227.1s  2 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#0 L=128 train transition_lnbwd_cuda=False  118.9s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#0 L=128 eval transition_cuda_b2b=False  166.9s  2 ops
+  [gpu1] ok    conditioned_transition[miniworld/float32] dims#0 L=8192 eval  230.1s  2 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#1 L=128 eval transition_cuda_b2b=False  159.8s  3 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=128 train transition_lnbwd_cuda=False  136.4s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#1 L=128 train transition_gatebwd_wgmma=False  296.6s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#2 L=128 eval  162.1s  3 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=128 train transition_lnbwd_privatize=False  156.8s  6 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=128 train transition_large_d_training=cute  123.0s  7 ops
+  [gpu1] ok    transition[triton/bfloat16] dims#2 L=128 train transition_force_split=True  408.3s  4 ops
+  [gpu3] ok    transition[triton/bfloat16] dims#3 L=128 train transition_force_split=True  315.5s  4 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=128 train trimul_impl=triton  175.5s  8 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=128 train trimul_impl=triton  190.0s  8 ops
+  [gpu3] ok    triangle_attention_heads[miniworld/bfloat16] dims#3 L=128 eval  25.4s  1 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=128 train ln_bwd_path=persistent  156.3s  4 ops
+  [gpu0] ok    transition[triton/bfloat16] dims#4 L=128 train transition_force_split=True  439.6s  4 ops
+  [gpu3] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=128 eval  237.9s  3 ops
+  [gpu0] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#0 L=128 train ln_bwd_path=persistent  60.3s  2 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->bfloat16] dims#1 L=128 eval  163.8s  3 ops
+  [gpu0] ok    layernorm_linear_stats[miniworld/bfloat16] dims#2 L=128 eval  65.1s  1 ops
+  [gpu3] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#1 L=128 train ln_bwd_path=persistent  112.1s  2 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#0 L=256 eval transition_cuda_b2b=False  125.1s  2 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#0 L=256 train transition_lnbwd_cuda=False  84.9s  4 ops
+  [gpu2] ok    conditioned_transition[miniworld/bfloat16] dims#0 L=8192 train  1635.2s  7 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=256 train transition_lnbwd_cuda=False  101.8s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#1 L=256 train transition_gatebwd_wgmma=False  333.8s  4 ops
+  [gpu0] ok    transition[triton/bfloat16] dims#2 L=256 train transition_force_split=True  321.2s  4 ops
+  [gpu2] ok    transition[triton/bfloat16] dims#3 L=256 train transition_force_split=True  307.8s  4 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=256 train trimul_impl=triton  140.1s  8 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#4 L=256 train transition_lnbwd_privatize=False  394.6s  6 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=256 train trimul_impl=triton  146.5s  8 ops
+  [gpu1] ok    triangle_attention_heads[miniworld/bfloat16] dims#3 L=256 eval  21.5s  1 ops
+  [gpu0] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=256 train ln_bwd_path=persistent  91.7s  4 ops
+  [gpu3] ok    transition[triton/bfloat16] dims#4 L=256 train transition_force_split=True  310.2s  4 ops
+  [gpu0] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#0 L=256 train ln_bwd_path=persistent  66.9s  2 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->bfloat16] dims#1 L=256 eval  131.8s  3 ops
+  [gpu2] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=256 eval  135.5s  3 ops
+  [gpu3] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#1 L=256 train ln_bwd_path=persistent  62.8s  2 ops
+  [gpu0] ok    layernorm_linear_stats[miniworld/bfloat16] dims#2 L=256 eval  66.8s  1 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#0 L=384 train transition_lnbwd_cuda=False  86.3s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#0 L=384 eval transition_cuda_b2b=False  125.5s  2 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#1 L=384 train transition_lnbwd_cuda=False  104.0s  4 ops
+  [gpu2] ok    transition[triton/bfloat16] dims#2 L=384 train transition_force_split=True  329.8s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#1 L=384 train transition_gatebwd_wgmma=False  412.7s  4 ops
+  [gpu1] ok    transition[triton/bfloat16] dims#3 L=384 train transition_force_split=True  307.8s  4 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=384 train trimul_impl=triton  130.1s  8 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=384 train transition_lnbwd_privatize=False  399.4s  6 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=384 train trimul_impl=triton  166.8s  8 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#0 L=384 eval  56.0s  2 ops
+  [gpu0] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=384 eval infer_concat=True  80.9s  2 ops
+  [gpu0] ok    triangle_attention_heads[miniworld/bfloat16] dims#3 L=384 eval  24.8s  3 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=384 train ln_bwd_path=persistent  96.7s  4 ops
+  [gpu2] ok    transition[triton/bfloat16] dims#4 L=384 train transition_force_split=True  314.6s  4 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=384 eval infer_concat=True  142.1s  2 ops
+  [gpu2] ok    layernorm_linear_stats[miniworld/bfloat16] dims#2 L=384 eval  73.1s  1 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->bfloat16] dims#1 L=384 eval  112.8s  3 ops
+  [gpu0] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=384 eval  152.0s  3 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#0 L=512 eval transition_cuda_b2b=False  131.7s  2 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#0 L=512 train transition_lnbwd_cuda=False  88.0s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#1 L=512 train transition_lnbwd_cuda=False  110.5s  4 ops
+  [gpu2] ok    transition[triton/bfloat16] dims#3 L=512 train transition_force_split=True  306.0s  4 ops
+  [gpu3] ok    transition[triton/bfloat16] dims#2 L=512 train transition_force_split=True  342.7s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=512 train transition_lnbwd_privatize=False  397.0s  6 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=512 train transition_gatebwd_wgmma=False  527.0s  4 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#0 L=512 eval  42.0s  2 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=512 train trimul_impl=triton  164.6s  8 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=512 eval infer_concat=True  40.5s  2 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=512 train ln_bwd_path=persistent  99.4s  4 ops
+  [gpu2] ok    transition[triton/bfloat16] dims#4 L=512 train transition_force_split=True  307.9s  4 ops
+  [gpu3] ok    triangle_attention_heads[miniworld/bfloat16] dims#3 L=512 eval  24.2s  3 ops
+  [gpu1] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=512 eval infer_concat=True  118.3s  2 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=512 train trimul_impl=triton  224.8s  8 ops
+  [gpu1] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#0 L=512 train ln_bwd_path=persistent  66.0s  2 ops
+  [gpu0] ok    msa_pair_weighted_averaging[miniworld/bfloat16] dims#1 L=512 train ln_bwd_path=persistent  68.3s  2 ops
+  [gpu3] ok    augmented_attention[miniworld/float32->bfloat16] dims#1 L=512 eval  133.1s  3 ops
+  [gpu2] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=512 eval  137.3s  3 ops
+  [gpu1] ok    layernorm_linear_stats[miniworld/bfloat16] dims#2 L=512 eval  69.8s  1 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#0 L=640 train transition_lnbwd_cuda=False  91.0s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#0 L=640 eval transition_cuda_b2b=False  143.6s  2 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=640 train transition_lnbwd_cuda=False  108.5s  4 ops
+  [gpu0] ok    transition[triton/bfloat16] dims#3 L=640 train transition_force_split=True  305.1s  4 ops
+  [gpu3] ok    transition[triton/bfloat16] dims#2 L=640 train transition_force_split=True  359.6s  4 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#4 L=640 train transition_lnbwd_privatize=False  397.1s  6 ops
+  [gpu3] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=640 train trimul_impl=triton  183.4s  8 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#0 L=640 eval  44.4s  2 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#1 L=640 train transition_gatebwd_wgmma=False  683.9s  4 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=640 eval infer_concat=True  46.1s  2 ops
+  [gpu0] ok    transition[triton/bfloat16] dims#4 L=640 train transition_force_split=True  308.2s  4 ops
+  [gpu0] ok    triangle_attention_heads[miniworld/bfloat16] dims#3 L=640 eval  30.8s  3 ops
+  [gpu1] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=640 train trimul_impl=triton  230.6s  8 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=640 train ln_bwd_path=persistent  103.0s  4 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=640 eval infer_concat=True  122.1s  2 ops
+  [gpu2] ok    layernorm_linear_stats[miniworld/bfloat16] dims#2 L=640 eval  76.1s  1 ops
+  [gpu1] ok    augmented_attention[miniworld/float32->bfloat16] dims#1 L=640 eval  133.6s  3 ops
+  [gpu0] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=640 eval  144.7s  3 ops
+  [gpu2] ok    transition[miniworld/bfloat16] dims#0 L=768 train transition_lnbwd_cuda=False  91.0s  4 ops
+  [gpu3] ok    transition[miniworld/bfloat16] dims#0 L=768 eval transition_cuda_b2b=False  136.2s  2 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#1 L=768 train transition_lnbwd_cuda=False  115.2s  4 ops
+  [gpu3] ok    transition[triton/bfloat16] dims#3 L=768 train transition_force_split=True  306.9s  4 ops
+  [gpu2] ok    transition[triton/bfloat16] dims#2 L=768 train transition_force_split=True  379.7s  4 ops
+  [gpu0] ok    transition[miniworld/bfloat16] dims#4 L=768 train transition_lnbwd_privatize=False  402.5s  6 ops
+  [gpu2] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#0 L=768 train trimul_impl=triton  207.3s  8 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#0 L=768 eval  45.6s  2 ops
+  [gpu3] ok    transition[triton/bfloat16] dims#4 L=768 train transition_force_split=True  307.9s  4 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=768 eval infer_concat=True  51.4s  2 ops
+  [gpu3] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#1 L=768 train ln_bwd_path=persistent  106.0s  4 ops
+  [gpu3] ok    triangle_attention_heads[miniworld/bfloat16] dims#3 L=768 eval  27.7s  3 ops
+  [gpu2] ok    triangle_attention_bidirectional[miniworld/bfloat16] dims#2 L=768 eval infer_concat=True  132.0s  2 ops
+  [gpu0] ok    triangle_multiplication_bidirectional[miniworld/bfloat16] dims#1 L=768 train trimul_impl=triton  353.7s  8 ops
+  [gpu1] ok    transition[miniworld/bfloat16] dims#1 L=768 train transition_gatebwd_wgmma=False  883.2s  4 ops
+  [gpu1] ok    swa_atom_attention[miniworld/bfloat16] dims#0 L=2048 eval  26.6s  2 ops
+  [gpu0] ok    layernorm_linear_stats[miniworld/bfloat16] dims#2 L=768 eval  76.6s  1 ops
+  [gpu2] ok    augmented_attention[miniworld/float32->bfloat16] dims#1 L=768 eval  110.9s  3 ops
+  [gpu3] ok    augmented_attention[miniworld/bfloat16->bfloat16] dims#1 L=768 eval  151.1s  3 ops
+build: 2048 case(s), 2048 unit(s), 4 gpu(s) -> /home/psk6950/miniworld-engine/.scratch/h100-build/shards
+  [cores] 4 slot(s), 28 core(s) each, shared with no other slot
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=128 D=128  19.3s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=128 D=16  11.3s  1 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=128 D=128  63.9s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=128 D=16  85.0s  1 ops
+  [gpu3] ok    layernorm_fwd_rowscale_triton[bfloat16] L=128 D=16  134.9s  1 ops
+  [gpu2] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=128 D=128  175.1s  1 ops
+  [gpu2] ok    rmsnorm_bwd_triton[bfloat16] pair L=128 D=16  542.2s  2 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=128 D=16  5.4s  1 ops
+  [gpu2] ok    rope_fwd_triton[bfloat16] token L=128 D=128  16.0s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=128 D=16  138.7s  2 ops
+  [gpu2] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=128 D=16  6.1s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=128 D=16  37.0s  1 ops
+  [gpu0] FAIL  adaln_gemm_gate_triton[bfloat16] token L=128 D=128  1014.5s  1 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=128 D=128  956.5s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=128 D=16  109.7s  2 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=128 D=16  12.6s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=128 D=16  218.4s  3 ops
+  [gpu0] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=128 D=16  16.0s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=128 D=128  16.7s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=128 D=128  26.4s  1 ops
+  [gpu0] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=128 D=128  26.1s  1 ops
+  [gpu2] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=128 D=384  57.9s  1 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=128 D=256  15.5s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=128 D=128  11.9s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=128 D=384  160.1s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=128 D=128  51.4s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=128 D=128  130.9s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=128 D=128  1591.3s  2 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=128 D=384  809.1s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=128 D=128  167.8s  1 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] token L=256 D=128  13.8s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=128 D=128  5.7s  2 ops
+  [gpu3] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=128 D=128  7.4s  1 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=128 D=384  776.4s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=128 D=128  32.0s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=128 D=128  490.4s  2 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=128 D=128  12.3s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=128 D=128  12.8s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=128 D=256  10.7s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=128 D=256  23.2s  1 ops
+  [gpu3] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=128 D=128  111.6s  2 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=128 D=128  157.4s  3 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=128 D=256  30.0s  1 ops
+  [gpu2] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=128 D=768  59.9s  1 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=128 D=384  20.6s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=128 D=256  17.3s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=128 D=768  136.3s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=128 D=256  53.7s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=128 D=256  168.3s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=128 D=384  1482.0s  2 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=128 D=768  930.7s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=128 D=256  81.5s  1 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=128 D=768  736.9s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=128 D=256  4.7s  2 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] token L=384 D=128  13.9s  1 ops
+  [gpu2] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=256 D=16  7.1s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=128 D=256  17.9s  3 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=128 D=256  31.5s  1 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=128 D=256  10.9s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=128 D=256  10.6s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=256 D=128  10.9s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=128 D=256  551.3s  2 ops
+  [gpu3] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=128 D=512  22.4s  1 ops
+  [gpu0] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=128 D=512  25.6s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=128 D=256  113.0s  2 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=256 D=128  52.7s  1 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=128 D=512  16.7s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=128 D=384  11.0s  1 ops
+  [gpu2] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=256 D=128  127.0s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=128 D=384  52.4s  1 ops
+  [gpu0] ok    layernorm_fwd_rowscale_triton[bfloat16] L=128 D=512  184.1s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=128 D=768  1615.8s  2 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=256 D=128  581.8s  1 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=256 D=128  1011.0s  1 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] token L=512 D=128  13.7s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=128 D=384  3.9s  2 ops
+  [gpu3] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=256 D=128  5.7s  1 ops
+  [gpu0] ok    rmsnorm_fwd_triton[bfloat16] pair L=128 D=512  173.0s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=128 D=384  14.8s  3 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=128 D=384  32.4s  1 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=256 D=16  10.8s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=256 D=16  9.6s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=256 D=256  10.7s  1 ops
+  [gpu3] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=256 D=128  24.0s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=256 D=128  23.9s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=128 D=512  433.4s  2 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=128 D=384  112.8s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=256 D=384  58.6s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] pair L=128 D=768  16.4s  1 ops
+  [gpu2] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=256 D=128  1001.2s  2 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=128 D=512  10.3s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=128 D=512  53.8s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=256 D=384  127.7s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=256 D=16  87.4s  1 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=256 D=384  506.5s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=256 D=16  48.7s  1 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] token L=640 D=128  15.0s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=128 D=512  3.9s  2 ops
+  [gpu3] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=384 D=16  5.1s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=128 D=512  30.5s  1 ops
+  [gpu2] ok    rmsnorm_bwd_triton[bfloat16] pair L=256 D=16  463.3s  2 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=256 D=384  576.1s  1 ops
+  [gpu0] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=256 D=128  9.9s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=128 D=512  113.5s  2 ops
+  [gpu0] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=256 D=128  10.6s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=384 D=128  13.8s  1 ops
+  [gpu3] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=128 D=512  157.8s  3 ops
+  [gpu0] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=256 D=256  26.6s  1 ops
+  [gpu2] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=256 D=256  26.1s  1 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=256 D=768  57.9s  1 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=256 D=128  13.4s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=128 D=768  12.4s  1 ops
+  [gpu2] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=256 D=768  131.4s  1 ops
+  [gpu0] ok    layernorm_fwd_rowscale_triton[bfloat16] L=256 D=128  87.8s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=128 D=768  50.8s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=256 D=384  1118.7s  2 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=256 D=768  763.2s  1 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=256 D=768  579.8s  1 ops
+  [gpu2] ok    rope_fwd_triton[bfloat16] token L=768 D=128  13.9s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=128 D=768  4.0s  2 ops
+  [gpu2] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=384 D=128  5.6s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=128 D=768  31.1s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=256 D=128  116.1s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=128 D=768  77.7s  3 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=256 D=256  8.1s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=256 D=256  7.8s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=384 D=256  10.8s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=256 D=128  466.5s  2 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=256 D=512  25.3s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=256 D=512  24.3s  1 ops
+  [gpu3] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=128 D=768  119.1s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=384 D=128  56.2s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] pair L=256 D=256  14.6s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=256 D=16  10.6s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=384 D=128  127.8s  1 ops
+  [gpu1] ok    layernorm_fwd_rowscale_triton[bfloat16] L=256 D=256  88.4s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=256 D=16  51.0s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=256 D=768  1133.3s  2 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=384 D=128  576.8s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=256 D=256  5.2s  1 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] token L=1024 D=128  13.7s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=256 D=256  463.2s  2 ops
+  [gpu0] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=512 D=16  6.2s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=256 D=16  31.7s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=256 D=16  77.3s  3 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=256 D=16  122.8s  2 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=384 D=16  12.0s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=384 D=16  9.4s  1 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=384 D=128  952.4s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=512 D=128  12.1s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=384 D=128  25.2s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=384 D=128  25.6s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=256 D=16  109.4s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=384 D=384  54.9s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=256 D=384  13.2s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=256 D=128  11.5s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=384 D=128  962.0s  2 ops
+  [gpu3] ok    layernorm_fwd_rowscale_triton[bfloat16] L=256 D=512  90.0s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=384 D=384  131.1s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=256 D=128  49.4s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=256 D=512  463.9s  2 ops
+  [gpu1] ok    rmsnorm_fwd_triton[bfloat16] pair L=256 D=512  4.2s  1 ops
+  [gpu1] ok    rope_fwd_triton[bfloat16] token L=2048 D=128  13.7s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=256 D=128  3.9s  2 ops
+  [gpu1] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=512 D=128  5.7s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=256 D=128  31.3s  1 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=384 D=384  748.3s  1 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=256 D=128  14.6s  3 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=384 D=128  9.4s  1 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=384 D=384  578.1s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=384 D=128  9.4s  1 ops
+  [gpu0] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=512 D=256  11.4s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=384 D=256  23.8s  1 ops
+  [gpu0] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=384 D=256  24.9s  1 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=384 D=768  57.9s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=256 D=128  114.9s  2 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=256 D=512  19.0s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=256 D=256  12.4s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=384 D=16  89.3s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=384 D=768  133.1s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=256 D=256  49.7s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=384 D=384  1116.2s  2 ops
+  [gpu1] FAIL  adaln_gemm_gate_triton[bfloat16] token L=384 D=768  700.8s  1 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=384 D=768  559.2s  1 ops
+  [gpu2] ok    rope_fwd_triton[bfloat16] token L=3072 D=128  13.7s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=256 D=256  4.1s  2 ops
+  [gpu2] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=640 D=16  5.3s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=256 D=256  30.3s  1 ops
+  [gpu1] ok    rmsnorm_fwd_triton[bfloat16] pair L=384 D=16  157.4s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=256 D=256  15.3s  3 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=384 D=256  9.6s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=384 D=256  8.3s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=640 D=128  11.9s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=384 D=512  24.0s  1 ops
+  [gpu3] ok    rmsnorm_bwd_triton[bfloat16] pair L=384 D=16  440.9s  2 ops
+  [gpu2] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=384 D=512  22.6s  1 ops
+  [gpu1] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=256 D=256  119.2s  2 ops
+  [gpu2] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=512 D=128  55.2s  1 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=256 D=768  18.9s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=256 D=384  12.2s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=512 D=128  132.6s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=384 D=128  90.1s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=256 D=384  56.5s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=384 D=768  1128.2s  2 ops
+  [gpu1] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=512 D=128  548.1s  1 ops
+  [gpu1] ok    rmsnorm_fwd_triton[bfloat16] pair L=384 D=128  4.6s  1 ops
+  [gpu1] ok    rope_fwd_triton[bfloat16] token L=4096 D=128  13.7s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=256 D=384  4.0s  2 ops
+  [gpu1] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=640 D=128  5.7s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=256 D=384  32.5s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=384 D=128  461.2s  2 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=256 D=384  14.5s  3 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=512 D=16  9.6s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=512 D=16  9.3s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=640 D=256  10.8s  1 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=512 D=128  893.8s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=512 D=128  25.2s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=512 D=128  26.6s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=256 D=384  118.3s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=512 D=384  56.5s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=384 D=128  15.6s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=256 D=512  16.8s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=512 D=384  127.1s  1 ops
+  [gpu3] ok    layernorm_fwd_rowscale_triton[bfloat16] L=384 D=256  94.2s  1 ops
+  [gpu2] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=512 D=128  958.6s  2 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=256 D=512  51.1s  1 ops
+  [gpu1] FAIL  adaln_gemm_gate_triton[bfloat16] token L=512 D=384  639.8s  1 ops
+  [gpu1] ok    rmsnorm_fwd_triton[bfloat16] pair L=384 D=256  4.2s  1 ops
+  [gpu1] ok    rope_fwd_triton[bfloat16] token L=5120 D=128  13.7s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=256 D=512  3.9s  2 ops
+  [gpu1] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=768 D=16  5.1s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=256 D=512  32.9s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=384 D=256  465.9s  2 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=256 D=512  14.1s  3 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=512 D=128  9.1s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=512 D=128  9.3s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=768 D=128  10.9s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=512 D=256  23.3s  1 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=512 D=384  555.5s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=512 D=256  24.6s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=256 D=512  122.3s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=512 D=768  56.8s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] pair L=384 D=256  14.8s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=256 D=768  11.5s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=512 D=768  135.6s  1 ops
+  [gpu1] ok    layernorm_fwd_rowscale_triton[bfloat16] L=384 D=512  93.1s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=256 D=768  59.1s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=512 D=384  1113.4s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=512 D=768  692.0s  1 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=512 D=768  548.2s  1 ops
+  [gpu0] ok    rope_fwd_triton[bfloat16] token L=6144 D=128  13.6s  1 ops
+  [gpu0] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=256 D=768  4.0s  2 ops
+  [gpu0] ok    trimul_outproj_gemm_gate_sm90_cute[bfloat16] L=768 D=128  5.7s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=256 D=768  32.1s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=384 D=512  158.1s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=256 D=768  79.7s  3 ops
+  [gpu0] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=512 D=256  7.4s  1 ops
+  [gpu3] ok    rmsnorm_bwd_triton[bfloat16] pair L=384 D=512  405.1s  2 ops
+  [gpu0] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=512 D=256  7.9s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] pair L=768 D=256  11.6s  1 ops
+  [gpu0] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=512 D=512  24.9s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=512 D=512  26.1s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=256 D=768  123.2s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=640 D=128  55.7s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=384 D=384  12.4s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=384 D=16  10.2s  1 ops
+  [gpu2] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=640 D=128  130.9s  1 ops
+  [gpu3] ok    layernorm_fwd_rowscale_triton[bfloat16] L=512 D=16  90.3s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=384 D=16  57.8s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=512 D=768  1129.1s  2 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=640 D=128  570.6s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=512 D=16  4.5s  1 ops
+  [gpu2] ok    rope_fwd_triton[bfloat16] token L=7168 D=128  13.7s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=512 D=16  472.6s  2 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=384 D=16  31.4s  1 ops
+  [gpu0] FAIL  adaln_gemm_gate_triton[bfloat16] token L=640 D=128  889.6s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=384 D=16  128.1s  2 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=640 D=16  12.6s  1 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=384 D=16  79.7s  3 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=640 D=16  9.8s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=128 D=128  12.1s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=640 D=128  25.2s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=640 D=128  27.9s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=384 D=16  111.1s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=640 D=384  54.9s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] pair L=384 D=512  14.5s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=384 D=128  11.4s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=640 D=384  130.4s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=640 D=128  957.7s  2 ops
+  [gpu1] ok    layernorm_fwd_rowscale_triton[bfloat16] L=512 D=128  92.1s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=384 D=128  56.0s  1 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=640 D=384  636.6s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=512 D=128  4.5s  1 ops
+  [gpu2] ok    rope_fwd_triton[bfloat16] token L=8192 D=128  13.8s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=384 D=128  4.1s  2 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=384 D=128  32.6s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=512 D=128  476.2s  2 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=384 D=128  14.5s  3 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=640 D=128  11.4s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=640 D=128  9.9s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=128 D=256  10.9s  1 ops
+  [gpu1] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=640 D=384  573.6s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=640 D=256  25.1s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=640 D=256  25.3s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=384 D=128  119.1s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=640 D=768  56.1s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] pair L=384 D=768  15.4s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=384 D=256  10.8s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=640 D=768  135.9s  1 ops
+  [gpu1] ok    layernorm_fwd_rowscale_triton[bfloat16] L=512 D=256  94.9s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=384 D=256  56.8s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=640 D=384  1110.6s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=640 D=768  639.8s  1 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=640 D=768  551.1s  1 ops
+  [gpu0] ok    rope_fwd_triton[bfloat16] atom L=1024 D=128  3.8s  1 ops
+  [gpu0] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=384 D=256  4.0s  2 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=512 D=256  189.8s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=384 D=256  32.2s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=384 D=256  16.0s  3 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=640 D=256  9.8s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=640 D=256  8.1s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=256 D=128  11.3s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=640 D=512  24.6s  1 ops
+  [gpu3] ok    rmsnorm_bwd_triton[bfloat16] pair L=512 D=256  396.2s  2 ops
+  [gpu2] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=640 D=512  26.8s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=384 D=256  122.8s  2 ops
+  [gpu2] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=768 D=128  54.6s  1 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=512 D=128  14.4s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=384 D=384  12.3s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=768 D=128  123.9s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=512 D=512  94.9s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=384 D=384  51.8s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=640 D=768  1134.9s  2 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=768 D=128  564.4s  1 ops
+  [gpu0] ok    rmsnorm_fwd_triton[bfloat16] pair L=512 D=512  33.8s  1 ops
+  [gpu0] ok    rope_fwd_triton[bfloat16] atom L=2048 D=128  4.3s  1 ops
+  [gpu0] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=384 D=384  4.1s  2 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=384 D=384  34.9s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=384 D=384  15.1s  3 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=768 D=128  889.7s  1 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=768 D=16  9.9s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=512 D=512  483.1s  2 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=768 D=16  9.7s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=256 D=256  11.0s  1 ops
+  [gpu3] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=768 D=128  27.2s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=768 D=128  27.6s  1 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=768 D=384  58.8s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=384 D=384  123.6s  2 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=512 D=256  16.0s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=384 D=512  12.2s  1 ops
+  [gpu0] ok    layernorm_fwd_rowscale_triton[bfloat16] L=640 D=16  94.1s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=768 D=384  130.7s  1 ops
+  [gpu2] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=768 D=128  953.7s  2 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=384 D=512  49.7s  1 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=768 D=384  639.3s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=640 D=16  4.5s  1 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] atom L=4096 D=128  3.6s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=384 D=512  3.9s  2 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=384 D=512  30.5s  1 ops
+  [gpu3] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=384 D=512  14.2s  3 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=640 D=16  481.1s  2 ops
+  [gpu0] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=768 D=128  9.4s  1 ops
+  [gpu0] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=768 D=128  9.8s  1 ops
+  [gpu0] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=384 D=128  11.5s  1 ops
+  [gpu0] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=768 D=256  26.2s  1 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=768 D=384  575.2s  1 ops
+  [gpu0] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=768 D=256  29.5s  1 ops
+  [gpu3] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=384 D=512  122.5s  2 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=768 D=768  60.4s  1 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=512 D=384  18.6s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=384 D=768  15.4s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=768 D=768  130.9s  1 ops
+  [gpu0] ok    layernorm_fwd_rowscale_triton[bfloat16] L=640 D=128  98.4s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=384 D=768  57.6s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=768 D=384  1116.3s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=768 D=768  640.4s  1 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=768 D=768  591.2s  1 ops
+  [gpu3] ok    rope_fwd_triton[bfloat16] atom L=8192 D=128  3.7s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=384 D=768  3.9s  2 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=640 D=128  201.9s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=384 D=768  32.0s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=640 D=128  398.4s  2 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=384 D=768  82.9s  3 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] pair L=768 D=256  8.6s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] pair L=768 D=256  9.4s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=384 D=256  11.7s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] pair L=768 D=512  24.9s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] pair L=768 D=512  26.7s  1 ops
+  [gpu3] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=384 D=768  126.2s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=1024 D=128  55.4s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] pair L=512 D=512  16.1s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=512 D=16  11.3s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=1024 D=128  128.7s  1 ops
+  [gpu1] ok    layernorm_fwd_rowscale_triton[bfloat16] L=640 D=256  94.5s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=512 D=16  51.8s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=768 D=768  1135.7s  2 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=1024 D=128  589.2s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] pair L=640 D=256  9.5s  1 ops
+  [gpu3] ok    rope_fwd_triton[float32] token L=128 D=128  14.8s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=640 D=256  490.5s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=1024 D=128  887.9s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=512 D=16  33.0s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=512 D=16  134.5s  2 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=128 D=16  9.1s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=128 D=16  13.3s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=512 D=16  84.6s  3 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=512 D=128  12.3s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=128 D=128  25.4s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=128 D=128  25.1s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=512 D=16  113.1s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=1024 D=384  54.6s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=512 D=768  15.1s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=512 D=128  11.4s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=1024 D=128  962.4s  2 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=1024 D=384  129.5s  1 ops
+  [gpu3] ok    layernorm_fwd_rowscale_triton[bfloat16] L=640 D=512  97.3s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=512 D=128  52.0s  1 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=1024 D=384  636.5s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=640 D=512  4.3s  1 ops
+  [gpu2] ok    rope_fwd_triton[float32] token L=256 D=128  13.8s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=512 D=128  4.1s  2 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=512 D=128  33.4s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] pair L=640 D=512  489.0s  2 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=512 D=128  18.0s  3 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=128 D=128  9.3s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=128 D=128  9.6s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=512 D=256  11.0s  1 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=1024 D=384  562.2s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=128 D=256  24.7s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=128 D=256  24.8s  1 ops
+  [gpu1] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=512 D=128  121.2s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=1024 D=768  56.8s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=640 D=128  12.8s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=512 D=256  11.1s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=1024 D=768  131.3s  1 ops
+  [gpu3] ok    layernorm_fwd_rowscale_triton[bfloat16] L=768 D=16  94.7s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=512 D=256  49.6s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=1024 D=384  1120.7s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=1024 D=768  639.2s  1 ops
+  [gpu1] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=1024 D=768  557.0s  1 ops
+  [gpu1] ok    rope_fwd_triton[float32] token L=384 D=128  13.9s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=512 D=256  4.0s  2 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=512 D=256  30.3s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=768 D=16  204.2s  1 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=512 D=256  14.5s  3 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=128 D=256  9.1s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=128 D=256  8.1s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=640 D=128  12.0s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=128 D=512  22.7s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=128 D=512  23.0s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] pair L=768 D=16  411.1s  2 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=512 D=256  124.2s  2 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=2048 D=128  54.5s  1 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=640 D=256  16.6s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=512 D=384  12.5s  1 ops
+  [gpu2] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=2048 D=128  127.8s  1 ops
+  [gpu0] ok    layernorm_fwd_rowscale_triton[bfloat16] L=768 D=128  98.9s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=512 D=384  53.2s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=1024 D=768  1135.1s  2 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=2048 D=128  553.5s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=768 D=128  28.6s  1 ops
+  [gpu2] ok    rope_fwd_triton[float32] token L=512 D=128  14.1s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=512 D=384  4.3s  2 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=512 D=384  35.2s  1 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=512 D=384  15.1s  3 ops
+  [gpu3] ok    rmsnorm_bwd_triton[bfloat16] pair L=768 D=128  490.2s  2 ops
+  [gpu1] FAIL  adaln_gemm_gate_triton[bfloat16] token L=2048 D=128  890.9s  1 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=256 D=16  9.6s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=256 D=16  10.1s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=640 D=256  12.5s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=256 D=128  26.2s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=256 D=128  26.3s  1 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=2048 D=384  58.1s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=512 D=384  125.3s  2 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=640 D=384  14.5s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=512 D=512  12.0s  1 ops
+  [gpu2] ok    layernorm_fwd_rowscale_triton[bfloat16] L=768 D=256  96.9s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=2048 D=384  130.0s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=2048 D=128  952.4s  2 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=512 D=512  49.5s  1 ops
+  [gpu1] FAIL  adaln_gemm_gate_triton[bfloat16] token L=2048 D=384  639.2s  1 ops
+  [gpu1] ok    rmsnorm_fwd_triton[bfloat16] pair L=768 D=256  16.7s  1 ops
+  [gpu1] ok    rope_fwd_triton[float32] token L=640 D=128  14.1s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=512 D=512  4.0s  2 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=512 D=512  34.0s  1 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=512 D=512  15.5s  3 ops
+  [gpu2] ok    rmsnorm_bwd_triton[bfloat16] pair L=768 D=256  492.8s  2 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=256 D=128  9.2s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=256 D=128  9.7s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=768 D=128  11.7s  1 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=2048 D=384  578.6s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=256 D=256  24.7s  1 ops
+  [gpu0] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=256 D=256  28.4s  1 ops
+  [gpu1] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=512 D=512  126.9s  2 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=2048 D=768  59.8s  1 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=640 D=512  21.4s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=512 D=768  16.4s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=2048 D=768  131.5s  1 ops
+  [gpu0] ok    layernorm_fwd_rowscale_triton[bfloat16] L=768 D=512  109.0s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=512 D=768  57.2s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=2048 D=384  1114.2s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=2048 D=768  640.9s  1 ops
+  [gpu1] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=2048 D=768  583.9s  1 ops
+  [gpu1] ok    rope_fwd_triton[float32] token L=768 D=128  14.1s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] pair L=768 D=512  206.2s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=512 D=768  5.2s  2 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=512 D=768  33.8s  1 ops
+  [gpu3] ok    rmsnorm_bwd_triton[bfloat16] pair L=768 D=512  413.0s  2 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=512 D=768  84.3s  3 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=256 D=256  7.3s  1 ops
+  [gpu1] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=256 D=256  8.0s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=768 D=256  12.5s  1 ops
+  [gpu1] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=256 D=512  23.6s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=256 D=512  23.6s  1 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=3072 D=128  5.9s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=3072 D=128  4.5s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=640 D=768  16.9s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=640 D=16  12.3s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=512 D=768  133.4s  2 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=640 D=16  48.7s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=2048 D=768  1133.0s  2 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=3072 D=128  549.5s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] atom L=1024 D=64  168.3s  1 ops
+  [gpu3] ok    rope_fwd_triton[float32] token L=1024 D=128  13.9s  1 ops
+  [gpu1] FAIL  adaln_gemm_gate_triton[bfloat16] token L=3072 D=128  888.5s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] atom L=1024 D=64  518.0s  2 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=640 D=16  33.7s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=640 D=16  143.2s  2 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=384 D=16  9.1s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=384 D=16  12.9s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=640 D=16  82.7s  3 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=1024 D=128  12.1s  1 ops
+  [gpu2] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=3072 D=128  958.0s  2 ops
+  [gpu0] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=384 D=128  28.2s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=384 D=128  24.7s  1 ops
+  [gpu0] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=3072 D=384  5.7s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=3072 D=384  4.3s  1 ops
+  [gpu1] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=640 D=16  113.5s  2 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=768 D=128  18.5s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=640 D=128  14.9s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=640 D=128  47.5s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] atom L=1024 D=128  463.9s  2 ops
+  [gpu1] ok    rmsnorm_fwd_triton[bfloat16] atom L=1024 D=128  4.3s  1 ops
+  [gpu1] ok    rope_fwd_triton[float32] token L=2048 D=128  13.8s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=640 D=128  3.9s  2 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=640 D=128  31.8s  1 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=640 D=128  14.2s  3 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=3072 D=384  591.3s  1 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=3072 D=384  637.4s  1 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=384 D=128  9.2s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=384 D=128  10.0s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=1024 D=256  11.4s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=384 D=256  24.4s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=384 D=256  25.7s  1 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=3072 D=768  4.0s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=3072 D=768  4.1s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] pair L=768 D=256  15.2s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=640 D=256  10.8s  1 ops
+  [gpu1] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=640 D=128  124.1s  2 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=640 D=256  53.8s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=3072 D=384  1121.3s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=3072 D=768  638.6s  1 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=3072 D=768  568.2s  1 ops
+  [gpu3] ok    rope_fwd_triton[float32] token L=3072 D=128  13.7s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=640 D=256  3.9s  2 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=640 D=256  34.0s  1 ops
+  [gpu3] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=640 D=256  14.2s  3 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] atom L=2048 D=64  157.6s  1 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=384 D=256  9.3s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=384 D=256  8.0s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=2048 D=128  11.4s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=384 D=512  24.7s  1 ops
+  [gpu3] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=640 D=256  126.5s  2 ops
+  [gpu2] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=384 D=512  23.8s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] atom L=2048 D=64  383.7s  2 ops
+  [gpu2] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=4096 D=128  57.7s  1 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=768 D=384  13.2s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=640 D=384  10.7s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=4096 D=128  130.7s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=640 D=384  54.6s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=3072 D=768  1138.3s  2 ops
+  [gpu2] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=4096 D=128  590.6s  1 ops
+  [gpu2] ok    rmsnorm_fwd_triton[bfloat16] atom L=2048 D=128  4.9s  1 ops
+  [gpu2] ok    rope_fwd_triton[float32] token L=4096 D=128  13.7s  1 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=640 D=384  4.0s  2 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=640 D=384  32.6s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[bfloat16] atom L=2048 D=128  468.4s  2 ops
+  [gpu2] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=640 D=384  16.2s  3 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=512 D=16  10.6s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=512 D=16  9.9s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=2048 D=256  11.2s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=512 D=128  23.7s  1 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=4096 D=128  890.8s  1 ops
+  [gpu2] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=512 D=128  24.2s  1 ops
+  [gpu1] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=640 D=384  129.9s  2 ops
+  [gpu2] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=4096 D=384  55.6s  1 ops
+  [gpu2] ok    layernorm_bwd_split_cuda[bfloat16] pair L=768 D=512  16.0s  1 ops
+  [gpu2] ok    layernorm_fwd_cuda[bfloat16] pair L=640 D=512  12.8s  1 ops
+  [gpu2] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=640 D=512  55.9s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=4096 D=384  130.9s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=4096 D=128  953.3s  2 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=4096 D=384  636.3s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] atom L=4096 D=64  3.9s  1 ops
+  [gpu3] ok    rope_fwd_triton[float32] token L=5120 D=128  13.7s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=640 D=512  4.0s  2 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] atom L=4096 D=64  451.1s  2 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=640 D=512  17.0s  3 ops
+  [gpu3] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=640 D=512  31.8s  1 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=512 D=128  9.1s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=512 D=128  9.8s  1 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=3072 D=128  10.8s  1 ops
+  [gpu1] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=4096 D=384  554.4s  1 ops
+  [gpu3] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=512 D=256  25.7s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=512 D=256  26.1s  1 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=4096 D=768  57.7s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=640 D=512  143.4s  2 ops
+  [gpu0] ok    layernorm_bwd_split_cuda[bfloat16] pair L=768 D=768  16.7s  1 ops
+  [gpu0] ok    layernorm_fwd_cuda[bfloat16] pair L=640 D=768  12.5s  1 ops
+  [gpu0] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=640 D=768  53.2s  1 ops
+  [gpu1] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=4096 D=768  135.8s  1 ops
+  [gpu2] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=4096 D=384  1116.1s  2 ops
+  [gpu3] FAIL  adaln_gemm_gate_triton[bfloat16] token L=4096 D=768  640.1s  1 ops
+  [gpu1] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=4096 D=768  556.2s  1 ops
+  [gpu1] ok    rope_fwd_triton[float32] token L=6144 D=128  13.7s  1 ops
+  [gpu1] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=640 D=768  3.9s  2 ops
+  [gpu1] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=640 D=768  33.1s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] atom L=4096 D=128  183.8s  1 ops
+  [gpu1] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=640 D=768  84.1s  3 ops
+  [gpu2] ok    rmsnorm_bwd_triton[bfloat16] atom L=4096 D=128  386.7s  2 ops
+  [gpu1] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=512 D=256  7.5s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=512 D=256  8.4s  1 ops
+  [gpu1] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=3072 D=256  11.7s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=512 D=512  22.8s  1 ops
+  [gpu1] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=512 D=512  24.0s  1 ops
+  [gpu3] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=640 D=768  142.4s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=5120 D=128  55.1s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] token L=128 D=128  12.6s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=768 D=16  10.3s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=768 D=16  49.4s  1 ops
+  [gpu3] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=5120 D=128  128.3s  1 ops
+  [gpu0] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=4096 D=768  1144.2s  2 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=5120 D=128  573.6s  1 ops
+  [gpu3] ok    rmsnorm_fwd_triton[bfloat16] atom L=8192 D=64  12.1s  1 ops
+  [gpu3] ok    rope_fwd_triton[float32] token L=7168 D=128  14.2s  1 ops
+  [gpu0] ok    rmsnorm_bwd_triton[bfloat16] atom L=8192 D=64  452.3s  2 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=768 D=16  30.1s  1 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=5120 D=128  890.0s  1 ops
+  [gpu3] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=768 D=16  152.4s  2 ops
+  [gpu3] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=640 D=16  9.2s  1 ops
+  [gpu3] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=640 D=16  12.5s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=768 D=16  82.3s  3 ops
+  [gpu3] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=4096 D=128  12.1s  1 ops
+  [gpu0] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=640 D=128  24.5s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=640 D=128  25.2s  1 ops
+  [gpu2] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=768 D=16  116.1s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=5120 D=384  54.8s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] token L=128 D=256  14.6s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=768 D=128  11.8s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=5120 D=128  958.9s  2 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=768 D=128  54.0s  1 ops
+  [gpu2] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=5120 D=384  131.4s  1 ops
+  [gpu0] FAIL  adaln_gemm_gate_triton[bfloat16] token L=5120 D=384  637.9s  1 ops
+  [gpu0] ok    rmsnorm_fwd_triton[bfloat16] atom L=8192 D=128  4.0s  1 ops
+  [gpu2] ok    rmsnorm_bwd_triton[bfloat16] atom L=8192 D=128  471.5s  2 ops
+  [gpu2] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=768 D=128  4.0s  2 ops
+  [gpu0] ok    rope_fwd_triton[float32] token L=8192 D=128  13.7s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=768 D=128  17.3s  3 ops
+  [gpu2] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=768 D=128  35.1s  1 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=640 D=128  10.2s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=640 D=128  10.0s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=4096 D=256  10.5s  1 ops
+  [gpu3] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=5120 D=384  585.9s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=640 D=256  24.4s  1 ops
+  [gpu3] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=640 D=256  24.4s  1 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=768 D=128  128.8s  2 ops
+  [gpu3] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=5120 D=768  56.7s  1 ops
+  [gpu3] ok    layernorm_bwd_split_cuda[bfloat16] token L=128 D=384  12.9s  1 ops
+  [gpu3] ok    layernorm_fwd_cuda[bfloat16] pair L=768 D=256  10.9s  1 ops
+  [gpu3] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=768 D=256  52.2s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=5120 D=768  135.6s  1 ops
+  [gpu1] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=5120 D=384  1122.4s  2 ops
+  [gpu2] FAIL  adaln_gemm_gate_triton[bfloat16] token L=5120 D=768  640.5s  1 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=5120 D=768  562.8s  1 ops
+  [gpu0] ok    rope_fwd_triton[float32] atom L=1024 D=128  3.7s  1 ops
+  [gpu0] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=768 D=256  3.9s  2 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=768 D=256  32.0s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=768 D=256  14.4s  3 ops
+  [gpu2] ok    rmsnorm_fwd_triton[float32] pair L=128 D=16  210.8s  1 ops
+  [gpu2] ok    transition_bwd_dx_sm90_cute[bfloat16] token L=640 D=256  9.0s  1 ops
+  [gpu2] ok    layernorm_linear_bwd_dx_sm90_cute[bfloat16] token L=640 D=256  8.8s  1 ops
+  [gpu2] ok    transition_fwd_b2b_sm90_cuda[bfloat16] token L=5120 D=128  12.4s  1 ops
+  [gpu2] ok    transition_expand_gate_sm90_cuda[bfloat16] token L=640 D=512  22.7s  1 ops
+  [gpu2] ok    transition_bwd_gate_sm90_cuda[bfloat16] token L=640 D=512  22.4s  1 ops
+  [gpu1] ok    rmsnorm_bwd_triton[float32] pair L=128 D=16  423.5s  2 ops
+  [gpu0] ok    transition_gate_bwd_sm90_cute[bfloat16] pair L=768 D=256  134.4s  2 ops
+  [gpu1] ok    cond_transition_expand_swiglu_saveact_triton[bfloat16] token L=6144 D=128  55.4s  1 ops
+  [gpu1] ok    layernorm_bwd_split_cuda[bfloat16] token L=128 D=512  14.6s  1 ops
+  [gpu1] ok    layernorm_fwd_cuda[bfloat16] pair L=768 D=384  10.5s  1 ops
+  [gpu1] ok    layernorm_linear_fwd_sm90_cute[bfloat16] pair L=768 D=384  51.9s  1 ops
+  [gpu0] ok    cond_transition_squeeze_gate_saveact_triton[bfloat16] token L=6144 D=128  128.0s  1 ops
+  [gpu3] ok    rmsnorm_adamod_bwd_triton[bfloat16] token L=5120 D=768  1141.1s  2 ops
+  [gpu0] ok    rmsnorm_adamod_fwd_triton[bfloat16] token L=6144 D=128  593.2s  1 ops
+  [gpu0] ok    rmsnorm_fwd_triton[float32] pair L=128 D=128  36.1s  1 ops
+  [gpu0] ok    rope_fwd_triton[float32] atom L=2048 D=128  4.0s  1 ops
+  [gpu0] ok    transition_layernorm_expand_swiglu_triton[bfloat16] pair L=768 D=384  4.1s  2 ops
+  [gpu0] ok    layernorm_linear_fwd_foldstats_sm90_cute[bfloat16] pair L=768 D=384  33.2s  1 ops
+  [gpu0] ok    transition_swiglu_fwd_sm90_cute[bfloat16] pair L=768 D=384  15.0s  3 ops
+slurmstepd-node23: error: *** STEP 267166.4 ON node23 CANCELLED AT 2026-09-13T19:39:59 DUE TO TIME LIMIT ***
+srun: Job step aborted: Waiting up to 32 seconds for job step to finish.
+slurmstepd-node23: error: *** JOB 267166 ON node23 CANCELLED AT 2026-09-13T19:39:59 DUE TO TIME LIMIT ***
