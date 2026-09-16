@@ -34,17 +34,12 @@ def augmented_attention_pair_bias(
     Autograd-transparent. Preserve the caller's precision: native BF16 stays BF16,
     while an FP32 caller does not silently run a quantized attention core.
     """
-    if kernel_type == "compute_efficient":
-        from miniworld_engine.kernels.augmented_attention.triton.main import (
-            triton_augmented_attention_pair_bias as _fn,
-        )
-    elif kernel_type == "memory_efficient":
-        from miniworld_engine.kernels.augmented_attention import (
-            triton_augmented_attention_pair_bias as _fn,
-        )
-    else:
+    if kernel_type not in ("compute_efficient", "memory_efficient"):
         msg = f"unknown kernel_type {kernel_type!r}"
         raise ValueError(msg)
+    from miniworld_engine.kernels.augmented_attention.interface import (
+        triton_augmented_attention_pair_bias as _fn,
+    )
 
     in_dtype = query.dtype
     # (A,B,H,L,D) -> (A,B,L,H,D); (B,H,L,L) -> (B,L,L,H)
@@ -52,5 +47,5 @@ def augmented_attention_pair_bias(
     k = key.transpose(2, 3)
     v = value.transpose(2, 3)
     b = bias.permute(0, 2, 3, 1)
-    out = _fn(q, k, v, b, mask)           # (A,B,L,H,D)
+    out = _fn(q, k, v, b, mask, compute_efficient=kernel_type == "compute_efficient")           # (A,B,L,H,D)
     return out.transpose(2, 3).to(in_dtype)  # -> (A,B,H,L,D)

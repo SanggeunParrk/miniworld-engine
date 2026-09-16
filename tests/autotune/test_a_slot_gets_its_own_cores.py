@@ -59,6 +59,7 @@ def test_the_slice_reaches_the_unit_as_taskset(tmp_path, monkeypatch):
     class _Proc:
         returncode = 0
 
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))
     monkeypatch.setattr(builder, "_run_unit_process",
                         lambda cmd, **kw: (seen.clear(), seen.extend(cmd), _Proc())[-1])
     unit = builder.OpUnit(op="layernorm_stats_triton", dtype="bfloat16", length=256)
@@ -74,6 +75,7 @@ def test_no_slice_means_no_taskset(tmp_path, monkeypatch):
     class _Proc:
         returncode = 0
 
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))
     monkeypatch.setattr(builder, "_run_unit_process",
                         lambda cmd, **kw: (seen.clear(), seen.extend(cmd), _Proc())[-1])
     unit = builder.OpUnit(op="layernorm_stats_triton", dtype="bfloat16", length=256)

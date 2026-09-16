@@ -23,7 +23,6 @@ target: transition
 level: module
 implementations:
   - pytorch
-  - old_triton
   - miniworld
 mode: inference
 metric: time

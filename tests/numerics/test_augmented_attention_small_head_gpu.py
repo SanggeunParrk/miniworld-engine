@@ -7,15 +7,25 @@ import torch
 pytestmark = pytest.mark.gpu
 
 
-@pytest.mark.parametrize("head_dim", [8, 24])
+@pytest.mark.parametrize("compute_efficient", [True, False])
+@pytest.mark.parametrize("head_dim", [8, 24, 32])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_padded_attention_matches_float_reference(head_dim, dtype, monkeypatch):
-    from miniworld_engine.kernels.augmented_attention.triton import main
+def test_padded_attention_matches_float_reference(head_dim, dtype, compute_efficient, monkeypatch):
+    from miniworld_engine.kernels.augmented_attention import interface
+    from miniworld_engine.kernels.augmented_attention.triton import (
+        main,
+        memory_efficient,
+    )
+
+    backend = main if compute_efficient else memory_efficient
+    names = ["_attn_fwd", "_attn_bwd", "_attn_bwd_preprocess"]
+    if compute_efficient:
+        names.append("_dq_reduce")
 
     # This tests masked padding arithmetic, not the full autotune search. Keep
     # the same legal tile for both dimensions and precisions without shared writes.
-    for name in ("_attn_fwd", "_attn_bwd", "_attn_bwd_preprocess", "_dq_reduce"):
-        tuner = getattr(main, name)
+    for name in names:
+        tuner = getattr(backend, name)
         candidates = [config for config in tuner.configs
                       if config.num_warps == 4 and config.num_stages == 2
                       and all(config.kwargs.get(axis, 32) == 32 for axis in ("BLOCK_M1", "BLOCK_M2"))]
@@ -36,7 +46,9 @@ def test_padded_attention_matches_float_reference(head_dim, dtype, monkeypatch):
     logits = logits + rb.permute(0, 3, 1, 2).unsqueeze(0)
     logits = logits.masked_fill(~mask[:, :, None, None, :], float("-inf"))
     reference = torch.einsum("abhlm,abmhd->ablhd", logits.softmax(-1), rv)
-    actual = main.triton_augmented_attention_pair_bias(q, k, v, bias, mask)
+    actual = interface.triton_augmented_attention_pair_bias(
+        q, k, v, bias, mask, compute_efficient=compute_efficient,
+    )
     grad = torch.randn_like(actual)
     actual.backward(grad)
     reference.backward(grad.float())

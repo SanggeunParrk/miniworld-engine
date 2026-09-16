@@ -60,6 +60,20 @@ Forward-looking plans, not yet the shipped path:
 - [design/layernorm-linear-warp-specialized-stats.md](design/layernorm-linear-warp-specialized-stats.md) — warp-specialized LN stats
 - [design/quack-0.5.0-cute-port.md](design/quack-0.5.0-cute-port.md) — port the cute backend to quack 0.5.0
 
+## Reports (`reports/`)
+
+Rendered benchmark reports, one per GPU, generated from the tracked results tables by
+`benchmarks/runners/report_gpu.py` (per-module sweep figures, a summary table and a summary
+figure). Regenerate after the tables change; do not hand-edit the numbers.
+
+| page | what it answers |
+|---|---|
+| [reports/a6000-module-sweeps.md](reports/a6000-module-sweeps.md) | every module's L and d_pair sweep on the RTX A6000, inference and training, against compiled PyTorch and the vendor baselines |
+| [reports/swa-dit-component-memory-a6000-20260915.md](reports/swa-dit-component-memory-a6000-20260915.md) | SWA operation memory and one-at-a-time block peak-memory savings |
+| [reports/swa-dit-component-audit-a6000-20260915.md](reports/swa-dit-component-audit-a6000-20260915.md) | SWA operation-by-operation speed and full-block substitution audit |
+| [reports/swa-dit-fullgraph-a6000-20260915.md](reports/swa-dit-fullgraph-a6000-20260915.md) | FA2 fullgraph backward fix and A6000 training rerun |
+| [reports/swa-dit-esmfold2-a6000-20260915.md](reports/swa-dit-esmfold2-a6000-20260915.md) | corrected ESMFold2 SWA DiT: A6000 time and incremental peak memory, three repetitions |
+
 ## Records (`records/`)
 
 Measurement records — a number taken at a point in time, kept for evidence. See

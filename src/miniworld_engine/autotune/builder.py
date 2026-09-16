@@ -41,6 +41,7 @@ import torch
 
 from miniworld_engine import build as build_matrix
 from miniworld_engine.autotune import triton_cache, width_evidence
+from miniworld_engine.autotune.checkpoint_cases import NAMES as CHECKPOINT_CASE_NAMES
 from miniworld_engine.autotune.module_registry import module_rows
 
 BF16 = torch.bfloat16
@@ -232,69 +233,6 @@ def _mask(batch: int, length: int) -> torch.Tensor:
     return torch.ones(batch, length, dtype=torch.bool, device="cuda")
 
 
-class _KernelModule(torch.nn.Module):
-    """Wraps a kernel callable so a Case can drive it exactly like a production module.
-
-    Some registered ops have no ``nn.Module`` that dispatches to them -- the tm1/tm2 Triton
-    implementations and the ``*_miniworld_*`` / ``*_perf_*`` triangle-attention variants are
-    alternative implementations kept for A/B measurement, reachable only through the public kernel
-    API in ``miniworld_engine.kernels``. They register with the cache all the same, so a build that
-    only drives modules can never produce their entries no matter how wide the module sweep gets.
-
-    A wrapper rather than a second Case KIND: ``run_case`` already does the right thing with an
-    ``nn.Module`` (train/eval, requires_grad on the inputs, backward on the summed output), and
-    duplicating that for callables would be two code paths that have to stay in step.
-    """
-
-    def __init__(self, fn: Callable, weights: dict[str, torch.Tensor],
-                 tail: tuple = ()) -> None:
-        super().__init__()
-        self._fn = fn
-        # Trailing NON-tensor arguments (an eps, a flag) that the kernel takes AFTER its weights.
-        # They cannot live in the Case's input tuple: forward() appends the weights after the
-        # inputs, so an eps placed there lands in the weight slot and the weights shift one right.
-        # That is how `layernorm_lowreg` was calling triton_layernorm_lowreg(x, 1e-5, w, b) against
-        # a (x, weight, bias, eps) signature -- eps arrived as a tensor and the kernel failed to
-        # compile. Keeping them out of the inputs is also right on its own: an eps is not something
-        # run_case should be attaching requires_grad to.
-        self._tail = tail
-        # registered so .cuda()/.to(dtype) reach them and so autograd sees leaves for the backward
-        for name, w in weights.items():
-            self.register_parameter(name, torch.nn.Parameter(w))
-
-    def forward(self, *args):
-        out = self._fn(*args, *[p for _, p in self.named_parameters()], *self._tail)
-        return out[0] if isinstance(out, tuple) else out
-
-
-def _kernel_case(fn_path: tuple[str, str], weights: Callable[[dict, torch.dtype], dict],
-                 tail: tuple = ()):
-    """Case factory for a kernel driven through its public API. Imports lazily, like the modules."""
-    def make(dims, p, impl, dt):
-        import importlib
-
-        mod, attr = fn_path
-        fn = getattr(importlib.import_module(mod), attr)
-        fn = fn.apply if hasattr(fn, "apply") else fn
-        return _KernelModule(fn, weights(dims, dt), tail).cuda().to(dt)
-    return make
-
-
-def _w(*shapes: tuple[int | str, ...]):
-    """Weight-dict builder for _kernel_case: positional names keep the kernel's argument order.
-
-    An extent is an int, or a str naming one of the case's ``dims`` -- ``_w(("d", "d"))`` is a
-    (d, d) weight whose d comes from the dims dict the case is instantiated with. The annotation
-    said ``tuple[int, ...]``, which every caller violates and which produced 27 of this repo's
-    type findings from one wrong word.
-    """
-    def build(dims: dict, dt: torch.dtype) -> dict:
-        return {f"w{i}": torch.randn(*[dims.get(s, s) if isinstance(s, str) else s for s in shape],
-                                     device="cuda", dtype=dt)
-                for i, shape in enumerate(shapes)}
-    return build
-
-
 def _swa_params(length: int, dims: dict, dtype: torch.dtype, batch: int = 1) -> tuple:
     """``(cos, sin, seqused, cu_seqlens, max_seqlen, valid)`` for SWA3DRoPEAttention.forward.
 
@@ -332,15 +270,8 @@ CASE_NAMES: tuple[str, ...] = (
     "msa_pair_weighted_averaging",
     "outer_product_mean",
     "pairformer_block",
-    "triangle_pair_attention",
-    "tm1",
-    "tm2",
-    "gated_projection",
-    "layernorm_linear_pair_bias",
     "swa_atom_attention",
-    "layernorm_lowreg",
-    "layernorm_transpose",
-    "layernorm_linear_stats",
+    *CHECKPOINT_CASE_NAMES,
 )
 
 
@@ -389,6 +320,7 @@ def cases() -> list[Case]:
     trunks. A ladder of round numbers (128/256/512) misses 384 and 32 entirely, and a bucket no
     build visits is a bucket production falls back to the full grid on.
     """
+    from miniworld_engine.autotune.checkpoint_cases import cases as checkpoint_cases
     from miniworld_engine.modules import (
         AdaptiveLayerNorm,
         AttentionPairBias,
@@ -405,7 +337,6 @@ def cases() -> list[Case]:
     from miniworld_engine.modules.triangle_attention import (
         BidirectionalTriangleAttention,
         TriangleAttention,
-        TrianglePairAttention,
     )
     from miniworld_engine.modules.triangle_multiplication import (
         BidirectionalTriangleMultiplication,
@@ -436,7 +367,9 @@ def cases() -> list[Case]:
              # byte-identical units to the d_hidden=384 pair row -- 152 duplicate units, and the
              # single-stream buckets (rows = B*L, not B*L*L) still had no entry anywhere.
              lambda b, l, dims, dt, s: (
-                 (_pair if s == "token_pair" else _single)(b, l, dims["d_hidden"], dt),),
+                 (torch.randn(b, 8, l, dims["d_hidden"], device="cuda", dtype=dt)
+                  if s == "msa_token" else
+                  (_pair if s == "token_pair" else _single)(b, l, dims["d_hidden"], dt)),),
              # bf16 only: the fused kernels are bf16, so an fp32 run falls to torch and there is
              # no autotuner to capture -- 12 fp32 units produced 0 ops each.
              # No "cuda" either: that extension is compiled for sm_90a and will not build on sm_86
@@ -533,34 +466,9 @@ def cases() -> list[Case]:
         # and an unbuilt op is a full-grid stall the day something starts reaching it. The audit
         # (build.audit, check "reach") is what turned these two up -- they were the only nn.Module
         # exports with no Case at all.
-        Case("triangle_pair_attention",
-             lambda dims, p, i, dt: TrianglePairAttention(
-                 **dims, implementation=IT(i)).cuda().to(dt),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d_pair"], dt), _mask(b, l)),
-             **_shapes("triangle_pair_attention")),
         # ---- kernels with no module that dispatches to them ------------------------------- #
         # Registered ops are built because they are registered, not because the current model
         # reaches them. Each entry below drives the op through its own public entry point.
-        Case("tm1",
-             _kernel_case(("miniworld_engine.kernels.tm1.triton.main", "triton_tm1"),
-                          _w(("d", "d"), ("d", "d"), ("d", "d"), ("d", "d"))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
-             **_shapes("tm1")),
-        Case("tm2",
-             _kernel_case(("miniworld_engine.kernels.tm2.triton.main", "triton_tm2"),
-                          _w(("d", "d"), ("d", "d"))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt), _pair(b, l, dims["d"], dt)),
-             **_shapes("tm2")),
-        Case("gated_projection",
-             _kernel_case(("miniworld_engine.kernels.gated_projection.triton.main",
-                           "TritonGatedProjectionFunction"), _w(("hd", "d"))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["hd"], dt), _pair(b, l, dims["hd"], dt)),
-             **_shapes("gated_projection")),
-        Case("layernorm_linear_pair_bias",
-             _kernel_case(("miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
-                           "triton_layer_norm_linear"), _w(("d",), ("n_head", "d"))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
-             **_shapes("layernorm_linear_pair_bias")),
         Case("swa_atom_attention",
              lambda dims, p, i, dt: SWA3DRoPEAttention(**dims).cuda().to(dt),
              # forward takes (x, attention_params); the params tuple is built by the caller in
@@ -574,21 +482,7 @@ def cases() -> list[Case]:
              **_shapes("swa_atom_attention")),
         # forward-only kernel probes: no backward is registered for these, so `train=False`
         # (a train unit would only re-run the same forward and write the same entries).
-        Case("layernorm_lowreg",
-             _kernel_case(("miniworld_engine.kernels.layernorm.triton.lowreg",
-                           "triton_layernorm_lowreg"), _w(("d",), ("d",)), tail=(1e-5,)),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
-             **_shapes("layernorm_lowreg")),
-        Case("layernorm_transpose",
-             _kernel_case(("miniworld_engine.kernels.layernorm.triton.transpose",
-                           "layer_norm_transpose"), _w(("d",), ("d",))),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt),),
-             **_shapes("layernorm_transpose")),
-        Case("layernorm_linear_stats",
-             _kernel_case(("miniworld_engine.kernels.layernorm_linear.triton.stats",
-                           "stats_triton"), _w()),
-             lambda b, l, dims, dt, s: (_pair(b, l, dims["d"], dt).reshape(-1, dims["d"]), 1e-5),
-             **_shapes("layernorm_linear_stats")),
+        *checkpoint_cases(),
     ]
 
 
@@ -743,6 +637,8 @@ class OpUnit:
 
         if self.side == "pair":
             return both_key(self.length * self.length)
+        if self.side == "msa":
+            return both_key(8 * self.length)
         from miniworld_engine.autotune.cache import _levels
         from miniworld_engine.autotune.shape_key import atom_key
         level = _levels().get(self.op)
@@ -1011,17 +907,6 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: `layernorm_fwd_saveact_triton` missing `(rows=2048, N=64)` and `(4096, 64)`.
     MSA_WIDTHS = _from_cases("d_msa") or (64,)
 
-    def _case_lengths() -> tuple[int, ...]:
-        """Every length `cases()` runs, which is the WORK list.
-
-        `TOKEN_SHAPES` and `DIT_TOKEN_LENGTHS` are KEY sets -- what `atom_key` floor-clamps into,
-        deliberately disjoint so one clamp can serve both sides -- and they were also used as the
-        work list. They are not the same thing and they did not agree: the key sets stop at 512 and
-        768 while `cases()` runs to 1024, so a length production runs had no unit at all.
-        """
-        return tuple(sorted({int(L) for c in cases() for L in c.lengths}))
-
-    CASE_LENGTHS = _case_lengths()
     #: Widths the TRANSITION's expansion presents, for the same reason MSA_WIDTHS exists: a shared
     #: kernel meets them and no stream ladder carries them. The transition expands its hidden width
     #: by `n` (4) before the SwiGLU, so every kernel downstream of that expansion sees `n*d_hidden`,
@@ -1094,9 +979,15 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
     #: from one `driver_width`, so it could only ever build the DIAGONAL -- (128,128) (256,256)
     #: (512,512) -- while `cases()` declares gated_projection at (hd, d) of (128,128) and
     #: (256,128). `--replay` asked for (256,128) and (512,256) and neither was reachable.
-    GATE_OUT_PAIRS = tuple(sorted({(d["hd"], d["d"])
-                                   for c in cases() if c.name == "gated_projection"
-                                   for d in c.dims if d.get("hd") and d.get("d")}))
+    GATE_OUT_PAIRS = tuple(sorted({
+        (r.dims["d_hidden"], r.dims["d_out"])
+        for r in module_rows() if r.module == "gated_linear"
+    } | {
+        (r.dims["d_hidden"] * (2 if r.module.endswith("_bidirectional") else 1),
+         r.dims["d_pair"])
+        for r in module_rows()
+        if r.module in ("triangle_multiplication", "triangle_multiplication_bidirectional")
+    }))
     #: (d_hidden, d_cond) for the DiT families. Their kernels key on both -- `pack(..., NX=NX,
     #: NC=NC)` and the `(D, ND)` / `(DC, ND)` variants -- and `drivers/conditioned_transition.py`
     #: derived the second from the first: `_DC_BASE = 384 if _D_BASE > 128 else 128`. That yields
@@ -1159,6 +1050,20 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             continue
         if config_dir is not None and not (config_dir / f"{r['kernel']}.csv").is_file():
             continue          # this config set declares no grid for it
+        if r["kernel"] in {"transition_fwd_b2b_triton", "transition_fwd_b2b_ktiled_triton"}:
+            from miniworld_engine.autotune.module_registry import (
+                transition_driver_shapes,
+            )
+
+            aliases = {"bf16": "bfloat16", "fp32": "float32"}
+            out.append([
+                OpUnit(op=r["kernel"], side=side, length=length, width=width,
+                       heads=expansion, dtype=aliases.get(dtype, dtype))
+                for side, length, width, expansion in transition_driver_shapes(r["kernel"])
+                if not driver_widths or width in driver_widths
+                for dtype in r["dtypes"].split("|")
+            ])
+            continue
         # A `level=both` kernel is TWO work lists, not one. It keys on rows (shape_key.BOTH_ROWS),
         # so a pair L and an atom A of the same value are different buckets -- pair L=256 is
         # 65,536 rows, atom A=256 is 256 -- and driving one length list picks a side per length
@@ -1194,15 +1099,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # pair+atom pair, which is right for layernorm (the DiT normalises atoms) and for
             # gated_projection until someone traces it.
             want = [x for x in (r.get("sides") or "pair|atom").split("|") if x]
-            # The token side of a SHARED row runs at the lengths `cases()` runs, not at
-            # TOKEN_SHAPES. `--replay` asked `layernorm_fwd_strided` and `_bwd_atomic_strided` for
-            # (rows=1024, N=384): 1024 rows of a 384-wide TOKEN activation, which is the DiT token
-            # track at length 1024 being normalised by the shared kernel. TOKEN_SHAPES stops at
-            # 512, so the only rung at 1024 was the ATOM side -- a different activation, at the
-            # atom width -- and the key was never built.
-            # The WORK list is what `cases()` runs. TOKEN_SHAPES is the key set and stops short
-            # of it; using it here is what left the shared layernorms with no unit at 768 or 1024.
-            _tok_shared = tuple(sorted(set(TOKEN_SHAPES) | set(CASE_LENGTHS)))
+            # Token sweep policy: 128..768 only. Other module lengths must not
+            # widen this stream by unioning unrelated cases (including atom lengths).
+            _tok_shared = TOKEN_SHAPES
             per = {"pair": [("pair", L) for L in BOTH_PAIR_LENGTHS],
                    "atom": [("atom", A) for A in ATOM_SHAPES],
                    "token": [("token", N) for N in _tok_shared]}
@@ -1219,18 +1118,8 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
             # `dev audit --replay`: identical widths (DC=128, K=128, ND=256), built at L in
             # 1024..8192, asked for at L in 256..768. The width class still decides the WIDTH --
             # `_widths` reads `klass`, so a `width=atom` row stays pinned to 128 on both ladders.
-            # The token side runs at every length `cases()` runs these families at, which is not
-            # DIT_TOKEN_LENGTHS. That list stops at 768 because it is a KEY set -- `atom_key`
-            # floor-clamps into it and the two side lists are disjoint so one clamp can serve both
-            # -- and it was reused here as a WORK list. `cases()` builds adaptive_layernorm,
-            # conditioned_transition and augmented_attention at 256..1024, so a token launch at
-            # 1024 keys to `atom_key(1024)`, and the build drove that length on the ATOM side only,
-            # at the atom width. `--replay` asked augmented_attention for (H=16, HEAD_DIM=24) and
-            # (16, 48) at base 1024 -- token widths -- and had them only at 128..768.
-            #
-            # Driving both sides at 1024 collides with nothing: the key carries the widths too, and
-            # the atom unit there is width 128 while the token units are 384/768.
-            _tok = tuple(sorted(set(DIT_TOKEN_LENGTHS) | set(CASE_LENGTHS)))
+            # Keep token and atom length ladders separate.
+            _tok = DIT_TOKEN_LENGTHS
             sided = ([("token", L) for L in _tok]
                      + [("atom", A) for A in DIT_ATOM_LENGTHS])
         else:
@@ -1350,9 +1239,7 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
         # the other axis. Before this the winner was whichever unit the pool happened to finish
         # last, which was neither deterministic nor chosen.
         def _distinct(widths: tuple, _op=r["kernel"]) -> tuple:
-            if len(widths) < 2 or not width_evidence.collapses(_op, widths, evidence):
-                return widths
-            return (max(widths),)
+            return width_evidence.distinct_widths(_op, widths, evidence)
 
         # A `head_dim` row's bucket carries TWO axes, so its units carry the pair. Everything else
         # gets heads=0, which leaves the driver's own derivation alone.
@@ -1389,11 +1276,9 @@ def op_units(only: set[str] | None = None, config_dir: Path | None = None, drive
                 # cross would build head counts the model never pairs with that head dim.
                 return [(d, h) for h, d in HEAD_PAIRS if d in ws]
             if _gate_out:
-                pair = dict(GATE_OUT_PAIRS)
-                return [(w, pair.get(w, 0)) for w in ws]
+                return [(w, output) for w, output in GATE_OUT_PAIRS if w in ws]
             if _dit_pair:
-                pair = dict(DIT_PAIRS)
-                return [(w, pair.get(w, 0)) for w in ws]
+                return [(w, condition) for w, condition in DIT_PAIRS if w in ws]
             return [(w, 0) for w in ws]
 
         out.append([OpUnit(op=r["kernel"], length=length, dtype=dt, side=side, width=w, heads=h)
@@ -1450,13 +1335,16 @@ def units(selected: list[Case]) -> list[Unit]:
     for case in selected:
         if case.rows:
             from miniworld_engine.autotune import derive
-            positions = {(r.stream, tuple(r.dims.items())): i for i, r in enumerate(case.rows)}
-            for u in derive.units(list(case.rows), arch=sm):
-                switch, value = u.option or ("", None)
-                if switch and value is not None:
-                    value = (float(value) if switch == "p_drop" else SWITCH_SETTINGS[switch][1](value))
-                out.append(Unit(case.name, positions[(u.stream, u.dims)], u.length,
-                                u.mode == "train", u.dtype, switch, value, u.impl, u.compute))
+            # Dimensions alone are not a row identity: the same channels can be
+            # used both once in the trunk and at A=5/48 in diffusion. Preserve
+            # each row's index, lengths, modes and augmentation exactly.
+            for dim_index, row in enumerate(case.rows):
+                for u in derive.units([row], arch=sm):
+                    switch, value = u.option or ("", None)
+                    if switch and value is not None:
+                        value = (float(value) if switch == "p_drop" else SWITCH_SETTINGS[switch][1](value))
+                    out.append(Unit(case.name, dim_index, u.length,
+                                    u.mode == "train", u.dtype, switch, value, u.impl, u.compute))
             continue
         # build/gpu_to_kernels/<sm>.csv, not a list trimmed in cases(): the sweep is shared across
         # cards, so dropping "cute" from Case.impls to protect sm_86 would also stop building it
@@ -2312,7 +2200,7 @@ def _child_main(argv: list[str] | None = None) -> int:
     # rows were split by stream, and this list was not -- so every token unit died in argparse
     # before it reached a kernel, 3 seconds and 0 ops each. The parent process and the child have
     # to agree on the vocabulary; keeping the tuple here in step with `_widths` is the whole job.
-    ap.add_argument("--side", default="", choices=("", "pair", "atom", "token"),
+    ap.add_argument("--side", default="", choices=("", "pair", "atom", "token", "msa"),
                     help="which side of a `level=both` kernel to drive. It keys on rows, so pair "
                          "L and atom A of the same value are different buckets and the side "
                          "cannot be inferred from --length. Reaches the drivers as "

@@ -4,6 +4,9 @@ from miniworld_engine.kernels._compile import opaque
 
 from miniworld_engine.autotune.configs import configs_for
 import torch
+
+# FP32 projections use IEEE dot precision; implicit TF32 changes DiT gradients.
+# The input_precision setting leaves BF16 tensor-core arithmetic unchanged.
 import triton
 import triton.language as tl
 
@@ -78,8 +81,8 @@ def transition_fwd_kernel(
             other=0.0,
         )
 
-        A_tile += tl.dot(x_tile, W1_tile)
-        B_tile += tl.dot(x_tile, W2_tile)
+        A_tile += tl.dot(x_tile, W1_tile, input_precision="ieee")
+        B_tile += tl.dot(x_tile, W2_tile, input_precision="ieee")
 
     swish_A = A_tile * tl.sigmoid(A_tile)
     swish_AB = swish_A * B_tile

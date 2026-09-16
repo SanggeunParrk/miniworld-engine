@@ -48,7 +48,7 @@ def runner(monkeypatch):
     namespace: dict[str, Any] = {"torch": torch, "nn": torch.nn, "Literal": Literal, "NamedTuple": NamedTuple,
                  "TypedDict": TypedDict, "BaseModel": BaseModel, "model_validator": model_validator, "Any": Any, "DictConfig": DictConfig,
                  "FP32_PRECISION": 32, "DEVICE": torch.device("cpu"), "_NO_GRAPH_TARGETS": set(),
-                 "MINIWORLD_IMPL": "miniworld", "DTV1_IMPL": "dtv1", "OLD_TRITON_IMPL": "old_triton",
+                 "MINIWORLD_IMPL": "miniworld", "DTV1_IMPL": "dtv1",
                  "BIAS_ONLY_V_IMPL": "bias_only_v", "cast": cast, "FabricLike": Any,
                  "importlib": importlib, "contextlib": contextlib,
                  "SWA3DRoPEAttention": SWA3DRoPEAttention,
@@ -61,10 +61,11 @@ def runner(monkeypatch):
     namespace["UnsupportedBenchmark"] = UnsupportedBenchmark
     exec(compile(ast.Module(body=body, type_ignores=[]), str(BENCH), "exec"), namespace)
     namespace["BenchConfig"].model_rebuild(_types_namespace=namespace)
-    seen = SimpleNamespace(models=[], compiled=[], measured=[])
+    seen = SimpleNamespace(models=[], compiled=[], compile_options=[], measured=[])
 
     def compile_spy(model, *args, **kwargs):
         seen.compiled.append(model)
+        seen.compile_options.append(kwargs)
 
     def setup_module(model):
         seen.models.append(model)
@@ -108,6 +109,8 @@ def test_every_module_honors_mode_depth_compile_and_dtype(runner, target, mode, 
     assert all(m.training == (mode == "training") for m in model.modules())
     assert len(model.layers) == 2
     assert (model in seen.compiled) == compiled
+    if target == "swa_dit" and compiled:
+        assert seen.compile_options[0]["fullgraph"] is True
     assert result.input_dtype == "float32"
     assert result.parameter_dtype == namespace["parameter_dtype_of"](model)
     assert len(seen.measured) == 1
@@ -206,7 +209,7 @@ def test_token_conditioning_uses_declared_condition_width(runner):
 
 
 @pytest.mark.parametrize(("target", "implementation"), [
-    ("triangle_attention", "old_triton"), ("conditioned_transition", "cute"),
+    ("conditioned_transition", "cute"),
     ("adaptive_layernorm", "cuda"), ("dit", "cuequivariance"), ("swa_dit", "cute"),
 ])
 def test_unsupported_modules_raise_explicit_status_instead_of_nan(runner, target, implementation):

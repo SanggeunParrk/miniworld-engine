@@ -10,7 +10,8 @@ shapes are the ones the launcher documents, not invented ones:
   these drivers call the Triton launchers directly and never reach that dispatch, so the row
   count is a free extent here.)
 * ``transition_b2b_ktiled`` is only reached from ``TritonTransitionFusedFunction.forward``
-  on the ``K > _B2B_MAX_K (=128)`` branch, so its driver uses ``K = K_LARGE (256), ND = 4*K``.
+  on the ``K > _B2B_MAX_K (=128)`` branch. Its driver uses the module-declared
+  width and expansion ratio (standalone defaults: K=256, n=4).
 * triangle_multiplication: ``fused_triangle_multiplicative_update_dtv1`` flattens
   ``x (b, i, j, d)`` to ``(M = b*i*j, d)``; the input gate weight has ``2*d`` rows and the
   output gate weight ``d`` rows (both proofs are in the launcher comments).
@@ -26,8 +27,8 @@ subtracts 3 from each and puts a partial tile at the end of every axis this fami
 * ``ND_SMALL = N_EXPAND * K_SMALL`` and ``2 * TRIMUL_D`` -- the expand/gate output width, the
   N axis of every expand GEMM and of the squeeze contraction (BLOCK_N / BLOCK_K_ND tails).
 
-``N_EXPAND`` (=4) is NOT perturbed: it is the transition's expansion factor, part of the op
-the bench defines (``n=4``), not a tile extent -- ND rides on ``K_SMALL`` instead.
+``N_EXPAND`` (module-declared, default 4) is NOT perturbed: it is the transition's
+expansion factor, not a tile extent -- ND rides on ``K_SMALL`` instead.
 
 ``_pair_x`` is the one exception, and only in ragged mode: it must stay square for
 ``length_of`` to read L off it, so ``ragged()`` is applied to L (61) rather than to L*L. The M
@@ -54,6 +55,8 @@ exactly as ``transition_b2b`` / ``transition_expand_gate`` already forward it in
 """
 from __future__ import annotations
 
+import os
+
 import torch
 
 from miniworld_engine.autotune.shape_key import both_key
@@ -61,6 +64,7 @@ from miniworld_engine.kernels.drivers import (
     BF16,
     both_level_is_pair,
     dev,
+    driver_heads,
     driver_length,
     driver_width,
     ragged,
@@ -82,7 +86,8 @@ L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, 
 #: ~420 s per config. The token-level kernels in this file are never driven above 512, so the
 #: same constant serves them unchanged.
 IS_PAIR = both_level_is_pair(L_PAIR)
-ROWS = ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR)  # M: pair rows L*L, or atom rows A
+ROWS = (8 * ragged(L_PAIR) if os.environ.get("MINIWORLD_DRIVER_SIDE") == "msa"
+        else ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR))  # M: pair rows L*L, or atom rows A
 #: What production records for this activation: ``both_key(rows_of(<pre-flatten shape>))``, which
 #: is ROWS -- L*L on the pair side, A on the atom side. It used to be ``both_key(L_PAIR)``, and
 #: that is what put a pair L=1024 (1,048,576 rows) and an atom A=1024 (1,024 rows) in one bucket.
@@ -90,13 +95,10 @@ ROWS = ragged(L_PAIR) ** 2 if IS_PAIR else ragged(L_PAIR)  # M: pair rows L*L, o
 #: caller; passing it is what makes the sweep's unit (op, bucket) instead of (op, one bucket) N
 #: times.
 SHAPE_KEY = both_key(ROWS)
-N_EXPAND = 4  # transition expansion factor n (bench: n=4) -- an op parameter, not a tile extent
-# K_SMALL does NOT follow the swept width, and that is not an oversight. `transition_b2b` is
-# dispatched only when `K <= _B2B_MAX_K` (128): above it the full-K-row load plus the weight tiles
-# overflow shared memory, which is why the K-tiled variant exists. Driving this kernel at the swept
-# width would tune a bucket the dispatcher never routes to it, and at 384 it would not tune at all
-# -- it would die OutOfResources at every length.
-K_SMALL = ragged(128)  # K: the AF3 transition d, and the b2b path's ceiling; ragged -> 125
+N_EXPAND = driver_heads(4)  # spare unit axis carries the actual module expansion ratio
+# The plan restricts this path to K <= 128; drive its actual declared width.
+# A fixed 128 silently collapsed template/MSA K=64 into the wrong cache key.
+K_SMALL = ragged(driver_width(128))
 #: The width the kernels DOWNSTREAM of the expansion see: `n * d_hidden`, which is what their
 #: buckets carry. Their registry rows say `width=expand_nd` and the unit hands the expanded width
 #: over here, so K follows from it rather than the other way round.
@@ -109,9 +111,8 @@ K_SMALL = ragged(128)  # K: the AF3 transition d, and the b2b path's ceiling; ra
 #: trimul's frozen per-side width: a kernel keys on a DERIVED width and the driver pinned it.
 ND_DRIVEN = ragged(driver_width(4 * 128))
 K_FROM_ND = max(16, ND_DRIVEN // N_EXPAND)
-# The ktiled kernel is the one that sweeps: it exists FOR K > _B2B_MAX_K, so it follows the width
-# whenever that clears the threshold, and otherwise takes the smallest width that does.
-K_LARGE = ragged(max(256, driver_width(256)))  # -> 253 at the default width
+# The plan restricts ktiled probes to K > _B2B_MAX_K; honor the declared width exactly.
+K_LARGE = ragged(driver_width(256))  # -> 253 at the default width
 ND_SMALL = N_EXPAND * K_SMALL  # expand/gate width for the K_SMALL paths: 512 -> 500
 
 
@@ -129,6 +130,8 @@ def _pair_x(k: int = K_SMALL) -> torch.Tensor:
     way, so both layouts record the same shape_key.
     """
     n = ragged(L_PAIR)
+    if os.environ.get("MINIWORLD_DRIVER_SIDE") == "msa":
+        return torch.randn(1, 8, n, k, device=dev(), dtype=BF16)
     if not IS_PAIR:
         return torch.randn(1, n, k, device=dev(), dtype=BF16)
     return torch.randn(1, n, n, k, device=dev(), dtype=BF16)

@@ -303,6 +303,8 @@ def test_launch_keywords_match_the_kernel_signature() -> None:
             for kw in node.keywords:
                 if kw.arg is None:                    # **kwargs forward
                     continue
+                if isinstance(f, ast.Subscript) and kw.arg == "enable_fp_fusion":
+                    continue  # Triton compiler option, not a kernel parameter.
                 if kw.arg not in params[name]:
                     bad.append(f"{path.relative_to(SRC)}:{node.lineno} "
                                f"{name}(..., {kw.arg}=...) -- not a parameter of {name}")

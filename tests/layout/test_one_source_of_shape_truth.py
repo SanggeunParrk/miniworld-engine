@@ -1,27 +1,4 @@
-"""The per-op build must be able to reach what the module cases present.
-
-There are two declarations of "what shapes the model runs" in `autotune/builder.py`:
-
-* `cases()` -- module-level, one entry per production module with its real `dims`. This is what
-  `dev audit --replay` drives (`builder.audit(builder.cases())`), so it is the repository's own
-  definition of a covered workload.
-* `op_units()`'s `LADDER` -- kernel-level, the channel widths `build all` sweeps. `build all` takes
-  the per-op path, so this list alone decides what the shipped cache contains.
-
-Nothing tied them together, and they drifted. Every consequence below was measured by
-`dev audit --replay` against a cache `build all` had just reported complete:
-
-* `cases()` builds `triangle_multiplication` and `triangle_attention_bidirectional` at
-  `d_pair=384`; the pair ladder was `(128, 256, 512)`. `trimul_outproj_layernorm_gemm_gate_triton`
-  and `layernorm_fwd_saveact_triton` had no `K=384` / `N=384` bucket at all.
-* `cases()` builds the MSA modules at `d_msa=64`, which reaches the shared `level=both` LayerNorm
-  kernels as a channel width. No ladder carried 64.
-
-This test does not try to DERIVE one from the other -- the dim-name-to-stream mapping is real
-knowledge and guessing it is how the last such "obvious" inference destroyed a cache. It asserts
-the weaker, checkable thing: every width any case presents is a rung on some ladder. That is
-exactly the invariant 384 and 64 broke, and it is one a new case cannot break silently.
-"""
+"""Model shapes are covered by module units; explicit driver probes keep their own axes."""
 from __future__ import annotations
 
 import os
@@ -35,7 +12,10 @@ from miniworld_engine.autotune import builder
 #: rather than tiling over. `augmented_attention`'s heads are the reason this list is explicit:
 #: the DiT fixes `n_head` and lets head_dim follow `d_single`, so 16 is a count, and 24 / 48 (the
 #: widths it implies) are what the kernel actually sees.
-NOT_A_WIDTH = frozenset({"n_head", "n_heads"})
+NOT_A_WIDTH = frozenset({"n_head", "n_heads", "n", "has_bias"})
+# Exact leaf-only axes are driven by checkpoint_cases, not by every GEMM's
+# legacy width ladder. Broadcasting norm width 833 into TriMul would be invalid.
+EXACT_LEAF_AXES = frozenset({"d_norm", "d_expanded", "d_out"})
 
 #: width -> why no ladder drives it. A width only needs a rung if it reaches a kernel that KEYS on
 #: shape -- `pack` folds a kernel's own tiled axes into the key, and a projection width that never
@@ -56,7 +36,7 @@ def _presented_widths() -> dict[int, list[str]]:
     for case in builder.cases():
         for dims in case.dims:
             for name, value in dims.items():
-                if name in NOT_A_WIDTH or not isinstance(value, int):
+                if name in NOT_A_WIDTH | EXACT_LEAF_AXES or not isinstance(value, int):
                     continue
                 out.setdefault(value, []).append(f"{case.name}.{name}")
     return out
@@ -75,19 +55,17 @@ def test_cases_present_widths_at_all() -> None:
     assert _presented_widths(), "builder.cases() presents no integer dims"
 
 
-def test_every_width_a_case_presents_is_on_some_ladder() -> None:
-    ladder = _ladder_widths()
-    presented = _presented_widths()
-    missing = {w: sorted(set(who)) for w, who in presented.items()
-               if w not in ladder and w not in NOT_DRIVEN}
-    detail = "\n".join(f"    {w}: presented by {', '.join(who)}" for w, who in sorted(missing.items()))
-    assert not missing, (
-        f"widths `builder.cases()` presents that no `op_units` ladder drives:\n{detail}\n\n"
-        f"ladder rungs: {sorted(ladder)}\n"
-        f"`build all` runs the per-op path, so a width absent from every ladder is a bucket the "
-        f"shipped cache can never hold -- while `dev audit --replay`, which drives `cases()`, asks "
-        f"for it on every run. Add the rung in `op_units` (PRESENTED / HEADROOM_PAIR / MSA_WIDTHS), "
-        f"or drop the width from the case if the model does not run it.")
+def test_every_model_row_is_preserved_by_the_module_plan(monkeypatch) -> None:
+    from miniworld_engine.autotune import derive, plan
+
+    monkeypatch.setattr(builder, "device_sm", lambda: "sm_86")
+    cases = builder.cases()
+    by_name = {case.name: case for case in cases}
+    actual = {plan.label(unit, by_name[unit.case]) for unit in builder.units(cases)}
+    expected = {unit.label for unit in derive.units(derive.module_rows(), arch="sm86")}
+    assert actual == expected
+    assert any("d_hidden=8" in label and "msa_pair_weighted_averaging[" in label
+               for label in actual)
 
 
 def test_not_driven_entries_are_still_undriven() -> None:

@@ -1,38 +1,56 @@
-"""The ATOM-track diffusion transformer block (ESMFold2 sliding-window attention).
+"""ESMFold2 atom DiT: adaLN-Zero, sliding-window 3D RoPE, and SwiGLU.
 
-    x = x + SWA3DRoPEAttention(AdaptiveLayerNorm(x, s), attention_params)
-    x = x + ConditionedTransition(x, s)
-
-A different algorithm from the token track's, which is why it is a different folder. The
-attention here is WINDOWED (half_window, so cost is linear in the atom length, not quadratic),
-positional information comes from 3D RoPE rather than a learned pair bias, and there is no pair
-representation in the block at all. The token block is in ``modules/dit``.
-
-The adaLN lives in THIS block, unlike the token one where both parts build their own:
-``SWA3DRoPEAttention`` is the attention core and takes ``(x, attention_params)`` -- it knows
-nothing about conditioning. Its own bench docstring says the modulate and the FFN "live in the
-consumer's SWAAtomBlock, not here". This is that consumer.
+Matches MiniWorld's ``block_style="esmfold2"`` with magnitude-preserving options
+disabled: each residual branch has its own zero-initialized conditioning gate.
+There is no atom-pair representation. Attention parameters are built externally
+with ``modules.swa_atom_attention.build_attention_params``.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from jaxtyping import Float
 
-from miniworld_engine.modules.adaptive_layernorm import AdaptiveLayerNorm
-from miniworld_engine.modules.conditioned_transition import ConditionedTransition
 from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.primitives import Linear
 from miniworld_engine.modules.swa_atom_attention import SWA3DRoPEAttention
 
 
-class SWADiTBlock(nn.Module):
-    """Atom-track DiT block: adaLN modulate -> windowed 3D-RoPE attention -> transition.
+class SwiGLUFFN(nn.Module):
+    """ESMFold2 SwiGLU with the hidden width rounded up to a multiple of 256."""
 
-    ``forward(x, cond, attention_params)`` -> ``x``'s shape, with ``x`` at the ATOM length.
-    ``attention_params`` is the tuple ``SWA3DRoPEAttention`` takes,
-    ``(cos, sin, seqused, cu_seqlens, max_seqlen, valid)``; build it with
-    ``modules.swa_atom_attention.build_attention_params``.
+    def __init__(
+        self, d_model: int, expansion_ratio: int = 2, *,
+        implementation: ImplementationType = ImplementationType.PYTORCH,
+    ) -> None:
+        super().__init__()
+        self.implementation = ImplementationType(implementation)
+        hidden = ((expansion_ratio * (d_model // 3) * 2) + 255) // 256 * 256
+        self.w_up = Linear(d_model, 2 * hidden, bias=False, init="normal")
+        self.w_down = Linear(hidden, d_model, bias=False, init="normal")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.implementation != ImplementationType.PYTORCH:
+            from miniworld_engine import ops
+
+            wa, wb = self.w_up.weight.chunk(2, dim=0)
+            return ops.swiglu_ffn(x, wa, wb, self.w_down.weight)
+        x1, x2 = self.w_up(x).chunk(2, dim=-1)
+        return self.w_down(F.silu(x1) * x2)
+
+
+class SWADiTBlock(nn.Module):
+    """MiniWorld ESMFold2 SWAAtomBlock, with engine attention dispatch.
+
+    ``n`` is MiniWorld's ``expansion_ratio``. Inputs have atom-length layout
+    ``[N, S, d]``, where ``N = A * B``. Modulation predicts shift, scale, and
+    residual gate for each of attention and FFN. Both gates start at zero, so
+    the block is initially the identity.
+
+    Parameter names follow the ESMFold2 block. Checkpoints from the former
+    AF3-AdaLN/ConditionedTransition composition are structurally incompatible.
     """
 
     def __init__(
@@ -46,14 +64,17 @@ class SWADiTBlock(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        self.ada_ln = AdaptiveLayerNorm(
-            d_hidden=d_atom, d_cond=d_cond, implementation=implementation,
+        self.implementation = ImplementationType(implementation)
+        self.attn_norm = nn.RMSNorm(d_atom, elementwise_affine=False)
+        self.ffn_norm = nn.RMSNorm(d_atom, elementwise_affine=False)
+        self.adaln_modulation = nn.Sequential(
+            nn.SiLU(),
+            Linear(d_cond, 6 * d_atom, bias=False, init="zero"),
         )
-        self.attention = SWA3DRoPEAttention(
-            d_atom, n_head, half_window=half_window, implementation=implementation)
-        self.transition = ConditionedTransition(
-            d_hidden=d_atom, d_cond=d_cond, n=n, implementation=implementation,
+        self.attn = SWA3DRoPEAttention(
+            d_atom, n_head, half_window=half_window, implementation=implementation,
         )
+        self.ffn = SwiGLUFFN(d_atom, expansion_ratio=n, implementation=self.implementation)
 
     def forward(
         self,
@@ -61,6 +82,28 @@ class SWADiTBlock(nn.Module):
         cond: Float[torch.Tensor, "N S d_cond"],
         attention_params: tuple,
     ) -> Float[torch.Tensor, "N S d_atom"]:
-        """Both residuals explicit, as on the token track."""
-        x = x + self.attention(self.ada_ln(x, cond), attention_params)
-        return x + self.transition(x, cond)
+        if self.implementation != ImplementationType.PYTORCH:
+            from miniworld_engine import ops
+
+            activated = self.adaln_modulation[0](cond)
+            projection = self.adaln_modulation[1]
+            assert isinstance(projection, nn.Linear)
+            sh_a, sc_a, g_a, sh_f, sc_f, g_f = projection.weight.chunk(6, dim=0)
+            # nn.RMSNorm(eps=None) uses the opmath epsilon (fp32 for BF16).
+            eps = torch.finfo(torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype).eps
+            attn_in, gate_a = ops.rms_norm_modulation(
+                x, activated, sc_a, sh_a, g_a, eps=eps,
+            )
+            x = ops.gated_residual(x, gate_a, self.attn(attn_in, attention_params))
+            ffn_in, gate_f = ops.rms_norm_modulation(
+                x, activated, sc_f, sh_f, g_f, eps=eps,
+            )
+            return ops.gated_residual(x, gate_f, self.ffn(ffn_in))
+
+        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = (
+            self.adaln_modulation(cond).chunk(6, dim=-1)
+        )
+        attn_in = self.attn_norm(x) * (1 + scale_a) + shift_a
+        x = x + gate_a * self.attn(attn_in, attention_params)
+        ffn_in = self.ffn_norm(x) * (1 + scale_f) + shift_f
+        return x + gate_f * self.ffn(ffn_in)

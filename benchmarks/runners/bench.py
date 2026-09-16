@@ -69,7 +69,6 @@ from miniworld_engine.modules.triangle_multiplication.module import _load_cute_f
 
 DTV1_IMPL = "dtv1"
 MINIWORLD_IMPL = "miniworld"
-OLD_TRITON_IMPL = "old_triton"
 #: An ABLATION, not a backend: the attention logits ARE the pair bias, so there is no query, no
 #: key, no qk^T and no qk RMSNorm -- `out = softmax(bias) @ v`. Everything around the core is the
 #: module's own (AdaLN, the projections that remain, both sigmoid gates, the conditioning scale),
@@ -163,6 +162,9 @@ class BenchConfig(BaseModel):
     #: compile on + graph auto), so a run that sets this deliberately is allowed through.
     allow_eager: bool = False
     name_suffix: str = ""
+    swa_component: Literal["block", "modulation", "rope", "swiglu", "residual", "sigmoid_gate"] = "block"
+    swa_kernels: list[str] | None = None
+    swa_active_gates: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -293,15 +295,13 @@ def module_miniworld_spec(raw: str) -> ImplementationSpec:
         # reported plausible times (3.16 ms at L=384/d=128, vs 0.65 ms for the triton path)
         # and the autotune-capture builder recorded NOTHING, because no triton kernel ever ran.
         return ImplementationSpec(ImplementationType.MINIWORLD, None, raw)
-    if raw.strip().lower() == OLD_TRITON_IMPL:
-        return ImplementationSpec(ImplementationType.TRITON, None, raw)
     return parse_implementation_spec(raw)
 
 
 def triton_miniworld_spec(raw: str) -> ImplementationSpec:
     if raw.strip().lower() == MINIWORLD_IMPL:
         return ImplementationSpec(ImplementationType.TRITON, None, raw)
-    if raw.strip().lower() in {OLD_TRITON_IMPL, BIAS_ONLY_V_IMPL}:
+    if raw.strip().lower() == BIAS_ONLY_V_IMPL:
         return ImplementationSpec(ImplementationType.PYTORCH, None, raw)
     return parse_implementation_spec(raw)
 
@@ -1055,12 +1055,6 @@ def bench_module_triangle_attention(
     fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
-    if implementation.strip().lower() == OLD_TRITON_IMPL:
-        # `BenchResult` is a NamedTuple with no `status` / `error` field, so this guard used to
-        # raise `TypeError: __new__() got an unexpected keyword argument 'status'` -- the check
-        # for an unsupported implementation was itself the crash. NaN is how every other bench
-        # in this file reports "not applicable".
-        raise UnsupportedBenchmark("triangle_attention has no old_triton implementation")
 
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -1144,37 +1138,14 @@ def bench_module_transition(
     fabric: FabricLike,
 ):
     spec = module_miniworld_spec(implementation)
-    is_old_triton = implementation.strip().lower() == OLD_TRITON_IMPL
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
-    class OldTritonTransition(Transition):
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            from miniworld_engine import kernels
-
-            # The base Transition now ALWAYS adds the residual; this legacy-triton baseline is the
-            # raw op, so add the residual explicitly (residual == the module input) to stay
-            # comparable to the residual-inclusive pytorch reference.
-            out = kernels.triton_transition(
-                self.ln_in(x),
-                self.expand_a.weight,
-                self.expand_b.weight,
-                self.squeeze.weight,
-                self.n,
-            )
-            return x + out
-
     class MultiTransition(nn.Module):
-        def __init__(
-            self,
-            layer_spec: ImplementationSpec,
-            *,
-            use_old_triton: bool = False,
-        ) -> None:
+        def __init__(self, layer_spec: ImplementationSpec) -> None:
             super().__init__()
-            layer_cls = OldTritonTransition if use_old_triton else Transition
             self.layers = nn.ModuleList(
                 [
-                    layer_cls(conf.d_pair, implementation=layer_spec.impl)
+                    Transition(conf.d_pair, implementation=layer_spec.impl)
                     for _ in range(conf.n_layers)
                 ],
             )
@@ -1190,7 +1161,7 @@ def bench_module_transition(
         for _ in range(conf.n_layers)
     ]
 
-    model = MultiTransition(spec, use_old_triton=is_old_triton).to(DEVICE)
+    model = MultiTransition(spec).to(DEVICE)
     for layer, state in zip(model.layers, layer_states, strict=True):
         layer.load_state_dict(state)
     model.to(dtype=dtype)
@@ -1264,7 +1235,6 @@ def bench_module_transition(
     execution_path = (
         "module.reference.torch"
         if spec.impl in {ImplementationType.PYTORCH, ImplementationType.CUEQUIVARIANCE}
-        else "kernels.transition.triton.main" if is_old_triton
         else "modules.transition.module.Transition"
     )
     return measured_result(
@@ -2981,11 +2951,206 @@ def bench_module_dit_atom(conf, seq_len, implementation, fabric):
     return bench_module_dit(conf, seq_len, implementation, fabric)
 
 
+def bench_swa_component_audit(conf, seq_len, implementation, fabric):
+    """Paired SWA sub-operation training and one-at-a-time full-block substitutions.
+
+    Uses the standard compiler, correctness checks, timer, and CSV provenance. All
+    substitutions are local benchmark subclasses; production dispatch is untouched.
+    """
+    import copy
+
+    import torch.nn.functional as F
+
+    from miniworld_engine import kernels, ops
+    from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
+    from miniworld_engine.modules.swa_atom_attention.module import apply_rotary_emb_3d
+    from miniworld_engine.modules.swa_dit import SWADiTBlock
+
+    names = {"modulation", "rope", "swiglu", "residual", "sigmoid_gate"}
+    requested = set(conf.swa_kernels if conf.swa_kernels is not None else names)
+    if requested - names:
+        raise ValueError(f"unknown SWA kernels: {requested - names}")
+    spec = triton_miniworld_spec(implementation)
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD, ImplementationType.TRITON}:
+        raise UnsupportedBenchmark("SWA audit supports pytorch and miniworld")
+    enabled = requested if spec.impl != ImplementationType.PYTORCH else set()
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    n, s, width, heads = conf.n_augment, seq_len * 8, conf.d_single_atom, 4
+    component = conf.swa_component
+    if conf.n_layers != 1 or not conf.compile or conf.mode != "training":
+        raise ValueError("SWA audit requires one block, compile=true, mode=training")
+
+    def torch_rope(q, k, cos, sin):
+        eps = torch.finfo(torch.float32).eps
+        q = F.rms_norm(q.float(), (q.shape[-1],), eps=eps).to(q.dtype)
+        k = F.rms_norm(k.float(), (k.shape[-1],), eps=eps).to(k.dtype)
+        return apply_rotary_emb_3d(q, cos, sin), apply_rotary_emb_3d(k, cos, sin)
+
+    class AuditAttention(SWA3DRoPEAttention):
+        audit_kernels: frozenset[str]
+
+        def forward(self, x, ap):
+            n, s = x.shape[:2]
+            cos, sin, used, cu, maximum, valid = ap
+            qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
+            q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
+            fn = qk_norm_rope_3d if "rope" in self.audit_kernels else torch_rope
+            q, k = fn(q, k, cos, sin)
+            out = self._flash_window(q, k, v, cu, used, maximum, valid, n, s).reshape(n, s, -1)
+            gate = self.gate_proj(x)
+            out = kernels.sigmoid_gate_fused(gate, out) if "sigmoid_gate" in self.audit_kernels else out * torch.sigmoid(gate)
+            return self.out_proj(out)
+
+    class AuditBlock(SWADiTBlock):
+        audit_kernels: frozenset[str]
+
+        def forward(self, x, cond, ap):
+            if "modulation" in self.audit_kernels:
+                activated = self.adaln_modulation[0](cond)
+                projection = self.adaln_modulation[1]
+                assert isinstance(projection, nn.Linear)
+                sh_a, sc_a, g_a, sh_f, sc_f, g_f = projection.weight.chunk(6, dim=0)
+                a, ga = ops.rms_norm_modulation(x, activated, sc_a, sh_a, g_a, eps=torch.finfo(torch.float32).eps)
+            else:
+                sha, sca, ga, shf, scf, gf = self.adaln_modulation(cond).chunk(6, dim=-1)
+                a = self.attn_norm(x) * (1 + sca) + sha
+            branch = self.attn(a, ap)
+            x = ops.gated_residual(x, ga, branch) if "residual" in self.audit_kernels else x + ga * branch
+            if "modulation" in self.audit_kernels:
+                f, gf = ops.rms_norm_modulation(x, activated, sc_f, sh_f, g_f, eps=torch.finfo(torch.float32).eps)
+            else:
+                f = self.ffn_norm(x) * (1 + scf) + shf
+            branch = self.ffn(f)
+            return ops.gated_residual(x, gf, branch) if "residual" in self.audit_kernels else x + gf * branch
+
+    class Component(nn.Module):
+        audit_kernels: frozenset[str]
+
+        def __init__(self, base):
+            super().__init__()
+            self.base = base
+
+        def forward(self, *inputs):
+            engine = component in self.audit_kernels
+            if component == "modulation":
+                x, cond = inputs
+                activated = self.base.adaln_modulation[0](cond)
+                shift, scale, gate = self.base.adaln_modulation[1].weight.chunk(6, dim=0)[:3]
+                if engine:
+                    return ops.rms_norm_modulation(x, activated, scale, shift, gate, eps=torch.finfo(torch.float32).eps)
+                return (self.base.attn_norm(x) * (1 + F.linear(activated, scale)) + F.linear(activated, shift), F.linear(activated, gate))
+            if component == "rope":
+                return (qk_norm_rope_3d if engine else torch_rope)(*inputs)
+            if component == "swiglu":
+                return self.base.ffn(inputs[0])
+            if component == "residual":
+                x, gate, branch = inputs
+                return ops.gated_residual(x, gate, branch) if engine else x + gate * branch
+            if component == "sigmoid_gate":
+                gate, branch = inputs
+                return kernels.sigmoid_gate_fused(gate, branch) if engine else torch.sigmoid(gate) * branch
+            raise ValueError(component)
+
+    base = AuditBlock(width, width, heads).to(device=DEVICE, dtype=dtype)
+    base.attn.__class__ = AuditAttention
+    if conf.swa_active_gates:
+        with torch.no_grad():
+            projection = base.adaln_modulation[1]
+            assert isinstance(projection, nn.Linear)
+            projection.weight.normal_(std=0.01)
+    model = base if component == "block" else Component(base)
+
+    def configure(model, selected):
+        for module in model.modules():
+            module.audit_kernels = frozenset(selected)
+            if hasattr(module, "implementation"):
+                module.implementation = ImplementationType.PYTORCH
+        base = model if isinstance(model, AuditBlock) else model.base
+        base.ffn.implementation = ImplementationType.MINIWORLD if "swiglu" in selected else ImplementationType.PYTORCH
+
+    configure(model, enabled)
+    reference = copy.deepcopy(model)
+    configure(reference, set())
+    if component == "block":
+        # Independent production PyTorch forward, not a second copy of the audit formula.
+        reference.__class__ = SWADiTBlock
+        reference.attn.__class__ = SWA3DRoPEAttention
+    x = torch.randn(n, s, width, device=DEVICE, dtype=dtype, requires_grad=True)
+    cond = torch.randn_like(x, requires_grad=True)
+    angles = torch.randn(1, s, width // heads // 2, device=DEVICE)
+    cos, sin = angles.cos(), angles.sin()
+    lengths = (torch.rand(n, s, device=DEVICE) > conf.mask_prob).sum(-1)
+    valid = torch.arange(s, device=DEVICE)[None] < lengths[:, None]
+    ap = build_attention_params(cos, sin, valid, num_aug=n)
+    cos, sin = ap[:2]
+    if component == "block":
+        inputs = (x, cond, ap)
+    elif component == "modulation":
+        inputs = (x, cond)
+    elif component == "rope":
+        # Preserve production Q/K's strided views into one packed QKV tensor.
+        packed = torch.randn(n, s, 3, heads, width // heads, device=DEVICE, dtype=dtype)
+        q, k, _ = packed.unbind(2)
+        inputs = (q.detach().requires_grad_(), k.detach().requires_grad_(), cos, sin)
+    elif component == "swiglu":
+        inputs = (x,)
+    elif component == "residual":
+        inputs = (x, cond, torch.randn_like(x, requires_grad=True))
+    else:
+        inputs = (x, cond)
+    # Only differentiable tensor inputs need independent gradient storage.
+    ref_inputs = tuple(t.detach().clone().requires_grad_() if isinstance(t, torch.Tensor) and t.requires_grad else t for t in inputs)
+    leaves = [t for t in inputs if isinstance(t, torch.Tensor) and t.requires_grad]
+    ref_leaves = [t for t in ref_inputs if isinstance(t, torch.Tensor) and t.requires_grad]
+    model.train()
+    reference.train()
+    compile_module_for_benchmark(model, fullgraph=True)
+    compile_module_for_benchmark(reference, fullgraph=True)
+    y, ry = model(*inputs), reference(*ref_inputs)
+    outputs = y if isinstance(y, tuple) else (y,)
+    references = ry if isinstance(ry, tuple) else (ry,)
+    grads = tuple(torch.randn_like(t) for t in outputs)
+    torch.autograd.backward(outputs, grads)
+    torch.autograd.backward(references, grads)
+    output_metrics, grad_metrics = [], []
+    for a, b in zip(outputs, references, strict=True):
+        torch.testing.assert_close(a, b, atol=.04 if dtype == torch.bfloat16 else .005, rtol=.04 if dtype == torch.bfloat16 else .01)
+        output_metrics.append(tensor_metrics(a, b))
+    for a, b in zip([*leaves, *model.parameters()], [*ref_leaves, *reference.parameters()], strict=True):
+        if a.grad is None or b.grad is None:
+            assert a.grad is None and b.grad is None
+            continue
+        metrics = tensor_metrics(a.grad, b.grad)
+        assert metrics[1] < (.03 if dtype == torch.bfloat16 else .005), metrics
+        assert bool(torch.isfinite(a.grad).all())
+        grad_metrics.append(metrics)
+    acc = {"output_max_abs": max(t[0] for t in output_metrics), "output_rel_frob": max(t[1] for t in output_metrics),
+           "output_cosine": min(t[2] for t in output_metrics), "grad_max_abs": max(t[0] for t in grad_metrics),
+           "grad_rel_frob": max(t[1] for t in grad_metrics), "grad_cosine": min(t[2] for t in grad_metrics)}
+    del reference, ref_inputs, ref_leaves, y, ry, outputs, references
+    for t in [*leaves, *model.parameters()]:
+        t.grad = None
+
+    def step():
+        out = model(*inputs)
+        torch.autograd.backward(out if isinstance(out, tuple) else (out,), grads)
+        return out
+
+    result = measured_result(conf=conf, func=step, grad_to_none=[*leaves, *model.parameters()],
+                             params=list(model.parameters()), is_train=True, input_dtype=str(dtype).replace("torch.", ""),
+                             parameter_dtype=parameter_dtype_of(model),
+                             execution_path=f"swa_audit:{component}:kernels={','.join(sorted(enabled))}:active_gates={conf.swa_active_gates}",
+                             reference="fullgraph_pytorch_same_weights_inputs")
+    return result._replace(**acc)
+
+
 def bench_module_swa_dit(conf, seq_len, implementation, fabric):
-    """ATOM-track DiT block: adaLN -> windowed 3D-RoPE attention -> conditioned transition.
+    """ESMFold2 atom DiT: RMSNorm + adaLN-Zero gates, windowed 3D-RoPE attention, SwiGLU.
     `modules/swa_dit`. Runs at the atom length (`seq_len * 8`), like the swa_atom_attention
     kernel bench, and reports NaN without a flash backend for the same reason.
     """
+    if conf.swa_component != "block" or conf.swa_kernels is not None or conf.swa_active_gates:
+        return bench_swa_component_audit(conf, seq_len, implementation, fabric)
     from miniworld_engine.modules.swa_atom_attention.module import (
         build_attention_params,
     )
@@ -3014,7 +3179,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
     model = MultiSWADiT().to(device=DEVICE, dtype=dtype)
     model.train(not is_inference_mode(conf.mode))
     if conf.compile:
-        compile_module_for_benchmark(model)
+        compile_module_for_benchmark(model, fullgraph=True)
     model = fabric.setup_module(model)
 
     atom_len, n = seq_len * 8, conf.n_augment
@@ -3121,7 +3286,7 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             "triangle_multiplication": ("pytorch", "triton", "miniworld", "cuequivariance", "cute", "dtv1"),
             "triangle_multiplication_bidirectional": ("pytorch", "triton", "miniworld", "cuequivariance", "cute", "dtv1"),
             "triangle_attention": ("pytorch", "triton", "miniworld", "cuequivariance"),
-            "transition": ("pytorch", "triton", "miniworld", "old_triton", "cute"),
+            "transition": ("pytorch", "triton", "miniworld", "cute"),
             "conditioned_transition": ("pytorch", "triton", "miniworld"),
             "adaptive_layernorm": ("pytorch", "triton", "miniworld"),
             "augmented_attention_token": ("pytorch", "triton", "miniworld"),
@@ -3153,17 +3318,11 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
     if out:
         return tuple(out)
     # Module-level targets have no `implementation == "..."` chain; their set is the enum plus
-    # `miniworld`. `old_triton` is NOT universal -- only `bias_only_attention` and `transition`
-    # define one (each builds its own `OldTriton*` subclass, which is why the name is in their
-    # source). Offering it everywhere meant `triangle_multiplication` failed 15 rows with
-    # `ValueError: Unknown implementation spec: 'old_triton'`, and the modules that merely fall
-    # through to TRITON benched the same path twice under two labels -- enough for
-    # `adaptive_layernorm`'s fastest row to be named after an implementation it does not have.
-    # Read from the source like everything else here, so it cannot drift.
+    # `miniworld`. Labels that only some targets define are read from the source (their constant
+    # is named in the function that supports them), so the list cannot drift: offering a label
+    # everywhere once benched the same path twice under two names.
     src = _inspect.getsource(fn)
     names = [*[m.value for m in ImplementationType], MINIWORLD_IMPL]
-    if "OLD_TRITON_IMPL" in src:
-        names.append(OLD_TRITON_IMPL)
     if "BIAS_ONLY_V_IMPL" in src:
         names.append(BIAS_ONLY_V_IMPL)
     return tuple(names)
@@ -3520,8 +3679,6 @@ def csv_row(
 ) -> dict[str, str | int | float | bool | None]:
     if implementation == DTV1_IMPL:
         spec = None
-    elif implementation == OLD_TRITON_IMPL:
-        spec = ImplementationSpec(ImplementationType.TRITON, None, implementation)
     else:
         try:
             spec = parse_implementation_spec(implementation)
@@ -3542,8 +3699,6 @@ def csv_row(
     implementation_type = spec.impl.value if spec is not None else implementation
     if implementation == MINIWORLD_IMPL:
         implementation_type = MINIWORLD_IMPL
-    if implementation == OLD_TRITON_IMPL:
-        implementation_type = OLD_TRITON_IMPL
     return {
         "run_name": run_name,
         "measurement_schema": 2,

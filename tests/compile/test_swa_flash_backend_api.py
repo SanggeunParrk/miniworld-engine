@@ -56,15 +56,15 @@ def test_backend_specific_varlen_api_preserves_padding_and_gradients(
         assert window_size == ((-1, -1) if half_window < 0 else (2, 2))
         return q * 2, torch.empty(0)  # exercise auxiliary tuple handling
 
-    # FA2's no-grad path keeps static capacity; cu_seqlens excludes unused storage.
+    # FA2 keeps static capacity in both modes; cu_seqlens excludes unused storage.
     def fa2(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
             dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1)):
         calls.append("fa2")
-        assert max_seqlen_q == max_seqlen_k == (int(seqused.max()) if grad_enabled else s)
+        assert max_seqlen_q == max_seqlen_k == s
         torch.testing.assert_close(cu_seqlens_q,
                                    torch.cat([seqused.new_zeros(1), seqused.cumsum(0, dtype=torch.int32)]))
         torch.testing.assert_close(cu_seqlens_k, cu_seqlens_q)
-        assert q.shape == (int(seqused.sum()) if grad_enabled else n * s, 1, 2)
+        assert q.shape == (n * s, 1, 2)
         assert q.dtype == torch.bfloat16
         assert softmax_scale == 0.5
         assert dropout_p == 0.0
@@ -72,11 +72,7 @@ def test_backend_specific_varlen_api_preserves_padding_and_gradients(
         return q * 2
 
     def unpad(tensor, mask):
-        assert grad_enabled, "No-grad forward must not invoke dynamic nonzero packing"
-        indices = mask.flatten().nonzero().flatten()
-        counts = mask.sum(-1, dtype=torch.int32)
-        offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0, dtype=torch.int32)])
-        return tensor.flatten(0, 1)[indices], indices, offsets, int(counts.max())
+        raise AssertionError("Neither mode may use dynamic nonzero packing")
 
     def pad(tensor, indices, batch, length):
         result = tensor.new_zeros((batch * length, *tensor.shape[1:]))

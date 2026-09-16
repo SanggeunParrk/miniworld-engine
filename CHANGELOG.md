@@ -8,6 +8,20 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `ops.gated_residual(x, gate, branch)`: fused linear residual gate with backward.
+
+### Changed
+
+- FA2 sliding-window attention uses static-capacity packing in backward as well as
+  forward, removing dynamic `nonzero`/host length reads from the AOT backward graph.
+  SWA DiT compiled benchmarks now require `fullgraph=True`.
+
+- `SWADiTBlock` now matches MiniWorld ESMFold2 adaLN-Zero. Engine backends use
+  fused RMSNorm modulation, SwiGLU, and residual gates; the previous AF3-style
+  block checkpoints and SWA DiT benchmark results are incompatible with this version.
+
 ### Removed
 - **`kernels.triton_adaptive_layer_norm`, and twelve kernels no production path reached.** Two
   audits of the adaln and conditioned_transition families found that half their registry surface
@@ -343,3 +357,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - Initial consolidation of AF3-style op kernels (triangle multiplication,
   transition, triangle/bias/augmented attention, layernorm, adaLN) with
   Triton / CuTeDSL / CUDA backends.
+
+### Checkpoint shape coverage and composite ops (2026-09-15)
+
+- Add public `ops.gated_linear`, `ops.swiglu_ffn`, and `ops.rms_norm_modulation` over existing autograd kernels.
+- Drive actual AF3, Protenix v1/v2, OpenDDE and ESMFold2 dimensions from the module build registry; include FP32 norm affine parameters, expansion ratios and projected attention head layouts.
+- Handle absent LayerNorm affine tensors on the CUDA path without a mixed-dtype PyTorch fallback.
+- Record constructor provenance and unsupported asymmetric TriMul/local attention in `docs/checkpoint-shapes-20260915.md`.

@@ -39,6 +39,9 @@ def spy(monkeypatch, tmp_path):
     monkeypatch.setattr(builder, "build_all", fake_build_all)
     monkeypatch.setattr(builder, "device_sm", lambda: "sm_86")
     monkeypatch.setattr(cli, "_merge_built_shards", lambda args, results: 0)
+    # A simulated successful build must never delete a developer's live Triton
+    # cache. Tests of pruning order override this spy explicitly below.
+    monkeypatch.setattr(cli, "_empty_triton_cache", lambda **kwargs: 0)
     monkeypatch.setattr(cli, "_resolve_gpus", lambda g: [0])
     from miniworld_engine.autotune import derive, plan, preflight
     # These tests exercise scheduling and final certification. Refresh/dependency
@@ -90,12 +93,7 @@ def test_the_default_is_the_module_sweep_alone(spy, tmp_path) -> None:
     # `--rebuild-cached` sat next to it -- and that arrangement cost 5h14m of an A6000 once,
     # re-timing 64 already-tuned units of layernorm_bwd_split to fill three missing keys.
     assert all(p["fill_gaps"] is True for p in spy), "a build should build what is missing"
-    # A second pass is allowed, and only for the complement: the kernels `dev derive` shows no
-    # module reaches. It is not a second statement of the same shapes -- that is what was wrong
-    # with the old two-pass build -- it is the kernels the first pass provably cannot produce.
-    assert len(spy) <= 2, f"`build all` ran {len(spy)} passes"
-    if len(spy) == 2:
-        assert spy[1]["kind"] == "OpUnit", spy
+    assert len(spy) == 1, "default build must not schedule non-model driver shapes"
 
 
 def test_the_op_sweep_drives_more_than_one_width(monkeypatch) -> None:
@@ -122,12 +120,7 @@ def test_the_op_sweep_drives_more_than_one_width(monkeypatch) -> None:
 def test_an_explicit_flag_still_asks_for_one_pass(spy, tmp_path, flag, kind) -> None:
     _run(_args(tmp_path, flag))
     assert spy[0]["kind"] == kind
-    if flag == "--per-module":
-        # `all` still owes the drivers no module reaches on the target card.
-        assert len(spy) == 2, spy
-        assert spy[1]["kind"] == "OpUnit", spy
-    else:
-        assert len(spy) == 1, spy
+    assert len(spy) == 1, spy
     assert spy[0]["fill_gaps"] is True, "an explicit single pass still fills gaps by default"
 
 
@@ -138,7 +131,7 @@ def test_a_named_case_still_gets_its_single_module_pass(spy, tmp_path) -> None:
     case name filters `op_units` by a name no kernel has, so it finds nothing and the command exits
     2 -- which is what `build gated_projection grid` did for one commit, having worked before it.
     """
-    _run(_args(tmp_path, case="gated_projection"))
+    _run(_args(tmp_path, case="layernorm_native"))
     assert len(spy) == 1, f"a named case ran {len(spy)} passes: {spy}"
     assert spy[0]["kind"] == "Case", spy
     assert spy[0]["fill_gaps"] is True, spy
@@ -172,6 +165,7 @@ def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:
         seen["cmd"] = cmd
         raise SystemExit(0)          # stop before anything launches
 
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))
     monkeypatch.setattr(builder, "_run_unit_process", fake_run)
     unit = builder.op_units({"gated_projection_gate_triton"})[0]
     for want in (True, False):
@@ -183,22 +177,15 @@ def test_the_flag_reaches_the_child(tmp_path, monkeypatch) -> None:
         assert ("--fill-gaps" in seen["cmd"]) is want, seen["cmd"]
 
 
-def test_the_driver_pass_runs_when_the_card_is_named(spy, tmp_path, monkeypatch) -> None:
-    """`build all`'s second pass, exercised without a GPU.
+def test_unreachable_driver_is_not_added_on_a_named_card(spy, tmp_path, monkeypatch):
+    from miniworld_engine.autotune import builder
 
-    It was not exercised at all: `_driver_pass_for_uncovered` returns early when
-    `builder.device_sm()` is None, which it is on every machine these tests run on, so the whole
-    pass was dead code under test. It crashed on its first real launch -- `device_sm` spells the
-    arch `sm_86` and both registries spell it `sm86`, so `uncovered_kernels` raised and all three
-    build jobs exited without writing a shard. Naming the card is all it takes to cover it."""
-    from miniworld_engine.autotune import builder as _builder
+    def unexpected(*args, **kwargs):
+        raise AssertionError("default build must use model cases only")
 
-    monkeypatch.setattr(_builder, "device_sm", lambda: "sm_86")
+    monkeypatch.setattr(builder, "op_units", unexpected)
     _run(_args(tmp_path))
-    kinds = [p["kind"] for p in spy]
-    assert kinds == ["Case", "OpUnit"], (
-        f"`build all` on a named card ran {kinds}; it owes the module sweep and then the driver "
-        f"sweep for the kernels no module reaches")
+    assert [p["kind"] for p in spy] == ["Case"]
 
 
 def test_successful_units_cannot_hide_missing_cache_keys(spy, tmp_path, monkeypatch):
@@ -240,8 +227,8 @@ def test_partial_driver_failure_is_not_hidden_by_module_coverage(
 
     monkeypatch.setattr(builder, "build_all", build)
     monkeypatch.setattr(cli, "_merge_built_shards", lambda args, rows: merged.extend(rows) or 0)
-    assert cli.cmd_build(_args(tmp_path)) == expected
-    assert len(merged) == 3, "successful measurements must survive partial failures"
+    assert cli.cmd_build(_args(tmp_path, "--per-op")) == expected
+    assert len(merged) == 2, "successful measurements must survive partial failures"
 
 
 def test_claimed_elsewhere_is_pending_work():

@@ -41,7 +41,7 @@ class _Autotuner:
 GRID = [_Cfg(m) for m in (32, 64, 128, 256)]
 
 
-def _entry_for(at, keep, tmp_path, monkeypatch, *, op="op_probe", csh=None):
+def _entry_for(at, keep, tmp_path, monkeypatch, *, op="op_probe", csh=None, with_space=False):
     """Write a cache file the way the BUILD writes one, then point the reader at it."""
     monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path)
     cache._load_cache.clear()
@@ -50,7 +50,8 @@ def _entry_for(at, keep, tmp_path, monkeypatch, *, op="op_probe", csh=None):
     dtype = cache.dtype_of_args(at.nargs)
     bucket = cache.bucket_of_autotuner(at, at.nargs, {})
     cache.store_ranked_configs(op, cache.gpu_key(), dtype, bucket, ranked, h,
-                               op_id=cache.op_identity(at))
+                               op_id=cache.op_identity(at),
+                               configs=at.configs if with_space else None)
     monkeypatch.setattr(cache, "op_of", lambda _c: op, raising=False)
     import miniworld_engine.autotune.configs as cfgmod
     monkeypatch.setattr(cfgmod, "op_of", lambda _c: op)
@@ -348,3 +349,45 @@ def test_shape_pruning_never_resurrects_excluded_only_winner(tmp_path, monkeypat
     assert cache._cached_subset(at, allowed, at.nargs, {}) == allowed
     assert len(seen) == 1
     assert "every tuned config" in seen[0]
+
+
+def test_a_proved_grid_narrowing_reuses_the_existing_winner(tmp_path, monkeypatch):
+    at = _Autotuner(GRID, ["shape_key"], {"x": torch.empty(2, 2, dtype=torch.bfloat16),
+                                          "shape_key": 256})
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch, with_space=True)
+    at.configs = GRID[:3]
+    got = cache._cached_subset(at, at.configs, at.nargs, {})
+    assert got == GRID[1:3]
+
+
+def test_narrowing_does_not_hide_an_environment_change(tmp_path, monkeypatch):
+    at = _Autotuner(GRID, ["shape_key"], {"x": torch.empty(2, 2, dtype=torch.bfloat16),
+                                          "shape_key": 256})
+    _entry_for(at, GRID[1:3], tmp_path, monkeypatch, with_space=True)
+    at.configs = GRID[:3]
+    monkeypatch.setattr(cache, "env_identity", lambda: "another compiler")
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is None
+
+
+def test_candidate_growth_is_not_a_proved_narrowing():
+    data = {"config_space_hash": cache.config_space_hash(GRID),
+            "config_space": [repr(cache._sig(c)) for c in GRID]}
+    assert cache.grid_compatible(data, GRID[:2])
+    assert not cache.grid_compatible(data, [*GRID, _Cfg(512)])
+    assert not cache.grid_compatible({}, GRID[:2])
+
+
+def test_cute_dict_candidates_reuse_a_narrowed_grid(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "_CACHE_ROOT", tmp_path)
+    cache._load_cache.clear()
+    # Actual CuTe callers omit unused Triton warp/stage fields.
+    candidates = [{"kwargs": {"tile_m": m, "cluster": (1, 1)}} for m in (64, 128, 256)]
+    op = "cute_probe"
+    cache.store_ranked_configs(
+        op, cache.gpu_key(), "bfloat16", "shape_key=128",
+        [(candidates[1], 1.0)], cache.config_space_hash(candidates), configs=candidates)
+    got = cache.select_config(op, dtype="bfloat16", bucket="shape_key=128", candidates=candidates[:2])
+    assert got is not None
+    assert got["kwargs"] == {"tile_m": 128, "cluster": (1, 1)}
+    assert cache.select_config(
+        op, dtype="bfloat16", bucket="shape_key=128", candidates=candidates[:1]) is None

@@ -3,11 +3,13 @@
 Fused attention with an additive pair bias and an optional mask, in two backends with an
 identical ``(q, k, v, bias, mask)`` signature:
 
-  * **compute-efficient** (``triton/main.py``, the default): stores the attention
-    probabilities so the backward reuses them instead of recomputing. Faster across the
-    benchmarked shapes (wins for L up to ~1024); costs more activation memory.
-  * **memory-efficient** (``triton/memory_efficient.py``): flash-style, recomputes the
-    attention in the backward. Lower memory, preferable on memory-tight or very long-L cases.
+  * **compute-efficient** (``triton/main.py``, the default): stores partial query
+    gradients per KV tile and bias gradients per augmentation, then reduces them.
+  * **memory-efficient** (``triton/memory_efficient.py``): atomically accumulates
+    query and shared bias gradients without those expanded buffers.
+
+Both backends recompute attention probabilities in backward. Atomic accumulation
+uses less workspace, but floating-point accumulation order can vary between runs.
 
 The choice is a per-call kwarg rather than two exported names, so this module is the family's
 single public door and the backend split stays an implementation detail of the family.
@@ -38,11 +40,9 @@ def triton_augmented_attention_pair_bias(
 ) -> torch.Tensor:
     """Fused augmented attention with pair bias.
 
-    ``compute_efficient`` (default ``True``) selects the compute-efficient backend
-    (stores attention probabilities; faster at the benchmarked shapes). Pass
-    ``False`` for the memory-efficient flash-style backend on memory-tight or
-    very long-L cases. Both backends carry a real backward and are numerically
-    equivalent to the torch reference.
+    ``compute_efficient`` (default ``True``) selects split-buffer gradient
+    accumulation. Pass ``False`` for atomic accumulation with lower workspace
+    memory. Both backends recompute attention probabilities in backward.
     """
     fn = (
         _pair_bias_compute_efficient

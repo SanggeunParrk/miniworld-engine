@@ -27,7 +27,7 @@ def test_single_input_cases_preserve_the_batch_axis(monkeypatch):
 
     from miniworld_engine.autotune import builder
     monkeypatch.setattr(builder, "_pair", lambda b, l, d, dt: torch.empty(b, l, l, d))
-    wanted = {"tm1", "layernorm_linear_pair_bias", "layernorm_lowreg", "layernorm_transpose"}
+    wanted = {"transition"}
     found = set()
     for case in builder.cases():
         if case.name in wanted:

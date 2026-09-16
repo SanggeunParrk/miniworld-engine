@@ -24,10 +24,10 @@ def layernorm_kernel(
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Standalone LayerNorm kernel with automatic backward reduction dispatch."""
-    if weight is None or bias is None:
-        return layernorm_pytorch(x, weight, bias, eps)
     if not x.is_cuda:
         return layernorm_pytorch(x, weight, bias, eps)
+    if weight is None or bias is None:
+        return triton_layernorm(x, weight, bias, eps)
 
     x = x.contiguous()
     weight = weight.contiguous()

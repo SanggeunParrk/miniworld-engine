@@ -33,7 +33,7 @@ def runner(monkeypatch):
               "is_inference_mode", "result_unit"}
     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in wanted]
     ns = dict(contextlib=contextlib, torch=torch, NamedTuple=NamedTuple, Callable=Callable, BenchConfig=SimpleNamespace,
-              DTV1_IMPL="dtv1", OLD_TRITON_IMPL="old_triton", MINIWORLD_IMPL="miniworld",
+              DTV1_IMPL="dtv1", MINIWORLD_IMPL="miniworld",
               _compile_wrap_now=lambda: "custom_op", os=SimpleNamespace(environ={}),
               **{name: getattr(runtime, name) for name in ("UnsupportedBenchmark", "compile_for_benchmark",
                   "observe_execution", "parameter_dtype_of", "require_compile_evidence", "input_shapes_of",

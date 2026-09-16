@@ -84,9 +84,9 @@ def compile_for_benchmark(func: Callable, *, fullgraph: bool = False):
     return compiled
 
 
-def compile_module_for_benchmark(model: torch.nn.Module) -> None:
-    probe = CompileProbe("module_forward", fullgraph=False)
-    model.compile(backend=probe, dynamic=False, fullgraph=False,
+def compile_module_for_benchmark(model: torch.nn.Module, *, fullgraph: bool = False) -> None:
+    probe = CompileProbe("module_forward", fullgraph=fullgraph)
+    model.compile(backend=probe, dynamic=False, fullgraph=fullgraph,
                   options={"triton.cudagraphs": False})
 
 

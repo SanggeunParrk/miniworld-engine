@@ -427,6 +427,12 @@ def triton_layernorm(x, weight, bias, eps, row_scale=None):
     """LayerNorm (autograd). Optional `row_scale` [M] folds a per-row scale into the LN epilogue
     (fwd) and the grad into the LN backward (bwd) — y = LN(x)*rs, the AF pair-mask applied FREE
     (no separate (M,N) multiply). rs=None -> plain LN."""
+    # Absent affine parameters are constants, not trainable synthetic parameters.
+    # Construct outside Function.apply so autograd never returns a gradient for None.
+    if weight is None:
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=torch.float32)
+    if bias is None:
+        bias = torch.zeros(x.shape[-1], device=x.device, dtype=torch.float32)
     return TritonLayerNormFunction.apply(x, weight, bias, eps, row_scale)
 
 

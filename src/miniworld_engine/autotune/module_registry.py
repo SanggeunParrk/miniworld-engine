@@ -30,6 +30,8 @@ STREAM_LADDERS: dict[str, tuple[int, ...]] = {
     "token_single": (128, 256, 384, 512, 640, 768),
     "atom_single": (1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192),
     "msa_token": (128, 256, 384, 512, 640, 768),
+    "atom_pair": (1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192),
+    "noise": (1,),
 }
 
 
@@ -91,3 +93,26 @@ def module_rows(path: Path = REGISTRY_MODULE) -> list[ModuleRow]:
     return rows
 
 
+def transition_driver_shapes(kernel: str) -> tuple[tuple[str, int, int, int], ...]:
+    """Exact (side, length, hidden width, expansion ratio) tuples for B2B probes.
+
+    Widths from norms/attention projections are not transition dimensions. Keep
+    K and n paired as declared by each module, and honor the two dispatch domains.
+    The module build remains authoritative for modes/flags and augmentation.
+    """
+    small = kernel == "transition_fwd_b2b_triton"
+    sides = {"token_pair": "pair", "token_single": "token", "atom_single": "atom",
+             "msa_token": "msa"}
+    shapes = set()
+    for row in module_rows():
+        if row.module not in {"transition", "swiglu_ffn"}:
+            continue
+        width = row.dims["d_hidden"]
+        if (width <= 128) != small:
+            continue
+        expanded = row.dims.get("d_expanded", row.dims.get("n", 4) * width)
+        if expanded % width:
+            raise ValueError("Transition driver requires an integral expansion ratio")
+        for length in row.lengths:
+            shapes.add((sides[row.stream], length, width, expanded // width))
+    return tuple(sorted(shapes))
