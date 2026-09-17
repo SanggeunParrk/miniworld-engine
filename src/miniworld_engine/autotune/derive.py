@@ -202,6 +202,16 @@ def install_recorder(sink: list) -> None:
         except Exception as exc:                       # a key the fake args cannot answer
             bucket = f"<unresolved:{type(exc).__name__}>"
         sink.append((op, dtype_of_args(nargs), bucket))
+        # A launcher may use values recorded by its grid callback after the
+        # launch (e.g. attention's actual split count for dQ reduction). Real
+        # Triton evaluates that callback with the selected config. Derivation
+        # needs the same host-side effect, without compiling or timing a kernel.
+        # Use one declared config; this does not select a runtime winner.
+        grid = kwargs.get("grid")
+        if callable(grid):
+            meta = dict(nargs)
+            meta.update(self.configs[0].all_kwargs())
+            grid(meta)
         return
 
     def plain_run(self, *args, **kwargs):
