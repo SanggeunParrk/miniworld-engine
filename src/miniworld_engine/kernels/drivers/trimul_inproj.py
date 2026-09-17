@@ -268,12 +268,13 @@ def fused_preact_gemm_kernel() -> None:
 
 
 def masked_front_sm90():
-    """Both single/bidirectional widths and inference/training save contracts."""
+    """Actual per-side inference and stacked training projection contracts."""
     from miniworld_engine.kernels.trimul_inproj.cute.masked_front import masked_front
     a = _rows(D)
     mask = torch.ones(M, device=dev(), dtype=torch.bool)
     mask[::3] = False
-    for hidden in (D, 2 * D):
-        weight = torch.randn(D, 4 * hidden, device=dev(), dtype=BF16)
-        for save in (False, True):
-            masked_front(a, weight, mask, save)
+    # Inference calls left/right separately, each with gate+value (2D).
+    # Training stacks both sides (4D), or both sides and directions (8D).
+    for projected, save in ((2 * D, False), (4 * D, True), (8 * D, True)):
+        weight = torch.randn(D, projected, device=dev(), dtype=BF16)
+        masked_front(a, weight, mask, save)

@@ -105,7 +105,9 @@ def masked_front(a: torch.Tensor, b: torch.Tensor, pair_mask: torch.Tensor,
     mask = pair_mask.reshape(1, a.shape[0]).to(torch.float32).contiguous()
     config = resolve_config(
         "trimul_inproj_masked_sm90_cute", gated_sm90_candidates(), dtype=str(a.dtype),
-        bucket=tensor_key(a, b, pair_mask, extra=(save_preact,)),
+        # Tune the actual launch operand. Bool/BF16 masks and their original
+        # ranks all become this same contiguous FP32 [1, M] row scale.
+        bucket=tensor_key(a, b, mask, extra=(save_preact,)),
         device_index=a.device.index,
         run=lambda c: _launch(a, b, out, preact if save_preact else None, mask, c),
     )
