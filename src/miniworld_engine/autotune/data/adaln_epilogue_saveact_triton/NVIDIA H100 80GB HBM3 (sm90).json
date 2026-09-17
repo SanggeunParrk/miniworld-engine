@@ -1507,12 +1507,15 @@
       "f6a42ef0d39a"
     ],
     "bfloat16+float32|HAS_SB=1,shape_key=17180394266": [
+      "c6bf420d3501",
       "f6a42ef0d39a"
     ],
     "bfloat16+float32|HAS_SB=1,shape_key=34360263450": [
+      "81b8a234d023",
       "f6a42ef0d39a"
     ],
     "bfloat16+float32|HAS_SB=1,shape_key=68720001818": [
+      "a0aa37c6702c",
       "f6a42ef0d39a"
     ],
     "float32|HAS_SB=1,shape_key=10738991898": [
@@ -1567,12 +1570,33 @@
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "grids": {
+    "81b8a234d023": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 3)"
+    ],
+    "a0aa37c6702c": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 4)"
+    ],
     "b33662e79aaa": [
       "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 2)",
       "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 3)",
       "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 4)",
       "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 2)",
       "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 3)"
+    ],
+    "c6bf420d3501": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 1, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 1, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 4)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 2, 1)"
     ],
     "f6a42ef0d39a": [
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
