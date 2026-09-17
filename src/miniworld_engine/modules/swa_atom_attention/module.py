@@ -275,15 +275,65 @@ def _flash_window_setup_context(ctx, inputs, output):
     ctx.meta = (max_seqlen, n, s, scale, half_window)
 
 
+def _flash_window_fa4_backward_fake(q, k, v, cu_seqlens, seqused, valid,
+                                    n, s, scale, half_window, grad_out):
+    return tuple(torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v))
+
+
+@opaque(fake=_flash_window_fa4_backward_fake, name="swa_atom_attention_flash_window_fa4_backward")
+def _flash_window_fa4_backward(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    cu_seqlens: torch.Tensor, seqused: torch.Tensor, valid: torch.Tensor,
+    n: int, s: int, scale: float, half_window: int, grad_out: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Recompute + native FA4 backward behind one compiler boundary.
+
+    Match FlashAttnVarlenFunc's native calls, preserving the existing extra-forward
+    recomputation and padding masks. AOTAutograd must not trace FA4's DLPack launch.
+    Calling nested autograd inside a custom op would also be incorrect: its backend
+    runs below autograd dispatch, so enable_grad alone cannot build a nested graph.
+    """
+    from flash_attn.cute.interface import _flash_attn_fwd, _flash_attn_bwd
+
+    nh, hd = q.shape[2:]
+    row_mask = valid.reshape(n * s, 1, 1)
+    def clean(t):
+        flat = t.reshape(n * s, nh, hd).to(torch.bfloat16)
+        return torch.where(row_mask, flat, torch.zeros_like(flat))
+    qf, kf, vf = clean(q), clean(k), clean(v)
+    dout = clean(grad_out)
+    half = -1 if half_window < 0 else half_window
+    out, lse, _, _ = _flash_attn_fwd(
+        qf, kf, vf, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
+        seqused_q=seqused, seqused_k=seqused, softmax_scale=scale,
+        causal=False, softcap=0.0, window_size_left=half,
+        window_size_right=half, return_lse=True,
+    )
+    grads = _flash_attn_bwd(
+        qf, kf, vf, out, dout, lse, softmax_scale=scale, causal=False,
+        softcap=0.0, window_size_left=half, window_size_right=half,
+        cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
+        seqused_q=seqused, seqused_k=seqused,
+    )
+    return tuple(torch.where(row_mask, g, torch.zeros_like(g)).reshape_as(t).to(t.dtype)
+                 for g, t in zip(grads, (q, k, v), strict=True))
+
+
 def _flash_window_backward(ctx, grad_out):
     """Recompute the flash forward with grad and backprop -- flash's own varlen backward.
 
-    Reentrant autograd rather than a hand-written flash backward: it is backend-agnostic (FA2 and
-    FA4) and covers the seqused and unpad paths for free. The cost is one extra flash forward per
-    backward -- the usual activation-recomputation trade, not a lost gradient.
+    FA4 uses opaque native launches so AOTAutograd can trace the registered backward.
+    FA2 retains its existing reentrant autograd path. Both recompute one flash forward;
+    this change does not add recomputation or freeze any trainable parameters.
     """
     q, k, v, cu_seqlens, seqused, valid = ctx.saved_tensors
     max_seqlen, n, s, scale, half_window = ctx.meta
+    if _flash_backend(q.device) == "fa4":
+        grads = _flash_window_fa4_backward(
+            q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out)
+        dq, dk, dv = (g if need else None for g, need in
+                      zip(grads, ctx.needs_input_grad[:3], strict=True))
+        return dq, dk, dv, None, None, None, None, None, None, None, None
     qd = q.detach().requires_grad_(ctx.needs_input_grad[0])
     kd = k.detach().requires_grad_(ctx.needs_input_grad[1])
     vd = v.detach().requires_grad_(ctx.needs_input_grad[2])
