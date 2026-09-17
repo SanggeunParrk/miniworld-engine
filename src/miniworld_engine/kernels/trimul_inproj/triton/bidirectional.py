@@ -22,7 +22,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _ln_materialize,
 )
 from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train
-from miniworld_engine.autotune.shape_key import pack, token_key
+from miniworld_engine.autotune.shape_key import both_key, pack, token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.contract import packed_forward, packed_backward
@@ -234,13 +234,14 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         tri = packed_forward(lf, rf, h)
         view = tri.reshape(H, M).t()                              # (M, H) m-major
         if x_n.dtype == torch.bfloat16:
-            te_xn, mean_out, rstd_out = _ln_materialize(view, ln_out_w, ln_out_b, eps)
+            te_xn, mean_out, rstd_out = _ln_materialize(
+                view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
             y, proj, gate = output_f567_train(
                 te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
         else:
             # The registered F567 kernel is BF16; retain the existing dtype coverage.
             proj, te_xn, mean_out, rstd_out = _te_forward(
-                view, ln_out_w, ln_out_b, Wp, None, eps)
+                view, ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
             y, gate = gate_elem_train(x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
@@ -267,7 +268,8 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         # ① LN_out + @Wp bwd (te_style)
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
-            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False,
+            shape_key=both_key(M))
         # `_te_backward` writes dx at x's strides and x here is `view` ((1, M)), so d_view is
         # m-major, `.t()` is contiguous and this reshape is a FREE VIEW -- d_tri ALIASES
         # d_view. Deleting the name frees nothing on its own; the storage goes at the `del`

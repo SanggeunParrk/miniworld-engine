@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from miniworld_engine.autotune.shape_key import both_key
 
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 from . import output_training
@@ -61,7 +62,8 @@ class BidirBackHalf(torch.autograd.Function):
         if ctx.native_output:
             proj, te_xn, mean_out, rstd_out = output_training.forward(view, ln_out_w, ln_out_b, Wp, eps)
         else:
-            proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
+            proj, te_xn, mean_out, rstd_out = _te_forward(
+                view, ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
         y, gate = gate_elem_train(
             x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
@@ -94,7 +96,8 @@ class BidirBackHalf(torch.autograd.Function):
                 d_proj, proj, te_xn, rstd_out, ln_out_w, ln_out_b, Wp)
         else:
             d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
-                d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+                d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False,
+                shape_key=both_key(M))
         # `del` after last use, inserted where no reference to the name remains anywhere below.
         # autograd frees an intermediate when its consumer node has run; this function holds every
         # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128

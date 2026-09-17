@@ -1473,7 +1473,9 @@ def select_config(
     # entries naming configs this kernel can no longer be launched with, and returning the fastest
     # stored one would hand the launcher a config that is not on its list.
     # `candidates` arrives as cache dicts (`cute_config._as_cache_dicts`), so one shape only.
-    live = {_sig_from_dict(c) for c in (candidates or [])}
+    prepared = getattr(candidates, "cache_signatures", None)
+    live = (prepared() if prepared is not None
+            else {_sig_from_dict(c) for c in (candidates or [])})
     for cfg in entry:
         if not isinstance(cfg, dict) or not isinstance(cfg.get("kwargs"), dict):
             continue

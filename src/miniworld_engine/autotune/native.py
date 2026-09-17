@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import math
+from collections.abc import Sequence
 from contextlib import ExitStack
 from functools import lru_cache
 from pathlib import Path
@@ -97,7 +98,8 @@ def source_identity() -> str:
                 tree = ast.parse(path.read_text())
                 # These helpers affect what a stored kwargs dictionary executes.
                 keep = {"_TUNABLE_FIELDS", "config_to_kwargs", "kwargs_to_config",
-                        "validate_hopper_config", "resolve_config"}
+                        "validate_hopper_config", "resolve_config", "_CandidateKwargs",
+                        "_cached_candidate_signatures"}
                 for node in tree.body:
                     names = {getattr(node, "name", "")}
                     if isinstance(node, ast.Assign):
@@ -169,6 +171,27 @@ def tensor_key(*tensors, extra=()) -> str:
     return repr((parts, extra))
 
 
+class _CacheConfigView(Sequence):
+    """Re-iterable canonical cache configs without eager whole-grid conversion."""
+    def __init__(self, candidates):
+        self._candidates = candidates
+
+    def __len__(self):
+        return len(self._candidates)
+
+    def cache_signatures(self):
+        prepared = getattr(self._candidates, "cache_signatures", None)
+        if prepared is not None:
+            return prepared()
+        from miniworld_engine.autotune.cache import _sig_from_dict
+        return frozenset(_sig_from_dict(c) for c in self)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [as_cfg_dict({"kwargs": dict(c)}) for c in self._candidates[index]]
+        return as_cfg_dict({"kwargs": dict(self._candidates[index])})
+
+
 def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None):
     """Resolve one config; in a build, measure every candidate once per exact workload.
 
@@ -181,14 +204,17 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None)
     dtype = dtype.removeprefix("torch.")
     if not candidates:
         raise ValueError(f"{op}: no configuration supports this workload")
-    grid = [as_cfg_dict({"kwargs": dict(c)}) for c in candidates]
     if torch.compiler.is_compiling():
         return dict(candidates[0])
     identity = source_identity()
     if not settings.current().run_autotune or run is None:
-        best = select_config(op, dtype=dtype, bucket=bucket, candidates=grid,
+        best = select_config(op, dtype=dtype, bucket=bucket, candidates=_CacheConfigView(candidates),
                              device_index=device_index, op_id=identity)
         return dict(best["kwargs"] if best else candidates[0])
+
+    # A build needs all candidates; runtime misses return before materializing
+    # them. No selected-config memoization: publication/invalidation stays live.
+    grid = list(_CacheConfigView(candidates))
 
     from miniworld_engine.autotune import capture
     # Portable CUDA builds also use this selector in environments without CuTe.

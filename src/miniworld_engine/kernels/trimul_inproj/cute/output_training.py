@@ -7,6 +7,7 @@ tiles. No division by gamma is used, including when gamma contains zeros.
 """
 
 import torch
+from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels._compile import opaque, device_constant
 from miniworld_engine.kernels.trimul_inproj.cute.dispatch import _cute_allowed
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import _ln_materialize
@@ -55,7 +56,8 @@ def _dx(
 
 
 def forward(x, g, b, w, eps):
-    xhat, mean, rstd = _ln_materialize(x, torch.ones_like(g), torch.zeros_like(b), eps)
+    xhat, mean, rstd = _ln_materialize(
+        x, torch.ones_like(g), torch.zeros_like(b), eps, shape_key=both_key(x.shape[0]))
     wf, gf, bf = w.float(), g.float(), b.float()
     folded = (wf * gf[None, :]).to(w.dtype)
     bias = (wf * bf[None, :]).sum(1).to(w.dtype)

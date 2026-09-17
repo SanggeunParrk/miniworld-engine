@@ -6,7 +6,7 @@ full-width reduction constraints are explicit; unused knobs are excluded.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from functools import lru_cache, wraps
 
@@ -134,12 +134,41 @@ def tm2_candidates() -> list[GemmConfig]:
 # --------------------------------------------------------------------------- #
 # runtime config resolution (kernel side)
 # --------------------------------------------------------------------------- #
+@lru_cache(maxsize=128)
+def _cached_candidate_signatures(candidates):
+    """Immutable membership evidence for an immutable tuple of GemmConfigs."""
+    from miniworld_engine.autotune.cache import _sig_from_dict, as_cfg_dict
+    return frozenset(_sig_from_dict(as_cfg_dict({"kwargs": config_to_kwargs(c)}))
+                     for c in candidates)
+
+
+class _CandidateKwargs(Sequence):
+    """Convert only candidates the selector actually inspects.
+
+    A miss needs just the first candidate. A valid cache or a build still sees
+    the complete declared space, in the same order, with fresh dictionaries.
+    """
+    def __init__(self, candidates):
+        self._candidates = tuple(candidates)
+
+    def __len__(self):
+        return len(self._candidates)
+
+    def cache_signatures(self):
+        return _cached_candidate_signatures(self._candidates)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [config_to_kwargs(c) for c in self._candidates[index]]
+        return config_to_kwargs(self._candidates[index])
+
+
 def resolve_config(op, candidates, *, dtype, bucket, default=None, device_index=None, run=None):
     """Use a cached candidate or measure the declared grid during a native build."""
     from miniworld_engine.autotune.native import choose_config
     if default is not None and default in candidates:
         candidates = [default] + [c for c in candidates if c != default]
-    kw = choose_config(op, [config_to_kwargs(c) for c in candidates], dtype=dtype,
+    kw = choose_config(op, _CandidateKwargs(candidates), dtype=dtype,
                        bucket=bucket, device_index=device_index,
                        run=(lambda c: run(kwargs_to_config(c))) if run is not None else None)
     return kwargs_to_config(kw)
