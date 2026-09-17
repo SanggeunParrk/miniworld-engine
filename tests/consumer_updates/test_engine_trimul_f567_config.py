@@ -165,7 +165,7 @@ def test_public_shape_validation_before_launch():
 @pytest.mark.gpu
 @pytest.mark.parametrize("tile", [
     (128, 32, 128, w, s) for w in (4, 8) for s in (2, 3, 4)
-] + [(64, 128, 32, 1, 3), (128, 128, 128, 8, 2), (128, 128, 128, 1, 2)])
+] + [(64, 128, 32, 1, 3), (128, 128, 128, 8, 2), (128, 128, 128, 1, 2), (128, 128, 32, 1, 2)])
 @pytest.mark.parametrize("kp", [128, 256])
 def test_aligned_gate_tile_after_projection(kp, tile):
     """The second aligned dot must not reuse a corrupt operand layout."""

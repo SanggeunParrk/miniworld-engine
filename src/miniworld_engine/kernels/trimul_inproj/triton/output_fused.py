@@ -84,7 +84,7 @@ def _output_f567_kernel(
     # transposing instead breaks wide, one-warp tiles. This constexpr choice
     # keeps every CSV schedule and the same GEMMs, with no architecture or
     # shape-specific tile blacklist. The projection is saved in the epilogue.
-    if BLOCK_M1 >= BLOCK_N:
+    if BLOCK_M1 > BLOCK_N:
         ag = tl.zeros((BLOCK_N, BLOCK_M1), tl.float32)
     else:
         ag = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
@@ -94,11 +94,11 @@ def _output_f567_kernel(
                     (rm[:, None] < M) & (gk[None, :] < KG), 0)
         gw = tl.load(WG + gk[:, None] * wg0 + rn[None, :] * wg1,
                     (gk[:, None] < KG) & (rn[None, :] < N), 0)
-        if BLOCK_M1 >= BLOCK_N:
+        if BLOCK_M1 > BLOCK_N:
             ag = tl.dot(tl.trans(gw), tl.trans(ga), ag)
         else:
             ag = tl.dot(ga, gw, ag)
-    if BLOCK_M1 >= BLOCK_N:
+    if BLOCK_M1 > BLOCK_N:
         ag = tl.trans(ag)
     p = ap.to(PROJ.dtype.element_ty)
     tl.store(PROJ + off, p, mask)
