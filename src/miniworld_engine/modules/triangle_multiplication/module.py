@@ -288,9 +288,9 @@ class TriangleMultiplication(nn.Module):
             if backend == KernelBackend.TRITON:
                 # Fused BDLL pipeline (mirrors cute's single-direction dispatch):
                 # LN_in -> gated BDLL front (transposed store, no permute) -> ONE
-                # bmm contraction -> te-style LN_out+@Wp -> triton output gate. One
-                # code path serves inference (forward-only) and training (merged
-                # autograd Function). Requires d_hidden == d_pair. See
+                # bmm contraction -> fused output stages. BF16 training uses
+                # LN_out + F567; inference also folds LN_out into the back kernel.
+                # Requires d_hidden == d_pair. See
                 # kernels/trimul_inproj/triton/unidirectional.py.
                 # residual + row-broadcast dropout are now FUSED into the triton gate store
                 # (same gate_elem epilogue the cute path uses) — no external _r() add.
@@ -322,9 +322,9 @@ class TriangleMultiplication(nn.Module):
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """TRITON single-direction path (fwd + autograd bwd) — the fused BDLL pipeline
-        mirroring cute's dispatch (LN_in -> gated BDLL front -> ONE bmm contraction ->
-        te-style LN_out+@Wp -> triton output gate). Same code path for inference and
-        training; the front emits left/right in channel-major BDLL directly (transposed
+        (LN_in -> gated BDLL front -> ONE bmm contraction -> fused output stages).
+        BF16 training shares F567 and the two backward fusions with bidirectional
+        TriMul. The front emits left/right in channel-major BDLL directly (transposed
         store, no permute) so the contraction lowers to a tensor-core cuBLAS bmm on
         contiguous operands. Requires ``d_hidden == d_pair`` (the front produces per-side
         width d_hidden). bf16 / fp32, B>=1. See

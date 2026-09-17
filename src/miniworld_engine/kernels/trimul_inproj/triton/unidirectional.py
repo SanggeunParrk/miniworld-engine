@@ -1,34 +1,28 @@
-"""Single-direction trimul in TRITON — the SAME fused BDLL pipeline the bidir path
-uses (``triton/bidirectional.py``), specialised to one direction (outgoing OR
-incoming). Mirrors the CUTE single-direction dispatch stage-for-stage; only the
-backend differs (triton/cuBLAS, no quack).
+"""Single-direction Triton TriMul with the bidirectional training fusions.
 
-The pipeline is:
-
-    x_n   = triton_layernorm(pair, ...)              # LN_in
-    left,right,preact = FRONT(x_n, WL,WLg,WR,WRg)    # gated in-proj, width=d_hidden, bdll
-    tri   = bmm(lf, rfᵀ)      (outgoing)  |  bmm(lfᵀ, rf)  (incoming)   # ONE contraction
-    proj  = _te_forward(tri_view, ln_out, Wp)        # LN_out + @Wp  (te_style: triton LN + cuBLAS)
-    y     = gate_elem(x_n, proj, Wg)                 # sigmoid output-gate  (triton)
-
-This is exactly the bidir back-half with h→full width and a SINGLE contraction:
-the FRONT (``bidir_front_triton``) is direction-agnostic (a wide gated GEMM that
-emits left/right in channel-major BDLL directly via a transposed store — NO
-permute), so it is reused verbatim; the only per-direction logic is the one
-``torch.bmm`` (and its transpose in the backward). All the heavy machinery
-(``_te_forward/_te_backward``, ``front_bwd_dW``, ``gate_elem_*``) is shared with
-bidir. B=1, bf16 / fp32. Requires d_hidden == d_pair.
+The shared front emits masked, gated projections in channel-major layout, then
+one cuBLAS contraction computes outgoing or incoming triangles. BF16 training
+uses output LN followed by F567 (projection, gate, dropout and residual), and
+fuses the two input-gradient GEMMs. Input LN backward adds the residual gradient
+in its store. FP32 retains the split GEMMs. Inference keeps the existing fused
+LN/projection/gate output kernel. B=1; d_hidden == d_pair.
 """
 
 from __future__ import annotations
 
 import torch
 
-from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
+    _ln_materialize,
 )
+from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+    input_dual_bwd,
+    input_ln_residual,
+)
+from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
 from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
@@ -73,11 +67,16 @@ class _UniBackHalfTriton(torch.autograd.Function):
         mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
         tri = _contract(lf, rf, outgoing)                        # (H, L, L)
         view = tri.reshape(H, M).t()                             # (M, H) m-major
-        proj, te_xn, mean_out, rstd_out = _te_forward(
-            view, ln_out_w, ln_out_b, Wp, None, eps)             # (M, D)
-        # Fuse the pairformer residual (== module input pair, [M,D]) + row-broadcast dropout
-        # into the gate store epilogue — same kernel path the cute dispatch uses.
-        y, gate = gate_elem_train(x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
+        if x_n.dtype == torch.bfloat16:
+            te_xn, mean_out, rstd_out = _ln_materialize(
+                view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
+            y, proj, gate = output_f567_train(
+                te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
+        else:
+            proj, te_xn, mean_out, rstd_out = _te_forward(
+                view, ln_out_w, ln_out_b, Wp, None, eps, shape_key=both_key(M))
+            y, gate = gate_elem_train(
+                x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.outgoing, ctx.mm = eps, outgoing, mm
@@ -110,7 +109,8 @@ class _UniBackHalfTriton(torch.autograd.Function):
         # ① LN_out + @Wp bwd (te_style)
         view = tri.reshape(H, M).t()
         d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
-            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False,
+            shape_key=both_key(M))
         del d_proj, view
         d_tri = d_view.t().reshape(H, L, L)
         del d_view
@@ -131,9 +131,12 @@ class _UniBackHalfTriton(torch.autograd.Function):
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
         del d_left, d_right
-        dx = torch.mm(d_glogit, Wg.t())                         # dx_gate  (M, D)
+        if x_n.dtype == torch.bfloat16:
+            dx = input_dual_bwd(d_glogit, dconc.t(), Wg.t(), W_stack, L)
+        else:
+            dx = torch.mm(d_glogit, Wg.t())
+            dx.addmm_(dconc.t(), W_stack)
         del d_glogit
-        dx.addmm_(dconc.t(), W_stack)                           # + dconcᵀ@W_stack (in-place)
         del W_stack, dconc
         dx_n = dx.reshape(B, L, L, D)
         del dx
@@ -188,8 +191,8 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     # `.bench/probe/fused_back_ab.py` carries all five guards, and refuses to print a speed if
     # either path is off the fp32 reference by more than 5e-2.
     #
-    # This still makes the TRITON inference path differ in STRUCTURE from the TRITON training path
-    # (`_UniBackHalfTriton`, unchanged, still splits).
+    # Training retains output LN as a separate stage and uses F567 for BF16 so
+    # its saved activations retain the original rounding points.
     # Weight forms: trimul_back wants ``.T`` weights, so Wp (to_out, nn.Linear form) -> Wp.T; Wgt is
     # already to_gate.weight.T. residual comes in flat [M,D] and is reshaped to [B,L,L,D].
     return trimul_back_triton(tri.unsqueeze(0), x_n, Wp.T.contiguous(), Wgt,
@@ -238,9 +241,9 @@ def trimul_triton(
     # The residual is the ORIGINAL (pre-LN_in) input pair, and it is not optional: this op is
     # ``y = pair + drop_row(trimul(pair))``. dropscale [B,1,L,D] -> [L,D] (B==1) for the gate
     # store's row-broadcast indexing. Both fold into the gate_elem epilogue (no external add).
-    residual_flat = pair.reshape(M, d)
+    x_n, residual = input_ln_residual(pair, ln_in_w, ln_in_b, eps_in)
+    residual_flat = residual.reshape(M, d)
     ds_2d = dropscale.reshape(L, d) if dropscale is not None else None
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled() and ds_2d is None:
