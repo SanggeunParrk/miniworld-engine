@@ -9653,7 +9653,7 @@
   },
   "key_scheme": 3,
   "op": "transition_gate_bwd_sm90_cute",
-  "op_identity": "f4e79803404384794a7bbd4194e4932a9d694863904a535cd7daf0fcee595519",
+  "op_identity": "25d20345a893b7dacc87aa6d772cbe20c1499e0ebffc5d34c9237422e89a4250",
   "provenance": {
     "built_utc": "2026-09-15T22:54:03+00:00",
     "native_identity_migration": {
@@ -9663,7 +9663,22 @@
       "to": "f4e79803404384794a7bbd4194e4932a9d694863904a535cd7daf0fcee595519"
     },
     "torch": "2.10.0+cu128",
-    "triton": "3.6.0"
+    "triton": "3.6.0",
+    "unrelated_triton_source_migration": {
+      "evidence": "Only AdaLN Triton epilogue and augmented-attention Triton dispatcher changed; all native kernels, launchers, tuning and compiler dependencies unchanged.",
+      "from": "f4e79803404384794a7bbd4194e4932a9d694863904a535cd7daf0fcee595519",
+      "source_changes": {
+        "kernels/adaln/triton/inference.py": {
+          "after": "3a21cc86a5097929a9cd37b033beca9d78a33fbe333211df3a28e09c1945b0a1",
+          "before": "6261e7a8bb74f12a9d91f216799bb7b92a1da1df476a1c3e8b7cc5d5cc8a44d9"
+        },
+        "kernels/augmented_attention/interface.py": {
+          "after": "bf424c42d518c9ca616bf3484247742da8732edb7ec86527b4dec9834bcb128d",
+          "before": "e25cc283ad48fb95c5542db1576431ab32bbece624101d942fd8678ad48f0ffa"
+        }
+      },
+      "to": "25d20345a893b7dacc87aa6d772cbe20c1499e0ebffc5d34c9237422e89a4250"
+    }
   },
   "schema": 1
 }

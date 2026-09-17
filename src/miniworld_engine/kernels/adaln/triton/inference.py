@@ -308,6 +308,11 @@ def _adaln_gemm_gate_kernel(
     # memory is what capped the kernel this replaces.
     xm = rmask[:, None] & nmask[None, :]
     xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
+    # Break a Triton 3.6 / ptxas 12.8 epilogue codegen pattern on SM90: the
+    # 128x256x32, four-warp, one-stage tile otherwise issues a misaligned
+    # shared-memory vector store. This FP32 identity preserves every input bit.
+    xv = tl.inline_asm_elementwise("mov.b32 $0, $1;", constraints="=f,f",
+                                   args=[xv], dtype=tl.float32, is_pure=True, pack=1)
     rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)
     c1 = tl.load(C1 + rows, mask=rmask, other=0.0)
     sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)

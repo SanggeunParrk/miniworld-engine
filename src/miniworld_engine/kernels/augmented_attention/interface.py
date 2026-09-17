@@ -1,16 +1,10 @@
-"""Public entry point for the augmented-attention (pair-bias) family.
+"""Augmented attention with split or atomic gradient accumulation.
 
-Fused attention with an additive pair bias and an optional mask, in two backends with an
-identical ``(q, k, v, bias, mask)`` signature:
-
-  * **compute-efficient** (``triton/main.py``, the default): stores the attention
-    probabilities so the backward reuses them instead of recomputing. Faster across the
-    benchmarked shapes (wins for L up to ~1024); costs more activation memory.
-  * **memory-efficient** (``triton/memory_efficient.py``): flash-style, recomputes the
-    attention in the backward. Lower memory, preferable on memory-tight or very long-L cases.
-
-The choice is a per-call kwarg rather than two exported names, so this module is the family's
-single public door and the backend split stays an implementation detail of the family.
+Both backends recompute attention scores in backward. The split backend keeps
+per-augmentation bias gradients and per-key-tile query gradients before reducing
+these buffers. The atomic backend accumulates into shared FP32 output buffers.
+Automatic selection bounds the quadratic temporary storage for large training
+shapes; explicit backend requests remain available for tuning and comparisons.
 """
 
 from __future__ import annotations
@@ -26,6 +20,15 @@ from miniworld_engine.kernels.augmented_attention.triton.memory_efficient import
 
 __all__ = ["triton_augmented_attention_pair_bias"]
 
+# A storage budget, not a measured performance crossover. The split backend's
+# query-gradient workspace is additional to this per-augmentation bias buffer.
+_SPLIT_BIAS_BUDGET_BYTES = 1 << 30
+
+
+def _split_bias_bytes(shape):
+    a, b, length, heads, _ = shape
+    return a * b * heads * length * length * 4
+
 
 def triton_augmented_attention_pair_bias(
     query: torch.Tensor,
@@ -34,19 +37,20 @@ def triton_augmented_attention_pair_bias(
     bias: torch.Tensor,
     mask: torch.Tensor | None = None,
     *,
-    compute_efficient: bool = True,
+    compute_efficient: bool | None = None,
 ) -> torch.Tensor:
-    """Fused augmented attention with pair bias.
+    """Fused attention with optional automatic selection of backward storage.
 
-    ``compute_efficient`` (default ``True``) selects the compute-efficient backend
-    (stores attention probabilities; faster at the benchmarked shapes). Pass
-    ``False`` for the memory-efficient flash-style backend on memory-tight or
-    very long-L cases. Both backends carry a real backward and are numerically
-    equivalent to the torch reference.
+    ``None`` uses atomic accumulation when training would require more than 1 GiB
+    for the split backend's unreduced bias gradient. Shape-only selection supports
+    torch.compile and CUDA graph capture without querying free device memory.
+    ``True`` explicitly selects split accumulation; ``False`` selects atomic.
+    Atomic FP32 accumulation can change the order of floating-point additions.
     """
-    fn = (
-        _pair_bias_compute_efficient
-        if compute_efficient
-        else _pair_bias_memory_efficient
-    )
+    if compute_efficient is None:
+        training = torch.is_grad_enabled() and any(
+            tensor.requires_grad for tensor in (query, key, value, bias)
+        )
+        compute_efficient = not training or _split_bias_bytes(query.shape) <= _SPLIT_BIAS_BUDGET_BYTES
+    fn = _pair_bias_compute_efficient if compute_efficient else _pair_bias_memory_efficient
     return fn(query, key, value, bias, mask)
