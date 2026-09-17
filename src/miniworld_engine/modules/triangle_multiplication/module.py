@@ -43,13 +43,13 @@ def _load_cute_fns():
     import sys
     from pathlib import Path
 
-    src_root = Path(__file__).resolve()
-    while src_root.name != "src" and src_root.parent != src_root:
-        src_root = src_root.parent
+    # Installed wheels have no `src` ancestor. Anchor on the package so both
+    # source checkouts and site-packages resolve the shipped kernel modules.
+    pkg_root = Path(__file__).resolve().parents[2]
     for d in (
-        src_root / "miniworld_engine" / "kernels" / "tm1" / "cute",
-        src_root / "miniworld_engine" / "kernels" / "tm2" / "cute",
-        src_root / "miniworld_engine" / "kernels" / "fused_ln_mask" / "cute",
+        pkg_root / "kernels" / "tm1" / "cute",
+        pkg_root / "kernels" / "tm2" / "cute",
+        pkg_root / "kernels" / "fused_ln_mask" / "cute",
     ):
         if str(d) not in sys.path:
             sys.path.insert(0, str(d))
