@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
+from functools import lru_cache, wraps
 
 from quack.gemm_config import GemmConfig, _get_sm90_configs
 
@@ -48,28 +49,76 @@ def _sm90(configs: Iterable[GemmConfig]) -> list[GemmConfig]:
     return [c for c in configs if c.device_capacity == 9 and not c.swap_ab]
 
 
+# Keep the established defaults first. Expand only fields consumed by launchers.
+CLUSTERS = ((1, 1), (1, 2), (2, 1), (2, 2))
+SWIZZLES = (1, 2, 4, 8)
+SCHEDULERS = (False, True)
+
+
+def _expand(configs, *, dynamic=True, clusters=CLUSTERS):
+    seeds = list(configs)
+    result = list(seeds)
+    seen = {tuple(config_to_kwargs(c).items()) for c in result}
+    for c in seeds:
+        for cm, cn in clusters:
+            for dyn in SCHEDULERS if dynamic else (False,):
+                for swizzle in SWIZZLES:
+                    candidate = replace(c, cluster_m=cm, cluster_n=cn,
+                                        is_dynamic_persistent=dyn, max_swizzle_size=swizzle)
+                    key = tuple(config_to_kwargs(candidate).items())
+                    if key not in seen:
+                        seen.add(key)
+                        result.append(candidate)
+    return result
+
+
+def _small_tiles():
+    # Legal pingpong atom-layout 1x1 shapes; useful for small M/N and reduction tails.
+    return [GemmConfig(tile_m=tm, tile_n=tn, pingpong=True,
+                       is_dynamic_persistent=False, cluster_m=1, cluster_n=1,
+                       device_capacity=9)
+            for tm, tn in ((64, 64), (64, 128), (64, 192), (64, 256), (128, 64))]
+
+
+def _cached_space(fn):
+    # GemmConfig is frozen. Cache its immutable tuple, returning a fresh list so
+    # callers can reorder/filter candidates without changing subsequent calls.
+    @lru_cache(maxsize=128)
+    def cached(*args, **kwargs):
+        return tuple(fn(*args, **kwargs))
+    @wraps(fn)
+    def candidates(*args, **kwargs):
+        return list(cached(*args, **kwargs))
+    return candidates
+
+
+@_cached_space
 def gated_sm90_candidates() -> list[GemmConfig]:
-    """Full sm90 sweep for a gated (swiglu/glu postact) GEMM: tile_n%32, no swap_ab, no m=192
-    coop — exactly ``_get_sm90_configs(epilogue="gated")``."""
-    return _sm90(_get_sm90_configs(epilogue="gated"))
+    """Gated N tiles remain divisible by 32; no swapped operands."""
+    return _expand(_sm90(_get_sm90_configs(epilogue="gated")) + _small_tiles())
 
 
+@_cached_space
 def plain_sm90_candidates() -> list[GemmConfig]:
-    """Full sm90 sweep for a plain (non-gated) GEMM epilogue."""
-    return _sm90(_get_sm90_configs(epilogue=None))
+    """Cooperative/pingpong tiles, CTA clusters, scheduler and swizzle sweep."""
+    return _expand(_sm90(_get_sm90_configs(epilogue=None)) + _small_tiles())
 
 
+@_cached_space
 def lnbwd_pp_candidates() -> list[GemmConfig]:
-    """dgrad / dab LN-backward candidate space. tile_n=K and atom_layout 1×1 are fixed by the single
-    full-N reduction (so pingpong, tile_m in {64,128,192}); tile_n here is a stable placeholder — the
-    kernel uses tile_n=K. The remaining knobs are SWEPT, not guessed: tile_m and cluster_m (cluster_n
-    stays 1 — the output N=K is a single N-tile, nothing to split across a cluster; cluster_m shares
-    the B=Wᵀ load across M-CTAs). Configs that don't compile for a shape are dropped during the sweep."""
-    return [GemmConfig(tile_m=tm, tile_n=128, pingpong=True, is_dynamic_persistent=False,
-                       cluster_m=cm, cluster_n=1, swap_ab=False, max_swizzle_size=8, device_capacity=9)
-            for tm in (64, 128, 192) for cm in (1, 2)]
+    """Full-N reduction fixes pingpong, cluster_n=1 and tile_n=width.
+
+    Sweep legal M tiles, multicast along M, scheduler and swizzle. Do not add
+    cooperative or N clusters: the epilogue requires one full-width reduction.
+    """
+    seeds = [GemmConfig(tile_m=tm, tile_n=128, pingpong=True,
+                       is_dynamic_persistent=False, cluster_m=cm, cluster_n=1,
+                       swap_ab=False, max_swizzle_size=8, device_capacity=9)
+             for tm in (64, 128, 192) for cm in (1, 2)]
+    return _expand(seeds, clusters=((1, 1), (2, 1)))
 
 
+@_cached_space
 def tm2_candidates() -> list[GemmConfig]:
     """tm2 from-scratch dual-A gated GEMM candidate space. The only knob is ``tile_m`` — the
     number of stacked m64 WGMMA atoms (one warpgroup each), tiled over M via
@@ -100,6 +149,7 @@ def resolve_config(op, candidates, *, dtype, bucket, default=None, device_index=
 LNBWD_TILE_N_MAX = {64: 256, 128: 208, 192: 128}
 
 
+@_cached_space
 def lnbwd_candidates(width, *, tile_m=None, cluster_m=None):
     return [replace(c, tile_n=width) for c in lnbwd_pp_candidates()
             if width <= LNBWD_TILE_N_MAX[c.tile_m]
@@ -107,9 +157,14 @@ def lnbwd_candidates(width, *, tile_m=None, cluster_m=None):
             and (cluster_m is None or c.cluster_m == cluster_m)]
 
 
+@_cached_space
 def fused_lnl_candidates():
     # M2 uses static scheduling and its own stats pipeline. Include the previously
     # qualified single-cluster tile alongside quack's cooperative/pingpong space.
     tiles = [GemmConfig(tile_m=128, tile_n=128, cluster_m=1, cluster_n=1,
                         pingpong=True, is_dynamic_persistent=False)]
-    return tiles + [c for c in plain_sm90_candidates() if c not in tiles]
+    # The custom M2 stats pipeline fails numerical qualification for pingpong
+    # M192/N128 on M=264 with a fused gate (all clusters/swizzles). This is an
+    # epilogue restriction: the same tile is valid in the other GEMM families.
+    return tiles + [c for c in plain_sm90_candidates()
+                    if not c.is_dynamic_persistent and c.tile_m != 192 and c not in tiles]

@@ -630,6 +630,12 @@ def runtime_candidates(data, entry_key, implementation=None):
     profiles = data.get("measurements", {}).get(entry_key)
     if not profiles:
         return data.get("entries", {}).get(entry_key)
+    active = data.get("native_runtime_profiles", {}).get(entry_key)
+    if active in profiles:
+        record = profiles[active]
+        if implementation is None or record["workload"].get("implementation") == implementation:
+            return record["entries"]
+        return []
     candidates = {}
     for record in profiles.values():
         recorded = record["workload"].get("implementation")
@@ -897,7 +903,22 @@ def store_ranked_configs(
                 del records[mid]
         mid = workload_id(measurement)
         record = records.setdefault(mid, {"workload": measurement, "entries": [], "searched": []})
-        merged = {_sig_from_dict(c): c for c in record["entries"]
+        if measurement.get("kind") == "native":
+            data.setdefault("native_runtime_profiles", {})[key] = mid
+            # Preserve ALL native timings, including candidates removed from the current
+            # grid, so narrowing/widening never loses runner-up measurements. Runtime
+            # still sees only the bounded top-K in entries.
+            history = {_sig_from_dict(c): c
+                       for c in record.get("timings", record["entries"])}
+            measured = {_sig(c) for c, _ in ranked}
+            searched_now = configs if entry_configs is None else entry_configs
+            for c in searched_now or []:
+                if _sig(c) not in measured:
+                    history.pop(_sig(c), None)  # a rebuild now proves this candidate invalid
+            for c, ms in ranked:
+                history[_sig(c)] = config_to_dict(c, ms)
+            record["timings"] = sorted(history.values(), key=lambda c: c["ms"])
+        merged = {_sig_from_dict(c): c for c in record.get("timings", record["entries"])
                   if live is None or _sig_from_dict(c) in live}
         for c, ms in ranked:
             merged[_sig(c)] = config_to_dict(c, ms)

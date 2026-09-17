@@ -30,7 +30,10 @@ def task_for(op, config, bucket):
         config = (layernorm_candidates("compile", 128, 2)[0] if op == "layernorm_fwd_cuda"
                   else {k: config[k] for k in ("warps", "min_blocks")})
         tensors, extra = [], ()  # these CUDA extensions compile every supported dtype/width
-    return {"op": op, "config": dict(config), "tensors": tensors, "extra": extra}
+    config = dict(config)
+    if op.endswith("sm90_cute"):
+        config.pop("max_swizzle_size", None)
+    return {"op": op, "config": config, "tensors": tensors, "extra": extra}
 
 
 def task_id(task):

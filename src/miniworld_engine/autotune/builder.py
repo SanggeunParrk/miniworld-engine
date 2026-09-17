@@ -1580,7 +1580,7 @@ def _generation_for_work(config_dir: Path | None) -> str:
 
     from miniworld_engine.autotune import plan
     from miniworld_engine.autotune.native import (
-        source_identity as native_source_identity,
+        source_identity as native_source_identity, policy_identity as native_policy_identity,
     )
     from miniworld_engine.autotune.shard import provenance
 
@@ -1589,6 +1589,10 @@ def _generation_for_work(config_dir: Path | None) -> str:
     # CuTe policies and hand-CUDA .cu bodies are outside the derivation hash.
     # Their edits must invalidate completed native unit shards as well.
     digest.update(native_source_identity().encode())
+    digest.update(native_policy_identity().encode())
+    from miniworld_engine import settings
+    digest.update(repr((settings.current().bench_clear_mb,
+                        settings.current().bench_rep_ms)).encode())
     digest.update(json.dumps(provenance(), sort_keys=True).encode())
     if config_dir is not None:
         for path in sorted(config_dir.glob("*.csv")):

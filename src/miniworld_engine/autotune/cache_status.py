@@ -140,7 +140,15 @@ def scan(gpu_substr: str | None = None) -> list[CacheStatus]:
                 elif _scheme_stale(op, data.get("key_scheme")):
                     verdict, reason = "STALE", "native cache key scheme changed"
                 elif data.get("op_identity") != _current_op_identity(op):
-                    verdict, reason = "STALE", "native source/configuration changed"
+                    verdict, reason = "STALE", "native implementation changed"
+                else:
+                    from miniworld_engine.autotune.native import pending_candidates
+                    try:
+                        pending = pending_candidates(op, data)
+                        if pending:
+                            reason = f"native config grid: {pending} candidate/workloads pending"
+                    except (ValueError, TypeError, IndexError, KeyError):
+                        verdict, reason = "UNKNOWN", "cannot resolve native workload grid"
                 env_stored = data.get("env_identity")
                 out.append(CacheStatus(op, gpu, verdict, reason,
                                        None if env_stored is None else env_stored == cur_env))

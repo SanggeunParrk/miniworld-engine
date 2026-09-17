@@ -2173,7 +2173,7 @@ def uninstall() -> None:
         _orig_compile = None
 
 
-def record_native(op, grid, dtype, bucket, config, ms, op_id):
+def record_native(op, grid, dtype, bucket, config, ms, op_id, *, measurement=None):
     """Record a native candidate in the same shard/coverage format as Triton."""
     grid = [as_cfg_dict(c) for c in grid]
     cfg = as_cfg_dict({"kwargs": dict(config)})
@@ -2184,6 +2184,10 @@ def record_native(op, grid, dtype, bucket, config, ms, op_id):
     existing = {_sig_from_dict(c) for c in slot["grid"]}
     slot["grid"].extend(c for c in grid if _sig_from_dict(c) not in existing)
     key = (dtype, bucket)
+    if measurement is not None:
+        from miniworld_engine.autotune.cache import workload_id
+        slot = slot.setdefault("profiles", {}).setdefault((key, workload_id(measurement)), {
+            "measurement": measurement, "entries": {}, "searched": {}})
     slot["searched"].setdefault(key, set()).add(sig)
     if not math.isfinite(ms):
         _UNUSABLE[op] = _UNUSABLE.get(op, 0) + 1
