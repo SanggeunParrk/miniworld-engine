@@ -63,15 +63,22 @@ class AdaptiveLayerNorm(nn.Module):
             # out here, and ConditionedTransition had its own shorter version, and the two
             # disagreed; neither asked whether gradients were being recorded at all.
             fn = adaln_train if needs_backward(self, x, cond) else adaln_inference
-            return fn(
-                x,
-                cond,
-                self.ln_cond.weight,
-                self.to_scale.weight,
-                self.to_scale.bias,
-                self.to_bias.weight,
-                self.ln_in.eps,
-                self.ln_cond.eps,
-            )
+            # AMP does not cast custom-op arguments. Keep the native GEMMs and
+            # their saved backward operands in one dtype, with FP32 master params
+            # connected through differentiable casts. Norm affine stays FP32.
+            device_type = x.device.type
+            compute_dtype = (torch.get_autocast_dtype(device_type)
+                             if torch.is_autocast_enabled(device_type) else x.dtype)
+            with torch.autocast(device_type=device_type, enabled=False):
+                return fn(
+                    x.to(compute_dtype),
+                    cond.to(compute_dtype),
+                    self.ln_cond.weight,
+                    self.to_scale.weight.to(compute_dtype),
+                    self.to_scale.bias.to(compute_dtype),
+                    self.to_bias.weight.to(compute_dtype),
+                    self.ln_in.eps,
+                    self.ln_cond.eps,
+                )
 
         raise InvalidImplementationError(self.implementation)

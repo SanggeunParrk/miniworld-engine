@@ -59,6 +59,14 @@ from __future__ import annotations
 
 import zlib as _zlib
 
+from miniworld_engine.kernels._compile import device_constant
+
+
+@device_constant
+def _axis_checksum(names: tuple[str, ...]) -> int:
+    """Only immutable axis NAMES are constant-folded; dimensions stay in pack."""
+    return _zlib.crc32(",".join(names).encode())
+
 #: Channel width. Exact -- a kernel is compiled for one of these and no other.
 DIM_BUCKETS: tuple[int, ...] = (64, 128, 256, 384, 512, 768)
 
@@ -284,7 +292,7 @@ def pack(base: int, **axes: int) -> int:
                 f"_RADIX and re-tune, or check that {name} is really a width."
             )
         value = value * _RADIX + w
-    value = value * _RADIX + (_zlib.crc32(",".join(sorted(axes)).encode()) & (_RADIX - 1))
+    value = value * _RADIX + (_axis_checksum(tuple(sorted(axes))) & (_RADIX - 1))
     # The per-axis check above is not the whole bound. `shape_key` reaches the kernel as a RUNTIME
     # scalar argument, so the assembled value has to stay an int64: the budget is
     # bits(base) + 12 * (axes + 1), and `both_key`'s top bucket (1,048,576 rows) leaves room for

@@ -136,27 +136,38 @@ class ConditionedTransition(nn.Module):
             # below the kernels only ever see M = B*A, which equals A only when B == 1 -- so the
             # kernels cannot recover it and it is threaded down as an explicit argument instead.
             length = length_of(x.shape)
-            x2 = x.reshape(-1, d)
-            cond2 = cond.reshape(-1, cond.shape[-1])
+            # AMP can produce BF16 activations while master weights remain FP32.
+            # Native Triton dot operands must agree, and backward must save tensors
+            # in that same compute dtype. Cast through autograd, never mutate params.
+            device_type = x.device.type
+            compute_dtype = (torch.get_autocast_dtype(device_type)
+                             if torch.is_autocast_enabled(device_type)
+                             else self.expand_a.weight.dtype)
+            x2 = x.reshape(-1, d).to(compute_dtype)
+            cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
+            wa, wb, ws, wsc, bsc = (
+                p.to(compute_dtype) for p in (self.expand_a.weight, self.expand_b.weight,
+                                             self.squeeze.weight, self.to_scale.weight,
+                                             self.to_scale.bias)
+            )
             # `x2.requires_grad` alone missed the conditioning tensor AND the projection
             # weights, which are parameters -- so a detached x with live weights took the
             # inference path and the gradient vanished silently (the kernels are `@opaque`, so
             # there is no grad_fn and no error). `dispatch.needs_backward` is the one condition
             # both this and AdaptiveLayerNorm now ask.
-            if needs_backward(self, x2, cond2):
-                y = kernels.cond_transition_train(
-                    x2, cond2,
-                    self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
-                    self.to_scale.weight, self.to_scale.bias,
-                    length,
-                )
-            else:
-                y = kernels.cond_transition_inference_dispatch(
-                    x2, cond2,
-                    self.expand_a.weight, self.expand_b.weight, self.squeeze.weight,
-                    self.to_scale.weight, self.to_scale.bias,
-                    length,
-                )
+            with torch.autocast(device_type=device_type, enabled=False):
+                if needs_backward(self, x2, cond2):
+                    y = kernels.cond_transition_train(
+                        x2, cond2,
+                        wa, wb, ws, wsc, bsc,
+                        length,
+                    )
+                else:
+                    y = kernels.cond_transition_inference_dispatch(
+                        x2, cond2,
+                        wa, wb, ws, wsc, bsc,
+                        length,
+                    )
             return y.reshape(*x.shape[:-1], self.d_hidden)
 
         raise InvalidImplementationError(self.implementation)
