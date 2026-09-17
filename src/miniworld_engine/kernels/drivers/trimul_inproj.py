@@ -364,3 +364,22 @@ def trimul_output_bwd_rows_sm90():
     gamma=torch.randn(k,device=dev(),dtype=BF16)
     stats=[torch.randn(m,device=dev(),dtype=torch.float32) for _ in range(3)]
     dgrad_ln_rows(dy,w,xhat,gamma,*stats)
+
+
+def trimul_parity_f567_sm90():
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_sm90
+    output_f567_sm90(*_output_f567_operands())
+
+
+def trimul_parity_dual_bwd_sm90():
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
+    input_dual_bwd_sm90(*_dual_operands())
+
+
+def trimul_parity_front_sm90():
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
+    args = (_x(), _w(2 * D), _w(2 * D), _w(2 * D), _w(2 * D))
+    mask = (torch.rand(M, device=dev()) > .2).to(BF16)
+    for save in (False, True):
+        for pair_mask in (None, mask):
+            bidir_front_sm90(*args, save_preact=save, pair_mask=pair_mask)

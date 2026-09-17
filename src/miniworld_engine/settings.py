@@ -255,6 +255,10 @@ class Settings:
     trimul_out_layout: str | None = None
     #: Engage the cute in-projection dispatch at all. Formerly TRIMUL_DISPATCH.
     trimul_cute_dispatch: bool = True
+    #: Replace individual kernels inside the Triton bidirectional algorithm with
+    #: SM90 TMA/WGMMA implementations. Configure before model compilation.
+    #: Empty preserves the measured Triton baseline; no legacy CuTe algorithm dispatch.
+    trimul_sm90_kernels: frozenset[str] = frozenset()
     #: Fused training front for the sm100 in-projection. Formerly MINIWORLD_TRAIN_FRONT_FUSED.
     trimul_train_front_fused: bool = True
 
@@ -318,6 +322,12 @@ def configure(**kwargs) -> Settings:
     unknown = set(kwargs) - fields
     if unknown:
         raise TypeError(f"unknown setting(s): {', '.join(sorted(unknown))}")
+    if "trimul_sm90_kernels" in kwargs:
+        names = frozenset(kwargs["trimul_sm90_kernels"])
+        unknown = names - {"front", "f567", "dual_bwd"}
+        if unknown:
+            raise ValueError(f"Unknown SM90 TriMul kernels: {sorted(unknown)}")
+        kwargs["trimul_sm90_kernels"] = names
     if "autotune_kernels" in kwargs and kwargs["autotune_kernels"] is not None:
         names = frozenset(kwargs["autotune_kernels"])
         known = frozenset(get_args(AutotuneKernel))

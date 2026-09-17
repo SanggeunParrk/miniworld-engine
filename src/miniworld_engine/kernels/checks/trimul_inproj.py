@@ -333,3 +333,38 @@ def trimul_output_f567_train():
     rows = torch.arange(norm.shape[0], device=norm.device) % length
     expected = residual.float() + p * g * ds.float()[rows]
     return {"y": (y, expected), "proj": (proj, p), "gate": (gate, g)}
+
+
+def trimul_parity_f567_sm90():
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_sm90
+    norm, x, wp, wg, residual, ds, length = args = _output_f567_operands()
+    y, proj, gate = output_f567_sm90(*args)
+    p = (norm.float() @ wp.float().t()).to(norm.dtype)
+    g = torch.sigmoid((x.float() @ wg.float()).to(x.dtype).float())
+    rows = torch.arange(norm.shape[0], device=norm.device) % length
+    expected = (residual.float() + p.float() * g * ds.float()[rows]).to(x.dtype)
+    return {"y": (y, expected), "proj": (proj, p), "gate": (gate, g.to(x.dtype))}
+
+
+def trimul_parity_dual_bwd_sm90():
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
+    g, f, w, v, length = args = _dual_operands()
+    y = input_dual_bwd_sm90(*args)
+    ref = ((g.float() @ w.float()).to(g.dtype).float() + f.float() @ v.float()).to(g.dtype)
+    return {"dx": (y, ref)}
+
+
+def trimul_parity_front_sm90():
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
+    h2 = 2 * D
+    x = _x(); weights = [_w(h2) for _ in range(4)]
+    mask = (torch.rand(M, device=x.device) > .2).to(x.dtype)
+    left, right, preact = bidir_front_sm90(x, *weights, pair_mask=mask)
+    xf = x.reshape(M, D).float()
+    pl, gl, pr, gr = [xf @ w.float() for w in weights]
+    def gated(p, g):
+        return ((p * torch.sigmoid(g)).to(x.dtype).float() * mask[:, None].float()).to(x.dtype).t()
+    raw = torch.cat([torch.stack([gl, pl], dim=2).reshape(M, 2*h2),
+                     torch.stack([gr, pr], dim=2).reshape(M, 2*h2)], dim=1).to(x.dtype).t()
+    return {"left": (left.reshape(h2, M), gated(pl, gl)),
+            "right": (right.reshape(h2, M), gated(pr, gr)), "preact": (preact, raw)}

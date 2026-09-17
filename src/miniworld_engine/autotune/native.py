@@ -34,6 +34,8 @@ BUILD_OPS = frozenset({
     "trimul_outproj_gemm_gate_sm90_cute", "transition_fwd_b2b_sm90_cuda",
     "transition_expand_gate_sm90_cuda", "transition_bwd_gate_sm90_cuda",
     "layernorm_fwd_cuda", "layernorm_bwd_split_cuda",
+    "trimul_inproj_gemm_gate_mmajor_sm90_cute", "trimul_output_f567_train_sm90_cute",
+    "trimul_input_dual_bwd_sm90_cute",
 })
 
 
@@ -90,7 +92,8 @@ def source_identity() -> str:
     paths += [Path(__file__), Path(__file__).with_name("cute_config.py"),
               Path(__file__).with_name("hopper_cuda_config.py"),
               Path(__file__).with_name("native_compile.py"),
-              Path(__file__).with_name("native_history.py")]
+              Path(__file__).with_name("native_history.py"),
+              Path(__file__).with_name("trimul_sm90_config.py")]
     for path in paths:
         if "notes" not in path.parts:
             digest.update(str(path.relative_to(root)).encode())
@@ -114,13 +117,20 @@ def source_identity() -> str:
 def policy_identity():
     """Search policy invalidates completed build units, never compatible timings."""
     digest = hashlib.sha256()
-    for name in ("cute_config.py", "hopper_cuda_config.py"):
+    for name in ("cute_config.py", "hopper_cuda_config.py", "trimul_sm90_config.py"):
         digest.update(Path(__file__).with_name(name).read_bytes())
+    from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS
+    for name in sorted(TRITON_OPS.values()):
+        digest.update(name.encode())
+        digest.update((Path(__file__).with_name("configs") / "grid" / (name + ".csv")).read_bytes())
     return digest.hexdigest()
 
 
 def candidates_for(op, bucket):
     """CPU-readable declared grid for one exact native workload."""
+    from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS, partition_for_bucket
+    if op in TRITON_OPS:
+        return partition_for_bucket(op, bucket)[0]
     from miniworld_engine.autotune import hopper_cuda_config as cuda
     tensors, _extra = ast.literal_eval(bucket)
     if op.endswith("sm90_cute"):

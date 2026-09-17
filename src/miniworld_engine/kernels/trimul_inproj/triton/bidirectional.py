@@ -8,6 +8,7 @@ from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
+from miniworld_engine import settings
 
 from miniworld_engine.kernels._compile import opaque
 import triton
@@ -145,6 +146,10 @@ def bidir_front_triton(x_n, WL, WLg, WR, WRg, *, save_preact=True, pair_mask=Non
     left,right:(B,2h,L,L) bdll and preact:(4*2h, M) interleaved (front_bwd_dW layout).
     ``save_preact=False`` (inference) skips the preact tensor + its stores — the
     backward-only side output cute's forward-only front also omits."""
+    if "front" in settings.current().trimul_sm90_kernels:
+        from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
+        return bidir_front_sm90(x_n, WL, WLg, WR, WRg,
+                                save_preact=save_preact, pair_mask=pair_mask)
     # B==1 by design: bdll intermediates put batch OUTSIDE the channel dim. B>1 was implemented
     # (batched grid axis + einsum channel-last contraction) + verified correct, but is SLOWER
     # than looping this B==1 path per batch — the large bdll intermediates (~300 MB at B=8,L=384)
@@ -236,7 +241,11 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         if x_n.dtype == torch.bfloat16:
             te_xn, mean_out, rstd_out = _ln_materialize(
                 view, ln_out_w, ln_out_b, eps, shape_key=both_key(M))
-            y, proj, gate = output_f567_train(
+            output_kernel = output_f567_train
+            if "f567" in settings.current().trimul_sm90_kernels:
+                from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_sm90
+                output_kernel = output_f567_sm90
+            y, proj, gate = output_kernel(
                 te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
         else:
             # The registered F567 kernel is BF16; retain the existing dtype coverage.
@@ -246,6 +255,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h, ctx.mm = eps, h, mm
+        ctx.sm90_dual_bwd = "dual_bwd" in settings.current().trimul_sm90_kernels
         ctx.dropscale, ctx.seq_len = dropscale, L
         return y.reshape(B, L, L, D)
 
@@ -287,7 +297,11 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
         if x_n.dtype == torch.bfloat16:
-            dx = input_dual_bwd(d_glogit, dconc.t(), Wg.t(), W_stack, L)
+            input_kernel = input_dual_bwd
+            if ctx.sm90_dual_bwd:
+                from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
+                input_kernel = input_dual_bwd_sm90
+            dx = input_kernel(d_glogit, dconc.t(), Wg.t(), W_stack, L)
         else:
             dx = torch.mm(d_glogit, Wg.t())
             dx.addmm_(dconc.t(), W_stack)

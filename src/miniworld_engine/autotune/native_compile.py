@@ -22,6 +22,12 @@ def task_for(op, config, bucket):
     from miniworld_engine.autotune.native import BUILD_OPS
     if op not in BUILD_OPS:
         return None
+    if op in ("trimul_inproj_gemm_gate_mmajor_sm90_cute",
+              "trimul_output_f567_train_sm90_cute", "trimul_input_dual_bwd_sm90_cute"):
+        # These launchers currently compile exact tensor layouts on the allocated
+        # compute GPU. Do not route their canonical Triton axis names through the
+        # legacy Quack compile ABI (tile_m/tile_n/cluster_*).
+        return None
     tensors, extra = ast.literal_eval(bucket)
     if op == "transition_swiglu_fwd_sm90_cute" and extra not in ((), ("None",)):
         return None  # arbitrary activation callables have no portable compile contract
