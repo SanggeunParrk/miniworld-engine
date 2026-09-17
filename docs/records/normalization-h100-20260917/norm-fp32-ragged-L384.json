@@ -1,0 +1,844 @@
+{
+  "dtype": "fp32",
+  "L": "384",
+  "shape_mode": "ragged",
+  "kernels": [
+    {
+      "name": "_dgrad_condln_kernel",
+      "config": {
+        "BLOCK_K_K2": 32,
+        "BLOCK_K_NC": 128,
+        "BLOCK_M1": 64,
+        "num_warps": 4,
+        "num_ctas": 1,
+        "num_stages": 3
+      },
+      "flags": {
+        "shape_key": 17596380853066
+      },
+      "ms": {
+        "old": 0.021824000403285027,
+        "relaxed": 0.021344000473618507
+      },
+      "speedup": 1.0224887518279344,
+      "samples_ms": {
+        "old": [
+          0.02191999927163124,
+          0.02195199951529503,
+          0.021888000890612602,
+          0.021824000403285027,
+          0.021824000403285027,
+          0.02179200015962124,
+          0.021824000403285027
+        ],
+        "relaxed": [
+          0.021407999098300934,
+          0.02143999934196472,
+          0.02131200022995472,
+          0.021344000473618507,
+          0.021344000473618507,
+          0.021344000473618507,
+          0.02131200022995472
+        ]
+      },
+      "old_new_errors": [
+        0.0,
+        1.9785186111676012e-07
+      ],
+      "reference_check": "rel DCond=7.79e-04 DLnW=8.26e-04 (band 3e-03 declared)",
+      "measurement": {
+        "scheme": 1,
+        "arguments": {
+          "D": {
+            "shape": [
+              250,
+              4096
+            ],
+            "stride": [
+              4096,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Wcat": {
+            "shape": [
+              250,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Cond": {
+            "shape": [
+              4096,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "MeanC": {
+            "shape": [
+              4096
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "RstdC": {
+            "shape": [
+              4096
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "LNW": {
+            "shape": [
+              123
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DCond": {
+            "shape": [
+              4096,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DLNW": {
+            "shape": [
+              123
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "M": 4096,
+          "NC": 123,
+          "K2": 250,
+          "sd0": 4096,
+          "sd1": 1,
+          "sw0": 123,
+          "sw1": 1,
+          "sc0": 123,
+          "sc1": 1,
+          "sdc0": 123,
+          "sdc1": 1,
+          "shape_key": 17596380853066
+        },
+        "implementation": "3e3b1fb311ef82c9e776ea469f6d3fc3b9e19f3bafa3af4a82e133df2c3acfe0"
+      }
+    },
+    {
+      "name": "_layer_norm_linear_bwd",
+      "config": {
+        "BLOCK_K_D": 32,
+        "BLOCK_K_NH": 32,
+        "BLOCK_M1": 32,
+        "num_warps": 4,
+        "num_ctas": 1,
+        "num_stages": 2
+      },
+      "flags": {
+        "shape_key": 4503601724535999
+      },
+      "ms": {
+        "old": 0.2779519855976105,
+        "relaxed": 0.13310399651527405
+      },
+      "speedup": 2.0882317050917005,
+      "samples_ms": {
+        "old": [
+          0.277648001909256,
+          0.2778880000114441,
+          0.2777920067310333,
+          0.27811199426651,
+          0.27803200483322144,
+          0.27799999713897705,
+          0.2779519855976105
+        ],
+        "relaxed": [
+          0.1332480013370514,
+          0.133215993642807,
+          0.1329919993877411,
+          0.13327999413013458,
+          0.13310399651527405,
+          0.13305599987506866,
+          0.13305599987506866
+        ]
+      },
+      "old_new_errors": [
+        0.0,
+        7.059285849209118e-07,
+        7.378621376119554e-07
+      ],
+      "reference_check": "rel dx=2.29e-07 dln_weight=1.29e-06 dproj_weight=9.61e-07 (band 2e-06 declared)",
+      "measurement": {
+        "scheme": 1,
+        "arguments": {
+          "dout_ptr": {
+            "shape": [
+              145161,
+              3
+            ],
+            "stride": [
+              3,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "x_ptr": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "lnw_ptr": {
+            "shape": [
+              125
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "pw_ptr": {
+            "shape": [
+              3,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "mean_ptr": {
+            "shape": [
+              145161
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "rstd_ptr": {
+            "shape": [
+              145161
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "dx_ptr": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "dlnw_ptr": {
+            "shape": [
+              125
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "dpw_ptr": {
+            "shape": [
+              3,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "stride_m": 125,
+          "M": 145161,
+          "N": 125,
+          "NH": 3,
+          "USE_DOT": false,
+          "shape_key": 4503601724535999
+        },
+        "implementation": "e801ee9d2ed48afee23c6ac222045ef73f6d7358a06d0847f5d45409084299b0"
+      }
+    },
+    {
+      "name": "rmsnorm_bwd_kernel",
+      "config": {
+        "BLOCK_K": 32,
+        "BLOCK_M1": 32,
+        "num_warps": 4,
+        "num_ctas": 1,
+        "num_stages": 2
+      },
+      "flags": {
+        "shape_key": 1099511747354,
+        "HAS_WEIGHT": true
+      },
+      "ms": {
+        "old": 0.03267199918627739,
+        "relaxed": 0.029184000566601753
+      },
+      "speedup": 1.1195174942419412,
+      "samples_ms": {
+        "old": [
+          0.0326399989426136,
+          0.03267199918627739,
+          0.03270399942994118,
+          0.03276799991726875,
+          0.0326399989426136,
+          0.03270399942994118,
+          0.03267199918627739
+        ],
+        "relaxed": [
+          0.029184000566601753,
+          0.02921600081026554,
+          0.029152000322937965,
+          0.02916800044476986,
+          0.029184000566601753,
+          0.029184000566601753,
+          0.029184000566601753
+        ]
+      },
+      "old_new_errors": [
+        0.0,
+        1.3764865798293613e-06
+      ],
+      "reference_check": "rel dx_aff=2.21e-07 dweight_aff=1.58e-06 dx_plain=2.08e-07 (band 4e-06 declared)",
+      "measurement": {
+        "scheme": 1,
+        "arguments": {
+          "DX": {
+            "shape": [
+              145161,
+              29
+            ],
+            "stride": [
+              29,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DY": {
+            "shape": [
+              145161,
+              29
+            ],
+            "stride": [
+              29,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DW": {
+            "shape": [
+              29
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "X": {
+            "shape": [
+              145161,
+              29
+            ],
+            "stride": [
+              29,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "W": {
+            "shape": [
+              29
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Rstd": {
+            "shape": [
+              145161
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "stride_r": 29,
+          "stride_c": 1,
+          "M": 145161,
+          "N": 29,
+          "shape_key": 1099511747354,
+          "HAS_WEIGHT": true
+        },
+        "implementation": "b747b94d26d369392bcd655830977471f0dc950092d0c102ca2ff9d9501cbd80"
+      }
+    },
+    {
+      "name": "rmsnorm_bwd_kernel",
+      "config": {
+        "BLOCK_K": 32,
+        "BLOCK_M1": 8,
+        "num_warps": 4,
+        "num_ctas": 1,
+        "num_stages": 2
+      },
+      "flags": {
+        "shape_key": 1099511747354,
+        "HAS_WEIGHT": false
+      },
+      "ms": {
+        "old": 0.025536000728607178,
+        "relaxed": 0.025439999997615814
+      },
+      "speedup": 1.0037736136399513,
+      "samples_ms": {
+        "old": [
+          0.025536000728607178,
+          0.025536000728607178,
+          0.025536000728607178,
+          0.025567999109625816,
+          0.025536000728607178,
+          0.025536000728607178,
+          0.02558399923145771
+        ],
+        "relaxed": [
+          0.025472000241279602,
+          0.02550400048494339,
+          0.025439999997615814,
+          0.02550400048494339,
+          0.025439999997615814,
+          0.025439999997615814,
+          0.025407999753952026
+        ]
+      },
+      "old_new_errors": [
+        0.0
+      ],
+      "reference_check": "rel dx_aff=2.21e-07 dweight_aff=1.58e-06 dx_plain=2.08e-07 (band 4e-06 declared)",
+      "measurement": {
+        "scheme": 1,
+        "arguments": {
+          "DX": {
+            "shape": [
+              145161,
+              29
+            ],
+            "stride": [
+              29,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DY": {
+            "shape": [
+              145161,
+              29
+            ],
+            "stride": [
+              29,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DW": {
+            "shape": [
+              29
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "X": {
+            "shape": [
+              145161,
+              29
+            ],
+            "stride": [
+              29,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "W": {
+            "shape": [
+              0
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Rstd": {
+            "shape": [
+              145161
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "stride_r": 29,
+          "stride_c": 1,
+          "M": 145161,
+          "N": 29,
+          "shape_key": 1099511747354,
+          "HAS_WEIGHT": false
+        },
+        "implementation": "b747b94d26d369392bcd655830977471f0dc950092d0c102ca2ff9d9501cbd80"
+      }
+    },
+    {
+      "name": "rmsnorm_adamod_bwd_kernel",
+      "config": {
+        "BLOCK_N": 128,
+        "BLOCK_K": 64,
+        "BLOCK_M1": 64,
+        "num_warps": 4,
+        "num_ctas": 1,
+        "num_stages": 3
+      },
+      "flags": {
+        "shape_key": 4503601691483146,
+        "HAS_WEIGHT": false
+      },
+      "ms": {
+        "old": 1.5015360116958618,
+        "relaxed": 1.4991360306739807
+      },
+      "speedup": 1.0016009094390201,
+      "samples_ms": {
+        "old": [
+          1.5015360116958618,
+          1.500111997127533,
+          1.500544011592865,
+          1.5017279982566833,
+          1.5022239685058594,
+          1.501871943473816,
+          1.5009439587593079
+        ],
+        "relaxed": [
+          1.497215986251831,
+          1.4993759989738464,
+          1.4987840056419373,
+          1.4997279644012451,
+          1.5001919865608215,
+          1.4991360306739807,
+          1.4982079863548279
+        ]
+      },
+      "old_new_errors": [
+        0.0,
+        0.0
+      ],
+      "reference_check": "rel dq_plain=2.09e-07 dc_plain=8.79e-07 dWsc_plain=1.29e-06 dWsh_plain=1.08e-06 dWg_plain=1.12e-06 dq_aff=1.77e-07 dc_aff=1.24e-06 dWsc_aff=1.09e-06 dWsh_aff=1.08e-06 dWg_aff=1.12e-06 dweight_aff=1.10e-06 (band 6e-04 declared)",
+      "measurement": {
+        "scheme": 1,
+        "arguments": {
+          "DQ": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DSD": {
+            "shape": [
+              145161,
+              375
+            ],
+            "stride": [
+              375,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DW": {
+            "shape": [
+              125
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DY": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Q": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "C": {
+            "shape": [
+              145161,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "WSC": {
+            "shape": [
+              125,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "W": {
+            "shape": [
+              0
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Rstd": {
+            "shape": [
+              145161
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "stride_qr": 125,
+          "stride_qc": 1,
+          "stride_cr": 123,
+          "stride_cc": 1,
+          "stride_wn": 123,
+          "stride_wk": 1,
+          "stride_sr": 375,
+          "stride_sc": 1,
+          "M": 145161,
+          "N": 125,
+          "K": 123,
+          "shape_key": 4503601691483146,
+          "HAS_WEIGHT": false
+        },
+        "implementation": "edd6a1dc5ee4842b7b5c469d6e338a0621a123a18b87848fc5f7a3a61a69f404"
+      }
+    },
+    {
+      "name": "rmsnorm_adamod_bwd_kernel",
+      "config": {
+        "BLOCK_N": 128,
+        "BLOCK_K": 64,
+        "BLOCK_M1": 64,
+        "num_warps": 4,
+        "num_ctas": 1,
+        "num_stages": 3
+      },
+      "flags": {
+        "shape_key": 4503601691483146,
+        "HAS_WEIGHT": true
+      },
+      "ms": {
+        "old": 1.55404794216156,
+        "relaxed": 1.551200032234192
+      },
+      "speedup": 1.0018359398325092,
+      "samples_ms": {
+        "old": [
+          1.5526080131530762,
+          1.55404794216156,
+          1.5546239614486694,
+          1.5524799823760986,
+          1.5558079481124878,
+          1.5542399883270264,
+          1.5539840459823608
+        ],
+        "relaxed": [
+          1.5539840459823608,
+          1.5521279573440552,
+          1.551200032234192,
+          1.5504640340805054,
+          1.552448034286499,
+          1.5511679649353027,
+          1.5504319667816162
+        ]
+      },
+      "old_new_errors": [
+        0.0,
+        0.0,
+        7.103172947608982e-07
+      ],
+      "reference_check": "rel dq_plain=2.09e-07 dc_plain=8.79e-07 dWsc_plain=1.29e-06 dWsh_plain=1.08e-06 dWg_plain=1.12e-06 dq_aff=1.77e-07 dc_aff=1.24e-06 dWsc_aff=1.09e-06 dWsh_aff=1.08e-06 dWg_aff=1.12e-06 dweight_aff=1.10e-06 (band 6e-04 declared)",
+      "measurement": {
+        "scheme": 1,
+        "arguments": {
+          "DQ": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DSD": {
+            "shape": [
+              145161,
+              375
+            ],
+            "stride": [
+              375,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DW": {
+            "shape": [
+              125
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "DY": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Q": {
+            "shape": [
+              145161,
+              125
+            ],
+            "stride": [
+              125,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "C": {
+            "shape": [
+              145161,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "WSC": {
+            "shape": [
+              125,
+              123
+            ],
+            "stride": [
+              123,
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "W": {
+            "shape": [
+              125
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "Rstd": {
+            "shape": [
+              145161
+            ],
+            "stride": [
+              1
+            ],
+            "dtype": "torch.float32"
+          },
+          "stride_qr": 125,
+          "stride_qc": 1,
+          "stride_cr": 123,
+          "stride_cc": 1,
+          "stride_wn": 123,
+          "stride_wk": 1,
+          "stride_sr": 375,
+          "stride_sc": 1,
+          "M": 145161,
+          "N": 125,
+          "K": 123,
+          "shape_key": 4503601691483146,
+          "HAS_WEIGHT": true
+        },
+        "implementation": "edd6a1dc5ee4842b7b5c469d6e338a0621a123a18b87848fc5f7a3a61a69f404"
+      }
+    }
+  ],
+  "passed": true
+}

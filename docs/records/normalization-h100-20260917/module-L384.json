@@ -1,0 +1,650 @@
+{
+  "length": 384,
+  "batch": 1,
+  "d_pair": 128,
+  "dropout": 0.25,
+  "fixture_config": {
+    "d_single": 384,
+    "d_pair": 128,
+    "d_single_token": 768,
+    "d_single_atom": 128,
+    "d_pair_atom": 16,
+    "n_layers": 1,
+    "trimul_direction": "outgoing",
+    "n_augment": 48,
+    "mask_prob": 0.2,
+    "min_seq_len": 384,
+    "max_seq_len": 384,
+    "seq_len_step": 64,
+    "min_d_pair": 64,
+    "max_d_pair": 256,
+    "d_pair_step": 64,
+    "d_pair_values": null,
+    "sweep_axis": "seq_len",
+    "sweep_seq_len": 512,
+    "autotune_shard": "",
+    "config_dir": "",
+    "pin_gate_backend": "",
+    "dropout": 0.25,
+    "compile_jobs": 0,
+    "pin_infer_concat": null,
+    "pin_transition_cuda_b2b": null,
+    "target": "triangle_multiplication_bidirectional",
+    "level": "module",
+    "implementations": [
+      "pytorch",
+      "triton"
+    ],
+    "mode": "training",
+    "metric": "time",
+    "compile": true,
+    "cudagraph": "disabled",
+    "allow_tf32": true,
+    "precision": "bf16-mixed",
+    "layernorm_weight_precision": null,
+    "allow_eager": false,
+    "name_suffix": "",
+    "swa_component": "block",
+    "swa_kernels": null,
+    "swa_active_gates": false
+  },
+  "actual_capture": "manual stochastic adapter outside stock measured_result",
+  "source": "official bench_module_triangle_multiplication_bidirectional fixture; its separate paired-dropout correctness runs unchanged",
+  "timed_scope": "static-compiled forward plus backward with fresh production torch.rand dropout on every CUDA graph replay; fresh-gradient overwrite graph; no optimizer",
+  "explicit_sm90_configs": {
+    "trimul_inproj_gemm_gate_mmajor_sm90_cute": {
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 32,
+      "BLOCK_M1": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "trimul_output_f567_train_sm90_cute": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "trimul_input_dual_bwd_sm90_cute": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 3
+    }
+  },
+  "explicit_triton_configs": {
+    "front": {
+      "BLOCK_M1": 64,
+      "BLOCK_K_D": 64,
+      "BLOCK_K_H2": 64,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    "f567": {
+      "BLOCK_M1": 128,
+      "BLOCK_N": 64,
+      "BLOCK_K": 64,
+      "GROUP_M": 4,
+      "num_warps": 8,
+      "num_stages": 3
+    },
+    "dual_bwd": {
+      "BLOCK_M1": 64,
+      "BLOCK_N": 128,
+      "BLOCK_K": 64,
+      "GROUP_M": 1,
+      "num_warps": 4,
+      "num_stages": 3
+    }
+  },
+  "builds": [
+    {
+      "build": 0,
+      "ms": {
+        "triton": 1.58406400680542,
+        "h100": 1.5315119922161102
+      },
+      "samples_ms": {
+        "triton": [
+          1.5819519758224487,
+          1.581824004650116,
+          1.58406400680542,
+          1.584559977054596,
+          1.583903968334198,
+          1.58406400680542,
+          1.5833759903907776,
+          1.5837439894676208,
+          1.5843680500984192,
+          1.5841920375823975,
+          1.5844160318374634,
+          1.584447979927063
+        ],
+        "h100": [
+          1.5296799540519714,
+          1.5323359966278076,
+          1.5316640138626099,
+          1.5317440032958984,
+          1.5321600437164307,
+          1.530992031097412,
+          1.530031979084015,
+          1.5320159792900085,
+          1.5317599773406982,
+          1.5313599705696106,
+          1.5311839580535889,
+          1.5311360359191895
+        ]
+      },
+      "errors_vs_triton": {
+        "h100": [
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": false,
+            "max_abs": 0.000457763671875,
+            "relative_l2": 3.913017962986487e-07
+          },
+          {
+            "equal": false,
+            "max_abs": 0.000732421875,
+            "relative_l2": 3.875185541346582e-07
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": false,
+            "max_abs": 0.000701904296875,
+            "relative_l2": 9.138444170275761e-07
+          },
+          {
+            "equal": false,
+            "max_abs": 0.0009765625,
+            "relative_l2": 6.612448828491324e-07
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          }
+        ]
+      },
+      "checks": {
+        "triton": {
+          "finite_tensors": 12,
+          "all_gradients_present": 11,
+          "same_rng_repeat": [
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.0003662109375,
+              "relative_l2": 3.745778087704821e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.0006561279296875,
+              "relative_l2": 4.1344608803228766e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.000640869140625,
+              "relative_l2": 9.161950060843083e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.0010986328125,
+              "relative_l2": 6.709713034069864e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            }
+          ],
+          "stable_buffer_pointers": true,
+          "fresh_rng_output_changed": true,
+          "fresh_rng_dx_changed": true,
+          "fresh_rng_output_relative_l2": 0.396140992641449,
+          "fresh_rng_dx_relative_l2": 0.5173563957214355,
+          "cuda_rng_state_advanced": true,
+          "timed_rng_reseed": false
+        },
+        "h100": {
+          "finite_tensors": 12,
+          "all_gradients_present": 11,
+          "same_rng_repeat": [
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00054931640625,
+              "relative_l2": 4.272839646546345e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.0008544921875,
+              "relative_l2": 4.6006385900909663e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.000762939453125,
+              "relative_l2": 9.939524261426413e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.0015869140625,
+              "relative_l2": 7.287218295459752e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            }
+          ],
+          "stable_buffer_pointers": true,
+          "fresh_rng_output_changed": true,
+          "fresh_rng_dx_changed": true,
+          "fresh_rng_output_relative_l2": 0.396140992641449,
+          "fresh_rng_dx_relative_l2": 0.5173563957214355,
+          "cuda_rng_state_advanced": true,
+          "timed_rng_reseed": false
+        }
+      },
+      "runtime_chosen": {},
+      "provenance": {
+        "pair": "beb83259d4718e7f0663a6cf1b352bc6b7ff8eadabaf7303888bae7586d7881b",
+        "dy": "791bf699f56fece4be00e06dabad96f1b3c625d9d9188d4374d4e08f954739b6",
+        "token_mask": "aa0032613726dd01e2fa9faca783aa2de740c84587e4aab3dc1979a1cebe1446",
+        "parameters": {
+          "layers.0.ln_pair.weight": "02722f124d0f1736a9dd7c4ddcd05630dcf16ee1ce3454e9a876005ce005d4ac",
+          "layers.0.ln_pair.bias": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+          "layers.0.to_left.weight": "193d9a2227d84800371eb01163ac472e5d3e7952fea48e2491d9c9bb73886183",
+          "layers.0.to_left_gate.weight": "8f99ebb2397f3fdebe0f44ea7afc0e89a5de51a6d00962cefe5f4f23c6f2a42d",
+          "layers.0.to_right.weight": "7d9c6d5701a5cac7fad4213ece20441550924d5499a806fe7e523a5b134829c6",
+          "layers.0.to_right_gate.weight": "ddbc334144e3de00f2cecf3b4bf8a9f1e5887f4c5f9521d3cbd0213035c9e7a6",
+          "layers.0.ln_out.weight": "893a106828fbdb9521e1d868c985aab7ad2ae2f606edc55329265a5e7676006c",
+          "layers.0.ln_out.bias": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "layers.0.to_gate.weight": "d164c01bb1e01cbc599d189c8ea07dec4d83c5276dd02440b66807ffcced76c3",
+          "layers.0.to_out.weight": "abb8b29ee691e3bec781531c06416efd2ab6e8968d7afd54a0df5b7b35edb8e2"
+        },
+        "output_projection_nonzero": [
+          32768
+        ],
+        "dropout_method_restored": true
+      }
+    },
+    {
+      "build": 1,
+      "ms": {
+        "triton": 1.5851839780807495,
+        "h100": 1.5335280001163483
+      },
+      "samples_ms": {
+        "triton": [
+          1.5800639986991882,
+          1.5845439434051514,
+          1.5850880146026611,
+          1.584223985671997,
+          1.5857599973678589,
+          1.585536003112793,
+          1.5847680568695068,
+          1.5856959819793701,
+          1.585279941558838,
+          1.5847519636154175,
+          1.5864319801330566,
+          1.5855040550231934
+        ],
+        "h100": [
+          1.5327679514884949,
+          1.5327839851379395,
+          1.5340800285339355,
+          1.5343839526176453,
+          1.5335360169410706,
+          1.533519983291626,
+          1.5333279967308044,
+          1.533791959285736,
+          1.5337599515914917,
+          1.5336960554122925,
+          1.5334879755973816,
+          1.5332639813423157
+        ]
+      },
+      "errors_vs_triton": {
+        "h100": [
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": false,
+            "max_abs": 0.000732421875,
+            "relative_l2": 4.7153471882666054e-07
+          },
+          {
+            "equal": false,
+            "max_abs": 0.0009765625,
+            "relative_l2": 4.5723675157205435e-07
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": false,
+            "max_abs": 0.0008087158203125,
+            "relative_l2": 9.99239432530885e-07
+          },
+          {
+            "equal": false,
+            "max_abs": 0.0008544921875,
+            "relative_l2": 6.103383043409849e-07
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          },
+          {
+            "equal": true,
+            "max_abs": 0.0,
+            "relative_l2": 0.0
+          }
+        ]
+      },
+      "checks": {
+        "triton": {
+          "finite_tensors": 12,
+          "all_gradients_present": 11,
+          "same_rng_repeat": [
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.0004425048828125,
+              "relative_l2": 4.2485055473662214e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00091552734375,
+              "relative_l2": 5.236938136476965e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00048828125,
+              "relative_l2": 8.782055260780908e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.001220703125,
+              "relative_l2": 6.608818807762873e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            }
+          ],
+          "stable_buffer_pointers": true,
+          "fresh_rng_output_changed": true,
+          "fresh_rng_dx_changed": true,
+          "fresh_rng_output_relative_l2": 0.396140992641449,
+          "fresh_rng_dx_relative_l2": 0.5173563957214355,
+          "cuda_rng_state_advanced": true,
+          "timed_rng_reseed": false
+        },
+        "h100": {
+          "finite_tensors": 12,
+          "all_gradients_present": 11,
+          "same_rng_repeat": [
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.000518798828125,
+              "relative_l2": 4.135499978019652e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00054931640625,
+              "relative_l2": 3.7434222122101346e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00054931640625,
+              "relative_l2": 9.208330311594182e-07
+            },
+            {
+              "equal": false,
+              "max_abs": 0.00079345703125,
+              "relative_l2": 5.61370086415991e-07
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            },
+            {
+              "equal": true,
+              "max_abs": 0.0,
+              "relative_l2": 0.0
+            }
+          ],
+          "stable_buffer_pointers": true,
+          "fresh_rng_output_changed": true,
+          "fresh_rng_dx_changed": true,
+          "fresh_rng_output_relative_l2": 0.396140992641449,
+          "fresh_rng_dx_relative_l2": 0.5173563957214355,
+          "cuda_rng_state_advanced": true,
+          "timed_rng_reseed": false
+        }
+      },
+      "runtime_chosen": {},
+      "provenance": {
+        "pair": "beb83259d4718e7f0663a6cf1b352bc6b7ff8eadabaf7303888bae7586d7881b",
+        "dy": "791bf699f56fece4be00e06dabad96f1b3c625d9d9188d4374d4e08f954739b6",
+        "token_mask": "aa0032613726dd01e2fa9faca783aa2de740c84587e4aab3dc1979a1cebe1446",
+        "parameters": {
+          "layers.0.ln_pair.weight": "02722f124d0f1736a9dd7c4ddcd05630dcf16ee1ce3454e9a876005ce005d4ac",
+          "layers.0.ln_pair.bias": "076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560",
+          "layers.0.to_left.weight": "193d9a2227d84800371eb01163ac472e5d3e7952fea48e2491d9c9bb73886183",
+          "layers.0.to_left_gate.weight": "8f99ebb2397f3fdebe0f44ea7afc0e89a5de51a6d00962cefe5f4f23c6f2a42d",
+          "layers.0.to_right.weight": "7d9c6d5701a5cac7fad4213ece20441550924d5499a806fe7e523a5b134829c6",
+          "layers.0.to_right_gate.weight": "ddbc334144e3de00f2cecf3b4bf8a9f1e5887f4c5f9521d3cbd0213035c9e7a6",
+          "layers.0.ln_out.weight": "893a106828fbdb9521e1d868c985aab7ad2ae2f606edc55329265a5e7676006c",
+          "layers.0.ln_out.bias": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+          "layers.0.to_gate.weight": "d164c01bb1e01cbc599d189c8ea07dec4d83c5276dd02440b66807ffcced76c3",
+          "layers.0.to_out.weight": "abb8b29ee691e3bec781531c06416efd2ab6e8968d7afd54a0df5b7b35edb8e2"
+        },
+        "output_projection_nonzero": [
+          32768
+        ],
+        "dropout_method_restored": true
+      }
+    }
+  ],
+  "device": "NVIDIA H100 80GB HBM3",
+  "passed": true
+}

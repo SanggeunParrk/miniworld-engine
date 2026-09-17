@@ -1,0 +1,27 @@
+[
+  {
+    "K": 128,
+    "shape_key": 6442977173,
+    "bucket": "PRIVATIZE_DGDB=1,shape_key=6442977173"
+  },
+  {
+    "K": 256,
+    "shape_key": 6443501461,
+    "bucket": "PRIVATIZE_DGDB=1,shape_key=6443501461"
+  },
+  {
+    "K": 384,
+    "shape_key": 6444025749,
+    "bucket": "PRIVATIZE_DGDB=1,shape_key=6444025749"
+  },
+  {
+    "K": 512,
+    "shape_key": 6444550037,
+    "bucket": "PRIVATIZE_DGDB=1,shape_key=6444550037"
+  },
+  {
+    "K": 768,
+    "shape_key": 6445598613,
+    "bucket": "PRIVATIZE_DGDB=1,shape_key=6445598613"
+  }
+]

@@ -1,0 +1,24 @@
+[
+  {
+    "kernel": "_ln_bwd_persistent",
+    "us": 483.232,
+    "dram_pct": 57.71,
+    "dram_tbps": 1.9345224819548401,
+    "occupancy": 12.5,
+    "registers": 255.0,
+    "read_bytes": 614502656.0,
+    "write_bytes": 320320512.0,
+    "shared_bank_conflicts": 16515804.0
+  },
+  {
+    "kernel": "kernel_cutlass_kernel_norm_tmaNormTma_object_at__Copy_Atom_ThrID_10_TV_Layout_Src_1819201_TV_Layout_Dst_1819201_Value_type_bf16_tensor00_o_5898242561011_Copy_Atom_ThrID_10_TV_Layout_Src_1_0",
+    "us": 416.32,
+    "dram_pct": 66.16,
+    "dram_tbps": 2.2176922367409704,
+    "occupancy": 24.54,
+    "registers": 120.0,
+    "read_bytes": 616252672.0,
+    "write_bytes": 307016960.0,
+    "shared_bank_conflicts": 43075388.0
+  }
+]

@@ -1,0 +1,927 @@
+{
+  "capture_stream_validation": true,
+  "results": {
+    "B4": [
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          4.3409630734458915e-07,
+          1.3652143593390065e-07
+        ],
+        "ms": {
+          "triton": 0.47516798973083496,
+          "cute": 0.4851200133562088
+        },
+        "speedup": 0.9794854399913896
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          4.3409630734458915e-07,
+          1.3652143593390065e-07
+        ],
+        "ms": {
+          "triton": 0.47494399547576904,
+          "cute": 0.44921600818634033
+        },
+        "speedup": 1.0572730864897326
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          4.3409630734458915e-07,
+          1.3652143593390065e-07
+        ],
+        "ms": {
+          "triton": 0.47577598690986633,
+          "cute": 0.6859360039234161
+        },
+        "speedup": 0.6936157078627209
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          3.4302382800888154e-07,
+          1.3920488584062696e-07
+        ],
+        "ms": {
+          "triton": 0.4760960042476654,
+          "cute": 0.6814079880714417
+        },
+        "speedup": 0.6986944863900678
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          3.4302382800888154e-07,
+          1.3920488584062696e-07
+        ],
+        "ms": {
+          "triton": 0.4755200147628784,
+          "cute": 0.40163201093673706
+        },
+        "speedup": 1.1839694093451625
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          3.4302382800888154e-07,
+          1.3920488584062696e-07
+        ],
+        "ms": {
+          "triton": 0.47625601291656494,
+          "cute": 0.5490559935569763
+        },
+        "speedup": 0.8674088226069846
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          2.8993048317715875e-07,
+          1.4385588542609185e-07
+        ],
+        "ms": {
+          "triton": 0.47516798973083496,
+          "cute": 0.5881119966506958
+        },
+        "speedup": 0.8079549344970377
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          2.8993048317715875e-07,
+          1.4385588542609185e-07
+        ],
+        "ms": {
+          "triton": 0.4753600060939789,
+          "cute": 0.4764159917831421
+        },
+        "speedup": 0.9977834797584967
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          2.8993048317715875e-07,
+          1.4385588542609185e-07
+        ],
+        "ms": {
+          "triton": 0.4752640128135681,
+          "cute": 0.4695040136575699
+        },
+        "speedup": 1.0122682639305385
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          4.4566175461113744e-07,
+          1.0312987797078677e-07
+        ],
+        "ms": {
+          "triton": 0.476608008146286,
+          "cute": 0.9811680018901825
+        },
+        "speedup": 0.48575575969468937
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          4.4566175461113744e-07,
+          1.0312987797078677e-07
+        ],
+        "ms": {
+          "triton": 0.4764159917831421,
+          "cute": 0.6432960033416748
+        },
+        "speedup": 0.7405859655715947
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          3.6318974139248894e-07,
+          1.1656388210212754e-07
+        ],
+        "ms": {
+          "triton": 0.4759039878845215,
+          "cute": 0.5949119925498962
+        },
+        "speedup": 0.7999569580783105
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          3.6318974139248894e-07,
+          1.1656388210212754e-07
+        ],
+        "ms": {
+          "triton": 0.4761599898338318,
+          "cute": 0.561024010181427
+        },
+        "speedup": 0.8487337104874506
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          2.7853170081471035e-07,
+          1.2026633555706212e-07
+        ],
+        "ms": {
+          "triton": 0.47593599557876587,
+          "cute": 0.5233920216560364
+        },
+        "speedup": 0.9093298634413313
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          2.7853170081471035e-07,
+          1.2026633555706212e-07
+        ],
+        "ms": {
+          "triton": 0.4758720099925995,
+          "cute": 0.487759992480278
+        },
+        "speedup": 0.9756273932447234
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          4.5363654521679564e-07,
+          1.411005996487802e-07
+        ],
+        "ms": {
+          "triton": 0.4482879936695099,
+          "cute": 1.8129279613494873
+        },
+        "speedup": 0.24727292160898562
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          3.556033050244878e-07,
+          1.4359117983531178e-07
+        ],
+        "ms": {
+          "triton": 0.4481920003890991,
+          "cute": 1.039135992527008
+        },
+        "speedup": 0.4313121705073171
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          4.584926955431001e-06,
+          2.9102477583364816e-07,
+          1.5376815554191126e-07
+        ],
+        "ms": {
+          "triton": 0.44726400077342987,
+          "cute": 1.1128000020980835
+        },
+        "speedup": 0.40192667139661586
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 2
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      }
+    ],
+    "F4": [
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.2316800057888031,
+          "cute": 0.3975359946489334
+        },
+        "speedup": 0.5827900087221063
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.2316800057888031,
+          "cute": 0.3824000060558319
+        },
+        "speedup": 0.6058577461292637
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23174400627613068,
+          "cute": 0.39899200201034546
+        },
+        "speedup": 0.5808236884661206
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23158399760723114,
+          "cute": 0.3110719919204712
+        },
+        "speedup": 0.7444707451078978
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.2317119985818863,
+          "cute": 0.27803200483322144
+        },
+        "speedup": 0.8334004523000135
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23174400627613068,
+          "cute": 0.2788800001144409
+        },
+        "speedup": 0.8309810892894164
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23177599906921387,
+          "cute": 0.290336012840271
+        },
+        "speedup": 0.7983026177215086
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.2319359928369522,
+          "cute": 0.24801599979400635
+        },
+        "speedup": 0.9351654450906004
+      },
+      {
+        "config": {
+          "BLOCK_M1": 32,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23161600530147552,
+          "cute": 0.2698560059070587
+        },
+        "speedup": 0.8582947951184253
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.2319680005311966,
+          "cute": 0.41411200165748596
+        },
+        "speedup": 0.5601576375539544
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23177599906921387,
+          "cute": 0.3935680091381073
+        },
+        "speedup": 0.5889096514139723
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.2314400002360344,
+          "cute": 0.6025919914245605
+        },
+        "speedup": 0.38407413893586195
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23180800676345825,
+          "cute": 0.2993919998407364
+        },
+        "speedup": 0.774262528346683
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23174400627613068,
+          "cute": 0.29232001304626465
+        },
+        "speedup": 0.7927750271393605
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23161600530147552,
+          "cute": 0.3860800117254257
+        },
+        "speedup": 0.5999171111354953
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23164799809455872,
+          "cute": 0.2646239995956421
+        },
+        "speedup": 0.8753854467037296
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23180800676345825,
+          "cute": 0.26134398579597473
+        },
+        "speedup": 0.8869842788133853
+      },
+      {
+        "config": {
+          "BLOCK_M1": 64,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 3
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23161600530147552,
+          "cute": 0.2754240036010742
+        },
+        "speedup": 0.8409434264013878
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23174400627613068,
+          "cute": 0.6463680267333984
+        },
+        "speedup": 0.35853259550493827
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23174399882555008,
+          "cute": 0.6799039840698242
+        },
+        "speedup": 0.3408481259932588
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23180800676345825,
+          "cute": 0.37856000661849976
+        },
+        "speedup": 0.6123415118096897
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23199999332427979,
+          "cute": 0.3550400137901306
+        },
+        "speedup": 0.6534474546900463
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 8,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 1
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23164799809455872,
+          "cute": 0.2931840121746063
+        },
+        "speedup": 0.7901112900951784
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 2
+        },
+        "passed": true,
+        "errors": [
+          1.0839160495379474e-05,
+          4.029877320732567e-09,
+          6.316138012607553e-08
+        ],
+        "ms": {
+          "triton": 0.23161600530147552,
+          "cute": 0.25279998779296875
+        },
+        "speedup": 0.9162025968575525
+      },
+      {
+        "config": {
+          "BLOCK_M1": 128,
+          "BLOCK_K": 256,
+          "num_warps": 16,
+          "num_stages": 3
+        },
+        "passed": false,
+        "error": "DSLCudaRuntimeError: CUDA_ERROR_INVALID_VALUE (error code: 1) \n\u001b[91m\u26a0\ufe0f Invalid parameter passed to CUDA operation.\u001b[0m\n\n\u001b[93mThis is likely a bug - please report it with:\u001b[0m \n\n\u001b[0m\n\u001b[1mError Code:\u001b[0m 1\n\n\u001b[94m\ud83d\udd0d Additional Context:\u001b[0m \n- \u001b[1mError name: CUDA_ERROR_INVALID_VALUE\n- Error code: 1\n- CUDA_TOOLKIT_PATH: not set\n- Target SM ARCH: not set\u001b[0m\n\n\u001b[94m\ud83d\udcca GPU Information:\u001b[0m\n\u001b[1m- CUDA devices available: 1 (current: <CUdevice 0>)\n- Architecture: \u001b[94mHopper\u001b[0m (\u001b[92msm_90a\u001b[0m)\n- Compatible SM archs: \u001b[92msm_90a\u001b[0m\n- Total Memory: \u001b[94m79.18 GB\u001b[0m\n\n\u001b[1mCompatibility Check:\u001b[0m\n\u001b[91m\u274c Error: Target SM ARCH unknown is not compatible\n\ud83d\udca1 Please use one of SM ARCHs: \u001b[92msm_90a\u001b[0m\n\n\u001b[92m\ud83d\udca1 Suggestions:\u001b[0m\n \u001b[92m1. Your GPU model\u001b[0m\n \u001b[92m2. SM ARCH setting\u001b[0m\n \u001b[92m3. Steps to reproduce\u001b[0m"
+      }
+    ]
+  }
+}

@@ -1183,6 +1183,8 @@ def _transition_ln_bwd_kernel(
     #   x_hat = x*rstd - c1 = (x-mean)*rstd ; wdy = gamma*dxn
     #   dx = rstd*(wdy - mean_k(wdy) - x_hat*mean_k(wdy*x_hat))
     #   dgamma += sum_m(dxn*x_hat) ; dbeta += sum_m(dxn)   (atomic over M-blocks)
+    # Parameter sums are initialized before this launch and consumed after it.
+    # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rows < M
@@ -1212,11 +1214,11 @@ def _transition_ln_bwd_kernel(
         pdb = tl.sum(dxn, axis=0)
         if PRIVATIZE_DGDB:
             replica = pid % NUM_REPLICAS
-            tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask)
-            tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask)
+            tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask, sem="relaxed")
+            tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask, sem="relaxed")
         else:
-            tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
-            tl.atomic_add(db_ptr + k, pdb, mask=kmask)
+            tl.atomic_add(dg_ptr + k, pdg, mask=kmask, sem="relaxed")
+            tl.atomic_add(db_ptr + k, pdb, mask=kmask, sem="relaxed")
     else:
         # pass A: the two row reductions over ALL of K.
         ca = tl.zeros([BLOCK_M1], dtype=tl.float32)
@@ -1253,11 +1255,11 @@ def _transition_ln_bwd_kernel(
             pdb = tl.sum(dxn, axis=0)
             if PRIVATIZE_DGDB:
                 replica = pid % NUM_REPLICAS
-                tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask)
-                tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask)
+                tl.atomic_add(dg_ptr + replica * dg_stride_replica + k * dg_stride_k, pdg, mask=kmask, sem="relaxed")
+                tl.atomic_add(db_ptr + replica * db_stride_replica + k * db_stride_k, pdb, mask=kmask, sem="relaxed")
             else:
-                tl.atomic_add(dg_ptr + k, pdg, mask=kmask)
-                tl.atomic_add(db_ptr + k, pdb, mask=kmask)
+                tl.atomic_add(dg_ptr + k, pdg, mask=kmask, sem="relaxed")
+                tl.atomic_add(db_ptr + k, pdb, mask=kmask, sem="relaxed")
 # fmt: on
 
 

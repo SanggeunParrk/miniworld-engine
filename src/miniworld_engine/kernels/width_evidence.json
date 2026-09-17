@@ -426,23 +426,6 @@
    "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274881053466"
   ]
  },
- "layernorm_bwd_foldstats_triton": {
-  "128": [
-   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
-  ],
-  "256": [
-   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
-  ],
-  "384": [
-   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
-  ],
-  "512": [
-   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
-  ],
-  "768": [
-   "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
-  ]
- },
  "layernorm_bwd_split_mmajor_triton": {
   "128": [
    "bfloat16+float32|shape_key=274878432026"

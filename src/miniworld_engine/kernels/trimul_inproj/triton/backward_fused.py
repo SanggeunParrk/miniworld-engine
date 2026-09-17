@@ -74,8 +74,11 @@ def _ln_bwd_residual_kernel(
         c1 = tl.sum(xhat * wdy, axis=1) / N
         c2 = tl.sum(wdy, axis=1) / N
         # Accumulate partial sums for dw/db (column reduction over this row tile)
-        tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
-        tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask)
+        # These atomics only accumulate parameter gradients; no CTA reads their result.
+        # The following kernel/stream dependency supplies visibility. Keep GPU-wide
+        # atomicity without acquire/release ordering for unrelated activation memory.
+        tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
+        tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask, sem="relaxed")
         dx = (wdy - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
         # Preserve the old BF16 LN gradient rounding before the residual add.
         dr = tl.load(RES + rows[:, None] * stride_r + cols[None, :] * stride_c,
@@ -101,8 +104,8 @@ def _ln_bwd_residual_kernel(
             c1 += tl.sum(xhat * wdy, axis=1)
             c2 += tl.sum(wdy, axis=1)
             # Accumulate partial sums for dw/db (column reduction over this row tile)
-            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
-            tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask)
+            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
+            tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask, sem="relaxed")
         c1 = c1 / N
         c2 = c2 / N
 

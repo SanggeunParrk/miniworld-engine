@@ -1,0 +1,17 @@
+{
+  "128": [
+    "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "256": [
+    "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "384": [
+    "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "512": [
+    "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ],
+  "768": [
+    "bfloat16+float32|PRIVATIZE_DGDB=1,shape_key=68720002965"
+  ]
+}

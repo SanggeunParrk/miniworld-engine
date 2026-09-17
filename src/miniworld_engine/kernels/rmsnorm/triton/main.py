@@ -106,6 +106,8 @@ def rmsnorm_bwd_kernel(
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
+    # Parameter sums are initialized before this launch and consumed after it.
+    # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     """``dx`` and, with a weight, ``dweight``.
 
     ``dweight`` is fp32 and accumulated across row tiles with ``atomic_add``, so its buffer is
@@ -128,7 +130,7 @@ def rmsnorm_bwd_kernel(
         xhat = tl.where(mask, x * rstd[:, None], 0.0)
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
+            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
             wdy = tl.where(mask, dy * w[None, :], 0.0)
         else:
             wdy = tl.where(mask, dy, 0.0)
@@ -149,7 +151,7 @@ def rmsnorm_bwd_kernel(
             xhat = tl.where(mask, x * rstd[:, None], 0.0)
             if HAS_WEIGHT:
                 w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-                tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
+                tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
                 wdy = tl.where(mask, dy * w[None, :], 0.0)
             else:
                 wdy = tl.where(mask, dy, 0.0)
@@ -413,6 +415,8 @@ def rmsnorm_adamod_bwd_kernel(
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key, HAS_WEIGHT: tl.constexpr,
 ):
+    # Parameter sums are initialized before this launch and consumed after it.
+    # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     """``dq``, ``dscale`` and ``dweight`` for the fused modulate. ``dshift`` IS ``dy``.
 
     ``scale`` is RECOMPUTED here (``c @ Wsc^T``) rather than saved: saving it is the 192 MB the
@@ -463,7 +467,7 @@ def rmsnorm_adamod_bwd_kernel(
                  dy, mask=mask)
         dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
         if HAS_WEIGHT:
-            tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask)
+            tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask, sem="relaxed")
             wdy = tl.where(mask, dnormed * w[None, :], 0.0)
         else:
             wdy = dnormed
@@ -505,7 +509,7 @@ def rmsnorm_adamod_bwd_kernel(
                      dy, mask=mask)
             dnormed = tl.where(mask, dy * (1.0 + acc_sc), 0.0)
             if HAS_WEIGHT:
-                tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask)
+                tl.atomic_add(DW + cols, tl.sum(dnormed * xhat, axis=0), mask=col_mask, sem="relaxed")
                 wdy = tl.where(mask, dnormed * w[None, :], 0.0)
             else:
                 wdy = dnormed

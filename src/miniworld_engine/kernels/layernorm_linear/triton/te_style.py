@@ -230,8 +230,11 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
              dx.to(DX.dtype.element_ty), mask=mask)
     pdg = tl.sum(tl.where(mask, dxn * xhat, 0.0), axis=0)
     pdb = tl.sum(tl.where(mask, dxn, 0.0), axis=0)
-    tl.atomic_add(DG + cols, pdg, mask=cmask)
-    tl.atomic_add(DB + cols, pdb, mask=cmask)
+    # These atomics only accumulate parameter gradients; no CTA reads their result.
+    # The following kernel/stream dependency supplies visibility. Keep GPU-wide
+    # atomicity without acquire/release ordering for unrelated activation memory.
+    tl.atomic_add(DG + cols, pdg, mask=cmask, sem="relaxed")
+    tl.atomic_add(DB + cols, pdb, mask=cmask, sem="relaxed")
 
 
 def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None):

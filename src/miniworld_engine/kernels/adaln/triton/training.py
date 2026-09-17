@@ -372,6 +372,8 @@ def _dgrad_condln_kernel(
     D, Wcat, Cond, MeanC, RstdC, LNW, DCond, DLNW, M, NC: tl.constexpr, K2,
     sd0, sd1, sw0, sw1, sc0, sc1, sdc0, sdc1,
     BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, shape_key):
+    # Parameter sums are initialized before this launch and consumed after it.
+    # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -421,7 +423,7 @@ def _dgrad_condln_kernel(
         c2 = tl.sum(tl.where(ncmask[None, :], dxhat, 0.0), axis=1) * inv_n
         c1 = tl.sum(tl.where(ncmask[None, :], dxhat * cnorm, 0.0), axis=1) * inv_n
         pdg = tl.sum(tl.where(nmask2, acc * cnorm, 0.0), axis=0)   # dlnw = Σ_m dcond_aff·cond̂
-        tl.atomic_add(DLNW + nc, pdg, mask=ncmask)
+        tl.atomic_add(DLNW + nc, pdg, mask=ncmask, sem="relaxed")
         # cond LayerNorm backward (affine γ=lnw, no β) on the in-register dcond_aff.
         dcond = rstd * (dxhat - c2[:, None] - cnorm * c1[:, None])
         tl.store(DCond + rm[:, None] * sdc0 + nc[None, :] * sdc1,
@@ -453,7 +455,7 @@ def _dgrad_condln_kernel(
             c2 += tl.sum(tl.where(ncmask[None, :], dxhat, 0.0), axis=1)
             c1 += tl.sum(tl.where(ncmask[None, :], dxhat * cnorm, 0.0), axis=1)
             pdg = tl.sum(tl.where(nmask2, acc * cnorm, 0.0), axis=0)   # dlnw = Σ_m dcond_aff·cond̂
-            tl.atomic_add(DLNW + nc, pdg, mask=ncmask)
+            tl.atomic_add(DLNW + nc, pdg, mask=ncmask, sem="relaxed")
         c1 *= inv_n   # scale once at the end, as the untiled kernel did
         c2 *= inv_n
 

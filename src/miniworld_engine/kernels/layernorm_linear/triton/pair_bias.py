@@ -181,6 +181,8 @@ def _layer_norm_linear_bwd(
     # channel axis is walked TWICE: pass A accumulates c1/c2 (and emits the dpw/dlnw atomics),
     # pass B forms dx. At BLOCK_K_D >= N each loop is one iteration = the original single-tile
     # schedule, with the second pass reading an L2-hot row.
+    # Parameter sums are initialized before this launch and consumed after it.
+    # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     rows = (tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)).to(tl.int64)
     row_mask = rows < M
     mean = tl.load(mean_ptr + rows, mask=row_mask, other=0.0)
@@ -217,6 +219,7 @@ def _layer_norm_linear_bwd(
                     dpw_ptr + hcols[:, None] * N + cols[None, :],
                     tl.dot(tl.trans(dout), y, allow_tf32=False),
                     mask=h_mask[:, None] & col_mask[None, :],
+                    sem="relaxed",
                 )
         else:
             for j in tl.static_range(NH):
@@ -227,12 +230,13 @@ def _layer_norm_linear_bwd(
                     dpw_ptr + j * N + cols,
                     tl.sum(dout_j[:, None] * y, axis=0),
                     mask=col_mask,
+                    sem="relaxed",
                 )
         dy = tl.where(mask, dy, 0.0)
         dxhat = dy * lnw[None, :]
         c1 += tl.sum(dxhat * xhat, axis=1)
         c2 += tl.sum(dxhat, axis=1)
-        tl.atomic_add(dlnw_ptr + cols, tl.sum(dy * xhat, axis=0), mask=col_mask)
+        tl.atomic_add(dlnw_ptr + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
     c1 = c1 / N
     c2 = c2 / N
 
