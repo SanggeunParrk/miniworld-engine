@@ -282,3 +282,21 @@ def trimul_bwd_gate_packed_recompute_triton():
 
 # ── trimul_inproj/cute: the two @triton.jit kernels living under cute/ ───────────────────────
 
+
+
+def trimul_output_f567_train():
+    """Run the specialized trimul_output_f567_train harness."""
+    from miniworld_engine.kernels.checks.trimul_output import output_f567_train as run
+    return run()
+
+
+def trimul_input_ln_residual_bwd():
+    """Run the specialized trimul_input_ln_residual_bwd harness."""
+    from miniworld_engine.kernels.checks.trimul_backward import ln_residual as run
+    return run()
+
+
+def trimul_input_dual_bwd():
+    """Run the specialized trimul_input_dual_bwd harness."""
+    from miniworld_engine.kernels.checks.trimul_backward import dual as run
+    return run()

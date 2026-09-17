@@ -56,7 +56,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self.implementation = ImplementationType(implementation)
         self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
         if self._backend == KernelBackend.CUTE:
-            from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch
+            from miniworld_engine.kernels.trimul_inproj.cute import (
+                _bdll_patch,
+                _gate_mul_patch,
+            )
             _bdll_patch.apply()
             _gate_mul_patch.apply()
             from .module import _load_cute_fns

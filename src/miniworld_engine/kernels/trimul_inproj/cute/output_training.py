@@ -36,22 +36,14 @@ def supported(x, w):
     )
 
 
-def _dx_fake(dy, w, xhat, g, rstd, c1, c2):
-    return torch.empty_strided(
-        xhat.shape, (1, xhat.shape[0]), device=xhat.device, dtype=xhat.dtype
-    )
+def __dx_fake(dy, w, xhat, g, rstd, c1, c2):
+    """Allocate outputs with the same shape, dtype and strides as _dx."""
+    return torch.empty_strided(xhat.shape, (1, xhat.shape[0]), device=xhat.device, dtype=xhat.dtype)
 
 
-@opaque(fake=_dx_fake, name="trimul_output_rows_dgrad")
-def _dx(
-    dy: torch.Tensor,
-    w: torch.Tensor,
-    xhat: torch.Tensor,
-    g: torch.Tensor,
-    rstd: torch.Tensor,
-    c1: torch.Tensor,
-    c2: torch.Tensor,
-) -> torch.Tensor:
+@opaque(fake=__dx_fake, name='trimul_output_rows_dgrad')
+def _dx(dy: torch.Tensor, w: torch.Tensor, xhat: torch.Tensor, g: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor, c2: torch.Tensor) -> torch.Tensor:
+    """Execute  dx behind an opaque compiler boundary."""
     return dgrad_ln_rows(dy, w, xhat, g, rstd, c1, c2)
 
 

@@ -281,3 +281,7 @@ cute collective 클래스가 통째로 빠진다(현재 최소 6개 CUDA 커널�
 `src/miniworld_engine/build/classify.py`는 본문만 보지 않는다. flash-attention forward는 `tl.dot`을
 인라인되는 `@triton.jit` 헬퍼에 두고, CUDA LayerNorm은 감축을 `__device__` 헬퍼에 둔다 — 본문만
 읽으면 둘 다 `elem`으로 잡힌다.
+
+TriMul fusion vocabulary: `input`, `output`, `inproj` identify projection roles;
+`dual`, `ln`, `residual`, `masked`, `rows`, `f567`, `train` describe the fused
+operations and training saves. F567 combines output projection, gate, dropout and residual.

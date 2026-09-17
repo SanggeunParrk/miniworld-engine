@@ -29,7 +29,7 @@ from pathlib import Path
 SRC = Path("src")
 REG = SRC / "miniworld_engine/kernels/registry.csv"
 
-GEMM = ((r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
+GEMM = ((r"\b(?:gemm|compile_gemm_kernel)\s*\(", "external GEMM"), (r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
         (r"\btcgen05\b|\bwgmma\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b|\bSM90_\d+x\d+x\d+_", "mma"))
 REDUCE = ((r"\btl\.(sum|max|min)\b", "tl.reduce"), (r"__shfl\w*", "shfl"),
           (r"\batomic_add\b|\batomicAdd\b|\btl\.atomic_\w+", "atomic"))

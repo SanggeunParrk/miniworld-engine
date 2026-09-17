@@ -12,6 +12,8 @@ def front(x, wl, wlg, wr, wrg, _wg, **kwargs):
     flat = x.reshape(-1, x.shape[-1])
     lp, lg, rp, rg = [flat @ w for w in (wl, wlg, wr, wrg)]
     def planes(t):
+        if kwargs.get("pair_mask") is not None:
+            t = t * kwargs["pair_mask"].reshape(-1, 1)
         return t.reshape(*x.shape[:-1], -1).permute(0, 3, 1, 2)
     return planes(lp * lg.sigmoid()), planes(rp * rg.sigmoid()), torch.cat((lp, lg, rp, rg), -1)
 
@@ -29,14 +31,14 @@ def front_backward(dl, dr, pre, x, wl, wlg, wr, wrg, *, pair_mask):
     return torch.cat(grads, -1).t(), *dw, torch.cat([w.t() for w in (wl, wlg, wr, wrg)])
 
 
-def te_forward(x, gamma, beta, weight, bias, eps):
+def te_forward(x, gamma, beta, weight, bias, eps, **kwargs):
     mean = x.mean(-1)
     rstd = (x.var(-1, unbiased=False) + eps).rsqrt()
     act = (x - mean[:, None]) * rstd[:, None] * gamma + beta
     return act @ weight.t(), act, mean, rstd
 
 
-def te_backward(dy, act, x, mean, rstd, gamma, weight, *, has_bias):
+def te_backward(dy, act, x, mean, rstd, gamma, weight, *, has_bias, **kwargs):
     grad = dy @ weight
     xhat = (x - mean[:, None]) * rstd[:, None]
     weighted = grad * gamma

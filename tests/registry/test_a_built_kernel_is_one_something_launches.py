@@ -108,7 +108,7 @@ def _launchers(trees: dict[Path, ast.Module]) -> dict[str, set[str]]:
             names = [a.arg for a in fn.args.args]
             invoked = {n.value.id for n in ast.walk(fn)
                        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)}
-            forwarded[fn.name] = [i for i, name in enumerate(names) if name in invoked]
+            forwarded.setdefault(fn.name, set()).update(i for i, name in enumerate(names) if name in invoked)
     for tree in trees.values():
         for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
             for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)

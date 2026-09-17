@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from miniworld_engine.kernels._tiles import tile_order, tile_grid
 
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import token_key
@@ -58,12 +59,7 @@ def _output_f567_kernel(
 ):
     pid = tl.program_id(0).to(tl.int64)
     nm, nn = tl.cdiv(M, BLOCK_M1), tl.cdiv(N, BLOCK_N)
-    group = pid // (GROUP_M * nn)
-    first_m = group * GROUP_M
-    group_m = tl.minimum(nm - first_m, GROUP_M)
-    local = pid % (GROUP_M * nn)
-    pm = first_m + local % group_m
-    pn = local // group_m
+    pm, pn = tile_order(pid, nm, nn, GROUP_M)
     rm = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rn = pn * BLOCK_N + tl.arange(0, BLOCK_N)
 
@@ -102,12 +98,13 @@ def _output_f567_kernel(
     tl.store(GATE + off, g, mask)
 
 
-def _output_f567_fake(norm, x, wp, wg, residual, dropscale, seq_len):
+def _output_f567_train_fake(norm, x, wp, wg, residual, dropscale, seq_len):
+    """Allocate outputs with the same shape, dtype and strides as output_f567_train."""
     shape = (norm.shape[0], wp.shape[0])
-    return tuple(norm.new_empty(shape) for _ in range(3))
+    return tuple((norm.new_empty(shape) for _ in range(3)))
 
 
-@opaque(fake=_output_f567_fake, name='trimul_output_f567_train')
+@opaque(fake=_output_f567_train_fake, name='trimul_output_f567_train')
 def output_f567_train(
     norm: torch.Tensor, x: torch.Tensor, wp: torch.Tensor, wg: torch.Tensor,
     residual: torch.Tensor, dropscale: torch.Tensor, seq_len: int,
@@ -134,7 +131,7 @@ def output_f567_train(
         raise ValueError('F567 input/weight/residual/drop-scale shapes disagree')
     if any(not t.is_contiguous() for t in (norm, x, residual, dropscale)):
         raise ValueError('F567 activation/residual/drop-scale operands must be contiguous')
-    y, proj, gate = _output_f567_fake(*tensors, seq_len)
+    y, proj, gate = _output_f567_train_fake(*tensors, seq_len)
     grid = lambda meta: (triton.cdiv(m, meta['BLOCK_M1']) * triton.cdiv(n, meta['BLOCK_N']),)
     _output_f567_kernel[grid](
         norm, x, wp, wg, proj, gate, y, residual, dropscale,

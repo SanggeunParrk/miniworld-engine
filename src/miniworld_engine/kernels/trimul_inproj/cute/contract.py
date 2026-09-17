@@ -52,12 +52,14 @@ def _bmm(a, b, out, quack):
         torch.bmm(a, b, out=out)
 
 
-def _forward_fake(left, right, h):
+def _packed_forward_fake(left, right, h):
+    """Allocate outputs with the same shape, dtype and strides as packed_forward."""
     return left.new_empty(left.shape)
 
 
-@opaque(fake=_forward_fake, name="trimul_bidir_contract_fwd")
+@opaque(fake=_packed_forward_fake, name='trimul_bidir_contract_fwd')
 def packed_forward(left: torch.Tensor, right: torch.Tensor, h: int) -> torch.Tensor:
+    """Execute packed forward behind an opaque compiler boundary."""
     quack = _use_quack(left, right) and h == 128
     tri = left.new_empty(left.shape)
     _bmm(left[:h], right[:h].transpose(1, 2), tri[:h], quack)
@@ -65,18 +67,18 @@ def packed_forward(left: torch.Tensor, right: torch.Tensor, h: int) -> torch.Ten
     return tri
 
 
-def _backward_fake(grad, left, right, h):
-    return left.new_empty(left.shape), right.new_empty(right.shape)
+def _packed_backward_fake(grad, left, right, h):
+    """Allocate outputs with the same shape, dtype and strides as packed_backward."""
+    return (left.new_empty(left.shape), right.new_empty(right.shape))
 
 
-@opaque(fake=_backward_fake, name="trimul_bidir_contract_bwd")
-def packed_backward(
-    grad: torch.Tensor, left: torch.Tensor, right: torch.Tensor, h: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+@opaque(fake=_packed_backward_fake, name='trimul_bidir_contract_bwd')
+def packed_backward(grad: torch.Tensor, left: torch.Tensor, right: torch.Tensor, h: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Execute packed backward behind an opaque compiler boundary."""
     quack = _use_quack(left, right, grad) and h == 128
-    dl, dr = left.new_empty(left.shape), right.new_empty(right.shape)
+    (dl, dr) = (left.new_empty(left.shape), right.new_empty(right.shape))
     _bmm(grad[:h], right[:h], dl[:h], quack)
     _bmm(grad[:h].transpose(1, 2), left[:h], dr[:h], quack)
     _bmm(right[h:], grad[h:].transpose(1, 2), dl[h:], quack)
     _bmm(left[h:], grad[h:], dr[h:], quack)
-    return dl, dr
+    return (dl, dr)

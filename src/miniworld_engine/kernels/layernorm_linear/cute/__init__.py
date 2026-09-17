@@ -16,11 +16,12 @@ __all__ = [
 ]
 
 
-def _m2_inference_fake(x, ln_weight, ln_bias, weight, bias, eps):
+def __m2_inference_fake(x, ln_weight, ln_bias, weight, bias, eps):
+    """Allocate outputs with the same shape, dtype and strides as _m2_inference."""
     return x.new_empty((x.shape[0], weight.shape[0]))
 
 
-@opaque(fake=_m2_inference_fake, name="layernorm_linear_m2_inference")
+@opaque(fake=__m2_inference_fake, name="layernorm_linear_m2_inference")
 def _m2_inference(x: torch.Tensor, ln_weight: torch.Tensor, ln_bias: torch.Tensor,
                   weight: torch.Tensor, bias: torch.Tensor | None, eps: float) -> torch.Tensor:
     """Keep CuTe compilation and its context variables outside Dynamo tracing."""

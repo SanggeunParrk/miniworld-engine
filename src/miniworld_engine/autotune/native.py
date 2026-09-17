@@ -154,7 +154,7 @@ def candidates_for(op, bucket):
 
 def pending_candidates(op, data):
     """Count missing per-entry coverage without treating a file grid as evidence."""
-    from miniworld_engine.autotune.cache import entry_space, _sig_from_dict
+    from miniworld_engine.autotune.cache import _sig_from_dict, entry_space
     pending = 0
     for key in data.get("entries", {}):
         _, bucket = key.split("|", 1)
@@ -224,9 +224,10 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None)
         is_compile_only = None
     if is_compile_only is not None and is_compile_only():
         return dict(candidates[0])
+    from triton.testing import do_bench
+
     from miniworld_engine.autotune import cache, native_history
     from miniworld_engine.autotune.native_compile import precompile
-    from triton.testing import do_bench
 
     measurement = {"scheme": 1, "kind": "native", "implementation": identity,
                    "bench_clear_mb": settings.current().bench_clear_mb,
@@ -299,6 +300,7 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None)
                         record = {"status": "retryable_failure",
                                   "diagnostic": f"{type(exc).__name__}: {exc}"}
                     history.record(sig, {**record, "config": dict(c)})
+                assert isinstance(record, dict), "candidate must produce a result"
                 if record["status"] == "ok":
                     ranked.append((record["ms"], c))
                     capture.record_native(op, grid, dtype, bucket, c, record["ms"], identity,

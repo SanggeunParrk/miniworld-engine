@@ -1,6 +1,15 @@
 """F567 builder inputs share the pair model's width/length declarations."""
+
 import torch
-from miniworld_engine.kernels.drivers import BF16, dev, driver_heads, driver_width, driver_length, ragged
+
+from miniworld_engine.kernels.drivers import (
+    BF16,
+    dev,
+    driver_heads,
+    driver_length,
+    driver_width,
+    ragged,
+)
 
 
 def operands():
@@ -11,13 +20,16 @@ def operands():
     m = length * length
     kw = dict(device=dev(), dtype=BF16)
     norm, x = torch.randn(m, kp, **kw), torch.randn(m, kg, **kw)
-    wp = torch.randn(n, kp, **kw) / kp**.5
-    wg = torch.randn(kg, n, **kw) / kg**.5
+    wp = torch.randn(n, kp, **kw) / kp**0.5
+    wg = torch.randn(kg, n, **kw) / kg**0.5
     residual = torch.randn(m, n, **kw)
-    dropscale = (torch.rand(length, n, device=dev()) > .25).to(BF16) / .75
+    dropscale = (torch.rand(length, n, device=dev()) > 0.25).to(BF16) / 0.75
     return norm, x, wp, wg, residual, dropscale, length
 
 
 def output_f567_train():
-    from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train as launch
+    from miniworld_engine.kernels.trimul_inproj.triton.output_fused import (
+        output_f567_train as launch,
+    )
+
     launch(*operands())

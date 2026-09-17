@@ -1580,7 +1580,10 @@ def _generation_for_work(config_dir: Path | None) -> str:
 
     from miniworld_engine.autotune import plan
     from miniworld_engine.autotune.native import (
-        source_identity as native_source_identity, policy_identity as native_policy_identity,
+        policy_identity as native_policy_identity,
+    )
+    from miniworld_engine.autotune.native import (
+        source_identity as native_source_identity,
     )
     from miniworld_engine.autotune.shard import provenance
 

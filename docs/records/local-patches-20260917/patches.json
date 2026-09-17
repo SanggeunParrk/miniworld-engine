@@ -1,0 +1,122 @@
+[
+  {
+    "patch": "miniworld-engine-wheel-cute-path.patch",
+    "sha256": "a0a3d08ecc79dc926067c50469850119264d5fa0109090be8e5f4166ca8cf507",
+    "commit": "803958fc82dee408e1a6092f6c890af8263a332f"
+  },
+  {
+    "patch": "miniworld-engine-cudagraph-amp.patch",
+    "sha256": "359cc36c6e89fca31eac6a57bbe8fcccc7dd3f09048d6cadd5d61c5862477ae9",
+    "commit": "65ff5ff6490c12e6300501548ce5dbe2102cfcb7"
+  },
+  {
+    "patch": "miniworld-engine-complete-wiring.patch",
+    "sha256": "45c57a68db1d56947104bec431a7f723d266c74523f92c53bbeca66386fbbbae",
+    "commit": "f1a932a60f21d49776ede05ac9f0ec1449595808"
+  },
+  {
+    "patch": "miniworld-engine-h100-upgrade.patch",
+    "sha256": "5d1c0288359445187de8b23a0358542f8b8f57064fc7d061646ed27bed950206",
+    "commit": "75e195133d430c101b16aff5ae35d44d67dc86c8"
+  },
+  {
+    "patch": "miniworld-engine-trimul-tuning.patch",
+    "sha256": "0714e932bb8e83d96366462a06f3e9c7f8bde322f76c35fc8b0d101d4ed07b34",
+    "commit": "b894a6fcd8266b66c80a678b875cc83055320c16"
+  },
+  {
+    "patch": "miniworld-engine-trimul-packed-training.patch",
+    "sha256": "55d39bd5dec67df759f15b67f23b5633fa14df5d616be5b6be803b407e27fead",
+    "commit": "7045a5ed048efa19e1d9393821c1d062a0b5a5a4"
+  },
+  {
+    "patch": "miniworld-engine-triton-packed-training.patch",
+    "sha256": "ad99d8680d23e511734e6a5a688a8f923caf6d36dd66efde71ca134b8491b633",
+    "commit": "960f470b4435490da4414762525bf294e835b6ec"
+  },
+  {
+    "patch": "miniworld-engine-layernorm-mixed-dtype.patch",
+    "sha256": "811734df03d9f2e4a84d7823f9e38bd5000dc93a28eadb4dce81ef4024488260",
+    "commit": "b46f3786e3b5a07c94c3fbb5e0ff38a4dceaa07c"
+  },
+  {
+    "patch": "miniworld-engine-h100-cache-build-20260915.patch",
+    "sha256": "003446fb1e33095be6e91a7dbd8098f3a1b183458dbaf90b14270c8848fe0457",
+    "commit": "b9b9bcf31ffac4a3c1172c174400f06f945fcf88"
+  },
+  {
+    "patch": "miniworld-engine-native-tuning.patch",
+    "sha256": "7003c617b4000ea88fa922a7cf757bffd12f32f101eaee7d8228c6b4375b3e7a",
+    "commit": "132becd6a1fb0ee76ae6110ca0c3d253cf920ca7"
+  },
+  {
+    "patch": "miniworld-engine-native-tuning-cache-compat.patch",
+    "sha256": "a87359d5164c018fadbb4566e2f610297017b0074b840b79c1ef93d9000a9af3",
+    "commit": "fef0aeebe1c3a899115d753c7a6c9f5a70f311ed"
+  },
+  {
+    "patch": "miniworld-engine-adaln-attention-memory.patch",
+    "sha256": "ccfd8b68b0cb1befd9d2a0241256db7a79893404c2d9acf078b9bdf2ef1dd6a8",
+    "commit": "59bc931c1cac5509913f192c50feea3a8f3f9a66"
+  },
+  {
+    "patch": "miniworld-engine-adaln-cache-20260916.patch",
+    "sha256": "f47e9cd120e5e0c2056caa45d881c32982bb425cf2ec6697e81c9d68d2c575a6",
+    "commit": "3268849aeebf29192bc394d2aa36a16ccd424b59"
+  },
+  {
+    "patch": "miniworld-engine-attention-compute-memory.patch",
+    "sha256": "4dc8d132a78c54e535470b582e691bcca1e42b141b552827eaca251bc5de3b9f",
+    "commit": "73b046ed54eba9ad872d21c5f72c13785271f0aa"
+  },
+  {
+    "patch": "miniworld-engine-attention-compute-cache-20260916.patch",
+    "sha256": "6540dd00627c7f28fea5750f71512ff1ac3469fc383985f190bc412714e88656",
+    "commit": "2814335019642838e73dbb67fe760a3489dd2cd3"
+  },
+  {
+    "patch": "miniworld-engine-derive-grid-callback.patch",
+    "sha256": "21336af93d8909a2d96fcf3c2dae3f159905fd0e92b34dfee1779e1d4d5e3d9a",
+    "commit": "35c400f80f66b1d6982e409fc60ae47bc8e049ef"
+  },
+  {
+    "patch": "miniworld-engine-attention-dq-layout.patch",
+    "sha256": "bcd51166eaf05ed41e1601983d5eaf44f07a7b2eede60bebf1fbdc54c007f0a5",
+    "commit": "36d34b03134cbfb9c4f0ca1e527eb7b8dcbafad1"
+  },
+  {
+    "patch": "miniworld-engine-triton-cache-build-20260916.patch",
+    "sha256": "09aee18beef75c4d86dd9072ec7f7c6318160437f3db72249502a3dcfd326c07",
+    "commit": "4bf8565412d2dc308051d84588266fee4fcdfacb"
+  },
+  {
+    "patch": "miniworld-engine-trimul-output-training.patch",
+    "sha256": "b09f4522ceabd3896e8d554275a5b7115d878ea0c8615fc5eed336b149d9b3c7",
+    "commit": "33d79e9e1be07f07c418f18c3805898271773537"
+  },
+  {
+    "patch": "miniworld-engine-trimul-f567-config.patch",
+    "sha256": "6682e33eb5fd9199a42d4e171ae258353e95b1fbf94c006ecb21bf6ef292825b",
+    "commit": "1d9f901c2a6e44e881089842a8148f7995d8ece7"
+  },
+  {
+    "patch": "miniworld-engine-trimul-backward-fusion.patch",
+    "sha256": "572389eadbeb9d0058604a907c8a837206c8cc33e97979c2f495e9951f2202ab",
+    "commit": "7f1a3cbe1a617a4da18d3297215b45da8ad873a7"
+  },
+  {
+    "patch": "miniworld-engine-trimul-training-audit.patch",
+    "sha256": "1a6d22f4a60bcaac83a265d9e374958df8486d2b856e967d42ddd278bf5d2a7f",
+    "commit": "27dc11e85f7791553720db2e5940ae09d5413c10"
+  },
+  {
+    "patch": "miniworld-engine-triton-backend-policy.patch",
+    "sha256": "62a609fb2b208dfe9b024a823f812accd106676f4b5e342d3c06f7fef03b32b5",
+    "commit": "7b0a3a51a60083258e2e4cd2f3f395babafe65a6"
+  },
+  {
+    "patch": "miniworld-engine-swa-fa4-backward-compile.patch",
+    "sha256": "65d6548468a2bc0a672628ea693fc35f9f1dc65c67184e0466553bde31e12d71",
+    "commit": "1cb37282e53f7f4aaf5c9b62d0f77747e41378bf"
+  }
+]

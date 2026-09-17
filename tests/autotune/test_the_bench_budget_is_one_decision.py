@@ -157,3 +157,10 @@ def test_half_the_decision_never_reaches_the_unit(tmp_path, monkeypatch):
     d.mkdir()
     builder._run_unit_subprocess(unit, 0, d, tmp_path, 4, bench_clear_mb=16)
     assert "--bench-clear-mb" not in seen
+
+
+@pytest.fixture(autouse=True)
+def fake_visible_allocation(monkeypatch):
+    # These tests mock subprocess launch; GPU visibility is part of that mock.
+    from miniworld_engine.autotune import builder
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))

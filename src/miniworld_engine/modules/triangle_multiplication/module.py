@@ -197,7 +197,10 @@ class TriangleMultiplication(nn.Module):
 
         if self._backend == KernelBackend.CUTE:
             _load_cute_fns()
-            from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch
+            from miniworld_engine.kernels.trimul_inproj.cute import (
+                _bdll_patch,
+                _gate_mul_patch,
+            )
             _bdll_patch.apply()
             _gate_mul_patch.apply()
 

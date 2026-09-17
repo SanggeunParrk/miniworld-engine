@@ -306,3 +306,10 @@ def test_compiled_cache_is_pruned_only_after_certification(spy, tmp_path, monkey
         assert events == ["merge", "coverage", "prune"]
     else:
         assert "prune" not in events
+
+
+@pytest.fixture(autouse=True)
+def fake_visible_allocation(monkeypatch):
+    # These tests mock subprocess launch; GPU visibility is part of that mock.
+    from miniworld_engine.autotune import builder
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))

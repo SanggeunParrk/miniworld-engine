@@ -278,3 +278,27 @@ def masked_front_sm90():
     for projected, save in ((2 * D, False), (4 * D, True), (8 * D, True)):
         weight = torch.randn(D, projected, device=dev(), dtype=BF16)
         masked_front(a, weight, mask, save)
+
+
+def trimul_output_bwd_rows_sm90():
+    """Run the specialized trimul_output_bwd_rows_sm90 harness."""
+    from miniworld_engine.kernels.drivers.hopper import trimul_output_bwd_rows as run
+    return run()
+
+
+def trimul_output_f567_train():
+    """Run the specialized trimul_output_f567_train harness."""
+    from miniworld_engine.kernels.drivers.trimul_output import output_f567_train as run
+    return run()
+
+
+def trimul_input_ln_residual_bwd():
+    """Run the specialized trimul_input_ln_residual_bwd harness."""
+    from miniworld_engine.kernels.drivers.trimul_backward import ln_residual as run
+    return run()
+
+
+def trimul_input_dual_bwd():
+    """Run the specialized trimul_input_dual_bwd harness."""
+    from miniworld_engine.kernels.drivers.trimul_backward import dual as run
+    return run()

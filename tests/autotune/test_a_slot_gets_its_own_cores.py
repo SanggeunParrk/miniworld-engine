@@ -81,3 +81,10 @@ def test_no_slice_means_no_taskset(tmp_path, monkeypatch):
     d.mkdir()
     builder._run_unit_subprocess(unit, 0, d, tmp_path, 4)
     assert "taskset" not in seen
+
+
+@pytest.fixture(autouse=True)
+def fake_visible_allocation(monkeypatch):
+    # These tests mock subprocess launch; GPU visibility is part of that mock.
+    from miniworld_engine.autotune import builder
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))

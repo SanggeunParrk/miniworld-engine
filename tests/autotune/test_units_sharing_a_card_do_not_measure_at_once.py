@@ -138,3 +138,10 @@ def test_the_probe_pass_reaches_the_unit_the_same_way(tmp_path, monkeypatch):
         shard_dir.mkdir()
         builder._run_unit_subprocess(unit, 0, shard_dir, tmp_path, 4, predict=predict)
         assert ("--predict-unusable" in seen) is want
+
+
+@pytest.fixture(autouse=True)
+def fake_visible_allocation(monkeypatch):
+    # These tests mock subprocess launch; GPU visibility is part of that mock.
+    from miniworld_engine.autotune import builder
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))

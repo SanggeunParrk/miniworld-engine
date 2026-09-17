@@ -4,12 +4,15 @@ import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
-from miniworld_engine._typecheck import typecheck
-from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine import kernels
-from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
+from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_augmented_attention
-from miniworld_engine.modules.exceptions import ImplementationType, InvalidImplementationError
+from miniworld_engine.modules.exceptions import (
+    ImplementationType,
+    InvalidImplementationError,
+)
+from miniworld_engine.modules.functional import sigmoid_gate
+from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
 
 class AttentionPairBias(nn.Module):

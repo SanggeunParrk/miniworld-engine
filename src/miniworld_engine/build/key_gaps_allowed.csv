@@ -48,3 +48,13 @@ qk_norm_rope_bwd_triton,HALF,packed as HALF=cos.shape[-1] in the shared both_key
 qk_norm_rope_bwd_triton,H,head index reconstruction only; the row-count key includes n*s*h and the kernel reduction width D is packed separately
 qk_norm_rope_bwd_triton,SEQ,sequence index reconstruction only; each program processes row-count-keyed rows with fixed reduction width D
 qk_norm_rope_bwd_triton,EPS,numeric tolerance in rsqrt only; no branch or loop bound depends on it
+augmented_attention_bwd_reduce_triton,INNER_SPAN,Workspace layout derived from keyed attention shape and the fixed chunk workspace budget; no independent caller parameter
+augmented_attention_bwd_reduce_triton,OUTPUT_SPAN,Workspace layout derived from keyed attention shape and the fixed chunk workspace budget; no independent caller parameter
+augmented_attention_bwd_split_triton,BIAS_STRIDE_B,Full or chunked scratch layout derived from keyed attention shape and the fixed compute-efficient workspace policy
+augmented_attention_bwd_split_triton,BIAS_STRIDE_H,Full or chunked scratch layout derived from keyed attention shape and the fixed compute-efficient workspace policy
+augmented_attention_bwd_split_triton,DQ_STRIDE_A,Full or chunked scratch layout derived from keyed attention shape and the fixed compute-efficient workspace policy
+augmented_attention_bwd_split_triton,DQ_STRIDE_B,Full or chunked scratch layout derived from keyed attention shape and the fixed compute-efficient workspace policy
+augmented_attention_bwd_split_triton,N_QUERY,Full or chunked scratch layout derived from keyed attention shape and the fixed compute-efficient workspace policy
+trimul_input_dual_bwd_triton,KG,dual_shape_key packs KG and N plus exact KP; wide eight-way projections use exact KP_DIV8 with a distinct axis name
+trimul_input_dual_bwd_triton,KP,dual_shape_key packs KG and N plus exact KP; wide eight-way projections use exact KP_DIV8 with a distinct axis name
+trimul_input_dual_bwd_triton,N,dual_shape_key packs KG and N plus exact KP; wide eight-way projections use exact KP_DIV8 with a distinct axis name

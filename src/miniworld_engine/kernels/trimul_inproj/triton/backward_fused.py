@@ -6,9 +6,10 @@ Function. Their gradients meet after LN differentiation, never in dgamma/dbeta.
 import torch
 import triton
 import triton.language as tl
+from miniworld_engine.kernels._tiles import tile_order, tile_grid
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.autotune.configs import configs_for
-from miniworld_engine.autotune.shape_key import both_key,rows_of,pack,token_key
+from miniworld_engine.autotune.shape_key import both_key,rows_of,pack,token_key,ShapeKeyTooWide
 from miniworld_engine.kernels.layernorm.triton.main import _ln_fwd
 
 
@@ -127,27 +128,27 @@ def _ln_bwd_residual_kernel(
                      dx.to(DX.dtype.element_ty).to(tl.float32) + dr, mask=mask)
 
 
-def _ln_fake(dy,x,weight,mean,rstd,dr,shape_key):
-    return (torch.empty_like(x),weight.new_empty(weight.shape,dtype=torch.float32),
-            weight.new_empty(weight.shape,dtype=torch.float32))
+def _input_ln_residual_bwd_fake(dy, x, weight, mean, rstd, dr, shape_key):
+    """Allocate outputs with the same shape, dtype and strides as input_ln_residual_bwd."""
+    return (torch.empty_like(x), weight.new_empty(weight.shape, dtype=torch.float32), weight.new_empty(weight.shape, dtype=torch.float32))
 
 
-@opaque(fake=_ln_fake,name='trimul_input_ln_residual_bwd')
-def input_ln_residual_bwd(dy:torch.Tensor,x:torch.Tensor,weight:torch.Tensor,
-                          mean:torch.Tensor,rstd:torch.Tensor,dr:torch.Tensor,
-                          shape_key:int)->tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
-    x=x.contiguous();dy=dy.contiguous();dr=dr.contiguous()
-    if x.ndim!=2 or dy.shape!=x.shape or dr.shape!=x.shape:
+@opaque(fake=_input_ln_residual_bwd_fake, name='trimul_input_ln_residual_bwd')
+def input_ln_residual_bwd(dy: torch.Tensor, x: torch.Tensor, weight: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor, dr: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Execute input ln residual bwd behind an opaque compiler boundary."""
+    x = x.contiguous()
+    dy = dy.contiguous()
+    dr = dr.contiguous()
+    if x.ndim != 2 or dy.shape != x.shape or dr.shape != x.shape:
         raise ValueError('LN/residual backward requires equal matrix shapes')
-    if x.dtype!=dy.dtype or dr.dtype!=dy.dtype:
+    if x.dtype != dy.dtype or dr.dtype != dy.dtype:
         raise ValueError('LN/residual gradients must share the input dtype')
-    m,n=x.shape
-    dx=torch.empty_like(x);dw=torch.zeros(n,device=x.device,dtype=torch.float32);db=torch.zeros_like(dw)
-    _ln_bwd_residual_kernel[lambda c:(triton.cdiv(m,c['BLOCK_M1']),)](
-        dx,dy,dw,db,dr,x,weight,mean,rstd,rstd,
-        dw.stride(0),db.stride(0),x.stride(0),x.stride(1),m,n,
-        shape_key=pack(shape_key,N=n),HAS_ROWSCALE=False)
-    return dx,dw,db
+    (m, n) = x.shape
+    dx = torch.empty_like(x)
+    dw = torch.zeros(n, device=x.device, dtype=torch.float32)
+    db = torch.zeros_like(dw)
+    _ln_bwd_residual_kernel[lambda c: (triton.cdiv(m, c['BLOCK_M1']),)](dx, dy, dw, db, dr, x, weight, mean, rstd, rstd, dw.stride(0), db.stride(0), x.stride(0), x.stride(1), m, n, shape_key=pack(shape_key, N=n), HAS_ROWSCALE=False)
+    return (dx, dw, db)
 
 
 class InputLNResidual(torch.autograd.Function):
@@ -191,8 +192,7 @@ def _input_dual_bwd_kernel(G,F,W,V,Y,M,
     BLOCK_M1:tl.constexpr,BLOCK_N:tl.constexpr,BLOCK_K:tl.constexpr,
     GROUP_M:tl.constexpr,shape_key):
     pid=tl.program_id(0).to(tl.int64);nm=tl.cdiv(M,BLOCK_M1);nn=tl.cdiv(N,BLOCK_N)
-    first=(pid//(GROUP_M*nn))*GROUP_M;gm=tl.minimum(nm-first,GROUP_M)
-    local=pid%(GROUP_M*nn);pm=first+local%gm;pn=local//gm
+    pm,pn=tile_order(pid,nm,nn,GROUP_M)
     rows=pm*BLOCK_M1+tl.arange(0,BLOCK_M1);cols=pn*BLOCK_N+tl.arange(0,BLOCK_N)
     rk=tl.arange(0,BLOCK_K);ag=tl.zeros((BLOCK_M1,BLOCK_N),tl.float32)
     for step in range(tl.cdiv(KG,BLOCK_K)):
@@ -211,19 +211,39 @@ def _input_dual_bwd_kernel(G,F,W,V,Y,M,
              (rows[:,None]<M)&(cols[None,:]<N))
 
 
-def _dual_fake(g,f,w,v,length):return g.new_empty((g.shape[0],w.shape[1]))
+def _input_dual_bwd_fake(g, f, w, v, length):
+    """Allocate outputs with the same shape, dtype and strides as input_dual_bwd."""
+    return g.new_empty((g.shape[0], w.shape[1]))
 
 
-@opaque(fake=_dual_fake,name='trimul_input_dual_bwd')
-def input_dual_bwd(g:torch.Tensor,f:torch.Tensor,w:torch.Tensor,v:torch.Tensor,
-                   length:int)->torch.Tensor:
-    if any(t.ndim!=2 for t in (g,f,w,v)):raise ValueError('dual dgrad expects matrices')
-    m,kg=g.shape;kp=f.shape[1];n=w.shape[1]
-    if f.shape[0]!=m or w.shape[0]!=kg or v.shape!=(kp,n):raise ValueError('dual dgrad shape mismatch')
-    if any(t.dtype!=torch.bfloat16 or t.device!=g.device for t in (g,f,w,v)):
+def dual_shape_key(length, kg, kp, n):
+    """Keep existing keys; express a wide packed projection by its hidden width.
+
+    The front concatenates four projections in each of two directions. At
+    hidden=512 its reduction width is 4096, one past pack's width limit.
+    KP_DIV8 is exact (never rounded) and its axis name separates this encoding
+    from the ordinary KP keys. The fused GEMM itself still receives full KP.
+    """
+    try:
+        return token_key(length, KG=kg, KP=kp, N=n)
+    except ShapeKeyTooWide:
+        if kp % 8:
+            raise
+        return token_key(length, KG=kg, KP_DIV8=kp // 8, N=n)
+
+
+@opaque(fake=_input_dual_bwd_fake, name='trimul_input_dual_bwd')
+def input_dual_bwd(g: torch.Tensor, f: torch.Tensor, w: torch.Tensor, v: torch.Tensor, length: int) -> torch.Tensor:
+    """Execute input dual bwd behind an opaque compiler boundary."""
+    if any((t.ndim != 2 for t in (g, f, w, v))):
+        raise ValueError('dual dgrad expects matrices')
+    (m, kg) = g.shape
+    kp = f.shape[1]
+    n = w.shape[1]
+    if f.shape[0] != m or w.shape[0] != kg or v.shape != (kp, n):
+        raise ValueError('dual dgrad shape mismatch')
+    if any((t.dtype != torch.bfloat16 or t.device != g.device for t in (g, f, w, v))):
         raise ValueError('dual dgrad expects BF16 on the same device')
-    out=_dual_fake(g,f,w,v,length)
-    _input_dual_bwd_kernel[lambda c:(triton.cdiv(m,c['BLOCK_M1'])*triton.cdiv(n,c['BLOCK_N']),)](
-        g,f,w,v,out,m,kg,kp,n,*g.stride(),*f.stride(),*w.stride(),*v.stride(),
-        shape_key=token_key(length,KG=kg,KP=kp,N=n))
+    out = _input_dual_bwd_fake(g, f, w, v, length)
+    _input_dual_bwd_kernel[lambda c: (tile_grid(m, n, c['BLOCK_M1'], c['BLOCK_N']),)](g, f, w, v, out, m, kg, kp, n, *g.stride(), *f.stride(), *w.stride(), *v.stride(), shape_key=dual_shape_key(length, kg, kp, n))
     return out

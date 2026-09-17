@@ -10,29 +10,31 @@ import torch
 from miniworld_engine.kernels._compile import opaque
 
 
-def _forward_fake(left, right, h):
+def _packed_forward_fake(left, right, h):
+    """Allocate outputs with the same shape, dtype and strides as packed_forward."""
     return left.new_empty(left.shape)
 
 
-@opaque(fake=_forward_fake, name="trimul_triton_contract_fwd")
+@opaque(fake=_packed_forward_fake, name='trimul_triton_contract_fwd')
 def packed_forward(left: torch.Tensor, right: torch.Tensor, h: int) -> torch.Tensor:
+    """Execute packed forward behind an opaque compiler boundary."""
     tri = left.new_empty(left.shape)
     torch.bmm(left[:h], right[:h].transpose(1, 2), out=tri[:h])
     torch.bmm(left[h:].transpose(1, 2), right[h:], out=tri[h:])
     return tri
 
 
-def _backward_fake(grad, left, right, h):
-    return left.new_empty(left.shape), right.new_empty(right.shape)
+def _packed_backward_fake(grad, left, right, h):
+    """Allocate outputs with the same shape, dtype and strides as packed_backward."""
+    return (left.new_empty(left.shape), right.new_empty(right.shape))
 
 
-@opaque(fake=_backward_fake, name="trimul_triton_contract_bwd")
-def packed_backward(
-    grad: torch.Tensor, left: torch.Tensor, right: torch.Tensor, h: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    dl, dr = left.new_empty(left.shape), right.new_empty(right.shape)
+@opaque(fake=_packed_backward_fake, name='trimul_triton_contract_bwd')
+def packed_backward(grad: torch.Tensor, left: torch.Tensor, right: torch.Tensor, h: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Execute packed backward behind an opaque compiler boundary."""
+    (dl, dr) = (left.new_empty(left.shape), right.new_empty(right.shape))
     torch.bmm(grad[:h], right[:h], out=dl[:h])
     torch.bmm(grad[:h].transpose(1, 2), left[:h], out=dr[:h])
     torch.bmm(right[h:], grad[h:].transpose(1, 2), out=dl[h:])
     torch.bmm(left[h:], grad[h:], out=dr[h:])
-    return dl, dr
+    return (dl, dr)

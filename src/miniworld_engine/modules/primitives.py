@@ -12,7 +12,11 @@ from torch import Size
 from torch.nn.parameter import Parameter
 
 from miniworld_engine import kernels
-from miniworld_engine.modules.dispatch import KernelBackend, resolve_layernorm, resolve_rmsnorm
+from miniworld_engine.modules.dispatch import (
+    KernelBackend,
+    resolve_layernorm,
+    resolve_rmsnorm,
+)
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,

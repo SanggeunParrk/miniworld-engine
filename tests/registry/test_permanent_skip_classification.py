@@ -1,3 +1,4 @@
+import pytest
 """A shape this GPU cannot hold is a correct answer, not a bad unit.
 
 `augmented_attention_bwd_split_triton[float32] L=4096` wants 153,600 bytes of shared memory and
@@ -82,3 +83,10 @@ def test_a_real_failure_releases_its_claim(tmp_path, monkeypatch):
     """Nothing produced and no permanent reason: a later run must be able to retry it."""
     _run(tmp_path, monkeypatch, rc=1, shard_ops=0, log_text="Traceback: something broke")
     assert not (tmp_path / "shards" / f"{UNIT.stem}.claim").exists()
+
+
+@pytest.fixture(autouse=True)
+def fake_visible_allocation(monkeypatch):
+    # These tests mock subprocess launch; GPU visibility is part of that mock.
+    from miniworld_engine.autotune import builder
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))

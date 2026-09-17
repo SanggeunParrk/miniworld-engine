@@ -90,26 +90,20 @@ def _launch(a, b, out, preact, mask, config):
 
 
 def _masked_front_fake(a, b, pair_mask, save_preact=False):
-    m, n = a.shape[0], b.shape[1]
+    """Allocate outputs with the same shape, dtype and strides as masked_front."""
+    (m, n) = (a.shape[0], b.shape[1])
     out = a.new_empty((n // 2, m)).T
     preact = a.new_empty((n, m)).T if save_preact else a.new_empty((0,))
-    return out, preact
+    return (out, preact)
 
 
-@opaque(fake=_masked_front_fake, name="trimul_inproj_masked_sm90_cute")
-def masked_front(a: torch.Tensor, b: torch.Tensor, pair_mask: torch.Tensor,
-                 save_preact: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+@opaque(fake=_masked_front_fake, name='trimul_inproj_masked_sm90_cute')
+def masked_front(a: torch.Tensor, b: torch.Tensor, pair_mask: torch.Tensor, save_preact: bool=False) -> tuple[torch.Tensor, torch.Tensor]:
+    """Execute masked front behind an opaque compiler boundary."""
     from miniworld_engine.autotune.cute_config import resolve_config, gated_sm90_candidates
     from miniworld_engine.autotune.native import tensor_key
-    out, preact = _masked_front_fake(a, b, pair_mask, save_preact)
+    (out, preact) = _masked_front_fake(a, b, pair_mask, save_preact)
     mask = pair_mask.reshape(1, a.shape[0]).to(torch.float32).contiguous()
-    config = resolve_config(
-        "trimul_inproj_masked_sm90_cute", gated_sm90_candidates(), dtype=str(a.dtype),
-        # Tune the actual launch operand. Bool/BF16 masks and their original
-        # ranks all become this same contiguous FP32 [1, M] row scale.
-        bucket=tensor_key(a, b, mask, extra=(save_preact,)),
-        device_index=a.device.index,
-        run=lambda c: _launch(a, b, out, preact if save_preact else None, mask, c),
-    )
+    config = resolve_config('trimul_inproj_masked_sm90_cute', gated_sm90_candidates(), dtype=str(a.dtype), bucket=tensor_key(a, b, mask, extra=(save_preact,)), device_index=a.device.index, run=lambda c: _launch(a, b, out, preact if save_preact else None, mask, c))
     _launch(a, b, out, preact if save_preact else None, mask, config)
-    return out, preact
+    return (out, preact)

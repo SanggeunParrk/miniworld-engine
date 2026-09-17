@@ -275,12 +275,12 @@ def _flash_window_setup_context(ctx, inputs, output):
     ctx.meta = (max_seqlen, n, s, scale, half_window)
 
 
-def _flash_window_fa4_backward_fake(q, k, v, cu_seqlens, seqused, valid,
-                                    n, s, scale, half_window, grad_out):
-    return tuple(torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v))
+def __flash_window_fa4_backward_fake(q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out):
+    """Allocate outputs with the same shape, dtype and strides as _flash_window_fa4_backward."""
+    return tuple((torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v)))
 
 
-@opaque(fake=_flash_window_fa4_backward_fake, name="swa_atom_attention_flash_window_fa4_backward")
+@opaque(fake=__flash_window_fa4_backward_fake, name="swa_atom_attention_flash_window_fa4_backward")
 def _flash_window_fa4_backward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, seqused: torch.Tensor, valid: torch.Tensor,
@@ -293,7 +293,7 @@ def _flash_window_fa4_backward(
     Calling nested autograd inside a custom op would also be incorrect: its backend
     runs below autograd dispatch, so enable_grad alone cannot build a nested graph.
     """
-    from flash_attn.cute.interface import _flash_attn_fwd, _flash_attn_bwd
+    from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
 
     nh, hd = q.shape[2:]
     row_mask = valid.reshape(n * s, 1, 1)
