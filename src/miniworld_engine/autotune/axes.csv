@@ -191,3 +191,7 @@ trimul_outproj_gemm_gate_triton,fused_sigmoid_gate2_fwd_kernel,miniworld_engine/
 trimul_outproj_layernorm_gemm_gate_triton,_back_kernel,miniworld_engine/kernels/trimul_inproj/triton/back.py,62,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1
 trimul_outproj_layernorm_gemm_gate_triton,_back_kernel,miniworld_engine/kernels/trimul_inproj/triton/back.py,62,BLOCK_M1,64,128,16,32,64,32 64 128 256,64,32,64,64,1,0,,
 trimul_outproj_layernorm_gemm_gate_triton,_back_kernel,miniworld_engine/kernels/trimul_inproj/triton/back.py,62,BLOCK_N,64,128,16,32,64,32 64 128 256,32,64,64,64,0,1,N,1
+trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,BLOCK_M1,,,,,,16 32 64 128,,,,,1,0,,
+trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,BLOCK_N,,,,,,32 64 128 256,,,,,1,0,,
+trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,BLOCK_K,,,,,,16 32 64 128,,,,,0,1,KP|KG,1
+trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,GROUP_M,,,,,,1 2 4 8,,,,,0,0,,

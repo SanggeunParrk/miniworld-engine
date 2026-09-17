@@ -1,32 +1,6 @@
-"""Bidirectional trimul in TRITON — a faithful 1:1 mirror of the CUTE bidir
-(``cute/bidir_training.py`` ``BidirBackHalf`` + ``bidir_forward``), same algorithm
-and same fusion boundaries, ONLY the backend differs (triton/cuBLAS, no quack).
-
-Stage-for-stage the cute bidir is:
-
-    x_n   = triton_layernorm(pair, ...)              # LN_in  (already triton in cute)
-    left,right,preact = FRONT(x_n, WL,WLg,WR,WRg)    # gated in-proj, out_hidden=2h, bdll
-    o_out = bmm(lf[:h], rf[:h]ᵀ) ;  o_in = bmm(lf[h:]ᵀ, rf[h:])   # 2 triangle contractions
-    tri   = packed_forward(lf, rf, h)              # training: GEMMs write final (2h,L,L) buffer
-    proj  = _te_forward(tri_view, ln_out, Wp)        # LN_out + @Wp   (te_style: triton LN + cuBLAS)
-    y     = gate_elem(x_n, proj, Wg)                 # sigmoid output-gate  (triton)
-
-and its backward is the merged BackHalf (gate-ew → dWg → te-bwd → contraction-bwd →
-front-bwd, dxn fused with the gate add). We reuse the EXACT same helpers cute uses:
-``_te_forward/_te_backward`` (layernorm_linear/te_style), ``front_bwd_dW``
-(trimul_inproj/triton/back_fused), ``gate_elem_triton/gate_elem_bwd_ew``
-(trimul_inproj/triton/gate_elem), ``triton_layernorm``. The two triangle
-training contractions use ``torch.bmm(..., out=...)`` on the BDLL tensors,
-removing one forward and two backward concatenations. The CuTe path uses the
-same packed layout with its measured cuBLAS/Quack policy. The big GEMMs
-(dWg, dxn) remain cuBLAS.
-
-The ONLY new kernel here is the FRONT forward: cute's front is a quack gated
-M-major GEMM; we write the equivalent in triton, producing left/right in BDLL
-(channel-major) AND the interleaved ``preact`` (=[gLlog,pL] per channel, left then
-right) that ``front_bwd_dW`` consumes. It reuses the ``front.py`` ``_lr_kernel``
-design (half-accumulator, transposed bdll store) generalised to per-side width 2h
-and extended to also store ``preact``. B=1, bf16 / fp32.
+"""Bidirectional Triton training: packed contractions, separate output LN (F4),
+and CSV-tuned F567 for BF16. Other dtypes retain the split output path.
+The saved tensors and complete backward are unchanged by F567 fusion.
 """
 
 from __future__ import annotations
@@ -43,7 +17,9 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
+    _ln_materialize,
 )
+from miniworld_engine.kernels.trimul_inproj.triton.output_fused import output_f567_train
 from miniworld_engine.autotune.shape_key import pack, token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
@@ -255,11 +231,15 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
         tri = packed_forward(lf, rf, h)
         view = tri.reshape(H, M).t()                              # (M, H) m-major
-        proj, te_xn, mean_out, rstd_out = _te_forward(
-            view, ln_out_w, ln_out_b, Wp, None, eps)              # (M, D)
-        # fuse the pairformer residual (== module input pair [M,D]) + row-broadcast dropout
-        # into the gate store epilogue (same path the cute dispatch uses).
-        y, gate = gate_elem_train(x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
+        if x_n.dtype == torch.bfloat16:
+            te_xn, mean_out, rstd_out = _ln_materialize(view, ln_out_w, ln_out_b, eps)
+            y, proj, gate = output_f567_train(
+                te_xn, x_n.reshape(M, D), Wp, Wg, residual, dropscale, L)
+        else:
+            # The registered F567 kernel is BF16; retain the existing dtype coverage.
+            proj, te_xn, mean_out, rstd_out = _te_forward(
+                view, ln_out_w, ln_out_b, Wp, None, eps)
+            y, gate = gate_elem_train(x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
                               preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
         ctx.eps, ctx.h, ctx.mm = eps, h, mm
