@@ -24,6 +24,7 @@ from miniworld_engine.autotune.cache import (
 
 _WINNERS: dict = {}
 BUILD_OPS = frozenset({
+    "trimul_output_bwd_rows_sm90_cute",
     "trimul_inproj_masked_sm90_cute",
     "transition_squeeze_residual_sm90_cute",
     "layernorm_linear_fwd_foldstats_sm90_cute", "layernorm_linear_fwd_sm90_cute",
@@ -44,6 +45,8 @@ def native_shape_supported(op, width, dtype):
         return width <= 1024 and dtype in ("bfloat16", "float32")
     if dtype != "bfloat16":
         return False
+    if op == "trimul_output_bwd_rows_sm90_cute":
+        return width == 128
     if op == "transition_squeeze_residual_sm90_cute":
         return width == 512  # only this width is enabled in production dispatch
     if op.endswith("sm90_cuda"):
@@ -123,7 +126,7 @@ def candidates_for(op, bucket):
         if op in ("trimul_inproj_masked_sm90_cute", "transition_swiglu_fwd_sm90_cute",
                   "transition_gate_bwd_sm90_cute"):
             grid = cute.gated_sm90_candidates()
-        elif op in ("layernorm_linear_fwd_foldstats_sm90_cute",
+        elif op in ("trimul_output_bwd_rows_sm90_cute", "layernorm_linear_fwd_foldstats_sm90_cute",
                     "transition_squeeze_residual_sm90_cute"):
             grid = cute.plain_sm90_candidates()
         elif op == "layernorm_linear_fwd_sm90_cute":

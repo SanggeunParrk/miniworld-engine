@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+from . import output_training
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import _te_backward, _te_forward
 from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch, dispatch
 from miniworld_engine.kernels.trimul_inproj.cute.contract import packed_backward, packed_forward
@@ -56,11 +57,15 @@ class BidirBackHalf(torch.autograd.Function):
         rf = right.reshape(H, L, L)
         tri = packed_forward(lf, rf, h)
         view = tri.reshape(H, M).t()                            # (M, H) m-major
-        proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
+        ctx.native_output = output_training.supported(view, Wp)
+        if ctx.native_output:
+            proj, te_xn, mean_out, rstd_out = output_training.forward(view, ln_out_w, ln_out_b, Wp, eps)
+        else:
+            proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
         y, gate = gate_elem_train(
             x_n.reshape(M, D), proj, Wg, residual, dropscale, seq_len=L)
         ctx.save_for_backward(x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-                              preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj)
+                              preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj, ln_out_b)
         ctx.eps, ctx.h = eps, h
         ctx.dropscale, ctx.seq_len = dropscale, L
         return y.reshape(B, L, L, D)
@@ -68,7 +73,7 @@ class BidirBackHalf(torch.autograd.Function):
     @staticmethod
     def backward(ctx, gy):
         (x_n, WL, WLg, WR, WRg, Wg, Wp, ln_out_w,
-         preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj) = ctx.saved_tensors
+         preact, lf, rf, tri, te_xn, mean_out, rstd_out, gate, proj, ln_out_b) = ctx.saved_tensors
         from miniworld_engine.kernels._quack_compat import gemm as _quack_gemm
         from miniworld_engine.kernels._quack_compat import gemm_act as _quack_gemm_act
         B, L, _, D = x_n.shape
@@ -84,8 +89,12 @@ class BidirBackHalf(torch.autograd.Function):
 
         # ① LN_out + @Wp bwd
         view = tri.reshape(H, M).t()
-        d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
-            d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
+        if ctx.native_output:
+            d_view, dLNo_w, dLNo_b, dWp = output_training.backward(
+                d_proj, proj, te_xn, rstd_out, ln_out_w, ln_out_b, Wp)
+        else:
+            d_view, dLNo_w, dLNo_b, dWp, _ = _te_backward(
+                d_proj, te_xn, view, mean_out, rstd_out, ln_out_w, Wp, has_bias=False)
         # `del` after last use, inserted where no reference to the name remains anywhere below.
         # autograd frees an intermediate when its consumer node has run; this function holds every
         # local until it returns, and these are pair-shaped -- 144 MiB each at B=1 L=768 d=128

@@ -134,6 +134,11 @@ def compile_task(task):
                 _major(a, "m", "k"), _major(b, "n", "k"), _major(ts[2], "m", "n"),
                 _major(ts[4], "m", "n"), _major(ts[3], "m", "n"),
                 _dtype(ts[5]), tile, cluster, pp, dyn, device)
+        elif op == "trimul_output_bwd_rows_sm90_cute":
+            from miniworld_engine.kernels.layernorm_linear.cute.dgrad_ln_rows import _compile
+            _compile(_dtype(a), _dtype(b), _dtype(a), _dtype(ts[2]),
+                     _major(a, "m", "k"), "k", "m", _major(ts[2], "m", "n"),
+                     cutlass.Float32, tile, cluster, pp, True, dyn, device)
         elif op == "layernorm_linear_bwd_dx_sm90_cute":
             from miniworld_engine.kernels.layernorm_linear.cute.dgrad_lnbwd import (
                 _compile,

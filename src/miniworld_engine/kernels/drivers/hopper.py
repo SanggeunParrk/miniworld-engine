@@ -99,3 +99,15 @@ def transition_expand_gate_sm90_cuda():
 
 def transition_bwd_gate_sm90_cuda():
     _cuda("gatebwd")
+
+
+def trimul_output_bwd_rows():
+    from miniworld_engine.kernels.layernorm_linear.cute.dgrad_ln_rows import dgrad_ln_rows
+    m,n=driver_length(128)**2,driver_width(128)
+    k=2*n
+    dy=torch.randn(m,n,device=dev(),dtype=BF16)
+    w=torch.randn(n,k,device=dev(),dtype=BF16)
+    xhat=torch.randn(m,k,device=dev(),dtype=BF16)
+    gamma=torch.randn(k,device=dev(),dtype=BF16)
+    stats=[torch.randn(m,device=dev(),dtype=torch.float32) for _ in range(3)]
+    dgrad_ln_rows(dy,w,xhat,gamma,*stats)
