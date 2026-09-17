@@ -9,14 +9,13 @@ import cutlass.cute as cute
 import cutlass.utils.hopper_helpers as sm90h
 import torch
 from cuda.bindings import driver as cuda
-
-from miniworld_engine.kernels._compile import opaque
 from cutlass import BFloat16, Float32, Int32
+from cutlass._mlir.dialects import llvm
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.cute.runtime import from_dlpack
 from cutlass.cutlass_dsl import T, dsl_user_op
-from cutlass._mlir.dialects import llvm
 from cutlass.utils import LayoutEnum
+from miniworld_engine.kernels._compile import opaque
 from quack import copy_utils as quack_copy
 
 
@@ -88,6 +87,8 @@ class ParityF567Sm90:
         atomP: cute.CopyAtom,
         atomG: cute.CopyAtom,
         atomR: cute.CopyAtom,
+        atomD: cute.CopyAtom,
+        tD_tma: cute.Tensor,
         sO_layout: cute.ComposedLayout,
         tO: cute.Tensor,
         tP: cute.Tensor,
@@ -136,6 +137,7 @@ class ParityF567Sm90:
                 cpasync.prefetch_descriptor(tma_atom_W1)
                 cpasync.prefetch_descriptor(tma_atom_W2)
                 cpasync.prefetch_descriptor(atomR)
+                cpasync.prefetch_descriptor(atomD)
                 for b in cutlass.range_constexpr(2 * STAGES + 1):
                     cute.arch.mbarrier_init(mbar_full_ptr + b, 1)
         cute.arch.mbarrier_init_fence()
@@ -153,7 +155,7 @@ class ParityF567Sm90:
             gX1,
             sX1,
         )
-        load_X2, _, _ = quack_copy.tma_get_copy_fn(
+        load_X2, _, prefetch_X2 = quack_copy.tma_get_copy_fn(
             tma_atom_X2,
             0,
             cute.make_layout(1),
@@ -197,6 +199,10 @@ class ParityF567Sm90:
                     load_W1(
                         src_idx=stage, dst_idx=stage, tma_bar_ptr=mbar_full_ptr + stage
                     )
+            # Warm the first projection operand tiles while the independent gate
+            # GEMM runs. This is an L2 hint; actual TMA stage barriers stay intact.
+            for future in cutlass.range_constexpr(min(STAGES, P_LOOP)):
+                cute.prefetch(tma_atom_X2, prefetch_X2[None, future])
 
         thr_mma = tiled_mma.get_slice(tidx)
         acc_shape = thr_mma.partition_shape_C((TILE_M, TILE_N))
@@ -349,11 +355,49 @@ class ParityF567Sm90:
                 sY = cute.make_tensor(
                     sG.iterator + cute.cosize(sO_layout), sO_layout.outer
                 )
+            # Retired operand rings hold P/G/Y. If a fourth tile is free, stage
+            # the broadcast dropout scale there without increasing shared memory.
+            # Unaligned row wrapping / N tails retain the scalar/vector fallback.
+            a_tiles = max(
+                cute.cosize(sX1_layout), cute.cosize(sX2_layout)
+            ) // cute.cosize(sO_layout)
+            b_tiles = max(
+                cute.cosize(sW1_layout), cute.cosize(sW2_layout)
+            ) // cute.cosize(sO_layout)
+            use_tma_ds = cutlass.const_expr(
+                self.L % TILE_M == 0 and self.N % TILE_N == 0 and a_tiles + b_tiles >= 4
+            )
+            if cutlass.const_expr(use_tma_ds):
+                if cutlass.const_expr(a_tiles >= 3):
+                    sD = cute.make_tensor(
+                        sP.iterator + 2 * cute.cosize(sO_layout), sO_layout.outer
+                    )
+                elif cutlass.const_expr(a_tiles >= 2 and b_tiles >= 2):
+                    sD = cute.make_tensor(
+                        sG.iterator + cute.cosize(sO_layout), sO_layout.outer
+                    )
+                else:
+                    sD = cute.make_tensor(
+                        sG.iterator + 2 * cute.cosize(sO_layout), sO_layout.outer
+                    )
+                gD_tma = cute.local_tile(
+                    tD_tma, (TILE_M, TILE_N), (m_block % (self.L // TILE_M), n_block)
+                )
+                load_D, _, _ = quack_copy.tma_get_copy_fn(
+                    atomD, 0, cute.make_layout(1), gD_tma, sD, single_stage=True
+                )
             store_op = sm90h.get_smem_store_op(LayoutEnum.ROW_MAJOR, BFloat16, Float32)
             copyC = cute.make_tiled_copy_C(store_op, tiled_mma).get_slice(tidx)
             pfrag = cute.make_fragment_like(acc_V, BFloat16)
             pfrag.store(acc_V.load().to(BFloat16))
             cute.arch.barrier()
+            if cutlass.const_expr(use_tma_ds):  # noqa: SIM102 - constexpr guards the DSL value
+                if warp_idx == 0:
+                    with cute.arch.elect_one():
+                        cute.arch.mbarrier_arrive_and_expect_tx(
+                            mbar_full_ptr, TILE_M * TILE_N * 2
+                        )
+                    load_D(tma_bar_ptr=mbar_full_ptr)
             cute.copy(store_op, copyC.retile(pfrag), copyC.partition_D(sP))
             cute.arch.fence_view_async_shared()
             cute.arch.barrier()
@@ -369,6 +413,12 @@ class ParityF567Sm90:
                 cute.copy(atomP, so, go)
                 with cute.arch.elect_one():
                     cute.arch.cp_async_bulk_commit_group()
+            if cutlass.const_expr(use_tma_ds):
+                # Gate stage zero has completed ceil(G_LOOP / STAGES) arrivals;
+                # reuse its next phase after all gate/projection MMA reads retire.
+                cute.arch.mbarrier_wait(
+                    mbar_full_ptr, Int32(cute.ceil_div(G_LOOP, STAGES) % 2)
+                )
             cg0 = copyC.retile(acc_G)
             cr0 = load_c.partition_S(sO)
             cc0 = copyC.retile(coords)
@@ -376,7 +426,10 @@ class ParityF567Sm90:
             global_atom = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=32
             )
-            if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
+            if cutlass.const_expr(use_tma_ds):
+                cd0 = load_c.partition_S(sD)
+                cd = cute.group_modes(cd0, 1, cute.rank(cd0))
+            elif cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
                 gD = cute.local_tile(
                     tD, (TILE_M, TILE_N), (m_block % (self.L // TILE_M), n_block)
                 )
@@ -398,7 +451,9 @@ class ParityF567Sm90:
                 rc = cute.make_fragment_like(gc, BFloat16)
                 dc = cute.make_fragment_like(gc, BFloat16)
                 cute.copy(load_atom, cr[None, epi_idx], rc)
-                if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
+                if cutlass.const_expr(use_tma_ds):
+                    cute.copy(load_atom, cd[None, epi_idx], dc)
+                elif cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
                     cute.copy(global_atom, cd[None, epi_idx], dc)
                 else:
                     dc.fill(0)
@@ -639,6 +694,9 @@ class ParityF567Sm90:
         atomR, tR = cpasync.make_tiled_tma_atom(
             cpasync.CopyBulkTensorTileG2SOp(), mR, sO_layout, (TILE_M, TILE_N)
         )
+        atomD, tD_tma = cpasync.make_tiled_tma_atom(
+            cpasync.CopyBulkTensorTileG2SOp(), mD, sO_layout, (TILE_M, TILE_N)
+        )
         tx_bytes_total = (TILE_M + TILE_N) * TILE_K * 2
         sx1 = cute.struct.Align[
             cute.struct.MemRange[
@@ -676,6 +734,8 @@ class ParityF567Sm90:
             atomP,
             atomG,
             atomR,
+            atomD,
+            tD_tma,
             sO_layout,
             tO,
             tP,

@@ -178,3 +178,21 @@ def test_f567_full_range_sigmoid_matches_triton(reduction):
     for a, b in zip(actual, (y, proj, gate), strict=True):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
     assert torch.any((gate > 0) & (gate < torch.finfo(torch.bfloat16).tiny))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ((257, 256, 128, 128, 128), (64, 64, 64, 4, 4, 2)),  # A2/B2, odd phase
+        ((257, 256, 256, 128, 128), (64, 64, 64, 2, 4, 2)),  # A2/B2, even phase
+        ((257, 256, 384, 128, 128), (64, 64, 64, 8, 4, 2)),  # stage0 reused3times
+        ((257, 256, 128, 128, 384), (128, 32, 64, 4, 8, 2)),  # A4/B1
+        ((257, 256, 128, 256, 128), (64, 256, 128, 2, 8, 2)),  # A1/B4
+        ((257, 256, 128, 128, 96), (64, 64, 64, 4, 4, 2)),  # row-wrap fallback
+        ((257, 256, 128, 96, 128), (64, 64, 64, 4, 4, 2)),  # N-tail fallback
+        ((257, 256, 128, 128, 128), (64, 128, 64, 4, 4, 2)),  # capacity fallback
+    ],
+)
+def test_dropout_tma_storage_and_phase(case):
+    shape, tiles = case
+    test_f567_sm90_matches_triton(shape, 1, tiles)

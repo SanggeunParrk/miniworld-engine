@@ -67,6 +67,16 @@ retired gate accumulator. The chunked epilogue consumes that FP32 gate without
 adding a fragment or changing rounding. The N128 config uses163 registers,
 down from168 after chunking, with no spills.
 
+When a fourth output-sized tile fits in the retired operand rings, aligned
+broadcast dropout scales use a TMA load into that tile and LDSM fragment reads.
+The gate's stage-zero barrier is reused at its next phase after all operand
+reads retire. P/G/Y and dropout storage remain disjoint, with no larger shared
+allocation. Row-wrap, N-tail and insufficient-capacity cases retain the vector
+or scalar load path. The initial projection activation tiles are also prefetched
+to L2 during gate work using `cute.prefetch`; this hint does not replace the real
+TMA loads or completion barriers. Both policies derive from existing dimensions
+and stage storage, with no sequence-length dispatch or new configuration axis.
+
 ### B9+B10
 
 Rounds and retains the first GEMM's BF16 result before the second GEMM to shorten
@@ -111,7 +121,39 @@ hardcoded shape winner. Drivers/checkers/candidate enumeration use the native bu
 path. These kernels compile on the allocated GPU. Measurements below use explicit
 candidate manifests and do not imply that the full native cache has been built.
 
-## Additional TMA pipeline checkpoint
+## Latest F567 follow-up
+
+Dropout TMA and initial projection L2 prefetch improve the measured F567 kernel
+further, while retaining the same algorithm/configuration contracts above.
+Two independent allocations with five rotated graph rounds each measured:
+
+| L | Previous CuTe us | New CuTe us | Strongest measured Triton us | Triton/new |
+|---|---:|---:|---:|---:|
+|384|95.236|93.231|105.510|1.132x|
+|768|362.116|355.706|409.107|approximately1.150x|
+
+L768 individual ratios span1.1496–1.1506x, so it is not robustly above the1.15x
+target. The selected native manifest is M64/N64/K64/G1/4warps/2stages at both
+lengths; there is no hardcoded length dispatch. The previous G4 manifest was
+also validated across three independent allocations. Full native-cache tuning
+is still incomplete.
+
+Selected final memcheck/racecheck suites each pass35 cases with zero errors or
+hazards. Compiled whole-module output and all gradients pass L384/L768,
+including holed masks, nonzero weights/dropout and zero-scale identity checks;
+worst relative L2 is1.415e-6. Twelve alternating official training graph rounds
+measure1.608384→1.557472ms atL384 (1.033x) and6.281248→6.106904ms atL768
+(1.029x). The whole-module target remains unmet. F2 and dual backward source
+are unchanged from0f2d455b; rejected warp-specialized/prefetch dual variants
+were not promoted.
+
+NCU of the G4 follow-up eliminates dropout LSU global-load sectors by using
+TMA, without materially reducing DRAM bytes. L768 also changes N128→N64,
+reducing shared66,560→41,984B and registers163→92; occupancy18.50→30.66%
+therefore includes both implementation and config effects. L2 throughput is
+92.41% and DRAM86.23% of peak. These counters are not timing medians.
+
+## Previous TMA pipeline checkpoint: 0f2d455b
 
 The per-kernel target is at least1.15x against the strongest measured Triton
 configuration; the eventual whole-module target is also1.15x. L128 performance
