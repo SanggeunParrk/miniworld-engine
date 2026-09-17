@@ -152,6 +152,10 @@
     "choice": "split",
     "ms": {}
   },
+  "gate|64|64|16384": {
+    "choice": "fused",
+    "ms": {}
+  },
   "gate|768|384|1048576": {
     "choice": "split",
     "ms": {
