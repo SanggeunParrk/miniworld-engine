@@ -18,9 +18,21 @@ CONFIGS.append(
     dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2)
 )
 
+# Production winner: two gate K tiles leave a third stage available for
+# front-GEMM prefetch, then both retired gate slots join the front ring.
+CONFIGS.append(
+    dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=3)
+)
+
 
 @pytest.mark.parametrize(
-    "shape", [(512, 128, 1024, 128), (512, 256, 1024, 128), (523, 40, 72, 48), (523, 40, 72, 13)]
+    "shape",
+    [
+        (512, 128, 1024, 128),
+        (512, 256, 1024, 128),
+        (523, 40, 72, 48),
+        (523, 40, 72, 13),
+    ],
 )
 @pytest.mark.parametrize("config", CONFIGS)
 def test_dual_bwd_sm90_matches_triton(shape, config):

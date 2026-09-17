@@ -37,6 +37,9 @@ def _assert_rel(actual, expected):
     (144, 224, 40, "fractional", True, 64, 32, 32, 3),
     (144, 144, 40, "binary", True, 64, 16, 16, 10),
     (144, 256, 40, "none", True, 128, 16, 16, 10),
+    # The fast geometry with saved values, plus an inference-only storage fit.
+    (144, 128, 72, "fractional", True, 128, 64, 32, 2),
+    (144, 128, 256, "fractional", False, 128, 64, 64, 6),
 ])
 def test_front_outputs_and_saved_contract(sm90_front, m, k, h2, mask_kind, save,
                                            bm, bk, bh, stages, warps):

@@ -276,6 +276,13 @@ class ParityF567Sm90:
                         tma_bar_ptr=mbar_full_ptr + STAGES + stage,
                     )
 
+        # Reuse the gate accumulator for its FP32 sigmoid while projection TMA
+        # transfers are in flight. Preserve the BF16 logit boundary; the epilogue
+        # consumes this FP32 gate and saves its independently rounded BF16 copy.
+        for gi in cutlass.range(cute.size(acc_G), unroll_full=True):
+            acc_G[gi] = _reciprocal_full(
+                1.0 + cute.math.exp(-acc_G[gi].to(BFloat16).to(Float32), fastmath=True)
+            )
         for k in cutlass.range_constexpr(P_LOOP):
             stage = k % STAGES
             cute.arch.mbarrier_wait(
@@ -313,77 +320,197 @@ class ParityF567Sm90:
                     )
         cute.arch.mbarrier_wait(mbar_full_ptr + 2 * STAGES, Int32(0))
         coords = thr_mma.partition_C(cute.make_identity_tensor((TILE_M, TILE_N)))
-        # Matrix load follows the accumulator fragment layout; TMA already
-        # zero-filled rows/columns outside the residual's logical extent.
-        residual_bf16 = cute.make_fragment_like(acc_G, BFloat16)
         load_atom = quack_copy.sm90_get_smem_load_op(LayoutEnum.ROW_MAJOR, BFloat16)
         load_c = cute.make_tiled_copy_C(load_atom, tiled_mma).get_slice(tidx)
-        cute.copy(load_atom, load_c.partition_S(sO), load_c.retile(residual_bf16))
-        rR = cute.make_fragment_like(acc_G, Float32)
-        rR.store(residual_bf16.load().to(Float32))
-        rD = cute.make_fragment_like(acc_G, Float32)
-        rD.fill(0)
-        if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
-            # Each aligned row tile is one contiguous slice of the broadcast
-            # scale. A packed BF16 pair is the accumulator's contiguous unit.
-            gD = cute.local_tile(
-                tD, (TILE_M, TILE_N), (m_block % (self.L // TILE_M), n_block)
+        if cutlass.const_expr(
+            max(cute.cosize(sX1_layout), cute.cosize(sX2_layout))
+            >= cute.cosize(sO_layout)
+            and max(cute.cosize(sW1_layout), cute.cosize(sW2_layout))
+            >= cute.cosize(sO_layout)
+            and max(
+                cute.cosize(sX1_layout),
+                cute.cosize(sX2_layout),
+                cute.cosize(sW1_layout),
+                cute.cosize(sW2_layout),
             )
-            scale_bf16 = cute.make_fragment_like(acc_G, BFloat16)
-            global_atom = cute.make_copy_atom(
-                cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=32
-            )
-            copy_d = cute.make_tiled_copy_C(global_atom, tiled_mma).get_slice(tidx)
-            cute.copy(global_atom, copy_d.partition_S(gD), copy_d.retile(scale_bf16))
-            rD.store(scale_bf16.load().to(Float32))
-        else:
-            for i in cutlass.range(cute.size(acc_G), unroll_full=True):
-                row = cutlass.Int64(m_block) * TILE_M + coords[i][0]
-                col = n_block * TILE_N + coords[i][1]
-                if row < tO.shape[0] and col < self.N:
-                    rD[i] = tD[row % self.L, col].to(Float32)
-        pv = acc_V.load().to(BFloat16)
-        denom = cute.make_fragment_like(acc_G, Float32)
-        denom.store(
-            1.0 + cute.math.exp(-acc_G.load().to(BFloat16).to(Float32), fastmath=True)
-        )
-        for i in cutlass.range(cute.size(acc_G), unroll_full=True):
-            denom[i] = _reciprocal_full(denom[i])
-        gv = denom.load()
-        out_frag = cute.make_fragment_like(acc_G, BFloat16)
-        out_frag.store((pv.to(Float32) * gv * rD.load() + rR.load()).to(BFloat16))
-        cute.arch.barrier()
-        store_op = sm90h.get_smem_store_op(LayoutEnum.ROW_MAJOR, BFloat16, Float32)
-        copyC = cute.make_tiled_copy_C(store_op, tiled_mma).get_slice(tidx)
-        for which in cutlass.range_constexpr(3):
-            if cutlass.const_expr(which == 0):
-                target = tO
-                atom = atomO
-            elif cutlass.const_expr(which == 1):
-                out_frag.store(pv)
-                target = tP
-                atom = atomP
+            >= 2 * cute.cosize(sO_layout)
+        ):
+            # Save projection to its final shared tile first, retiring FP32 acc_V.
+            sP = storage.sX1.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
+            sG = storage.sW1.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
+            if cutlass.const_expr(
+                max(cute.cosize(sX1_layout), cute.cosize(sX2_layout))
+                >= 2 * cute.cosize(sO_layout)
+            ):
+                sY = cute.make_tensor(
+                    sP.iterator + cute.cosize(sO_layout), sO_layout.outer
+                )
             else:
-                out_frag.store(gv.to(BFloat16))
-                target = tG
-                atom = atomG
-            cute.copy(store_op, copyC.retile(out_frag), copyC.partition_D(sO))
+                sY = cute.make_tensor(
+                    sG.iterator + cute.cosize(sO_layout), sO_layout.outer
+                )
+            store_op = sm90h.get_smem_store_op(LayoutEnum.ROW_MAJOR, BFloat16, Float32)
+            copyC = cute.make_tiled_copy_C(store_op, tiled_mma).get_slice(tidx)
+            pfrag = cute.make_fragment_like(acc_V, BFloat16)
+            pfrag.store(acc_V.load().to(BFloat16))
+            cute.arch.barrier()
+            cute.copy(store_op, copyC.retile(pfrag), copyC.partition_D(sP))
             cute.arch.fence_view_async_shared()
             cute.arch.barrier()
             if warp_idx == 0:
-                dst = cute.local_tile(target, (TILE_M, TILE_N), (m_block, n_block))
+                dst = cute.local_tile(tP, (TILE_M, TILE_N), (m_block, n_block))
                 so, go = cpasync.tma_partition(
-                    atom,
+                    atomP,
                     0,
                     cute.make_layout(1),
-                    cute.group_modes(sO, 0, cute.rank(sO)),
+                    cute.group_modes(sP, 0, cute.rank(sP)),
                     cute.group_modes(dst, 0, cute.rank(dst)),
                 )
-                cute.copy(atom, so, go)
+                cute.copy(atomP, so, go)
+                with cute.arch.elect_one():
+                    cute.arch.cp_async_bulk_commit_group()
+            cg0 = copyC.retile(acc_G)
+            cr0 = load_c.partition_S(sO)
+            cc0 = copyC.retile(coords)
+            cc = cute.group_modes(cc0, 1, cute.rank(cc0))
+            global_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=32
+            )
+            if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
+                gD = cute.local_tile(
+                    tD, (TILE_M, TILE_N), (m_block % (self.L // TILE_M), n_block)
+                )
+                cd0 = copyC.partition_S(gD)
+                cd = cute.group_modes(cd0, 1, cute.rank(cd0))
+            cp0 = load_c.partition_S(sP)
+            co0 = copyC.partition_D(sY)
+            cs0 = copyC.partition_D(sG)
+            cg = cute.group_modes(cg0, 1, cute.rank(cg0))
+            cr = cute.group_modes(cr0, 1, cute.rank(cr0))
+            cp = cute.group_modes(cp0, 1, cute.rank(cp0))
+            co = cute.group_modes(co0, 1, cute.rank(co0))
+            cs = cute.group_modes(cs0, 1, cute.rank(cs0))
+            for epi_idx in cutlass.range_constexpr(cute.size(cg, mode=[1])):
+                gc = cg[None, epi_idx]
+                pc = cute.make_fragment_like(gc, BFloat16)
+                # Same C geometry as residual LDSM; the source P tile is read-only.
+                cute.copy(load_atom, cp[None, epi_idx], pc)
+                rc = cute.make_fragment_like(gc, BFloat16)
+                dc = cute.make_fragment_like(gc, BFloat16)
+                cute.copy(load_atom, cr[None, epi_idx], rc)
+                if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
+                    cute.copy(global_atom, cd[None, epi_idx], dc)
+                else:
+                    dc.fill(0)
+                    for di in cutlass.range(cute.size(dc), unroll_full=True):
+                        row = cutlass.Int64(m_block) * TILE_M + cc[None, epi_idx][di][0]
+                        col = n_block * TILE_N + cc[None, epi_idx][di][1]
+                        if row < tO.shape[0] and col < self.N:
+                            dc[di] = tD[row % self.L, col]
+                denom = cute.make_fragment_like(gc, Float32)
+                denom.store(gc.load())
+                yc = cute.make_fragment_like(gc, BFloat16)
+                saved_gc = cute.make_fragment_like(gc, BFloat16)
+                yc.store(
+                    (
+                        pc.load().to(Float32) * denom.load() * dc.load().to(Float32)
+                        + rc.load().to(Float32)
+                    ).to(BFloat16)
+                )
+                saved_gc.store(denom.load().to(BFloat16))
+                cute.copy(store_op, yc, co[None, epi_idx])
+                cute.copy(store_op, saved_gc, cs[None, epi_idx])
+            cute.arch.fence_view_async_shared()
+            cute.arch.barrier()
+            if warp_idx == 0:
+                for which in cutlass.range_constexpr(2):
+                    if cutlass.const_expr(which == 0):
+                        target, atom, shared = tO, atomO, sY
+                    else:
+                        target, atom, shared = tG, atomG, sG
+                    dst = cute.local_tile(target, (TILE_M, TILE_N), (m_block, n_block))
+                    so, go = cpasync.tma_partition(
+                        atom,
+                        0,
+                        cute.make_layout(1),
+                        cute.group_modes(shared, 0, cute.rank(shared)),
+                        cute.group_modes(dst, 0, cute.rank(dst)),
+                    )
+                    cute.copy(atom, so, go)
                 with cute.arch.elect_one():
                     cute.arch.cp_async_bulk_commit_group()
                     cute.arch.cp_async_bulk_wait_group(0, read=True)
             cute.arch.barrier()
+        else:
+            # Matrix load follows the accumulator fragment layout; TMA already
+            # zero-filled rows/columns outside the residual's logical extent.
+            residual_bf16 = cute.make_fragment_like(acc_G, BFloat16)
+            load_atom = quack_copy.sm90_get_smem_load_op(LayoutEnum.ROW_MAJOR, BFloat16)
+            load_c = cute.make_tiled_copy_C(load_atom, tiled_mma).get_slice(tidx)
+            cute.copy(load_atom, load_c.partition_S(sO), load_c.retile(residual_bf16))
+            rR = cute.make_fragment_like(acc_G, Float32)
+            rR.store(residual_bf16.load().to(Float32))
+            rD = cute.make_fragment_like(acc_G, Float32)
+            rD.fill(0)
+            if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
+                # Each aligned row tile is one contiguous slice of the broadcast
+                # scale. A packed BF16 pair is the accumulator's contiguous unit.
+                gD = cute.local_tile(
+                    tD, (TILE_M, TILE_N), (m_block % (self.L // TILE_M), n_block)
+                )
+                scale_bf16 = cute.make_fragment_like(acc_G, BFloat16)
+                global_atom = cute.make_copy_atom(
+                    cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=32
+                )
+                copy_d = cute.make_tiled_copy_C(global_atom, tiled_mma).get_slice(tidx)
+                cute.copy(
+                    global_atom, copy_d.partition_S(gD), copy_d.retile(scale_bf16)
+                )
+                rD.store(scale_bf16.load().to(Float32))
+            else:
+                for i in cutlass.range(cute.size(acc_G), unroll_full=True):
+                    row = cutlass.Int64(m_block) * TILE_M + coords[i][0]
+                    col = n_block * TILE_N + coords[i][1]
+                    if row < tO.shape[0] and col < self.N:
+                        rD[i] = tD[row % self.L, col].to(Float32)
+            pv = acc_V.load().to(BFloat16)
+            denom = cute.make_fragment_like(acc_G, Float32)
+            denom.store(acc_G.load())
+            gv = denom.load()
+            out_frag = cute.make_fragment_like(acc_G, BFloat16)
+            out_frag.store((pv.to(Float32) * gv * rD.load() + rR.load()).to(BFloat16))
+            cute.arch.barrier()
+            store_op = sm90h.get_smem_store_op(LayoutEnum.ROW_MAJOR, BFloat16, Float32)
+            copyC = cute.make_tiled_copy_C(store_op, tiled_mma).get_slice(tidx)
+            for which in cutlass.range_constexpr(3):
+                if cutlass.const_expr(which == 0):
+                    target = tO
+                    atom = atomO
+                elif cutlass.const_expr(which == 1):
+                    out_frag.store(pv)
+                    target = tP
+                    atom = atomP
+                else:
+                    out_frag.store(gv.to(BFloat16))
+                    target = tG
+                    atom = atomG
+                cute.copy(store_op, copyC.retile(out_frag), copyC.partition_D(sO))
+                cute.arch.fence_view_async_shared()
+                cute.arch.barrier()
+                if warp_idx == 0:
+                    dst = cute.local_tile(target, (TILE_M, TILE_N), (m_block, n_block))
+                    so, go = cpasync.tma_partition(
+                        atom,
+                        0,
+                        cute.make_layout(1),
+                        cute.group_modes(sO, 0, cute.rank(sO)),
+                        cute.group_modes(dst, 0, cute.rank(dst)),
+                    )
+                    cute.copy(atom, so, go)
+                    with cute.arch.elect_one():
+                        cute.arch.cp_async_bulk_commit_group()
+                        cute.arch.cp_async_bulk_wait_group(0, read=True)
+                cute.arch.barrier()
 
     @cute.jit
     def __call__(

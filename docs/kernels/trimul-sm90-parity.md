@@ -27,10 +27,13 @@ Both implementations issue explicit TMA loads/stores and WGMMA.
 
 - **Four warps:** one CTA handles one M tile and loops over the channel tiles.
   When K fits the requested stage ring, A remains in shared memory across those
-  channel tiles. Larger K refills the same ring. Retired B storage holds disjoint
-  raw and gated output tiles. STSM and TMA write the final buffers. Warp shuffles
-  convert interleaved gate/projection fragment ownership to the gated store layout.
-  Barrier phases account for each stage's use count across channel tiles.
+  channel tiles. Larger K refills the same ring. Separate operand and output
+  storage overlaps the next channel's TMA input with the current epilogue, and
+  overlaps the current output TMA with the next GEMM. The row mask is loaded once
+  per CTA. Two BF16 values are packed into one 32-bit warp shuffle, then the
+  required half is selected without FP32 conversions. STSM and TMA write the
+  final buffers. Barrier phases account for each stage's use count across channel
+  tiles; waits protect output staging before it is reused.
 - **Eight warps:** Quack producer/consumer mainloop. M64 uses a 128-register
   consumer budget, allowing two resident CTAs where shared memory also permits.
   The persistent grid derives its residency from register/thread budgets and a
@@ -47,8 +50,22 @@ reciprocal. Residual fragments use LDSM; aligned dropout scales use paired BF16
 loads, with a masked scalar fallback for tails. The two independent reductions
 reuse an A/B stage ring after WGMMA completion and a CTA barrier.
 
-At L384, a matched config changed from 162 to128 registers and from74752 to41984
-shared bytes. Actual active-warp occupancy increased from18.06% to24.16%.
+When the retired operand rings can hold three output tiles, projection is rounded
+to BF16 and staged first. Residual and dropout values are loaded per matrix-copy
+chunk, then sigmoid/output math and saved-gate stores run on that chunk. Residual
+storage remains read-only; the three output tiles occupy disjoint retired A/B
+regions. This reduces live registers without allocating more shared memory or
+adding a global intermediate. Smaller rings retain the original epilogue.
+
+At the measured L384 M64/N64/K64/w4/s2 config, this epilogue reduces registers
+128→92 while keeping the same shared allocation; measured active-warp occupancy
+rises from23.98% to30.53%. Full-range sigmoid, BF16 saved values, dropout and
+residual arithmetic remain unchanged.
+
+Projection TMA prefetch also overlaps in-place FP32 sigmoid(BF16(logit)) in the
+retired gate accumulator. The chunked epilogue consumes that FP32 gate without
+adding a fragment or changing rounding. The N128 config uses163 registers,
+down from168 after chunking, with no spills.
 
 ### B9+B10
 
@@ -58,6 +75,13 @@ TMA writes it directly to the output. Storage is sized for the larger of the inp
 ring and output tile. Widths incompatible with TMA store alignment retain a masked
 scalar store. Wait-group overlap and K-loop unrolling experiments that regressed
 performance were not retained.
+
+When the short gate reduction fits the stage ring, unused slots receive front
+GEMM tiles immediately. A gate slot receives its front tile as soon as its last
+WGMMA read retires behind a wait and CTA barrier. The front reduction starts from
+the corresponding rotated ring position. Longer gate reductions retain the
+ordinary refill path. This overlaps the two reductions without extra shared
+memory, global intermediates, cache-retention policy, or config axes.
 
 For the actual D128/H256 module this kernel has **KG128/KP1024/N128**. Historical
 KG256 standalone measurements describe a different shape and must not be mixed in.
@@ -74,7 +98,10 @@ KG256 standalone measurements describe a different shape and must not be mixed i
 
 All three support M64/M128 with four/eight physical warps. WGMMA requires groups
 of four warps; one/two-warp emulation and logical M16/M32 padding are not implemented.
-Shared-memory exclusions are explicit. Declared and executable domains therefore
+Shared-memory exclusions are explicit. The four-warp F2 budget includes separate
+aligned A/B rings and output storage; training saves require more space than
+inference. Runtime and native build coverage both use the saved-output flag.
+Declared and executable domains therefore
 differ. Stages allocate real buffers; GROUP_M retains its meaning where the Triton
 CSV includes it. F2's original CSV has no GROUP_M axis.
 
@@ -84,9 +111,52 @@ hardcoded shape winner. Drivers/checkers/candidate enumeration use the native bu
 path. These kernels compile on the allocated GPU. Measurements below use explicit
 candidate manifests and do not imply that the full native cache has been built.
 
-## Verification and performance
+## Additional TMA pipeline checkpoint
 
-Final validation on H100 80GB:
+The per-kernel target is at least1.15x against the strongest measured Triton
+configuration; the eventual whole-module target is also1.15x. L128 performance
+is outside the requested optimization scope.
+
+| Kernel | L384 Triton / CuTe us | Ratio | L768 Triton / CuTe us | Ratio |
+|---|---:|---:|---:|---:|
+| F2 |220.238 /183.078|1.203x|876.068 /737.801|1.187x|
+| F567 |105.586 /95.373|1.107x|410.061 /360.106|1.139x|
+| B9+B10 |141.449 /132.717|1.066x|534.529 /510.572|1.047x|
+
+F2 reaches the component target; the other two do not. A previous paired F567
+L768 run measured402.596/362.478us, so its established gain is approximately
+1.11–1.14x. The final F2 comparison follows72 additional Triton configurations;
+the earlier96-config CuTe search used the pipeline before packed shuffle.
+These are bounded searches, not a claim of complete native-cache tuning.
+
+The official static-compile/manual-CUDA-graph training module, B1/D128/BF16,
+forward+backward without optimizer, dropout0,12 alternating rounds measured:
+
+| L | Triton ms | All three CuTe kernels ms | Ratio |
+|---|---:|---:|---:|
+|384|1.608288|1.557488|1.033x|
+|768|6.285792|6.113424|1.028x|
+
+The whole-module15% target remains unmet. Other common kernels use the same
+cache/heuristic paths on both arms. Source and CSV spaces retain the contracts
+above; measured winners are explicit benchmark manifests, not installed native
+cache entries or hardcoded sequence-length branches.
+
+Validation: F2 has41 kernel checks plus2 native-storage checks; dual backward36;
+the promoted F567 checkpoint27. Selected memcheck/racecheck suites contain
+36/36/27 cases respectively and report zero errors/hazards. Compiled whole-module
+output and every gradient pass atL384/L768 with nonzero weights, holed masks and
+fixed nonzero dropout; worst relative L2 is1.44e-6. Zero-scale residual identity
+and zero parameter gradients also pass.
+
+Native/registry checks initially passed1145 cases; two documentation-count
+failures were corrected and13 related checks passed on rerun. The unrelated
+committed-cache freshness failure for existing LayerNorm/Transition entries was
+reproduced unchanged in an isolated600c8c4c checkout; it was not suppressed.
+
+## Historical checkpoint: 600c8c4c
+
+Validation and performance before the additional pipeline work:
 
 - 95 integrated GPU regression tests and414 registry/config/launch checks passed.
 - Selected Compute Sanitizer memcheck and racecheck: F2 32, F567 26, dual backward32

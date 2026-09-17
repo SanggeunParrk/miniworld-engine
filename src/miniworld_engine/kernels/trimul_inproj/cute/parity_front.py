@@ -1,7 +1,7 @@
 """SM90 F2 with the Triton bidirectional front's saved-value/rounding contract.
 
-Reuses Quack's explicit TMA load/store and WGMMA mainloop, not the old
-MaskedGatedSm90 arithmetic. Config names retain their Triton meaning; unsupported
+The eight-warp implementation uses Quack's TMA/WGMMA mainloop. The four-warp
+implementation shares producer and consumer work within one warpgroup. Config names retain their Triton meaning; unsupported
 physical configurations raise instead of silently changing their tile/warp count.
 The one packed output allocation is split into disjoint left/right views outside
 the opaque boundary. No intermediate GEMM output, cast, mask or copy is launched.
@@ -33,7 +33,7 @@ def _front_glu(gate, projection):
     return projection * _reciprocal_full(1.0 + cute.math.exp(-gate, fastmath=True))
 
 
-def front_config_rejection(config, *, m=None, k=None, h2=None):
+def front_config_rejection(config, *, m=None, k=None, h2=None, save_preact=True):
     """Return an explicit hardware/layout reason, or None for a legal candidate.
 
     The shared CSV is the complete *requested* domain. This implementation has
@@ -60,7 +60,7 @@ def front_config_rejection(config, *, m=None, k=None, h2=None):
         return "TMA interleaved weight row stride requires4*H2 multiple of8"
     if config["num_warps"] == 4:
         from .front_single_warpgroup import four_warp_shared_bytes
-        used = four_warp_shared_bytes(config)
+        used = four_warp_shared_bytes(config, save_preact=save_preact)
         limit = cutlass.utils.get_smem_capacity_in_bytes("sm_90")
         if used > limit:
             return f"Requested stage ring needs {used} shared bytes, exceeds SM90 limit {limit}"
@@ -212,7 +212,10 @@ def launch_front(a, w, packed, preact, pair_mask, config):
     if pair_mask is not None and (pair_mask.numel() != a.shape[0]
                                  or pair_mask.dtype != a.dtype or not pair_mask.is_contiguous()):
         raise ValueError("Front mask must be contiguous M-vector in input dtype")
-    reason = front_config_rejection(config, m=a.shape[0], k=a.shape[1], h2=w.shape[1] // 4)
+    reason = front_config_rejection(
+        config, m=a.shape[0], k=a.shape[1], h2=w.shape[1] // 4,
+        save_preact=preact is not None,
+    )
     if reason:
         raise ValueError(reason)
     device = get_device_capacity(a.device)
@@ -260,7 +263,8 @@ def front_sm90(a: torch.Tensor, w: torch.Tensor, pair_mask: torch.Tensor | None,
         config = resolve(
             "trimul_inproj_gemm_gate_mmajor_sm90_cute", (a, w, pair_mask), extra=(save_preact,),
             feasibility=lambda c: front_config_rejection(
-                c, m=a.shape[0], k=a.shape[1], h2=w.shape[1] // 4),
+                c, m=a.shape[0], k=a.shape[1], h2=w.shape[1] // 4,
+                save_preact=save_preact),
             run=lambda c: launch_front(a, w, packed, preact if save_preact else None, pair_mask, c),
         )
     launch_front(a, w, packed, preact if save_preact else None, pair_mask, config)

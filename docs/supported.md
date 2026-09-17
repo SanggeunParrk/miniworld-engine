@@ -32,17 +32,17 @@ been run because the only A5000 node is drained. Read it as bf16 evidence and no
 `tests/registry/test_the_support_page_counts_its_own_evidence.py` checks every number above against
 the manifest it cites, so this table cannot age past its evidence again.
 
-## GPU that has NOT been run
+## Incomplete architecture coverage
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 90 | yes, on sm86 (which satisfies sm80) |
-| sm90 | 18 | **no** |
+| sm80 | 91 | yes, on sm86 (which satisfies sm80) |
+| sm90 | 21 | partial: three [TriMul parity kernels](kernels/trimul-sm90-parity.md) |
 | sm100 | 4 | **no** |
 
-Six kernels are declared for hardware nothing in this repository has ever run them on. They may
-work; the point is that nobody knows, and `arch` should be read as "written for", not "verified
-on", until a manifest for that card exists here.
+Full-registry manifests are still missing for sm90 and sm100. The linked SM90 report
+covers the three opt-in TriMul parity kernels, not every H100 implementation.
+For paths without execution evidence, `arch` means "written for", not "verified on".
 
 ## CPU
 

@@ -3,10 +3,10 @@
 Explicit TMA loads and WGMMA. Tiles smaller than the instruction's 64-row
 minimum are explicitly rejected.
 Stages are real independent shared-memory K slots in a circular TMA pipeline.
-No operand transposes are materialized. The second GEMM accepts the production
+Short gate reductions prefetch front tiles into unused and then retired gate
+stages before the front reduction begins. No operand transposes are materialized. The second GEMM accepts the production
 column-major dconc.T and column-major W_stack.T views directly.
 """
-
 
 import cutlass
 import cutlass.cute as cute
@@ -32,6 +32,14 @@ class DualBackwardSm90:
         self.pm = BLOCK_M1
         self.mma_mgroups = min(num_warps // 4, BLOCK_M1 // 64)
         self.mma_ngroups = num_warps // 4 // self.mma_mgroups
+        self.gate_tiles = (kg + BLOCK_K - 1) // BLOCK_K
+        self.front_offset = self.gate_tiles if self.gate_tiles < num_stages else 0
+        self.front_tiles = (kp + BLOCK_K - 1) // BLOCK_K
+        # If the gate fits in the ring, unused slots can hold early front
+        # tiles. Each gate slot joins that ring after its last WGMMA read.
+        self.short_gate = self.gate_tiles <= num_stages
+        self.front_initial = min(max(0, num_stages - self.gate_tiles), self.front_tiles)
+        self.front_ahead = min(num_stages, self.front_tiles) if self.short_gate else 0
         self.shared_storage = None
 
     @cute.kernel
@@ -120,19 +128,43 @@ class DualBackwardSm90:
                 accf.fill(0)
                 loops = cutlass.const_expr((self.kp + self.bk - 1) // self.bk)
             if warp == 0:
-                for stage in cutlass.range_constexpr(min(self.stages, loops)):
-                    with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive_and_expect_tx(
-                            kbar + stage, (self.pm + self.bn) * self.bk * 2
-                        )
+                for pre in cutlass.range_constexpr(min(self.stages, loops)):
                     if cutlass.const_expr(kind == 0):
-                        loadg(src_idx=stage, dst_idx=stage, tma_bar_ptr=kbar + stage)
-                        loadw(src_idx=stage, dst_idx=stage, tma_bar_ptr=kbar + stage)
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive_and_expect_tx(
+                                kbar + pre, (self.pm + self.bn) * self.bk * 2
+                            )
+                        loadg(src_idx=pre, dst_idx=pre, tma_bar_ptr=kbar + pre)
+                        loadw(src_idx=pre, dst_idx=pre, tma_bar_ptr=kbar + pre)
                     else:
-                        loadf(src_idx=stage, dst_idx=stage, tma_bar_ptr=kbar + stage)
-                        loadv(src_idx=stage, dst_idx=stage, tma_bar_ptr=kbar + stage)
+                        if cutlass.const_expr(pre >= self.front_ahead):
+                            dst_stage = (pre + self.front_offset) % self.stages
+                            with cute.arch.elect_one():
+                                cute.arch.mbarrier_arrive_and_expect_tx(
+                                    kbar + dst_stage, (self.pm + self.bn) * self.bk * 2
+                                )
+                            loadf(
+                                src_idx=pre,
+                                dst_idx=dst_stage,
+                                tma_bar_ptr=kbar + dst_stage,
+                            )
+                            loadv(
+                                src_idx=pre,
+                                dst_idx=dst_stage,
+                                tma_bar_ptr=kbar + dst_stage,
+                            )
+                if cutlass.const_expr(kind == 0):
+                    for pre in cutlass.range_constexpr(self.front_initial):
+                        dst_stage = pre + self.front_offset
+                        front_bar = bar + self.stages + dst_stage
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive_and_expect_tx(
+                                front_bar, (self.pm + self.bn) * self.bk * 2
+                            )
+                        loadf(src_idx=pre, dst_idx=dst_stage, tma_bar_ptr=front_bar)
+                        loadv(src_idx=pre, dst_idx=dst_stage, tma_bar_ptr=front_bar)
             for step in cutlass.range(loops):
-                stage = step % self.stages
+                stage = (step + (self.front_offset if kind == 1 else 0)) % self.stages
                 phase = (step // self.stages) & 1
                 cute.arch.mbarrier_wait(kbar + stage, phase)
                 cute.arch.fence_view_async_shared()
@@ -157,6 +189,25 @@ class DualBackwardSm90:
                 warpgroup.commit_group()
                 warpgroup.wait_group(0)
                 cute.arch.barrier()
+                if cutlass.const_expr(kind == 0 and self.short_gate):
+                    # wait_group(0) and the CTA barrier above retire this slot
+                    # for every consumer before TMA changes its operand layout.
+                    if warp == 0 and self.front_initial + step < self.front_tiles:
+                        front_bar = bar + self.stages + step
+                        with cute.arch.elect_one():
+                            cute.arch.mbarrier_arrive_and_expect_tx(
+                                front_bar, (self.pm + self.bn) * self.bk * 2
+                            )
+                        loadf(
+                            src_idx=self.front_initial + step,
+                            dst_idx=step,
+                            tma_bar_ptr=front_bar,
+                        )
+                        loadv(
+                            src_idx=self.front_initial + step,
+                            dst_idx=step,
+                            tma_bar_ptr=front_bar,
+                        )
                 if warp == 0 and step + self.stages < loops:
                     with cute.arch.elect_one():
                         cute.arch.mbarrier_arrive_and_expect_tx(
@@ -227,9 +278,7 @@ class DualBackwardSm90:
         def layout(rows, major):
             orient = LayoutEnum.ROW_MAJOR if major else LayoutEnum.COL_MAJOR
             atom = warpgroup.make_smem_layout_atom(
-                sm90h.get_smem_layout_atom(
-                    orient, BFloat16, self.bk if major else rows
-                ),
+                sm90h.get_smem_layout_atom(orient, BFloat16, self.bk if major else rows),
                 BFloat16,
             )
             return cute.tile_to_shape(

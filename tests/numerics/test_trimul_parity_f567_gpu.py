@@ -123,7 +123,8 @@ def test_f567_native_selector_replays_prepared_launch(monkeypatch):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
-def test_f567_full_range_sigmoid_matches_triton():
+@pytest.mark.parametrize("reduction", [(16, 8), (256, 128)])
+def test_f567_full_range_sigmoid_matches_triton(reduction):
     """Preserve tiny BF16 gate values and exponential overflow behavior."""
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
@@ -132,7 +133,8 @@ def test_f567_full_range_sigmoid_matches_triton():
         _output_f567_kernel,
     )
 
-    m, kp, kg, n, length = 129, 16, 8, 128, 128
+    kp, kg = reduction
+    m, n, length = 129, 128, 128
     kw = {"device": "cuda", "dtype": torch.bfloat16}
     norm = torch.ones(m, kp, **kw)
     x = torch.zeros(m, kg, **kw)

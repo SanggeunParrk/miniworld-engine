@@ -57,7 +57,10 @@ def partition_for_bucket(op, bucket):
         from miniworld_engine.kernels.trimul_inproj.cute.parity_front import front_config_rejection
         m, k = tensors[0][0]
         h2 = tensors[1][0][1] // 4
-        feasible = lambda c: front_config_rejection(c, m=m, k=k, h2=h2)
+        save_preact = bool(extra[0]) if extra else True
+        feasible = lambda c: front_config_rejection(
+            c, m=m, k=k, h2=h2, save_preact=save_preact
+        )
     elif op == "trimul_output_f567_train_sm90_cute":
         from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import feasibility
         kp, kg = tensors[0][0][1], tensors[1][0][1]

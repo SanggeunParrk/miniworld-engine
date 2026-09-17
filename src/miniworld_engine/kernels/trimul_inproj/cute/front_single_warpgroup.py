@@ -1,10 +1,13 @@
 """Four-warp F2 with explicit TMA/WGMMA and Triton's output contract.
 
-One CTA processes one M tile and traverses all interleaved gate/projection N
-chunks. If the complete K reduction fits the requested stage ring, retain A in
-shared memory across N chunks. Larger K reductions refill the same stage ring.
-The retired B storage holds disjoint raw and gated output tiles; both use STSM
-and TMA stores. No additional global intermediate or kernel is introduced.
+One CTA processes one M tile and traverses the interleaved N chunks. When all K
+chunks fit the requested stage ring, A stays resident across N chunks. Separate
+A/B operand rings and epilogue storage let the next B transfer overlap gate math,
+and let output TMA stores overlap the next GEMM. Stage counts remain real slots.
+The row mask is loaded once per CTA. Packed BF16 shuffles preserve exact bits
+while rearranging gated columns for STSM/TMA stores. No global intermediate or
+fusion boundary is added; raw saved values and both BF16 rounding steps match
+Triton, including tiny sigmoid values.
 """
 
 import cutlass
@@ -42,10 +45,12 @@ class FrontSingleWarpgroupSm90:
         sa = storage.a.get_tensor(la.outer, swizzle=la.inner)
         sb = storage.b.get_tensor(lb.outer, swizzle=lb.inner)
         bar = storage.bar.data_ptr()
-        sp = storage.b.get_tensor(lp.outer, swizzle=lp.inner)
-        so = cute.make_tensor(
-            sp.iterator + (cute.cosize(lp) if self.save else 0), lo.outer
+        sp = storage.e.get_tensor(lp.outer, swizzle=lp.inner)
+        output_pointer = cute.recast_ptr(
+            storage.e.data_ptr() + (cute.cosize(lp) if self.save else 0),
+            swizzle_=lo.inner,
         )
+        so = cute.make_tensor(output_pointer, lo.outer)
         if warp == 0:
             with cute.arch.elect_one():
                 cpasync.prefetch_descriptor(aa)
@@ -54,6 +59,16 @@ class FrontSingleWarpgroupSm90:
                     cute.arch.mbarrier_init(bar + i, 1)
         cute.arch.mbarrier_init_fence()
         cute.arch.barrier()
+        thr = mma.get_slice(tid)
+        coords = thr.partition_C(cute.make_identity_tensor((self.bm, self.bn)))
+        mask_cache = cute.make_rmem_tensor((cute.size(coords) // 2,), Float32)
+        if cutlass.const_expr(self.mask):
+            for i in cutlass.range(cute.size(mask_cache), unroll_full=True):
+                row = pid * self.bm + coords[2 * i][0]
+                value = Float32(0)
+                if row < mask.shape[0]:
+                    value = mask[row].to(Float32)
+                mask_cache[i] = value
         # Barrier phases persist across N chunks. A stage is used ceil((Ktiles-j)/stages)
         # times per chunk; this also handles K-trip counts not divisible by stages.
         for ni in cutlass.range(cute.ceil_div(self.n, self.bn)):
@@ -66,7 +81,6 @@ class FrontSingleWarpgroupSm90:
             load_b, _, _ = copy_utils.tma_get_copy_fn(
                 ab, 0, cute.make_layout(1), gb, sb
             )
-            thr = mma.get_slice(tid)
             acc = cute.make_fragment(thr.partition_shape_C((self.bm, self.bn)), Float32)
             xa = thr.make_fragment_A(thr.partition_A(sa))
             xb = thr.make_fragment_B(thr.partition_B(sb))
@@ -74,7 +88,7 @@ class FrontSingleWarpgroupSm90:
             atom.set(warpgroup.Field.ACCUMULATE, True)
             acc.fill(0)
             loops = cutlass.const_expr((self.k + self.bk - 1) // self.bk)
-            if warp == 0:
+            if warp == 0 and ni == 0:
                 for i in cutlass.range_constexpr(min(self.stages, loops)):
                     with cute.arch.elect_one():
                         tx = self.bn * self.bk * 2
@@ -127,7 +141,28 @@ class FrontSingleWarpgroupSm90:
                     )
             warpgroup.wait_group(0)
             cute.arch.barrier()
-            coords = thr.partition_C(cute.make_identity_tensor((self.bm, self.bn)))
+            # Prefetch the next channel chunk while this chunk's epilogue runs.
+            # Its inputs and outputs occupy disjoint shared-memory regions.
+            if warp == 0 and ni + 1 < cute.ceil_div(self.n, self.bn):
+                next_b = cute.local_tile(tb, (self.bn, self.bk), (ni + 1, None))
+                load_next_b, _, _ = copy_utils.tma_get_copy_fn(
+                    ab, 0, cute.make_layout(1), next_b, sb
+                )
+                for i in cutlass.range_constexpr(min(self.stages, loops)):
+                    with cute.arch.elect_one():
+                        tx = self.bn * self.bk * 2
+                        if cutlass.const_expr(loops > self.stages):
+                            tx = tx + self.bm * self.bk * 2
+                        cute.arch.mbarrier_arrive_and_expect_tx(bar + i, tx)
+                    if cutlass.const_expr(loops > self.stages):
+                        load_a(src_idx=i, dst_idx=i, tma_bar_ptr=bar + i)
+                    load_next_b(src_idx=i, dst_idx=i, tma_bar_ptr=bar + i)
+            # The prior output store overlapped the current GEMM. Finish its
+            # shared-memory reads only when this epilogue is about to overwrite E.
+            if warp == 0:
+                with cute.arch.elect_one():
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+            cute.arch.barrier()
             gate_out = cute.make_rmem_tensor((cute.size(acc) // 2,), BFloat16)
             for i in cutlass.range(cute.size(acc) // 2, unroll_full=True):
                 row, _ = coords[2 * i]
@@ -138,11 +173,7 @@ class FrontSingleWarpgroupSm90:
                     proj * _reciprocal_full(1.0 + cute.math.exp(-gate, fastmath=True))
                 ).to(BFloat16)
                 if cutlass.const_expr(self.mask):
-                    mr = mi * self.bm + row
-                    mv = Float32(0)
-                    if mr < mask.shape[0]:
-                        mv = mask[mr].to(Float32)
-                    value = (value.to(Float32) * mv).to(BFloat16)
+                    value = (value.to(Float32) * mask_cache[i]).to(BFloat16)
                 gate_out[i] = value
             store_op = sm90h.get_smem_store_op(LayoutEnum.COL_MAJOR, BFloat16, Float32)
             shuffled = cute.make_fragment(
@@ -150,17 +181,19 @@ class FrontSingleWarpgroupSm90:
             )
             lane = tid % 32
             # A gate pair collapses two N columns into one per lane. The half-N
-            # STSM layout expects adjacent pairs again: redistribute within each
-            # four-lane subgroup, preserving the M-coordinate ownership.
+            # STSM layout expects adjacent pairs again. Pack both possible BF16
+            # source values into one word, shuffle once within the four-lane
+            # subgroup, and select the required half without FP32 conversion.
             for i in cutlass.range(cute.size(shuffled), unroll_full=True):
                 si = (i // 4) * 4 + (i % 4) // 2
                 source = (lane // 4) * 4 + (2 * (lane % 4) + i % 2) % 4
-                low = cute.arch.shuffle_sync(gate_out[si].to(Float32), source)
-                high = cute.arch.shuffle_sync(gate_out[si + 2].to(Float32), source)
-                v = low
-                if lane % 4 >= 2:
-                    v = high
-                shuffled[i] = v.to(BFloat16)
+                pair = cute.make_rmem_tensor((2,), BFloat16)
+                pair[0] = gate_out[si]
+                pair[1] = gate_out[si + 2]
+                word = cute.recast_tensor(pair, cutlass.Uint32)
+                moved = cute.arch.shuffle_sync(word[0], source)
+                word[0] = moved >> ((lane % 4 // 2) * 16)
+                shuffled[i] = pair[0]
             copy_o = cute.make_tiled_copy_C(store_op, mmao).get_slice(tid)
             cute.copy(store_op, copy_o.retile(shuffled), copy_o.partition_D(so))
             if cutlass.const_expr(self.save):
@@ -192,8 +225,11 @@ class FrontSingleWarpgroupSm90:
                     cute.copy(ap, ss, gg)
                 with cute.arch.elect_one():
                     cute.arch.cp_async_bulk_commit_group()
-                    cute.arch.cp_async_bulk_wait_group(0, read=True)
             cute.arch.barrier()
+        if warp == 0:
+            with cute.arch.elect_one():
+                cute.arch.cp_async_bulk_wait_group(0, read=True)
+        cute.arch.barrier()
 
     @cute.jit
     def __call__(self, a, b, o, p, mask, stream: cuda.CUstream):
@@ -261,10 +297,14 @@ class FrontSingleWarpgroupSm90:
         bt = cute.struct.Align[
             cute.struct.MemRange[
                 BFloat16,
-                max(
-                    cute.cosize(lb),
-                    cute.cosize(lo) + (cute.cosize(lp) if self.save else 0),
-                ),
+                cute.cosize(lb),
+            ],
+            1024,
+        ]
+
+        et = cute.struct.Align[
+            cute.struct.MemRange[
+                BFloat16, cute.cosize(lo) + (cute.cosize(lp) if self.save else 0)
             ],
             1024,
         ]
@@ -274,6 +314,7 @@ class FrontSingleWarpgroupSm90:
             bar: cute.struct.MemRange[cutlass.Int64, self.stages]
             a: at
             b: bt
+            e: et
 
         self.storage = Storage
         self.kernel(
@@ -296,7 +337,10 @@ def launch_four_warp(a, w, out, pre, mask, c):
         pre.T if pre is not None else out.T,
         mask if mask is not None else a[:, 0],
     )
-    if any(t.dtype != torch.bfloat16 or not t.is_cuda or t.device != a.device for t in tensors):
+    if any(
+        t.dtype != torch.bfloat16 or not t.is_cuda or t.device != a.device
+        for t in tensors
+    ):
         raise ValueError("Four-warp F2 requires BF16 CUDA operands on the same device")
     args = [from_dlpack(t.detach(), assumed_align=16) for t in tensors]
     args.append(cuda.CUstream(torch.cuda.current_stream().cuda_stream))
@@ -326,10 +370,13 @@ def launch_four_warp(a, w, out, pre, mask, c):
 
 
 def four_warp_shared_bytes(config, save_preact=True):
-    """Exact aligned stage/output storage bound, excluding driver-reserved bytes."""
+    """Aligned, disjoint barrier/A-ring/B-ring/epilogue storage size."""
     bm, bn, bk = config["BLOCK_M1"], 2 * config["BLOCK_K_H2"], config["BLOCK_K_D"]
     stages = config["num_stages"]
-    a_bytes = bm * bk * stages * 2
-    b_bytes = max(bn * bk * stages * 2, bm * bn * (3 if save_preact else 1))
     align = lambda size: (size + 1023) // 1024 * 1024
-    return 1024 + align(a_bytes) + align(b_bytes)
+    return (
+        align(stages * 8)
+        + align(bm * bk * stages * 2)
+        + align(bn * bk * stages * 2)
+        + align(bm * bn * (3 if save_preact else 1))
+    )
