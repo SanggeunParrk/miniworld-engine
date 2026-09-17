@@ -68,27 +68,40 @@ def _output_f567_kernel(
     # extent. BLOCK_K is tunable CSV data, not a fixed kernel constant.
     rkp = tl.arange(0, BLOCK_K)
     ap = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-    for k0 in range(tl.cdiv(KP, BLOCK_K)):
-        k = k0 * BLOCK_K + rkp
-        a = tl.load(XN + rm[:, None] * KP + k[None, :],
-                    (rm[:, None] < M) & (k[None, :] < KP), 0)
-        w = tl.load(WP + k[:, None] * wp1 + rn[None, :] * wp0,
-                    (k[:, None] < KP) & (rn[None, :] < N), 0)
-        ap = tl.dot(a, w, ap)
-    p = ap.to(PROJ.dtype.element_ty)
+    for pk0 in range(tl.cdiv(KP, BLOCK_K)):
+        pk = pk0 * BLOCK_K + rkp
+        pa = tl.load(XN + rm[:, None] * KP + pk[None, :],
+                    (rm[:, None] < M) & (pk[None, :] < KP), 0)
+        pw = tl.load(WP + pk[:, None] * wp1 + rn[None, :] * wp0,
+                    (pk[:, None] < KP) & (rn[None, :] < N), 0)
+        ap = tl.dot(pa, pw, ap)
     off = rm[:, None] * N + rn[None, :]
     mask = (rm[:, None] < M) & (rn[None, :] < N)
-    tl.store(PROJ + off, p, mask)
 
     rkg = tl.arange(0, BLOCK_K)
-    ag = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-    for k0 in range(tl.cdiv(KG, BLOCK_K)):
-        k = k0 * BLOCK_K + rkg
-        a = tl.load(X + rm[:, None] * KG + k[None, :],
-                    (rm[:, None] < M) & (k[None, :] < KG), 0)
-        w = tl.load(WG + k[:, None] * wg0 + rn[None, :] * wg1,
-                    (k[:, None] < KG) & (rn[None, :] < N), 0)
-        ag = tl.dot(a, w, ag)
+    # Put the shorter output-tile axis on the gate dot's row axis. On Hopper,
+    # tall second-dot layouts can corrupt aligned operands; unconditionally
+    # transposing instead breaks wide, one-warp tiles. This constexpr choice
+    # keeps every CSV schedule and the same GEMMs, with no architecture or
+    # shape-specific tile blacklist. The projection is saved in the epilogue.
+    if BLOCK_M1 >= BLOCK_N:
+        ag = tl.zeros((BLOCK_N, BLOCK_M1), tl.float32)
+    else:
+        ag = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
+    for gk0 in range(tl.cdiv(KG, BLOCK_K)):
+        gk = gk0 * BLOCK_K + rkg
+        ga = tl.load(X + rm[:, None] * KG + gk[None, :],
+                    (rm[:, None] < M) & (gk[None, :] < KG), 0)
+        gw = tl.load(WG + gk[:, None] * wg0 + rn[None, :] * wg1,
+                    (gk[:, None] < KG) & (rn[None, :] < N), 0)
+        if BLOCK_M1 >= BLOCK_N:
+            ag = tl.dot(tl.trans(gw), tl.trans(ga), ag)
+        else:
+            ag = tl.dot(ga, gw, ag)
+    if BLOCK_M1 >= BLOCK_N:
+        ag = tl.trans(ag)
+    p = ap.to(PROJ.dtype.element_ty)
+    tl.store(PROJ + off, p, mask)
     # Preserve split cuBLAS BF16 logits and proj rounding, then use the FP32
     # sigmoid for y while storing the BF16 gate expected by the existing bwd.
     g = tl.sigmoid(ag.to(X.dtype.element_ty).to(tl.float32))

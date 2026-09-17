@@ -160,3 +160,35 @@ def test_public_shape_validation_before_launch():
     wrong[0] = wrong[0].float()
     with pytest.raises(TypeError, match="BF16"):
         output_f567_train(*wrong)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("tile", [
+    (128, 32, 128, w, s) for w in (4, 8) for s in (2, 3, 4)
+] + [(64, 128, 32, 1, 3), (128, 128, 128, 8, 2), (128, 128, 128, 1, 2)])
+@pytest.mark.parametrize("kp", [128, 256])
+def test_aligned_gate_tile_after_projection(kp, tile):
+    """The second aligned dot must not reuse a corrupt operand layout."""
+    torch.manual_seed(391)
+    m, n, kg, length = 512, 128, 128, 32
+    bm, bn, bk, warps, stages = tile
+    kw: dict[str, Any] = {"device": "cuda", "dtype": torch.bfloat16}
+    norm, x = torch.randn(m, kp, **kw), torch.randn(m, kg, **kw)
+    wp = torch.randn(n, kp, **kw) / kp**.5
+    wg = torch.randn(kg, n, **kw) / kg**.5
+    residual = torch.randn(m, n, **kw)
+    ds = torch.ones(length, n, **kw)
+    y, proj, gate = (torch.empty_like(residual) for _ in range(3))
+    _output_f567_kernel.fn[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
+        norm, x, wp, wg, proj, gate, y, residual, ds, m, length, kp, kg, n,
+        *wp.stride(), *wg.stride(), shape_key=token_key(length, KP=kp, KG=kg, N=n),
+        BLOCK_M1=bm, BLOCK_N=bn, BLOCK_K=bk, GROUP_M=1,
+        num_warps=warps, num_stages=stages,
+    )
+    expected_proj = (norm.float() @ wp.float().t()).bfloat16().float()
+    expected_gate = torch.sigmoid((x.float() @ wg.float()).bfloat16().float())
+    expected_y = residual.float() + expected_proj * expected_gate
+    for actual, expected in [(proj, expected_proj), (gate, expected_gate), (y, expected_y)]:
+        assert torch.isfinite(actual).all()
+        error = (actual.float() - expected).norm() / expected.norm().clamp_min(1e-8)
+        assert error < .004, error.item()
