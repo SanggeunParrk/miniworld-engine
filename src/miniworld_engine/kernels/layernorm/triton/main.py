@@ -66,23 +66,10 @@ def layer_norm_fwd_fused(
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
     row_mask = rows < M
 
-    # TWO-PASS (not Welford): pass 1 accumulates Σx and Σx² over the N tiles in fp32 — both are
-    # plain sums, so tiling them is exact — and pass 2 re-reads X to normalize. LayerNorm re-uses
-    # the row it just reduced, so a tiled reduce axis costs either a second read of X or a Welford
-    # carry; the re-read is far simpler.
-    # The old `var -= (BLOCK_K - N)/N * mean*mean` fixup is gone with it: it existed only because
-    # the padded lanes were centred by `x - mean` without a mask. Here every tile is masked, so the
-    # tail columns contribute exactly nothing to Σx or Σx².
-    #
-    # COVERING TILE (BLOCK_K >= N): both `for` loops would be single-trip, but the two tl.loads of
-    # X are NOT CSE'd — the tl.store of Mean/Rstd sits between them and Triton cannot prove the raw
-    # pointers do not alias — so the "collapses back to one read" claim was false: the kernel did
-    # read X, read X, write Y (3 HBM passes instead of 2). Both N and BLOCK_K are tl.constexpr, so
-    # the guard below is resolved at TRACE time and only ONE branch is ever emitted; the covering
-    # tile degenerates to the pre-tiling single-pass schedule (read X once, keep it in registers).
-    # The fast path uses the CENTRED variance Σ(x-mean)²/N — what the pre-tiling kernel used, and
-    # numerically stabler — because x is already live. The uncentered Σx²/N - mean² form is kept in
-    # the tiled branch, where it exists precisely so each tile is read exactly once.
+    # Keep a covering row tile in registers. For smaller feature tiles, combine
+    # centred tile moments with Welford's formula, then re-read X to normalize.
+    # E[x*x] - E[x]*E[x] loses variance on large-offset inputs (even in FP32).
+    # Both paths mask tail columns out of the statistics.
     if BLOCK_K >= N:
         cols = tl.arange(0, BLOCK_K)
         col_mask = cols < N
@@ -105,17 +92,24 @@ def layer_norm_fwd_fused(
             y = y * rs[:, None]
         tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
     else:
-        s = tl.zeros([BLOCK_M1], dtype=tl.float32)
-        ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        mean = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        m2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        count = 0
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             mask = row_mask[:, None] & (cols[None, :] < N)
             x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
                         mask=mask, other=0.0).to(tl.float32)
-            s += tl.sum(x, axis=1)
-            ss += tl.sum(x * x, axis=1)
-        mean = s / N
-        var = ss / N - mean * mean
+            tile_count = tl.minimum(BLOCK_K, N - n0)
+            tile_mean = tl.sum(x, axis=1) / tile_count
+            centered = tl.where(mask, x - tile_mean[:, None], 0.0)
+            tile_m2 = tl.sum(centered * centered, axis=1)
+            next_count = count + tile_count
+            delta = tile_mean - mean
+            m2 += tile_m2 + delta * delta * (count * tile_count / next_count)
+            mean += delta * (tile_count / next_count)
+            count = next_count
+        var = m2 / N
         rstd = 1 / tl.sqrt(var + eps)
 
         # Write mean / rstd

@@ -42,6 +42,7 @@ def transition_fwd_kernel(
     M,
     K: tl.constexpr,
     ND: tl.constexpr,
+    stride_an, stride_ak, stride_bn, stride_bk,
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -71,12 +72,12 @@ def transition_fwd_kernel(
             other=0.0,
         )
         W1_tile = tl.load(
-            W1_ptr + (offs_n[None, :] * K + offs_k[:, None]),
+            W1_ptr + (offs_n[None, :] * stride_an + offs_k[:, None] * stride_ak),
             mask=((offs_n[None, :] < ND) & (offs_k[:, None] < K)),
             other=0.0,
         )
         W2_tile = tl.load(
-            W2_ptr + (offs_n[None, :] * K + offs_k[:, None]),
+            W2_ptr + (offs_n[None, :] * stride_bn + offs_k[:, None] * stride_bk),
             mask=((offs_n[None, :] < ND) & (offs_k[:, None] < K)),
             other=0.0,
         )
@@ -133,6 +134,8 @@ def _expand_swiglu(
         M,
         N,          # K -- the input width
         nd,         # ND -- the expanded width
+        expand_a_weight.stride(0), expand_a_weight.stride(1),
+        expand_b_weight.stride(0), expand_b_weight.stride(1),
         shape_key=pack(shape_key, K=N, ND=nd),
     )
     return expand
@@ -193,7 +196,7 @@ class TritonTransitionFunction(torch.autograd.Function):
         ``d`` simply leaves it out.
         """
         orig_shape = x.shape
-        x = x.view(-1, orig_shape[-1]).contiguous()
+        x = x.reshape(-1, orig_shape[-1]).contiguous()
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -243,7 +246,7 @@ class TritonTransitionFunction(torch.autograd.Function):
             grad_output = grad_output.to(x.dtype)
 
         orig_shape = grad_output.shape
-        grad_output = grad_output.view(-1, orig_shape[-1]).contiguous()
+        grad_output = grad_output.reshape(-1, orig_shape[-1]).contiguous()
         # Backward via the fast STACKED save-xn kernel: one kernel emits h (the SwiGLU output,
         # for dWs) + dAB=[dA|dB], so the squeeze input is NOT recomputed (no second
         # transition_fwd_kernel) and dWa/dWb/dxn collapse to single stacked GEMMs. ~9% faster

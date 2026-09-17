@@ -909,8 +909,9 @@ def _transition_expand_gatebwd_kernel(
     h_ptr, dA_ptr, dB_ptr, dAB_ptr, xn_ptr,
     M, ND, K, shape_key,
     stride_xm, stride_xk,
-    stride_wn, stride_wk,    # Wa, Wb: (ND, K) row-major
-    stride_gm, stride_gn,    # grad_expand / h / dA / dB: (M, ND) row-major
+    stride_an, stride_ak, stride_bn, stride_bk,  # independent Wa/Wb layouts
+    stride_gm, stride_gn,    # grad_expand input
+    stride_hm, stride_hn,    # h / dA / dB output (empty_like may compact a sliced input)
     stride_abm, stride_abn,  # dAB: (M, 2*ND) row-major, [dA | dB]
     stride_nm, stride_nk,    # xn out: (M, K) row-major
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -956,19 +957,20 @@ def _transition_expand_gatebwd_kernel(
                 tl.store(xn_ptr + rows[:, None] * stride_nm + k[None, :] * stride_nk, xn, mask=xkmask)
         else:
             xn = x  # x_ptr already holds the saved normalized x
-        wa = tl.load(wa_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+        wa = tl.load(wa_ptr + k[:, None] * stride_ak + cols[None, :] * stride_an,
                      mask=k_mask[:, None] & cmask[None, :], other=0.0)
-        wb = tl.load(wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
+        wb = tl.load(wb_ptr + k[:, None] * stride_bk + cols[None, :] * stride_bn,
                      mask=k_mask[:, None] & cmask[None, :], other=0.0)
         a += tl.dot(xn, wa, out_dtype=tl.float32, input_precision="ieee")
         b += tl.dot(xn, wb, out_dtype=tl.float32, input_precision="ieee")
     sig = tl.sigmoid(a)
     silu = a * sig
     goff = rows[:, None] * stride_gm + cols[None, :] * stride_gn
+    hoff = rows[:, None] * stride_hm + cols[None, :] * stride_hn
     gmask = rmask[:, None] & cmask[None, :]
     ge = tl.load(ge_ptr + goff, mask=gmask, other=0.0).to(tl.float32)
     if STORE_H:
-        tl.store(h_ptr + goff, (silu * b).to(et), mask=gmask)
+        tl.store(h_ptr + hoff, (silu * b).to(et), mask=gmask)
     dA = (ge * b * (sig + silu * (1.0 - sig))).to(et)
     dB = (ge * silu).to(et)
     if STACK_DAB:
@@ -983,8 +985,8 @@ def _transition_expand_gatebwd_kernel(
             mask=gmask,
         )
     else:
-        tl.store(dA_ptr + goff, dA, mask=gmask)
-        tl.store(dB_ptr + goff, dB, mask=gmask)
+        tl.store(dA_ptr + hoff, dA, mask=gmask)
+        tl.store(dB_ptr + hoff, dB, mask=gmask)
 # fmt: on
 
 
@@ -1015,12 +1017,13 @@ def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.T
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
-        wa.contiguous(), wb.contiguous(), grad_expand,
+        wa, wb, grad_expand,
         h, dA, dB, dA, xn,
         M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1),
+        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        dA.stride(0), dA.stride(1),
         dA.stride(0), dA.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=True,
@@ -1046,12 +1049,13 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         x2, rstd, c1, gamma.contiguous(), beta.contiguous(),
-        wa.contiguous(), wb.contiguous(), grad_expand,
+        wa, wb, grad_expand,
         h, dAB, dAB, dAB, xn,
         M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         x2.stride(0), x2.stride(1),
-        wa.stride(0), wa.stride(1),
+        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        h.stride(0), h.stride(1),
         dAB.stride(0), dAB.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=True,
@@ -1077,12 +1081,13 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
-        wa.contiguous(), wb.contiguous(), grad_expand,
+        wa, wb, grad_expand,
         h, dA, dB, dA, xn,           # dAB/xn_ptr unused — pass existing tensors as filler
         M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         xn.stride(0), xn.stride(1),
-        wa.stride(0), wa.stride(1),
+        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        dA.stride(0), dA.stride(1),
         dA.stride(0), dA.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=False,
@@ -1117,12 +1122,13 @@ def _transition_expand_gatebwd_savedxn_stacked(
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _transition_expand_gatebwd_kernel[grid](
         xn, xn, xn, xn, xn,
-        wa.contiguous(), wb.contiguous(), grad_expand,
+        wa, wb, grad_expand,
         h, dAB, dAB, dAB, xn,
         M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
         xn.stride(0), xn.stride(1),
-        wa.stride(0), wa.stride(1),
+        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
         grad_expand.stride(0), grad_expand.stride(1),
+        h.stride(0), h.stride(1),
         dAB.stride(0), dAB.stride(1),
         xn.stride(0), xn.stride(1),
         NORMALIZE=False,
