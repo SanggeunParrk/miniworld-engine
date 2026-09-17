@@ -11189,9 +11189,15 @@
   },
   "key_scheme": 3,
   "op": "layernorm_fwd_cuda",
-  "op_identity": "9994de3e8563aab036f7b099478cd0f428f8d80359c9cf8bfaf9cac0c2845363",
+  "op_identity": "f4e79803404384794a7bbd4194e4932a9d694863904a535cd7daf0fcee595519",
   "provenance": {
     "built_utc": "2026-09-15T22:49:44+00:00",
+    "native_identity_migration": {
+      "evidence": "byte-identical kernel/launcher tree; tuning policy and bookkeeping only",
+      "from": "9994de3e8563aab036f7b099478cd0f428f8d80359c9cf8bfaf9cac0c2845363",
+      "timing_profile": "legacy-unattributed",
+      "to": "f4e79803404384794a7bbd4194e4932a9d694863904a535cd7daf0fcee595519"
+    },
     "torch": "2.10.0+cu128",
     "triton": "3.6.0"
   },
