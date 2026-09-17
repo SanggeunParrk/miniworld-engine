@@ -380,3 +380,13 @@ def transition_bwd_cuda():
             )
         out[name] = (actual, expected)
     return out
+
+
+def transition_squeeze_residual_triton():
+    from miniworld_engine.kernels.drivers.transition import SHAPE_KEY
+    from miniworld_engine.kernels.transition.triton.residual import squeeze_residual
+    h = rows2d(ROWS, N_EXPAND * K_SMALL)
+    w = rows2d(K_SMALL, N_EXPAND * K_SMALL)
+    r = rows2d(ROWS, K_SMALL)
+    expected = ((h.float() @ w.float().T).to(h.dtype).float() + r.float()).to(r.dtype)
+    return squeeze_residual(h, w, r, SHAPE_KEY), expected

@@ -84,24 +84,9 @@ class Transition(nn.Module):
         super().__init__()
         self.d_hidden = d_hidden
         self.n = n
-        # ==========================================================================
-        # THIS MODULE ALWAYS APPLIES THE POST-TRANSITION RESIDUAL: y = x + transition(x).
-        # The residual connection is UNCONDITIONAL — it is baked into the op (folded into the
-        # b2b/triton epilogue for free, reusing the already-loaded input tile). This is the AF3
-        # pairformer default (``pair = pair + transition(pair)``) and residual connections are
-        # ubiquitous/standard in this domain, so there is deliberately NO flag to turn it off.
-        # The transition track has NO dropout (AF3), so this module takes no dropout either.
-        #
-        # WHY IT'S FUSED IN (SPEED): the residual add is done INSIDE the transition kernel's
-        # output epilogue rather than as a separate ``out + x`` elementwise op. That removes a
-        # whole extra kernel launch and its M×D read+write round-trip through HBM — the input
-        # tile is already resident in registers/smem at store time, so the add is effectively
-        # free. Keeping it unconditional is what lets the kernel own that fused epilogue; a
-        # runtime toggle would force the slow separate-add path.
-        # >>> The residual is part of what this module IS; there is no way to turn it off, not
-        # >>> even by editing a local. For the raw op in isolation -- benchmarking, or a caller
-        # >>> that owns its own residual -- use ``ops.transition``, the weights-as-args facade.
-        # ==========================================================================
+        # Every backend returns x + transition(x). Residual fusion depends on the
+        # selected path: the legacy split adds it separately; transition_residual_fusion
+        # folds it into squeeze forward and input-LN backward. No dropout in this module.
         # 'miniworld' (ours, auto) resolves to the TRITON family, which itself
         # dispatches the best concrete kernel per shape/arch (hand-CUDA b2b for
         # d in {128,256} & n==4, cute split for d>=512, else triton). Transition has
@@ -132,11 +117,10 @@ class Transition(nn.Module):
         (``_backend``), degrading to the pytorch reference (with a warning) on a dtype the fused
         kernels can't run.
 
-        The residual is UNCONDITIONAL and fused into the kernel epilogue FOR SPEED (no separate
-        ``out + x`` kernel / HBM round-trip; the input tile is already resident at store time) —
-        see the constructor comment. There is intentionally no runtime flag to disable it, as
-        residual connections are the standard in this domain (AF3 ``pair = pair + transition(pair)``).
-        >>> The raw op without the residual is ``ops.transition``, not a flag on this module."""
+        Residual is always included; whether it shares a kernel with the projection
+        depends on the backend and transition_residual_fusion setting. The raw op
+        without the residual is available through ``ops.transition``.
+        """
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
@@ -188,6 +172,8 @@ class Transition(nn.Module):
         def _r(out):  # explicit residual add for paths that don't fold it in-kernel
             return out + x
 
+        if settings.current().transition_residual_fusion:
+            return self._residual_triton_forward(x)
         if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
@@ -275,6 +261,8 @@ class Transition(nn.Module):
         def _r(out):  # explicit residual add for paths that don't fold it in-kernel
             return out + x
 
+        if settings.current().transition_residual_fusion:
+            return self._residual_triton_forward(x)
         if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
@@ -322,6 +310,15 @@ class Transition(nn.Module):
             self.n,
             self.ln_in.eps,
             save_xn=False,
+        )
+
+    def _residual_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.kernels.transition.triton.residual import transition_residual
+
+        return transition_residual(
+            x, self.ln_in.weight, self.ln_in.bias,
+            self.expand_a.weight.to(x.dtype), self.expand_b.weight.to(x.dtype),
+            self.squeeze.weight.to(x.dtype), self.ln_in.eps,
         )
 
     def _old_triton_forward(self, x: torch.Tensor) -> torch.Tensor:

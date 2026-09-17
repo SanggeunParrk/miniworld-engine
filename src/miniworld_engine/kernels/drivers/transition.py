@@ -455,3 +455,12 @@ def squeeze_residual_sm90():
     weight = torch.randn(width, 4 * width, device=dev(), dtype=BF16)
     residual = torch.randn(ROWS, width, device=dev(), dtype=BF16)
     squeeze_residual(expand, weight, residual)
+
+
+def transition_squeeze_residual_triton():
+    """Same squeeze/residual launcher and row key used by the split Transition."""
+    from miniworld_engine.kernels.transition.triton.residual import squeeze_residual
+    h = rows2d(ROWS, N_EXPAND * K_SMALL)
+    w = rows2d(K_SMALL, N_EXPAND * K_SMALL)
+    r = rows2d(ROWS, K_SMALL)
+    squeeze_residual(h, w, r, SHAPE_KEY)

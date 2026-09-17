@@ -206,6 +206,8 @@ class Settings:
     #: escape hatch and A/B lever; the fused large-d path is the default. Formerly
     #: MINIWORLD_TRANSITION_FORCE_SPLIT.
     transition_force_split: bool = False
+    #: Fuse split-path squeeze/residual and LN-backward/residual (Triton only).
+    transition_residual_fusion: bool = False
     #: Route d=128/n=4 inference through the hand-CUDA fused b2b kernel (~1.29x the Triton b2b).
     #: Formerly MINIWORLD_TRANSITION_CUDA_B2B.
     transition_cuda_b2b: bool = True
