@@ -195,3 +195,9 @@ trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/tri
 trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,BLOCK_N,,,,,,32 64 128 256,,,,,1,0,,
 trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,BLOCK_K,,,,,,16 32 64 128,,,,,0,1,KP|KG,1
 trimul_output_f567_train_triton,_output_f567_kernel,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,,GROUP_M,,,,,,1 2 4 8,,,,,0,0,,
+trimul_input_ln_residual_bwd_triton,_ln_bwd_residual_kernel,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,,BLOCK_K,,,,,,64 128 256 512 1024,,,,,0,1,N,1
+trimul_input_ln_residual_bwd_triton,_ln_bwd_residual_kernel,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,,BLOCK_M1,,,,,,1 2 4 8 16 32 64 128,,,,,1,0,,
+trimul_input_dual_bwd_triton,_input_dual_bwd_kernel,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,,BLOCK_M1,,,,,,16 32 64 128,,,,,1,0,,
+trimul_input_dual_bwd_triton,_input_dual_bwd_kernel,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,,BLOCK_N,,,,,,32 64 128 256,,,,,1,0,,
+trimul_input_dual_bwd_triton,_input_dual_bwd_kernel,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,,BLOCK_K,,,,,,32 64 128,,,,,0,1,KG|KP,1
+trimul_input_dual_bwd_triton,_input_dual_bwd_kernel,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,,GROUP_M,,,,,,1 2 4 8,,,,,0,0,,

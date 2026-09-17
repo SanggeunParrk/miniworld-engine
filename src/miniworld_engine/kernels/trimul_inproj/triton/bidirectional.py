@@ -1,6 +1,7 @@
 """Bidirectional Triton training: packed contractions, separate output LN (F4),
 and CSV-tuned F567 for BF16. Other dtypes retain the split output path.
-The saved tensors and complete backward are unchanged by F567 fusion.
+Backward fuses the two input dgrad GEMMs for BF16 and input LN with the
+identity-residual gradient. Forward saved tensors and rounding points remain.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import triton.language as tl
 
 
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
+from .backward_fused import input_ln_residual, input_dual_bwd
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
     _te_backward,
     _te_forward,
@@ -282,8 +284,11 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         # front bwd: d_concat (triton) + dW (cuBLAS) + W_stack; dxn fuses the gate add
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
-        dx = torch.mm(d_glogit, Wg.t())                          # dx_gate  (M, D)
-        dx.addmm_(dconc.t(), W_stack)                            # + dconcᵀ@W_stack (in-place)
+        if x_n.dtype == torch.bfloat16:
+            dx = input_dual_bwd(d_glogit, dconc.t(), Wg.t(), W_stack, L)
+        else:
+            dx = torch.mm(d_glogit, Wg.t())
+            dx.addmm_(dconc.t(), W_stack)
         dx_n = dx.reshape(B, L, L, D)
         # trailing Nones: eps, h, mask; then d_residual (fused residual input), dropscale
         return (dx_n, dWL, dWLg, dWR, dWRg, dWg, dWp, dLNo_w, dLNo_b, None, None, None,
@@ -356,9 +361,9 @@ def bidirectional_trimul_triton(
     # The residual is the ORIGINAL (pre-LN_in) input pair, and is not optional: this op is
     # ``y = pair + drop_row(bidir_trimul(pair))``. dropscale [B,1,L,D] -> [L,D] (B==1) for the
     # gate store's row-broadcast indexing. Both fold into the gate_elem epilogue (no external add).
-    residual_flat = pair.reshape(M, d)
     ds_2d = dropscale.reshape(L, d) if dropscale is not None else None
-    x_n = triton_layernorm(pair, ln_in_w, ln_in_b, eps_in)
+    x_n, residual = input_ln_residual(pair, ln_in_w, ln_in_b, eps_in)
+    residual_flat = residual.reshape(M, d)
     WLt, WLgt = WL.t().contiguous(), WLg.t().contiguous()
     WRt, WRgt, Wgt = WR.t().contiguous(), WRg.t().contiguous(), Wg.t().contiguous()
     if not torch.is_grad_enabled() and ds_2d is None:
