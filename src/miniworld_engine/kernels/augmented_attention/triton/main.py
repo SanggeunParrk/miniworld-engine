@@ -308,6 +308,7 @@ def _attn_bwd_dqdkdv(
     stride_d,
     H,
     N_CTX,
+    N_QUERY,
     BLOCK_M1: tl.constexpr,
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
@@ -331,18 +332,18 @@ def _attn_bwd_dqdkdv(
 
     key_mask = tl.load(mask_ptr + offs_n, mask=offs_n < N_CTX, other=False)
 
-    for _start_m in range(0, N_CTX, BLOCK_M1):
+    for _start_m in range(0, N_QUERY, BLOCK_M1):
         offs_m = _start_m + tl.arange(0, BLOCK_M1)
-        qT_mask = (offs_m[None, :] < N_CTX) & (offs_k[:, None] < HEAD_DIM)
-        do_mask = (offs_m[:, None] < N_CTX) & (offs_k[None, :] < HEAD_DIM)
+        qT_mask = (offs_m[None, :] < N_QUERY) & (offs_k[:, None] < HEAD_DIM)
+        do_mask = (offs_m[:, None] < N_QUERY) & (offs_k[None, :] < HEAD_DIM)
         qT = tl.load(qT_ptrs, mask=qT_mask, other=0.0)
 
-        bias_mask = (offs_m[None, :] < N_CTX) & (offs_n[:, None] < N_CTX)
+        bias_mask = (offs_m[None, :] < N_QUERY) & (offs_n[:, None] < N_CTX)
         biasT = tl.load(biasT_ptrs, mask=bias_mask, other=float("-inf"))
         biasT = tl.where(key_mask[:, None], biasT, float("-inf"))
         do = tl.load(do_ptrs, mask=do_mask, other=0.0)
-        m = tl.load(m_ptrs, mask=offs_m < N_CTX, other=0.0)
-        Di = tl.load(d_ptrs, mask=offs_m < N_CTX, other=0.0)
+        m = tl.load(m_ptrs, mask=offs_m < N_QUERY, other=0.0)
+        Di = tl.load(d_ptrs, mask=offs_m < N_QUERY, other=0.0)
 
         qkT = tl.dot(k, qT) + biasT / (qk_scale / 1.44269504)
         m_safe = tl.maximum(m, -1e38)
@@ -378,8 +379,7 @@ def _attn_bwd_dqdkdv(
 # AUTOTUNE KEY: `A`/`B` out for the same reason as the forward -- `A` is unread here, and `B` only
 # folds into the constant M_offset stride (B*H*N_CTX).
 @triton.autotune(configs=configs_for("augmented_attention_bwd_split_triton"),
-                 key=['shape_key'],
-                 reset_to_zero=['DQ', 'DBias'])
+                 key=['shape_key', 'CHUNKED'])
 @triton.jit
 def _attn_bwd(
     Q,
@@ -417,6 +417,14 @@ def _attn_bwd(
     BLOCK_M2: tl.constexpr,
     HEAD_DIM_PAD: tl.constexpr,
     shape_key,
+    CHUNKED: tl.constexpr = False,
+    N_QUERY: tl.constexpr = 0,
+    DQ_STRIDE_A: tl.constexpr = 0,
+    DQ_STRIDE_B: tl.constexpr = 0,
+    BIAS_STRIDE_B: tl.constexpr = 0,
+    BIAS_STRIDE_H: tl.constexpr = 0,
+    DK_ACC = None,
+    DV_ACC = None,
 ):
     tl.static_assert(HEAD_DIM_PAD >= HEAD_DIM)
     pid = tl.program_id(0).to(tl.int64)
@@ -432,14 +440,20 @@ def _attn_bwd(
     V += qkv_offset
     DO += qkv_offset
     # DQ carries a split offset so each pid owns an independent slot.
-    DQ += pid * stride_dq_split + qkv_offset
+    if CHUNKED:
+        DQ += pid * stride_dq_split + aid * DQ_STRIDE_A + bid * DQ_STRIDE_B + hid * stride_h
+    else:
+        DQ += pid * stride_dq_split + qkv_offset
     DK += qkv_offset
     DV += qkv_offset
     M += M_offset
     D += M_offset
 
     offset_bias = bid * bias_stride_z + hid * bias_stride_h
-    Bias += offset_bias
+    if CHUNKED:
+        Bias += bid * BIAS_STRIDE_B + hid * BIAS_STRIDE_H
+    else:
+        Bias += offset_bias
     DBias += aid * bias_stride_a + offset_bias
 
     mask_offset = aid * stride_maska + bid * stride_maskb
@@ -466,6 +480,14 @@ def _attn_bwd(
         other=0.0,
     )
 
+    if CHUNKED:
+        # Carry unscaled dK and dV between query chunks in FP32. Separate input
+        # and output buffers keep repeated autotune launches free of side effects.
+        acc_offsets = qkv_offset + offs_n[:, None] * stride_n + offs_k[None, :] * stride_d
+        acc_mask = (offs_n[:, None] < N_CTX) & (offs_k[None, :] < HEAD_DIM)
+        dk = tl.load(DK_ACC + acc_offsets, mask=acc_mask, other=0.0)
+        dv = tl.load(DV_ACC + acc_offsets, mask=acc_mask, other=0.0)
+
     qk_scale = sm_scale * 1.44269504
     dk, dv = _attn_bwd_dqdkdv(
         dk,
@@ -485,6 +507,7 @@ def _attn_bwd(
         stride_d,
         H,
         N_CTX,
+        N_QUERY if CHUNKED else N_CTX,
         BLOCK_M1,
         BLOCK_M2,
         HEAD_DIM_PAD,
@@ -496,7 +519,8 @@ def _attn_bwd(
     )
 
     dv_ptrs = DV + offs_n[:, None] * stride_n + offs_k[None, :] * stride_d
-    dk *= sm_scale
+    if not CHUNKED:
+        dk *= sm_scale
     dk_ptrs = DK + offs_n[:, None] * stride_n + offs_k[None, :] * stride_d
 
     tl.store(
@@ -549,6 +573,8 @@ def _dq_reduce(
     N_ELEM,  # elements in one split (= A*B*L*H*D)
     BLOCK_E: tl.constexpr,
     shape_key,
+    INNER_SPAN: tl.constexpr = 0,
+    OUTPUT_SPAN: tl.constexpr = 0,
 ):
     pid = tl.program_id(0).to(tl.int64)
     offs = pid * BLOCK_E + tl.arange(0, BLOCK_E)
@@ -561,7 +587,11 @@ def _dq_reduce(
         val = tl.load(ptr, mask=mask, other=0.0)
         acc += val
 
-    out_ptr = DQ_Out + offs
+    if INNER_SPAN:
+        out_offsets = (offs // INNER_SPAN) * OUTPUT_SPAN + offs % INNER_SPAN
+    else:
+        out_offsets = offs
+    out_ptr = DQ_Out + out_offsets
     tl.store(out_ptr, acc, mask=mask)
 
 
@@ -683,19 +713,20 @@ def _aa_bwd(
 
     # dq_expand is (num_splits, A, B, L, H, D): one slot per BLOCK_M2 block.
     num_splits = triton.cdiv(L, _bwd_min_block_n())
-    dq_expand = torch.zeros(
+    dq_expand = torch.empty(
         int(num_splits), A, B, L, H, D, device=q.device, dtype=torch.float32
     )
 
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
-    dbias = torch.zeros(A, B, H, L, L, device=q.device, dtype=torch.float32)
+    dbias = torch.empty(A, B, H, L, L, device=q.device, dtype=torch.float32)
 
-    grid = lambda META: (
-        triton.cdiv(L, META["BLOCK_M2"]),
-        A,
-        B * H,
-    )
+    active = {}
+    def grid(meta):
+        # Record the actual launched tile, including when autotuning selects it.
+        # This call-local value also works with concurrent callers/capture.
+        active['splits'] = triton.cdiv(L, meta['BLOCK_M2'])
+        return active['splits'], A, B * H
     _attn_bwd[grid](
         q,
         k,
@@ -728,7 +759,7 @@ def _aa_bwd(
         L,
         D,
         HEAD_DIM_PAD=max(16, triton.next_power_of_2(D)),
-        shape_key=atom_key(L, H=H, HEAD_DIM=D),
+        shape_key=atom_key(L, H=H, HEAD_DIM=D), CHUNKED=False,
     )
 
     # sum the splits into the final dq
@@ -741,7 +772,7 @@ def _aa_bwd(
     _dq_reduce[grid_reduce](
         dq_expand,
         dq,
-        int(num_splits),
+        active['splits'],
         dq_expand.stride(0),
         1,  # element stride (contiguous)
         n_elem,
@@ -749,6 +780,91 @@ def _aa_bwd(
     )
 
     return dq, dk, dv, dbias
+
+
+# Bound only temporary storage; no change to attention's FLOPs or accumulation
+# ownership. The small-shape path retains its original launch geometry.
+_SPLIT_BIAS_BUDGET_BYTES = 1 << 30
+_CHUNK_WORKSPACE_BYTES = 4 << 30
+
+
+def _query_chunk_rows(a, b, length, heads, head_dim):
+    splits = triton.cdiv(length, _bwd_min_block_n())
+    per_row = a * b * heads * (splits * head_dim + length) * 4
+    # Chunk boundaries must preserve every candidate's query-tile boundaries.
+    alignment = max(c.kwargs['BLOCK_M1'] for c in _attn_bwd.configs)
+    rows = max(alignment, (_CHUNK_WORKSPACE_BYTES // per_row // alignment) * alignment)
+    return min(length, rows)
+
+
+def _aa_bwd_chunked_fake(dy, q, k, v, bias, mask, o, m, shape_key):
+    a, b, length, heads, _ = q.shape
+    return (torch.empty_like(q, dtype=torch.float32), torch.empty_like(k),
+            torch.empty_like(v), q.new_empty((b, heads, length, length), dtype=torch.float32))
+
+
+@opaque(fake=_aa_bwd_chunked_fake, name="augmented_attention_bwd_chunked")
+def _aa_bwd_chunked(dy: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    bias: torch.Tensor, mask: torch.Tensor, o: torch.Tensor, m: torch.Tensor,
+                    shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the same joint dQ/dK/dV/dBias GEMM in bounded query windows.
+
+    dQ partials keep separate key-split slots and are reduced in the original
+    order directly into the final buffer. dBias is reduced over augmentation
+    immediately. dK/dV carry FP32 accumulators between query windows, with one
+    final scale/cast. No atomics and no extra recomputation of attention scores.
+    """
+    a, b, length, heads, dim = q.shape
+    rows = _query_chunk_rows(a, b, length, heads, dim)
+    splits = triton.cdiv(length, _bwd_min_block_n())
+    delta = torch.empty_like(m)
+    _attn_bwd_preprocess[lambda meta: (triton.cdiv(length, meta['BLOCK_M1']), a * b, heads)](
+        o, dy, delta, length, q.stride(1), q.stride(2), q.stride(3), q.stride(4), heads, dim,
+        shape_key=atom_key(length, H=heads, HEAD_DIM=dim),
+        HEAD_DIM_PAD=max(16, triton.next_power_of_2(dim)))
+
+    dq = torch.empty_like(q, dtype=torch.float32)
+    dbias = torch.empty((b, heads, length, length), device=q.device, dtype=torch.float32)
+    dk_prev, dv_prev = (torch.zeros_like(t, dtype=torch.float32) for t in (k, v))
+    dk_next, dv_next = (torch.empty_like(t) for t in (dk_prev, dv_prev))
+    dq_slots = torch.empty((splits, a, b, rows, heads, dim), device=q.device, dtype=torch.float32)
+    dbias_slots = torch.empty((a, b, heads, rows, length), device=q.device, dtype=torch.float32)
+    for start in range(0, length, rows):
+        stop = min(start + rows, length)
+        count = stop - start
+        if count != rows:
+            # A compact final window preserves the kernel's contiguous scratch
+            # strides. Release the full scratch first rather than retaining both.
+            del dq_slots, dbias_slots
+            dq_slots = torch.empty((splits, a, b, count, heads, dim), device=q.device, dtype=torch.float32)
+            dbias_slots = torch.empty((a, b, heads, count, length), device=q.device, dtype=torch.float32)
+        # Only reduce slots the launched candidate writes. Unused capacity is
+        # never read, so neither these scratch buffers nor dBias need clearing.
+        active = {}
+        def grid(meta):
+            active['splits'] = triton.cdiv(length, meta['BLOCK_M2'])
+            return active['splits'], a, b * heads
+        q_window, dy_window = q[:, :, start:stop], dy[:, :, start:stop]
+        bias_window = bias[:, :, start:stop]
+        _attn_bwd[grid](
+            q_window, k, v, bias_window, mask, dim ** -0.5, dy_window,
+            dq_slots, dk_next, dv_next, dbias_slots,
+            m[:, :, :, start:stop], delta[:, :, :, start:stop],
+            *q.stride(), dq_slots.stride(0), *dbias_slots.stride(), *mask.stride()[:2],
+            a, b, heads, length, dim, HEAD_DIM_PAD=max(16, triton.next_power_of_2(dim)),
+            shape_key=atom_key(length, H=heads, HEAD_DIM=dim), CHUNKED=True, N_QUERY=count,
+            DQ_STRIDE_A=dq_slots.stride(1), DQ_STRIDE_B=dq_slots.stride(2),
+            BIAS_STRIDE_B=bias.stride(0), BIAS_STRIDE_H=bias.stride(1),
+            DK_ACC=dk_prev, DV_ACC=dv_prev)
+        n_elem = a * b * count * heads * dim
+        _dq_reduce[lambda meta: (triton.cdiv(n_elem, meta['BLOCK_E']),)](
+            dq_slots, dq[:, :, start:stop], active['splits'], dq_slots.stride(0), 1, n_elem,
+            shape_key=atom_key(length), INNER_SPAN=count * heads * dim,
+            OUTPUT_SPAN=length * heads * dim)
+        torch.sum(dbias_slots, dim=0, out=dbias[:, :, start:stop])
+        dk_prev, dk_next = dk_next, dk_prev
+        dv_prev, dv_next = dv_next, dv_prev
+    return dq, (dk_prev * (dim ** -0.5)).to(k.dtype), dv_prev.to(v.dtype), dbias
 
 
 #: Largest head dim this kernel accepts. NOT a routing threshold -- past it the call
@@ -794,12 +910,15 @@ class TritonAugmentedAttentionFunction(torch.autograd.Function):
         if dy.dtype != q.dtype:
             dy = dy.to(q.dtype)
 
-        dq, dk, dv, dbias = _aa_bwd(
-            dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(q.shape[2]),
-        )
-        # Reduce over A and restore the caller's (B, L, L, H) bias layout OUTSIDE the op, so these
-        # stay in the graph and fuse with whatever consumes dbias.
-        dbias = dbias.sum(dim=0).permute(0, 2, 3, 1).contiguous()
+        A, B, L, H, _ = q.shape
+        if A * B * H * L * L * 4 > _SPLIT_BIAS_BUDGET_BYTES:
+            dq, dk, dv, dbias = _aa_bwd_chunked(
+                dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
+        else:
+            dq, dk, dv, dbias = _aa_bwd(
+                dy.contiguous(), q, k, v, bias, mask, o, m, atom_key(L))
+            dbias = dbias.sum(dim=0)
+        dbias = dbias.permute(0, 2, 3, 1).contiguous()
         return dq, dk, dv, dbias, None   # mask takes no gradient
 
 
