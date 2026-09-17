@@ -2989,6 +2989,7 @@
       "b7143d03634b"
     ],
     "bfloat16+float32|shape_key=137439478554": [
+      "22b1a86a1453",
       "46211cb131a8"
     ],
     "bfloat16+float32|shape_key=17180394266": [
@@ -3076,6 +3077,13 @@
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "grids": {
+    "22b1a86a1453": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 8, 5)"
+    ],
     "46211cb131a8": [
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 2)",

@@ -1079,7 +1079,8 @@
       "9841098574bb"
     ],
     "bfloat16+float32|shape_key=562954248913738": [
-      "9841098574bb"
+      "9841098574bb",
+      "ed9169b367c8"
     ],
     "bfloat16+float32|shape_key=70373039670090": [
       "9841098574bb"
@@ -1749,6 +1750,13 @@
       "((('BLOCK_K_K2', 64), ('BLOCK_K_NC', 64), ('BLOCK_M1', 64)), 8, 4)",
       "((('BLOCK_K_K2', 64), ('BLOCK_K_NC', 64), ('BLOCK_M1', 64)), 8, 5)",
       "((('BLOCK_K_K2', 64), ('BLOCK_K_NC', 64), ('BLOCK_M1', 64)), 8, 6)"
+    ],
+    "ed9169b367c8": [
+      "((('BLOCK_K_K2', 32), ('BLOCK_K_NC', 128), ('BLOCK_M1', 64)), 4, 4)",
+      "((('BLOCK_K_K2', 32), ('BLOCK_K_NC', 128), ('BLOCK_M1', 64)), 4, 5)",
+      "((('BLOCK_K_K2', 32), ('BLOCK_K_NC', 128), ('BLOCK_M1', 64)), 4, 6)",
+      "((('BLOCK_K_K2', 64), ('BLOCK_K_NC', 128), ('BLOCK_M1', 64)), 4, 3)",
+      "((('BLOCK_K_K2', 64), ('BLOCK_K_NC', 128), ('BLOCK_M1', 64)), 4, 4)"
     ]
   },
   "key_scheme": 3,
