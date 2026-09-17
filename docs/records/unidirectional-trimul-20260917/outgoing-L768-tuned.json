@@ -1,0 +1,291 @@
+{
+  "length": 768,
+  "direction": "outgoing",
+  "device": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "config": {
+    "d_single": 384,
+    "d_pair": 128,
+    "d_single_token": 768,
+    "d_single_atom": 128,
+    "d_pair_atom": 16,
+    "n_layers": 1,
+    "trimul_direction": "outgoing",
+    "n_augment": 48,
+    "mask_prob": 0.2,
+    "min_seq_len": 768,
+    "max_seq_len": 768,
+    "seq_len_step": 64,
+    "min_d_pair": 64,
+    "max_d_pair": 256,
+    "d_pair_step": 64,
+    "d_pair_values": null,
+    "sweep_axis": "seq_len",
+    "sweep_seq_len": 512,
+    "autotune_shard": "",
+    "config_dir": "",
+    "pin_gate_backend": "",
+    "dropout": 0.25,
+    "compile_jobs": 0,
+    "pin_infer_concat": null,
+    "pin_transition_cuda_b2b": null,
+    "target": "triangle_multiplication",
+    "level": "module",
+    "implementations": [
+      "pytorch",
+      "triton"
+    ],
+    "mode": "training",
+    "metric": "time",
+    "compile": true,
+    "cudagraph": "disabled",
+    "allow_tf32": true,
+    "precision": "bf16-mixed",
+    "layernorm_weight_precision": null,
+    "allow_eager": false,
+    "name_suffix": "",
+    "swa_component": "block",
+    "swa_kernels": null,
+    "swa_active_gates": false
+  },
+  "harness": {
+    "before": {
+      "value": 4.283583879470825,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+      "reference": "pytorch",
+      "output_max_abs": 0.04535818099975586,
+      "output_rel_frob": 0.0028154179453849792,
+      "output_cosine": 0.9999960064888,
+      "grad_max_abs": 0.05888843536376953,
+      "grad_rel_frob": 0.004436037968844175,
+      "grad_cosine": 0.9999902248382568,
+      "compiled": true,
+      "cudagraph": "disabled",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 768, 768, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 768]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 768, 768, 128]}}",
+      "execution_validation": "{\"finite_tensors\": 12}"
+    },
+    "after": {
+      "value": 3.8496320247650146,
+      "input_dtype": "bfloat16",
+      "parameter_dtype": "bfloat16+float32",
+      "execution_path": "modules.triangle_multiplication.module.TriangleMultiplication",
+      "reference": "pytorch",
+      "output_max_abs": 0.04535818099975586,
+      "output_rel_frob": 0.00281541864387691,
+      "output_cosine": 0.9999960064888,
+      "grad_max_abs": 0.0557103157043457,
+      "grad_rel_frob": 0.004313784651458263,
+      "grad_cosine": 0.9999907612800598,
+      "compiled": true,
+      "cudagraph": "disabled",
+      "compile_scope": "module_forward:partial_allowed",
+      "compiled_graphs": 1,
+      "measurement_scope": "forward_backward",
+      "input_shapes": "{\"dy\": {\"dtype\": \"bfloat16\", \"shape\": [1, 768, 768, 128]}, \"inference_step.mask\": {\"dtype\": \"bool\", \"shape\": [1, 768]}, \"inference_step.pair\": {\"dtype\": \"bfloat16\", \"shape\": [1, 768, 768, 128]}}",
+      "execution_validation": "{\"finite_tensors\": 12}"
+    }
+  },
+  "paired": {
+    "before": {
+      "ms": 4.295215964317322,
+      "samples_ms": [
+        4.288784027099609,
+        4.30787205696106,
+        4.295439958572388,
+        4.297600030899048,
+        4.297744035720825,
+        4.298288106918335,
+        4.291455984115601,
+        4.299968004226685,
+        4.294991970062256,
+        4.293391942977905,
+        4.289504051208496,
+        4.291296005249023
+      ]
+    },
+    "after": {
+      "ms": 3.8479599952697754,
+      "samples_ms": [
+        3.846992015838623,
+        3.8466399908065796,
+        3.8489279747009277,
+        3.8493599891662598,
+        3.839568018913269,
+        3.8443360328674316,
+        3.85697603225708,
+        3.855232000350952,
+        3.842479944229126,
+        3.8452800512313843,
+        3.8552958965301514,
+        3.8520320653915405
+      ]
+    }
+  },
+  "fused_cache_lookups": [
+    {
+      "op": "trimul_output_f567_train_triton",
+      "bucket": "L=768,M=589824,shape_key=216181580354814105,wg0=128,wg1=1,wp0=128,wp1=1",
+      "configs": [
+        {
+          "kwargs": {
+            "BLOCK_M1": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 1
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 2
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 4
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 64,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 8
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 128,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 1
+          },
+          "num_warps": 8,
+          "num_stages": 3
+        }
+      ]
+    },
+    {
+      "op": "trimul_input_dual_bwd_triton",
+      "bucket": "M=589824,fs0=1,fs1=589824,gs0=128,gs1=1,shape_key=216181586797265049,vs0=128,vs1=1,ws0=1,ws1=128",
+      "configs": [
+        {
+          "kwargs": {
+            "BLOCK_M1": 64,
+            "BLOCK_N": 128,
+            "BLOCK_K": 64,
+            "GROUP_M": 1
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 128,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 1
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 128,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 2
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 128,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 4
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_M1": 128,
+            "BLOCK_N": 64,
+            "BLOCK_K": 64,
+            "GROUP_M": 8
+          },
+          "num_warps": 4,
+          "num_stages": 3
+        }
+      ]
+    },
+    {
+      "op": "trimul_input_ln_residual_bwd_triton",
+      "bucket": "HAS_ROWSCALE=0,shape_key=9895605175066",
+      "configs": [
+        {
+          "kwargs": {
+            "BLOCK_K": 64,
+            "BLOCK_M1": 64
+          },
+          "num_warps": 2,
+          "num_stages": 2
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 64,
+            "BLOCK_M1": 64
+          },
+          "num_warps": 2,
+          "num_stages": 3
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 64,
+            "BLOCK_M1": 64
+          },
+          "num_warps": 2,
+          "num_stages": 4
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 64,
+            "BLOCK_M1": 64
+          },
+          "num_warps": 2,
+          "num_stages": 5
+        },
+        {
+          "kwargs": {
+            "BLOCK_K": 64,
+            "BLOCK_M1": 64
+          },
+          "num_warps": 2,
+          "num_stages": 6
+        }
+      ]
+    }
+  ],
+  "scope": "One production module, forward+backward, no optimizer; fixed-shape torch.compile(dynamic=False); graph/dropout per config; same GPU, 12 alternating rounds using the harness timer, 100 ms per sample.",
+  "speedup": 1.1162319695624043
+}

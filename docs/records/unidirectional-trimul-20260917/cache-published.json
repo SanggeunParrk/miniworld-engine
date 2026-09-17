@@ -1,0 +1,14 @@
+{
+  "ops": [
+    "trimul_output_f567_train_triton",
+    "trimul_input_dual_bwd_triton",
+    "trimul_input_ln_residual_bwd_triton"
+  ],
+  "shapes": [
+    128,
+    384,
+    768
+  ],
+  "entries": 9,
+  "patch": "miniworld-engine-trimul-unidirectional-cache.patch"
+}

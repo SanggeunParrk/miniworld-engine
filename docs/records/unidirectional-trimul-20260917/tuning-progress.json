@@ -1,0 +1,119 @@
+[
+  {
+    "length": 384,
+    "stage": "f567",
+    "entries": [
+      [
+        "trimul_output_f567_train_triton",
+        "bfloat16",
+        "L=384,M=147456,shape_key=108095189297922201,wg0=128,wg1=1,wp0=128,wp1=1",
+        1728,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_output_f567_train_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 384,
+    "stage": "dual",
+    "entries": [
+      [
+        "trimul_input_dual_bwd_triton",
+        "bfloat16",
+        "M=147456,fs0=1,fs1=147456,gs0=128,gs1=1,shape_key=108095195740373145,vs0=128,vs1=1,ws0=1,ws1=128",
+        646,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_input_dual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 384,
+    "stage": "ln_residual",
+    "entries": [
+      [
+        "trimul_input_ln_residual_bwd_triton",
+        "bfloat16+float32",
+        "HAS_ROWSCALE=0,shape_key=2473901687578",
+        270,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_input_ln_residual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 128,
+    "stage": "f567",
+    "entries": [
+      [
+        "trimul_output_f567_train_triton",
+        "bfloat16",
+        "L=128,M=16384,shape_key=36037595259994265,wg0=128,wg1=1,wp0=128,wp1=1",
+        1727,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_output_f567_train_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 128,
+    "stage": "dual",
+    "entries": [
+      [
+        "trimul_input_dual_bwd_triton",
+        "bfloat16",
+        "M=16384,fs0=1,fs1=16384,gs0=128,gs1=1,shape_key=36037601702445209,vs0=128,vs1=1,ws0=1,ws1=128",
+        646,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_input_dual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 128,
+    "stage": "ln_residual",
+    "entries": [
+      [
+        "trimul_input_ln_residual_bwd_triton",
+        "bfloat16+float32",
+        "HAS_ROWSCALE=0,shape_key=274878432026",
+        270,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_input_ln_residual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 768,
+    "stage": "f567",
+    "entries": [
+      [
+        "trimul_output_f567_train_triton",
+        "bfloat16",
+        "L=768,M=589824,shape_key=216181580354814105,wg0=128,wg1=1,wp0=128,wp1=1",
+        1726,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_output_f567_train_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 768,
+    "stage": "dual",
+    "entries": [
+      [
+        "trimul_input_dual_bwd_triton",
+        "bfloat16",
+        "M=589824,fs0=1,fs1=589824,gs0=128,gs1=1,shape_key=216181586797265049,vs0=128,vs1=1,ws0=1,ws1=128",
+        646,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_input_dual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  },
+  {
+    "length": 768,
+    "stage": "ln_residual",
+    "entries": [
+      [
+        "trimul_input_ln_residual_bwd_triton",
+        "bfloat16+float32",
+        "HAS_ROWSCALE=0,shape_key=9895605175066",
+        270,
+        "/home/psk6950/MiniWorld/runs/trimul_unidirectional_20260917/engine/../tuned-cache/trimul_input_ln_residual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json"
+      ]
+    ]
+  }
+]

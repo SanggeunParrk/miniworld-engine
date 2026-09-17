@@ -1,0 +1,12 @@
+{
+  "configs": 1728,
+  "worst_relative_error": [
+    0.0,
+    0.00160725018940866,
+    7.224896307889139e-06
+  ],
+  "M": 512,
+  "L": 384,
+  "D": 128,
+  "scope": "all single-direction L384 shape-pruned F567 schedules; sampled 512 rows"
+}
