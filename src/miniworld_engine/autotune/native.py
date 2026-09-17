@@ -25,6 +25,7 @@ from miniworld_engine.autotune.cache import (
 
 _WINNERS: dict = {}
 BUILD_OPS = frozenset({
+    "layernorm_bwd_split_sm90_cute",
     "trimul_output_bwd_rows_sm90_cute",
     "trimul_inproj_masked_sm90_cute",
     "transition_squeeze_residual_sm90_cute",
@@ -40,6 +41,8 @@ BUILD_OPS = frozenset({
 
 
 def native_shape_supported(op, width, dtype):
+    if op == "layernorm_bwd_split_sm90_cute":
+        return width > 0 and dtype in ("bfloat16", "float32")
     if op in ("layernorm_fwd_cuda", "layernorm_bwd_split_cuda"):
         if op == "layernorm_bwd_split_cuda":
             alignment = 128 if dtype == "bfloat16" else 64

@@ -324,7 +324,7 @@ def configure(**kwargs) -> Settings:
         raise TypeError(f"unknown setting(s): {', '.join(sorted(unknown))}")
     if "trimul_sm90_kernels" in kwargs:
         names = frozenset(kwargs["trimul_sm90_kernels"])
-        unknown = names - {"front", "f567", "dual_bwd"}
+        unknown = names - {"front", "f567", "dual_bwd", "out_ln_bwd"}
         if unknown:
             raise ValueError(f"Unknown SM90 TriMul kernels: {sorted(unknown)}")
         kwargs["trimul_sm90_kernels"] = names

@@ -11,6 +11,7 @@ import itertools
 from pathlib import Path
 
 TRITON_OPS = {
+    "layernorm_bwd_split_sm90_cute": "layernorm_bwd_split_triton",
     "trimul_inproj_gemm_gate_mmajor_sm90_cute": "trimul_gemm_gate_mmajor_triton",
     "trimul_output_f567_train_sm90_cute": "trimul_output_f567_train_triton",
     "trimul_input_dual_bwd_sm90_cute": "trimul_input_dual_bwd_triton",
@@ -68,6 +69,13 @@ def partition_for_bucket(op, bucket):
     elif op == "trimul_input_dual_bwd_sm90_cute":
         from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import feasibility
         feasible = lambda c: feasibility(c, smem_limit=extra[1])
+    elif op == "layernorm_bwd_split_sm90_cute":
+        from miniworld_engine.kernels.layernorm.cute.tma_backward import config_rejection
+        shape, strides, dtype = tensors[0]
+        feasible = lambda c: config_rejection(
+            c, n=shape[1], itemsize=4 if "float32" in dtype else 2,
+            m_major=strides[0] == 1, smem_limit=extra[0]
+        )
     else:
         raise ValueError(f"Unknown SM90 TriMul op: {op}")
     return partition_configs(op, feasible)

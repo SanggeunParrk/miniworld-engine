@@ -23,7 +23,8 @@ def task_for(op, config, bucket):
     if op not in BUILD_OPS:
         return None
     if op in ("trimul_inproj_gemm_gate_mmajor_sm90_cute",
-              "trimul_output_f567_train_sm90_cute", "trimul_input_dual_bwd_sm90_cute"):
+              "trimul_output_f567_train_sm90_cute", "trimul_input_dual_bwd_sm90_cute",
+              "layernorm_bwd_split_sm90_cute"):
         # These launchers currently compile exact tensor layouts on the allocated
         # compute GPU. Do not route their canonical Triton axis names through the
         # legacy Quack compile ABI (tile_m/tile_n/cluster_*).

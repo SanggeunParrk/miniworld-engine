@@ -323,11 +323,22 @@ def test_native_launchers_use_registered_measurement_names():
     seen = set()
     for family in ("layernorm", "layernorm_linear", "transition", "tm2", "trimul_inproj"):
         for path in (root / family).rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text())):
+            tree = ast.parse(path.read_text())
+            constants = {
+                target.id: node.value.value
+                for node in tree.body if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                for target in node.targets if isinstance(target, ast.Name)
+            }
+            for node in ast.walk(tree):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                        and node.func.id in ("choose_config", "resolve_config")
-                        and node.args and isinstance(node.args[0], ast.Constant)):
-                    op = node.args[0].value
+                        and node.func.id in ("choose_config", "resolve_config", "resolve")
+                        and node.args):
+                    arg = node.args[0]
+                    op = (arg.value if isinstance(arg, ast.Constant)
+                          else constants.get(arg.id) if isinstance(arg, ast.Name) else None)
+                    if op is None:
+                        continue
                     assert op in native.BUILD_OPS, (path, op)
                     seen.add(op)
     assert len(seen) == len(native.BUILD_OPS) - 3  # CUDA transition constructs its three names

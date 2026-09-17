@@ -221,6 +221,10 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
     ``dynamic_func() missing 1 required positional argument: 'shape_key'``. It is the wide-N
     large-M branch, so the trimul backward died for any L with L*L >= 300_000 (L >= 548) at
     d_hidden > 128."""
+    if "out_ln_bwd" in settings.current().trimul_sm90_kernels:
+        from ...layernorm.cute.tma_backward import input_rejection, backward_impl
+        if input_rejection(x, dxn, gamma, mean, rstd, dx_strides) is None:
+            return backward_impl(dxn, x, gamma, mean, rstd, dx_strides)
     M, K = x.shape
     dx = torch.empty_strided((M, K), dx_strides, device=x.device, dtype=dxn.dtype)
     NP = _persistent_grid(x.device)
