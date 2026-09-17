@@ -14,7 +14,16 @@ def layernorm_pytorch(
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Reference LayerNorm over the last dimension."""
-    return F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+    # Norm affine parameters stay FP32 after module.bfloat16(). The CUDA
+    # PyTorch fallback rejects BF16 input + FP32 weight when bias is absent.
+    # Accumulate low-precision inputs in FP32 and preserve the activation dtype.
+    compute_dtype = torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+    result = F.layer_norm(
+        x.to(compute_dtype), (x.shape[-1],),
+        weight.to(compute_dtype) if weight is not None else None,
+        bias.to(compute_dtype) if bias is not None else None, eps,
+    )
+    return result.to(x.dtype)
 
 
 class LayerNormRef(nn.Module):
