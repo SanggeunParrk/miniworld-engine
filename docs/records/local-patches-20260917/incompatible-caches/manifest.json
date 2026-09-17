@@ -1,0 +1,372 @@
+[
+  {
+    "op": "adaln_fwd_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/adaln_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/adaln_fwd_triton/NVIDIA RTX A5000 (sm86).json",
+    "sha256": "14f8b695a497437f76c6a48dc43e514014f826c8e88221c9b0c8c35c12368cce"
+  },
+  {
+    "op": "adaln_gemm_gate_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/adaln_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/adaln_gemm_gate_triton/NVIDIA RTX A5000 (sm86).json",
+    "sha256": "239c110fcad0576fa565592df8a9487b78a8709d279af4e5aab1367ce9310ffc"
+  },
+  {
+    "op": "adaln_gemm_gate_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/adaln_gemm_gate_triton/NVIDIA RTX A6000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/adaln_gemm_gate_triton/NVIDIA RTX A6000 (sm86).json",
+    "sha256": "bb50c222ace93707c9ecdd00c49bd9e3fb89cde92f52f1f14767a685c8f8d2b0"
+  },
+  {
+    "op": "augmented_attention_bwd_reduce_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/augmented_attention_bwd_reduce_triton/NVIDIA RTX A5000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/augmented_attention_bwd_reduce_triton/NVIDIA RTX A5000 (sm86).json",
+    "sha256": "d52ef6f401512c804aabcf8791f8f4d700abdc5d58d84b7e875a820ceca400ab"
+  },
+  {
+    "op": "augmented_attention_bwd_reduce_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/augmented_attention_bwd_reduce_triton/NVIDIA RTX A6000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/augmented_attention_bwd_reduce_triton/NVIDIA RTX A6000 (sm86).json",
+    "sha256": "da94902c9dc8d4b6ad87ccbbed14a0256423a4bab74576e88c1e18222a639486"
+  },
+  {
+    "op": "augmented_attention_bwd_split_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/augmented_attention_bwd_split_triton/NVIDIA RTX A5000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/augmented_attention_bwd_split_triton/NVIDIA RTX A5000 (sm86).json",
+    "sha256": "41889bfdd7de8812ee5728e1ebb1014455690a1a9991924fdcaffb7233d5bb2a"
+  },
+  {
+    "op": "augmented_attention_bwd_split_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/augmented_attention_bwd_split_triton/NVIDIA RTX A6000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/augmented_attention_bwd_split_triton/NVIDIA RTX A6000 (sm86).json",
+    "sha256": "429d045cd0197ff35890829f53ba736158acc4766c31916233f3f1fad4f4e1cc"
+  },
+  {
+    "op": "layernorm_bwd_foldstats_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/layernorm_bwd_foldstats_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/layernorm_bwd_foldstats_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "7f9c4eacff2d6d9e33218f85c3ac37b52c4fd4ed438f573a93816d2d28442d29"
+  },
+  {
+    "op": "layernorm_bwd_split_cuda",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/layernorm_bwd_split_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/layernorm_bwd_split_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "cb42e9cf374de0c006927a68271cee85e4ac1f69a9ff628d50cf288233ba2d67"
+  },
+  {
+    "op": "layernorm_fwd_cuda",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/layernorm_fwd_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/layernorm_fwd_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "969848c7d4c2860d638ec1ee91a2c8a1165d5264cdbd0e173086c4548a3af9a4"
+  },
+  {
+    "op": "layernorm_linear_bwd_dx_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/layernorm_linear_bwd_dx_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/layernorm_linear_bwd_dx_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "81311435d69418ae5cacfa967b2d4a82ded4a3335d4210addb6cd884091a510d"
+  },
+  {
+    "op": "layernorm_linear_fwd_foldstats_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/layernorm_linear_fwd_foldstats_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/layernorm_linear_fwd_foldstats_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "11e88d01d4b32025663b64fb52495015ea43c1e47f2b45678bea35799bf1be61"
+  },
+  {
+    "op": "layernorm_linear_fwd_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/layernorm_linear_fwd_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/layernorm_linear_fwd_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "faf4fa6d8fccd87b9f72fe7cceb034ab8a5660645e9d2b01ed16c2fc6fc08f04"
+  },
+  {
+    "op": "rmsnorm_adamod_bwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/rmsnorm_adamod_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/rmsnorm_adamod_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "6167614df3bdbfcdfec84fdae705f3d6eaa0de4ffd80fedf85049f4843cfc116"
+  },
+  {
+    "op": "rmsnorm_adamod_fwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/rmsnorm_adamod_fwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/rmsnorm_adamod_fwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "c247199ced1dd1cc11ea54c23f8fa97bc9650813e1ca6f8fe0a92fe4f7b468c5"
+  },
+  {
+    "op": "rmsnorm_bwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/rmsnorm_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/rmsnorm_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "ccc43377b082de21decb796b3eb66bbf870499f6e45ed3c0c2bd1c0dc48b7462"
+  },
+  {
+    "op": "rmsnorm_fwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/rmsnorm_fwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/rmsnorm_fwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "3d18ca07038b198a5ae83b269cb7ed1c7b87c22b70199d2aeb2d4231770a1b80"
+  },
+  {
+    "op": "transition_bwd_dx_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_bwd_dx_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_bwd_dx_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "1c0ba6f2d23dcea688c2962834a25c0d019ab7d64add1cff7baf5b1eaf51d20e"
+  },
+  {
+    "op": "transition_bwd_gate_sm90_cuda",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_bwd_gate_sm90_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_bwd_gate_sm90_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "f6a4e72f9ed924f0980a6dc682977dff34745c749d99ec1b31d8915227b339d3"
+  },
+  {
+    "op": "transition_bwd_swiglu_recompute_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_bwd_swiglu_recompute_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_bwd_swiglu_recompute_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "432be6a7a05ca3fa1e7084a60edde1f673450e6cef57d08610d68bff514dc965"
+  },
+  {
+    "op": "transition_expand_swiglu_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_expand_swiglu_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_expand_swiglu_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "185971e148ce5fb3d70e3cd11405bcdd6dac43cdc38229e2b44eea6847a02d01"
+  },
+  {
+    "op": "transition_fwd_b2b_ktiled_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_fwd_b2b_ktiled_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_fwd_b2b_ktiled_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "11e21571e2e38555115b886eff68817f2fa123dd6ef2c4985ae6e9ccfc0686c8"
+  },
+  {
+    "op": "transition_fwd_b2b_sm90_cuda",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_fwd_b2b_sm90_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_fwd_b2b_sm90_cuda/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "81594d1b11ad212a5bce9d08dafb6ce4d127370fe1161365c9f908f52f627b5d"
+  },
+  {
+    "op": "transition_fwd_b2b_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_fwd_b2b_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_fwd_b2b_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "ce78036862977be7c38235e07f0ac674aadbd396243c9278919ae91c33a3be06"
+  },
+  {
+    "op": "transition_gate_bwd_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_gate_bwd_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_gate_bwd_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "4126bc188124fd458fb8d16a3dadfe078d4c3472e7425c29baa60b843b3e22a1"
+  },
+  {
+    "op": "transition_layernorm_expand_swiglu_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_layernorm_expand_swiglu_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_layernorm_expand_swiglu_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "6bd76aae508c7882e9f71ad498f219933d7d7ab18045df2aaa05b80866670b82"
+  },
+  {
+    "op": "transition_squeeze_residual_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_squeeze_residual_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_squeeze_residual_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "3f565c4f58337d78e2e8df13fc362d34c103f4c6c951678bba91ccf7d659dc81"
+  },
+  {
+    "op": "transition_swiglu_fwd_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/transition_swiglu_fwd_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/transition_swiglu_fwd_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "d49e270ef40b8e46ef796a1f6745356d324311c0054866a0c1f969f47a69ef22"
+  },
+  {
+    "op": "trimul_gemm_gate_mmajor_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_gemm_gate_mmajor_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_gemm_gate_mmajor_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "5fd659bb2c29da4389303e9e314ce773788c5f61dd576ee4192269419194bd93"
+  },
+  {
+    "op": "trimul_gemm_gate_mmajor_triton",
+    "gpu": "NVIDIA RTX A5000 (sm86)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_gemm_gate_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_gemm_gate_mmajor_triton/NVIDIA RTX A5000 (sm86).json",
+    "sha256": "049b9872389de551d5565a5ad32b835fb3153a6630d86ca0169f924cef51624b"
+  },
+  {
+    "op": "trimul_gemm_gate_mmajor_triton",
+    "gpu": "NVIDIA RTX A6000 (sm86)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_gemm_gate_mmajor_triton/NVIDIA RTX A6000 (sm86).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_gemm_gate_mmajor_triton/NVIDIA RTX A6000 (sm86).json",
+    "sha256": "93640f31106ddc52403d9a05eaf06c93fc6a24256e51b07c2cc7256cac17fbb2"
+  },
+  {
+    "op": "trimul_inproj_masked_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_inproj_masked_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_inproj_masked_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "4cb758b9228250216497fbc78213714d05a617b4f8709cb7784ae24c45e3448b"
+  },
+  {
+    "op": "trimul_input_dual_bwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_input_dual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_input_dual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "18f9454f2938c592b596d21f7c9951ed0ec23df6c3c281c721c99fb5e306ba3f"
+  },
+  {
+    "op": "trimul_input_ln_residual_bwd_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "profiled kernel dependency changed (implementation)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_input_ln_residual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_input_ln_residual_bwd_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "30aea1d5adfcad55b49b94b7a7768ddf3b57cd2447e4bf1eec389e2649342b0a"
+  },
+  {
+    "op": "trimul_outproj_gemm_gate_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_outproj_gemm_gate_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_outproj_gemm_gate_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "d172600a7132e74fda3285232abfc3c6569224816a2b832936d11c5021c29b64"
+  },
+  {
+    "op": "trimul_output_bwd_rows_sm90_cute",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "native implementation changed",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_output_bwd_rows_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_output_bwd_rows_sm90_cute/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "ac85e497d56685dcce145372d5f2933e6f05efa3f963f993863a82e09da590b9"
+  },
+  {
+    "op": "trimul_output_f567_train_triton",
+    "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+    "verdict": "STALE",
+    "reason": "kernel source/key changed (op_identity)",
+    "env_matches": true,
+    "original": "src/miniworld_engine/autotune/data/trimul_output_f567_train_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "archive": "docs/records/local-patches-20260917/incompatible-caches/trimul_output_f567_train_triton/NVIDIA H100 80GB HBM3 (sm90).json",
+    "sha256": "27d0c16c28c0c9906062f212965de472e0af977580648df56823f2365e8db2df"
+  }
+]

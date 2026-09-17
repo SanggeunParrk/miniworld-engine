@@ -598,7 +598,7 @@ def _dq_reduce(
     tl.store(out_ptr, acc, mask=mask)
 
 
-def __aa_fwd_fake(q, k, v, bias, mask, shape_key):
+def _aa_fwd_fake(q, k, v, bias, mask, shape_key):
     """``(out, m)``: ``out`` like ``q``; ``m`` is the per-row logsumexp, ``(A, B, H, L)`` and
     fp32 while the activations are bf16 -- the backward recomputes ``p = exp2(qk*scale - m)``
     from it, so its digits land in an exponent.
@@ -607,7 +607,7 @@ def __aa_fwd_fake(q, k, v, bias, mask, shape_key):
     return torch.empty_like(q), q.new_empty((A, B, H, L), dtype=torch.float32)
 
 
-@opaque(fake=__aa_fwd_fake, name="augmented_attention_fwd")
+@opaque(fake=_aa_fwd_fake, name="augmented_attention_fwd")
 def _aa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -661,7 +661,7 @@ def _aa_fwd(
     return out, m
 
 
-def __aa_bwd_fake(dy, q, k, v, bias, mask, o, m, shape_key):
+def _aa_bwd_fake(dy, q, k, v, bias, mask, o, m, shape_key):
     """``(dq, dk, dv, dbias_raw)``: ``dq`` comes back fp32 -- it is summed out of the fp32
     per-split ``dq_expand`` buffer -- while ``dk``/``dv`` keep their inputs' dtype.
     ``dbias_raw`` is the UNREDUCED ``(A, B, H, L, L)`` fp32 accumulator: the sum over A and the
@@ -676,7 +676,7 @@ def __aa_bwd_fake(dy, q, k, v, bias, mask, o, m, shape_key):
     )
 
 
-@opaque(fake=__aa_bwd_fake, name="augmented_attention_bwd")
+@opaque(fake=_aa_bwd_fake, name="augmented_attention_bwd")
 def _aa_bwd(
     dy: torch.Tensor,
     q: torch.Tensor,
@@ -800,13 +800,13 @@ def _query_chunk_rows(a, b, length, heads, head_dim):
     return min(length, rows)
 
 
-def __aa_bwd_chunked_fake(dy, q, k, v, bias, mask, o, m, shape_key):
+def _aa_bwd_chunked_fake(dy, q, k, v, bias, mask, o, m, shape_key):
     """Allocate outputs with the same shape, dtype and strides as _aa_bwd_chunked."""
     (a, b, length, heads, _) = q.shape
     return (torch.empty_like(q, dtype=torch.float32), torch.empty_like(k), torch.empty_like(v), q.new_empty((b, heads, length, length), dtype=torch.float32))
 
 
-@opaque(fake=__aa_bwd_chunked_fake, name="augmented_attention_bwd_chunked")
+@opaque(fake=_aa_bwd_chunked_fake, name="augmented_attention_bwd_chunked")
 def _aa_bwd_chunked(dy: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     bias: torch.Tensor, mask: torch.Tensor, o: torch.Tensor, m: torch.Tensor,
                     shape_key: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -1,5 +1,9 @@
 # miniworld-engine
 
+![MiniWorld Engine graphical abstract: model operations, GPU kernel fusion, hardware-specific tuning and cache reuse, with A6000 DiT results.](docs/assets/miniworld-engine-graphical-abstract.png)
+
+[Figure details and measurement scope](docs/assets/README.md).
+
 Dedicated GPU kernel-development repo for MiniWorld / AF3-style ops. The idea is
 to **cut one op out of the full model and optimize it in isolation**:
 
@@ -295,14 +299,16 @@ from-scratch single-megakernel tm2 (`kernels/tm2/cute/tm2_cute_kernel.py`) is WI
 `miniworld-engine` (installed by the package; `python -m miniworld_engine.cli` works too):
 
 ```bash
-miniworld-engine build all            # verify the current plan, then fill its cache gaps and alternatives
+miniworld-engine build all            # verify the current model plan, then fill its cache gaps
 miniworld-engine build all --resume   # default: reuse compatible completed measurements
 miniworld-engine dev coverage --arch sm86    # default cache key: NVIDIA RTX A6000 (sm86)
 miniworld-engine dev audit            # registry, tuning and build-system contract checks
 ```
 
-`build all` runs the module plan first and alternative-kernel drivers second, then checks
-required cache coverage after merging. Declared invocations, selected work and cache keys
+`build all` runs only the configured FoldForge/MiniWorld module shapes, then checks
+required cache coverage after merging. Unreachable diagnostic kernels are not appended to
+the default build; use explicit `--per-op` for a separate kernel experiment.
+[Model shape policy](docs/reports/model-shape-cleanup-20260916.md). Declared invocations, selected work and cache keys
 are different counts; the command prints them for the current source and GPU.
 A claim file alone does not prove completion: resume requires reusable measurement shards
 and matching provenance. `--no-resume` disables completed-shard reuse.

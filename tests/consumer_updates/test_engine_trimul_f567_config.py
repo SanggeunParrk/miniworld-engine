@@ -1,6 +1,7 @@
 """CSV, shape-key and tiled F567 correctness contracts for the staged engine."""
 
 import itertools
+from typing import Any
 
 import pytest
 import torch
@@ -48,12 +49,12 @@ def test_independent_shape_axes_do_not_alias():
     }
     assert len(keys) == 24
     cfg = triton.Config(
-        dict(BLOCK_M1=128, BLOCK_N=256, BLOCK_K=128, GROUP_M=8),
+        {"BLOCK_M1": 128, "BLOCK_N": 256, "BLOCK_K": 128, "GROUP_M": 8},
         num_warps=8,
         num_stages=4,
     )
     # An intentionally oversized one-config mask probe is still executable.
-    assert prune_output_configs([cfg], dict(M=7, N=13, KP=19, KG=17)) == [cfg]
+    assert prune_output_configs([cfg], {"M": 7, "N": 13, "KP": 19, "KG": 17}) == [cfg]
 
 
 def probes():
@@ -63,30 +64,30 @@ def probes():
         itertools.product([16, 32, 64, 128], [32, 64, 128, 256])
     ):
         choices.append(
-            dict(
-                BLOCK_M1=m,
-                BLOCK_N=n,
-                BLOCK_K=[16, 32, 64, 128][i % 4],
-                GROUP_M=[1, 2, 4, 8][i % 4],
-                num_warps=[4, 8][i % 2],
-                num_stages=[2, 3, 4][i % 3],
-            )
+            {
+                "BLOCK_M1": m,
+                "BLOCK_N": n,
+                "BLOCK_K": [16, 32, 64, 128][i % 4],
+                "GROUP_M": [1, 2, 4, 8][i % 4],
+                "num_warps": [4, 8][i % 2],
+                "num_stages": [2, 3, 4][i % 3],
+            }
         )
-    for w in (1, 2):
-        choices.append(
-            dict(
-                BLOCK_M1=32,
-                BLOCK_N=64,
-                BLOCK_K=32,
-                GROUP_M=4,
-                num_warps=w,
-                num_stages=2,
-            )
-        )
+    choices.extend(
+            {
+                "BLOCK_M1": 32,
+                "BLOCK_N": 64,
+                "BLOCK_K": 32,
+                "GROUP_M": 4,
+                "num_warps": w,
+                "num_stages": 2,
+            }
+        for w in (1, 2)
+    )
     choices.append(
-        dict(
-            BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=8, num_warps=4, num_stages=3
-        )
+        {
+            "BLOCK_M1": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_M": 8, "num_warps": 4, "num_stages": 3
+        }
     )
     return choices
 
@@ -100,7 +101,7 @@ def test_masks_groups_and_independent_reductions(cfg, transpose_weights):
     torch.backends.cuda.matmul.allow_tf32 = False
     m, n = 5 * cfg["BLOCK_M1"] + 7, 2 * cfg["BLOCK_N"] + 3
     kp, kg, length = 193, 67, 17
-    kw = dict(device="cuda", dtype=torch.bfloat16)
+    kw: dict[str, Any] = {"device": "cuda", "dtype": torch.bfloat16}
     norm, x = torch.randn(m, kp, **kw), torch.randn(m, kg, **kw)
     wp, wg = torch.randn(n, kp, **kw) / kp**0.5, torch.randn(kg, n, **kw) / kg**0.5
     if transpose_weights:
@@ -141,8 +142,8 @@ def test_masks_groups_and_independent_reductions(cfg, transpose_weights):
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_public_shape_validation_before_launch():
-    kw = dict(device="cuda", dtype=torch.bfloat16)
-    args = [
+    kw: dict[str, Any] = {"device": "cuda", "dtype": torch.bfloat16}
+    args: list[Any] = [
         torch.empty(7, 19, **kw),
         torch.empty(7, 17, **kw),
         torch.empty(13, 19, **kw),

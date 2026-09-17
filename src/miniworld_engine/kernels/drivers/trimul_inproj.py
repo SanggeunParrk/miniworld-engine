@@ -27,12 +27,16 @@ make one missing dependency take down all 25 drivers instead of the one it belon
 """
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
+from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels.drivers import (
     BF16,
     both_level_is_pair,
     dev,
+    driver_heads,
     driver_length,
     driver_width,
     norm_affine,
@@ -280,25 +284,83 @@ def masked_front_sm90():
         masked_front(a, weight, mask, save)
 
 
-def trimul_output_bwd_rows_sm90():
-    """Run the specialized trimul_output_bwd_rows_sm90 harness."""
-    from miniworld_engine.kernels.drivers.hopper import trimul_output_bwd_rows as run
-    return run()
+
+def _ln_residual_operands():
+    n = ragged(driver_width(128))
+    l = driver_length(64)
+    m = ragged(l * l)
+    kw: dict[str, Any] = {"device": dev(), "dtype": BF16}
+    x = torch.randn(m, n, **kw)
+    w = torch.randn(n, **kw) * 0.1 + 1
+    mean = x.float().mean(1)
+    rstd = torch.rsqrt(x.float().var(1, unbiased=False) + 1e-5)
+    return torch.randn_like(x), x, w, mean, rstd, torch.randn_like(x), both_key(m)
 
 
-def trimul_output_f567_train():
-    """Run the specialized trimul_output_f567_train harness."""
-    from miniworld_engine.kernels.drivers.trimul_output import output_f567_train as run
-    return run()
+def _dual_operands():
+    n = ragged(driver_width(128))
+    l = driver_length(64)
+    m = ragged(l * l)
+    kg = n
+    kp = ragged(8 * driver_heads(driver_width(128)))
+    kw: dict[str, Any] = {"device": dev(), "dtype": BF16}
+    return (
+        torch.randn(m, kg, **kw),
+        torch.randn(kp, m, **kw).t(),
+        torch.randn(n, kg, **kw).t() / kg**0.5,
+        torch.randn(kp, n, **kw) / kp**0.5,
+        l,
+    )
 
 
 def trimul_input_ln_residual_bwd():
-    """Run the specialized trimul_input_ln_residual_bwd harness."""
-    from miniworld_engine.kernels.drivers.trimul_backward import ln_residual as run
-    return run()
+    from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+        input_ln_residual_bwd,
+    )
+
+    input_ln_residual_bwd(*_ln_residual_operands())
 
 
 def trimul_input_dual_bwd():
-    """Run the specialized trimul_input_dual_bwd harness."""
-    from miniworld_engine.kernels.drivers.trimul_backward import dual as run
-    return run()
+    from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+        input_dual_bwd,
+    )
+
+    input_dual_bwd(*_dual_operands())
+
+
+def _output_f567_operands():
+    width = driver_width(128)
+    hidden = driver_heads(width)
+    length = ragged(driver_length(64))
+    n, kg, kp = ragged(width), ragged(width), ragged(2 * hidden)
+    m = length * length
+    kw: dict[str, Any] = {"device": dev(), "dtype": BF16}
+    norm, x = torch.randn(m, kp, **kw), torch.randn(m, kg, **kw)
+    wp = torch.randn(n, kp, **kw) / kp**0.5
+    wg = torch.randn(kg, n, **kw) / kg**0.5
+    residual = torch.randn(m, n, **kw)
+    dropscale = (torch.rand(length, n, device=dev()) > 0.25).to(BF16) / 0.75
+    return norm, x, wp, wg, residual, dropscale, length
+
+
+def trimul_output_f567_train():
+    from miniworld_engine.kernels.trimul_inproj.triton.output_fused import (
+        output_f567_train as launch,
+    )
+
+    launch(*_output_f567_operands())
+
+
+def trimul_output_bwd_rows_sm90():
+    from miniworld_engine.kernels.layernorm_linear.cute.dgrad_ln_rows import (
+        dgrad_ln_rows,
+    )
+    m,n=driver_length(128)**2,driver_width(128)
+    k=2*n
+    dy=torch.randn(m,n,device=dev(),dtype=BF16)
+    w=torch.randn(n,k,device=dev(),dtype=BF16)
+    xhat=torch.randn(m,k,device=dev(),dtype=BF16)
+    gamma=torch.randn(k,device=dev(),dtype=BF16)
+    stats=[torch.randn(m,device=dev(),dtype=torch.float32) for _ in range(3)]
+    dgrad_ln_rows(dy,w,xhat,gamma,*stats)

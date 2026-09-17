@@ -124,7 +124,7 @@ def both_level_is_pair(length: int) -> bool:
     # side from the length can only ever build one of them. `MINIWORLD_DRIVER_SIDE` is how the
     # builder asks for the other. Unset, the old rule stands.
     side = os.environ.get("MINIWORLD_DRIVER_SIDE", "").strip().lower()
-    if side in ("pair", "atom", "token"):
+    if side in ("pair", "atom", "token", "msa"):
         # "token" is a side too, and it is NOT a pair. The three DiT families are driven per side
         # for their LENGTHS and WIDTHS -- token counts 256..768 at d 384/512/768, atom counts
         # 1024..8192 at d 128 -- but the activation is (B, N, D) on both, never (B, L, L, D).

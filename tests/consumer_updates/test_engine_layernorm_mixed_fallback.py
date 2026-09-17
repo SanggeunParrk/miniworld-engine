@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.primitives import LayerNorm
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -12,7 +13,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 @pytest.mark.parametrize("bias", [False, True])
 def test_mixed_norm_affine_fallback(dtype, bias):
     torch.manual_seed(640)
-    norm = LayerNorm(16, bias=bias, implementation="miniworld").cuda().to(dtype)
+    norm = LayerNorm(16, bias=bias, implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
     reference = torch.nn.LayerNorm(16, bias=bias).cuda().float()
     reference.load_state_dict(norm.state_dict())
     assert norm.weight.dtype == torch.float32
@@ -28,6 +29,8 @@ def test_mixed_norm_affine_fallback(dtype, bias):
         (x.grad, xr.grad),
         (norm.weight.grad, reference.weight.grad),
     ]:
+        assert actual is not None
+        assert expected is not None
         error = (actual.float() - expected).norm() / expected.norm().clamp_min(1e-8)
         assert error < 0.01
     if bias:

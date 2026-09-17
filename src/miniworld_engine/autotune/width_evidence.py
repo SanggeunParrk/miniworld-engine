@@ -119,3 +119,22 @@ def measure(ops: list[tuple[str, str, tuple[int, ...]]], out: Path | None = None
     if out is not None:
         out.write_text(json.dumps(dict(sorted(result.items())), indent=1, sort_keys=True) + "\n")
     return result
+
+
+def distinct_widths(op: str, widths: tuple[int, ...], data: dict | None = None) -> tuple[int, ...]:
+    """Collapse each proven-equivalent group while retaining every unmeasured width.
+
+    Adding one new dimension must not undo deduplication of all previously measured
+    dimensions. Unknown dimensions are never inferred equivalent to a known group.
+    """
+    per = (data if data is not None else load()).get(op, {})
+    groups: dict[tuple[str, ...], int] = {}
+    unknown = set()
+    for width in widths:
+        keys = per.get(str(width))
+        if keys:
+            signature = tuple(sorted(keys))
+            groups[signature] = max(width, groups.get(signature, width))
+        else:
+            unknown.add(width)
+    return tuple(sorted(unknown | set(groups.values())))

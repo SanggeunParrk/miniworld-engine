@@ -39,7 +39,7 @@ def test_fa4_compiled_backward_and_graph(half_window, dtype):
             call, fullgraph=True, dynamic=False, options={"triton.cudagraphs": False}
         )
         yr = _flash_window_core(
-            *refs, cu, lengths, s, valid, n, s, d**-0.5, half_window
+            refs[0], refs[1], refs[2], cu, lengths, s, valid, n, s, d**-0.5, half_window
         )
         yr.backward(dy)
         y = compiled(*xs)
@@ -53,9 +53,10 @@ def test_fa4_compiled_backward_and_graph(half_window, dtype):
             ) < 0.005
 
         check(y, yr)
-        for a, b in zip(xs, refs):
+        for a, b in zip(xs, refs, strict=False):
             check(a.grad, b.grad)
         for x in xs:
+            assert x.grad is not None
             x.grad.zero_()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
@@ -64,7 +65,7 @@ def test_fa4_compiled_backward_and_graph(half_window, dtype):
         graph.replay()
         torch.cuda.synchronize()
         check(gy, yr)
-        for a, b in zip(xs, refs):
+        for a, b in zip(xs, refs, strict=False):
             check(a.grad, b.grad)
         # Opcheck verifies fake shape/stride/dtype and functionalization in addition
         # to the explicit numerical and graph checks above.

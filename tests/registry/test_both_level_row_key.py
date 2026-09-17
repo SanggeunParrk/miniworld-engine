@@ -78,7 +78,7 @@ def test_the_bucket_set_is_exactly_what_the_work_list_drives():
     union, outside = set(), []
     for r in rows:
         want = {x for x in (r.get("sides") or "pair|atom").split("|") if x}
-        assert want <= {"pair", "atom", "token"}, f"{r['kernel']}: unknown side in {want}"
+        assert want <= {"pair", "atom", "token", "msa"}, f"{r['kernel']}: unknown side in {want}"
         seen = set()
         for u in op_units(only={r["kernel"]}):
             assert u.side in want, (
@@ -153,6 +153,7 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
         # This specialized projection is called only by the SWA atom module;
         # the older shared sigmoid kernels still serve all three streams.
         want = ({"atom"} if r["kernel"] == "swa_gate_out_fwd_triton"
+                else {"pair", "atom", "msa"} if r["kernel"] == "transition_fwd_b2b_triton"
                 else expect.get(r["family"]))
         got = {x for x in (r.get("sides") or "").split("|") if x}
         if want is None:
@@ -163,7 +164,7 @@ def test_every_both_level_family_names_all_three_streams_it_runs_on():
     assert not bad, "\n  ".join(["a level=both row disagrees with the model:", *bad])
 
 
-def test_a_transition_kernel_is_not_built_on_atoms():
+def test_only_bare_swiglu_transition_is_built_on_atoms():
     """The finding that produced the `sides` column, pinned so it cannot quietly come back.
 
     `Transition` in the model is constructed in pairformer (pair and single), msa_module (msa and
@@ -174,6 +175,9 @@ def test_a_transition_kernel_is_not_built_on_atoms():
     bad = []
     for r in registry_rows():
         if r["family"] != "transition" or r["level"] != "both":
+            continue
+        # ESMFold2 atom SwiGLUFFN uses this kernel with HAS_LN=0.
+        if r["kernel"] == "transition_fwd_b2b_triton":
             continue
         if "atom" in (r.get("sides") or "pair|atom").split("|"):
             bad.append(r["kernel"])

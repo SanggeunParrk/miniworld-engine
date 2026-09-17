@@ -57,7 +57,7 @@ def inputs(dtype, d=32, length=259):
     )
     mask = torch.rand(3, 2, length, device="cuda") > 0.25
     mask[0, 0] = False
-    return args, mask
+    return (args[0], args[1], args[2], args[3]), mask
 
 
 @pytest.mark.gpu
@@ -70,7 +70,7 @@ def test_chunked_matches_legacy_and_reference(monkeypatch, dtype, head_dim, tile
     args, mask = inputs(dtype, head_dim)
     grad = torch.randn_like(args[0])
     monkeypatch.setattr(main, "_SPLIT_BIAS_BUDGET_BYTES", 1 << 60)
-    legacy = interface.triton_augmented_attention_pair_bias(*args, mask)
+    legacy = interface.triton_augmented_attention_pair_bias(args[0], args[1], args[2], args[3], mask)
     legacy_grads = torch.autograd.grad(legacy, args, grad)
     monkeypatch.setattr(main, "_SPLIT_BIAS_BUDGET_BYTES", 0)
     monkeypatch.setattr(main, "_CHUNK_WORKSPACE_BYTES", 1)
@@ -79,19 +79,19 @@ def test_chunked_matches_legacy_and_reference(monkeypatch, dtype, head_dim, tile
         "_pair_bias_memory_efficient",
         lambda *a: pytest.fail("atomic fallback"),
     )
-    actual = interface.triton_augmented_attention_pair_bias(*args, mask)
+    actual = interface.triton_augmented_attention_pair_bias(args[0], args[1], args[2], args[3], mask)
     actual_grads = torch.autograd.grad(actual, args, grad)
     old = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
-        ref = augmented_attention_pair_bias_pytorch(*args, mask)
+        ref = augmented_attention_pair_bias_pytorch(args[0], args[1], args[2], args[3], mask)
         ref_grads = torch.autograd.grad(ref, args, grad)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = old
-    for result, want in [(actual, ref), *zip(actual_grads, ref_grads)]:
+    for result, want in [(actual, ref), *zip(actual_grads, ref_grads, strict=False)]:
         assert torch.isfinite(result).all()
         assert (result.float() - want.float()).norm() / want.float().norm() < 0.02
-    for result, want in zip(actual_grads, legacy_grads):
+    for result, want in zip(actual_grads, legacy_grads, strict=False):
         rel = (result.float() - want.float()).norm() / want.float().norm()
         assert rel < 2e-6, float(rel)
     assert torch.count_nonzero(actual[0, 0]) == 0
@@ -128,11 +128,11 @@ def test_head48_stage1_gradient(monkeypatch, length, dtype, chunked):
     old = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
-        actual = interface.triton_augmented_attention_pair_bias(*args, mask)
+        actual = interface.triton_augmented_attention_pair_bias(args[0], args[1], args[2], args[3], mask)
         actual_grads = torch.autograd.grad(actual, args, grad)
-        ref = augmented_attention_pair_bias_pytorch(*args, mask)
+        ref = augmented_attention_pair_bias_pytorch(args[0], args[1], args[2], args[3], mask)
         ref_grads = torch.autograd.grad(ref, args, grad)
-        for result, want in [(actual, ref), *zip(actual_grads, ref_grads)]:
+        for result, want in [(actual, ref), *zip(actual_grads, ref_grads, strict=False)]:
             assert torch.isfinite(result).all()
             rel = (result.float() - want.float()).norm() / want.float().norm()
             assert rel < 0.02, float(rel)
@@ -166,7 +166,7 @@ def test_compile_cuda_graph_and_repeatability(monkeypatch, dtype, length):
         def step():
             for t in args:
                 t.grad = None
-            out = fn(*args, mask)
+            out = fn(args[0], args[1], args[2], args[3], mask)
             out.sum().backward()
             return out, tuple(t.grad for t in args)
 
@@ -184,7 +184,7 @@ def test_compile_cuda_graph_and_repeatability(monkeypatch, dtype, length):
         torch.cuda.synchronize()
         for result, want in [
             (captured[0], expected[0]),
-            *zip(captured[1], expected[1]),
+            *zip(captured[1], expected[1], strict=False),
         ]:
             assert torch.isfinite(result).all()
             torch.testing.assert_close(result, want, atol=0, rtol=0)

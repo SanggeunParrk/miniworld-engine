@@ -1,4 +1,3 @@
-import pytest
 """A shape this GPU cannot hold is a correct answer, not a bad unit.
 
 `augmented_attention_bwd_split_triton[float32] L=4096` wants 153,600 bytes of shared memory and
@@ -17,6 +16,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 from miniworld_engine.autotune import builder
 from miniworld_engine.cli import is_bad_unit
@@ -48,6 +49,7 @@ def _run(tmp_path: Path, monkeypatch, *, rc: int, shard_ops: int, log_text: str)
         kw["stdout"].flush()
         return _Proc()
 
+    monkeypatch.setattr(builder, "visible_device", lambda index: str(index))
     monkeypatch.setattr(builder, "_run_unit_process", fake_run)
     return builder._run_unit_subprocess(unit, 0, shard_dir, tmp_path, compile_jobs=1)
 

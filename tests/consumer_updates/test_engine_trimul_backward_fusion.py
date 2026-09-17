@@ -1,5 +1,7 @@
 """Backward fusion accuracy, tail/stride handling, and autograd branch placement."""
 
+from typing import Any
+
 import pytest
 import torch
 import triton
@@ -17,7 +19,7 @@ def error(a, b):
 
 
 DUAL = [
-    dict(BLOCK_M1=m, BLOCK_N=n, BLOCK_K=k, GROUP_M=g, num_warps=w, num_stages=s)
+    {"BLOCK_M1": m, "BLOCK_N": n, "BLOCK_K": k, "GROUP_M": g, "num_warps": w, "num_stages": s}
     for m, n, k, g, w, s in [
         (16, 32, 32, 1, 4, 2),
         (32, 64, 64, 2, 4, 3),
@@ -37,7 +39,7 @@ def test_dual_tails_and_rounding(cfg, strided):
     n = 2 * cfg["BLOCK_N"] + 3
     kg = 69
     kp = 259
-    kw = dict(device="cuda", dtype=torch.bfloat16)
+    kw: dict[str, Any] = {"device": "cuda", "dtype": torch.bfloat16}
     g = torch.randn(m, kg, **kw)
     f = torch.randn(kp, m, **kw).t()
     w = torch.randn(n, kg, **kw).t() / kg**0.5
@@ -66,11 +68,12 @@ def test_dual_tails_and_rounding(cfg, strided):
         **cfg,
     )
     ref = (g.float() @ w.float()).bfloat16().float() + f.float() @ v.float()
-    assert torch.isfinite(y).all() and error(y, ref) < 0.004
+    assert torch.isfinite(y).all()
+    assert error(y, ref) < 0.004
 
 
 LN = [
-    dict(BLOCK_M1=m, BLOCK_K=k, num_warps=w, num_stages=s)
+    {"BLOCK_M1": m, "BLOCK_K": k, "num_warps": w, "num_stages": s}
     for m, k, w, s in [
         (1, 64, 1, 2),
         (4, 128, 4, 1),
@@ -89,7 +92,7 @@ def test_ln_residual_tails(cfg, dtype):
     torch.manual_seed(974)
     m = 137
     n = 193
-    kw = dict(device="cuda", dtype=dtype)
+    kw: dict[str, Any] = {"device": "cuda", "dtype": dtype}
     x = torch.randn(m, n, **kw)
     dy = torch.randn_like(x)
     dr = torch.randn_like(x)
@@ -130,14 +133,15 @@ def test_ln_residual_tails(cfg, dtype):
         (dy.float() * xh).sum(0),
         dy.float().sum(0),
     )
-    for actual, ref in zip((dx, dw, db), refs):
-        assert torch.isfinite(actual).all() and error(actual, ref) < 0.004
+    for actual, ref in zip((dx, dw, db), refs, strict=False):
+        assert torch.isfinite(actual).all()
+        assert error(actual, ref) < 0.004
 
 
 @pytest.mark.parametrize("compiled", [False, True])
 def test_autograd_residual_does_not_enter_parameter_grads(compiled):
     torch.manual_seed(377)
-    kw = dict(device="cuda", dtype=torch.bfloat16)
+    kw: dict[str, Any] = {"device": "cuda", "dtype": torch.bfloat16}
     x = torch.randn(1, 17, 17, 128, **kw).requires_grad_()
     w = torch.randn(128, **kw).requires_grad_()
     b = torch.randn(128, **kw).requires_grad_()
@@ -145,16 +149,19 @@ def test_autograd_residual_does_not_enter_parameter_grads(compiled):
     def fn(x, w, b):
         return input_ln_residual(x, w, b, 1e-5)
 
-    if compiled:
-        fn = torch.compile(fn, fullgraph=True, dynamic=False)
-    norm, residual = fn(x, w, b)
+    call = torch.compile(fn, fullgraph=True, dynamic=False) if compiled else fn
+    norm, residual = call(x, w, b)
     dy = torch.zeros_like(norm)
     dr = torch.randn_like(residual)
     gx, gw, gb = torch.autograd.grad((norm, residual), (x, w, b), (dy, dr))
     assert (
         torch.equal(gx, dr)
-        and torch.count_nonzero(gw) == 0
-        and torch.count_nonzero(gb) == 0
+    )
+    assert (
+        torch.count_nonzero(gw) == 0
+    )
+    assert (
+        torch.count_nonzero(gb) == 0
     )
 
 

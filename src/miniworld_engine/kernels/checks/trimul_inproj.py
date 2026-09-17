@@ -284,19 +284,52 @@ def trimul_bwd_gate_packed_recompute_triton():
 
 
 
-def trimul_output_f567_train():
-    """Run the specialized trimul_output_f567_train harness."""
-    from miniworld_engine.kernels.checks.trimul_output import output_f567_train as run
-    return run()
+from miniworld_engine.kernels.drivers.trimul_inproj import (
+    _dual_operands,
+    _ln_residual_operands,
+    _output_f567_operands,
+)
 
 
 def trimul_input_ln_residual_bwd():
-    """Run the specialized trimul_input_ln_residual_bwd harness."""
-    from miniworld_engine.kernels.checks.trimul_backward import ln_residual as run
-    return run()
+    from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+        input_ln_residual_bwd,
+    )
+
+    dy, x, w, mean, rs, dr, _key = args = _ln_residual_operands()
+    dx, dw, db = input_ln_residual_bwd(*args)
+    xhat = (x.float() - mean[:, None]) * rs[:, None]
+    u = dy.float() * w.float()
+    gx = rs[:, None] * (
+        u - u.mean(1, keepdim=True) - xhat * (u * xhat).mean(1, keepdim=True)
+    )
+    return {
+        "dx": (dx, gx.to(x.dtype).float() + dr.float()),
+        "dw": (dw, (dy.float() * xhat).sum(0)),
+        "db": (db, dy.float().sum(0)),
+    }
 
 
 def trimul_input_dual_bwd():
-    """Run the specialized trimul_input_dual_bwd harness."""
-    from miniworld_engine.kernels.checks.trimul_backward import dual as run
-    return run()
+    from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+        input_dual_bwd,
+    )
+
+    g, f, w, v, _l = args = _dual_operands()
+    y = input_dual_bwd(*args)
+    ref = (g.float() @ w.float()).to(g.dtype).float() + f.float() @ v.float()
+    return {"dx": (y, ref)}
+
+
+def trimul_output_f567_train():
+    from miniworld_engine.kernels.trimul_inproj.triton.output_fused import (
+        output_f567_train as launch,
+    )
+
+    norm, x, wp, wg, residual, ds, length = args = _output_f567_operands()
+    y, proj, gate = launch(*args)
+    p = norm.float() @ wp.float().t()
+    g = torch.sigmoid(x.float() @ wg.float())
+    rows = torch.arange(norm.shape[0], device=norm.device) % length
+    expected = residual.float() + p * g * ds.float()[rows]
+    return {"y": (y, expected), "proj": (proj, p), "gate": (gate, g)}

@@ -1,0 +1,158 @@
+{
+  "source_identity": "981ac7988e7671a60c707676f4d2121ee5822ae52611d284c6f857bdef53832e",
+  "gpus": {
+    "A5000": {
+      "required": 1331,
+      "usable": 1322,
+      "missing_due_to_parent_oom": [
+        "augmented_attention_bwd_reduce_triton|float32|shape_key=4096",
+        "augmented_attention_bwd_reduce_triton|float32|shape_key=8192",
+        "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=281475043953114",
+        "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=43980666571226",
+        "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=52776692484570",
+        "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=52776759593434",
+        "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=562950020663770",
+        "augmented_attention_bwd_split_triton|float32|shape_key=281475043953114",
+        "augmented_attention_bwd_split_triton|float32|shape_key=562950020663770"
+      ],
+      "oom_units": [
+        {
+          "unit": "augmented_attention[miniworld/bfloat16->bfloat16] stream=atom_single d_single=128;d_cond=128;d_pair=16;n_head=4 L=4096 A=48 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu1-augmented_attention-miniworld-bfloat16-corebfloat16-dims0-L4096-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip augmented_attention dims#0 L=4096 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 23.56 GiB of which 7.60 GiB is free. Including non-PyTorch memory, this process has 15.95 GiB memory in use. Of the allocated memory 14.98 GiB is allocated by PyTorch, and 731.24 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "adaln_bwd_dx_dlnw_triton|bfloat16+float32|shape_key=281479272203082",
+            "adaln_bwd_pre_dx_triton|bfloat16+float32|shape_key=68720001818",
+            "adaln_epilogue_saveact_triton|bfloat16+float32|HAS_SB=1,shape_key=68720001818",
+            "augmented_attention_bwd_pre_triton|bfloat16+float32|shape_key=281475043953114",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=4096",
+            "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=281475043953114",
+            "augmented_attention_fwd_triton|bfloat16+float32|shape_key=281475043953114",
+            "layernorm_fwd_saveact_strided_triton|bfloat16+float32|shape_key=2473901687578"
+          ]
+        },
+        {
+          "unit": "projected_attention[miniworld/bfloat16] stream=token_pair n_head=12;d_hidden=384 L=640 A=1 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu4-projected_attention-miniworld-bfloat16-dims4-L640-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip projected_attention dims#4 L=640 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 11.72 GiB. GPU 0 has a total capacity of 23.56 GiB of which 7.58 GiB is free. Including non-PyTorch memory, this process has 15.97 GiB memory in use. Of the allocated memory 14.99 GiB is allocated by PyTorch, and 250.73 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "augmented_attention_bwd_pre_triton|bfloat16+float32|shape_key=43980666571226",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=640",
+            "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=43980666571226",
+            "augmented_attention_fwd_triton|bfloat16+float32|shape_key=43980666571226"
+          ]
+        },
+        {
+          "unit": "augmented_attention[miniworld/bfloat16->bfloat16] stream=atom_single d_single=128;d_cond=128;d_pair=16;n_head=4 L=8192 A=48 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu4-augmented_attention-miniworld-bfloat16-corebfloat16-dims0-L8192-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip augmented_attention dims#0 L=8192 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 GiB. GPU 0 has a total capacity of 23.56 GiB of which 8.92 GiB is free. Including non-PyTorch memory, this process has 14.63 GiB memory in use. Of the allocated memory 10.25 GiB is allocated by PyTorch, and 4.12 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "adaln_bwd_dx_dlnw_triton|bfloat16+float32|shape_key=562954248913738",
+            "adaln_bwd_pre_dx_triton|bfloat16+float32|shape_key=137439478554",
+            "adaln_epilogue_saveact_triton|bfloat16+float32|HAS_SB=1,shape_key=137439478554",
+            "augmented_attention_bwd_pre_triton|bfloat16+float32|shape_key=562950020663770",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=8192",
+            "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=562950020663770",
+            "augmented_attention_fwd_triton|bfloat16+float32|shape_key=562950020663770",
+            "layernorm_fwd_saveact_strided_triton|bfloat16+float32|shape_key=4398047036186"
+          ]
+        },
+        {
+          "unit": "projected_attention[miniworld/bfloat16] stream=token_pair n_head=8;d_hidden=256 L=768 A=1 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu5-projected_attention-miniworld-bfloat16-dims3-L768-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip projected_attention dims#3 L=768 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 13.50 GiB. GPU 0 has a total capacity of 23.56 GiB of which 5.93 GiB is free. Including non-PyTorch memory, this process has 17.62 GiB memory in use. Of the allocated memory 16.64 GiB is allocated by PyTorch, and 250.44 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "augmented_attention_bwd_pre_triton|bfloat16+float32|shape_key=52776692484570",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=768",
+            "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=52776692484570",
+            "augmented_attention_fwd_triton|bfloat16+float32|shape_key=52776692484570"
+          ]
+        },
+        {
+          "unit": "augmented_attention[miniworld/bfloat16->float32] stream=atom_single d_single=128;d_cond=128;d_pair=16;n_head=4 L=4096 A=48 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu5-augmented_attention-miniworld-bfloat16-corefloat32-dims0-L4096-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip augmented_attention dims#0 L=4096 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 12.00 GiB. GPU 0 has a total capacity of 23.56 GiB of which 7.55 GiB is free. Including non-PyTorch memory, this process has 15.99 GiB memory in use. Of the allocated memory 15.43 GiB is allocated by PyTorch, and 315.24 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "adaln_bwd_dx_dlnw_triton|bfloat16+float32|shape_key=281479272203082",
+            "adaln_bwd_pre_dx_triton|bfloat16+float32|shape_key=68720001818",
+            "adaln_epilogue_saveact_triton|bfloat16+float32|HAS_SB=1,shape_key=68720001818",
+            "augmented_attention_bwd_pre_triton|float32|shape_key=281475043953114",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=4096",
+            "augmented_attention_bwd_split_triton|float32|shape_key=281475043953114",
+            "augmented_attention_fwd_triton|float32|shape_key=281475043953114",
+            "layernorm_fwd_saveact_strided_triton|bfloat16+float32|shape_key=2473901687578"
+          ]
+        },
+        {
+          "unit": "augmented_attention[miniworld/bfloat16->float32] stream=atom_single d_single=128;d_cond=128;d_pair=16;n_head=4 L=8192 A=48 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu5-augmented_attention-miniworld-bfloat16-corefloat32-dims0-L8192-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip augmented_attention dims#0 L=8192 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 GiB. GPU 0 has a total capacity of 23.56 GiB of which 8.92 GiB is free. Including non-PyTorch memory, this process has 14.63 GiB memory in use. Of the allocated memory 11.22 GiB is allocated by PyTorch, and 3.15 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "adaln_bwd_dx_dlnw_triton|bfloat16+float32|shape_key=562954248913738",
+            "adaln_bwd_pre_dx_triton|bfloat16+float32|shape_key=137439478554",
+            "adaln_epilogue_saveact_triton|bfloat16+float32|HAS_SB=1,shape_key=137439478554",
+            "augmented_attention_bwd_pre_triton|float32|shape_key=562950020663770",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=8192",
+            "augmented_attention_bwd_split_triton|float32|shape_key=562950020663770",
+            "augmented_attention_fwd_triton|float32|shape_key=562950020663770",
+            "layernorm_fwd_saveact_strided_triton|bfloat16+float32|shape_key=4398047036186"
+          ]
+        },
+        {
+          "unit": "projected_attention[miniworld/bfloat16] stream=token_pair n_head=12;d_hidden=384 L=768 A=1 train",
+          "log": ".bench/model-cache-20260916/A5000/shards/logs/gpu0-projected_attention-miniworld-bfloat16-dims4-L768-train-plan9fe63c20fcc0-d6a691bd6b40ef56.log",
+          "reason": "skip projected_attention dims#4 L=768 train: OutOfMemoryError: CUDA out of memory. Tried to allocate 20.25 GiB. GPU 0 has a total capacity of 23.56 GiB of which 18.26 GiB is free. Process 166161 has 472.00 MiB memory in use. Including non-PyTorch memory, this process has 4.82 GiB memory in use. Of the allocated memory 3.86 GiB is allocated by PyTorch, and 230.44 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+          "expected_keys": [
+            "augmented_attention_bwd_pre_triton|bfloat16+float32|shape_key=52776759593434",
+            "augmented_attention_bwd_reduce_triton|float32|shape_key=768",
+            "augmented_attention_bwd_split_triton|bfloat16+float32|shape_key=52776759593434",
+            "augmented_attention_fwd_triton|bfloat16+float32|shape_key=52776759593434"
+          ]
+        }
+      ],
+      "original_job": "1707734",
+      "recovery_job": "1709340"
+    },
+    "A6000": {
+      "required": 1331,
+      "usable": 1331,
+      "missing_due_to_parent_oom": [],
+      "oom_units": [],
+      "original_job": "1707792",
+      "recovery_job": "1709339"
+    }
+  },
+  "classification": "A6000 complete; A5000 capacity-limited (9 keys not built)",
+  "illegal_access_incident": {
+    "initial_job": "1707734",
+    "reproduced": false,
+    "tile": {
+      "BLOCK_M1": 128,
+      "BLOCK_K": 256,
+      "num_warps": 2,
+      "num_stages": 1
+    },
+    "shape": {
+      "length": 512,
+      "width": 384
+    },
+    "checks": [
+      "isolated kernel memcheck and sampled numerical checks",
+      "three original module forward/backward runs under memcheck",
+      "original module cache-build unit retry"
+    ],
+    "root_cause": "not established; no candidate was removed or identity relabeled"
+  },
+  "validated_at_utc": "2026-09-17T00:33:38.392495+00:00",
+  "source_commit": "ff3b74f712cb0ffd6db552ef1e8048e672af2e19",
+  "validation": {
+    "ruff": "passed",
+    "ty": "passed",
+    "cpu_pytest": {
+      "tests": 3378,
+      "skipped": 35,
+      "failures": 0,
+      "errors": 0
+    }
+  }
+}

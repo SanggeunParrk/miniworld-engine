@@ -168,7 +168,7 @@ class Transition(nn.Module):
             # Force the cute (quack SM90 WGMMA) backend regardless of d (for benchmarking /
             # explicit selection). Same fused structure; LN folded into the cute expand.
             backward_backend = _explicit_cute_backward_backend()
-            out = kernels.cute_transition_fused(
+            return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight.to(x.dtype),
                 self.ln_in.bias.to(x.dtype),
@@ -180,7 +180,6 @@ class Transition(nn.Module):
                 backward_backend=backward_backend,
                 residual=x,
             )
-            return out
 
         raise InvalidImplementationError(self.implementation)
 

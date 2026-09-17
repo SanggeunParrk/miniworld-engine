@@ -63,8 +63,8 @@ def run_case(m, n, k, dtype, config, offset=0):
     return compiled
 
 
-@pytest.mark.parametrize("n,k", [(128, 128), (384, 384), (768, 384)])
-@pytest.mark.parametrize("m,offset", [(8192, 0), (133, 1)])
+@pytest.mark.parametrize(("n", "k"), [(128, 128), (384, 384), (768, 384)])
+@pytest.mark.parametrize(("m", "offset"), [(8192, 0), (133, 1)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_previously_fatal_tile(n, k, m, offset, dtype):
     run_case(m, n, k, dtype, (128, 256, 32, 4, 1, 1), offset)

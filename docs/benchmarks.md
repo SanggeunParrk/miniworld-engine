@@ -7,7 +7,7 @@
 - `kernels/<kernel>/`: isolated kernel benchmarks.
 - `modules/<module>/`: composed module benchmarks.
 - `runners/`: shared, kernel-agnostic executable entry points (`bench.py`,
-  `plot_csv.py`, and any reusable harness usable across targets).
+  `plot_csv.py`, `report_gpu.py`, and any reusable harness usable across targets).
 
 ### Per-target subdirectories (strict)
 
@@ -181,6 +181,17 @@ Let `A=benchmarks/kernels/gemm_epilogue/artifacts`.
    The plot caption must include the fixed sweep dimensions, e.g. `d_pair=128`
    for an L sweep or `L=384` for a d sweep.
 
+3. **Report** (optional, per GPU). Once the curated tables under
+   `results/<gpu>/tables/` are updated, render the docs page that collects every module's
+   sweeps for that card:
+   ```bash
+   PYTHONPATH=src python benchmarks/runners/report_gpu.py a6000   # -> docs/reports/a6000-module-sweeps.md
+   ```
+   It plots only `measurement_schema=2` tables (older ones are listed as excluded, never
+   drawn), uses the shared style below, and reads the optional repetition columns
+   (`value_min`/`value_max`/`n_repetitions`/`runtime_cache_misses`) for error bars and
+   disclosures. Same rule as `plot_csv.py`: run it through `srun`, not on the login node.
+
 ## Visual style (single source of truth)
 
 All figures share one palette/theme so the benchmark
@@ -280,9 +291,9 @@ the matrix below is the remaining repo-developed module kernels, one
 
 | target | implementations | sweeps | modes | notes |
 | --- | --- | --- | --- | --- |
-| `triangle_attention` | `pytorch`, `cuequivariance`, `miniworld` | `seq_len`, `d_pair` | inference, training | Full triangular self-attention (`use_self_attention=True`). MiniWorld maps to the canonical Triton pair-bias attention kernel plus the module LayerNorm/projection/gate path; `old_triton` is not a separate public full-attention implementation. See `docs/kernels/triangle-attention.md`. |
-| `transition` | `pytorch`, `old_triton`, `miniworld` | `seq_len`, `d_pair` | inference, training | `old_triton` is the Team-GM Triton transition path (`LayerNorm(TRITON)` + `kernels.transition.triton.main`). MiniWorld means the production d-aware fused route: Triton for small `d_pair`, CuTe for large `d_pair`. Component-only `cute` runs are diagnostics, not final plots. |
-| `conditioned_transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmarks the post-AdaLN tail only; inference dispatch is fused at `d_pair<=128` and composed above that, training uses the custom autograd path. |
+| `triangle_attention` | `pytorch`, `cuequivariance`, `miniworld` | `seq_len`, `d_pair` | inference, training | Full triangular self-attention (`use_self_attention=True`). MiniWorld maps to the canonical Triton pair-bias attention kernel plus the module LayerNorm/projection/gate path. See `docs/kernels/triangle-attention.md`. |
+| `transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | MiniWorld is the repo transition path (fused b2b / split dispatch by card and width); the Team-GM legacy Triton transition is no longer a benchmark implementation. |
+| `conditioned_transition` | `pytorch`, `miniworld` | `seq_len` | inference, training | the token-side block: hidden `d_single_token` (768) conditioned on `d_single` (384), the widths the model's token DiT builds; `d_pair` is not an input, so there is no d sweep. The config used to say `d_single_token: 384`, a width the model never builds and the cache never tuned. |
 | `adaptive_layernorm` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmark treats `d_pair` as the AdaLN hidden/condition width so d sweeps change the real tensor shape. |
 | `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |
 | `augmented_attention_atom` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | atom path; L sweep still includes `L=384`; unsupported/OOM points stay as failed CSV rows. |
@@ -321,3 +332,32 @@ exception for SWA attention. SWA now propagates the implementation through its a
 PyTorch uses torch RMSNorm, RoPE, and sigmoid gating; MiniWorld keeps its fused kernels.
 This applies to standalone SWA Attention and SWA DiT. Inductor-generated kernels for torch
 operations are part of the compiled PyTorch baseline, not imported MiniWorld kernels.
+
+
+## SWA DiT component audit
+
+The `swa_dit` module target can measure individual differentiable operations and
+one-at-a-time replacements inside the full block. This is a training-only,
+fullgraph diagnostic using the same timer and provenance as the normal benchmark.
+
+- `+swa_component=modulation|rope|swiglu|residual|sigmoid_gate` selects an isolated
+  operation, including forward and backward. These are operation bundles, not
+  per-launch Triton timings.
+- `+swa_component=block` measures the whole block.
+- `'+swa_kernels=[rope,swiglu]'` enables only the listed engine operations for the
+  `miniworld` row. The `pytorch` row keeps every operation in PyTorch, with the same
+  FA2/FA4 attention core. Lists can contain any of the five operation names.
+- `+swa_active_gates=true` initializes modulation weights with normal std0.01 so
+  attention and FFN branches contribute to output and upstream gradients.
+
+Use `mode=training compile=true n_layers=1`, and pair
+`implementations=[pytorch,miniworld]`. Each pair has identical seeded inputs,
+weights and upstream gradients. Outputs and all applicable gradients are checked
+against compiled PyTorch before timing; the whole-block reference is the production
+`SWADiTBlock`. Run independent process repetitions on one GPU and retain their CSVs.
+The active-gate diagnostic is separate from the normal zero-initialized benchmark.
+
+An isolated modulation uses three projections for one branch; the production
+PyTorch block combines all six projections into one GEMM. Therefore isolated
+speedups and whole-block replacement effects must both be reported, and individual
+replacement gains must not be summed to predict a combined speedup.

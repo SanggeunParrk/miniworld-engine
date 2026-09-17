@@ -415,6 +415,10 @@ def install_native_recorders() -> None:
 
     # The generic fake autograd function intentionally replaces the native signature.
     swa._flash_window_core = flash_shape  # ty: ignore[invalid-assignment]
+    # Shape-only external backend contracts must be reachable when deriving a
+    # different architecture without its optional FlashAttention package.
+    # The core above accepts FakeTensors only; production probes are untouched.
+    swa._FA2_SPEC = swa._FA4_SPEC = True
 
     def ln_backward(dy, x, weight, mean, rstd, row_scale=None):
         from torch._subclasses.fake_tensor import is_fake

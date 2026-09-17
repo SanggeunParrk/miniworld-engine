@@ -3,6 +3,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -39,7 +40,7 @@ def tuner(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "_bench_lock_release", lambda: None)
     monkeypatch.setattr(capture, "_use_a_smaller_bench_budget", lambda *_: None)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda *_: None)
-    state = {"compiled": [], "ran": [], "last": None, "results": {}}
+    state: dict[str, Any] = {"compiled": [], "ran": [], "last": None, "results": {}}
 
     def precompile(op, configs, bucket):
         state["compiled"].extend(c["tile"] for c in configs)
@@ -92,6 +93,7 @@ def test_all_timings_survive_merge_and_topk_narrowing(tuner, tmp_path):
     capture.dump_shard(str(shard), unit_complete=True)
     capture.merge_shards([str(shard)], gpu="test_h100", top_k=2)
     data = cache._load(OP, "test_h100")
+    assert data is not None
     record = next(iter(next(iter(data["measurements"].values())).values()))
     assert len(record["entries"]) == 2
     assert len(record["timings"]) == 8
@@ -124,7 +126,7 @@ def test_timeout_retried_without_false_coverage(tuner):
     with pytest.raises(RuntimeError, match="incomplete native tuning"):
         t["choose"]([1, 2])
     slot = capture._CAPTURE[OP]
-    _, _, searched, _ = list(capture._captured_entries(slot))[0]
+    _, _, searched, _ = next(iter(capture._captured_entries(slot)))
     assert len(searched) == 1
     del t["results"][2]
     t["choose"]([1, 2])
@@ -132,10 +134,13 @@ def test_timeout_retried_without_false_coverage(tuner):
 
 
 def test_checkpoint_survives_interruption(tmp_path):
-    with pytest.raises(KeyboardInterrupt):
+    def interrupted():
         with native_history.session(str(tmp_path), ("identity",)) as history:
             history.record("one", {"status": "ok", "ms": 0.1})
             raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupted()
     with native_history.session(str(tmp_path), ("identity",)) as history:
         assert history.records["one"]["ms"] == 0.1
     with native_history.session(str(tmp_path), ("other source",)) as history:
@@ -151,7 +156,7 @@ def test_corrupt_journal_rebuilds(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "factory,count",
+    ("factory", "count"),
     [
         ("gated_sm90_candidates", 448),
         ("plain_sm90_candidates", 512),
@@ -241,6 +246,7 @@ def test_failure_provenance_and_rebuild_invalidates_old_winner(tuner, tmp_path):
     assert t["choose"]([1, 2]) == {"tile": 2}
     capture.flush(gpu="test_h100")
     data = cache._load(OP, "test_h100")
+    assert data is not None
     record = next(iter(next(iter(data["measurements"].values())).values()))
     assert [c["kwargs"]["tile"] for c in record["timings"]] == [2]
     assert (
@@ -306,6 +312,7 @@ def test_runtime_uses_explicit_last_native_profile(tuner, monkeypatch):
         candidates=[cache.as_cfg_dict({"kwargs": {"tile": i}}) for i in (1, 2)],
         op_id=native.source_identity(),
     )
+    assert selected is not None
     assert selected["kwargs"] == {"tile": 2}
 
 

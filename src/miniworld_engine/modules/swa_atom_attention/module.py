@@ -138,7 +138,7 @@ def _flash_window_core(
     Shared by the opaque forward launch and the backward's recompute. flash's own
     varlen func is differentiable, so calling this under ``enable_grad`` and running
     ``autograd.grad`` through it is what gives the op a backward -- FA2 and FA4, the
-    seqused and the unpad paths, all without reimplementing flash's backward.
+    seqused and the static packing paths, without reimplementing flash's backward.
     """
     backend = _flash_backend(q.device)
     if backend not in {"fa4", "fa2"}:  # pragma: no cover - the caller checks first
@@ -166,7 +166,7 @@ def _flash_window_core(
     # FA4 has seqused but no max_seqlen_q/k arguments. FA2 uses the packed path
     # below, whose API requires explicit maximum sequence lengths instead.
     if backend == "fa4":
-        from flash_attn.cute import (  # lazy — pulls CUTLASS
+        from flash_attn.cute import (  # lazy — pulls CUTLASS  # ty: ignore[unresolved-import]  # optional FlashAttention backend
             flash_attn_varlen_func as fa4_varlen,
         )
 
@@ -186,42 +186,34 @@ def _flash_window_core(
         # cu_seqlens the padding positions stay in the sequence, their zeroed keys score 0
         # against every query, and softmax hands them real probability mass.
         #
-        # So this branch removes the padding instead of describing it: unpad to a densely
-        # packed [total_valid, H, D] with the true per-row lengths in cu_seqlens, attend, and
+        # So this branch moves valid tokens to the front of a fixed-capacity buffer,
+        # with the true per-row lengths in cu_seqlens, attends, and
         # scatter back. A padding key cannot take mass because it is not there, and the window
         # is measured inside each real sequence rather than across a padded stride.
         #
-        from flash_attn.flash_attn_interface import (
+        from flash_attn.flash_attn_interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
             flash_attn_varlen_func as fa2_varlen,
         )
 
-        if torch.is_grad_enabled():
-            # Preserve FA2's existing differentiable packing for backward recomputation.
-            from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+        # A graph cannot capture nonzero() or a host read of max(sequence length).
+        # Keep N*S storage, but use true lengths in cu_var: trailing capacity is NOT
+        # an attention key. Rank valid tokens within each row, preserving arbitrary
+        # masks and the original packed-window ordering, including empty sequences.
+        counts = valid.sum(-1, dtype=torch.int32)
+        cu_var = torch.cat([counts.new_zeros(1), counts.cumsum(0, dtype=torch.int32)])
+        flat_valid = valid.reshape(n * s)
+        rank = flat_valid.to(torch.long).cumsum(0)
+        # Map padding to unique trailing slots too: the whole mapping is a
+        # permutation, so packing needs no atomic additions at a shared zero slot.
+        positions = torch.arange(n * s, device=q.device)
+        packed_row = torch.where(flat_valid, rank - 1, rank[-1] + positions - rank)
+        indices = packed_row[:, None, None].expand(n * s, nh, hd)
 
-            q_un, indices, cu_var, max_var = unpad_input(q.reshape(n, s, nh, hd), valid)[:4]
-            k_un = index_first_axis(k, indices)
-            v_un = index_first_axis(v, indices)
-        else:
-            # A graph cannot capture nonzero() or a host read of max(sequence length).
-            # Keep N*S storage, but use true lengths in cu_var: trailing capacity is NOT
-            # an attention key. Rank valid tokens within each row, preserving arbitrary
-            # masks and the original packed-window ordering, including empty sequences.
-            counts = valid.sum(-1, dtype=torch.int32)
-            cu_var = torch.cat([counts.new_zeros(1), counts.cumsum(0, dtype=torch.int32)])
-            flat_valid = valid.reshape(n * s)
-            rank = flat_valid.to(torch.long).cumsum(0)
-            # Map padding to unique trailing slots too: the whole mapping is a
-            # permutation, so packing needs no atomic additions at a shared zero slot.
-            positions = torch.arange(n * s, device=q.device)
-            packed_row = torch.where(flat_valid, rank - 1, rank[-1] + positions - rank)
-            indices = packed_row[:, None, None].expand(n * s, nh, hd)
+        def _pack(t):
+            return torch.empty_like(t).scatter(0, indices, t)
 
-            def _pack(t):
-                return torch.empty_like(t).scatter(0, indices, t)
-
-            q_un, k_un, v_un = _pack(q), _pack(k), _pack(v)
-            max_var = s  # static upper bound; cu_var carries the actual lengths
+        q_un, k_un, v_un = _pack(q), _pack(k), _pack(v)
+        max_var = s  # static upper bound; cu_var carries the actual lengths
         out = fa2_varlen(
             q_un, k_un, v_un,
             cu_seqlens_q=cu_var, cu_seqlens_k=cu_var,
@@ -231,10 +223,7 @@ def _flash_window_core(
         )
         if isinstance(out, tuple):
             out = out[0]
-        if torch.is_grad_enabled():
-            out = pad_input(out, indices, n, s).reshape(n, s, nh, hd)
-        else:
-            out = out.gather(0, indices).reshape(n, s, nh, hd)
+        out = out.gather(0, indices).reshape(n, s, nh, hd)
     # seqused_q skips padding-query rows (position >= seqused), leaving them
     # uninitialized (can be NaN). SELECT with where (not multiply) so that garbage
     # is discarded rather than turned into NaN*0=NaN; matches the old pad_input zeros.
@@ -275,12 +264,12 @@ def _flash_window_setup_context(ctx, inputs, output):
     ctx.meta = (max_seqlen, n, s, scale, half_window)
 
 
-def __flash_window_fa4_backward_fake(q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out):
+def _flash_window_fa4_backward_fake(q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out):
     """Allocate outputs with the same shape, dtype and strides as _flash_window_fa4_backward."""
-    return tuple((torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v)))
+    return tuple(torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v))
 
 
-@opaque(fake=__flash_window_fa4_backward_fake, name="swa_atom_attention_flash_window_fa4_backward")
+@opaque(fake=_flash_window_fa4_backward_fake, name="swa_atom_attention_flash_window_fa4_backward")
 def _flash_window_fa4_backward(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     cu_seqlens: torch.Tensor, seqused: torch.Tensor, valid: torch.Tensor,
@@ -293,7 +282,10 @@ def _flash_window_fa4_backward(
     Calling nested autograd inside a custom op would also be incorrect: its backend
     runs below autograd dispatch, so enable_grad alone cannot build a nested graph.
     """
-    from flash_attn.cute.interface import _flash_attn_bwd, _flash_attn_fwd
+    from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
 
     nh, hd = q.shape[2:]
     row_mask = valid.reshape(n * s, 1, 1)
@@ -315,8 +307,9 @@ def _flash_window_fa4_backward(
         cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
         seqused_q=seqused, seqused_k=seqused,
     )
-    return tuple(torch.where(row_mask, g, torch.zeros_like(g)).reshape_as(t).to(t.dtype)
-                 for g, t in zip(grads, (q, k, v), strict=True))
+    dq, dk, dv = (torch.where(row_mask, g, torch.zeros_like(g)).reshape_as(t).to(t.dtype)
+                  for g, t in zip(grads, (q, k, v), strict=True))
+    return dq, dk, dv
 
 
 def _flash_window_backward(ctx, grad_out):

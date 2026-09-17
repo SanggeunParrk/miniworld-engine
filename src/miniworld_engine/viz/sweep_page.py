@@ -37,12 +37,25 @@ def _rows() -> list[dict[str, str]]:
         return list(csv.DictReader(fh))
 
 
-def _ladders(kernel: str) -> dict[str, list[str]]:
+def _config_inventory(kernel: str) -> tuple[dict[str, list[str]], list]:
+    """Read the same configs as the tuner; listed rows are not Cartesian axes."""
+    from miniworld_engine.autotune.configs import _read
+
     p = GRID / f"{kernel}.csv"
     if not p.is_file():
-        return {}
-    with p.open(newline="") as fh:
-        return {r[0]: r[1].split() for r in csv.reader(fh) if len(r) >= 2 and r[0] != "axis"}
+        return {}, []
+    configs = _read(p)
+    values = collections.defaultdict(set)
+    for config in configs:
+        for axis, value in config.kwargs.items():
+            values[axis].add(value)
+        values["num_warps"].add(config.num_warps)
+        values["num_stages"].add(config.num_stages)
+    return {axis: [str(v) for v in sorted(ladder)] for axis, ladder in values.items()}, configs
+
+
+def _ladders(kernel: str) -> dict[str, list[str]]:
+    return _config_inventory(kernel)[0]
 
 
 def _exempt_reasons() -> dict[str, str]:
@@ -99,50 +112,6 @@ def _prune_fn_name(path: pathlib.Path, symbol: str) -> str | None:
     return None
 
 
-def _benched_per_unit(op: str, grid: int, sides) -> int:
-    """Configs one unit actually compiles and times -- `grid` minus what the KERNEL's own
-    `early_config_prune` deletes first.
-
-    `units x grid` is the page's obvious cost model and it is wrong for any kernel that ships a
-    prune. `autotune/cache.py`'s reader wraps `early_config_prune` and, on the BUILD path, returns
-    `base(configs, nargs)` -- the kernel's own prune still runs, and `capture` makes that pruned
-    list the round's work item for both compile and bench. Reporting the unpruned grid made
-    `transition_fwd_b2b_triton` read as a quarter of the whole sweep when it is well under one
-    percent: `_prefer_covering_b2b` pins BLOCK_K_D, BLOCK_K_ND and GROUP_M at the K its driver
-    builds, cutting 28,000 configs to 560. A page that is read to decide where tuning time goes
-    must not price 50x of phantom.
-
-    Two kernels in the repository ship a prune (`transition_fwd_b2b_triton`,
-    `layernorm_linear_fwd_triton`); everything else returns `grid` unchanged. Falls back to `grid`
-    on any failure -- over-reporting is the safe direction for a cost estimate, under-reporting is
-    not.
-    """
-    import importlib
-
-    from miniworld_engine.autotune.configs import configs_for
-
-    row = {r["kernel"]: r for r in _rows()}.get(op)
-    if row is None:
-        return grid
-    name = _prune_fn_name(PKG.parent / row["file"], row["symbol"])
-    if name is None:
-        return grid
-    try:
-        prune = getattr(importlib.import_module(row["file"].replace("/", ".")[:-3]), name)
-        cfgs = configs_for(op)
-        # Evaluate at the SMALLEST width this op is driven at, not the largest. The prune keys on
-        # the launch's K, and both kernels that ship one have a driver that PINS K rather than
-        # following the unit's width: `drivers/transition.py:99` sets `K_SMALL = ragged(128)` and
-        # says so outright ("does NOT follow the swept width, and that is not an oversight"),
-        # because `transition_b2b` is dispatched only at K <= _B2B_MAX_K = 128. Taking the max
-        # over the unit widths evaluates the prune at a K the driver never builds -- at K=512
-        # `_prefer_covering_b2b` keeps all 28,000, and the phantom this function exists to remove
-        # comes straight back.
-        widths = sorted({w for _s, (_L, W) in sides.items() for w in W}) or [128]
-        return min(len(list(prune(cfgs, {"K": w, "D": w, "ND": 4 * w, "M": 1 << 16})))
-                   for w in widths) or grid
-    except Exception:
-        return grid
 
 
 def _derived_rows(sm: str | None) -> list[dict]:
@@ -170,60 +139,83 @@ def collect() -> tuple[list[dict], dict]:
     that runs 6,526 units over 60 kernels, which is the exact kind of drift this page exists to
     make visible.
 
-    Falls back to ``op_units`` when the derived file is missing or is for another card, so a fresh
-    checkout still renders something rather than failing.
+    Requires a current verified plan. A stale plan must be regenerated with ``dev derive``;
+    speculative Cartesian driver shapes are never substituted.
     """
     from miniworld_engine.autotune import derive, plan
-    from miniworld_engine.autotune.builder import op_units
+    from miniworld_engine.autotune.shape_key import _RADIX, _axis_name_tag
+    from miniworld_engine.build.key_gaps import _folds_for
 
     reg = {r["kernel"]: r for r in _rows()}
     exempt = _exempt_reasons()
     sides: dict[str, dict[str, tuple[set, set]]] = collections.defaultdict(
         lambda: collections.defaultdict(lambda: (set(), set())))
     units: collections.Counter = collections.Counter()
-    try:
-        evidence = plan.load("sm86")
-        verification = "verified against current dispatch sources"
-    except (OSError, ValueError, KeyError) as exc:
-        evidence = None
-        verification = f"UNVERIFIED: {exc}"
-    cover = _coverage() if evidence else {}
+    dimensions = collections.defaultdict(lambda: collections.defaultdict(set))
+    prune_inputs = collections.defaultdict(list)
+    # An obsolete derivation must never silently substitute a Cartesian driver ladder.
+    evidence = plan.load("sm86")
+    verification = "verified against current dispatch sources"
+    cover = _coverage()
     derived_rows = _derived_rows("sm86")
-    if derived_rows:
-        for r in derived_rows:
-            units[r["kernel"]] += 1
-            for stream in r["streams"].split("|"):
-                lengths, widths = sides[r["kernel"]][stream]
-                lengths.update(json.loads(r.get("shapes") or "{}").get(
-                    stream, [int(x) for x in r["lengths"].split("|") if x]))
-    else:
-        for u in op_units():
-            units[u.op] += 1
-            lengths, widths = sides[u.op][u.side]
-            lengths.add(u.length)
-            widths.add(u.width)
+    folds = {op: tuple(sorted(_folds_for(row["file"], row["symbol"])))
+             for op, row in reg.items()}
+    for r in derived_rows:
+        op = r["kernel"]
+        units[op] += 1
+        exact = ""
+        axes = folds.get(op, ())
+        keyed = dict(part.split("=", 1) for part in r["bucket"].split(",") if "=" in part)
+        value = keyed.get("shape_key", "")
+        if axes and value.isdigit() and int(value) % _RADIX == _axis_name_tag(axes):
+            packed = int(value) // _RADIX
+            values = {}
+            for axis in reversed(axes):
+                values[axis] = packed % _RADIX
+                packed //= _RADIX
+            exact = ", ".join(f"{axis}={values[axis]}" for axis in axes)
+            prune_inputs[op].append(values)
+        for stream in r["streams"].split("|"):
+            lengths, _widths = sides[op][stream]
+            lengths.update(json.loads(r.get("shapes") or "{}").get(
+                stream, [int(x) for x in r["lengths"].split("|") if x]))
+            if exact:
+                dimensions[op][stream].add(exact)
 
     out, total = [], 0
     for op in sorted(units):
-        ax = _ladders(op)
+        ax, configs = _config_inventory(op)
         if not ax:
             continue
-        grid = 1
-        for values in ax.values():
-            grid *= len(values)
+        grid = len(configs)
         r = reg[op]
         # The derivation records keys, not the full per-launch prune inputs. Do not infer a
         # smaller search from a guessed width; show the declared unpruned upper bound.
         benched = grid
         cost = units[op] * benched
+        cost_kind = "unpruned upper bound"
+        if op == "transition_fwd_b2b_triton" and len(prune_inputs[op]) == units[op]:
+            from miniworld_engine.kernels.transition.triton.fused import (
+                _prefer_covering_b2b,
+            )
+
+            if all("K" in args for args in prune_inputs[op]):
+                counts = [len(_prefer_covering_b2b(configs, args)) for args in prune_inputs[op]]
+                cost = sum(counts)
+                benched = max(counts)
+                cost_kind = "verified keys after existing covering prune; cache reuse not subtracted"
+
+
         total += cost
         out.append({
             "kernel": op, "kind": r["kind"], "stack": r["stack"], "dtypes": r["dtypes"],
             "where": r["file"].split("miniworld_engine/kernels/", 1)[-1],
             "level": r["level"], "width": (r["width"] or "both").strip(),
-            "axes": ax, "units": units[op], "grid": grid, "benched": benched, "cost": cost,
-            "cover": cover.get(op, 0.0), "exempt": exempt.get(op, ""),
-            "sides": [{"name": s, "L": sorted(L), "W": sorted(W)}
+            "cost_kind": cost_kind, "axes": ax, "units": units[op], "grid": grid, "benched": benched, "cost": cost,
+            "cover": cover.get(op, 0.0), "coverage_verified": bool(evidence),
+            "exempt": exempt.get(op, ""),
+            "sides": [{"name": s, "L": sorted(L), "W": sorted(W),
+                       "dimensions": sorted(dimensions[op][s])}
                       for s, (L, W) in sorted(sides[op].items())],
         })
     out.sort(key=lambda r: -r["cost"])
@@ -242,6 +234,8 @@ def collect() -> tuple[list[dict], dict]:
         "derived": sum(1 for r in out if r["cover"] >= 1.0),
         "unmeasured": sum(1 for r in out if r["cover"] == 0.0),
         "verification": verification,
+        "count_label": "keys",
+        "unit_label": "module invocations declared",
     }
     return out, totals
 
@@ -381,19 +375,30 @@ TEMPLATE = """<title>Autotune Sweep Grid</title>
 <div class="wrap">
 <header><h1>the autotune sweep, one row per kernel</h1>
 <p class="lede">{n} kernels. Each row is what a full <code>build</code> compiles and benches
-for that kernel: the shapes it is driven at, the config axes it searches, and the product.
+for that kernel when a verified plan is available. Otherwise rows are alternative per-kernel
+driver probes, not the full-build work list.
 Coverage is for NVIDIA RTX A6000 (sm86), with cache identities checked.
-Config counts are unpruned upper bounds for a cold search. Per-shape pruning and existing
-measurements reduce the actual work; these counts do not provide a build ETA.</p>
+Config count is the number of explicit candidates, not the Cartesian product of the displayed
+axis values. Transition B2B applies its existing covering prune using the recorded K; other costs remain unpruned upper bounds. Existing measurements reduce actual work. These are not build ETAs.</p>
 <p class="lede">Plan: {verification}</p>
+<p class="lede">Only shapes reached by the declared FoldForge and MiniWorld model cases are included.
+ Paired dimensions are decoded from actual cache keys; they are not Cartesian axes.
+ Stream labels identify the caller workload: an MSA call also launches pair-tensor kernels.
+ A stale plan must be regenerated with <code>dev derive</code> before rendering this page.
+ <a href="checkpoint-shapes-20260915.json">Constructor census</a> ·
+ <a href="reports/model-shape-cleanup-20260916.md">Model shape cleanup</a></p>
+<p class="lede">Tile, warp and stage grids remain unchanged. Costs include only the explicitly identified prune,
+ not measured build ETAs; existing usable cache entries reduce the remaining work.</p>
 <dl class="gm">
- <div><dt>buckets × grid</dt><dd class="num">{cost} M</dd></div>
+ <div><dt>{count_label} × grid</dt><dd class="num">{cost} M</dd></div>
  <div><dt>build ETA</dt><dd class="num">not measured</dd></div>
- <div><dt>module invocations declared</dt><dd class="num">{units}</dd></div>
- <div><dt>cache keys required</dt><dd class="num">{buckets}</dd></div>
+ <div><dt>{unit_label}</dt><dd class="num">{units}</dd></div>
+ <div><dt>{count_label}</dt><dd class="num">{buckets}</dd></div>
  <div><dt>kernels covered</dt><dd class="num">{derived} of {n}</dd></div>
 </dl>
 <dl class="leg">
+ <div><dt>atom_pair</dt><dd>local atom windows: (B, ceil(A/32), 32, 128, D)</dd></div>
+ <div><dt>noise</dt><dd>one Fourier embedding per diffusion sample</dd></div>
  <div><dt>atom_single</dt><dd>an atom count at <code>d_single_atom</code></dd></div>
  <div><dt>token_single</dt><dd>a token count at <code>d_single</code> / <code>d_single_token</code></dd></div>
  <div><dt>token_pair</dt><dd>a token count at <code>d_pair</code> — a pair activation is
@@ -409,7 +414,7 @@ measurements reduce the actual work; these counts do not provide a build ETA.</p
 <div class="tw"><table>
 <thead><tr><th>kernel</th><th>kind</th><th>dtype</th><th>shape · L · d</th>
 <th>tile axes</th><th>GROUP_M</th><th>warps</th><th>stages</th>
-<th class="r">keys</th><th class="r">grid</th><th class="r">keys × grid</th></tr></thead>
+<th class="r">{count_label}</th><th class="r">grid</th><th class="r">{count_label} × grid</th></tr></thead>
 <tbody>{rows}</tbody></table></div>
 </div>
 """
@@ -421,7 +426,7 @@ measurements reduce the actual work; these counts do not provide a build ETA.</p
 #: The stream vocabulary, as `registry_module.csv` spells it. A row read from
 #: `registry_kernel.csv` already carries one of these, so it passes straight through; the
 #: `pair`/`atom`/`token` spellings are what `OpUnit.side` uses and are translated.
-STREAM_NAMES = frozenset({"token_pair", "token_single", "atom_single", "msa_token"})
+STREAM_NAMES = frozenset({"token_pair", "token_single", "atom_single", "msa_token", "atom_pair", "noise"})
 
 
 def shape_name(row: dict, side: str) -> str:
@@ -438,6 +443,8 @@ def shape_name(row: dict, side: str) -> str:
     """
     if side in STREAM_NAMES:
         return side
+    if side == "msa":
+        return "msa_token"
     if side == "pair":
         return "token_pair"
     if side == "atom":
@@ -449,6 +456,8 @@ def shape_name(row: dict, side: str) -> str:
 
 
 def _badge(row: dict) -> str:
+    if not row.get("coverage_verified", True):
+        return '<span class="ev part" title="current dispatch coverage has not been verified">unknown</span>'
     c = row["cover"]
     if c >= 1.0:
         return '<span class="ev ok" title="all required A6000 keys are usable">100%</span>'
@@ -469,7 +478,9 @@ def render(rows: list[dict], totals: dict) -> str:
         shapes = "".join(
             f'<div class="lad"><span class="lv">{shape_name(r, s["name"])}</span>'
             f'{" ".join(str(x) for x in s["L"])}'
-            + (f'<span class="faint"> &middot; d </span>{" ".join(str(x) for x in s["W"])}'
+            + (f'<span class="faint"> &middot; </span>{e(" / ".join(s["dimensions"]))}'
+               if s.get("dimensions") else
+               f'<span class="faint"> &middot; d </span>{" ".join(str(x) for x in s["W"])}'
                if s["W"] else "") + "</div>"
             for s in r["sides"])
         tiles = "".join(
@@ -480,20 +491,25 @@ def render(rows: list[dict], totals: dict) -> str:
         gcell = (f'<td class="lad">{e(" ".join(gm))}</td>' if gm else
                  f'<td class="lad faint" title="{e(r["exempt"])}">&mdash;</td>')
         dt = "".join(f'<span class="dt {e(x)}">{e(x)}</span>' for x in r["dtypes"].split("|"))
+        shape_note = (
+            '<div class="fam"><a href="reports/autotune-space-20260916.md#atomic-layernorm-shape-audit">'
+            'Fallback shape audit: includes extrapolated widths; misses checkpoint widths</a></div>'
+            if r["kernel"] == "layernorm_bwd_atomic_triton" and not r["coverage_verified"] else "")
         body.append(
             f'<tr><td class="k"><span class="op">{e(r["kernel"])}</span>'
             f'<span class="fam">{e(r["where"])} &middot; {e(r["stack"])}</span></td>'
             f'<td><span class="chip {e(r["kind"])}">{e(r["kind"])}</span></td>'
-            f'<td class="lad">{dt}</td><td>{shapes}</td><td class="tiles">{tiles}</td>{gcell}'
+            f'<td class="lad">{dt}</td><td>{shapes}{shape_note}</td><td class="tiles">{tiles}</td>{gcell}'
             f'<td class="lad">{e(" ".join(ax.get("num_warps", [])))}{_badge(r)}</td>'
             f'<td class="lad">{e(" ".join(ax.get("num_stages", [])))}</td>'
             f'<td class="r lad">{r["units"]:,}</td><td class="r lad">{r["grid"]:,}</td>'
-            f'<td class="cost r"><span class="bar" style="--w:{bar}%"></span>'
+            f'<td class="cost r" title="{e(r.get("cost_kind", "upper bound"))}"><span class="bar" style="--w:{bar}%"></span>'
             f'<span class="v lad">{r["cost"]:,}</span></td></tr>')
     return TEMPLATE.format(
         css=CSS, rows="".join(body), n=totals["kernels"], units=f'{totals["units"]:,}',
         buckets=f'{totals["buckets"]:,}',
         verification=e(totals.get("verification", "unverified")),
+        count_label=e(totals["count_label"]), unit_label=e(totals["unit_label"]),
         cost=f'{totals["cost"] / 1e6:.2f}', hours=f'{totals["hours"]:.0f}',
         derived=totals["derived"], unmeasured=totals["unmeasured"],
         partial=totals["kernels"] - totals["derived"] - totals["unmeasured"])
@@ -508,7 +524,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render(rows, totals))
     print(f"{args.out}: {totals['kernels']} kernels, {totals['units']:,} units, "
-          f"{totals['buckets']:,} required keys; {totals['verification']}; build ETA not measured")
+          f"{totals['buckets']:,} {totals['count_label']}; "
+          f"{totals['verification']}; build ETA not measured")
     return 0
 
 

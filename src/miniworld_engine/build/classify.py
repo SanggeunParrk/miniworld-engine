@@ -179,7 +179,7 @@ def classify(path: Path, symbol: str) -> tuple[str, str, str]:
     if not src:
         src, how = text, "WHOLE FILE (symbol not found)"
     sig = [n for p, n in GEMM if re.search(p, src)] + [n for p, n in REDUCE if re.search(p, src)]
-    gemm = {"tl.dot", "cublasGemm", "mma"} & set(sig)
+    gemm = {"tl.dot", "cublasGemm", "mma", "external GEMM"} & set(sig)
     red = {"tl.reduce", "shfl", "atomic"} & set(sig)
     kind = "gemm" if gemm else ("reduce" if red else "elem")
     return kind, ",".join(sig), how

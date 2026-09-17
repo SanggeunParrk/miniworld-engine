@@ -62,7 +62,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
             )
             _bdll_patch.apply()
             _gate_mul_patch.apply()
-            from .module import _load_cute_fns
+            from miniworld_engine.modules.triangle_multiplication.module import (
+                _load_cute_fns,
+            )
             _load_cute_fns()
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).

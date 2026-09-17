@@ -38,6 +38,9 @@ DATA = ROOT / "src" / "miniworld_engine" / "autotune" / "data"
 #: (op, flag) -> the launch site proving the missing value never runs in production.
 #: An entry here is a claim about the CODE, not a to-do: it has to name where the flag is fixed.
 ONE_SIDED: dict[tuple[str, str], str] = {
+    ("layernorm_bwd_foldstats_triton", "PRIVATIZE_DGDB"):
+        "drivers/transition.py pins transition_lnbwd_privatize=True, the production default; "
+        "False is an explicit experimental setting, not a current build invocation",
     ("trimul_input_ln_residual_bwd_triton", "HAS_ROWSCALE"): "input_ln_residual_bwd launches HAS_ROWSCALE=False; masking belongs to the front projections",
     ("layernorm_fwd_strided_triton", "HAS_W"):
         "adaln/triton/inference.py:142 passes HAS_W=True as a literal; `_cond_affine` is the only "

@@ -86,10 +86,11 @@ def test_every_row_declares_what_it_varies(row):
 
 
 def test_no_two_rows_declare_the_same_shape_twice():
-    """Two rows with the same (module, stream, dims) build the same units twice."""
+    """Channel dimensions may repeat when diffusion augmentation differs."""
     seen: dict = {}
     for row in ROWS:
-        key = (row.module, row.stream, tuple(sorted(row.dims.items())))
+        key = (row.module, row.stream, tuple(sorted(row.dims.items())),
+               row.augmentation("eval"), row.augmentation("train"))
         assert key not in seen, f"duplicate row for {key}"
         seen[key] = row
 

@@ -558,23 +558,23 @@ def apply_config_dir(directory: Path) -> int:
 #: bench then prints the engine's own per-op "no tuned autotune cache" warning, so it cannot
 #: silently produce a fast-looking number from an untuned kernel.
 KERNEL_TARGETS: dict[str, tuple[str, ...]] = {
-    "dual_gemm_epilogue": ("tm1", "triangle_multiplication"),
+    "dual_gemm_epilogue": ("triangle_multiplication_bidirectional", "triangle_multiplication"),
     "dual_gemm_epilogue_bwd": ("triangle_multiplication",),
-    "gemm_epilogue": ("layernorm_linear_pair_bias",),
+    "gemm_epilogue": ("layernorm_linear_native",),
     # gemm_epilogue_bwd imports adaln, augmented_attention, bias_only_attention,
     # conditioned_transition, layernorm and layernorm_linear -- it benches the shared GEMM-epilogue
     # backward across all of them, so its cache comes from all of their cases.
     "gemm_epilogue_bwd": ("adaptive_layernorm", "augmented_attention", "attention_pair_bias",
-                          "conditioned_transition", "layernorm_lowreg",
-                          "layernorm_linear_pair_bias"),
-    "gemm_gate": ("tm2",),
+                          "conditioned_transition", "layernorm_native",
+                          "layernorm_linear_native"),
+    "gemm_gate": ("triangle_multiplication",),
     "gemm_gate_bwd": ("triangle_multiplication",),
     "transition_b2b": ("transition",),
     "transition_b2b_bwd": ("transition",),
-    "layernorm": ("layernorm_lowreg", "layernorm_transpose"),
-    "layernorm_bwd": ("layernorm_lowreg", "layernorm_transpose"),
-    "fused_ln_mask": ("layernorm_lowreg",),
-    "adaln": ("adaptive_layernorm", "layernorm_linear_pair_bias"),
+    "layernorm": ("layernorm_native", "triangle_multiplication"),
+    "layernorm_bwd": ("layernorm_native", "triangle_multiplication"),
+    "fused_ln_mask": ("triangle_multiplication",),
+    "adaln": ("adaptive_layernorm", "layernorm_linear_native"),
     "adaln_bwd": ("adaptive_layernorm",),
     "triangle_attention": ("triangle_attention_bidirectional", "triangle_attention_heads"),
     "bias_only_attention": ("attention_pair_bias",),
@@ -895,36 +895,6 @@ def cmd_build(args: argparse.Namespace) -> int:
     # model -- `transition` is launched by both.
     module_pass = args.per_module or (not args.per_op and args.case not in STACKS)
 
-    def _driver_pass_for_uncovered():
-        """The kernels no module reaches, driven through their own harnesses.
-
-        `build all` is two sweeps and one command. The module sweep is enumerated from
-        registry_module.csv and covers everything the model dispatches to; this covers the rest --
-        the alternative implementations kept for A/B, which register with the cache but have no
-        caller, so no module sweep can ever produce them.
-
-        It is NARROWED to that complement rather than run whole. The driver sweep's width ladders
-        are hand-written, and running them for a kernel the modules already cover is precisely the
-        arrangement that gave the build two disagreeing statements of the same shapes -- 146
-        buckets production reached with no entry, found only by a replay on a card.
-        """
-        from miniworld_engine.autotune import derive
-
-        sm = builder.device_sm()
-        if sm is None:
-            return []
-        try:
-            names = derive.uncovered_kernels(sm)
-        except FileNotFoundError:
-            print("registry_kernel.csv is missing; run `miniworld-engine dev derive` so the "
-                  "build knows which kernels no module reaches", file=sys.stderr)
-            return []
-        if not names:
-            return []
-        units = builder.op_units(names, config_dir=directory)
-        print(f"driver sweep: {len(units)} (op, shape, width) items — {len(names)} kernel(s) no "
-              f"module dispatches to", flush=True)
-        return units
     if module_pass:
         from miniworld_engine.autotune import plan
         sm = builder.device_sm()
@@ -955,10 +925,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     # record: `layernorm_bwd_split` spent 5h14m re-timing 64 already-tuned units to fill three
     # missing keys, because the run said `--rebuild-cached` when it meant "reach the new buckets".
     fill_gaps = not bool(getattr(args, "rebuild", False))
-    #: `build all` also owes the kernels no module reaches. Run as a SECOND pass because
-    #: `build_all` reads `selected[0]` to decide whether it was handed Cases or OpUnits, so a
-    #: mixed list would send a module Unit into a lookup that expects an op name.
-    extra = _driver_pass_for_uncovered() if (module_pass and args.case == "all") else []
+    # Only model-reachable shapes belong to the default build. Explicit --per-op remains
+    # available for isolated implementation diagnostics.
     results: list = builder.build_all(selected, Path(args.shards).expanduser(),
                                       _resolve_gpus(args.gpus), args.compile_jobs,
                                       resume=args.resume, reclaim=args.reclaim,
@@ -979,20 +947,6 @@ def cmd_build(args: argparse.Namespace) -> int:
                                       # it drops any op the cache answers at ANY bucket, which is
                                       # exactly the op that owes a new one.
                                       skip_cached=False)
-    if extra:
-        results += builder.build_all(extra, Path(args.shards).expanduser(),
-                                     _resolve_gpus(args.gpus), args.compile_jobs,
-                                     resume=args.resume, reclaim=False,
-                                     config_dir=directory, fill_gaps=fill_gaps,
-                                     units_per_gpu=getattr(args, "units_per_gpu", 1),
-                                     keep_ir=getattr(args, "keep_ir", False),
-                                     predict=getattr(args, "predict_unusable", False),
-                                     bench_clear_mb=getattr(args, "bench_clear_mb", 0),
-                                     bench_rep_ms=getattr(args, "bench_rep_ms", 0),
-                                     unit_timeout_seconds=getattr(args, "unit_timeout_seconds",
-                                                               builder.DEFAULT_UNIT_TIMEOUT_SECONDS),
-                                     pin_cores=getattr(args, "pin_cores", False),
-                                     skip_cached=False)
     held = [r for r in results if r.get("claimed_elsewhere")]
     skipped = [r for r in results if r.get("skipped") and not r.get("claimed_elsewhere")]
     finished = [r for r in results if not r.get("claimed_elsewhere") and not r.get("skipped")]
@@ -1821,8 +1775,8 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("--per-op", action="store_true",
                      help="work item = (op, shape bucket) driven through its registry driver, "
                           "instead of (case, dims, length, mode) driving a whole module. No "
-                          "redundancy: each (op, bucket) is tuned exactly once. `build all` "
-                          "already runs this for the kernels no module reaches; use it to build "
+                          "redundancy: each (op, bucket) is tuned exactly once. This is an explicit "
+                          "diagnostic sweep outside the default model plan; use it to build "
                           "one kernel by name. The positional takes one kernel name or a "
                           "comma list of them, and a list is ONE sweep -- one import, one GPU "
                           "pool, one interleaved work list.")

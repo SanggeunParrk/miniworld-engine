@@ -28,8 +28,8 @@ def test_output_rows_fp32(case, compiled, record_property):
     dy = torch.randn(m, n, device="cuda", dtype=torch.bfloat16)
 
     def evaluate(x, g, b, w, dy):
-        y, xhat, mean, rstd = out.forward(x, g, b, w, 1e-5)
-        return (y,) + out.backward(dy, y, xhat, rstd, g, b, w)
+        y, xhat, _mean, rstd = out.forward(x, g, b, w, 1e-5)
+        return (y, *out.backward(dy, y, xhat, rstd, g, b, w))
 
     fn = (
         torch.compile(
@@ -47,7 +47,7 @@ def test_output_rows_fp32(case, compiled, record_property):
         torch.nn.functional.layer_norm(ref[0], (k,), ref[1], ref[2], 1e-5), ref[3]
     )
     grads = torch.autograd.grad(yr, ref, dy.float())
-    for name, a, z in zip(("y", "dx", "dg", "db", "dw"), result, (yr,) + grads):
+    for name, a, z in zip(("y", "dx", "dg", "db", "dw"), result, (yr, *grads), strict=False):
         assert torch.isfinite(a).all(), name
         if z.norm() == 0:
             assert torch.count_nonzero(a) == 0, name
@@ -78,7 +78,8 @@ def test_gamma_storage_dtype_shares_native_cache_key(monkeypatch):
     stats = [torch.randn(264, device="cuda") for _ in range(3)]
     a = dgrad_ln_rows(dy, w, xhat, gamma, *stats)
     b = dgrad_ln_rows(dy, w, xhat, gamma.float(), *stats)
-    assert len(seen) == 2 and seen[0] == seen[1]
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
     torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 

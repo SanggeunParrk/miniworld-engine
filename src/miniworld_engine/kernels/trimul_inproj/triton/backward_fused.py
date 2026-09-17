@@ -245,5 +245,5 @@ def input_dual_bwd(g: torch.Tensor, f: torch.Tensor, w: torch.Tensor, v: torch.T
     if any((t.dtype != torch.bfloat16 or t.device != g.device for t in (g, f, w, v))):
         raise ValueError('dual dgrad expects BF16 on the same device')
     out = _input_dual_bwd_fake(g, f, w, v, length)
-    _input_dual_bwd_kernel[lambda c: (tile_grid(m, n, c['BLOCK_M1'], c['BLOCK_N']),)](g, f, w, v, out, m, kg, kp, n, *g.stride(), *f.stride(), *w.stride(), *v.stride(), shape_key=dual_shape_key(length, kg, kp, n))
+    _input_dual_bwd_kernel[lambda c: tile_grid(m, n, c['BLOCK_M1'], c['BLOCK_N'])](g, f, w, v, out, m, kg, kp, n, *g.stride(), *f.stride(), *w.stride(), *v.stride(), shape_key=dual_shape_key(length, kg, kp, n))
     return out

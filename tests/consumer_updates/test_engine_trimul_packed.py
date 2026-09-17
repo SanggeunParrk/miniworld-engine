@@ -20,7 +20,7 @@ def models(kind, implementation="miniworld"):
         .float()
     )
     actual = (
-        cls(128, p_drop=0, implementation=implementation, **options)
+        cls(128, p_drop=0, implementation=ImplementationType(implementation), **options)
         .cuda()
         .to(torch.bfloat16)
     )
@@ -44,7 +44,7 @@ def check(name, a, b):
 
 
 @pytest.mark.parametrize(
-    "length,hidden,strided",
+    ("length", "hidden", "strided"),
     [
         (31, 7, False),
         (128, 128, False),
@@ -89,11 +89,12 @@ def test_packed_contractions(length, hidden, strided, contract):
         ("dl", dl, lr.grad),
         ("dr", dr, rr.grad),
     ):
+        assert expected is not None
         check(name, value, expected)
         assert value.is_contiguous()
         error = (value.float() - expected).norm() / expected.norm()
         assert error < 0.004, (name, float(error))
-    for before, after in zip(saved, tensors):
+    for before, after in zip(saved, tensors, strict=False):
         torch.testing.assert_close(before, after, rtol=0, atol=0)
     assert (
         len({t.untyped_storage().data_ptr() for t in [left, right, grad, tri, dl, dr]})
@@ -122,7 +123,7 @@ def test_cold_compiled_training_reference(dynamic, implementation):
     yr.backward(dy.float())
     check("output", y, yr)
     check("input", x.grad, xr.grad)
-    for (name, p), (rn, rp) in zip(actual.named_parameters(), ref.named_parameters()):
+    for (name, p), (rn, rp) in zip(actual.named_parameters(), ref.named_parameters(), strict=False):
         assert name == rn
         check(name, p.grad, rp.grad)
 
@@ -164,13 +165,15 @@ def test_compiled_training_graph_rng_residual(implementation):
     previous = output.clone()
     graph.replay()
     assert not torch.equal(previous, output), "dropout RNG froze"
+    assert x.grad is not None
     assert torch.isfinite(x.grad).all()
     mask.zero_()
     graph.replay()
     torch.testing.assert_close(output, x, rtol=0, atol=0)
     torch.testing.assert_close(x.grad, dy, rtol=0, atol=0)
     for name, param in actual.named_parameters():
-        assert param.grad is not None and torch.isfinite(param.grad).all()
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()
         # Masking the front does not mask the output LayerNorm bias: its
         # derivative remains live even at beta=0 and zero contraction output.
         if name != "ln_out.bias":

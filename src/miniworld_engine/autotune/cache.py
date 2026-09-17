@@ -17,7 +17,7 @@ Cache JSON schema (v1)::
      "grids":       {"<12-hex>": ["<config sig repr>", ...]},   # spaces this file's entries were
      "entry_grids": {"<dtype>|<bucket>": ["<12-hex>", ...]}}    # swept under, by reference
 
-``config_space_hash`` invalidates an entry when the kernel's grid changes, so a stale cache
+``config_space_hash`` detects grid changes; a proved narrowing can reuse retained winners. A stale cache
 degrades to a warn + full-grid fallback instead of silently pinning old tiles.
 
 ``grids`` / ``entry_grids`` are what stop a rebuild re-measuring what is already known: they say
@@ -1295,6 +1295,21 @@ def _miss(op, gk, what, why, configs):
     return heuristic_subset(configs, cap)
 
 
+def grid_compatible(data: dict, configs) -> bool:
+    """Reuse a matching grid or a proved narrowing of its recorded candidates.
+
+    This grants runtime candidate reuse only. It does not certify per-workload
+    timing coverage, change a grid stamp, or excuse missing environment/key/source
+    identity. The caller still intersects this shape's winners with live configs.
+    """
+    if data.get("config_space_hash") == config_space_hash(configs):
+        return True
+    previous = data.get("config_space")
+    return bool(configs and previous) and {
+        repr(_sig(config)) for config in configs
+    } <= set(previous or ())
+
+
 def _cached_subset(autotuner, configs, nargs, meta):
     """The cached top-K for this (op, gpu, dtype, bucket), or a bounded fallback on a miss."""
     from miniworld_engine.autotune.configs import op_of  # avoid an import cycle
@@ -1311,7 +1326,7 @@ def _cached_subset(autotuner, configs, nargs, meta):
     # Capture records the declared grid; shape/device pruning only limits which
     # of its winners may launch. Comparing the pruned subset falsely invalidates
     # a valid cache whenever an early prune removes even one unsafe schedule.
-    if data.get("config_space_hash") != config_space_hash(autotuner.configs):
+    if not grid_compatible(data, autotuner.configs):
         return _miss(op, gk, dtype,
                      "tuned autotune cache is STALE (kernel config grid changed)", configs)
     if _scheme_stale(op, data.get("key_scheme")):
@@ -1453,7 +1468,7 @@ def select_config(
         _warn_once(op, gk, dtype, "native cache source/environment changed",
                    fallback="the declared native default")
         return None
-    if not op_id and candidates is not None and data.get("config_space_hash") != config_space_hash(candidates):
+    if not op_id and candidates is not None and not grid_compatible(data, candidates):
         _warn_once(op, gk, dtype, "tuned autotune cache is STALE (kernel config grid changed)")
         return None
     if _scheme_stale(op, data.get("key_scheme")):
@@ -1475,7 +1490,7 @@ def select_config(
     # `candidates` arrives as cache dicts (`cute_config._as_cache_dicts`), so one shape only.
     prepared = getattr(candidates, "cache_signatures", None)
     live = (prepared() if prepared is not None
-            else {_sig_from_dict(c) for c in (candidates or [])})
+            else {_sig_from_dict(as_cfg_dict(c)) for c in (candidates or [])})
     for cfg in entry:
         if not isinstance(cfg, dict) or not isinstance(cfg.get("kwargs"), dict):
             continue

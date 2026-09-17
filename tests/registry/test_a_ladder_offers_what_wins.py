@@ -22,6 +22,8 @@ from __future__ import annotations
 import collections
 import csv
 import json
+import re
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -70,6 +72,13 @@ MEASURED_AXES = {
 
 
 
+@cache
+def _live_identity(op: str) -> str | None:
+    from miniworld_engine.autotune.cache_status import _current_op_identity
+
+    return _current_op_identity(op)
+
+
 def _superseded(op: str, data: dict) -> bool:
     """Has the cache policy already declared these measurements invalid?
 
@@ -89,6 +98,10 @@ def _superseded(op: str, data: dict) -> bool:
     # nothing there and means revision 1, and reading the key directly treats those -- which is
     # most of the corpus -- as matching whatever the registry now declares.
     if _stored_rev(data) != build_rev(op):
+        return True
+    # Old source winners cannot narrow the new implementation's search space.
+    identity = _live_identity(op)
+    if identity and data.get("op_identity") and data["op_identity"] != identity:
         return True
     stored_env = data.get("env_identity")
     return bool(stored_env) and stored_env != env_identity()
@@ -265,17 +278,54 @@ def _measured() -> dict[str, dict[tuple[str, str], int]]:
     return out
 
 
-def _covered() -> set[str]:
-    """Kernels whose cache covers a whole planned build on at least one card.
+@cache
+def _required_keys(arch: str) -> dict[str, set[str]]:
+    """Only a verified current derivation can prove the model's required buckets."""
+    from miniworld_engine.autotune import derive, plan
 
-    Below that line a ladder derived from the cache is derived from a SAMPLE, and the sample is
-    biased in the one direction that costs: the widths still missing are the wide ones. Every
-    kernel whose winners currently stop at `num_warps=4` is a kernel measured at d=128 only, with
-    256 and 512 unbuilt -- and wider activations are exactly where more warps start to pay.
+    try:
+        plan.load(arch)
+        rows = derive.kernel_rows(arch)
+    except (OSError, ValueError):
+        return {}
+    required: dict[str, set[str]] = collections.defaultdict(set)
+    for row in rows:
+        required[row["kernel"]].add(f"{row['dtype']}|{row['bucket']}")
+    return required
+
+
+def _covered() -> set[str]:
+    """Require the actual model keys, not an equal count of unrelated old keys.
+
+    The model-derived shape catalog can replace widths while keeping the same
+    number of invocations. Counting buckets alone then declares an old sample
+    complete and incorrectly demands narrowing the new workload's search grid.
+    A card without a current verified plan cannot support that conclusion.
     """
-    planned, measured = _planned(), _measured()
-    return {k for k, want in planned.items()
-            if any(n >= want.get(dt, 0) > 0 for (_card, dt), n in measured.get(k, {}).items())}
+    planned, measured_counts = _planned(), _measured()
+    covered: set[str] = set()
+    for directory in sorted(DATA.iterdir()):
+        if not directory.is_dir():
+            continue
+        for path in directory.glob("*.json"):
+            # Retain the original full driver-sweep requirement as well as the
+            # exact model-key check; a small model subset is insufficient.
+            if not any(card == path.stem and n >= planned.get(directory.name, {}).get(dtype, 0) > 0
+                       for (card, dtype), n in measured_counts.get(directory.name, {}).items()):
+                continue
+            match = re.search(r"\((sm\d+)\)", path.stem)
+            if match is None:
+                continue
+            required = _required_keys(match[1]).get(directory.name, set())
+            if not required:
+                continue
+            data = json.loads(path.read_text())
+            if _superseded(directory.name, data):
+                continue
+            measured = {key for key, rows in data.get("entries", {}).items() if rows}
+            if required <= measured:
+                covered.add(directory.name)
+    return covered
 
 
 def _derive(won_axis: collections.Counter, rungs: tuple[int, ...]) -> list[int]:
@@ -400,3 +450,20 @@ def test_the_narrowing_is_not_silently_stalled() -> None:
           f"{len(absent)} with no cache at their declared precision")
     assert planned, "op_units planned nothing, so coverage cannot be computed"
     assert measured, "the cache holds nothing, so coverage cannot be computed"
+
+
+def test_equal_bucket_counts_do_not_certify_changed_model_shapes(tmp_path, monkeypatch):
+    """Two old widths cannot stand in for two different current widths."""
+    import sys
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "DATA", tmp_path)
+    monkeypatch.setattr(module, "_planned", lambda: {"probe": {"bf16": 2}})
+    monkeypatch.setattr(module, "_required_keys", lambda arch: {"probe": {"bf16|x", "bf16|y"}})
+    monkeypatch.setattr(module, "_superseded", lambda op, data: False)
+    path = tmp_path / "probe" / "test GPU (sm86).json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"entries": {"bf16|x": [{}], "bf16|z": [{}]}}))
+    assert not _covered()
+    path.write_text(json.dumps({"entries": {"bf16|x": [{}], "bf16|y": [{}]}}))
+    assert _covered() == {"probe"}

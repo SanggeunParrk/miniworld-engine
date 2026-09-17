@@ -34,12 +34,12 @@ def _ext(kind, width, config):
     return _EXTENSIONS[key]
 
 
-def __b2b_launch_fake(x, rstd, c1, g, beta, wa, wb, ws, bn, stages, warpgroups, kt, min_blocks):
+def _b2b_launch_fake(x, rstd, c1, g, beta, wa, wb, ws, bn, stages, warpgroups, kt, min_blocks):
     """Allocate outputs with the same shape, dtype and strides as _b2b_launch."""
     return torch.empty_like(x)
 
 
-@opaque(fake=__b2b_launch_fake, name="transition_b2b_fwd_cuda")
+@opaque(fake=_b2b_launch_fake, name="transition_b2b_fwd_cuda")
 def _b2b_launch(
     x: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
     g: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor,

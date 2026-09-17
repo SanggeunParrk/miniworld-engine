@@ -49,13 +49,13 @@ def test_the_page_states_the_current_sweep_size(stated) -> None:
     ladders, which the module sweep replaced: 4,948 units over 67 kernels for a build that runs
     6,526 over 60."""
     _rows, totals = collect()
-    assert stated.get("module invocations declared") == f"{totals['units']:,}", (
+    assert stated.get(totals["unit_label"]) == f"{totals['units']:,}", (
         f"the page says {stated.get('module invocations declared')!r} units, the repository plans "
         f"{totals['units']:,}. Regenerate the page.")
-    assert stated.get("cache keys required") == f"{totals['buckets']:,}", (
+    assert stated.get(totals["count_label"]) == f"{totals['buckets']:,}", (
         f"the page says {stated.get('cache keys required')!r} entries, the derivation names "
         f"{totals['buckets']:,}. Re-run `dev derive`, then regenerate the page.")
-    assert stated.get("buckets × grid") == f"{totals['cost'] / 1e6:.2f} M", (
+    assert stated.get(totals["count_label"] + " × grid") == f"{totals['cost'] / 1e6:.2f} M", (
         f"the page says {stated.get('buckets × grid')!r}, the repository is "
         f"{totals['cost'] / 1e6:.2f} M (config, shape). Regenerate the page.")
 

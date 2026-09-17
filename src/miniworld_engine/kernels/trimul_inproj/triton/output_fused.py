@@ -132,7 +132,7 @@ def output_f567_train(
     if any(not t.is_contiguous() for t in (norm, x, residual, dropscale)):
         raise ValueError('F567 activation/residual/drop-scale operands must be contiguous')
     y, proj, gate = _output_f567_train_fake(*tensors, seq_len)
-    grid = lambda meta: (triton.cdiv(m, meta['BLOCK_M1']) * triton.cdiv(n, meta['BLOCK_N']),)
+    grid = lambda meta: tile_grid(m, n, meta['BLOCK_M1'], meta['BLOCK_N'])
     _output_f567_kernel[grid](
         norm, x, wp, wg, proj, gate, y, residual, dropscale,
         m, seq_len, kp, kg, n, *wp.stride(), *wg.stride(),

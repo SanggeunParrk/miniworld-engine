@@ -8,6 +8,34 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `ops.gated_residual(x, gate, branch)`: fused linear residual gate with backward.
+
+### Changed
+
+- Merge the 24 active MiniWorld consumer patches: packed TriMul buffers, configured
+  F567 forward and dual-dgrad/LayerNorm-residual backward fusions, strict Triton
+  backend selection, and expanded resumable CuTe/CUDA tuning.
+  See [integration and validation](docs/records/local-patches-20260917/README.md).
+- Retire 37 incompatible H100/A5000/A6000 cache files from runtime selection;
+  original measurements and checksums remain in the integration archive.
+
+- FA2 sliding-window attention uses static-capacity packing in backward as well as
+  forward, removing dynamic `nonzero`/host length reads from the AOT backward graph.
+  SWA DiT compiled benchmarks now require `fullgraph=True`.
+
+- `SWADiTBlock` now matches MiniWorld ESMFold2 adaLN-Zero. Engine backends use
+  fused RMSNorm modulation, SwiGLU, and residual gates; the previous AF3-style
+  block checkpoints and SWA DiT benchmark results are incompatible with this version.
+
+### Fixed
+
+- AdaLN GEMM alignment, large compute-efficient attention backward scratch usage,
+  mixed-affine LayerNorm and compiled FA4 backward.
+- Wide TriMul packed reduction keys (`KP=4096`), compact CuTe cache selection,
+  and shape-only derivation of another architecture's external FlashAttention path.
+
 ### Removed
 - **`kernels.triton_adaptive_layer_norm`, and twelve kernels no production path reached.** Two
   audits of the adaln and conditioned_transition families found that half their registry surface
@@ -343,3 +371,10 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 - Initial consolidation of AF3-style op kernels (triangle multiplication,
   transition, triangle/bias/augmented attention, layernorm, adaLN) with
   Triton / CuTeDSL / CUDA backends.
+
+### Checkpoint shape coverage and composite ops (2026-09-15)
+
+- Add public `ops.gated_linear`, `ops.swiglu_ffn`, and `ops.rms_norm_modulation` over existing autograd kernels.
+- Drive actual AF3, Protenix v1/v2, OpenDDE and ESMFold2 dimensions from the module build registry; include FP32 norm affine parameters, expansion ratios and projected attention head layouts.
+- Handle absent LayerNorm affine tensors on the CUDA path without a mixed-dtype PyTorch fallback.
+- Record constructor provenance and unsupported asymmetric TriMul/local attention in `docs/checkpoint-shapes-20260915.md`.

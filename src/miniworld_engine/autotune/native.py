@@ -122,7 +122,7 @@ def policy_identity():
 def candidates_for(op, bucket):
     """CPU-readable declared grid for one exact native workload."""
     from miniworld_engine.autotune import hopper_cuda_config as cuda
-    tensors, extra = ast.literal_eval(bucket)
+    tensors, _extra = ast.literal_eval(bucket)
     if op.endswith("sm90_cute"):
         from miniworld_engine.autotune import cute_config as cute
         if op in ("trimul_inproj_masked_sm90_cute", "transition_swiglu_fwd_sm90_cute",

@@ -234,7 +234,7 @@ def test_a_kernel_targets_mode_is_not_the_callers_to_choose():
 
 
 def test_case_names_are_declared() -> None:
-    """`CASE_NAMES` must be exactly what `cases()` builds, in order.
+    """`CASE_NAMES` must name each case exactly once; enumeration order is internal.
 
     It exists so `miniworld-engine build <typo>` can be rejected without importing anything:
     `cases()` constructs the production modules, which imports every kernel, so the old code spent
@@ -243,7 +243,9 @@ def test_case_names_are_declared() -> None:
     """
     from miniworld_engine.autotune.builder import CASE_NAMES, cases
 
-    assert tuple(c.name for c in cases()) == CASE_NAMES
+    actual = [c.name for c in cases()]
+    assert len(actual) == len(set(actual)) == len(CASE_NAMES)
+    assert set(actual) == set(CASE_NAMES)
 
 
 def test_build_rejects_an_unknown_case_without_importing_kernels(capsys) -> None:

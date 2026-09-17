@@ -80,9 +80,11 @@ def test_entries_are_ranked_fastest_first(path: Path):
         for c in ranked:
             assert isinstance(c.get("kwargs"), dict), f"{bucket}: entry has no kwargs"
             assert isinstance(c.get("num_warps"), int)
-            assert c["num_warps"] > 0
+            from miniworld_engine.autotune.native import BUILD_OPS
+            minimum = 0 if path.parent.name in BUILD_OPS else 1
+            assert c["num_warps"] >= minimum
             assert isinstance(c.get("num_stages"), int)
-            assert c["num_stages"] > 0
+            assert c["num_stages"] >= minimum
 
 
 @pytest.mark.parametrize("path", FILES, ids=_id)

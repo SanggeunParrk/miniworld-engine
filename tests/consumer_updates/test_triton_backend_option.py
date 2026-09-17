@@ -70,7 +70,7 @@ def test_transition_policy_precedes_internal_h100_dispatch(monkeypatch, training
 @pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
-    "kind,width",
+    ("kind", "width"),
     [("transition", 128), ("transition", 512), ("trimul", 128)],
     ids=["transition128", "transition512", "trimul128"],
 )
@@ -112,7 +112,7 @@ def test_cuda_training_and_graph_no_native_engine_calls(monkeypatch, kind, width
         shape = (1, 128, 128, width) if kind == "trimul" else (1, 128, width)
         layer = layer.to(device="cuda", dtype=torch.bfloat16).train()
         with torch.no_grad():
-            for n, p in layer.named_parameters():
+            for _n, p in layer.named_parameters():
                 if p.ndim == 2:
                     p.normal_(std=0.02)
         x = torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -142,8 +142,9 @@ def test_cuda_training_and_graph_no_native_engine_calls(monkeypatch, kind, width
 
         assert error(actual, expected) < 0.02
         assert error(x.grad, xr.grad) < 0.03
-        for (name, p), (_, rp) in zip(layer.named_parameters(), ref.named_parameters()):
-            assert p.grad is not None and torch.isfinite(p.grad).all(), name
+        for (name, p), (_, rp) in zip(layer.named_parameters(), ref.named_parameters(), strict=False):
+            assert p.grad is not None, name
+            assert torch.isfinite(p.grad).all(), name
             assert error(p.grad, rp.grad) < 0.04, (name, error(p.grad, rp.grad))
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
@@ -183,7 +184,7 @@ def test_cuda_standalone_layernorm_blocks_native_override(monkeypatch):
         expected = torch.nn.functional.layer_norm(x, (width,), w, b)
         actual_grads = torch.autograd.grad(actual, (x, w, b), dy)
         expected_grads = torch.autograd.grad(expected, (x, w, b), dy)
-        for a, e in zip((actual, *actual_grads), (expected, *expected_grads)):
+        for a, e in zip((actual, *actual_grads), (expected, *expected_grads), strict=False):
             assert torch.isfinite(a).all()
             assert (a.float() - e.float()).norm() / e.float().norm().clamp_min(
                 1e-8

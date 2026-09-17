@@ -26,20 +26,24 @@ def isolate(monkeypatch):
 def test_build_searches_records_and_reuses_exact_workload(monkeypatch):
     import triton.testing
     calls = []
+    failed = {192}
     def run(c):
         calls.append(c["tile_m"])
-        if c["tile_m"] == 192:
+        if c["tile_m"] in failed:
             raise ValueError("unsupported tile")
         return 1 / c["tile_m"]
     monkeypatch.setattr(triton.testing, "do_bench", lambda fn, **_: fn())
     grid = [{"tile_m": t} for t in (64, 128, 192)]
     args = {"dtype": "bf16", "bucket": "M17|K128", "run": run}
-    assert native.choose_config("test", grid, **args) == {"tile_m": 128}
+    with pytest.raises(RuntimeError, match="incomplete native tuning"):
+        native.choose_config("test", grid, **args)
     assert set(calls) == {64, 128, 192}
     slot = capture._CAPTURE["test"]
-    assert len(slot["searched"][("bf16", "M17|K128")]) == 3
-    assert len(slot["entries"][("bf16", "M17|K128")]) == 2
-    assert capture._UNUSABLE["test"] == 1
+    assert len(next(iter(capture._captured_entries(slot)))[2]) == 2
+    assert len(next(iter(capture._captured_entries(slot)))[1]) == 2
+    assert not native._WINNERS
+    failed.clear()
+    assert native.choose_config("test", grid, **args) == {"tile_m": 192}
     calls.clear()
     native.choose_config("test", grid, **args)
     assert not calls
@@ -50,9 +54,9 @@ def test_build_searches_records_and_reuses_exact_workload(monkeypatch):
 def test_all_failed_round_is_not_a_success(monkeypatch):
     def fail(_):
         raise RuntimeError("compilation failed")
-    with pytest.raises(RuntimeError, match="every native configuration failed"):
+    with pytest.raises(RuntimeError, match="incomplete native tuning"):
         native.choose_config("bad", [{"tile_m": 64}], dtype="bf16", bucket="x", run=fail)
-    assert not capture._CAPTURE["bad"]["entries"]
+    assert not capture._CAPTURE.get("bad", {}).get("entries")
     assert not native._WINNERS
 
 
@@ -77,10 +81,11 @@ def test_precompile_failure_is_recorded_without_launching_candidate(monkeypatch)
         assert capture._NATIVE_LOCK_HELD
         return 1.0
 
-    assert native.choose_config("compile-failure", grid, dtype="bf16", bucket="x", run=run) == grid[1]
+    with pytest.raises(RuntimeError, match="incomplete native tuning"):
+        native.choose_config("compile-failure", grid, dtype="bf16", bucket="x", run=run)
     assert events == ["compile", "lock"]
-    assert capture._UNUSABLE["compile-failure"] == 1
-    assert len(capture._CAPTURE["compile-failure"]["searched"][("bf16", "x")]) == 2
+    assert not native._WINNERS
+    assert len(next(iter(capture._captured_entries(capture._CAPTURE["compile-failure"])))[2]) == 1
     assert not capture._NATIVE_LOCK_HELD
 
 
@@ -156,9 +161,14 @@ def test_cute_space_excludes_unused_swap_and_respects_reduction_contract():
         plain_sm90_candidates,
     )
     assert all(not c.swap_ab for c in plain_sm90_candidates())
+    from miniworld_engine.autotune.cute_config import LNBWD_TILE_N_MAX
+    for width in (128, 192, 256, 512):
+        for c in lnbwd_candidates(width):
+            assert c.tile_n == width <= LNBWD_TILE_N_MAX[c.tile_m]
+            assert c.pingpong
+            assert c.cluster_n == 1
+            assert not c.swap_ab
     assert {c.tile_m for c in lnbwd_candidates(256)} == {64}
-    assert all(c.tile_n == 256 and not c.is_dynamic_persistent for c in lnbwd_candidates(256))
-    assert not lnbwd_candidates(512)
 
 
 def test_cuda_defines_are_validated_and_change_with_config():
@@ -298,6 +308,8 @@ def test_native_measurements_survive_publication_and_runtime_lookup(op, tmp_path
     assert native.choose_config(op, configs, dtype="torch.bfloat16", bucket=key) == winner
     monkeypatch.setattr(cache_status, "configs_for",
                         lambda *_: pytest.fail("native status must not register a Triton CSV"))
+    # This publication fixture uses an artificial key/grid; workload decoding is tested separately.
+    monkeypatch.setattr(native, "pending_candidates", lambda *args, **kwargs: [])
     assert cache_status.scan()[0].verdict == "OK"
     monkeypatch.setattr(native, "source_identity", lambda: "source-v2")
     assert cache_status.scan()[0].verdict == "STALE"
@@ -309,7 +321,7 @@ def test_native_launchers_use_registered_measurement_names():
     from pathlib import Path
     root = Path(native.__file__).resolve().parents[1] / "kernels"
     seen = set()
-    for family in ("layernorm", "layernorm_linear", "transition", "tm2"):
+    for family in ("layernorm", "layernorm_linear", "transition", "tm2", "trimul_inproj"):
         for path in (root / family).rglob("*.py"):
             for node in ast.walk(ast.parse(path.read_text())):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

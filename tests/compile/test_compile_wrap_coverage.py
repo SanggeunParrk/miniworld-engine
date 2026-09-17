@@ -75,6 +75,9 @@ def _is_launch(node: ast.AST) -> bool:
     return (isinstance(node, ast.Call)
             and isinstance(node.func, ast.Subscript)
             and isinstance(node.func.value, (ast.Name, ast.Attribute))
+            # nn.Sequential[0](x) is a module call, not kernel[grid](x).
+            and not (isinstance(node.func.slice, ast.Constant)
+                     and isinstance(node.func.slice.value, int))
             and bool(node.args or node.keywords))
 
 
@@ -162,6 +165,7 @@ OP_FAMILIES = (
     "conditioned_transition",
     "fused_ln_mask",
     "gated_projection",
+    "gated_residual",      # adaLN-Zero residual multiply/add, without a projection
     "layernorm_linear",     # before "layernorm": it is the longer, more specific prefix
     "layernorm",
     "rmsnorm",

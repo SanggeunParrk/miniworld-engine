@@ -60,6 +60,8 @@ def test_native_recorder_does_not_compile_and_retains_dtype_restrictions(monkeyp
     from miniworld_engine.modules.swa_atom_attention import module as swa
     monkeypatch.setattr(quack_cache, "CACHE_ENABLED", quack_cache.CACHE_ENABLED)
     monkeypatch.setattr(swa, "_flash_window_core", swa._flash_window_core)
+    monkeypatch.setattr(swa, "_FA2_SPEC", False)
+    monkeypatch.setattr(swa, "_FA4_SPEC", False)
     from miniworld_engine.kernels.transition import cuda as transition_cuda
     monkeypatch.setattr(cute, "compile", cute.compile)
     monkeypatch.setattr(cute_utils, "get_max_active_clusters", cute_utils.get_max_active_clusters)
@@ -71,6 +73,11 @@ def test_native_recorder_does_not_compile_and_retains_dtype_restrictions(monkeyp
         pytest.fail("fake derivation compiled a CUDA extension")
     monkeypatch.setattr(cuda, "_ext", forbidden)
     derive.install_native_recorders()
+    assert swa._FA2_SPEC
+    assert swa._FA4_SPEC
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *args: (8, 6))
+    assert swa._flash_backend(torch.device("cuda")) == "fa2"
     with FakeTensorMode():
         x = torch.empty(48 * 384, 384, dtype=torch.bfloat16)
         w = torch.empty(384, dtype=torch.bfloat16)

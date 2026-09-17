@@ -1,5 +1,7 @@
 """Wide native search spaces must not be rebuilt on every default-path launch."""
 
+from typing import Any
+
 import pytest
 
 from miniworld_engine import settings
@@ -10,7 +12,7 @@ from miniworld_engine.autotune import cache, cute_config, native
 def resolver(monkeypatch):
     previous = settings.current()
     settings.configure(run_autotune=False)
-    state = {"data": None, "converted": 0}
+    state: dict[str, Any] = {"data": None, "converted": 0}
     monkeypatch.setattr(cache, "gpu_key", lambda *_: "test_h100")
     monkeypatch.setattr(cache, "env_identity", lambda: "compiler")
     monkeypatch.setattr(cache, "build_rev", lambda *_: 1)
@@ -30,13 +32,13 @@ def resolver(monkeypatch):
     def publish(config, *, identity="implementation"):
         row = cache.as_cfg_dict({"kwargs": original(config)})
         row["ms"] = 1.0
-        state["data"] = dict(
-            build_rev=1,
-            op_identity=identity,
-            env_identity="compiler",
-            key_scheme=cache.KEY_SCHEME,
-            entries={"bfloat16|shape": [row]},
-        )
+        state["data"] = {
+            "build_rev": 1,
+            "op_identity": identity,
+            "env_identity": "compiler",
+            "key_scheme": cache.KEY_SCHEME,
+            "entries": {"bfloat16|shape": [row]},
+        }
 
     def resolve(candidates=None):
         return cute_config.resolve_config(

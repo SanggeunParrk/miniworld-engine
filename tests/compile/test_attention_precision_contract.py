@@ -16,12 +16,13 @@ def test_attention_passes_caller_precision_to_the_backend(monkeypatch, dtype):
     bias = torch.randn(1, 2, 7, 7, dtype=torch.float32)
     seen = []
 
-    def backend(q, k, v, b, mask):
+    def backend(q, k, v, b, mask, *, compute_efficient):
+        assert compute_efficient
         seen.extend((q, k, v, b))
         return v
 
     monkeypatch.setitem(
-        sys.modules, "miniworld_engine.kernels.augmented_attention.triton.main",
+        sys.modules, "miniworld_engine.kernels.augmented_attention.interface",
         SimpleNamespace(triton_augmented_attention_pair_bias=backend),
     )
     result = augmented_attention_pair_bias(query, key, value, bias)

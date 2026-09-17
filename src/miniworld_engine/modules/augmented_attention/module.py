@@ -1,4 +1,6 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/augmented_attention.py
+from typing import Literal
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,6 +37,8 @@ class AugmentedAttentionPairBias(nn.Module):
         Number of attention heads.
     use_qk_norm : bool
         Whether to apply RMSNorm to query and key projections.
+    kernel_type : {"compute_efficient", "memory_efficient"}
+        Split-buffer or atomic gradient accumulation for the Triton backend.
     implementation : ImplementationType
         Implementation to use.
 
@@ -48,9 +52,13 @@ class AugmentedAttentionPairBias(nn.Module):
         n_head: int,
         *,
         use_qk_norm: bool = False,
+        kernel_type: Literal["compute_efficient", "memory_efficient"] = "compute_efficient",
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
+        if kernel_type not in ("compute_efficient", "memory_efficient"):
+            raise ValueError(f"unknown kernel_type {kernel_type!r}")
+        self.kernel_type = kernel_type
         self.n_head = n_head
         self.use_qk_norm = use_qk_norm
         self.implementation = ImplementationType(implementation)
@@ -137,6 +145,7 @@ class AugmentedAttentionPairBias(nn.Module):
                 value,
                 bias,
                 mask,
+                compute_efficient=self.kernel_type == "compute_efficient",
             )
 
         raise InvalidImplementationError(self.implementation)

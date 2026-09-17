@@ -28,6 +28,18 @@ benchmarks/kernels/<target>/
   `augmented_attention/` folder and disambiguate by an `atom_`/`token_` filename prefix;
   they are now separate targets with separate folders and unprefixed filenames.)
 
+A table may carry a variant suffix when one target is benched under a second configuration
+that is a CLI override rather than its own target: `inference_seq_len_incoming.csv` is
+`triangle_multiplication` with `trimul_direction=incoming`, beside the unsuffixed outgoing table.
+
+A table may also be an aggregate of several benchmark processes. Then every row is the first
+process's row with `value` replaced by the median over the processes that measured that point,
+and these columns are appended: `gpu_uuid`, `host`, `value_min`, `value_max`, `n_repetitions`,
+`repetition_run_ids` (every process's `run_id`, `|`-separated, so each raw CSV under
+`artifacts/` is still named), `runtime_cache_misses` and `runtime_cache_miss_ops` (tuned-cache
+misses that fell back to the bounded heuristic search at that point). `plot_csv.py` and
+`report_gpu.py` read such tables unchanged.
+
 ## Rules
 
 1. **CSV** (the numbers) is tracked for **both** module and kernel benches.

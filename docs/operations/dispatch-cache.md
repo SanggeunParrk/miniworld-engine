@@ -603,17 +603,14 @@ builder, narrowed:
 `--per-op` selects the registered kernel-driver workload; it does not prove coverage of
 every module constexpr combination that can reach that kernel.
 
-**`build all` runs both, and needs no flag to.** Neither list is complete alone. `--per-op`
-coverage is DECLARED — registry.csv × level — so every kernel with a driver is tuned, but each
-through its own driver, which never produces the constexpr combinations a module's real dispatch
-does (`SAVE_PREACT=1`, `ADD_RESIDUAL=0`, `H2=512,K=256`). Measured on an A6000, a cache built that
-way answers `missing_pairs 0` to the declared question and misses 363 lookups the module matrix
-makes, across 42 of 91 ops (`docs/records/cache-coverage-replay-a6000.md`). The module matrix
-reaches those keys and reaches only 48 of the 91 kernels.
+**`build all` runs the verified model plan only.** The declared rows cover configured
+FoldForge models and MiniWorld. Their actual dispatch, including supported alternative
+paths, determines the required keys. Kernels unreachable from these model shapes are
+not appended through a second, Cartesian driver sweep.
 
-The current default runs the verified module plan first and the registered alternatives
-second. `fill_gaps` and workload-attributed shared tuning records reuse compatible
-measurements. `--per-op` and `--per-module` request one pass alone.
+`fill_gaps` and workload-attributed shared tuning records reuse compatible measurements.
+`--per-op` remains an explicit diagnostic workload; `--per-module` makes the default
+module selection explicit. See [model shape policy](../reports/model-shape-cleanup-20260916.md).
 
 Use `dev coverage` for required-key coverage of the current verified plan, `dev audit`
 for build-system contracts, and `dev audit --replay` for actual GPU lookup behavior.

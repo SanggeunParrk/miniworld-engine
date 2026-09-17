@@ -120,8 +120,8 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 16.82022476196289,
-        "num_stages": 4,
+        "ms": 4.0565760135650635,
+        "num_stages": 3,
         "num_warps": 2
       },
       {
@@ -129,26 +129,26 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 32
         },
-        "ms": 16.86835289001465,
+        "ms": 4.094464063644409,
         "num_stages": 2,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
-          "BLOCK_M2": 128
-        },
-        "ms": 16.875423431396484,
-        "num_stages": 3,
-        "num_warps": 2
       },
       {
         "kwargs": {
           "BLOCK_M1": 64,
           "BLOCK_M2": 64
         },
-        "ms": 16.98406410217285,
+        "ms": 4.1303040981292725,
         "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 128
+        },
+        "ms": 4.151296138763428,
+        "num_stages": 4,
         "num_warps": 2
       },
       {
@@ -156,7 +156,7 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 128
         },
-        "ms": 17.225727081298828,
+        "ms": 4.153856039047241,
         "num_stages": 3,
         "num_warps": 4
       }
@@ -167,7 +167,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 5.135359764099121,
+        "ms": 16.119808197021484,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -176,7 +176,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 5.179903984069824,
+        "ms": 16.194047927856445,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -185,7 +185,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 5.3585920333862305,
+        "ms": 16.714752197265625,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -194,7 +194,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 5.4824957847595215,
+        "ms": 16.976896286010742,
         "num_stages": 1,
         "num_warps": 4
       },
@@ -203,7 +203,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 64
         },
-        "ms": 5.490687847137451,
+        "ms": 17.154048919677734,
         "num_stages": 1,
         "num_warps": 2
       }
@@ -261,26 +261,26 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 32
         },
-        "ms": 28.15488052368164,
+        "ms": 6.944767951965332,
         "num_stages": 2,
         "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
-          "BLOCK_M2": 128
-        },
-        "ms": 28.897279739379883,
-        "num_stages": 3,
-        "num_warps": 2
       },
       {
         "kwargs": {
           "BLOCK_M1": 64,
           "BLOCK_M2": 64
         },
-        "ms": 29.001728057861328,
+        "ms": 7.049215793609619,
         "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 128
+        },
+        "ms": 7.057919979095459,
+        "num_stages": 3,
         "num_warps": 2
       },
       {
@@ -288,7 +288,7 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 128
         },
-        "ms": 29.241344451904297,
+        "ms": 7.13318395614624,
         "num_stages": 3,
         "num_warps": 4
       },
@@ -297,7 +297,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 29.307903289794922,
+        "ms": 7.81823992729187,
         "num_stages": 4,
         "num_warps": 2
       }
@@ -308,7 +308,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 9.987071990966797,
+        "ms": 27.388927459716797,
         "num_stages": 2,
         "num_warps": 1
       },
@@ -317,25 +317,16 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 10.003456115722656,
+        "ms": 27.397119522094727,
         "num_stages": 3,
         "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 32,
-          "BLOCK_M2": 64
-        },
-        "ms": 10.480640411376953,
-        "num_stages": 2,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 10.512384414672852,
+        "ms": 28.489728927612305,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -344,7 +335,16 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 64
         },
-        "ms": 10.680319786071777,
+        "ms": 29.832191467285156,
+        "num_stages": 2,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 64
+        },
+        "ms": 30.35545539855957,
         "num_stages": 3,
         "num_warps": 2
       }
@@ -684,8 +684,8 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 32
         },
-        "ms": 1.8186240196228027,
-        "num_stages": 3,
+        "ms": 0.951807975769043,
+        "num_stages": 2,
         "num_warps": 1
       },
       {
@@ -693,7 +693,7 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 32
         },
-        "ms": 1.8769919872283936,
+        "ms": 0.9656320214271545,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -702,8 +702,8 @@
           "BLOCK_M1": 64,
           "BLOCK_M2": 32
         },
-        "ms": 1.881600022315979,
-        "num_stages": 2,
+        "ms": 0.9707520008087158,
+        "num_stages": 3,
         "num_warps": 1
       },
       {
@@ -711,7 +711,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 1.9205119609832764,
+        "ms": 0.9820160269737244,
         "num_stages": 4,
         "num_warps": 2
       },
@@ -720,7 +720,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 1.9307520389556885,
+        "ms": 0.9850879907608032,
         "num_stages": 1,
         "num_warps": 2
       }
@@ -729,46 +729,46 @@
       {
         "kwargs": {
           "BLOCK_M1": 32,
-          "BLOCK_M2": 32
-        },
-        "ms": 1.282047986984253,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
-          "BLOCK_M2": 32
-        },
-        "ms": 1.2902400493621826,
-        "num_stages": 3,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 1.3204480409622192,
+        "ms": 4.043776035308838,
         "num_stages": 1,
         "num_warps": 4
       },
       {
         "kwargs": {
           "BLOCK_M1": 32,
-          "BLOCK_M2": 64
+          "BLOCK_M2": 32
         },
-        "ms": 1.324031949043274,
-        "num_stages": 2,
-        "num_warps": 2
+        "ms": 4.047359943389893,
+        "num_stages": 3,
+        "num_warps": 1
       },
       {
         "kwargs": {
           "BLOCK_M1": 32,
           "BLOCK_M2": 64
         },
-        "ms": 1.3322240114212036,
+        "ms": 4.051455974578857,
         "num_stages": 1,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 32
+        },
+        "ms": 4.098559856414795,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 64
+        },
+        "ms": 4.4364800453186035,
+        "num_stages": 2,
         "num_warps": 2
       }
     ],
@@ -822,10 +822,37 @@
     "bfloat16+float32|shape_key=8590002214": [
       {
         "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 2.0899839401245117,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 4.164096117019653,
+        "ms": 2.151423931121826,
+        "num_stages": 3,
+        "num_warps": 2
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 64,
+          "BLOCK_M2": 32
+        },
+        "ms": 2.1821439266204834,
+        "num_stages": 3,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 128
+        },
+        "ms": 2.1831679344177246,
         "num_stages": 4,
         "num_warps": 2
       },
@@ -834,36 +861,9 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 128
         },
-        "ms": 4.179967880249023,
-        "num_stages": 3,
-        "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 64,
-          "BLOCK_M2": 32
-        },
-        "ms": 4.2291200160980225,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
-          "BLOCK_M2": 128
-        },
-        "ms": 4.24345588684082,
+        "ms": 2.2722558975219727,
         "num_stages": 2,
         "num_warps": 2
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 64,
-          "BLOCK_M2": 32
-        },
-        "ms": 4.305920124053955,
-        "num_stages": 3,
-        "num_warps": 1
       }
     ],
     "bfloat16+float32|shape_key=8590067750": [
@@ -872,16 +872,7 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 2.770944118499756,
-        "num_stages": 2,
-        "num_warps": 1
-      },
-      {
-        "kwargs": {
-          "BLOCK_M1": 32,
-          "BLOCK_M2": 32
-        },
-        "ms": 2.805759906768799,
+        "ms": 8.770048141479492,
         "num_stages": 3,
         "num_warps": 1
       },
@@ -890,7 +881,16 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 32
         },
-        "ms": 2.900991916656494,
+        "ms": 8.811520099639893,
+        "num_stages": 2,
+        "num_warps": 1
+      },
+      {
+        "kwargs": {
+          "BLOCK_M1": 32,
+          "BLOCK_M2": 32
+        },
+        "ms": 9.001471996307373,
         "num_stages": 4,
         "num_warps": 1
       },
@@ -899,8 +899,8 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 64
         },
-        "ms": 2.964479923248291,
-        "num_stages": 2,
+        "ms": 9.031167984008789,
+        "num_stages": 1,
         "num_warps": 2
       },
       {
@@ -908,8 +908,8 @@
           "BLOCK_M1": 32,
           "BLOCK_M2": 64
         },
-        "ms": 2.9731839895248413,
-        "num_stages": 1,
+        "ms": 10.027008056640625,
+        "num_stages": 2,
         "num_warps": 2
       }
     ],
@@ -963,19 +963,19 @@
   },
   "entry_grids": {
     "bfloat16+float32|shape_key=10737485862": [
-      "d06596996f18"
+      "de4f9fdd9448"
     ],
     "bfloat16+float32|shape_key=10737551398": [
-      "d06596996f18"
+      "6a5f9f7e20e3"
     ],
     "bfloat16+float32|shape_key=10737682470": [
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=12884969510": [
-      "d06596996f18"
+      "de4f9fdd9448"
     ],
     "bfloat16+float32|shape_key=12885035046": [
-      "d06596996f18"
+      "7a7b4c1ba56f"
     ],
     "bfloat16+float32|shape_key=12885166118": [
       "d06596996f18"
@@ -1001,23 +1001,19 @@
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=6442518566": [
-      "843c3c4394ac",
-      "d06596996f18"
+      "843c3c4394ac"
     ],
     "bfloat16+float32|shape_key=6442584102": [
-      "5285c074028d",
-      "d06596996f18"
+      "5285c074028d"
     ],
     "bfloat16+float32|shape_key=6442715174": [
       "44b9746a0207",
       "d06596996f18"
     ],
     "bfloat16+float32|shape_key=8590002214": [
-      "d06596996f18",
       "f8fbad7b4dd7"
     ],
     "bfloat16+float32|shape_key=8590067750": [
-      "d06596996f18",
       "e3617a588f32"
     ],
     "bfloat16+float32|shape_key=8590198822": [
@@ -1048,6 +1044,20 @@
       "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
       "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)",
       "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)"
+    ],
+    "6a5f9f7e20e3": [
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 4, 1)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)"
+    ],
+    "7a7b4c1ba56f": [
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 3)"
     ],
     "843c3c4394ac": [
       "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 1)",
@@ -1166,6 +1176,13 @@
       "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 3)",
       "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 4, 4)"
     ],
+    "de4f9fdd9448": [
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 3)",
+      "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 4)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 128)), 4, 3)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 2)",
+      "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 2, 2)"
+    ],
     "e3617a588f32": [
       "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
       "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
@@ -1182,6 +1199,3468 @@
     ]
   },
   "key_scheme": 3,
+  "measurements": {
+    "bfloat16+float32|shape_key=10737485862": {
+      "423e90b6a2ee130ff3c1": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 4.0565760135650635,
+            "num_stages": 3,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 4.094464063644409,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 64
+            },
+            "ms": 4.1303040981292725,
+            "num_stages": 2,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 4.151296138763428,
+            "num_stages": 4,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 128
+            },
+            "ms": 4.153856039047241,
+            "num_stages": 3,
+            "num_warps": 4
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 4)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 128)), 4, 3)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 2, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 16,
+            "HEAD_DIM_PAD": 16,
+            "HL": 2560,
+            "N_CTX": 640,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640
+              ],
+              "stride": [
+                1638400,
+                409600,
+                640,
+                1
+              ]
+            },
+            "bs_h": 409600,
+            "bs_m": 640,
+            "bs_n": 1,
+            "bs_z": 1638400,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2560,
+                640
+              ],
+              "stride": [
+                1638400,
+                640,
+                1
+              ]
+            },
+            "dbias_hl": 409600,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2560,
+                640,
+                640
+              ],
+              "stride": [
+                1048576000,
+                409600,
+                640,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                16
+              ],
+              "stride": [
+                26214400,
+                16,
+                40960,
+                64,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                16
+              ],
+              "stride": [
+                26214400,
+                16,
+                40960,
+                64,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 16,
+            "ds_lrow": 40960,
+            "ds_tok": 64,
+            "ds_z": 26214400,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                16
+              ],
+              "stride": [
+                26214400,
+                16,
+                40960,
+                64,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 16,
+            "gs_lrow": 40960,
+            "gs_tok": 64,
+            "gs_z": 26214400,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                16
+              ],
+              "stride": [
+                26214400,
+                16,
+                40960,
+                64,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2560,
+                640
+              ],
+              "stride": [
+                1638400,
+                640,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                16
+              ],
+              "stride": [
+                26214400,
+                16,
+                40960,
+                64,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 16,
+            "qs_lrow": 40960,
+            "qs_tok": 64,
+            "qs_z": 26214400,
+            "shape_key": 10737485862,
+            "sm_scale": 0.25,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                16
+              ],
+              "stride": [
+                26214400,
+                16,
+                40960,
+                64,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=10737551398": {
+      "8ce760d1acfdc4f5d4b0": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 16.119808197021484,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 16.194047927856445,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 16.714752197265625,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 16.976896286010742,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 17.154048919677734,
+            "num_stages": 1,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 4, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 7680,
+            "N_CTX": 640,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640
+              ],
+              "stride": [
+                4915200,
+                409600,
+                640,
+                1
+              ]
+            },
+            "bs_h": 409600,
+            "bs_m": 640,
+            "bs_n": 1,
+            "bs_z": 4915200,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                7680,
+                640
+              ],
+              "stride": [
+                4915200,
+                640,
+                1
+              ]
+            },
+            "dbias_hl": 409600,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                7680,
+                640,
+                640
+              ],
+              "stride": [
+                3145728000,
+                409600,
+                640,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                157286400,
+                32,
+                245760,
+                384,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                157286400,
+                32,
+                245760,
+                384,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 245760,
+            "ds_tok": 384,
+            "ds_z": 157286400,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                157286400,
+                32,
+                245760,
+                384,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 245760,
+            "gs_tok": 384,
+            "gs_z": 157286400,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                157286400,
+                32,
+                245760,
+                384,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                7680,
+                640
+              ],
+              "stride": [
+                4915200,
+                640,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                157286400,
+                32,
+                245760,
+                384,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 245760,
+            "qs_tok": 384,
+            "qs_z": 157286400,
+            "shape_key": 10737551398,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                157286400,
+                32,
+                245760,
+                384,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      },
+      "aabc14962831d925f95b": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 10.445823669433594,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 10.598400115966797,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 10.916863918304443,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 11.108351707458496,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 11.151360034942627,
+            "num_stages": 1,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 4, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 5120,
+            "N_CTX": 640,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640
+              ],
+              "stride": [
+                3276800,
+                409600,
+                640,
+                1
+              ]
+            },
+            "bs_h": 409600,
+            "bs_m": 640,
+            "bs_n": 1,
+            "bs_z": 3276800,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                5120,
+                640
+              ],
+              "stride": [
+                3276800,
+                640,
+                1
+              ]
+            },
+            "dbias_hl": 409600,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                5120,
+                640,
+                640
+              ],
+              "stride": [
+                2097152000,
+                409600,
+                640,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                104857600,
+                32,
+                163840,
+                256,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                104857600,
+                32,
+                163840,
+                256,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 163840,
+            "ds_tok": 256,
+            "ds_z": 104857600,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                104857600,
+                32,
+                163840,
+                256,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 163840,
+            "gs_tok": 256,
+            "gs_z": 104857600,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                104857600,
+                32,
+                163840,
+                256,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                5120,
+                640
+              ],
+              "stride": [
+                3276800,
+                640,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                104857600,
+                32,
+                163840,
+                256,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 163840,
+            "qs_tok": 256,
+            "qs_z": 104857600,
+            "shape_key": 10737551398,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                104857600,
+                32,
+                163840,
+                256,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      },
+      "d031e5a6dcf2b6feff5c": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 5.211136102676392,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 5.256192207336426,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 5.408768177032471,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 5.501952171325684,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 5.548543930053711,
+            "num_stages": 1,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 4, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 2560,
+            "N_CTX": 640,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640
+              ],
+              "stride": [
+                1638400,
+                409600,
+                640,
+                1
+              ]
+            },
+            "bs_h": 409600,
+            "bs_m": 640,
+            "bs_n": 1,
+            "bs_z": 1638400,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2560,
+                640
+              ],
+              "stride": [
+                1638400,
+                640,
+                1
+              ]
+            },
+            "dbias_hl": 409600,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2560,
+                640,
+                640
+              ],
+              "stride": [
+                1048576000,
+                409600,
+                640,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                52428800,
+                32,
+                81920,
+                128,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                52428800,
+                32,
+                81920,
+                128,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 81920,
+            "ds_tok": 128,
+            "ds_z": 52428800,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                52428800,
+                32,
+                81920,
+                128,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 81920,
+            "gs_tok": 128,
+            "gs_z": 52428800,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                52428800,
+                32,
+                81920,
+                128,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2560,
+                640
+              ],
+              "stride": [
+                1638400,
+                640,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                52428800,
+                32,
+                81920,
+                128,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 81920,
+            "qs_tok": 128,
+            "qs_z": 52428800,
+            "shape_key": 10737551398,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                640,
+                640,
+                32
+              ],
+              "stride": [
+                52428800,
+                32,
+                81920,
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=12884969510": {
+      "4c132bc230a06f534e83": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 6.944767951965332,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 64
+            },
+            "ms": 7.049215793609619,
+            "num_stages": 2,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 7.057919979095459,
+            "num_stages": 3,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 128
+            },
+            "ms": 7.13318395614624,
+            "num_stages": 3,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 7.81823992729187,
+            "num_stages": 4,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 4)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 128)), 4, 3)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 64)), 2, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 16,
+            "HEAD_DIM_PAD": 16,
+            "HL": 3072,
+            "N_CTX": 768,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768
+              ],
+              "stride": [
+                2359296,
+                589824,
+                768,
+                1
+              ]
+            },
+            "bs_h": 589824,
+            "bs_m": 768,
+            "bs_n": 1,
+            "bs_z": 2359296,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                3072,
+                768
+              ],
+              "stride": [
+                2359296,
+                768,
+                1
+              ]
+            },
+            "dbias_hl": 589824,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                3072,
+                768,
+                768
+              ],
+              "stride": [
+                1811939328,
+                589824,
+                768,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                16
+              ],
+              "stride": [
+                37748736,
+                16,
+                49152,
+                64,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                16
+              ],
+              "stride": [
+                37748736,
+                16,
+                49152,
+                64,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 16,
+            "ds_lrow": 49152,
+            "ds_tok": 64,
+            "ds_z": 37748736,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                16
+              ],
+              "stride": [
+                37748736,
+                16,
+                49152,
+                64,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 16,
+            "gs_lrow": 49152,
+            "gs_tok": 64,
+            "gs_z": 37748736,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                16
+              ],
+              "stride": [
+                37748736,
+                16,
+                49152,
+                64,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                3072,
+                768
+              ],
+              "stride": [
+                2359296,
+                768,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                16
+              ],
+              "stride": [
+                37748736,
+                16,
+                49152,
+                64,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 16,
+            "qs_lrow": 49152,
+            "qs_tok": 64,
+            "qs_z": 37748736,
+            "shape_key": 12884969510,
+            "sm_scale": 0.25,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                16
+              ],
+              "stride": [
+                37748736,
+                16,
+                49152,
+                64,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=12885035046": {
+      "8e26e53d43b027cec6b4": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 27.388927459716797,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 27.397119522094727,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 28.489728927612305,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 29.832191467285156,
+            "num_stages": 2,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 30.35545539855957,
+            "num_stages": 3,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 9216,
+            "N_CTX": 768,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768
+              ],
+              "stride": [
+                7077888,
+                589824,
+                768,
+                1
+              ]
+            },
+            "bs_h": 589824,
+            "bs_m": 768,
+            "bs_n": 1,
+            "bs_z": 7077888,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                9216,
+                768
+              ],
+              "stride": [
+                7077888,
+                768,
+                1
+              ]
+            },
+            "dbias_hl": 589824,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                9216,
+                768,
+                768
+              ],
+              "stride": [
+                5435817984,
+                589824,
+                768,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                226492416,
+                32,
+                294912,
+                384,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                226492416,
+                32,
+                294912,
+                384,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 294912,
+            "ds_tok": 384,
+            "ds_z": 226492416,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                226492416,
+                32,
+                294912,
+                384,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 294912,
+            "gs_tok": 384,
+            "gs_z": 226492416,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                226492416,
+                32,
+                294912,
+                384,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                9216,
+                768
+              ],
+              "stride": [
+                7077888,
+                768,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                226492416,
+                32,
+                294912,
+                384,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 294912,
+            "qs_tok": 384,
+            "qs_z": 226492416,
+            "shape_key": 12885035046,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                226492416,
+                32,
+                294912,
+                384,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      },
+      "e92a7722127701ceb99b": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 17.81350326538086,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 17.895423889160156,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 18.546688079833984,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 18.9880313873291,
+            "num_stages": 2,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 19.343360900878906,
+            "num_stages": 3,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 6144,
+            "N_CTX": 768,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768
+              ],
+              "stride": [
+                4718592,
+                589824,
+                768,
+                1
+              ]
+            },
+            "bs_h": 589824,
+            "bs_m": 768,
+            "bs_n": 1,
+            "bs_z": 4718592,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                6144,
+                768
+              ],
+              "stride": [
+                4718592,
+                768,
+                1
+              ]
+            },
+            "dbias_hl": 589824,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                6144,
+                768,
+                768
+              ],
+              "stride": [
+                3623878656,
+                589824,
+                768,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                150994944,
+                32,
+                196608,
+                256,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                150994944,
+                32,
+                196608,
+                256,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 196608,
+            "ds_tok": 256,
+            "ds_z": 150994944,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                150994944,
+                32,
+                196608,
+                256,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 196608,
+            "gs_tok": 256,
+            "gs_z": 150994944,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                150994944,
+                32,
+                196608,
+                256,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                6144,
+                768
+              ],
+              "stride": [
+                4718592,
+                768,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                150994944,
+                32,
+                196608,
+                256,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 196608,
+            "qs_tok": 256,
+            "qs_z": 150994944,
+            "shape_key": 12885035046,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                8,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                150994944,
+                32,
+                196608,
+                256,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      },
+      "edd028e4f748db9abb7a": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 8.860671997070312,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 8.937472343444824,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 9.241600036621094,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 9.343999862670898,
+            "num_stages": 2,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 9.61894416809082,
+            "num_stages": 3,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 3072,
+            "N_CTX": 768,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768
+              ],
+              "stride": [
+                2359296,
+                589824,
+                768,
+                1
+              ]
+            },
+            "bs_h": 589824,
+            "bs_m": 768,
+            "bs_n": 1,
+            "bs_z": 2359296,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                3072,
+                768
+              ],
+              "stride": [
+                2359296,
+                768,
+                1
+              ]
+            },
+            "dbias_hl": 589824,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                3072,
+                768,
+                768
+              ],
+              "stride": [
+                1811939328,
+                589824,
+                768,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                75497472,
+                32,
+                98304,
+                128,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                75497472,
+                32,
+                98304,
+                128,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 98304,
+            "ds_tok": 128,
+            "ds_z": 75497472,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                75497472,
+                32,
+                98304,
+                128,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 98304,
+            "gs_tok": 128,
+            "gs_z": 75497472,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                75497472,
+                32,
+                98304,
+                128,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                3072,
+                768
+              ],
+              "stride": [
+                2359296,
+                768,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                75497472,
+                32,
+                98304,
+                128,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 98304,
+            "qs_tok": 128,
+            "qs_z": 75497472,
+            "shape_key": 12885035046,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                768,
+                768,
+                32
+              ],
+              "stride": [
+                75497472,
+                32,
+                98304,
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=6442518566": {
+      "e3a52c6e6517bf428657": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 0.951807975769043,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 0.9656320214271545,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 0.9707520008087158,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 0.9820160269737244,
+            "num_stages": 4,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 0.9850879907608032,
+            "num_stages": 1,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 4)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 4)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 16,
+            "HEAD_DIM_PAD": 16,
+            "HL": 1536,
+            "N_CTX": 384,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384
+              ],
+              "stride": [
+                589824,
+                147456,
+                384,
+                1
+              ]
+            },
+            "bs_h": 147456,
+            "bs_m": 384,
+            "bs_n": 1,
+            "bs_z": 589824,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                1536,
+                384
+              ],
+              "stride": [
+                589824,
+                384,
+                1
+              ]
+            },
+            "dbias_hl": 147456,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1536,
+                384,
+                384
+              ],
+              "stride": [
+                226492416,
+                147456,
+                384,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                16
+              ],
+              "stride": [
+                9437184,
+                16,
+                24576,
+                64,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                16
+              ],
+              "stride": [
+                9437184,
+                16,
+                24576,
+                64,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 16,
+            "ds_lrow": 24576,
+            "ds_tok": 64,
+            "ds_z": 9437184,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                16
+              ],
+              "stride": [
+                9437184,
+                16,
+                24576,
+                64,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 16,
+            "gs_lrow": 24576,
+            "gs_tok": 64,
+            "gs_z": 9437184,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                16
+              ],
+              "stride": [
+                9437184,
+                16,
+                24576,
+                64,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                1536,
+                384
+              ],
+              "stride": [
+                589824,
+                384,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                16
+              ],
+              "stride": [
+                9437184,
+                16,
+                24576,
+                64,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 16,
+            "qs_lrow": 24576,
+            "qs_tok": 64,
+            "qs_z": 9437184,
+            "shape_key": 6442518566,
+            "sm_scale": 0.25,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                16
+              ],
+              "stride": [
+                9437184,
+                16,
+                24576,
+                64,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=6442584102": {
+      "b1b417f42e24804e7d6d": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 4.043776035308838,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 4.047359943389893,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 4.051455974578857,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 4.098559856414795,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 4.4364800453186035,
+            "num_stages": 2,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 4, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 4608,
+            "N_CTX": 384,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384
+              ],
+              "stride": [
+                1769472,
+                147456,
+                384,
+                1
+              ]
+            },
+            "bs_h": 147456,
+            "bs_m": 384,
+            "bs_n": 1,
+            "bs_z": 1769472,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                4608,
+                384
+              ],
+              "stride": [
+                1769472,
+                384,
+                1
+              ]
+            },
+            "dbias_hl": 147456,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4608,
+                384,
+                384
+              ],
+              "stride": [
+                679477248,
+                147456,
+                384,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                56623104,
+                32,
+                147456,
+                384,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                56623104,
+                32,
+                147456,
+                384,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 147456,
+            "ds_tok": 384,
+            "ds_z": 56623104,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                56623104,
+                32,
+                147456,
+                384,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 147456,
+            "gs_tok": 384,
+            "gs_z": 56623104,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                56623104,
+                32,
+                147456,
+                384,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                4608,
+                384
+              ],
+              "stride": [
+                1769472,
+                384,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                56623104,
+                32,
+                147456,
+                384,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 147456,
+            "qs_tok": 384,
+            "qs_z": 56623104,
+            "shape_key": 6442584102,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                56623104,
+                32,
+                147456,
+                384,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      },
+      "e2b14f9d786022740152": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 1.2892160415649414,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 1.2917760014533997,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 1.316864013671875,
+            "num_stages": 1,
+            "num_warps": 4
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 1.3189120292663574,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 1.3844480514526367,
+            "num_stages": 2,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 4, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 1536,
+            "N_CTX": 384,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384
+              ],
+              "stride": [
+                589824,
+                147456,
+                384,
+                1
+              ]
+            },
+            "bs_h": 147456,
+            "bs_m": 384,
+            "bs_n": 1,
+            "bs_z": 589824,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                1536,
+                384
+              ],
+              "stride": [
+                589824,
+                384,
+                1
+              ]
+            },
+            "dbias_hl": 147456,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                1536,
+                384,
+                384
+              ],
+              "stride": [
+                226492416,
+                147456,
+                384,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                18874368,
+                32,
+                49152,
+                128,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                18874368,
+                32,
+                49152,
+                128,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 49152,
+            "ds_tok": 128,
+            "ds_z": 18874368,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                18874368,
+                32,
+                49152,
+                128,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 49152,
+            "gs_tok": 128,
+            "gs_z": 18874368,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                18874368,
+                32,
+                49152,
+                128,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                1536,
+                384
+              ],
+              "stride": [
+                589824,
+                384,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                18874368,
+                32,
+                49152,
+                128,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 49152,
+            "qs_tok": 128,
+            "qs_z": 18874368,
+            "shape_key": 6442584102,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                384,
+                384,
+                32
+              ],
+              "stride": [
+                18874368,
+                32,
+                49152,
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=8590002214": {
+      "832b54ecbd7c4c65183c": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 2.0899839401245117,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 2.151423931121826,
+            "num_stages": 3,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 64,
+              "BLOCK_M2": 32
+            },
+            "ms": 2.1821439266204834,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 2.1831679344177246,
+            "num_stages": 4,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 128
+            },
+            "ms": 2.2722558975219727,
+            "num_stages": 2,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 128)), 2, 4)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 64), ('BLOCK_M2', 32)), 1, 3)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 16,
+            "HEAD_DIM_PAD": 16,
+            "HL": 2048,
+            "N_CTX": 512,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512
+              ],
+              "stride": [
+                1048576,
+                262144,
+                512,
+                1
+              ]
+            },
+            "bs_h": 262144,
+            "bs_m": 512,
+            "bs_n": 1,
+            "bs_z": 1048576,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2048,
+                512
+              ],
+              "stride": [
+                1048576,
+                512,
+                1
+              ]
+            },
+            "dbias_hl": 262144,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                512,
+                512
+              ],
+              "stride": [
+                536870912,
+                262144,
+                512,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                16
+              ],
+              "stride": [
+                16777216,
+                16,
+                32768,
+                64,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                16
+              ],
+              "stride": [
+                16777216,
+                16,
+                32768,
+                64,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 16,
+            "ds_lrow": 32768,
+            "ds_tok": 64,
+            "ds_z": 16777216,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                16
+              ],
+              "stride": [
+                16777216,
+                16,
+                32768,
+                64,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 16,
+            "gs_lrow": 32768,
+            "gs_tok": 64,
+            "gs_z": 16777216,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                16
+              ],
+              "stride": [
+                16777216,
+                16,
+                32768,
+                64,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2048,
+                512
+              ],
+              "stride": [
+                1048576,
+                512,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                16
+              ],
+              "stride": [
+                16777216,
+                16,
+                32768,
+                64,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 16,
+            "qs_lrow": 32768,
+            "qs_tok": 64,
+            "qs_z": 16777216,
+            "shape_key": 8590002214,
+            "sm_scale": 0.25,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                16
+              ],
+              "stride": [
+                16777216,
+                16,
+                32768,
+                64,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16+float32|shape_key=8590067750": {
+      "317ad40d9c1a07e02640": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 8.770048141479492,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 8.811520099639893,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 9.001471996307373,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 9.031167984008789,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 10.027008056640625,
+            "num_stages": 2,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 6144,
+            "N_CTX": 512,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512
+              ],
+              "stride": [
+                3145728,
+                262144,
+                512,
+                1
+              ]
+            },
+            "bs_h": 262144,
+            "bs_m": 512,
+            "bs_n": 1,
+            "bs_z": 3145728,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                6144,
+                512
+              ],
+              "stride": [
+                3145728,
+                512,
+                1
+              ]
+            },
+            "dbias_hl": 262144,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                6144,
+                512,
+                512
+              ],
+              "stride": [
+                1610612736,
+                262144,
+                512,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                100663296,
+                32,
+                196608,
+                384,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                100663296,
+                32,
+                196608,
+                384,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 196608,
+            "ds_tok": 384,
+            "ds_z": 100663296,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                100663296,
+                32,
+                196608,
+                384,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 196608,
+            "gs_tok": 384,
+            "gs_z": 100663296,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                100663296,
+                32,
+                196608,
+                384,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                6144,
+                512
+              ],
+              "stride": [
+                3145728,
+                512,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                100663296,
+                32,
+                196608,
+                384,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 196608,
+            "qs_tok": 384,
+            "qs_z": 100663296,
+            "shape_key": 8590067750,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                12,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                100663296,
+                32,
+                196608,
+                384,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      },
+      "570bfd386b04836c13aa": {
+        "entries": [
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 2.7678720951080322,
+            "num_stages": 2,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 2.7750399112701416,
+            "num_stages": 3,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 32
+            },
+            "ms": 2.865151882171631,
+            "num_stages": 4,
+            "num_warps": 1
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 2.911743998527527,
+            "num_stages": 1,
+            "num_warps": 2
+          },
+          {
+            "kwargs": {
+              "BLOCK_M1": 32,
+              "BLOCK_M2": 64
+            },
+            "ms": 3.0556159019470215,
+            "num_stages": 2,
+            "num_warps": 2
+          }
+        ],
+        "searched": [
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 2)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 3)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 32)), 1, 4)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 1)",
+          "((('BLOCK_M1', 32), ('BLOCK_M2', 64)), 2, 2)"
+        ],
+        "workload": {
+          "arguments": {
+            "HEAD_DIM": 32,
+            "HEAD_DIM_PAD": 32,
+            "HL": 2048,
+            "N_CTX": 512,
+            "bias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512
+              ],
+              "stride": [
+                1048576,
+                262144,
+                512,
+                1
+              ]
+            },
+            "bs_h": 262144,
+            "bs_m": 512,
+            "bs_n": 1,
+            "bs_z": 1048576,
+            "d_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2048,
+                512
+              ],
+              "stride": [
+                1048576,
+                512,
+                1
+              ]
+            },
+            "dbias_hl": 262144,
+            "dbias_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                2048,
+                512,
+                512
+              ],
+              "stride": [
+                536870912,
+                262144,
+                512,
+                1
+              ]
+            },
+            "dk_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                33554432,
+                32,
+                65536,
+                128,
+                1
+              ]
+            },
+            "do_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                33554432,
+                32,
+                65536,
+                128,
+                1
+              ]
+            },
+            "ds_d": 1,
+            "ds_h": 32,
+            "ds_lrow": 65536,
+            "ds_tok": 128,
+            "ds_z": 33554432,
+            "dv_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                33554432,
+                32,
+                65536,
+                128,
+                1
+              ]
+            },
+            "gs_d": 1,
+            "gs_h": 32,
+            "gs_lrow": 65536,
+            "gs_tok": 128,
+            "gs_z": 33554432,
+            "k_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                33554432,
+                32,
+                65536,
+                128,
+                1
+              ]
+            },
+            "m_ptr": {
+              "dtype": "torch.float32",
+              "shape": [
+                1,
+                2048,
+                512
+              ],
+              "stride": [
+                1048576,
+                512,
+                1
+              ]
+            },
+            "q_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                33554432,
+                32,
+                65536,
+                128,
+                1
+              ]
+            },
+            "qs_d": 1,
+            "qs_h": 32,
+            "qs_lrow": 65536,
+            "qs_tok": 128,
+            "qs_z": 33554432,
+            "shape_key": 8590067750,
+            "sm_scale": 0.1767766952966369,
+            "v_ptr": {
+              "dtype": "torch.bfloat16",
+              "shape": [
+                1,
+                4,
+                512,
+                512,
+                32
+              ],
+              "stride": [
+                33554432,
+                32,
+                65536,
+                128,
+                1
+              ]
+            }
+          },
+          "implementation": "7b287f4d75c7eeb4716335f3067415164d2333ded97715477f16eabb225bc3b9",
+          "scheme": 1
+        }
+      }
+    }
+  },
   "op": "triangle_attention_bwd_dkdv_triton",
   "op_identity": "4fb701544563",
   "provenance": {

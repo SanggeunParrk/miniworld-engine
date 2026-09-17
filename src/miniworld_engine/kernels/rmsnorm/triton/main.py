@@ -28,6 +28,9 @@ multiply per row for the caller that has no weight.
 from __future__ import annotations
 
 import torch
+
+# FP32 projections use IEEE dot precision; implicit TF32 changes DiT gradients.
+# The input_precision setting leaves BF16 tensor-core arithmetic unchanged.
 import triton
 import triton.language as tl
 
@@ -242,11 +245,11 @@ def rmsnorm_adamod_fwd_kernel(
                           mask=wmask, other=0.0)
             wsh = tl.load(WSH + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                           mask=wmask, other=0.0)
-            acc_sc += tl.dot(c, wsc)
-            acc_sh += tl.dot(c, wsh)
+            acc_sc += tl.dot(c, wsc, input_precision="ieee")
+            acc_sh += tl.dot(c, wsh, input_precision="ieee")
             wg = tl.load(WG + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                          mask=wmask, other=0.0)
-            acc_g += tl.dot(c, wg)
+            acc_g += tl.dot(c, wg, input_precision="ieee")
         y = q * rstd[:, None]
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
@@ -291,11 +294,11 @@ def rmsnorm_adamod_fwd_kernel(
                           mask=wmask, other=0.0)
             wsh = tl.load(WSH + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                           mask=wmask, other=0.0)
-            acc_sc += tl.dot(c, wsc)
-            acc_sh += tl.dot(c, wsh)
+            acc_sc += tl.dot(c, wsc, input_precision="ieee")
+            acc_sh += tl.dot(c, wsh, input_precision="ieee")
             wg = tl.load(WG + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                          mask=wmask, other=0.0)
-            acc_g += tl.dot(c, wg)
+            acc_g += tl.dot(c, wg, input_precision="ieee")
         q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
                     mask=mask, other=0.0).to(tl.float32)
         y = q * rstd[:, None]
@@ -439,7 +442,7 @@ def rmsnorm_adamod_bwd_kernel(
                         mask=row_mask[:, None] & k_mask[None, :], other=0.0)
             wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                           mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-            acc_sc += tl.dot(c, wsc)
+            acc_sc += tl.dot(c, wsc, input_precision="ieee")
         q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
                     mask=mask, other=0.0).to(tl.float32)
         dy = tl.load(DY + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
@@ -481,7 +484,7 @@ def rmsnorm_adamod_bwd_kernel(
                             mask=row_mask[:, None] & k_mask[None, :], other=0.0)
                 wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                               mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-                acc_sc += tl.dot(c, wsc)
+                acc_sc += tl.dot(c, wsc, input_precision="ieee")
             q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
                         mask=mask, other=0.0).to(tl.float32)
             dy = tl.load(DY + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
@@ -521,7 +524,7 @@ def rmsnorm_adamod_bwd_kernel(
                             mask=row_mask[:, None] & k_mask[None, :], other=0.0)
                 wsc = tl.load(WSC + cols[None, :] * stride_wn + ks[:, None] * stride_wk,
                               mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-                acc_sc += tl.dot(c, wsc)
+                acc_sc += tl.dot(c, wsc, input_precision="ieee")
             q = tl.load(Q + rows[:, None] * stride_qr + cols[None, :] * stride_qc,
                         mask=mask, other=0.0).to(tl.float32)
             dy = tl.load(DY + rows[:, None] * stride_qr + cols[None, :] * stride_qc,

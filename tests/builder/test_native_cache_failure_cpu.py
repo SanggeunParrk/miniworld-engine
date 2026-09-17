@@ -71,7 +71,7 @@ def test_partial_entry_map_uses_default(runtime, entries):
 
 
 @pytest.mark.parametrize("measurement", [float("nan"), float("inf"), 0, -1])
-def test_failed_measurement_is_searched_but_never_published(monkeypatch, tmp_path, measurement):
+def test_failed_measurement_remains_retryable_and_never_published(monkeypatch, tmp_path, measurement):
     import torch
     import triton.testing
 
@@ -88,7 +88,7 @@ def test_failed_measurement_is_searched_but_never_published(monkeypatch, tmp_pat
     monkeypatch.setattr(triton.testing, "do_bench", lambda fn, **kw: measurement)
     capture.reset()
     try:
-        with pytest.raises(RuntimeError, match="every native configuration failed"):
+        with pytest.raises(RuntimeError, match="incomplete native tuning"):
             native.choose_config(OP, GRID, dtype="bfloat16", bucket="shape", run=lambda _: None)
         assert not native._WINNERS
         assert not capture._NATIVE_LOCK_HELD
@@ -96,7 +96,7 @@ def test_failed_measurement_is_searched_but_never_published(monkeypatch, tmp_pat
         capture.dump_shard(str(shard))
         payload = json.loads(shard.read_text())
         assert payload["_has_entries"] is False
-        assert len(payload[OP]["searched"]["bfloat16|shape"]) == len(GRID)
-        assert not payload[OP]["entries"]
+        assert not payload.get(OP, {}).get("searched")
+        assert not payload.get(OP, {}).get("entries")
     finally:
         capture.reset()

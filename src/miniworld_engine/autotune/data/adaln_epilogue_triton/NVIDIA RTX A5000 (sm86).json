@@ -896,42 +896,83 @@
       "f6a42ef0d39a"
     ],
     "float32|shape_key=10740564762": [
+      "b46686f5b011",
       "f6a42ef0d39a"
     ],
     "float32|shape_key=12886475546": [
       "f6a42ef0d39a"
     ],
     "float32|shape_key=12888048410": [
+      "b46686f5b011",
       "f6a42ef0d39a"
     ],
     "float32|shape_key=2149057306": [
       "f6a42ef0d39a"
     ],
     "float32|shape_key=2150630170": [
+      "e420d61b2d53",
       "f6a42ef0d39a"
     ],
     "float32|shape_key=4296540954": [
       "f6a42ef0d39a"
     ],
     "float32|shape_key=4298113818": [
+      "c13e6972a79a",
       "f6a42ef0d39a"
     ],
     "float32|shape_key=6444024602": [
       "f6a42ef0d39a"
     ],
     "float32|shape_key=6445597466": [
+      "b4ba456430fc",
       "f6a42ef0d39a"
     ],
     "float32|shape_key=8591508250": [
       "f6a42ef0d39a"
     ],
     "float32|shape_key=8593081114": [
+      "d545cf8d5330",
       "f6a42ef0d39a"
     ]
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA RTX A5000 (sm86)",
   "grids": {
+    "b46686f5b011": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 2, 1)"
+    ],
+    "b4ba456430fc": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 2, 1)"
+    ],
+    "c13e6972a79a": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 2, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 2)), 1, 4)"
+    ],
+    "d545cf8d5330": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 2, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 1, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 1, 3)"
+    ],
+    "e420d61b2d53": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 2, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 2, 3)"
+    ],
     "f6a42ef0d39a": [
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 1)",
       "((('BLOCK_K', 1024), ('BLOCK_M1', 1)), 1, 2)",
