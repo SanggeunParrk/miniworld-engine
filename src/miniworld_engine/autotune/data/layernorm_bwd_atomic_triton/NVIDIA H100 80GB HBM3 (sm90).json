@@ -3429,16 +3429,19 @@
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099512152858": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0c7c1e6b2123"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099512677146": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "b6359f261d85"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099513201434": [
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099513725722": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0a747175599d"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=12886475546": [
       "0398d851d9f4"
@@ -3459,28 +3462,34 @@
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473901687578": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0a7a423fadae"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473902211866": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "7f0eb1cdc78d"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473902736154": [
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473903260442": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "19efe781abfe"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878432026": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "ce0297384fe7"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878956314": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "1dc4aee1e1a6"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274879480602": [
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274880004890": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0c7c1e6b2123"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=34360001306": [
       "0398d851d9f4"
@@ -3495,16 +3504,19 @@
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398047036186": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "5d2a45e98949"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398047560474": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "07bb319a94e4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398048084762": [
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398048609050": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "b65b21ddedbc"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6444024602": [
       "0398d851d9f4"
@@ -3513,16 +3525,19 @@
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871948198682": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0c7c1e6b2123"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871948722970": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0c7c1e6b2123"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871949247258": [
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871949771546": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "20df2a7eebb7"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=68719739674": [
       "0398d851d9f4"
@@ -3537,16 +3552,19 @@
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895605175066": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "1e092be66dbd"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895605699354": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "0c7c1e6b2123"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895606223642": [
       "0398d851d9f4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895606747930": [
-      "0398d851d9f4"
+      "0398d851d9f4",
+      "19efe781abfe"
     ]
   },
   "env_identity": "4cfb996f8c09",
@@ -4993,6 +5011,97 @@
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 4)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 5)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 6)"
+    ],
+    "07bb319a94e4": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 6)"
+    ],
+    "0a747175599d": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 5)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 6)"
+    ],
+    "0a7a423fadae": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 6)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 64)), 2, 1)"
+    ],
+    "0c7c1e6b2123": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 6)"
+    ],
+    "19efe781abfe": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 5)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 6)"
+    ],
+    "1dc4aee1e1a6": [
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 3)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 5)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 6)"
+    ],
+    "1e092be66dbd": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 128)), 8, 1)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 128)), 8, 4)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 128)), 8, 6)"
+    ],
+    "20df2a7eebb7": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 5)"
+    ],
+    "5d2a45e98949": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 6)"
+    ],
+    "7f0eb1cdc78d": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 6)"
+    ],
+    "b6359f261d85": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 5)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 3)"
+    ],
+    "b65b21ddedbc": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 5)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 6)"
+    ],
+    "ce0297384fe7": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 5)"
     ]
   },
   "key_scheme": 3,

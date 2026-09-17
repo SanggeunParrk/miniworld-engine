@@ -2789,16 +2789,19 @@
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099512152858": [
-      "2227697a5009"
+      "2227697a5009",
+      "9a0f32f1a18e"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099512677146": [
-      "2227697a5009"
+      "2227697a5009",
+      "42d73ed4b19c"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099513201434": [
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=1099513725722": [
-      "2227697a5009"
+      "2227697a5009",
+      "899434acd404"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=12886475546": [
       "2227697a5009"
@@ -2819,28 +2822,34 @@
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473901687578": [
-      "2227697a5009"
+      "2227697a5009",
+      "90a31bed40d1"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473902211866": [
-      "2227697a5009"
+      "2227697a5009",
+      "cd204fc300ce"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473902736154": [
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=2473903260442": [
-      "2227697a5009"
+      "2227697a5009",
+      "77d5ef11987c"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878432026": [
-      "2227697a5009"
+      "2227697a5009",
+      "55df950888e3"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274878956314": [
-      "2227697a5009"
+      "2227697a5009",
+      "95102d2818d4"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274879480602": [
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=274880004890": [
-      "2227697a5009"
+      "2227697a5009",
+      "577ee2385888"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=34360001306": [
       "2227697a5009"
@@ -2855,16 +2864,19 @@
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398047036186": [
-      "2227697a5009"
+      "2227697a5009",
+      "5a0074531684"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398047560474": [
-      "2227697a5009"
+      "2227697a5009",
+      "fb6be441907e"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398048084762": [
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=4398048609050": [
-      "2227697a5009"
+      "2227697a5009",
+      "ec5b4ced7a74"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6444024602": [
       "2227697a5009"
@@ -2873,16 +2885,19 @@
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871948198682": [
-      "2227697a5009"
+      "2227697a5009",
+      "febce5f257a8"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871948722970": [
-      "2227697a5009"
+      "2227697a5009",
+      "e8b59a582832"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871949247258": [
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=6871949771546": [
-      "2227697a5009"
+      "2227697a5009",
+      "ec5b4ced7a74"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=68719739674": [
       "2227697a5009"
@@ -2897,16 +2912,19 @@
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895605175066": [
-      "2227697a5009"
+      "2227697a5009",
+      "bb39086ff0ca"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895605699354": [
-      "2227697a5009"
+      "2227697a5009",
+      "e8b59a582832"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895606223642": [
       "2227697a5009"
     ],
     "bfloat16+float32|HAS_ROWSCALE=0,shape_key=9895606747930": [
-      "2227697a5009"
+      "2227697a5009",
+      "ec5b4ced7a74"
     ]
   },
   "env_identity": "4cfb996f8c09",
@@ -3713,6 +3731,111 @@
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 3)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 4)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 8, 5)"
+    ],
+    "42d73ed4b19c": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 1, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 1, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 1, 5)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 3)"
+    ],
+    "55df950888e3": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 4)"
+    ],
+    "577ee2385888": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 1, 5)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 2, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 2, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 2)), 2, 3)"
+    ],
+    "5a0074531684": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 4, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 1, 1)"
+    ],
+    "77d5ef11987c": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 2, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 4, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 4, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 4, 5)"
+    ],
+    "899434acd404": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 4, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 4)), 4, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 2, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 8)), 4, 5)"
+    ],
+    "90a31bed40d1": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 2, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 2, 5)"
+    ],
+    "95102d2818d4": [
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 64)), 8, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 4)), 1, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 4)), 1, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 4)), 1, 4)"
+    ],
+    "9a0f32f1a18e": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 4)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 32)), 4, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_M1', 32)), 4, 4)"
+    ],
+    "bb39086ff0ca": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 4, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 4)"
+    ],
+    "cd204fc300ce": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 1, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 3)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 4)"
+    ],
+    "e8b59a582832": [
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 3)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 5)"
+    ],
+    "ec5b4ced7a74": [
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 1)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 2)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 3)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 4)",
+      "((('BLOCK_K', 512), ('BLOCK_M1', 16)), 8, 5)"
+    ],
+    "fb6be441907e": [
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 8, 5)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 8)), 1, 5)"
+    ],
+    "febce5f257a8": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 16)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 64)), 8, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 4, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 8)), 4, 4)"
     ]
   },
   "key_scheme": 3,

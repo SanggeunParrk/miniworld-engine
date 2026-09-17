@@ -867,27 +867,75 @@
   },
   "entry_grids": {
     "bfloat16+float32|K=128,N=512": [
+      "c187bc0ceda9",
       "fb9e9d003b11"
     ],
     "bfloat16+float32|K=16,N=64": [
+      "c222128d6d26",
       "fb9e9d003b11"
     ],
     "bfloat16+float32|K=256,N=1024": [
+      "1f96c9e3c0d5",
       "fb9e9d003b11"
     ],
     "bfloat16+float32|K=384,N=1536": [
+      "1b7f6d2c9b53",
       "fb9e9d003b11"
     ],
     "bfloat16+float32|K=512,N=2048": [
+      "464f6ab4ae33",
       "fb9e9d003b11"
     ],
     "bfloat16+float32|K=768,N=3072": [
+      "7cc7643e9416",
       "fb9e9d003b11"
     ]
   },
   "env_identity": "4cfb996f8c09",
   "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
   "grids": {
+    "1b7f6d2c9b53": [
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 5)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 6)"
+    ],
+    "1f96c9e3c0d5": [
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 6)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 32, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 8, 1)"
+    ],
+    "464f6ab4ae33": [
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 16, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 16, 3)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 16, 5)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 32, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 32, 6)"
+    ],
+    "7cc7643e9416": [
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 16, 5)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 16, 6)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 32, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 32, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_N', 32)), 32, 3)"
+    ],
+    "c187bc0ceda9": [
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 16, 6)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 8, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_N', 32)), 8, 6)"
+    ],
+    "c222128d6d26": [
+      "((('BLOCK_K', 64), ('BLOCK_N', 32)), 4, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_N', 32)), 4, 5)",
+      "((('BLOCK_K', 64), ('BLOCK_N', 32)), 8, 2)",
+      "((('BLOCK_K', 64), ('BLOCK_N', 32)), 8, 3)",
+      "((('BLOCK_K', 64), ('BLOCK_N', 32)), 8, 6)"
+    ],
     "fb9e9d003b11": [
       "((('BLOCK_K', 128), ('BLOCK_N', 128)), 1, 1)",
       "((('BLOCK_K', 128), ('BLOCK_N', 128)), 1, 2)",

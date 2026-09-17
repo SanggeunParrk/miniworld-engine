@@ -2644,19 +2644,24 @@
       "0de27cd1f95a"
     ],
     "bfloat16+float32|shape_key=2148533018": [
-      "0de27cd1f95a"
+      "0de27cd1f95a",
+      "53d749b782f0"
     ],
     "bfloat16+float32|shape_key=2149057306": [
       "0de27cd1f95a"
     ],
     "bfloat16+float32|shape_key=2149581594": [
-      "0de27cd1f95a"
+      "0de27cd1f95a",
+      "7f3c7a655987",
+      "d178f42d35f5"
     ],
     "bfloat16+float32|shape_key=2150630170": [
       "0de27cd1f95a"
     ],
     "bfloat16+float32|shape_key=2151678746": [
-      "0de27cd1f95a"
+      "0de27cd1f95a",
+      "6e0771c2e0ff",
+      "d178f42d35f5"
     ],
     "bfloat16+float32|shape_key=2473901687578": [
       "0de27cd1f95a"
@@ -3153,6 +3158,34 @@
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 2, 3)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 2, 4)",
       "((('BLOCK_K', 64), ('BLOCK_M1', 8)), 2, 5)"
+    ],
+    "53d749b782f0": [
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 1)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 2)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 3)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 4)",
+      "((('BLOCK_K', 128), ('BLOCK_M1', 32)), 2, 5)"
+    ],
+    "6e0771c2e0ff": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 2, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 2, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 2, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 2, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 4)), 2, 5)"
+    ],
+    "7f3c7a655987": [
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 2, 1)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 2, 2)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 2, 3)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 2, 4)",
+      "((('BLOCK_K', 1024), ('BLOCK_M1', 8)), 2, 5)"
+    ],
+    "d178f42d35f5": [
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 1)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 2)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 3)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 4)",
+      "((('BLOCK_K', 256), ('BLOCK_M1', 16)), 2, 5)"
     ]
   },
   "key_scheme": 3,
