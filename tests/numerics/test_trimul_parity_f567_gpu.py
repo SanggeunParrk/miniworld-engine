@@ -121,3 +121,58 @@ def test_f567_native_selector_replays_prepared_launch(monkeypatch):
     assert len(replayed) == 2
     for a, b in zip(actual, expected, strict=True):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+def test_f567_full_range_sigmoid_matches_triton():
+    """Preserve tiny BF16 gate values and exponential overflow behavior."""
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from miniworld_engine.kernels.trimul_inproj.cute.parity_f567 import output_f567_impl
+    from miniworld_engine.kernels.trimul_inproj.triton.output_fused import (
+        _output_f567_kernel,
+    )
+
+    m, kp, kg, n, length = 129, 16, 8, 128, 128
+    kw = {"device": "cuda", "dtype": torch.bfloat16}
+    norm = torch.ones(m, kp, **kw)
+    x = torch.zeros(m, kg, **kw)
+    x[:, 0] = 1
+    wp = torch.ones(n, kp, **kw)
+    wg = torch.zeros(kg, n, **kw)
+    wg[0] = torch.linspace(-100, 100, n, device="cuda").bfloat16()
+    residual = torch.zeros(m, n, **kw)
+    ds = torch.ones(length, n, **kw)
+    config = {
+        "BLOCK_M1": 64,
+        "BLOCK_N": 64,
+        "BLOCK_K": 64,
+        "GROUP_M": 4,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
+    actual = output_f567_impl(norm, x, wp, wg, residual, ds, length, config)
+    y, proj, gate = (torch.empty_like(residual) for _ in range(3))
+    _output_f567_kernel.fn[(6,)](
+        norm,
+        x,
+        wp,
+        wg,
+        proj,
+        gate,
+        y,
+        residual,
+        ds,
+        m,
+        length,
+        kp,
+        kg,
+        n,
+        *wp.stride(),
+        *wg.stride(),
+        shape_key=0,
+        **config,
+    )
+    torch.cuda.synchronize()
+    for a, b in zip(actual, (y, proj, gate), strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    assert torch.any((gate > 0) & (gate < torch.finfo(torch.bfloat16).tiny))

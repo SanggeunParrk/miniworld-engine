@@ -14,8 +14,14 @@ CONFIGS = [
     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
 ]
 
+CONFIGS.append(
+    dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2)
+)
 
-@pytest.mark.parametrize("shape", [(512, 256, 1024, 128), (523, 40, 72, 48)])
+
+@pytest.mark.parametrize(
+    "shape", [(512, 128, 1024, 128), (512, 256, 1024, 128), (523, 40, 72, 48), (523, 40, 72, 13)]
+)
 @pytest.mark.parametrize("config", CONFIGS)
 def test_dual_bwd_sm90_matches_triton(shape, config):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
@@ -36,7 +42,7 @@ def test_dual_bwd_sm90_matches_triton(shape, config):
         :, :m
     ].t()
     w = torch.randn(n, kg + 8, device="cuda", dtype=torch.bfloat16)[:, :kg].t()
-    v = torch.randn(kp, n + 8, device="cuda", dtype=torch.bfloat16)[
+    v = torch.randn(kp, ((n + 7) // 8) * 8 + 8, device="cuda", dtype=torch.bfloat16)[
         :, :n
     ].requires_grad_()
     result = input_dual_bwd_sm90_impl(g, f, w, v, 128, config)

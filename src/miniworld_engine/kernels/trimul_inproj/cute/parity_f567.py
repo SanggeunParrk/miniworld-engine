@@ -14,15 +14,35 @@ from miniworld_engine.kernels._compile import opaque
 from cutlass import BFloat16, Float32, Int32
 from cutlass.cute.nvgpu import cpasync, warpgroup
 from cutlass.cute.runtime import from_dlpack
+from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass._mlir.dialects import llvm
 from cutlass.utils import LayoutEnum
 from quack import copy_utils as quack_copy
+
+
+@dsl_user_op
+def _reciprocal_full(x, *, loc=None, ip=None):
+    """Match Triton's full-range approximate FP32 division, including subnormals."""
+    return Float32(
+        llvm.inline_asm(
+            T.f32(),
+            [Float32(x).ir_value(loc=loc, ip=ip)],
+            "div.full.f32 $0, 0f3f800000, $1;",
+            "=f,f",
+            has_side_effects=False,
+            is_align_stack=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 class ParityF567Sm90:
     """Two independent K reductions, tiled M/N, TMA loads and WGMMA math.
 
-    Each reduction owns a num_stages ring. TMA prefetch overlaps WGMMA;
-    stage barriers and CTA fences protect reuse. No LN affine weight folding.
+    The independent reductions reuse one num_stages operand ring. TMA prefetch
+    overlaps WGMMA within each reduction; a wait and CTA barrier protect the
+    phase handoff. No LN affine weight folding.
     """
 
     def __init__(
@@ -103,9 +123,9 @@ class ParityF567Sm90:
         storage = smem.allocate(self.shared_storage)
 
         sX1 = storage.sX1.get_tensor(sX1_layout.outer, swizzle=sX1_layout.inner)
-        sX2 = storage.sX2.get_tensor(sX2_layout.outer, swizzle=sX2_layout.inner)
+        sX2 = storage.sX1.get_tensor(sX2_layout.outer, swizzle=sX2_layout.inner)
         sW1 = storage.sW1.get_tensor(sW1_layout.outer, swizzle=sW1_layout.inner)
-        sW2 = storage.sW2.get_tensor(sW2_layout.outer, swizzle=sW2_layout.inner)
+        sW2 = storage.sW1.get_tensor(sW2_layout.outer, swizzle=sW2_layout.inner)
         sO = storage.sO.get_tensor(sO_layout.outer, swizzle=sO_layout.inner)
 
         mbar_full_ptr = storage.mbar_full.data_ptr()
@@ -177,21 +197,6 @@ class ParityF567Sm90:
                     load_W1(
                         src_idx=stage, dst_idx=stage, tma_bar_ptr=mbar_full_ptr + stage
                     )
-                if cutlass.const_expr(stage < P_LOOP):
-                    with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive_and_expect_tx(
-                            mbar_full_ptr + STAGES + stage, tx_bytes_total
-                        )
-                    load_X2(
-                        src_idx=stage,
-                        dst_idx=stage,
-                        tma_bar_ptr=mbar_full_ptr + STAGES + stage,
-                    )
-                    load_W2(
-                        src_idx=stage,
-                        dst_idx=stage,
-                        tma_bar_ptr=mbar_full_ptr + STAGES + stage,
-                    )
 
         thr_mma = tiled_mma.get_slice(tidx)
         acc_shape = thr_mma.partition_shape_C((TILE_M, TILE_N))
@@ -251,6 +256,26 @@ class ParityF567Sm90:
                         dst_idx=stage,
                         tma_bar_ptr=mbar_full_ptr + stage,
                     )
+        warpgroup.wait_group(0)
+        cute.arch.barrier()
+        if warp_idx == 0:
+            for stage in cutlass.range_constexpr(STAGES):
+                if cutlass.const_expr(stage < P_LOOP):
+                    with cute.arch.elect_one():
+                        cute.arch.mbarrier_arrive_and_expect_tx(
+                            mbar_full_ptr + STAGES + stage, tx_bytes_total
+                        )
+                    load_X2(
+                        src_idx=stage,
+                        dst_idx=stage,
+                        tma_bar_ptr=mbar_full_ptr + STAGES + stage,
+                    )
+                    load_W2(
+                        src_idx=stage,
+                        dst_idx=stage,
+                        tma_bar_ptr=mbar_full_ptr + STAGES + stage,
+                    )
+
         for k in cutlass.range_constexpr(P_LOOP):
             stage = k % STAGES
             cute.arch.mbarrier_wait(
@@ -288,20 +313,43 @@ class ParityF567Sm90:
                     )
         cute.arch.mbarrier_wait(mbar_full_ptr + 2 * STAGES, Int32(0))
         coords = thr_mma.partition_C(cute.make_identity_tensor((TILE_M, TILE_N)))
+        # Matrix load follows the accumulator fragment layout; TMA already
+        # zero-filled rows/columns outside the residual's logical extent.
+        residual_bf16 = cute.make_fragment_like(acc_G, BFloat16)
+        load_atom = quack_copy.sm90_get_smem_load_op(LayoutEnum.ROW_MAJOR, BFloat16)
+        load_c = cute.make_tiled_copy_C(load_atom, tiled_mma).get_slice(tidx)
+        cute.copy(load_atom, load_c.partition_S(sO), load_c.retile(residual_bf16))
         rR = cute.make_fragment_like(acc_G, Float32)
+        rR.store(residual_bf16.load().to(Float32))
         rD = cute.make_fragment_like(acc_G, Float32)
-        rR.fill(0)
         rD.fill(0)
-        for i in cutlass.range(cute.size(acc_G), unroll_full=True):
-            row = cutlass.Int64(m_block) * TILE_M + coords[i][0]
-            col = n_block * TILE_N + coords[i][1]
-            if row < tO.shape[0] and col < self.N:
-                rR[i] = sO[coords[i][0], coords[i][1]].to(Float32)
-                rD[i] = tD[row % self.L, col].to(Float32)
+        if cutlass.const_expr(self.L % TILE_M == 0 and self.N % TILE_N == 0):
+            # Each aligned row tile is one contiguous slice of the broadcast
+            # scale. A packed BF16 pair is the accumulator's contiguous unit.
+            gD = cute.local_tile(
+                tD, (TILE_M, TILE_N), (m_block % (self.L // TILE_M), n_block)
+            )
+            scale_bf16 = cute.make_fragment_like(acc_G, BFloat16)
+            global_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=32
+            )
+            copy_d = cute.make_tiled_copy_C(global_atom, tiled_mma).get_slice(tidx)
+            cute.copy(global_atom, copy_d.partition_S(gD), copy_d.retile(scale_bf16))
+            rD.store(scale_bf16.load().to(Float32))
+        else:
+            for i in cutlass.range(cute.size(acc_G), unroll_full=True):
+                row = cutlass.Int64(m_block) * TILE_M + coords[i][0]
+                col = n_block * TILE_N + coords[i][1]
+                if row < tO.shape[0] and col < self.N:
+                    rD[i] = tD[row % self.L, col].to(Float32)
         pv = acc_V.load().to(BFloat16)
-        gv = 1.0 / (
+        denom = cute.make_fragment_like(acc_G, Float32)
+        denom.store(
             1.0 + cute.math.exp(-acc_G.load().to(BFloat16).to(Float32), fastmath=True)
         )
+        for i in cutlass.range(cute.size(acc_G), unroll_full=True):
+            denom[i] = _reciprocal_full(denom[i])
+        gv = denom.load()
         out_frag = cute.make_fragment_like(acc_G, BFloat16)
         out_frag.store((pv.to(Float32) * gv * rD.load() + rR.load()).to(BFloat16))
         cute.arch.barrier()
@@ -466,25 +514,24 @@ class ParityF567Sm90:
         )
         tx_bytes_total = (TILE_M + TILE_N) * TILE_K * 2
         sx1 = cute.struct.Align[
-            cute.struct.MemRange[BFloat16, cute.cosize(sX1_layout)], 1024
+            cute.struct.MemRange[
+                BFloat16, max(cute.cosize(sX1_layout), cute.cosize(sX2_layout))
+            ],
+            1024,
         ]
-        sx2 = cute.struct.Align[
-            cute.struct.MemRange[BFloat16, cute.cosize(sX2_layout)], 1024
-        ]
+
         sw1 = cute.struct.Align[
-            cute.struct.MemRange[BFloat16, cute.cosize(sW1_layout)], 1024
-        ]
-        sw2 = cute.struct.Align[
-            cute.struct.MemRange[BFloat16, cute.cosize(sW2_layout)], 1024
+            cute.struct.MemRange[
+                BFloat16, max(cute.cosize(sW1_layout), cute.cosize(sW2_layout))
+            ],
+            1024,
         ]
 
         @cute.struct
         class SharedStorage:
             mbar_full: cute.struct.MemRange[cutlass.Int64, 2 * STAGES + 1]
             sX1: sx1
-            sX2: sx2
             sW1: sw1
-            sW2: sw2
             sO: so
 
         self.shared_storage = SharedStorage
@@ -552,10 +599,10 @@ def feasibility(config, smem_limit=232448, kp=None, kg=None):
         or ns not in (2, 3, 4)
     ):
         return "Config is outside corresponding Triton domain"
-    # Four operand rings plus one epilogue tile and struct alignment padding.
+    # One shared A/B operand ring, one epilogue tile, and alignment padding.
     ps = min(ns, (kp + bk - 1) // bk) if kp is not None else ns
     gs = min(ns, (kg + bk - 1) // bk) if kg is not None else ns
-    if 2 * (bm + bn) * bk * (ps + gs) + 2 * bm * bn + 1024 > smem_limit:
+    if 2 * (bm + bn) * bk * max(ps, gs) + 2 * bm * bn + 1024 > smem_limit:
         return "TMA pipeline stage storage exceeds per-CTA shared memory"
     return None
 

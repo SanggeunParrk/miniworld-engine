@@ -7,7 +7,6 @@ No operand transposes are materialized. The second GEMM accepts the production
 column-major dconc.T and column-major W_stack.T views directly.
 """
 
-from __future__ import annotations
 
 import cutlass
 import cutlass.cute as cute
@@ -47,6 +46,9 @@ class DualBackwardSm90:
         av,
         tv,
         y,
+        ay,
+        ty,
+        lo: cute.ComposedLayout,
         lg: cute.ComposedLayout,
         lf: cute.ComposedLayout,
         lw: cute.ComposedLayout,
@@ -98,8 +100,7 @@ class DualBackwardSm90:
         thrg, thrf = mg.get_slice(tidx), mf.get_slice(tidx)
         accg = cute.make_fragment(thrg.partition_shape_C((self.pm, self.bn)), Float32)
         accf = cute.make_fragment(thrf.partition_shape_C((self.pm, self.bn)), Float32)
-        accg.fill(0)
-        accf.fill(0)
+        gate_saved = cute.make_fragment_like(accg, BFloat16)
         xg = thrg.make_fragment_A(thrg.partition_A(sg))
         wg = thrg.make_fragment_B(thrg.partition_B(sw))
         xf = thrf.make_fragment_A(thrf.partition_A(sf))
@@ -112,9 +113,11 @@ class DualBackwardSm90:
         for kind in cutlass.range_constexpr(2):
             kbar = bar + kind * self.stages
             if cutlass.const_expr(kind == 0):
+                accg.fill(0)
                 loops = cutlass.const_expr((self.kg + self.bk - 1) // self.bk)
             else:
                 cute.arch.barrier()
+                accf.fill(0)
                 loops = cutlass.const_expr((self.kp + self.bk - 1) // self.bk)
             if warp == 0:
                 for stage in cutlass.range_constexpr(min(self.stages, loops)):
@@ -181,15 +184,43 @@ class DualBackwardSm90:
                             dst_idx=stage,
                             tma_bar_ptr=kbar + stage,
                         )
+            if cutlass.const_expr(kind == 0):
+                # The Triton algorithm rounds this reduction before the front
+                # GEMM. Preserve that BF16 value instead of a live FP32 tile.
+                gate_saved.store(accg.load().to(BFloat16))
         coords = thrg.partition_C(cute.make_identity_tensor((self.pm, self.bn)))
-        result = (accf.load() + accg.load().to(BFloat16).to(Float32)).to(BFloat16)
+        result = (accf.load() + gate_saved.load().to(Float32)).to(BFloat16)
         out = cute.make_fragment_like(accg, BFloat16)
         out.store(result)
-        for i in cutlass.range(cute.size(out), unroll_full=True):
-            row = row_origin + coords[i][0]
-            col = ni * self.bn + coords[i][1]
-            if coords[i][0] < self.logical_m and row < y.shape[0] and col < self.n:
-                y[row, col] = out[i]
+        if cutlass.const_expr(self.n % 8 == 0):
+            # Reuse the now-retired A staging storage for a coalesced TMA store.
+            so = storage.sg.get_tensor(lo.outer, swizzle=lo.inner)
+            cute.arch.barrier()
+            store_op = sm90h.get_smem_store_op(LayoutEnum.ROW_MAJOR, BFloat16, Float32)
+            copy_c = cute.make_tiled_copy_C(store_op, mg).get_slice(tidx)
+            cute.copy(store_op, copy_c.retile(out), copy_c.partition_D(so))
+            cute.arch.fence_view_async_shared()
+            cute.arch.barrier()
+            if warp == 0:
+                dst = cute.local_tile(ty, (self.pm, self.bn), (mi, ni))
+                shared, global_ = cpasync.tma_partition(
+                    ay,
+                    0,
+                    cute.make_layout(1),
+                    cute.group_modes(so, 0, cute.rank(so)),
+                    cute.group_modes(dst, 0, cute.rank(dst)),
+                )
+                cute.copy(ay, shared, global_)
+                with cute.arch.elect_one():
+                    cute.arch.cp_async_bulk_commit_group()
+                    cute.arch.cp_async_bulk_wait_group(0, read=True)
+            cute.arch.barrier()
+        else:
+            for i in cutlass.range(cute.size(out), unroll_full=True):
+                row = row_origin + coords[i][0]
+                col = ni * self.bn + coords[i][1]
+                if row < y.shape[0] and col < self.n:
+                    y[row, col] = out[i]
 
     @cute.jit
     def __call__(self, g, f, w, v, y, stream: cuda.CUstream):
@@ -251,8 +282,19 @@ class DualBackwardSm90:
             (self.mma_mgroups, self.mma_ngroups, 1),
             (64, self.bn // self.mma_ngroups),
         )
+        output_atom = warpgroup.make_smem_layout_atom(
+            sm90h.get_smem_layout_atom(LayoutEnum.ROW_MAJOR, BFloat16, self.bn),
+            BFloat16,
+        )
+        lo = cute.tile_to_shape(output_atom, (self.pm, self.bn), order=(0, 1))
+        if cutlass.const_expr(self.n % 8 == 0):
+            ay, ty = cpasync.make_tiled_tma_atom(
+                cpasync.CopyBulkTensorTileS2GOp(), y, lo, (self.pm, self.bn)
+            )
+        else:
+            ay, ty = ag, y
         sg_type = cute.struct.Align[
-            cute.struct.MemRange[BFloat16, cute.cosize(lg)], 1024
+            cute.struct.MemRange[BFloat16, max(cute.cosize(lg), cute.cosize(lo))], 1024
         ]
         sw_type = cute.struct.Align[
             cute.struct.MemRange[BFloat16, cute.cosize(lw)], 1024
@@ -265,7 +307,9 @@ class DualBackwardSm90:
             sw: sw_type
 
         self.shared_storage = Storage
-        self.kernel(ag, tg, af, tf, aw, tw, av, tv, y, lg, lf, lw, lv, mg, mf).launch(
+        self.kernel(
+            ag, tg, af, tf, aw, tw, av, tv, y, ay, ty, lo, lg, lf, lw, lv, mg, mf
+        ).launch(
             grid=[
                 cute.ceil_div(y.shape[0], self.logical_m)
                 * cute.ceil_div(self.n, self.bn),
@@ -287,7 +331,10 @@ def feasibility(config, smem_limit=232448):
         return "WGMMA has a minimum 64-row instruction tile"
     if config["num_warps"] not in (4, 8):
         return "implementation requires one or two four-warp groups"
-    sizes = [bm * bk * config["num_stages"] * 2, bn * bk * config["num_stages"] * 2]
+    sizes = [
+        max(bm * bk * config["num_stages"] * 2, bm * bn * 2),
+        bn * bk * config["num_stages"] * 2,
+    ]
     usage = 1024 + sum((s + 1023) // 1024 * 1024 for s in sizes)
     if usage > smem_limit:
         return f"shared memory {usage} exceeds device limit {smem_limit}"
