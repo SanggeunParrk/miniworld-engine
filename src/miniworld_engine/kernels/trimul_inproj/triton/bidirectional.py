@@ -7,7 +7,7 @@ Stage-for-stage the cute bidir is:
     x_n   = triton_layernorm(pair, ...)              # LN_in  (already triton in cute)
     left,right,preact = FRONT(x_n, WL,WLg,WR,WRg)    # gated in-proj, out_hidden=2h, bdll
     o_out = bmm(lf[:h], rf[:h]ᵀ) ;  o_in = bmm(lf[h:]ᵀ, rf[h:])   # 2 triangle contractions
-    tri   = cat([o_out, o_in])                       # (2h, L, L)
+    tri   = packed_forward(lf, rf, h)              # training: GEMMs write final (2h,L,L) buffer
     proj  = _te_forward(tri_view, ln_out, Wp)        # LN_out + @Wp   (te_style: triton LN + cuBLAS)
     y     = gate_elem(x_n, proj, Wg)                 # sigmoid output-gate  (triton)
 
@@ -16,8 +16,10 @@ front-bwd, dxn fused with the gate add). We reuse the EXACT same helpers cute us
 ``_te_forward/_te_backward`` (layernorm_linear/te_style), ``front_bwd_dW``
 (trimul_inproj/triton/back_fused), ``gate_elem_triton/gate_elem_bwd_ew``
 (trimul_inproj/triton/gate_elem), ``triton_layernorm``. The two triangle
-contractions are ``torch.bmm`` on the BDLL tensors — exactly what cute's
-``dispatch.bmm`` is (cuBLAS). The big GEMMs (dWg, dxn) are cuBLAS, as in cute.
+training contractions use ``torch.bmm(..., out=...)`` on the BDLL tensors,
+removing one forward and two backward concatenations. The CuTe path uses the
+same packed layout with its measured cuBLAS/Quack policy. The big GEMMs
+(dWg, dxn) remain cuBLAS.
 
 The ONLY new kernel here is the FRONT forward: cute's front is a quack gated
 M-major GEMM; we write the equivalent in triton, producing left/right in BDLL
@@ -45,6 +47,7 @@ from miniworld_engine.kernels.layernorm_linear.triton.te_style import (
 from miniworld_engine.autotune.shape_key import pack, token_key
 from miniworld_engine.kernels.trimul_inproj.triton.back import trimul_back_triton
 from miniworld_engine.kernels.trimul_inproj.triton.back_fused import front_bwd_dW
+from miniworld_engine.kernels.trimul_inproj.triton.contract import packed_forward, packed_backward
 from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
     gate_elem_bwd_ew,
     gate_elem_infer,
@@ -250,9 +253,7 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         # Mask applies to the contraction inputs (left/right) ONLY — NOT to x_n, so the
         # output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch reference).
         mm = mask  # Applied inside the front stores; x_n/output gate stay unmasked.
-        o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))         # outgoing  lo @ roᵀ
-        o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])          # incoming  liᵀ @ ri
-        tri = torch.cat([o_out, o_in], dim=0)                     # (H, L, L)
+        tri = packed_forward(lf, rf, h)
         view = tri.reshape(H, M).t()                              # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(
             view, ln_out_w, ln_out_b, Wp, None, eps)              # (M, D)
@@ -294,21 +295,10 @@ class _BidirBackHalfTriton(torch.autograd.Function):
         del d_view, d_proj, view
 
         # contraction bwd (split outgoing/incoming), cuBLAS bmm
-        d_o_out, d_o_in = d_tri[:h], d_tri[h:]
-        lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
-        d_lo = torch.bmm(d_o_out, ro)                             # outgoing O=lo@roᵀ
-        d_ro = torch.bmm(d_o_out.transpose(1, 2), lo)
-        d_li = torch.bmm(ri, d_o_in.transpose(1, 2))             # incoming O=liᵀ@ri
-        d_ri = torch.bmm(li, d_o_in)
-        d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
-        d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
-        # `del` after last use. autograd frees an intermediate when its consumer node has run; a
-        # plain Python backward holds every local to the end, and here that is measured waste: the
-        # peak of this function is `front_bwd_dW` allocating dconc (4D, M) -- 1,152 MiB at
-        # B=1 L=768 d=128 bf16 -- and at that instant the four bmm results the cats above already
-        # consumed were still live, 144 MiB each. The views go too: d_o_out/d_o_in are slices of
-        # d_tri, so d_tri's own 288 MiB is only freed once no view of it is named.
-        del d_lo, d_li, d_ro, d_ri, d_o_out, d_o_in, d_tri, lo, ro, li, ri
+        d_left, d_right = packed_backward(d_tri, lf, rf, h)
+        d_left = d_left.reshape(B, H, L, L)
+        d_right = d_right.reshape(B, H, L, L)
+        del d_tri
         # front bwd: d_concat (triton) + dW (cuBLAS) + W_stack; dxn fuses the gate add
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
             d_left, d_right, preact, x_n, WL, WLg, WR, WRg, pair_mask=ctx.mm)
