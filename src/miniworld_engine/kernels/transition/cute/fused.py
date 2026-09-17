@@ -6,8 +6,8 @@ Mirrors ``triton/fused.py`` (``TritonTransitionFusedFunction``) EXACTLY in struc
 dataflow, same separate-backward design — but swaps the two GEMM-bearing triton kernels for
 cute WGMMA:
 
-  * FORWARD: ``transition_expand_swiglu_cute`` (LN-folded gated dual-GEMM) + torch.matmul
-    squeeze  (replaces the triton fused expand + squeeze).
+  * FORWARD: ``transition_expand_swiglu_cute`` (LN-folded gated dual-GEMM), then
+    squeeze with a CuTe residual epilogue on qualified H100 shapes, otherwise cuBLAS.
   * BACKWARD: ``grad_expand = go @ Ws`` (cuBLAS) -> ONE cute ``transition_expand_gatebwd_cute``
     (dual-accumulator WGMMA recompute + SwiGLU-backward epilogue -> h, dA, dB) -> dWs/dWa/dWb/
     d_xn (cuBLAS) -> the EXISTING triton ``_transition_ln_bwd`` (NOT ported — it is a
@@ -89,13 +89,14 @@ from miniworld_engine.kernels.transition.cute.backward_gatebwd import (
 
 
 def _cute_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
-                   n, eps, shape_key):
+                   n, eps, shape_key, residual=None):
     """``out`` (M, D) -- still flat, ``CuteTransitionFusedFunction.forward`` does the reshape --
     plus the saved LN stats ``rstd`` and ``c1`` as (M,) fp32 against a bf16 activation. The (M, ND)
     expand/h activation is deliberately not among the outputs: the backward recomputes it."""
     m = x2.shape[0]
     return (
-        x2.new_empty((m, squeeze_weight.shape[0])),
+        x2.new_empty((m, squeeze_weight.shape[0]), dtype=(
+            torch.promote_types(x2.dtype, residual.dtype) if residual is not None else x2.dtype)),
         x2.new_empty((m,), dtype=torch.float32),   # rstd
         x2.new_empty((m,), dtype=torch.float32),   # c1
     )
@@ -112,6 +113,7 @@ def _cute_fwd(
     n: int,
     eps: float,
     shape_key: int,
+    residual: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The cute forward launches -> ``(out, rstd, c1)``; ``x2`` arrives flat, contiguous and cast.
 
@@ -133,7 +135,16 @@ def _cute_fwd(
         eps,
         stats=(rstd, c1),
     )
-    out = torch.matmul(expand, squeeze_weight.T)
+    if (residual is not None and residual.dtype == expand.dtype == torch.bfloat16
+            and squeeze_weight.shape == (512, 2048) and x2.shape[0] >= 16384
+            and x2.shape[0] % 128 == 0 and residual.is_contiguous()
+            and torch.cuda.get_device_capability(x2.device)[0] == 9):
+        from .squeeze_residual import squeeze_residual
+        out = squeeze_residual(expand, squeeze_weight, residual.reshape_as(x2))
+    else:
+        out = torch.matmul(expand, squeeze_weight.T)
+        if residual is not None:
+            out = out + residual.reshape_as(x2)
 
     # Recompute-all training policy: do NOT save the (M, ND) expand/h activation — it is
     # re-derived in the backward (store_h=True) to keep the training memory footprint minimal.
@@ -249,6 +260,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         n: int,
         eps: float,
         backward_backend: str = "triton",
+        residual: torch.Tensor | None = None,
     ) -> Float[torch.Tensor, "... d"]:
         if backward_backend not in {"triton", "cute"}:
             msg = f"backward_backend must be 'triton' or 'cute', got {backward_backend!r}"
@@ -273,7 +285,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         shape_key = both_key(rows_of(orig_shape))
         out, rstd, c1 = _cute_fwd(
             x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight,
-            squeeze_weight, n, eps, shape_key,
+            squeeze_weight, n, eps, shape_key, residual,
         )
         ctx.save_for_backward(
             x2, rstd, c1, ln_weight, ln_bias,
@@ -284,6 +296,7 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
         ctx.orig_shape = orig_shape
         ctx.shape_key = shape_key
         ctx.backward_backend = backward_backend
+        ctx.has_residual = residual is not None
         return out.reshape(orig_shape)
 
     @staticmethod
@@ -298,7 +311,8 @@ class CuteTransitionFusedFunction(torch.autograd.Function):
             list(ctx.orig_shape), ctx.shape_key,
         )
         # n, eps, backward_backend take no gradient.
-        return dx, dgamma, dbeta, dWa, dWb, dWs, None, None, None
+        return dx, dgamma, dbeta, dWa, dWb, dWs, None, None, None, (
+            grad_output if ctx.has_residual else None)
 
 
 def cute_transition_fused(
@@ -311,6 +325,7 @@ def cute_transition_fused(
     n: int,
     eps: float = 1e-5,
     backward_backend: str = "triton",
+    residual: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fully fused Transition fwd+bwd with the GEMMs on quack SM90 WGMMA."""
     return CuteTransitionFusedFunction.apply(
@@ -323,4 +338,5 @@ def cute_transition_fused(
         n,
         eps,
         backward_backend,
+        residual,
     )

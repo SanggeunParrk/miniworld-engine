@@ -440,3 +440,13 @@ def transition_expand_gate_sm90_cuda():
 def transition_bwd_gate_sm90_cuda():
     from miniworld_engine.kernels.drivers import hopper
     return hopper.transition_bwd_gate_sm90_cuda()
+
+
+def squeeze_residual_sm90():
+    """Squeeze epilogue with the residual as an independent read-only C operand."""
+    from miniworld_engine.kernels.transition.cute.squeeze_residual import squeeze_residual
+    width = 512
+    expand = torch.randn(ROWS, 4 * width, device=dev(), dtype=BF16)
+    weight = torch.randn(width, 4 * width, device=dev(), dtype=BF16)
+    residual = torch.randn(ROWS, width, device=dev(), dtype=BF16)
+    squeeze_residual(expand, weight, residual)

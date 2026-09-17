@@ -85,6 +85,7 @@ def trimul_inproj_cute_forward(
     b_lr: torch.Tensor | None = None,  # pre-packed (D, 4H); skips cat/interleave
     hidden_dim: int = -1,  # where D lives in x: -1/3 -> BLLD, 1 -> BDLL
     out_hidden: int | None = None,  # per-side output width H (left/right each H wide); None -> D
+    pair_mask: torch.Tensor | None = None,
     return_preact: bool = False,  # also return the pre-glu activation [B,4H,L,L] (for front bwd)
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Forward. Returns ``(left_bdll, right_bdll, gate_blld)``.
@@ -158,6 +159,16 @@ def trimul_inproj_cute_forward(
     else:
         assert b_lr.shape == (D, 4 * H), f"b_lr: expected ({D},{4*H}), got {tuple(b_lr.shape)}"
     B_lr = b_lr
+
+    if pair_mask is not None:
+        from .masked_front import masked_front
+        lr_view, preact_view = masked_front(x_flat, B_lr, pair_mask, return_preact)
+        lr = lr_view.T.reshape(B, 2 * H, L, L)
+        left_bdll, right_bdll = lr[:, :H], lr[:, H:]
+        if return_preact:
+            return left_bdll, right_bdll, preact_view.T.reshape(B, 4 * H, L, L)
+        gate = torch.sigmoid(x_flat @ Wg).reshape(B, L, L, D) if compute_gate else None
+        return left_bdll, right_bdll, gate
 
     if bdll_direct:
         # FAST path: M-major view of [B, 2H, L, L]. Stock quack rejects an

@@ -39,23 +39,22 @@ def pick(name, key, candidates, *, operands, case="triangle_multiplication"):
     """Run the fastest of `candidates` for `key`, caching the choice. candidates: list of
     (label, thunk()->result).
 
-    A cache MISS calibrates, and calibrating is two things Dynamo cannot have inside a trace: it
-    writes ``_CACHE`` (a module global -- "Mutating a variable not in the current scope", which
-    graph-breaks the whole enclosing region) and it runs ``do_bench``, which on the fake tensors
-    a trace carries would time nothing. So under tracing a miss falls back to ``candidates[0]``
-    instead. That is not an arbitrary pick: candidate 0 is cuBLAS everywhere in this file, the
-    always-valid variant the others are compared against.
-
-    A HIT traces fine -- reading a global dict is just a guard -- so a run that calibrates before
-    it compiles (any eager warm-up step) still gets the tuned choice inside the graph. This was
-    found by tests/compile/test_compile_regimes_gpu.py: with a cold cache a pairformer block traced to 6
-    graphs, with a warm one to 1, and the whole difference was this function.
+    Calibration and stride-based cache keys stay outside Dynamo tracing. During
+    autograd backward speculation, saved tensors can have unknown strides; reading
+    those for a Python dictionary key fails before any GEMM can be traced. Compiled
+    execution therefore selects the policy-allowed cuBLAS variant directly. Eager
+    execution retains shape/layout-specific calibration and its cached winners.
     """
     if not _cute_allowed(operands[0].device, operands[0].dtype, case):
         candidates = [(label, thunk) for label, thunk in candidates
                       if label not in ("quack", "cute")]
     if not candidates:
         raise RuntimeError(f"{name}: GPU policy excludes every dispatch candidate")
+    if torch.compiler.is_compiling():
+        for label, thunk in candidates:
+            if label == "cublas":
+                return thunk()
+        return candidates[0][1]()
     # Indices refer to THIS candidate list. A warm winner on another card, dtype,
     # layout or policy must never select a different (possibly unsupported) backend.
     key = (key, tuple((t.device, t.dtype, tuple(t.shape), tuple(t.stride())) for t in operands),

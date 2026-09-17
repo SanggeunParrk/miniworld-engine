@@ -79,7 +79,25 @@ def compile_task(task):
     pp, dyn, device = c["pingpong"], c["is_dynamic_persistent"], (9, 0)
     a, b = ts[:2]
     with compile_only_mode():
-        if op == "layernorm_linear_fwd_foldstats_sm90_cute":
+        if op == "transition_squeeze_residual_sm90_cute":
+            from quack.gemm import _compile_gemm
+            _compile_gemm(
+                a_dtype=_dtype(a), b_dtype=_dtype(b), d_dtype=_dtype(ts[2]), c_dtype=_dtype(ts[2]),
+                a_major=_major(a, "m", "k"), b_major=_major(b, "n", "k"),
+                d_major="n", c_major=_major(ts[2], "m", "n"),
+                tile_shape_mn=tile, cluster_shape_mnk=cluster, pingpong=pp,
+                persistent=True, is_dynamic_persistent=dyn,
+                rowvec_dtype=None, colvec_dtype=None, colvec_ndim=0,
+                alpha_mode=0, beta_mode=0, add_to_output=False, concat_layout=None,
+                varlen_m=False, varlen_k=False, gather_A=False, use_tma_gather=False,
+                has_batch_idx_permute=False, device_capacity=device, rounding_mode=0,
+                sr_seed_mode=0, has_trace_ptr=False, num_warps=None,
+            )
+        elif op == "trimul_inproj_masked_sm90_cute":
+            from miniworld_engine.kernels.trimul_inproj.cute.masked_front import _compile_masked_front
+            _compile_masked_front(_dtype(a), _major(a, "m", "k"), _major(b, "k", "n"),
+                                  task["extra"][0], tile, cluster, pp, dyn, device)
+        elif op == "layernorm_linear_fwd_foldstats_sm90_cute":
             from miniworld_engine.kernels.layernorm_linear.cute.gemm_layernorm_linear import (
                 _compile_gemm_lnl,
             )

@@ -195,8 +195,11 @@ class TriangleMultiplication(nn.Module):
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
 
-        if implementation == ImplementationType.CUTE:
+        if self._backend == KernelBackend.CUTE:
             _load_cute_fns()
+            from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch
+            _bdll_patch.apply()
+            _gate_mul_patch.apply()
 
     def _kernel_tm1(
         self, pair: torch.Tensor, backend: KernelBackend
@@ -496,8 +499,10 @@ class TriangleMultiplication(nn.Module):
             self.to_right.weight.T,
             self.to_right_gate.weight.T,
             out_layout=_resolve_trimul_out_layout(pair.device),
+            pair_mask=((mask.unsqueeze(-1) & mask.unsqueeze(-2))
+                       if mask is not None and _dispatch.is_sm90(pair.device) else None),
         )
-        if mask is not None:
+        if mask is not None and not _dispatch.is_sm90(pair.device):
             scale = (mask.unsqueeze(-1) & mask.unsqueeze(-2))[:, None]
             left_bdll, right_bdll = left_bdll * scale, right_bdll * scale
         if self.outgoing:

@@ -48,12 +48,8 @@ class _SingleBackHalf(torch.autograd.Function):
         M = B * L * L
         left, right, preact = trimul_inproj_cute_forward(
             x_n, WL, WLg, WR, WRg, None, bdll_direct=True, compute_gate=False,
-            b_lr=b_lr, return_preact=True)
-        # Mask only contraction operands; the output gate must see the unmasked LN input.
-        if pair_mask is not None:
-            scale = pair_mask.reshape(B, 1, L, L).to(left.dtype)
-            left = left * scale
-            right = right * scale
+            b_lr=b_lr, return_preact=True, pair_mask=pair_mask)
+        # Mask is fused into the front GEMM stores; saved preactivations stay raw.
         ctx.pair_mask = pair_mask
         lf = left.reshape(D, L, L)
         rf = right.reshape(D, L, L)

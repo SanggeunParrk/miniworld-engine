@@ -55,6 +55,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
         self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
+        if self._backend == KernelBackend.CUTE:
+            from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch
+            _bdll_patch.apply()
+            _gate_mul_patch.apply()
+            from .module import _load_cute_fns
+            _load_cute_fns()
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
@@ -361,8 +367,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
                 self.to_right.weight.to(pair.dtype)[sl].T.contiguous(),
                 self.to_right_gate.weight.to(pair.dtype)[sl].T.contiguous(),
                 out_layout=_resolve_trimul_out_layout(pair.device),
+                pair_mask=pair_scale,
             )
-            if pair_scale is not None:
+            if pair_scale is not None and not _dispatch.is_sm90(pair.device):
                 left, right = left * pair_scale, right * pair_scale
             return left, right
 

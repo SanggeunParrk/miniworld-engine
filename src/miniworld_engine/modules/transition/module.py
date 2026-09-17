@@ -178,8 +178,9 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
                 backward_backend=backward_backend,
+                residual=x,
             )
-            return out + x
+            return out
 
         raise InvalidImplementationError(self.implementation)
 
@@ -240,7 +241,7 @@ class Transition(nn.Module):
         # (sm_100) AND on pre-Hopper (sm_80 / A100) fall through to the triton
         # family (its split path handles any d) — correctness-guard fallback.
         if self.d_hidden >= 256 and _dispatch.is_sm90(x.device):
-            return _r(kernels.cute_transition_fused(
+            return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight.to(x.dtype),
                 self.ln_in.bias.to(x.dtype),
@@ -249,7 +250,8 @@ class Transition(nn.Module):
                 self.squeeze.weight.to(x.dtype),
                 self.n,
                 self.ln_in.eps,
-            ))
+                residual=x,
+            )
         return kernels.triton_transition_fused(
             x,
             self.ln_in.weight.to(x.dtype),
@@ -296,7 +298,7 @@ class Transition(nn.Module):
             # SM90 (H100) only; on Blackwell AND pre-Hopper (A100) the triton family (below)
             # carries d=512 too.
             backward_backend = _large_d_training_backend_from_env() or "triton"
-            return _r(kernels.cute_transition_fused(
+            return kernels.cute_transition_fused(
                 x,
                 self.ln_in.weight.to(x.dtype),
                 self.ln_in.bias.to(x.dtype),
@@ -306,7 +308,8 @@ class Transition(nn.Module):
                 self.n,
                 self.ln_in.eps,
                 backward_backend=backward_backend,
-            ))
+                residual=x,
+            )
         # d<=256 (Version A / save_xn=False): fused forward (b2b / sm100 cute fwd) + the
         # sm100 gatebwd backward (recomputes xn from saved stats, less memory). On sm_100
         # only d=128 reaches here (d>=256 took the split branch above); the AF3 shape.

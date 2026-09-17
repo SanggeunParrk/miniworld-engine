@@ -265,3 +265,15 @@ def fused_preact_gemm_kernel() -> None:
     lr = torch.empty(2 * h, M, device=dev(), dtype=BF16)
     preact = torch.empty(4 * h, M, device=dev(), dtype=BF16)
     fused_front_gemm(_rows(), b, b.clone(), lr, preact)
+
+
+def masked_front_sm90():
+    """Both single/bidirectional widths and inference/training save contracts."""
+    from miniworld_engine.kernels.trimul_inproj.cute.masked_front import masked_front
+    a = _rows(D)
+    mask = torch.ones(M, device=dev(), dtype=torch.bool)
+    mask[::3] = False
+    for hidden in (D, 2 * D):
+        weight = torch.randn(D, 4 * hidden, device=dev(), dtype=BF16)
+        for save in (False, True):
+            masked_front(a, weight, mask, save)

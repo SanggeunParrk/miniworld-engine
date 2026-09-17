@@ -127,6 +127,7 @@ def tm1_cute_forward(
     WR: torch.Tensor,  # (D, D)  — to_right.weight.T
     WRg: torch.Tensor,  # (D, D)  — to_right_gate.weight.T
     *,
+    pair_mask: torch.Tensor | None = None,
     out_layout: str = "bdll",  # "bdll" (spec) or "blld" (cheap path, no permute)
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward TM1 (left+right gated dual GEMM). Returns ``(left, right)`` in
@@ -157,6 +158,16 @@ def tm1_cute_forward(
 
     B_left = _interleave(WLg, WL)  # (D, 2D), gate at even cols, proj at odd
     B_right = _interleave(WRg, WR)
+
+    if pair_mask is not None:
+        from miniworld_engine.kernels.trimul_inproj.cute.masked_front import masked_front
+        left, _ = masked_front(x_flat, B_left, pair_mask)
+        right, _ = masked_front(x_flat, B_right, pair_mask)
+        if out_layout == "blld":
+            return (left.reshape(B, L, L, D).contiguous(),
+                    right.reshape(B, L, L, D).contiguous())
+        return (left.T.reshape(D, B, L, L).permute(1, 0, 2, 3).contiguous(),
+                right.T.reshape(D, B, L, L).permute(1, 0, 2, 3).contiguous())
 
     if out_layout in ("blld", "bdll"):
         _, left_flat = gemm_act(A=x_flat, B=B_left, activation="glu", store_preact=False)

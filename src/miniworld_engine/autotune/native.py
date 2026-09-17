@@ -23,6 +23,8 @@ from miniworld_engine.autotune.cache import (
 
 _WINNERS: dict = {}
 BUILD_OPS = frozenset({
+    "trimul_inproj_masked_sm90_cute",
+    "transition_squeeze_residual_sm90_cute",
     "layernorm_linear_fwd_foldstats_sm90_cute", "layernorm_linear_fwd_sm90_cute",
     "transition_swiglu_fwd_sm90_cute", "transition_gate_bwd_sm90_cute",
     "transition_bwd_dx_sm90_cute", "layernorm_linear_bwd_dx_sm90_cute",
@@ -41,6 +43,8 @@ def native_shape_supported(op, width, dtype):
         return width <= 1024 and dtype in ("bfloat16", "float32")
     if dtype != "bfloat16":
         return False
+    if op == "transition_squeeze_residual_sm90_cute":
+        return width == 512  # only this width is enabled in production dispatch
     if op.endswith("sm90_cuda"):
         return width in ((128, 256) if "b2b" in op else (128, 256, 512))
     if op in ("transition_bwd_dx_sm90_cute", "layernorm_linear_bwd_dx_sm90_cute"):
