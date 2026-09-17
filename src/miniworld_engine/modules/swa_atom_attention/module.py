@@ -622,7 +622,9 @@ class SWA3DRoPEAttention(nn.Module):
         # the dense `_sdpa_band` is an O(S^2) CPU/test reference with a different launch profile, and
         # quietly using it on the GPU measures the wrong kernel (that is exactly how a whole benchmark
         # sweep once ran on the band-mask path). Require flash on CUDA and fail loudly otherwise.
-        if _flash_backend(x.device) is not None:
+        if self.implementation == ImplementationType.PYTORCH:
+            out = self._sdpa_band(q, k, v, valid)
+        elif _flash_backend(x.device) is not None:
             out = self._flash_window(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s)
         elif x.is_cuda:
             msg = (

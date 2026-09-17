@@ -248,6 +248,7 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     # layernorm's MINIWORLD is the auto-routing layernorm_kernel (fused triton fwd +
     # per-shape auto-dispatched backward), grouped under the CUDA-family entry.
     "layernorm": KernelBackend.CUDA,
+    "rmsnorm": KernelBackend.TRITON,
     # These have no faster module-layer backend than the TRITON family (whose kernels do
     # their own shape/arch sub-dispatch, incl. cute on Hopper+ internally). Listed
     # explicitly so the policy is auditable rather than implicit-by-omission.
@@ -301,6 +302,10 @@ def resolve_augmented_attention(impl, device=None):
 
 def resolve_layernorm(impl, device=None):
     return resolve("layernorm", impl, device)
+
+
+def resolve_rmsnorm(impl, device=None):
+    return resolve("rmsnorm", impl, device)
 
 
 def resolve_triangle_multiplication(impl, device=None):

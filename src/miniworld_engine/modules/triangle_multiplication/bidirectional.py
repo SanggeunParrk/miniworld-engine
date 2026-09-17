@@ -216,9 +216,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         return bidirectional_trimul_triton(
             pair,
-            self.to_left.weight, self.to_left_gate.weight,
-            self.to_right.weight, self.to_right_gate.weight,
-            self.to_gate.weight, self.to_out.weight,
+            self.to_left.weight.to(pair.dtype), self.to_left_gate.weight.to(pair.dtype),
+            self.to_right.weight.to(pair.dtype), self.to_right_gate.weight.to(pair.dtype),
+            self.to_gate.weight.to(pair.dtype), self.to_out.weight.to(pair.dtype),
             self.ln_pair.weight, self.ln_pair.bias,
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
@@ -240,11 +240,21 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         Calls the weights-as-args kernel with THIS module's OWN parameters by reference
         (the ``.t().contiguous()`` transposes stay in the autograd graph), so gradients
-        flow straight back to ``self.to_left.weight`` / ``ln_pair.weight`` / … and the
+        flow straight back to ``self.to_left.weight.to(pair.dtype)`` / ``ln_pair.weight`` / … and the
         optimizer trains them. The former ``BidirV6TriMul*`` wrapper cloned the weights
         into fresh, first-forward-created Parameters — leaving this module's registered
         params grad-less (dead) and the live copies invisible to an optimizer built over
-        ``model.parameters()`` before the first forward. bf16, B=1."""
+        ``model.parameters()`` before the first forward. The native kernel is B=1;
+        batch slicing below preserves the public module's batched contract."""
+        if pair.shape[0] > 1:
+            return torch.cat([
+                self._forward_cute_train(
+                    pair[i:i + 1],
+                    None if mask is None else mask[i:i + 1],
+                    None if dropscale is None else
+                    (dropscale if dropscale.shape[0] == 1 else dropscale[i:i + 1]),
+                ) for i in range(pair.shape[0])
+            ], dim=0)
         major = (
             torch.cuda.get_device_capability(pair.device)[0]
             if torch.cuda.is_available()
@@ -264,12 +274,13 @@ class BidirectionalTriangleMultiplication(nn.Module):
             from miniworld_engine.kernels.trimul_inproj.cute.bidir_training import (
                 prepack_lr_operand as _prepack,
             )
-        # By-reference (differentiable) transposes of the module's own projection weights.
-        WL = self.to_left.weight.t().contiguous()
-        WLg = self.to_left_gate.weight.t().contiguous()
-        WR = self.to_right.weight.t().contiguous()
-        WRg = self.to_right_gate.weight.t().contiguous()
-        Wg = self.to_gate.weight.t().contiguous()
+        # Differentiable compute-dtype casts keep FP32 master weights compatible
+        # with the BF16 native kernels; transposes retain the parameter gradient path.
+        WL = self.to_left.weight.to(pair.dtype).t().contiguous()
+        WLg = self.to_left_gate.weight.to(pair.dtype).t().contiguous()
+        WR = self.to_right.weight.to(pair.dtype).t().contiguous()
+        WRg = self.to_right_gate.weight.to(pair.dtype).t().contiguous()
+        Wg = self.to_gate.weight.to(pair.dtype).t().contiguous()
         b_lr = _prepack(WL, WLg, WR, WRg)
         row_scale = None
         if mask is not None:
@@ -281,14 +292,14 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # guard with which function `_fwd` is bound to, so it checks the call against the
             # union of both signatures and flags the sm100 variant.
             return _fwd(
-                pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
+                pair, WL, WLg, WR, WRg, Wg, self.to_out.weight.to(pair.dtype),
                 self.ln_pair.weight, self.ln_pair.bias,
                 self.ln_out.weight, self.ln_out.bias,
                 self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
                 dropscale=dropscale, eps_out=self.ln_out.eps,  # ty: ignore[unknown-argument]
             )
         out = _fwd(
-            pair, WL, WLg, WR, WRg, Wg, self.to_out.weight,
+            pair, WL, WLg, WR, WRg, Wg, self.to_out.weight.to(pair.dtype),
             self.ln_pair.weight, self.ln_pair.bias,
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, b_lr, self.d_hidden, row_scale,
@@ -314,6 +325,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
         by the incoming einsum (no input transpose needed since we control the einsum).
         Same math as the pytorch reference; bf16 in / fp32 acc / bf16 out.
         """
+        if pair.shape[0] > 1:
+            return torch.cat([
+                self._forward_cute(
+                    pair[i:i + 1], None if mask is None else mask[i:i + 1]
+                ) for i in range(pair.shape[0])
+            ], dim=0)
         # The free inference implementation is SM100-only. Hopper retains its own stack;
         # process environment must not silently select a foreign architecture's kernels.
         if _dispatch.is_sm100(pair.device):
@@ -339,10 +356,10 @@ class BidirectionalTriangleMultiplication(nn.Module):
         def _front(sl: slice):
             left, right = tm1_cute_forward(
                 x,
-                self.to_left.weight[sl].T.contiguous(),
-                self.to_left_gate.weight[sl].T.contiguous(),
-                self.to_right.weight[sl].T.contiguous(),
-                self.to_right_gate.weight[sl].T.contiguous(),
+                self.to_left.weight.to(pair.dtype)[sl].T.contiguous(),
+                self.to_left_gate.weight.to(pair.dtype)[sl].T.contiguous(),
+                self.to_right.weight.to(pair.dtype)[sl].T.contiguous(),
+                self.to_right_gate.weight.to(pair.dtype)[sl].T.contiguous(),
                 out_layout=_resolve_trimul_out_layout(pair.device),
             )
             if pair_scale is not None:
@@ -364,9 +381,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # shared back: sigmoid(x @ to_gate.T) * (out_normed @ to_out.T)  (gate K=d, out K=2h).
         # Fuse the residual (== module input pair) into the gate store via gate_elem_infer — the
         # proj GEMM stays cuBLAS, the sigmoid·mul·+residual is one triton pass.
-        proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.T           # (M, d) cuBLAS
+        proj = out_normed.reshape(M, 2 * h) @ self.to_out.weight.to(pair.dtype).T           # (M, d) cuBLAS
         y = gate_elem_infer(
-            x.reshape(M, d), proj, self.to_gate.weight.T,
+            x.reshape(M, d), proj, self.to_gate.weight.to(pair.dtype).T,
             residual=pair.reshape(M, d), seq_len=l1)
         return y.view(b, l1, l2, d)
 
@@ -403,9 +420,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # residual form directly -- there is no `out + pair` left to do here.
         return bidirectional_trimul_sm100(
             pair,
-            self.to_left.weight, self.to_left_gate.weight,
-            self.to_right.weight, self.to_right_gate.weight,
-            self.to_gate.weight, self.to_out.weight,
+            self.to_left.weight.to(pair.dtype), self.to_left_gate.weight.to(pair.dtype),
+            self.to_right.weight.to(pair.dtype), self.to_right_gate.weight.to(pair.dtype),
+            self.to_gate.weight.to(pair.dtype), self.to_out.weight.to(pair.dtype),
             self.ln_pair.weight, self.ln_pair.bias,
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, self.ln_out.eps, self.d_hidden,

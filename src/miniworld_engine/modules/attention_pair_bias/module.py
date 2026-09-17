@@ -6,7 +6,10 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import Linear
+from miniworld_engine import kernels
+from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
+from miniworld_engine.modules.dispatch import KernelBackend, resolve_augmented_attention
+from miniworld_engine.modules.exceptions import ImplementationType, InvalidImplementationError
 
 
 class AttentionPairBias(nn.Module):
@@ -35,26 +38,29 @@ class AttentionPairBias(nn.Module):
         d_hidden: int | None = None,
         *,
         use_qk_norm: bool = False,
+        implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
         self.n_head = n_head
         self.use_qk_norm = use_qk_norm
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_augmented_attention(self.implementation)
         if d_hidden is None:
             if d_single % n_head != 0:
                 msg = f"{d_single=} must be divisible by {n_head=}"
                 raise ValueError(msg)
             d_hidden = d_single // n_head
 
-        self.ln_single = nn.LayerNorm(d_single)
+        self.ln_single = LayerNorm(d_single, implementation=self.implementation)
         self.to_query = Linear(d_single, d_hidden * n_head, bias=True, init="glorot")
         self.to_key = Linear(d_single, d_hidden * n_head, bias=False, init="glorot")
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False, init="glorot")
 
         if use_qk_norm:
-            self.norm_query = nn.RMSNorm(d_hidden)
-            self.norm_key = nn.RMSNorm(d_hidden)
+            self.norm_query = RMSNorm(d_hidden, implementation=self.implementation)
+            self.norm_key = RMSNorm(d_hidden, implementation=self.implementation)
 
-        self.ln_pair = nn.LayerNorm(d_pair)
+        self.ln_pair = LayerNorm(d_pair, implementation=self.implementation)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
@@ -90,7 +96,18 @@ class AttentionPairBias(nn.Module):
             bias = bias.masked_fill(
                 ~mask[:, None, None, :], torch.finfo(bias.dtype).min
             )
-        out = F.scaled_dot_product_attention(query, key, value, bias)
+        if self._backend == KernelBackend.PYTORCH:
+            out = F.scaled_dot_product_attention(query, key, value, bias)
+        elif self._backend == KernelBackend.TRITON:
+            # Reuse the existing QK + pair-bias kernel with one augmentation.
+            # Bias-only attention is a different operation and cannot replace QK.
+            q, k, v = (t.transpose(1, 2).unsqueeze(0) for t in (query, key, value))
+            out = kernels.triton_augmented_attention_pair_bias(
+                q, k, v, bias.permute(0, 2, 3, 1),
+                None if mask is None else mask.unsqueeze(0),
+            ).squeeze(0).transpose(1, 2)
+        else:
+            raise InvalidImplementationError(self.implementation)
 
         gate = self.to_gate(single)
         out = rearrange(out, "B H L D -> B L (H D)")

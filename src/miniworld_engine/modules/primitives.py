@@ -12,7 +12,7 @@ from torch import Size
 from torch.nn.parameter import Parameter
 
 from miniworld_engine import kernels
-from miniworld_engine.modules.dispatch import KernelBackend, resolve_layernorm
+from miniworld_engine.modules.dispatch import KernelBackend, resolve_layernorm, resolve_rmsnorm
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
@@ -183,6 +183,35 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
                 self.eps,
             )
         raise InvalidImplementationError(self.implementation)
+
+
+class RMSNorm(nn.RMSNorm):
+    """State-dict-compatible RMSNorm with the existing engine forward/backward.
+
+    Preserve torch 2.10's accumulation-dtype epsilon when eps=None; BF16/FP16
+    accumulate in FP32. Input-dtype epsilon would materially change small inputs.
+    """
+
+    def __init__(self, normalized_shape, eps=None, elementwise_affine=True,
+                 device=None, dtype=None, *, implementation=ImplementationType.PYTORCH):
+        super().__init__(normalized_shape, eps, elementwise_affine, device=device, dtype=dtype)
+        self.implementation = ImplementationType(implementation)
+        self._backend = resolve_rmsnorm(self.implementation)
+        if len(self.normalized_shape) != 1 and self._backend != KernelBackend.PYTORCH:
+            raise ValueError("Engine RMSNorm supports one normalized dimension")
+
+    def forward(self, x):
+        if self._backend == KernelBackend.PYTORCH or not x.is_cuda:
+            return super().forward(x)
+        if self._backend != KernelBackend.TRITON:
+            raise InvalidImplementationError(self.implementation)
+        eps = self.effective_eps(x.dtype)
+        return kernels.triton_rmsnorm(x, self.weight, eps)
+
+    def effective_eps(self, dtype):
+        if self.eps is not None:
+            return self.eps
+        return torch.finfo(torch.float32 if dtype in (torch.bfloat16, torch.float16) else dtype).eps
 
 
 class Linear(nn.Linear):

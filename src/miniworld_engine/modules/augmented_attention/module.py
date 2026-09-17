@@ -17,7 +17,7 @@ from miniworld_engine.modules.exceptions import (
     InvalidImplementationError,
 )
 from miniworld_engine.modules.functional import sigmoid_gate
-from miniworld_engine.modules.primitives import LayerNorm, Linear
+from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
 
 class AugmentedAttentionPairBias(nn.Module):
@@ -67,8 +67,8 @@ class AugmentedAttentionPairBias(nn.Module):
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
 
         if use_qk_norm:
-            self.norm_query = nn.RMSNorm(d_hidden)
-            self.norm_key = nn.RMSNorm(d_hidden)
+            self.norm_query = RMSNorm(d_hidden, implementation=self.implementation)
+            self.norm_key = RMSNorm(d_hidden, implementation=self.implementation)
 
         # No offset: this LayerNorm's bias reaches the loss only through `to_bias`, as a per-head
         # constant added to every attention logit, and softmax(z + c) == softmax(z) exactly. Its
@@ -77,7 +77,7 @@ class AugmentedAttentionPairBias(nn.Module):
         # gives a directional derivative that converges to 4 digits. Matches MiniWorld upstream
         # (`nn.LayerNorm(d_pair, bias=False)`) and AlphaFold3 (`create_offset=False` on the
         # pair_input_layer_norm).
-        self.ln_pair = LayerNorm(d_pair, bias=False)
+        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=self.implementation)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")

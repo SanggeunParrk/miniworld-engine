@@ -43,7 +43,7 @@ from miniworld_engine.modules.pairformer import (
     PairformerBlock,
     PairformerConfig,
 )
-from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear, MPLinear
+from miniworld_engine.modules.primitives import Dropout, LayerNorm, Linear, MPLinear, RMSNorm
 from miniworld_engine.modules.swa_atom_attention import SWA3DRoPEAttention
 from miniworld_engine.modules.transition import Transition
 from miniworld_engine.modules.triangle_attention import (
@@ -68,6 +68,7 @@ __all__ = [
     "InvalidImplementationError",
     "KernelBackend",
     "LayerNorm",
+    "RMSNorm",
     "Linear",
     "MPLinear",
     "MSAPairWeightedAveraging",
