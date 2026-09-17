@@ -312,9 +312,9 @@ def _bidir_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, h,
         x_n, WLt, WLgt, WRt, WRgt, save_preact=False, pair_mask=mask)
     lf = left.reshape(H, L, L)
     rf = right.reshape(H, L, L)
-    o_out = torch.bmm(lf[:h], rf[:h].transpose(1, 2))            # outgoing
-    o_in = torch.bmm(lf[h:].transpose(1, 2), rf[h:])            # incoming
-    tri = torch.cat([o_out, o_in], dim=0)                        # (H, L, L)
+    # Reuse the training contraction launcher: both cuBLAS calls write directly
+    # into disjoint slices of the final buffer, with no intermediate cat copy.
+    tri = packed_forward(lf, rf, h)                            # (H, L, L)
     # ONE pass: LN_out(H) + proj GEMM (H -> D) + gate GEMM (D -> D) + residual. This used to be
     # `_te_forward` (LN+GEMM) followed by `gate_elem_infer`, because `trimul_back_triton` gated
     # over the same axis it normalised and so refused H != D. It takes the gate's width separately

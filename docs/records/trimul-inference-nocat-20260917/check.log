@@ -1,0 +1,17 @@
+INSTALLED /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/miniworld_engine/__init__.py
+.......                                                                  [100%]
+=============================== warnings summary ===============================
+tests/consumer_updates/test_trimul_inference_packed.py::test_inference_uses_packed_with_identical_output[holes]
+  /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/miniworld_engine/autotune/cache.py:1405: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'trimul_gemm_gate_mmajor_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16|SAVE_PREACT=0,shape_key=8800388517254). Falling back to a heuristic 24 of 864 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    hit = _cached_subset(self, cfgs, nargs, meta)
+
+tests/consumer_updates/test_trimul_inference_packed.py: 14 warnings
+  /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/consumer_updates/test_trimul_inference_packed.py::test_packed_has_two_bmm_and_no_cat[128]
+  /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/profiler/profiler.py:217: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+    _warn_once(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+7 passed, 16 warnings in 31.05s
