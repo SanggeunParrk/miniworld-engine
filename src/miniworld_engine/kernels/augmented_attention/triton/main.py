@@ -361,7 +361,10 @@ def _attn_bwd_dqdkdv(
         dk = tl.dot(dsT, tl.trans(qT), dk)
 
         # store, not atomic_add: each split writes its own slot.
-        dqT_to_add = tl.dot(tl.trans(k), dsT) * (qk_scale / 1.44269504)
+        # Form dQ in query-major order, then transpose for the strided store.
+        # The equivalent K.T @ dS.T layout produces an invalid shared-memory
+        # WGMMA descriptor for BF16 padded heads with Triton 3.6 / ptxas 12.8.
+        dqT_to_add = tl.trans(tl.dot(tl.trans(dsT), k)) * (qk_scale / 1.44269504)
         tl.store(dqT_ptrs, dqT_to_add, mask=qT_mask)
 
         qT_ptrs += BLOCK_M1 * stride_tok
