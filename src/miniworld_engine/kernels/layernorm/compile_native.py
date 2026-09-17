@@ -57,6 +57,9 @@ def _time_bwd_path(impl, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rs
 def _resolve_bwd_path(
     m: int, n: int, dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor
 ) -> str:
+    if settings.current().engine_backend == "triton":
+        override = _ln_bwd_override()
+        return override if override in {"atomic", "persistent"} else _static_bwd_path(m, n, False)
     override = _ln_bwd_override()
     if override is not None and override in _VALID_BWD_PATHS:
         if override == "cuda" and x.dtype != weight.dtype:

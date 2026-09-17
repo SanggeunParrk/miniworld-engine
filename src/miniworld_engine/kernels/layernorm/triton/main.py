@@ -393,7 +393,7 @@ def _ln_bwd(
     # So auto-take CUDA for the masked path (always wins), but keep dense behind the opt-in
     # env flag. Lazy import so the nvcc JIT build only triggers when this path is taken; any
     # build/run failure falls through to triton.
-    if (x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _ln_cuda_bwd_enabled())):
+    if (settings.current().engine_backend != "triton" and x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _ln_cuda_bwd_enabled())):
         try:
             from ..cuda import layer_norm_bwd_cuda
             dx_c, dw_c, db_c = layer_norm_bwd_cuda(

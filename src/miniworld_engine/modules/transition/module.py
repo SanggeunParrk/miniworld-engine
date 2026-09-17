@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 
-from miniworld_engine import kernels
+from miniworld_engine import kernels, settings
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_transition
@@ -189,7 +189,7 @@ class Transition(nn.Module):
         def _r(out):  # explicit residual add for paths that don't fold it in-kernel
             return out + x
 
-        if _force_split_enabled():
+        if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): the fused triton path uses the
         # bounded-smem k-tiled b2b there (correct, no OOM) but it is SLOWER than the
@@ -276,7 +276,7 @@ class Transition(nn.Module):
         def _r(out):  # explicit residual add for paths that don't fold it in-kernel
             return out + x
 
-        if _force_split_enabled():
+        if settings.current().engine_backend == "triton" or _force_split_enabled():
             return _r(self._old_triton_forward(x))
         # Pre-Hopper (sm_80 / A100), large d (>=256): split beats the fused k-tiled path
         # in training too (d=256 6.3 vs 7.0 ms, d=512 20.2 vs 26.8 ms). d=128 stays fused

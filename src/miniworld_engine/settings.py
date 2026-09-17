@@ -198,6 +198,9 @@ class Settings:
     #: Inference LN+proj concat fusion (layernorm_linear).
     pin_infer_concat: bool | None = None
 
+    #: Process-wide application policy; configure before constructing models.
+    engine_backend: Literal["auto", "triton"] = "auto"
+
     # ---- transition backend selection ------------------------------------------------------ #
     #: Force the split path (ln_in + non-fused triton_transition) over the fused kernels. An
     #: escape hatch and A/B lever; the fused large-d path is the default. Formerly

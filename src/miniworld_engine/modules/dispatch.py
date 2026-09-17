@@ -269,6 +269,12 @@ def resolve(
     any concrete backend passes through unchanged. Single entry point behind the per-op
     ``resolve_*`` wrappers kept below for the modules / benchmark harness."""
     impl = _coerce(impl)
+    from miniworld_engine import settings
+    if settings.current().engine_backend == "triton":
+        if impl in {ImplementationType.CUTE, ImplementationType.CUDA}:
+            raise ValueError(f"{op}: {impl.value} conflicts with engine_backend=triton")
+        if impl == ImplementationType.MINIWORLD:
+            return KernelBackend.TRITON
     # An explicit CUEQUIVARIANCE request for an op with no cueq kernel (anything outside
     # _CUEQ_OPS) falls back to the PYTORCH reference, never the Triton fused path.
     if impl == ImplementationType.CUEQUIVARIANCE and op not in _CUEQ_OPS:
