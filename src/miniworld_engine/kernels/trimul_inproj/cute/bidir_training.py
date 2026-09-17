@@ -24,6 +24,7 @@ import torch.nn as nn
 from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 from miniworld_engine.kernels.layernorm_linear.triton.te_style import _te_backward, _te_forward
 from miniworld_engine.kernels.trimul_inproj.cute import _bdll_patch, _gate_mul_patch, dispatch
+from miniworld_engine.kernels.trimul_inproj.cute.contract import packed_backward, packed_forward
 from miniworld_engine.kernels.trimul_inproj.cute.launch import (
     prepack_lr_operand, trimul_inproj_cute_forward,
 )
@@ -35,7 +36,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.gate_elem import (
 
 class BidirBackHalf(torch.autograd.Function):
     """Front (cute gated GEMM, out_hidden=2h) → 2 contractions (outgoing [:h] / incoming [h:],
-    cuBLAS bmm, contiguous-grad) → LN_out+@Wp (te) → gate (triton), as ONE Function. Backward
+    packed bmm, contiguous-grad) → LN_out+@Wp (te) → gate (triton), as ONE Function. Backward
     fuses the gate input-grad + the x_n-add into the front dxn GEMM (cute); dW stays cuBLAS."""
 
     @staticmethod
@@ -53,9 +54,7 @@ class BidirBackHalf(torch.autograd.Function):
         ctx.pair_mask = pair_mask
         lf = left.reshape(H, L, L)
         rf = right.reshape(H, L, L)
-        o_out = dispatch.bmm("contr_o_fwd", lf[:h], rf[:h].transpose(1, 2))   # outgoing
-        o_in = dispatch.bmm("contr_i_fwd", lf[h:].transpose(1, 2), rf[h:])    # incoming
-        tri = torch.cat([o_out, o_in], dim=0)                   # (H, L, L)
+        tri = packed_forward(lf, rf, h)
         view = tri.reshape(H, M).t()                            # (M, H) m-major
         proj, te_xn, mean_out, rstd_out = _te_forward(view, ln_out_w, ln_out_b, Wp, None, eps)
         y, gate = gate_elem_train(
@@ -96,19 +95,10 @@ class BidirBackHalf(torch.autograd.Function):
         del d_view
 
         # contraction bwd (contiguous-grad formulas), split outgoing/incoming
-        d_o_out, d_o_in = d_tri[:h], d_tri[h:]
-        lo, ro, li, ri = lf[:h], rf[:h], lf[h:], rf[h:]
-        d_lo = dispatch.bmm("contr_o_dl", d_o_out, ro)          # outgoing: O=lo@roᵀ
-        d_ro = dispatch.bmm("contr_o_dr", d_o_out.transpose(1, 2), lo)
-        d_li = dispatch.bmm("contr_i_dl", ri, d_o_in.transpose(1, 2))   # incoming: O=liᵀ@ri
-        d_ri = dispatch.bmm("contr_i_dr", li, d_o_in)
-        d_left = torch.cat([d_lo, d_li], dim=0).reshape(B, H, L, L)
-        del d_li, d_lo
-        d_right = torch.cat([d_ro, d_ri], dim=0).reshape(B, H, L, L)
-        # d_tri's slices keep its storage alive, so the base and both views go together or not at
-        # all -- 288 MiB at B=1 L=768 h=128 bf16. lo/ro/li/ri are slices of the SAVED lf/rf, which
-        # ctx holds regardless; they are named here only so no slice of d_tri is missed.
-        del d_ri, d_ro, d_o_out, d_o_in, d_tri, lo, ro, li, ri
+        d_left, d_right = packed_backward(d_tri, lf, rf, h)
+        d_left = d_left.reshape(B, H, L, L)
+        d_right = d_right.reshape(B, H, L, L)
+        del d_tri
 
         # front bwd: d_concat + dW (cuBLAS) + W_stack; dxn fused with the gate add.
         dconc, dWL, dWLg, dWR, dWRg, W_stack = front_bwd_dW(
