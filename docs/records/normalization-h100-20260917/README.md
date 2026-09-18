@@ -33,6 +33,12 @@ Official benchmark fixture, B=1, D=hidden=128, dropout=0.25, static compile plus
 
 ## Experimental TMA B4/F4
 
+> Follow-up correction: the 1.186–1.189x B4 comparison below uses Triton
+> persistent. Updated Triton atomic is faster than that TMA implementation at
+> L768. See the [stronger-baseline recheck](../trimul-b4-l384-20260918/README.md).
+> These historical measurements do not establish a 15% gain over the fastest
+> measured Triton implementation.
+
 - Implemented explicit CuTe TMA loads, shared-memory stage rings, mbarriers, and B4 TMA output stores. B4 retains the persistent per-CTA parameter partials and the same two final reductions.
 - No WGMMA is appropriate here: LayerNorm contains no matrix product.
 - Current prototype supports BF16 m-major inputs with N=BK=256 and aligned leading stride. It does **not** implement the full Triton feature-tile grid, so it is not a drop-in production replacement.

@@ -1,5 +1,11 @@
 # TriMul B4: native TMA implementation and dispatch
 
+> **Baseline correction (2026-09-18):** the 1.187x result below is against the
+> selected Triton persistent path. Updated Triton atomic is faster than this
+> native TMA implementation at L768. See the [paired recheck and experimental
+> improvement](../trimul-b4-l384-20260918/README.md). The earlier result does not
+> establish a 15% gain over the fastest measured Triton path.
+
 ## Result
 
 B4 (output LayerNorm backward) now has a native, cache-managed SM90 implementation.
@@ -55,8 +61,8 @@ width/dtype; production itself does not pad or copy activations.
 ## Performance
 
 H100 80GB, alternating CUDA-graph measurements. B4 timings include both final
-parameter reductions. These compare against the updated Triton baseline, not the
-older pre-optimization LayerNorm.
+parameter reductions. These compare against the then-selected updated Triton path (persistent at
+L768, atomic at L384), not the fastest measured available path; see correction above.
 
 |Workload|Triton|TMA candidate|Decision|
 |---|---:|---:|---|
