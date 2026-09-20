@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/anthropics/uplifting-biomolecular-modeling",
+  "revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "source_prefix": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5",
+  "license": "Apache-2.0",
+  "files": {
+    "csrc/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+    "csrc/tmn_ptx.cuh": "f774e39f8346998f96f9c839d142fe29d2733c2b4ef5e811e05b7165ea6fb2aa",
+    "csrc/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b",
+    "python/trimul_native/launch.py": "cb6b6a5e09a557fd99ed284288da85f32a142ac5bbdd67c74741c3a2844546cc",
+    "python/trimul_native/_driver.py": "3d614468751e376abec32efa8c7caa977cc2ee575525726e9b4303bd9b7461c6",
+    "python/trimul_native/manifest.py": "f27789378ec49aac030b1ac9fed842e5179a304abcef64425d22f53f43e4da50"
+  },
+  "local_changes": "Only a minimal Python package initializer is added; listed source files are byte-identical."
+}

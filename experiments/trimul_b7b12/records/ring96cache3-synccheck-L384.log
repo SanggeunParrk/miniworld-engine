@@ -1,0 +1,17 @@
+========= COMPUTE-SANITIZER
+PTXAS /home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/fe14ebeccabbd14fc5003d504070a7f1c34f2e3ccf60aa42c796e66ef87254f3.cubin ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'front_reduce' for 'sm_90a'
+ptxas info    : Function properties for front_reduce
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 0 barriers
+ptxas info    : Compile time = 9.941 ms
+ptxas info    : Compiling entry function 'front_b7b12' for 'sm_90a'
+ptxas info    : Function properties for front_b7b12
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 126 registers, used 1 barriers, 1024 bytes smem
+ptxas info    : Compile time = 158.729 ms
+
+/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/autotune/cache.py:1420: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'trimul_input_dual_bwd_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16|M=147456,fs0=1,fs1=147456,gs0=128,gs1=1,shape_key=108095204330307737,vs0=128,vs1=1,ws0=1,ws1=128). Falling back to a heuristic 3 of 648 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  hit = _cached_subset(self, cfgs, nargs, meta)
+SANITIZER_CHECK_PASS 384 {'dx': {'relative_l2': 3.0322930797410663e-06, 'max_absolute': 0.0078125, 'finite': True}, 'dWL': {'relative_l2': 0.00011420088412705809, 'max_absolute': 1.0, 'finite': True}, 'dWLg': {'relative_l2': 0.00020426638366188854, 'max_absolute': 0.5, 'finite': True}, 'dWR': {'relative_l2': 0.00015608149988111109, 'max_absolute': 1.0, 'finite': True}, 'dWRg': {'relative_l2': 0.00010323087917640805, 'max_absolute': 0.25, 'finite': True}, 'dgamma': {'relative_l2': 8.388279297832923e-07, 'max_absolute': 0.000244140625, 'finite': True}, 'dbeta': {'relative_l2': 5.523924073713715e-07, 'max_absolute': 0.000396728515625, 'finite': True}}
+========= ERROR SUMMARY: 0 errors

@@ -319,6 +319,13 @@ or checkout and does not automatically commit results. A successful cache build 
 replace module numerical tests or benchmarks. Full policy:
 [dispatch-cache.md](docs/operations/dispatch-cache.md).
 
+## Research checkpoints
+
+The [H100 TriMul B7–B12 checkpoint](experiments/trimul_b7b12/README.md)
+contains the Anthropic-derived CUDA training extension, wiring diagram,
+reproducible runners and validation/performance evidence. It is an explicit
+experiment; installing the engine does not select it automatically.
+
 ## Toolchain
 
 One-time, per clone — git will not let a repository point itself at its own hooks:

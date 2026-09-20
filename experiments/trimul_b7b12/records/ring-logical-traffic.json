@@ -1,0 +1,48 @@
+[
+  {
+    "L": 384,
+    "tiles": 2304,
+    "logical_bytes": {
+      "dw_preactivation": 301989888,
+      "dw_upstream": 150994944,
+      "dw_xn": 301989888,
+      "ring_write": 301989888,
+      "ring_read": 301989888,
+      "dx_projection_weights": 603979776,
+      "gate_dgrad_input": 37748736,
+      "gate_weights": 75497472,
+      "ln_input_and_residual": 75497472,
+      "dx_write": 37748736,
+      "dw_partial_write_and_read": 41943040,
+      "ln_partial_write_and_read": 212992,
+      "weight_output": 262144,
+      "ln_parameter_output": 1024
+    },
+    "logical_bytes_subtotal": 2231845888,
+    "tensor_flops": 82141249536,
+    "scope": "Named tensor loads/stores; excludes mask/stat/gamma/counters, polls, cache overfetch, write allocation and hardware-sector effects. Not compulsory traffic of all possible implementations."
+  },
+  {
+    "L": 768,
+    "tiles": 9216,
+    "logical_bytes": {
+      "dw_preactivation": 1207959552,
+      "dw_upstream": 603979776,
+      "dw_xn": 1207959552,
+      "ring_write": 1207959552,
+      "ring_read": 1207959552,
+      "dx_projection_weights": 2415919104,
+      "gate_dgrad_input": 150994944,
+      "gate_weights": 301989888,
+      "ln_input_and_residual": 301989888,
+      "dx_write": 150994944,
+      "dw_partial_write_and_read": 41943040,
+      "ln_partial_write_and_read": 212992,
+      "weight_output": 262144,
+      "ln_parameter_output": 1024
+    },
+    "logical_bytes_subtotal": 8800125952,
+    "tensor_flops": 328564998144,
+    "scope": "Named tensor loads/stores; excludes mask/stat/gamma/counters, polls, cache overfetch, write allocation and hardware-sector effects. Not compulsory traffic of all possible implementations."
+  }
+]

@@ -1,0 +1,49 @@
+{
+  "base_commit": "091962652c7185484999c153df316cc8cfd9a774",
+  "production_source_test_benchmark_and_pyproject_diff": [],
+  "integrity": "passed: pinned upstream SHA-256, unchanged selected CUDA/configs, portable imports, timing records",
+  "gpu": {
+    "node": "node02",
+    "device": "NVIDIA H100 80GB HBM3",
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "nvcc": "12.9",
+    "replay_comparisons": 48,
+    "replay_result": "passed",
+    "full_training_gradient_comparisons": "11 outputs at each of L384/768; eager and graph replay pass",
+    "stack_and_spills": "zero for both selected kernels",
+    "sanitizer_evidence": "original 14 scoped/independent checks retained; selected CUDA sources unchanged"
+  },
+  "lint": {
+    "status": "failed in unchanged repository code with available ruff",
+    "errors": 77,
+    "log": "packaging-lint.log"
+  },
+  "types": {
+    "status": "not run: ty executable unavailable",
+    "log": "packaging-types.log"
+  },
+  "cpu_tests": {
+    "status": "completed with failures",
+    "passed": 3789,
+    "failed": 11,
+    "skipped": 151,
+    "deselected": 585,
+    "seconds": 278.8,
+    "failures": [
+      "FAILED tests/autotune/test_compact_search_space.py::test_inventory_does_not_add_an_unreached_b2b_driver",
+      "FAILED tests/builder/test_native_autotune.py::test_native_launchers_use_registered_measurement_names",
+      "FAILED tests/compile/test_compile_wrap_coverage.py::test_every_launcher_is_opaque_or_only_reached_through_one",
+      "FAILED tests/compile/test_fake_matches_body.py::test_every_op_and_fake_is_written_the_same_way",
+      "FAILED tests/consumer_updates/test_triton_backend_option.py::test_transition_policy_precedes_internal_h100_dispatch[True]",
+      "FAILED tests/consumer_updates/test_triton_backend_option.py::test_transition_policy_precedes_internal_h100_dispatch[False]",
+      "FAILED tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_counts_the_kernels_the_build_drives",
+      "FAILED tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_states_the_current_sweep_size",
+      "FAILED tests/layout/test_the_sweep_page_matches_the_repo.py::test_every_row_the_build_drives_is_on_the_page",
+      "FAILED tests/registry/test_key_flags_are_built_on_both_sides.py::test_one_sided_entries_are_still_one_sided",
+      "FAILED tests/registry/test_no_stale_caches.py::test_no_committed_cache_is_stale_on_a_gpu_we_can_rebuild"
+    ],
+    "log": "packaging-tests.log"
+  },
+  "note": "No claim of green whole-repository CI. This source checkpoint does not change installed engine code, tests or dispatch."
+}

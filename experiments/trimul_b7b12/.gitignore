@@ -1,0 +1,17 @@
+build/
+__pycache__/
+*.pyc
+*.ncu-rep
+*.cubin
+*.lock
+*.ptxas.log
+/*-sanitizers.json
+/*-memcheck-*.log
+/*-racecheck-*.log
+/*-synccheck-*.log
+!records/
+/train-total-*.json
+/new-*.json
+/baseline-initial.json
+/ring-logical-traffic.json
+!records/*.log

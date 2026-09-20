@@ -1,0 +1,841 @@
+PASS: pinned upstream, unchanged selected CUDA/configs, portable Python and 600-sample training records
+benchmarks/runners/bench.py:174:13: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+172 |         # Resolve before int validation so all consumers and CSVs see a concrete count.
+173 |         # Explicit counts remain usable for sweeps; module defaults follow the workload.
+174 |         if (isinstance(values, (dict, DictConfig)) and values.get("level") == "module"
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+175 |                 and values.get("n_augment", "auto") == "auto"):
+176 |             values = dict(values)
+    |
+    = help: Convert to `X | Y`
+
+benchmarks/runners/bench.py:178:12: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+176 |             values = dict(values)
+177 |             values["n_augment"] = 5 if values.get("mode") == "inference" else 48
+178 |         if isinstance(values, (dict, DictConfig)):
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+179 |             values = dict(values)
+180 |             if values.get("dropout", "auto") == "auto":
+    |
+    = help: Convert to `X | Y`
+
+benchmarks/runners/bench.py:3313:44: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+3311 |         for cmp in node.comparators:
+3312 |             vals = ([cmp] if isinstance(cmp, _ast.Constant)
+3313 |                     else list(cmp.elts) if isinstance(cmp, (_ast.Tuple, _ast.List, _ast.Set))
+     |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+3314 |                     else [])
+3315 |             for v in vals:
+     |
+     = help: Convert to `X | Y`
+
+benchmarks/runners/measurement.py:127:14: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+125 |             for key, item in inspect.getclosurevars(value).nonlocals.items():
+126 |                 visit(item, f"{name}.{key}" if name else key, depth + 1)
+127 |         elif isinstance(value, (tuple, list)):
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+128 |             for index, item in enumerate(value):
+129 |                 visit(item, f"{name}[{index}]", depth + 1)
+    |
+    = help: Convert to `X | Y`
+
+benchmarks/runners/measurement.py:147:10: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+145 |     if isinstance(value, torch.Tensor):
+146 |         result[prefix] = value
+147 |     elif isinstance(value, (tuple, list)):
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+148 |         for index, item in enumerate(value):
+149 |             result.update(_output_tensors(item, f"{prefix}[{index}]"))
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/builder.py:1337:40: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+1335 |                 continue
+1336 |             for kw in dec.keywords:
+1337 |                 if kw.arg == "key" and isinstance(kw.value, (ast.List, ast.Tuple)):
+     |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+1338 |                     return any(getattr(e, "value", None) == "shape_key" for e in kw.value.elts)
+1339 |     return True
+     |
+     = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:172:39: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+170 |     """Hashable signature (sorted kwargs, num_warps, num_stages) for any-backend config."""
+171 |     d = as_cfg_dict(config)
+172 |     kw = tuple(sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+173 |                       for k, v in d["kwargs"].items()))
+174 |     return (kw, d["num_warps"], d["num_stages"])
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:180:39: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+178 |     """Signature of a stored/JSON config dict; JSON turned tuples into lists -> re-tuple them
+179 |     so it compares equal to a live config's ``_sig``."""
+180 |     kw = tuple(sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+    |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+181 |                       for k, v in d["kwargs"].items()))
+182 |     return (kw, int(d["num_warps"]), int(d["num_stages"]))
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:343:12: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+341 |     target: str | None = None
+342 |     for node in tree.body:
+343 |         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+344 |             if node.name == fn_name:
+345 |                 target = ast.get_source_segment(src, node)
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:348:14: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+346 |             elif node.name.startswith("_"):          # shared private helper
+347 |                 shared.append(ast.get_source_segment(src, node) or "")
+348 |         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.Import, ast.ImportFrom)):
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+349 |             shared.append(ast.get_source_segment(src, node) or "")
+350 |     if target is None:
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:364:12: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+362 |     out: dict[str, str] = {}
+363 |     for node in tree.body:
+364 |         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+365 |             out[node.name] = ast.get_source_segment(src, node) or ""
+366 |         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:437:46: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+435 |         # the sibling's own import lines: `_M = ragged(...)` means nothing without `ragged`
+436 |         imports = [ast.get_source_segment(sib_src, n) or ""
+437 |                    for n in sib_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+438 |         chunks.append(f"# from {target}\n" + "\n".join(imports + [defs[n] for n in sorted(wanted)]))
+439 |         chunks.append(_imported_driver_scope(target, sib_src, _seen | {mod_name, target},
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:611:14: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+609 |             args[name] = {"shape": list(value.shape), "stride": list(value.stride()),
+610 |                           "dtype": str(value.dtype)}
+611 |         elif isinstance(value, (int, float, str, bool)):
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+612 |             args[name] = value
+613 |     return {"scheme": 1, "arguments": args,
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/cache.py:1504:48: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+1502 |             if op_id or "ms" in cfg:
+1503 |                 ms = cfg.get("ms")
+1504 |                 if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+     |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+1505 |                     continue
+1506 |                 if not math.isfinite(ms) or ms <= 0:
+     |
+     = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/capture.py:248:34: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+246 |         # An autotune key is normally a scalar (a length, a flag). Anything else is named by
+247 |         # type: str() on a tensor would serialise the tensor into a dict key on every round.
+248 |         parts = [str(args[k]) if isinstance(args[k], (int, float, str, bool))
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+249 |                  else type(args[k]).__name__
+250 |                  for k in (getattr(autotuner, "keys", ()) or ()) if k in args]
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/capture.py:439:24: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+437 |         # Anchor on the MEASURED median, not on the single launch above: the anchor is what every
+438 |         # later config is compared against, and one noisy sample must not tighten it.
+439 |         ms = res[0] if isinstance(res, (list, tuple)) else res
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+440 |         try:
+441 |             secs = float(ms) / 1000.0
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/capture.py:1396:8: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+1394 | def _median(t) -> float:
+1395 |     """do_bench(quantiles=(0.5,0.2,0.8)) returns [median, q20, q80]; be tolerant of a scalar."""
+1396 |     if isinstance(t, (list, tuple)):
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+1397 |         return float(t[0])
+1398 |     return float(t)
+     |
+     = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/capture.py:1403:39: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+1401 | def _sig(config) -> tuple:
+1402 |     d = as_cfg_dict(config)
+1403 |     kw = tuple(sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+     |                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+1404 |                       for k, v in d["kwargs"].items()))
+1405 |     return (kw, d["num_warps"], d["num_stages"])
+     |
+     = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/capture.py:1731:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+1729 |     return {repr(_sig_from_dict(c)): float(c["ms"])
+1730 |             for c in rows
+1731 |             if isinstance(c.get("ms"), (int, float)) and math.isfinite(c["ms"])}
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+     |
+     = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/capture.py:2093:37: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+     |
+2091 |             mark = (id(self), getattr(self, "_miniworld_measurement_id", None),
+2092 |                     tuple(sorted((k, str(v)) for k, v in kwargs.items()
+2093 |                                  if isinstance(v, (int, float, str, bool)))))
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+2094 |             if mark not in _SINGLE_SEEN:
+2095 |                 _SINGLE_SEEN.add(mark)
+     |
+     = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/native.py:131:5: I001 [*] Import block is un-sorted or un-formatted
+    |
+129 | def candidates_for(op, bucket):
+130 |     """CPU-readable declared grid for one exact native workload."""
+131 |     from miniworld_engine.autotune.trimul_sm90_config import TRITON_OPS, partition_for_bucket
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+132 |     if op in TRITON_OPS:
+133 |         return partition_for_bucket(op, bucket)[0]
+    |
+    = help: Organize imports
+
+src/miniworld_engine/autotune/native.py:261:20: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+259 |             for row in rows:
+260 |                 ms = row.get("ms")
+261 |                 if isinstance(ms, (int, float)) and math.isfinite(ms) and ms > 0:
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+262 |                     known[signature(row["kwargs"])] = {"status": "ok", "ms": ms}
+263 |             for sig in record.get("searched", []):
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/native_history.py:20:46: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+18 |         return True
+19 |     ms = record.get("ms")
+20 |     return (record.get("status") == "ok" and isinstance(ms, (int, float))
+   |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+21 |             and math.isfinite(ms) and ms > 0)
+   |
+   = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/round_cache.py:29:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+27 |     retry = set()
+28 |     for sig, ms in data.items():
+29 |         if not isinstance(ms, (int, float)) or math.isnan(ms):
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+30 |             continue
+31 |         if math.isfinite(ms) or outcomes.get(sig) == "observed_failure" or predict:
+   |
+   = help: Convert to `X | Y`
+
+src/miniworld_engine/autotune/trimul_sm90_config.py:34:18: B905 [*] `zip()` without an explicit `strict=` parameter
+   |
+32 |         raise ValueError("Use an unsliced domain for SM90 parity search")
+33 |     names = [axis for axis, _ in axes]
+34 |     return [dict(zip(names, values)) for values in itertools.product(*(values for _, values in axes))]
+   |                  ^^^^^^^^^^^^^^^^^^ B905
+   |
+   = help: Add explicit value for parameter `strict=`
+
+src/miniworld_engine/autotune/trimul_sm90_config.py:57:9: I001 [*] Import block is un-sorted or un-formatted
+   |
+55 |     tensors, extra = ast.literal_eval(bucket)
+56 |     if op == "trimul_inproj_gemm_gate_mmajor_sm90_cute":
+57 |         from miniworld_engine.kernels.trimul_inproj.cute.parity_front import front_config_rejection
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+58 |         m, k = tensors[0][0]
+59 |         h2 = tensors[1][0][1] // 4
+   |
+   = help: Organize imports
+
+src/miniworld_engine/autotune/trimul_sm90_config.py:69:9: I001 [*] Import block is un-sorted or un-formatted
+   |
+67 |         feasible = lambda c: feasibility(c, smem_limit=extra[1], kp=kp, kg=kg)
+68 |     elif op == "trimul_input_dual_bwd_sm90_cute":
+69 |         from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import feasibility
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+70 |         feasible = lambda c: feasibility(c, smem_limit=extra[1])
+71 |     else:
+   |
+   = help: Organize imports
+
+src/miniworld_engine/build/key_gaps.py:65:36: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+63 |             continue
+64 |         for kw in dec.keywords:
+65 |             if kw.arg == "key" and isinstance(kw.value, (ast.List, ast.Tuple)):
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+66 |                 return [e.value for e in kw.value.elts
+67 |                         if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+   |
+   = help: Convert to `X | Y`
+
+src/miniworld_engine/kernels/bias_only_attention/dispatch.py:141:30: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+139 |         # forward, dominating runtime).
+140 |         r = triton.testing.do_bench(fn, warmup=10, rep=50, quantiles=[0.5])
+141 |         return float(r[0] if isinstance(r, (list, tuple)) else r)
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+142 |
+143 |     tf, ts = t(fused), t(split)
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/kernels/checks/trimul_inproj.py:350:5: I001 [*] Import block is un-sorted or un-formatted
+    |
+349 | def trimul_parity_dual_bwd_sm90():
+350 |     from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+351 |     g, f, w, v, length = args = _dual_operands()
+352 |     y = input_dual_bwd_sm90(*args)
+    |
+    = help: Organize imports
+
+src/miniworld_engine/kernels/checks/trimul_inproj.py:358:5: I001 [*] Import block is un-sorted or un-formatted
+    |
+357 | def trimul_parity_front_sm90():
+358 |     from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+359 |     h2 = 2 * D
+360 |     x = _x(); weights = [_w(h2) for _ in range(4)]
+    |
+    = help: Organize imports
+
+src/miniworld_engine/kernels/drivers/trimul_inproj.py:375:5: I001 [*] Import block is un-sorted or un-formatted
+    |
+374 | def trimul_parity_dual_bwd_sm90():
+375 |     from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import input_dual_bwd_sm90
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+376 |     input_dual_bwd_sm90(*_dual_operands())
+    |
+    = help: Organize imports
+
+src/miniworld_engine/kernels/drivers/trimul_inproj.py:380:5: I001 [*] Import block is un-sorted or un-formatted
+    |
+379 | def trimul_parity_front_sm90():
+380 |     from miniworld_engine.kernels.trimul_inproj.cute.parity_front import bidir_front_sm90
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+381 |     args = (_x(), _w(2 * D), _w(2 * D), _w(2 * D), _w(2 * D))
+382 |     mask = (torch.rand(M, device=dev()) > .2).to(BF16)
+    |
+    = help: Organize imports
+
+src/miniworld_engine/modules/primitives.py:130:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+128 |         shape: tuple[int, ...] = (
+129 |             tuple(normalized_shape)
+130 |             if isinstance(normalized_shape, (list, Size))
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+131 |             else (int(normalized_shape),)
+132 |         )
+    |
+    = help: Convert to `X | Y`
+
+src/miniworld_engine/modules/transition/module.py:316:9: I001 [*] Import block is un-sorted or un-formatted
+    |
+315 |     def _residual_triton_forward(self, x: torch.Tensor) -> torch.Tensor:
+316 |         from miniworld_engine.kernels.transition.triton.residual import transition_residual
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+317 |
+318 |         return transition_residual(
+    |
+    = help: Organize imports
+
+tests/autotune/test_prediction_provenance.py:28:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+26 |         outcomes.update(predicted="predicted_skip", failed="observed_failure")
+27 |     raw = json.loads(next(tmp_path.glob("*.json")).read_text())
+28 |     assert all(isinstance(ms, (int, float)) for ms in raw.values())
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+29 |     loaded = {}
+30 |     with round_cache.transaction(str(tmp_path), IDENTITY, outcomes=loaded) as data:
+   |
+   = help: Convert to `X | Y`
+
+tests/autotune/test_shipped_cache_wellformed.py:77:20: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+75 |         assert ranked, f"{bucket}: empty ranking"
+76 |         times = [c["ms"] for c in ranked]
+77 |         assert all(isinstance(t, (int, float)) and math.isfinite(t) and t > 0 for t in times), \
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+78 |             f"{bucket}: non-finite or non-positive ms in {times}"
+79 |         assert times == sorted(times), f"{bucket}: not fastest-first: {times}"
+   |
+   = help: Convert to `X | Y`
+
+tests/builder/test_lazy_import_targets.py:82:12: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+80 |     names: set[str] = set()
+81 |     for node in tree.body:
+82 |         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+83 |             names.add(node.name)
+84 |         elif isinstance(node, ast.Assign):
+   |
+   = help: Convert to `X | Y`
+
+tests/builder/test_lazy_import_targets.py:88:14: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+86 |         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+87 |             names.add(node.target.id)
+88 |         elif isinstance(node, (ast.Import, ast.ImportFrom)):
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+89 |             names.update(a.asname or a.name.split(".")[0] for a in node.names)
+90 |         elif isinstance(node, ast.If):  # version/try guards bind inside a block
+   |
+   = help: Convert to `X | Y`
+
+tests/builder/test_lazy_import_targets.py:92:20: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+90 |         elif isinstance(node, ast.If):  # version/try guards bind inside a block
+91 |             for sub in ast.walk(node):
+92 |                 if isinstance(sub, (ast.FunctionDef, ast.ClassDef)):
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+93 |                     names.add(sub.name)
+94 |         elif isinstance(node, ast.Try):
+   |
+   = help: Convert to `X | Y`
+
+tests/builder/test_lazy_import_targets.py:96:20: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+94 |         elif isinstance(node, ast.Try):
+95 |             for sub in ast.walk(node):
+96 |                 if isinstance(sub, (ast.Import, ast.ImportFrom)):
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+97 |                     names.update(a.asname or a.name.split(".")[0] for a in sub.names)
+98 |                 elif isinstance(sub, (ast.FunctionDef, ast.ClassDef)):
+   |
+   = help: Convert to `X | Y`
+
+tests/builder/test_lazy_import_targets.py:98:22: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+ 96 |                 if isinstance(sub, (ast.Import, ast.ImportFrom)):
+ 97 |                     names.update(a.asname or a.name.split(".")[0] for a in sub.names)
+ 98 |                 elif isinstance(sub, (ast.FunctionDef, ast.ClassDef)):
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+ 99 |                     names.add(sub.name)
+100 |     return names
+    |
+    = help: Convert to `X | Y`
+
+tests/builder/test_no_build_at_import.py:35:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+33 |     for node in tree.body:                      # top level ONLY; a call inside a def is fine
+34 |         for inner in ast.walk(node):
+35 |             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+36 |                 break                           # everything under a def is deferred by definition
+37 |             if isinstance(inner, ast.Call):
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_benchmark_yaml_graph_policy.py:24:60: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+22 |     source = ROOT / "benchmarks/runners/bench.py"
+23 |     tree = ast.parse(source.read_text())
+24 |     nodes: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+   |                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+25 |              and node.name in {"BenchConfig", "is_inference_mode"}]
+26 |     namespace: dict[str, Any] = {"BaseModel": BaseModel, "model_validator": model_validator,
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_compile_wrap_coverage.py:77:17: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+75 |     return (isinstance(node, ast.Call)
+76 |             and isinstance(node.func, ast.Subscript)
+77 |             and isinstance(node.func.value, (ast.Name, ast.Attribute))
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+78 |             # nn.Sequential[0](x) is a module call, not kernel[grid](x).
+79 |             and not (isinstance(node.func.slice, ast.Constant)
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_compile_wrap_coverage.py:90:20: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+88 |         tree = ast.parse(path.read_text())
+89 |         for node in ast.walk(tree):
+90 |             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+91 |                 continue
+92 |             names = []
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_fake_matches_body.py:45:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+43 |         nonlocal knowable
+44 |         for child in ast.iter_child_nodes(parent):
+45 |             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+46 |                 continue
+47 |             if isinstance(child, ast.Return) and child.value is not None:
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_fake_matches_body.py:49:20: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+47 |             if isinstance(child, ast.Return) and child.value is not None:
+48 |                 value = child.value
+49 |                 if isinstance(value, (ast.Tuple, ast.List)):
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+50 |                     arities.add(len(value.elts))
+51 |                 else:
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_kernel_bench_contracts.py:51:45: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+49 |         if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "implementation":
+50 |             for comparator in node.comparators:
+51 |                 values = comparator.elts if isinstance(comparator, (ast.Set, ast.List, ast.Tuple)) else [comparator]
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+52 |                 labels.update(value.value for value in values if isinstance(value, ast.Constant)
+53 |                               and isinstance(value.value, str))
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_layernorm_bench_regimes.py:24:59: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+22 |              "_flat", "as_bench_result", "is_inference_mode", "bench_kernel_layernorm_bwd"}
+23 |     tree = ast.parse(BENCH.read_text())
+24 |     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+   |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+25 |             and node.name in names]
+26 |     namespace: dict[str, Any] = {"torch": torch, "Literal": Literal, "NamedTuple": NamedTuple, "TypedDict": TypedDict,
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_measurement_result_contracts.py:34:59: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+32 |     wanted = {"BenchResult", "measured_result", "actual_compiled_flag", "csv_row", "mode_label",
+33 |               "is_inference_mode", "result_unit"}
+34 |     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in wanted]
+   |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+35 |     ns = dict(contextlib=contextlib, torch=torch, NamedTuple=NamedTuple, Callable=Callable, BenchConfig=SimpleNamespace,
+36 |               DTV1_IMPL="dtv1", MINIWORLD_IMPL="miniworld",
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_module_bench_contracts.py:46:59: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+44 |              "parse_implementation_spec", "as_bench_result", "tensor_metrics", "_paired_trimul_dropout"}
+45 |     tree = ast.parse(BENCH.read_text())
+46 |     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+   |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+47 |             and (node.name in names or node.name.startswith("bench_module_"))]
+48 |     namespace: dict[str, Any] = {"torch": torch, "nn": torch.nn, "Literal": Literal, "NamedTuple": NamedTuple,
+   |
+   = help: Convert to `X | Y`
+
+tests/compile/test_other_bench_contracts.py:229:59: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+227 |     path = REPO / "src/miniworld_engine/kernels/tm1/notes/triangle_multiplication_tm1_cute/v14" / filename
+228 |     tree = ast.parse(path.read_text())
+229 |     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.For, ast.Raise))]
+    |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+230 |     def failed_run(*args, **kwargs):
+231 |         raise RuntimeError("injected config failure")
+    |
+    = help: Convert to `X | Y`
+
+tests/consumer_updates/test_trimul_sm90_front_storage.py:33:9: PT018 Assertion should be broken down into multiple parts
+   |
+31 |     )
+32 |     if save_preact:
+33 |         assert reason is not None and "shared" in reason
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ PT018
+34 |         assert candidate not in kept
+35 |         assert any(row["config"] == candidate and row["reason"] == reason
+   |
+   = help: Break down assertion into multiple parts
+
+tests/numerics/test_layernorm_backward_tiles_gpu.py:43:26: PT006 Wrong type passed to first argument of `pytest.mark.parametrize`; expected `tuple`
+   |
+41 | @pytest.mark.parametrize("transposed", [False, True])
+42 | @pytest.mark.parametrize("width", [128, 137, 256, 384])
+43 | @pytest.mark.parametrize("covering,warps", [(False, 8), (True, 16)])
+   |                          ^^^^^^^^^^^^^^^^ PT006
+44 | def test_persistent_backward_wide_warps(dtype, transposed, width, covering, warps):
+45 |     from miniworld_engine.kernels.layernorm.triton.persistent import _ln_bwd_persistent
+   |
+   = help: Use a `tuple` for the first argument
+
+tests/numerics/test_layernorm_backward_tiles_gpu.py:62:5: I001 [*] Import block is un-sorted or un-formatted
+   |
+60 |   @pytest.mark.parametrize("block_k", [64, 256])
+61 |   def test_atomic_backward_mask_and_residual(dtype, rowscale, residual, block_k):
+62 | /     from miniworld_engine.kernels.layernorm.triton.main import layer_norm_bwd_dx_fused
+63 | |     from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import _ln_bwd_residual_kernel
+   | |____________________________________________________________________________________________________^ I001
+64 |       x, dy, w, mean, rstd = inputs(137, dtype)
+65 |       scale = (torch.arange(x.shape[0], device="cuda") % 3 != 0).float() * 1.25
+   |
+   = help: Organize imports
+
+tests/numerics/test_normalization_atomic_gradients_gpu.py:20:5: I001 [*] Import block is un-sorted or un-formatted
+   |
+18 | @pytest.mark.parametrize("tile", [32, 128])
+19 | def test_pair_bias_parameter_gradients(dtype, heads, tile):
+20 |     from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import _layer_norm_linear_bwd
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+21 |     torch.manual_seed(131)
+22 |     m, n = 259, 65
+   |
+   = help: Organize imports
+
+tests/numerics/test_normalization_atomic_gradients_gpu.py:48:5: I001 [*] Import block is un-sorted or un-formatted
+   |
+46 | @pytest.mark.parametrize("tile", [32, 128])
+47 | def test_transition_replica_parameter_gradients(private, tile):
+48 |     from miniworld_engine.kernels.transition.triton.fused import _transition_ln_bwd_kernel
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ I001
+49 |     torch.manual_seed(619)
+50 |     m, n = 1031, 65
+   |
+   = help: Organize imports
+
+tests/numerics/test_op_contracts_gpu.py:194:8: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+192 |     if isinstance(value, torch.Tensor):
+193 |         return value.detach()
+194 |     if isinstance(value, (list, tuple)):
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+195 |         return type(value)(_detach(v) for v in value)
+196 |     if isinstance(value, dict):
+    |
+    = help: Convert to `X | Y`
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+  |
+1 |   """B9+B10 SM90 rounding, pitched/transposed layouts, and tile/warp independence."""
+2 |
+3 | / import pytest
+4 | | import torch
+  | |____________^ I001
+  |
+  = help: Organize imports
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:8:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+ 7 | CONFIGS = [
+ 8 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+ 9 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+10 |     dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:9:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+ 7 | CONFIGS = [
+ 8 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+ 9 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+10 |     dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+11 |     dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=2, num_warps=4, num_stages=3),
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:10:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+ 8 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+ 9 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+10 |     dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+11 |     dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=2, num_warps=4, num_stages=3),
+12 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=4),
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:11:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+ 9 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=4, num_warps=8, num_stages=2),
+10 |     dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+11 |     dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=2, num_warps=4, num_stages=3),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+12 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=4),
+13 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=8, num_stages=2),
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:12:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+10 |     dict(BLOCK_M1=64, BLOCK_N=32, BLOCK_K=32, GROUP_M=8, num_warps=4, num_stages=3),
+11 |     dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=2, num_warps=4, num_stages=3),
+12 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=4),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+13 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=8, num_stages=2),
+14 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:13:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+11 |     dict(BLOCK_M1=64, BLOCK_N=64, BLOCK_K=128, GROUP_M=2, num_warps=4, num_stages=3),
+12 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=4),
+13 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=8, num_stages=2),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+14 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+15 | ]
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:14:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+12 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=4),
+13 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=8, num_stages=2),
+14 |     dict(BLOCK_M1=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=2),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+15 | ]
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:18:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+17 | CONFIGS.append(
+18 |     dict(BLOCK_M1=64, BLOCK_N=256, BLOCK_K=32, GROUP_M=1, num_warps=4, num_stages=2)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+19 | )
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:24:5: C408 Unnecessary `dict()` call (rewrite as a literal)
+   |
+22 | # front-GEMM prefetch, then both retired gate slots join the front ring.
+23 | CONFIGS.append(
+24 |     dict(BLOCK_M1=64, BLOCK_N=128, BLOCK_K=64, GROUP_M=1, num_warps=4, num_stages=3)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ C408
+25 | )
+   |
+   = help: Rewrite as a literal
+
+tests/numerics/test_trimul_sm90_dual_bwd_gpu.py:41:5: I001 [*] Import block is un-sorted or un-formatted
+   |
+39 |       if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
+40 |           pytest.skip("requires SM90 CUDA GPU")
+41 | /     import triton
+42 | |     from miniworld_engine.kernels.trimul_inproj.cute.parity_dual_bwd import (
+43 | |         input_dual_bwd_sm90_impl,
+44 | |     )
+45 | |     from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import (
+46 | |         _input_dual_bwd_kernel,
+47 | |         dual_shape_key,
+48 | |     )
+   | |_____^ I001
+49 |
+50 |       torch.manual_seed(73)
+   |
+   = help: Organize imports
+
+tests/registry/test_a_built_kernel_is_one_something_launches.py:64:14: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+62 |         elif isinstance(sub, ast.Attribute):
+63 |             got.add(sub.attr)
+64 |         elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+65 |             got |= {a.asname or a.name.split(".")[-1] for a in sub.names}
+66 |     return got
+   |
+   = help: Convert to `X | Y`
+
+tests/registry/test_a_built_kernel_is_one_something_launches.py:75:44: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+73 |         key = f"<mod:{p}>"
+74 |         refs[key] |= _referenced(t)
+75 |         funcs = [n for n in ast.walk(t) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+76 |         for fn in funcs:
+77 |             refs[fn.name] |= _referenced(fn)
+   |
+   = help: Convert to `X | Y`
+
+tests/registry/test_a_built_kernel_is_one_something_launches.py:99:46: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+ 97 |     out: dict[str, set[str]] = collections.defaultdict(set)
+ 98 |     for t in trees.values():
+ 99 |         for fn in [n for n in ast.walk(t) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+100 |             for sub in ast.walk(fn):
+101 |                 if isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Name):
+    |
+    = help: Convert to `X | Y`
+
+tests/registry/test_a_unit_side_survives_the_subprocess.py:36:40: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+34 |             continue
+35 |         for kw in node.keywords:
+36 |             if kw.arg == "choices" and isinstance(kw.value, (ast.Tuple, ast.List)):
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+37 |                 return {e.value for e in kw.value.elts
+38 |                         if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+   |
+   = help: Convert to `X | Y`
+
+tests/registry/test_driver_imports_resolve.py:86:27: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+84 |             ttree = ast.parse(target.read_text())
+85 |             defined = {n.name for n in ast.walk(ttree)
+86 |                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+87 |             defined |= {t.id for n in ast.walk(ttree) if isinstance(n, ast.Assign)
+88 |                         for t in n.targets if isinstance(t, ast.Name)}
+   |
+   = help: Convert to `X | Y`
+
+tests/registry/test_driver_imports_resolve.py:90:28: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+   |
+88 |                         for t in n.targets if isinstance(t, ast.Name)}
+89 |             defined |= {a.asname or a.name for n in ast.walk(ttree)
+90 |                         if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+91 |             # A module-level `__getattr__` (PEP 562) makes its names at first access -- that is how
+92 |             # kernels/layernorm/cuda hands out `layer_norm_cuda`, an extension it compiles on
+   |
+   = help: Convert to `X | Y`
+
+tests/registry/test_registry_complete.py:287:16: UP038 Use `X | Y` in `isinstance` call instead of `(X, Y)`
+    |
+285 |         rebound = set()
+286 |         for n in ast.walk(tree):
+287 |             if isinstance(n, (ast.Import, ast.ImportFrom)):
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ UP038
+288 |                 rebound |= {a.asname or a.name.split(".")[0] for a in n.names}
+289 |             elif isinstance(n, ast.Assign):
+    |
+    = help: Convert to `X | Y`
+
+Found 77 errors.
+[*] 14 fixable with the `--fix` option (63 hidden fixes can be enabled with the `--unsafe-fixes` option).

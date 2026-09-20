@@ -1,0 +1,15 @@
+========= COMPUTE-SANITIZER
+PTXAS /home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/fe14ebeccabbd14fc5003d504070a7f1c34f2e3ccf60aa42c796e66ef87254f3.cubin ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'front_reduce' for 'sm_90a'
+ptxas info    : Function properties for front_reduce
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 0 barriers
+ptxas info    : Compile time = 9.941 ms
+ptxas info    : Compiling entry function 'front_b7b12' for 'sm_90a'
+ptxas info    : Function properties for front_b7b12
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 126 registers, used 1 barriers, 1024 bytes smem
+ptxas info    : Compile time = 158.729 ms
+
+ISOLATED_INITCHECK_FINISHED 2
+========= ERROR SUMMARY: 0 errors

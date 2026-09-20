@@ -1,0 +1,21 @@
+========= COMPUTE-SANITIZER
+/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/autotune/cache.py:1420: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'layernorm_bwd_atomic_strided_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32|shape_key=68720526106). Falling back to a heuristic 3 of 288 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  hit = _cached_subset(self, cfgs, nargs, meta)
+PTXAS /home/psk6950/MiniWorld/runs/anthropic_b7b12_fusion_20260920/build/fe14ebeccabbd14fc5003d504070a7f1c34f2e3ccf60aa42c796e66ef87254f3.cubin ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'front_reduce' for 'sm_90a'
+ptxas info    : Function properties for front_reduce
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 0 barriers
+ptxas info    : Compile time = 9.941 ms
+ptxas info    : Compiling entry function 'front_b7b12' for 'sm_90a'
+ptxas info    : Function properties for front_b7b12
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 126 registers, used 1 barriers, 1024 bytes smem
+ptxas info    : Compile time = 158.729 ms
+
+/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/autotune/cache.py:1420: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'trimul_input_dual_bwd_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16|M=4096,fs0=1,fs1=4096,gs0=128,gs1=1,shape_key=36037610292379801,vs0=128,vs1=1,ws0=1,ws1=128). Falling back to a heuristic 3 of 648 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  hit = _cached_subset(self, cfgs, nargs, meta)
+/home/psk6950/MiniWorld/runs/trimul_sm90_parity_20260917/engine/src/miniworld_engine/autotune/cache.py:1420: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'trimul_input_ln_residual_bwd_triton' on 'NVIDIA H100 80GB HBM3 (sm90)' (bfloat16+float32|HAS_ROWSCALE=0,shape_key=68720001818). Falling back to a heuristic 3 of 270 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+  hit = _cached_subset(self, cfgs, nargs, meta)
+SANITIZER_CHECK_PASS 64 {'dx': {'relative_l2': 0.0, 'max_absolute': 0.0, 'finite': True}, 'dWL': {'relative_l2': 6.285400741035119e-05, 'max_absolute': 0.125, 'finite': True}, 'dWLg': {'relative_l2': 2.5156452466035262e-05, 'max_absolute': 0.015625, 'finite': True}, 'dWR': {'relative_l2': 2.5077211830648594e-05, 'max_absolute': 0.03125, 'finite': True}, 'dWRg': {'relative_l2': 7.643046410521492e-05, 'max_absolute': 0.0625, 'finite': True}, 'dgamma': {'relative_l2': 3.353506485836988e-07, 'max_absolute': 2.288818359375e-05, 'finite': True}, 'dbeta': {'relative_l2': 7.314917382927888e-08, 'max_absolute': 7.62939453125e-06, 'finite': True}}
+========= ERROR SUMMARY: 0 errors

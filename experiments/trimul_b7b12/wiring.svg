@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1390" viewBox="0 0 1240 1390" role="img" aria-labelledby="title desc"><title id="title">B7–B12 CUDA training: validated paths by training bucket</title><desc id="desc">L384 recomputes B7 in two CTA roles. L768 computes B7 once and passes BF16 derivatives through a 12 MiB global ring intended for L2. Both finish parameter reductions in the same CUDA launch and retain fused forward saves.</desc><defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#496a7b"/></marker></defs><style>text{font-family:system-ui,sans-serif;fill:#183849}.h{font-size:23px;font-weight:700}.b{font-size:18px;font-weight:650}.t{font-size:15px}.s{font-size:13px;fill:#496474}.line{fill:none;stroke:#496a7b;stroke-width:2;marker-end:url(#a)}</style><rect width="1240" height="1390" fill="#f3f7f8"/>
+<text x="30" y="38" class="h">Bidirectional TriMul · B7–B12 · ONE CUDA launch</text>
+<text x="30" y="65" class="t">H100 · BF16 · dropout 25% · C128 · left/right H256 each · Anthropic v5 training extension</text>
+<rect x="30" y="83" width="1180" height="80" rx="10" fill="#fff" stroke="#9cb9c5"/>
+<text x="48" y="111" class="b">Forward remains fused: input LN + projection/gate; saved values remain unchanged</text>
+<text x="48" y="139" class="t">Saved x_n, mean, inverse std, gate/projection preactivations; original x retained. B1–B6 feed this stage.</text>
+<rect x="30" y="185" width="1180" height="522" rx="10" fill="#edf7f4" stroke="#9cb9c5"/>
+<text x="49" y="216" class="h">L384 · B7 recomputation + overlapped dx store</text>
+<text x="49" y="242" class="t">264 CTAs × 256 threads · two CTAs/SM · 112 KiB dynamic shared/CTA · zero stack/spills</text>
+<rect x="50" y="265" width="465" height="350" rx="10" fill="#fff" stroke="#9cb9c5"/>
+<rect x="540" y="265" width="650" height="350" rx="10" fill="#fff" stroke="#9cb9c5"/>
+<text x="68" y="293" class="b">104 CTAs · B7 + B8 · weight gradients</text>
+<text x="68" y="320" class="s">8 hidden groups × 13 splits; 2 FP32 accumulation segments</text>
+<rect x="68" y="335" width="429" height="82" rx="10" fill="#edf4fb" stroke="#9cb9c5"/>
+<text x="84" y="363" class="b">B7 · mask + sigmoid/GLU backward</text>
+<text x="84" y="390" class="t">TMA preactivation + upstream; BF16 derivatives</text>
+<path d="M280 417V436" class="line"/>
+<rect x="68" y="440" width="429" height="88" rx="10" fill="#e5f5ed" stroke="#9cb9c5"/>
+<text x="84" y="467" class="b">B8 · WGMMA: dG/dP × saved x_n</text>
+<text x="84" y="494" class="t">Separate gate/projection warpgroups; N128 MMA</text>
+<text x="68" y="556" class="t">Global dW partials: 13 MiB</text>
+<text x="68" y="583" class="s">No full d_concat; four direct weight tensor maps</text>
+<text x="560" y="293" class="b">160 CTAs · B9–B12 · input gradients</text>
+<rect x="560" y="315" width="610" height="60" rx="10" fill="#edf4fb" stroke="#9cb9c5"/>
+<text x="577" y="340" class="b">B9 · output-gate WGMMA → BF16 contribution</text>
+<text x="577" y="363" class="s">Retained in registers until B10 add</text>
+<path d="M866 375V395" class="line"/>
+<rect x="560" y="398" width="610" height="77" rx="10" fill="#edf4fb" stroke="#9cb9c5"/>
+<text x="577" y="425" class="b">B7 + B10 · recompute derivatives → WGMMA</text>
+<text x="577" y="452" class="t">Lg → Lp → Rg → Rp; add B9; BF16 dx_n in registers</text>
+<path d="M866 475V493" class="line"/>
+<rect x="560" y="495" width="610" height="75" rx="10" fill="#f3eefb" stroke="#9cb9c5"/>
+<text x="577" y="522" class="b">B11 + B12 · input LN backward + residual</text>
+<text x="577" y="547" class="t">Saved mean/rstd; BF16 pair access; TMA dx output</text>
+<text x="560" y="596" class="s">Next gate / current LN inputs / prior dx store overlap computation</text>
+<text x="49" y="639" class="b">B7 runs in both roles; the large intermediate tensors are not materialized.</text>
+<text x="49" y="668" class="t">Same launch: completion barrier → final dW, dγ, dβ reduction → counters reset</text>
+<text x="49" y="691" class="s">LN partials: 160 KiB. No forward/save-policy change; production dispatch unchanged.</text>
+<rect x="30" y="730" width="1180" height="522" rx="10" fill="#edf7f4" stroke="#9cb9c5"/>
+<text x="49" y="761" class="h">L768 · B7 computed once → bounded L2 ring</text>
+<text x="49" y="787" class="t">264 CTAs × 256 threads · two CTAs/SM · 112 KiB dynamic shared/CTA · zero stack/spills</text>
+<rect x="50" y="810" width="465" height="350" rx="10" fill="#fff" stroke="#9cb9c5"/>
+<rect x="540" y="810" width="650" height="350" rx="10" fill="#fff" stroke="#9cb9c5"/>
+<text x="68" y="838" class="b">160 CTAs · B7 + B8 · weight gradients</text>
+<text x="68" y="865" class="s">8 hidden groups × 20 splits; 2 FP32 accumulation segments</text>
+<rect x="68" y="880" width="429" height="82" rx="10" fill="#edf4fb" stroke="#9cb9c5"/>
+<text x="84" y="908" class="b">B7 · mask + sigmoid/GLU backward</text>
+<text x="84" y="935" class="t">TMA preactivation + upstream; BF16 derivatives</text>
+<path d="M280 962V981" class="line"/>
+<rect x="68" y="985" width="429" height="88" rx="10" fill="#e5f5ed" stroke="#9cb9c5"/>
+<text x="84" y="1012" class="b">B8 · WGMMA: dG/dP × saved x_n</text>
+<text x="84" y="1039" class="t">Separate gate/projection warpgroups; N128 MMA</text>
+<text x="68" y="1101" class="t">Global dW partials: 20 MiB</text>
+<text x="68" y="1128" class="s">No full d_concat; four direct weight tensor maps</text>
+<text x="560" y="838" class="b">104 CTAs · B9–B12 · input gradients</text>
+<rect x="560" y="860" width="610" height="60" rx="10" fill="#edf4fb" stroke="#9cb9c5"/>
+<text x="577" y="885" class="b">B9 · output-gate WGMMA → BF16 contribution</text>
+<text x="577" y="908" class="s">Retained in registers until B10 add</text>
+<path d="M866 920V940" class="line"/>
+<rect x="560" y="943" width="610" height="77" rx="10" fill="#edf4fb" stroke="#9cb9c5"/>
+<text x="577" y="970" class="b">B10 · TMA-read ring → WGMMA</text>
+<text x="577" y="997" class="t">Lg → Lp → Rg → Rp; add B9; BF16 dx_n in registers</text>
+<path d="M866 1020V1038" class="line"/>
+<rect x="560" y="1040" width="610" height="75" rx="10" fill="#f3eefb" stroke="#9cb9c5"/>
+<text x="577" y="1067" class="b">B11 + B12 · input LN backward + residual</text>
+<text x="577" y="1092" class="t">Saved mean/rstd; BF16 pair access; TMA dx output</text>
+<text x="560" y="1141" class="s">Ring handoff: full TMA completion → release/acquire → safe reuse</text>
+<path d="M497 917H528V981H560" class="line"/>
+<text x="49" y="1184" class="b">12 MiB global ring: 96 × 64 rows × 1024 BF16; intended for L2, can reach HBM</text>
+<text x="49" y="1213" class="t">Same launch: completion barrier → final dW, dγ, dβ reduction → counters reset</text>
+<text x="49" y="1236" class="s">LN partials: 104 KiB. No forward/save-policy change; production dispatch unchanged.</text>
+<rect x="30" y="1273" width="1180" height="95" rx="10" fill="#fff" stroke="#9cb9c5"/>
+<text x="49" y="1302" class="b">B7–B12: L384 617.216 → 364.848 µs (1.692×) · L768 2365.632 → 1429.136 µs (1.655×)</text>
+<text x="49" y="1328" class="t">600 alternating graph samples/path. ≥1.7× and defensible SoL90 remain unachieved.</text>
+<text x="49" y="1352" class="s">Ring NCU: L2 89.26%; this hardware counter is not proof of overall algorithmic SoL90.</text>
+</svg>

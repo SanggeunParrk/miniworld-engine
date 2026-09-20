@@ -1,0 +1,583 @@
+........................................................................ [  1%]
+........................................................................ [  3%]
+............................F........................................... [  5%]
+.................s...................................................... [  7%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 12%]
+........................................................................ [ 14%]
+........................................................................ [ 16%]
+........................................................................ [ 18%]
+........................................................................ [ 20%]
+........................................................................ [ 21%]
+........................................................................ [ 23%]
+........................................................................ [ 25%]
+........................................................................ [ 27%]
+........................................................................ [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 36%]
+........................................................................ [ 38%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 43%]
+........................................................................ [ 45%]
+................................F....................................... [ 47%]
+......................................s................................. [ 49%]
+........................................................................ [ 51%]
+...F...................................................s...F............ [ 52%]
+........................................................................ [ 54%]
+........................................................................ [ 56%]
+........................................................................ [ 58%]
+................................................s....................... [ 60%]
+........................................................................ [ 62%]
+..........FF............................................................ [ 63%]
+........................................................................ [ 65%]
+......................................................sssFFF......s..... [ 67%]
+.............ss..ssss.....ssssssssssssssssssssssssssssssssssssssssssssss [ 69%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 71%]
+ssssss.................................................................. [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 76%]
+............................s........................................... [ 78%]
+................................s.......s........................Fs..... [ 80%]
+........................................................................ [ 82%]
+........................................................................ [ 83%]
+......................F................................................. [ 85%]
+........................................................................ [ 87%]
+........................................................................ [ 89%]
+........................................................................ [ 91%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 96%]
+........................................................................ [ 98%]
+................................................ssssss......             [100%]
+=================================== FAILURES ===================================
+_____________ test_inventory_does_not_add_an_unreached_b2b_driver ______________
+
+    def test_inventory_does_not_add_an_unreached_b2b_driver():
+        from miniworld_engine.autotune import derive
+
+>       rows, _ = sweep_page.collect()
+
+tests/autotune/test_compact_search_space.py:85:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/miniworld_engine/viz/sweep_page.py:157: in collect
+    evidence = plan.load("sm86")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+arch = 'sm86'
+registry = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.csv')
+path = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.units.json')
+
+    def load(arch: str, registry: Path | None = None, path: Path | None = None) -> dict:
+        from miniworld_engine.autotune.derive import normalise_arch, registry_path
+        registry = registry if registry is not None else registry_path(arch)
+        path = path if path is not None else registry.with_suffix(".units.json")
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("kernel derivation evidence must be an object")
+        if (not data.get("complete") or data.get("errors")
+                or data.get("source_identity") != source_identity()
+                or data.get("registry_identity") != hashlib.sha256(registry.read_bytes()).hexdigest()
+                or normalise_arch(data.get("arch", "")) != normalise_arch(arch)):
+>           raise ValueError("kernel derivation is incomplete or stale; run dev derive")
+E           ValueError: kernel derivation is incomplete or stale; run dev derive
+
+src/miniworld_engine/autotune/plan.py:52: ValueError
+____________ test_native_launchers_use_registered_measurement_names ____________
+
+    def test_native_launchers_use_registered_measurement_names():
+        """A driver op filter must retain every measurement emitted by its launcher."""
+        import ast
+        from pathlib import Path
+        root = Path(native.__file__).resolve().parents[1] / "kernels"
+        seen = set()
+        for family in ("layernorm", "layernorm_linear", "transition", "tm2", "trimul_inproj"):
+            for path in (root / family).rglob("*.py"):
+                for node in ast.walk(ast.parse(path.read_text())):
+                    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id in ("choose_config", "resolve_config")
+                            and node.args and isinstance(node.args[0], ast.Constant)):
+                        op = node.args[0].value
+                        assert op in native.BUILD_OPS, (path, op)
+                        seen.add(op)
+>       assert len(seen) == len(native.BUILD_OPS) - 3  # CUDA transition constructs its three names
+E       AssertionError: assert 12 == (18 - 3)
+E        +  where 12 = len({'layernorm_bwd_split_cuda', 'layernorm_fwd_cuda', 'layernorm_linear_bwd_dx_sm90_cute', 'layernorm_linear_fwd_foldstats_sm90_cute', 'layernorm_linear_fwd_sm90_cute', 'transition_bwd_dx_sm90_cute', ...})
+E        +  and   18 = len(frozenset({'layernorm_bwd_split_cuda', 'layernorm_fwd_cuda', 'layernorm_linear_bwd_dx_sm90_cute', 'layernorm_linear_fwd_foldstats_sm90_cute', 'layernorm_linear_fwd_sm90_cute', 'transition_bwd_dx_sm90_cute', ...}))
+E        +    where frozenset({'layernorm_bwd_split_cuda', 'layernorm_fwd_cuda', 'layernorm_linear_bwd_dx_sm90_cute', 'layernorm_linear_fwd_foldstats_sm90_cute', 'layernorm_linear_fwd_sm90_cute', 'transition_bwd_dx_sm90_cute', ...}) = native.BUILD_OPS
+
+tests/builder/test_native_autotune.py:333: AssertionError
+__________ test_every_launcher_is_opaque_or_only_reached_through_one ___________
+
+    def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
+        """No traced path may reach a raw kernel launch.
+
+        A launcher does NOT have to be an op if every one of its callers already is: it can only be
+        entered from inside an opaque region, so Dynamo never sees it, and wrapping it would just add
+        a second dispatch on a hot inner call. Everything else needs its own fake.
+
+        ``kernels/checks/`` and ``kernels/drivers/`` are excluded: that is the autotune-capture
+        harness, which calls kernels directly and is never inside a compiled model. The exclusion is
+        by DIRECTORY, not by filename: the harness is one module per registry family now
+        (``drivers/transition.py``, ``checks/transition.py``, ...), so a name-prefix test would let
+        every one of them back in.
+        """
+        harness = {SRC / "kernels" / "checks", SRC / "kernels" / "drivers"}
+        paths = [p for p in _python_files() if p.parent not in harness]
+        launchers, ops, calls = _launchers_and_ops(paths)
+
+        # "Covered" is TRANSITIVE: `_ln_bwd_atomic`'s only caller is `ln_bwd_mmajor`, which is not an
+        # op itself but is only ever called from one. Iterate to a fixed point rather than looking one
+        # level up, which is what a first version of this test did -- and it flagged three launchers
+        # that were already unreachable.
+        covered = set(ops)
+        for _ in range(len(calls) + 1):
+            grew = False
+            for name, callers in calls.items():
+                if name in covered or not callers:
+                    continue
+                if all(c in covered or is_op for c, is_op in callers):
+                    covered.add(name)
+                    grew = True
+            if not grew:
+                break
+
+        bad = [f"{path.relative_to(SRC)}:{lineno} {name}"
+               for _key, (name, is_op, lineno, path) in sorted(launchers.items())
+               if not is_op and name not in covered]
+>       assert not bad, (
+            "these launch a kernel on a path Dynamo can reach, but are not opaque ops:\n  "
+            + "\n  ".join(bad))
+E       AssertionError: these launch a kernel on a path Dynamo can reach, but are not opaque ops:
+E           kernels/trimul_inproj/cute/parity_dual_bwd.py:422 launch
+E           kernels/trimul_inproj/cute/parity_f567.py:840 launch
+E       assert not ['kernels/trimul_inproj/cute/parity_dual_bwd.py:422 launch', 'kernels/trimul_inproj/cute/parity_f567.py:840 launch']
+
+tests/compile/test_compile_wrap_coverage.py:147: AssertionError
+________________ test_every_op_and_fake_is_written_the_same_way ________________
+
+    def test_every_op_and_fake_is_written_the_same_way() -> None:
+        """One convention for all 107 sites, checked rather than asserted in a review.
+
+        These are not aesthetics. An op name is public (``torch.ops.miniworld_engine.<name>`` shows up
+        in profiles and graph dumps), so it is given explicitly instead of derived from whatever the
+        Python function happens to be called. A fake needs a docstring because it is a CLAIM about a
+        kernel nobody can read from the call site -- which dtype, which layout, which extent comes
+        from a non-tensor argument -- and 36 of them had none. Annotations are not optional at all:
+        ``torch.library`` infers the schema from them.
+
+        Measured before this test existed: fake style split 67 lambda / 38 named, 36 fakes and 19 ops
+        undocumented, one op unannotated -- and that one turned out not to be a style problem but a
+        registration failure, because ``@torch.no_grad()`` sat between ``@opaque`` and the function
+        and ``infer_schema`` could not resolve its annotations.
+        """
+        problems: list[str] = []
+        for name, fn, fake, path in _opaque_sites():
+            where = f"{name}  ({path.relative_to(SRC)})"
+            if fake is None or not isinstance(fake, ast.FunctionDef):
+                problems.append(f"{where}: fake= must be a named module-level function, not a lambda")
+                continue
+            base = fn.name if fn.name.startswith("_") else f"_{fn.name}"
+            if fake.name not in (f"{base}_fake", f"_{name}_fake"):
+                problems.append(f"{where}: fake is called {fake.name!r}, expected {base}_fake")
+            if not ast.get_docstring(fake):
+                problems.append(f"{where}: the fake has no docstring")
+            if not ast.get_docstring(fn):
+                problems.append(f"{where}: the op has no docstring")
+            args = fn.args
+            if any(a.annotation is None
+                   for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)):
+                problems.append(f"{where}: unannotated parameter -- torch.library cannot infer a schema")
+            if fn.returns is None:
+                problems.append(f"{where}: no return annotation")
+>       assert not problems, "op/fake convention:\n  " + "\n  ".join(problems)
+E       AssertionError: op/fake convention:
+E           transition_squeeze_residual  (kernels/transition/triton/residual.py): the fake has no docstring
+E           transition_squeeze_residual  (kernels/transition/triton/residual.py): the op has no docstring
+E           trimul_input_dual_bwd_sm90  (kernels/trimul_inproj/cute/parity_dual_bwd.py): fake is called '_fake', expected _input_dual_bwd_sm90_fake
+E           trimul_input_dual_bwd_sm90  (kernels/trimul_inproj/cute/parity_dual_bwd.py): the fake has no docstring
+E           trimul_input_dual_bwd_sm90  (kernels/trimul_inproj/cute/parity_dual_bwd.py): the op has no docstring
+E           trimul_parity_f567_sm90  (kernels/trimul_inproj/cute/parity_f567.py): fake is called '_fake', expected _output_f567_sm90_fake
+E           trimul_parity_f567_sm90  (kernels/trimul_inproj/cute/parity_f567.py): the fake has no docstring
+E           trimul_front_parity_sm90  (kernels/trimul_inproj/cute/parity_front.py): fake is called '_front_fake', expected _front_sm90_fake
+E           trimul_front_parity_sm90  (kernels/trimul_inproj/cute/parity_front.py): the fake has no docstring
+E           trimul_front_parity_sm90  (kernels/trimul_inproj/cute/parity_front.py): the op has no docstring
+E       assert not ['transition_squeeze_residual  (kernels/transition/triton/residual.py): the fake has no docstring', 'transition_squeez..._f567_sm90  (kernels/trimul_inproj/cute/parity_f567.py): fake is called '_fake', expected _output_f567_sm90_fake", ...]
+
+tests/compile/test_fake_matches_body.py:154: AssertionError
+_________ test_transition_policy_precedes_internal_h100_dispatch[True] _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fd928fa7310>
+training = True
+
+    @pytest.mark.parametrize("training", [True, False])
+    def test_transition_policy_precedes_internal_h100_dispatch(monkeypatch, training):
+        from miniworld_engine.modules import Transition
+
+        configure_engine_backend("triton")
+        module = Transition(128, implementation=EngineImpl.MINIWORLD).train(training)
+        monkeypatch.setattr(module, "_old_triton_forward", lambda x: x * 3)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("Native/fused auto path was entered")
+
+        for name in [
+            "cute_transition_fused",
+            "cuda_transition_b2b",
+            "triton_transition_fused",
+        ]:
+            monkeypatch.setattr(kernels, name, forbidden)
+        x = torch.ones(2, 128, dtype=torch.bfloat16)
+>       assert torch.equal(module(x), x * 4)
+
+tests/consumer_updates/test_triton_backend_option.py:67:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+../../.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py:1776: in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+../../.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py:1787: in _call_impl
+    return forward_call(*args, **kwargs)
+src/miniworld_engine/modules/transition/module.py:148: in forward
+    return self._training_forward(x)
+src/miniworld_engine/modules/transition/module.py:265: in _training_forward
+    return self._residual_triton_forward(x)
+src/miniworld_engine/modules/transition/module.py:318: in _residual_triton_forward
+    return transition_residual(
+src/miniworld_engine/kernels/transition/triton/residual.py:86: in transition_residual
+    xn, residual = input_ln_residual(x, gamma, beta, eps)
+src/miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py:173: in input_ln_residual
+    return InputLNResidual.apply(x,weight,bias,eps)
+../../.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/function.py:583: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+src/miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py:160: in forward
+    flat=x.reshape(-1,x.shape[-1]).contiguous();key=both_key(rows_of(x.shape))
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+shape = torch.Size([2, 128])
+
+    def rows_of(shape) -> int:
+        """M -- the row count a launch iterates -- from an activation's PRE-flatten shape.
+
+        Every leading axis multiplied out: pair (B, L, L, D) -> B*L*L, token/atom (B, L, D) -> B*L.
+        This is what :func:`both_key` buckets, and it is the one quantity that does not depend on
+        knowing which side of a ``level=both`` kernel the call came from.
+
+        Refuses a 2-D shape for the same reason :func:`length_of` does -- not because M is unreadable
+        there (it is exactly ``shape[0]``) but because a caller holding only ``(M, D)`` cannot know
+        whether its M is the whole launch or one slice of it, and every call site in this repo that
+        passed a pre-flattened matrix was doing so by mistake.
+        """
+        dims = tuple(shape)
+        if len(dims) < 3:
+>           raise ValueError(
+                f"shape {dims} is already flattened; pass the activation's shape BEFORE it is "
+                f"flattened -- (B, L, D) or (B, L, L, D) -- or compute the key at the caller that "
+                f"still has it and pass `shape_key=` down. See the note in rows_of's docstring.")
+E           ValueError: shape (2, 128) is already flattened; pass the activation's shape BEFORE it is flattened -- (B, L, D) or (B, L, L, D) -- or compute the key at the caller that still has it and pass `shape_key=` down. See the note in rows_of's docstring.
+
+src/miniworld_engine/autotune/shape_key.py:431: ValueError
+________ test_transition_policy_precedes_internal_h100_dispatch[False] _________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fd9294d9cf0>
+training = False
+
+    @pytest.mark.parametrize("training", [True, False])
+    def test_transition_policy_precedes_internal_h100_dispatch(monkeypatch, training):
+        from miniworld_engine.modules import Transition
+
+        configure_engine_backend("triton")
+        module = Transition(128, implementation=EngineImpl.MINIWORLD).train(training)
+        monkeypatch.setattr(module, "_old_triton_forward", lambda x: x * 3)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("Native/fused auto path was entered")
+
+        for name in [
+            "cute_transition_fused",
+            "cuda_transition_b2b",
+            "triton_transition_fused",
+        ]:
+            monkeypatch.setattr(kernels, name, forbidden)
+        x = torch.ones(2, 128, dtype=torch.bfloat16)
+>       assert torch.equal(module(x), x * 4)
+
+tests/consumer_updates/test_triton_backend_option.py:67:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+../../.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py:1776: in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+../../.pixi/envs/cu128/lib/python3.10/site-packages/torch/nn/modules/module.py:1787: in _call_impl
+    return forward_call(*args, **kwargs)
+src/miniworld_engine/modules/transition/module.py:149: in forward
+    return self._inference_forward(x)
+src/miniworld_engine/modules/transition/module.py:176: in _inference_forward
+    return self._residual_triton_forward(x)
+src/miniworld_engine/modules/transition/module.py:318: in _residual_triton_forward
+    return transition_residual(
+src/miniworld_engine/kernels/transition/triton/residual.py:86: in transition_residual
+    xn, residual = input_ln_residual(x, gamma, beta, eps)
+src/miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py:173: in input_ln_residual
+    return InputLNResidual.apply(x,weight,bias,eps)
+../../.pixi/envs/cu128/lib/python3.10/site-packages/torch/autograd/function.py:583: in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+src/miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py:160: in forward
+    flat=x.reshape(-1,x.shape[-1]).contiguous();key=both_key(rows_of(x.shape))
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+shape = torch.Size([2, 128])
+
+    def rows_of(shape) -> int:
+        """M -- the row count a launch iterates -- from an activation's PRE-flatten shape.
+
+        Every leading axis multiplied out: pair (B, L, L, D) -> B*L*L, token/atom (B, L, D) -> B*L.
+        This is what :func:`both_key` buckets, and it is the one quantity that does not depend on
+        knowing which side of a ``level=both`` kernel the call came from.
+
+        Refuses a 2-D shape for the same reason :func:`length_of` does -- not because M is unreadable
+        there (it is exactly ``shape[0]``) but because a caller holding only ``(M, D)`` cannot know
+        whether its M is the whole launch or one slice of it, and every call site in this repo that
+        passed a pre-flattened matrix was doing so by mistake.
+        """
+        dims = tuple(shape)
+        if len(dims) < 3:
+>           raise ValueError(
+                f"shape {dims} is already flattened; pass the activation's shape BEFORE it is "
+                f"flattened -- (B, L, D) or (B, L, L, D) -- or compute the key at the caller that "
+                f"still has it and pass `shape_key=` down. See the note in rows_of's docstring.")
+E           ValueError: shape (2, 128) is already flattened; pass the activation's shape BEFORE it is flattened -- (B, L, D) or (B, L, L, D) -- or compute the key at the caller that still has it and pass `shape_key=` down. See the note in rows_of's docstring.
+
+src/miniworld_engine/autotune/shape_key.py:431: ValueError
+______________ test_the_page_counts_the_kernels_the_build_drives _______________
+
+stated = {'build ETA': 'not measured', 'kernels covered': '42 of 52', 'keys': '1,385', 'keys × grid': '1.12 M', ...}
+
+    def test_the_page_counts_the_kernels_the_build_drives(stated) -> None:
+>       _rows, totals = collect()
+
+tests/layout/test_the_sweep_page_matches_the_repo.py:36:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/miniworld_engine/viz/sweep_page.py:157: in collect
+    evidence = plan.load("sm86")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+arch = 'sm86'
+registry = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.csv')
+path = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.units.json')
+
+    def load(arch: str, registry: Path | None = None, path: Path | None = None) -> dict:
+        from miniworld_engine.autotune.derive import normalise_arch, registry_path
+        registry = registry if registry is not None else registry_path(arch)
+        path = path if path is not None else registry.with_suffix(".units.json")
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("kernel derivation evidence must be an object")
+        if (not data.get("complete") or data.get("errors")
+                or data.get("source_identity") != source_identity()
+                or data.get("registry_identity") != hashlib.sha256(registry.read_bytes()).hexdigest()
+                or normalise_arch(data.get("arch", "")) != normalise_arch(arch)):
+>           raise ValueError("kernel derivation is incomplete or stale; run dev derive")
+E           ValueError: kernel derivation is incomplete or stale; run dev derive
+
+src/miniworld_engine/autotune/plan.py:52: ValueError
+_________________ test_the_page_states_the_current_sweep_size __________________
+
+stated = {'build ETA': 'not measured', 'kernels covered': '42 of 52', 'keys': '1,385', 'keys × grid': '1.12 M', ...}
+
+    def test_the_page_states_the_current_sweep_size(stated) -> None:
+        """Both numbers, because they are different questions and the page used to answer neither.
+
+        `module invocations declared` is what `build all` starts -- one module invocation per row of
+        registry_module.csv. `cache keys required` is what it produces -- one per row of
+        registry_kernel.csv. The page read `op_units()` for both and so reported the per-kernel driver
+        ladders, which the module sweep replaced: 4,948 units over 67 kernels for a build that runs
+        6,526 over 60."""
+>       _rows, totals = collect()
+
+tests/layout/test_the_sweep_page_matches_the_repo.py:51:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/miniworld_engine/viz/sweep_page.py:157: in collect
+    evidence = plan.load("sm86")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+arch = 'sm86'
+registry = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.csv')
+path = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.units.json')
+
+    def load(arch: str, registry: Path | None = None, path: Path | None = None) -> dict:
+        from miniworld_engine.autotune.derive import normalise_arch, registry_path
+        registry = registry if registry is not None else registry_path(arch)
+        path = path if path is not None else registry.with_suffix(".units.json")
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("kernel derivation evidence must be an object")
+        if (not data.get("complete") or data.get("errors")
+                or data.get("source_identity") != source_identity()
+                or data.get("registry_identity") != hashlib.sha256(registry.read_bytes()).hexdigest()
+                or normalise_arch(data.get("arch", "")) != normalise_arch(arch)):
+>           raise ValueError("kernel derivation is incomplete or stale; run dev derive")
+E           ValueError: kernel derivation is incomplete or stale; run dev derive
+
+src/miniworld_engine/autotune/plan.py:52: ValueError
+________________ test_every_row_the_build_drives_is_on_the_page ________________
+
+stated = {'build ETA': 'not measured', 'kernels covered': '42 of 52', 'keys': '1,385', 'keys × grid': '1.12 M', ...}
+
+    def test_every_row_the_build_drives_is_on_the_page(stated) -> None:
+        """A kernel added to registry.csv and not to the page is the drift that matters most: the page
+        reads as a complete inventory, so a missing row is invisible rather than obviously wrong."""
+>       rows, _totals = collect()
+
+tests/layout/test_the_sweep_page_matches_the_repo.py:66:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/miniworld_engine/viz/sweep_page.py:157: in collect
+    evidence = plan.load("sm86")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+arch = 'sm86'
+registry = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.csv')
+path = PosixPath('/home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/src/miniworld_engine/kernels/registry_kernel.units.json')
+
+    def load(arch: str, registry: Path | None = None, path: Path | None = None) -> dict:
+        from miniworld_engine.autotune.derive import normalise_arch, registry_path
+        registry = registry if registry is not None else registry_path(arch)
+        path = path if path is not None else registry.with_suffix(".units.json")
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("kernel derivation evidence must be an object")
+        if (not data.get("complete") or data.get("errors")
+                or data.get("source_identity") != source_identity()
+                or data.get("registry_identity") != hashlib.sha256(registry.read_bytes()).hexdigest()
+                or normalise_arch(data.get("arch", "")) != normalise_arch(arch)):
+>           raise ValueError("kernel derivation is incomplete or stale; run dev derive")
+E           ValueError: kernel derivation is incomplete or stale; run dev derive
+
+src/miniworld_engine/autotune/plan.py:52: ValueError
+__________________ test_one_sided_entries_are_still_one_sided __________________
+
+    def test_one_sided_entries_are_still_one_sided() -> None:
+        """A declaration that has been overtaken by a rebuild is stale documentation; drop it."""
+        per_gpu = _flag_values_per_gpu()
+        booleans: dict[tuple[str, str], set[str]] = {}
+        for (op, _gpu, flag), vals in per_gpu.items():
+            if len(vals) > 1:
+                booleans.setdefault((op, flag), set()).update(vals)
+        stale = sorted(k for k, why in ONE_SIDED.items()
+                       if len(booleans.get(k, set())) > 1)
+>       assert not stale, (
+            f"ONE_SIDED still claims these are pinned, but the cache now holds both values: {stale}. "
+            f"Remove the entry -- the claim is no longer true of the code.")
+E       AssertionError: ONE_SIDED still claims these are pinned, but the cache now holds both values: [('layernorm_bwd_atomic_triton', 'HAS_ROWSCALE')]. Remove the entry -- the claim is no longer true of the code.
+E       assert not [('layernorm_bwd_atomic_triton', 'HAS_ROWSCALE')]
+
+tests/registry/test_key_flags_are_built_on_both_sides.py:256: AssertionError
+___________ test_no_committed_cache_is_stale_on_a_gpu_we_can_rebuild ___________
+
+    def test_no_committed_cache_is_stale_on_a_gpu_we_can_rebuild():
+        stale = [r for r in _stale() if r.gpu not in CANNOT_REBUILD_HERE]
+>       assert not stale, (
+            "committed autotune caches are stale against the current code -- rebuild + `dev merge` "
+            "them (see `dev cache-status`):\n"
+            + "\n".join(f"  {r.op} [{r.gpu}]: {r.reason}" for r in stale)
+        )
+E       AssertionError: committed autotune caches are stale against the current code -- rebuild + `dev merge` them (see `dev cache-status`):
+E           adaln_bwd_dx_dlnw_triton [NVIDIA H100 80GB HBM3 (sm90)]: kernel source/key changed (op_identity)
+E           adaln_bwd_dx_dlnw_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           adaln_bwd_dx_dlnw_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           adaln_fwd_gate_triton [NVIDIA H100 80GB HBM3 (sm90)]: profiled kernel dependency changed (implementation)
+E           adaln_fwd_gate_triton [NVIDIA RTX A5000 (sm86)]: profiled kernel dependency changed (implementation)
+E           adaln_fwd_gate_triton [NVIDIA RTX A6000 (sm86)]: profiled kernel dependency changed (implementation)
+E           layernorm_bwd_atomic_strided_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_bwd_atomic_strided_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_bwd_atomic_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_bwd_atomic_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_bwd_foldstats_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_fwd_saveact_triton [NVIDIA H100 80GB HBM3 (sm90)]: kernel source/key changed (op_identity)
+E           layernorm_fwd_saveact_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_fwd_saveact_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_linear_bwd_fp32_triton [NVIDIA H100 80GB HBM3 (sm90)]: kernel source/key changed (op_identity)
+E           layernorm_linear_bwd_fp32_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           layernorm_linear_bwd_fp32_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           rmsnorm_adamod_bwd_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           rmsnorm_adamod_bwd_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           rmsnorm_adamod_fwd_triton [NVIDIA RTX A5000 (sm86)]: profiled kernel dependency changed (implementation)
+E           rmsnorm_adamod_fwd_triton [NVIDIA RTX A6000 (sm86)]: profiled kernel dependency changed (implementation)
+E           rmsnorm_bwd_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           rmsnorm_bwd_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           transition_bwd_swiglu_recompute_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           transition_bwd_swiglu_recompute_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           transition_expand_swiglu_triton [NVIDIA RTX A5000 (sm86)]: kernel source/key changed (op_identity)
+E           transition_expand_swiglu_triton [NVIDIA RTX A6000 (sm86)]: kernel source/key changed (op_identity)
+E           trimul_input_dual_bwd_triton [NVIDIA H100 80GB HBM3 (sm90)]: profiled kernel dependency changed (implementation)
+E       assert not [CacheStatus(op='adaln_bwd_dx_dlnw_triton', gpu='NVIDIA H100 80GB HBM3 (sm90)', verdict='STALE', reason='kernel source...X A6000 (sm86)', verdict='STALE', reason='profiled kernel dependency changed (implementation)', env_matches=True), ...]
+
+tests/registry/test_no_stale_caches.py:55: AssertionError
+=============================== warnings summary ===============================
+tests/autotune/test_a_miss_can_build_instead_of_guessing.py::test_by_default_a_miss_is_bounded_and_forgotten
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_a_miss_can_build_instead_of_guessing.py:50: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'op_probe' on 'cpu' (bfloat16). Falling back to a heuristic 24 of 64 configs (run `miniworld-engine build all` to tune this GPU properly) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    got = _miss([_Cfg(BLOCK_M1=b) for b in range(64)])
+
+tests/autotune/test_cache_policy_state_machine.py::test_the_reader_refuses_when_every_tuned_config_was_cut
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_cache_policy_state_machine.py:157: UserWarning: [miniworld.autotune] every tuned config for this shape was removed from the config grid for op 'op_probe' on 'cpu' (bfloat16|shape_key=128). Falling back to the full grid (2 configs) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    got = C._cached_subset(at_new, new_grid, nargs, {})
+
+tests/autotune/test_cache_policy_state_machine.py::test_select_config_refuses_an_entry_the_candidate_space_lost
+  /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/_pytest/python.py:157: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'adaln_gemm_gate_triton' on 'cpu' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    result = testfunction(**testargs)
+
+tests/autotune/test_cache_reader.py::test_a_different_shape_bucket_does_not_reuse_the_entry
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_cache_reader.py:76: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'op_probe' on 'cpu' (bfloat16|shape_key=1024). Falling back to the full grid (4 configs) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is None
+
+tests/autotune/test_cache_reader.py::test_a_stale_config_space_hash_falls_back_to_the_full_grid
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_cache_reader.py:83: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel config grid changed) for op 'op_probe' on 'cpu' (bfloat16). Falling back to the full grid (4 configs) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is None
+
+tests/autotune/test_cache_reader.py::test_the_cache_can_only_narrow_within_the_live_grid
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_cache_reader.py:92: UserWarning: [miniworld.autotune] every tuned config for this shape was removed from the config grid for op 'op_probe' on 'cpu' (bfloat16|shape_key=256). Falling back to the full grid (4 configs) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    got = cache._cached_subset(at, at.configs, at.nargs, {})
+
+tests/autotune/test_cache_reader.py::test_a_cache_built_by_a_different_toolchain_is_not_served
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_cache_reader.py:199: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (triton/cuda/ptxas changed since it was built) for op 'op_probe' on 'cpu' (bfloat16). Falling back to the full grid (4 configs) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    assert cache._cached_subset(at, at.configs, at.nargs, {}) is None
+
+tests/autotune/test_cache_reader.py::test_an_edited_kernel_body_invalidates_the_entry
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/autotune/test_cache_reader.py:207: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (kernel source or autotune key list changed) for op 'op_probe' on 'cpu' (bfloat16). Falling back to the full grid (4 configs) — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    assert cache._cached_subset(edited, edited.configs, edited.nargs, {}) is None
+
+tests/autotune/test_cache_reader.py::test_cute_dict_candidates_reuse_a_narrowed_grid
+  /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/_pytest/python.py:157: UserWarning: [miniworld.autotune] no valid measured config for this shape remains in the current candidate space for op 'cute_probe' on 'cpu' (bfloat16|shape_key=128). Falling back to the declared native default — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    result = testfunction(**testargs)
+
+tests/builder/test_native_autotune.py::test_native_runtime_rejects_changed_measurement_revision[0-1]
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/builder/test_native_autotune.py:118: UserWarning: [miniworld.autotune] tuned autotune cache is STALE (build revision changed) for op 'revision-test' on 'test-sm90' (bf16). Falling back to the declared native default — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    assert native.choose_config("revision-test", configs, dtype="bf16", bucket="shape") == configs[0]
+
+tests/builder/test_native_cache_failure_cpu.py::test_corrupt_root_uses_default[{"entries":]
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/builder/test_native_cache_failure_cpu.py:30: UserWarning: [miniworld.autotune] no tuned autotune cache for op 'layernorm_linear_fwd_foldstats_sm90_cute' on 'test-sm90' (bfloat16). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    return native.choose_config(OP, GRID, dtype="bfloat16", bucket="shape")
+
+tests/builder/test_native_cache_failure_cpu.py::test_partial_entry_map_uses_default[None]
+  /home/psk6950/MiniWorld/runs/engine_b7b12_publish_20260920/tests/builder/test_native_cache_failure_cpu.py:30: UserWarning: [miniworld.autotune] no tuned autotune cache entry for this shape for op 'layernorm_linear_fwd_foldstats_sm90_cute' on 'test-sm90' (bfloat16|shape). Falling back to the full autotune grid — this run may be slower and the chosen config may be suboptimal. Build a tuned cache for this GPU with the autotune cache-builder (see docs/operations/dispatch-cache.md).
+    return native.choose_config(OP, GRID, dtype="bfloat16", bucket="shape")
+
+tests/compile/test_compiled_flag_is_what_ran.py: 14 warnings
+  /home/psk6950/MiniWorld/.pixi/envs/cu128/lib/python3.10/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/autotune/test_compact_search_space.py::test_inventory_does_not_add_an_unreached_b2b_driver
+FAILED tests/builder/test_native_autotune.py::test_native_launchers_use_registered_measurement_names
+FAILED tests/compile/test_compile_wrap_coverage.py::test_every_launcher_is_opaque_or_only_reached_through_one
+FAILED tests/compile/test_fake_matches_body.py::test_every_op_and_fake_is_written_the_same_way
+FAILED tests/consumer_updates/test_triton_backend_option.py::test_transition_policy_precedes_internal_h100_dispatch[True]
+FAILED tests/consumer_updates/test_triton_backend_option.py::test_transition_policy_precedes_internal_h100_dispatch[False]
+FAILED tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_counts_the_kernels_the_build_drives
+FAILED tests/layout/test_the_sweep_page_matches_the_repo.py::test_the_page_states_the_current_sweep_size
+FAILED tests/layout/test_the_sweep_page_matches_the_repo.py::test_every_row_the_build_drives_is_on_the_page
+FAILED tests/registry/test_key_flags_are_built_on_both_sides.py::test_one_sided_entries_are_still_one_sided
+FAILED tests/registry/test_no_stale_caches.py::test_no_committed_cache_is_stale_on_a_gpu_we_can_rebuild
+11 failed, 3789 passed, 151 skipped, 585 deselected, 26 warnings in 278.80s (0:04:38)
+[miniworld.autotune] wrote 4 op(s) tuned on miss to /tmp/pytest-of-psk6950/pytest-12/test_the_shard_lands_in_that_d0/on-miss-1063274-1789898112294.json -- fold them in with `miniworld-engine dev merge`
+[miniworld.autotune] wrote 4 op(s) tuned on miss to /tmp/pytest-of-psk6950/pytest-12/test_the_directory_turns_a_mis0/on-miss-1063274-1789898112293.json -- fold them in with `miniworld-engine dev merge`
