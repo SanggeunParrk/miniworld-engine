@@ -1,0 +1,75 @@
+{
+  "384": {
+    "source": "front_prefetch_lnpair_storepipe",
+    "source_sha256": "9a37d1c2d012ec2343c1dcc0b50eadb635b6c38d20052b15171f714c530a88f5",
+    "raw_csv": "storepipe-l2-breakdown.csv",
+    "raw_csv_sha256": "62f833558247425ee137252869aa5a72df93b3926dc25fa6cd8ee3118bac4142",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 365.728,
+        "unit": "us"
+      },
+      "lts__ltcfabric2ltc_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 78.628492,
+        "unit": "%"
+      },
+      "lts__d_sectors.avg.pct_of_peak_sustained_elapsed": {
+        "value": 53.233624,
+        "unit": "%"
+      },
+      "lts__t_sectors.avg.pct_of_peak_sustained_elapsed": {
+        "value": 45.29617,
+        "unit": "%"
+      },
+      "lts__cycles_elapsed.avg": {
+        "value": 623702.0,
+        "unit": "cycle"
+      },
+      "lts__t_sectors.sum": {
+        "value": 67803148.0,
+        "unit": "sector"
+      },
+      "lts__d_sectors.sum": {
+        "value": 106246136.0,
+        "unit": "sector"
+      }
+    }
+  },
+  "768": {
+    "source": "front_ring96_cache3",
+    "source_sha256": "db5ecf11eb15a0d92f129037b232d2c6de4a6b797048da52b6fb25261a94ff49",
+    "raw_csv": "ring96cache3-l2-breakdown.csv",
+    "raw_csv_sha256": "712fcebdb55305adc5438df77ab27267c23fa05fdc69882cfe4ac242da7ecf14",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": 1.426688,
+        "unit": "ms"
+      },
+      "lts__ltcfabric2ltc_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": 90.26899,
+        "unit": "%"
+      },
+      "lts__d_sectors.avg.pct_of_peak_sustained_elapsed": {
+        "value": 57.037189,
+        "unit": "%"
+      },
+      "lts__t_sectors.avg.pct_of_peak_sustained_elapsed": {
+        "value": 56.649293,
+        "unit": "%"
+      },
+      "lts__cycles_elapsed.avg": {
+        "value": 2429883.0,
+        "unit": "cycle"
+      },
+      "lts__t_sectors.sum": {
+        "value": 330362770.0,
+        "unit": "sector"
+      },
+      "lts__d_sectors.sum": {
+        "value": 443499824.0,
+        "unit": "sector"
+      }
+    }
+  },
+  "interpretation": "Breakdown of NCU L2 throughput; maximum is LTC fabric activity, not proof of algorithmic SoL90."
+}

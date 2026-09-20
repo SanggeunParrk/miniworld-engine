@@ -72,5 +72,5 @@
 <rect x="30" y="1273" width="1180" height="95" rx="10" fill="#fff" stroke="#9cb9c5"/>
 <text x="49" y="1302" class="b">B7–B12: L384 617.216 → 364.848 µs (1.692×) · L768 2365.632 → 1429.136 µs (1.655×)</text>
 <text x="49" y="1328" class="t">600 alternating graph samples/path. ≥1.7× and defensible SoL90 remain unachieved.</text>
-<text x="49" y="1352" class="s">Ring NCU: L2 89.26%; this hardware counter is not proof of overall algorithmic SoL90.</text>
+<text x="49" y="1352" class="s">NCU L768: L2 inter-partition fabric 90.27%, data sectors 57.04%; not proof of algorithmic SoL90.</text>
 </svg>

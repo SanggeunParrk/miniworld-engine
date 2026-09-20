@@ -62,9 +62,12 @@ original records are retained separately from repackaged runs.
 Historical candidate timing keys such as `kindprefetch` refer to the selected
 source identified by that record's filename, not an additional implementation.
 
-NCU on the L768 ring reports L2 throughput89.26%, SM38.43% and2.648GB DRAM
-traffic. This is a bottleneck observation, not proof that the algorithm is at
-90% of a hardware lower bound. See [traffic accounting](SOL_TRAFFIC_MODEL.md).
+The original full NCU profile reports L2 throughput89.26%, SM38.43% and2.648GB
+DRAM traffic atL768. A separate breakdown identifies inter-partition LTC fabric
+activity as the largest L2 component:90.27%, versus57.04% for L2 data sectors.
+L384 reports78.63% fabric activity. These counters do not establish algorithmic
+SoL90. See [traffic accounting](SOL_TRAFFIC_MODEL.md) and the source-hashed
+[`records/l2-breakdown-summary.json`](records/l2-breakdown-summary.json).
 
 ## Validation
 
@@ -107,6 +110,7 @@ python "$experiment/run_newfront_sanitizers.py" --source front_prefetch_lnpair_s
 python "$experiment/run_newfront_sanitizers.py" --source front_ring96_cache3 --label new-ring --ring
 compute-sanitizer --tool initcheck --error-exitcode 86 python "$experiment/initcheck_storepipe.py"
 compute-sanitizer --tool initcheck --error-exitcode 86 python "$experiment/initcheck_ring96cache3.py"
+ncu --metrics 'breakdown:lts__throughput.avg.pct_of_peak_sustained_elapsed,gpu__time_duration.sum,lts__cycles_elapsed.avg,lts__t_sectors.sum,lts__d_sectors.sum' --cache-control none --clock-control none --profile-from-start off --kernel-name 'regex:front_b7b12' -o b7b12-L768 python "$experiment/profile_selected.py" --length 768
 ```
 
 For two GPUs, run one process with `CUDA_VISIBLE_DEVICES=0` and the other with
