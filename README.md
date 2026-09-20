@@ -326,6 +326,14 @@ contains the Anthropic-derived CUDA training extension, wiring diagram,
 reproducible runners and validation/performance evidence. It is an explicit
 experiment; installing the engine does not select it automatically.
 
+The [H100 TriMul K1/K3 inference optimisation](experiments/trimul_k1k3_inference/README.md)
+rebuilds Anthropic's native v5 inference kernels with a small compile-switch
+overlay (tanh sigmoid, K1 LayerNorm class, bf16x2 residual, resident-weight wait
+skip, K3 three consumer warpgroups, templated mask element type, programmatic
+dependent launch): engine-path TriMul op −12.8 % at L384 and −10.0 % at L768,
+bit-identical outputs across the last two rounds. It is served through
+`TRIMUL_NATIVE_BUILD_DIR`, not by default dispatch.
+
 ## Toolchain
 
 One-time, per clone — git will not let a repository point itself at its own hooks:

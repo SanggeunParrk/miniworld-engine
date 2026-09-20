@@ -1,0 +1,65 @@
+{
+ "length": 768,
+ "res": {
+  "tmn.k1": {
+   "n_iter": [
+    23,
+    24
+   ],
+   "startup_cyc": {
+    "med": 7213.5,
+    "min": 5291,
+    "max": 8119
+   },
+   "steady_per_tile_cyc": {
+    "med": 12700.454545454544,
+    "min": 12187.95652173913,
+    "max": 13118.045454545454
+   },
+   "last_tile_cyc": {
+    "med": 10428.5,
+    "min": 7510,
+    "max": 12887
+   },
+   "total_cyc": {
+    "med": 299030.0,
+    "min": 285984,
+    "max": 316501
+   },
+   "launch_skew_us": 0.096,
+   "end_spread_us": 18.144,
+   "span_us": 179.008,
+   "ctas": 132
+  },
+  "tmn.k3": {
+   "n_iter": [
+    23,
+    24
+   ],
+   "startup_cyc": {
+    "med": 8159.5,
+    "min": 5743,
+    "max": 9399
+   },
+   "steady_per_tile_cyc": {
+    "med": 12156.08695652174,
+    "min": 11740.454545454546,
+    "max": 12798.227272727272
+   },
+   "last_tile_cyc": {
+    "med": 10448.5,
+    "min": 9028,
+    "max": 12110
+   },
+   "total_cyc": {
+    "med": 288653.0,
+    "min": 277730,
+    "max": 306469
+   },
+   "launch_skew_us": 0.128,
+   "end_spread_us": 16.256,
+   "span_us": 169.984,
+   "ctas": 132
+  }
+ }
+}

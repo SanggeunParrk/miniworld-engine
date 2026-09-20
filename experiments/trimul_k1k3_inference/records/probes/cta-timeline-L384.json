@@ -1,0 +1,65 @@
+{
+ "length": 384,
+ "res": {
+  "tmn.k1": {
+   "n_iter": [
+    5,
+    6
+   ],
+   "startup_cyc": {
+    "med": 7473.0,
+    "min": 5457,
+    "max": 8072
+   },
+   "steady_per_tile_cyc": {
+    "med": 12581.25,
+    "min": 11993.0,
+    "max": 13151.2
+   },
+   "last_tile_cyc": {
+    "med": 10869.5,
+    "min": 9518,
+    "max": 12854
+   },
+   "total_cyc": {
+    "med": 80595.0,
+    "min": 67399,
+    "max": 83117
+   },
+   "launch_skew_us": 0.096,
+   "end_spread_us": 8.832,
+   "span_us": 46.304,
+   "ctas": 132
+  },
+  "tmn.k3": {
+   "n_iter": [
+    5,
+    6
+   ],
+   "startup_cyc": {
+    "med": 5670.5,
+    "min": 4325,
+    "max": 8879
+   },
+   "steady_per_tile_cyc": {
+    "med": 12502.4,
+    "min": 11735.0,
+    "max": 14304.25
+   },
+   "last_tile_cyc": {
+    "med": 10886.0,
+    "min": 8870,
+    "max": 13771
+   },
+   "total_cyc": {
+    "med": 78299.0,
+    "min": 66301,
+    "max": 86006
+   },
+   "launch_skew_us": 0.128,
+   "end_spread_us": 11.136,
+   "span_us": 47.36,
+   "ctas": 132
+  }
+ }
+}

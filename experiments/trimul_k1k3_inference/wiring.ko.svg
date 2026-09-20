@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1300" role="img" aria-labelledby="title desc"><title id="title">Anthropic TriMul K1/K3 on H100: changed operations and measured results</title><desc id="desc">K1 and K3 pipelines of the Anthropic native v5 TriMul with the three adopted changes highlighted: tanh-based sigmoid in both gates, K1 LayerNorm class 1, native bf16x2 residual add in K3. Engine-path TriMul op time drops 12.8 percent at L384 and 10.0 percent at L768 after four rounds; round 4 adds a templated mask element type in K1 and programmatic dependent launch of K1 and K3.</desc><defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#58717b"/></marker></defs><style>text{font-family:Arial,sans-serif;fill:#18343f}.edge{fill:none;stroke:#58717b;stroke-width:2;marker-end:url(#arr)}.t{font-size:15px}.h{font-size:17px;font-weight:700}.s{font-size:13px;fill:#4a6270}.new{fill:#fff3d6;stroke:#c98a1b}</style><rect width="1200" height="1300" fill="#f4f8fa"/>
+<text x="35" y="45" font-size="27" font-weight="700">Anthropic TriMul 추론 커널 K1/K3 · H100 추가 최적화 (2026-09-20, Claude)</text>
+<text x="35" y="77" font-size="16">native v5 tmn90_z128_h128 · CUDA 12.9 재빌드 · BF16 C128 · outgoing · residual · 원본 소스 불변, #ifdef 훅 6개 + K3 3 WG 채택 · 4차: K1 마스크 원소형 템플릿 + PDL · 노란 상자 = 변경된 연산</text>
+<rect x="35" y="100" width="1130" height="70" rx="12" fill="#e9eff4" stroke="#a7bac6"/>
+<text x="55" y="130" class="h">op = K1 → cuBLAS contraction → K3 (+ mask/변환 elementwise) · 132 CTAs persistent · 각 커널 1 launch</text>
+<text x="55" y="156" class="t">엔진 경로 TriMul op (bench.py, warm graph 5×50, 같은 세션 2회 평균): L384 169.7 → 148.0 µs (−12.8%) · L768 613.8 → 552.6 µs (−10.0%) · 3차 153.1 / 558.9</text>
+<rect x="35" y="195" width="555" height="560" rx="12" fill="#fff" stroke="#367d70"/>
+<text x="52" y="225" class="h">K1 · t6x32 (192 tok/CTA, 3 consumer WG + producer WG, 512 thr)</text>
+<text x="52" y="250" class="t">producer: z tile TMA (48KiB) · weight ring 8×16KiB resident</text>
+<rect x="52" y="268" width="520" height="60" rx="10" fill="#fff" stroke="#a7bac6"/>
+<text x="66" y="292" class="t">A fragments ← z tile (ldmatrix) → sA 즉시 해제 (다음 tile 적재 겹침)</text>
+<text x="66" y="314" class="s">z 256 B/token 읽기 · 레지스터 32개에 유지</text>
+<path d="M312 328V344" class="edge"/>
+<rect x="52" y="344" width="520" height="74" rx="10" class="new"/>
+<text x="66" y="368" class="h">LN_in · class 2 (ln_stock 참조 합산 순서) → class 1 (ln_fragment)</text>
+<text x="66" y="392" class="s">K1 bf16 z는 tile table 이름상 l2로 서빙되고 있었음 · 명령 −9% · K1 −5.4%</text>
+<text x="66" y="410" class="s">rstd = rsqrt.approx(var+eps), y = fma((x−mean)·rstd, γ, β), bf16 1회 반올림 (K3와 동일 class)</text>
+<path d="M312 418V434" class="edge"/>
+<rect x="52" y="434" width="520" height="60" rx="10" fill="#fff" stroke="#a7bac6"/>
+<text x="66" y="458" class="t">8 weight blocks × WGMMA m64n64k128 (gate | proj) · 두 accumulator 세트로 b+1 MMA와 b 에필로그 교차</text>
+<text x="66" y="480" class="s">tensor pipe 41 → 47% active (변경 후 상대 비중 증가)</text>
+<path d="M312 494V510" class="edge"/>
+<rect x="52" y="510" width="520" height="74" rx="10" class="new"/>
+<text x="66" y="534" class="h">gate: sigmoid(g)·p·mask → sigmoid = fma(tanh.approx(0.5g), 0.5, 0.5)</text>
+<text x="66" y="558" class="s">원본 rcp.approx(1+ex2.approx(−g·log2e)): MUFU 2회, 의존 5단 → MUFU 1회, 3단</text>
+<text x="66" y="576" class="s">XU 파이프 42 → 25% · stall 1위 'wait' 감소 · K1 −4.2%</text>
+<path d="M312 584V600" class="edge"/>
+<rect x="52" y="600" width="520" height="80" rx="10" fill="#fff" stroke="#a7bac6"/>
+<text x="66" y="624" class="t">pack bf16 → stmatrix 전치 → planes ab[2C_H][N][N] 저장</text>
+<text x="66" y="646" class="s">BJ=32 타일: TMA store 조건(BJ%64==0) 미충족 → lane별 lds128+stg128, 블록마다 named barrier</text>
+<text x="66" y="666" class="s">샘플의 ~23% (남은 후보: 32-token TMA store box) · 512 B/token 쓰기</text>
+<text x="52" y="712" class="h">K1 L768: 205.9 → 183.9 µs (−10.7%) · warm NCU DRAM 62.6 → 72.3% · +상주 W 대기 생략</text>
+<text x="52" y="738" class="s">패턴 하한(451 MB @ 2.85 TB/s = 158 µs) 대비 73.6% → 86%</text>
+<rect x="610" y="195" width="555" height="560" rx="12" fill="#fff" stroke="#345ec0"/>
+<text x="627" y="225" class="h">K3 · t3x64 s8a1 (192 tok/CTA, 3 consumer WG + producer, 512 thr, 160 regs) ← 3차 채택</text>
+<text x="627" y="250" class="t">producer: X planes TMA (32KiB) · z tile TMA (32KiB, chunk별 barrier) · W_og|W_o 8×8KiB resident</text>
+<rect x="627" y="268" width="520" height="60" rx="10" fill="#fff" stroke="#a7bac6"/>
+<text x="641" y="292" class="t">X 서브타일 ldmatrix.trans → sX 즉시 해제 → LN_out (class 1, SERIAL affine)</text>
+<text x="641" y="314" class="s">X 256 B/token 읽기 · LN affine/pack이 K3 샘플의 ~24%</text>
+<path d="M887 328V344" class="edge"/>
+<rect x="627" y="344" width="520" height="60" rx="10" fill="#fff" stroke="#a7bac6"/>
+<text x="641" y="368" class="t">z rows → gate operand: LN_in 재계산 (통계 2 pass + affine, class 1)</text>
+<text x="641" y="390" class="s">z 256 B/token 읽기 · 남은 후보: K1 SAVE 통계 인계로 통계 pass 생략</text>
+<path d="M887 404V420" class="edge"/>
+<rect x="627" y="420" width="520" height="60" rx="10" fill="#fff" stroke="#a7bac6"/>
+<text x="641" y="444" class="t">4 output blocks × (proj m64n32k128 + gate m64n32k128) · 두 accumulator 세트(a2)</text>
+<text x="641" y="466" class="s">tensor 20 → 22% · mbarrier 대기(X/z/W) ~11% · eligible warp 0.7/cycle (latency-bound)</text>
+<path d="M887 480V496" class="edge"/>
+<rect x="627" y="496" width="520" height="74" rx="10" class="new"/>
+<text x="641" y="520" class="h">o = bf16(sigmoid(g)·p) → 같은 tanh sigmoid</text>
+<text x="641" y="544" class="s">XU 21 → 12% · K3 −6.3% (K3의 gate는 128 ch/token, MUFU 의존 체인이 에필로그 임계 경로)</text>
+<text x="641" y="562" class="s">수치: 원본 대비 bf16 원소 3.4% 차이(대부분 1 ulp), fp32 참조 대비 rel_rms 불변</text>
+<path d="M887 570V586" class="edge"/>
+<rect x="627" y="586" width="520" height="74" rx="10" class="new"/>
+<text x="641" y="610" class="h">residual: out = bf16(z + o) → add.rn.bf16x2 한 명령</text>
+<text x="641" y="634" class="s">원본 unpack 2 + fadd 2 + cvt.rn.bf16x2 (5 명령) → 결과 bit-identical · K3 −3.1%</text>
+<text x="641" y="652" class="s">stmatrix staging → warp slice별 TMA bulk store (dims [C_z][N][N]) · 256 B/token 쓰기</text>
+<text x="627" y="712" class="h">K3 L768: 210.8 → 175.0 µs (−17.0%) · warm NCU DRAM 63.4 → 74.5% · eligible warp 0.71 → 1.00</text>
+<text x="627" y="738" class="s">패턴 하한(451 MB @ 2.85 TB/s = 158 µs) 대비 74.6% → 90%</text>
+<rect x="35" y="775" width="1130" height="205" rx="12" fill="#fff" stroke="#a7bac6"/>
+<text x="55" y="805" font-size="19" font-weight="700">단독 A/B (같은 조건, 변형별 별도 프로세스, CUPTI 60회 per-kernel · L768 K1 / K3 µs · 원본 205.9 / 210.8)</text>
+<text x="55" y="835" class="t">채택: tanh sigmoid 195.9 / 196.4 · K1 LN class 1 193.4 / — · bf16x2 residual — / 189.6(comb1 위) → 결합 185.0 / 189.6</text>
+<text x="55" y="861" class="t">기각: exact 변형(K3 238) · tile 재튠(기본 최적) · START_OFFSET 0/4(불변) · K1 BULK_STORE(BJ=32에 비활성) · K3 BULK_STORE=0(+2.5%)</text>
+<text x="55" y="887" class="t">기각: K3 regs 40/232(−1.5%, 결합 시 0) · K3 LN SERIAL 해제(+2%) · K1 SCHED 1(L384 +3.6%) · K1 t3x64+TMA store(동등)</text>
+<text x="55" y="917" class="s">cuBLAS contraction 178 µs(op의 29%, ≈650 TFLOPS) 불변 · 수치 class: tolerance(fast). exact word(참조 순서 K3)는 별도 커널로 변경 없음.</text>
+<text x="55" y="943" class="s">payload: runs/anthropic_k1k3_20260920/payload (csrc·python·build·r2 testvectors) · TRIMUL_NATIVE_BUILD_DIR로 엔진 row native_rebuilt에 연결 · production dispatch 미변경</text>
+<text x="55" y="969" class="s">보고서 K1K3_REPORT_20260920.md · 하네스 k1k3_bench.py · 원자료 logs/ · 훅 소스 native2/csrc</text>
+<rect x="35" y="1000" width="1130" height="95" rx="12" fill="#e9eff4" stroke="#a7bac6"/>
+<text x="55" y="1030" class="h">SoL 판단</text>
+<text x="55" y="1056" class="t">L768: 유효 바이트 451 MB, 스트리밍 패턴 하한 158 µs 대비 K1 86% / K3 90% (DRAM 72–75%). L384: 78% / 73% (ragged tail). K1만 90% 미달.</text>
+<text x="55" y="1080" class="s">3차 라운드: 상주 W 대기 생략(채택), K3 3 WG(채택); warp-local store·paired store·gate FMA·통계 인계·32-tok TMA store는 실측 기각 (보고서 §7–8).</text>
+<rect x="35" y="1115" width="1130" height="165" rx="12" fill="#fff" stroke="#c98a1b"/>
+<text x="55" y="1145" class="h">4차 라운드 (SoL 재검토, 엔진 op 기준) · 채택 2건 · payload → var_pdl (native13/csrc: TMN_MASK_TEMPLATE, TMN_PDL)</text>
+<text x="55" y="1171" class="t">마스크 원소형 템플릿 (K1 이름 m2 = bf16, m3 = bool): 매 호출 fp32 캐스트 커널 4.4 / 4.9 µs 제거, 출력 비트 동일 · bool로 넘기면 K1 L768 −4 µs 추가</text>
+<text x="55" y="1195" class="t">PDL (griddepcontrol.wait / launch_dependents + cuLaunchKernelEx 속성): K3 → 다음 op K1 경계에서 K1 prologue(가중치 fan-out ≈4 µs)를 K3 꼬리에 겹침 · 2-op chain −1.9 µs (L384)</text>
+<text x="55" y="1219" class="s">cuBLAS contraction: NCU DRAM 304 + 139 MB = 필수 바이트, DRAM 72% + tensor 78% @ 1.58 GHz(전력 스로틀), L384는 메모리 하한 · cuBLASLt 8 algos 중 기본 선택이 최선 → 교체 여지 없음</text>
+<text x="55" y="1243" class="s">남은 구조 손실 (per-CTA clock 프로브): CTA 시작 fan-out K1 4.2 / K3 3.3–4.8 µs · ragged tail L768 ≈5.4 µs/커널 · SM 편차 · 타일 정상 상태는 스트리밍 하한의 93–95%</text>
+<text x="55" y="1267" class="s">op 복합 하한 대비: L768 552.6 µs = 86% · L384 148.0 µs = 81% · 미구현 후보(각 ≤2%): 64-token WG 단위 tail 분할, 2-CTA cluster multicast 가중치, 엔진의 bool mask 전달</text>
+</svg>

@@ -1,0 +1,15 @@
+# build outputs of build_payload.py (cubins, manifest, test vectors) and local measurement outputs; the evidence lives in records/
+payload*/
+upstream*/
+testvectors/
+build/
+logs/
+__pycache__/
+*.pyc
+*.cubin
+*.ncu-rep
+*.pt
+/lt_search
+/*.json
+!OVERLAY.json
+!records/

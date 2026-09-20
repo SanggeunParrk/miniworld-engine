@@ -1,0 +1,48 @@
+{
+  "family": "trimul",
+  "length": 768,
+  "width": 128,
+  "direction": "outgoing",
+  "row": "native_rebuilt",
+  "output": "/home/psk6950/MiniWorld/runs/anthropic_k1k3_20260920/logs/engine3-pdl-L768-r2.json",
+  "profile": false,
+  "module": false,
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch": "2.10.0+cu128",
+  "cuda": "12.8",
+  "upstream_revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "precision": "bf16 operands; fp32 LN affine; TF32 disabled",
+  "measurement": "warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
+  "engine_backend": "auto",
+  "dropout": 0,
+  "training": false,
+  "selection": {
+    "row": "native_rebuilt",
+    "local_rebuild": true
+  },
+  "first_call_s": 2.2432491779327393,
+  "error": {
+    "rel_rms": 0.002586004789918661,
+    "max_abs": 0.03220176696777344,
+    "finite": true
+  },
+  "update_error": {
+    "rel_rms": 0.006131279747933149,
+    "max_abs": 0.03220176696777344,
+    "finite": true
+  },
+  "graph_error": {
+    "rel_rms": 0.002586004789918661,
+    "max_abs": 0.03220176696777344,
+    "finite": true
+  },
+  "ms": 0.5585388946533203,
+  "samples_ms": [
+    0.5456403350830078,
+    0.5459750366210937,
+    0.5585388946533203,
+    0.5618886566162109,
+    0.5737094497680664
+  ],
+  "status": "passed"
+}

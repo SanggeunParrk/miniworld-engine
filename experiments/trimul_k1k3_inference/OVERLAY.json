@@ -1,0 +1,109 @@
+{
+ "purpose": "Files applied over the Anthropic native v5 trimul_native package (byte-identical upstream base) to build the K1/K3 inference payload; every change sits behind a TMN_* compile switch or extends the host package",
+ "upstream": {
+  "repository": "https://github.com/anthropics/uplifting-biomolecular-modeling",
+  "revision": "f4f62fa6592ae4938d49b1757bea0cfeff9f468e",
+  "source_prefix": "common/opt_core/opt_core/kernels/trimul/native/pkg/v5",
+  "package_version": "v5 1.2.2",
+  "license": "Apache-2.0"
+ },
+ "base_files": {
+  "csrc/common/tmn_math.cuh": "3504d522868ad81d2d072a3a744fe042da5b3761736729aca1a5be3fbfe57f8b",
+  "csrc/tmn_kernels.cuh": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
+  "csrc/tmn_sm90_unit.cuh": "ea7de806cb3577b0ee1ff382c882938cd9957f78546895e01af38ef2170e24e0",
+  "python/trimul_native/_driver.py": "3d614468751e376abec32efa8c7caa977cc2ee575525726e9b4303bd9b7461c6",
+  "python/trimul_native/face.py": "e95b68797d76fb9e9264909b44ee07a6bac75f869e34201ff380216312cb8f8d",
+  "python/trimul_native/kernel.py": "1ba2329f59323172c3bb1f1d9a1651f57772d74808904d080a96733dc4765533",
+  "python/trimul_native/launch.py": "cb6b6a5e09a557fd99ed284288da85f32a142ac5bbdd67c74741c3a2844546cc",
+  "python/trimul_native/ops.py": "4fc3139a5b268ce035ab7e319fc4be310f986e77627194685c6b60cf0604bf59"
+ },
+ "overlay_files": {
+  "csrc/common/tmn_math.cuh": "21567cfa0181dbb1004d08db851175f781dd5e3730fd9805c8ddc72f79be107e",
+  "csrc/tmn_kernels.cuh": "8660b5f8d16be4c1908b4067aee1fd7604381962d8a28ff7ba34d77d80c2c9aa",
+  "csrc/tmn_sm90_unit.cuh": "a1e5cce89955c54c2ae213a33221b3ef1f2373051fe28db6cee1d4744ee9ab4a",
+  "python/trimul_native/_driver.py": "9add7c99274b1d421db262506696a4cda9e094154dcf008168ce29b764450f1a",
+  "python/trimul_native/face.py": "5c5262e8df5f8b32edfaf243449b03a76f52cc9e65b9155e6378d02a92169b9c",
+  "python/trimul_native/kernel.py": "9e751f68ce2aa4be7d7175970fe00d9aeee2d154aab8964bbbf0d9abcba5842c",
+  "python/trimul_native/launch.py": "9c818a2eb46c2a5075b237ab766befce858d3e8a478806943029e9b945f316fd",
+  "python/trimul_native/ops.py": "76376fb4a9ef7c3fdc35be3e732b3786e3f178e937ebb09a28c4171a689c8844"
+ },
+ "unit": "tmn90_z128_h128",
+ "archs": [
+  "sm_90a"
+ ],
+ "defines": {
+  "TMN_SIGMOID_TANH": 1,
+  "TMN_K1_FORCE_LNM": 1,
+  "TMN_RESIDUAL_BF16X2_NATIVE": 1,
+  "TMN_WSKIP": 1,
+  "TMN_MASK_TEMPLATE": 1,
+  "TMN_PDL": 1
+ },
+ "probe_define": {
+  "TMN_CTA_TS": 1
+ },
+ "always_compiled_changes": [
+  "K3Params gains a trailing `stats` pointer (host packing shifted: residual flag field 17, stats field 12)",
+  "K3Cfg generalised to NCWG consumer warpgroups; TMN_K3_SET_BF16(128,128,3,64,8,1) instantiated and tabled as the K3 default for N <= 1536",
+  "K1 mask element type is a template parameter MT; m2 (bf16) / m3 (bool,uint8) instantiations of the five tabled bf16 K1 configurations",
+  "host: MASK_CODE dtype -> kernel name with fp32-cast fallback, cuLaunchKernelEx path with the programmatic-stream-serialisation attribute (TRIMUL_NATIVE_PDL, default on)"
+ ],
+ "recorded_payload_build": {
+  "nvcc_flags": [
+   "-cubin",
+   "-arch=sm_90a",
+   "-O3",
+   "-std=c++17",
+   "-DNDEBUG",
+   "--expt-relaxed-constexpr",
+   "-Xptxas",
+   "-v",
+   "-lineinfo",
+   "-DTMN_SIGMOID_TANH=1",
+   "-DTMN_K1_FORCE_LNM=1",
+   "-DTMN_RESIDUAL_BF16X2_NATIVE=1",
+   "-DTMN_WSKIP=1",
+   "-DTMN_MASK_TEMPLATE=1",
+   "-DTMN_PDL=1",
+   "-I",
+   "csrc"
+  ],
+  "cubin_sha256": "b5b2e6f6932014babbad21b1771e7c9c56fd284a8df9f964b76f77ed01a9d951",
+  "kernels": 62,
+  "resources": {
+   "tmn_k1_z128_h128_b_t6x32_s8k2_m1_l2_v0": {
+    "arch": "sm_90a",
+    "barriers": 16,
+    "regs": 128,
+    "spill_loads": 0,
+    "spill_stores": 0,
+    "stack": 0
+   },
+   "tmn_k1_z128_h128_b_t6x32_s8k2_m2_l2_v0": {
+    "arch": "sm_90a",
+    "barriers": 16,
+    "regs": 128,
+    "spill_loads": 0,
+    "spill_stores": 0,
+    "stack": 0
+   },
+   "tmn_k1_z128_h128_b_t6x32_s8k2_m3_l2_v0": {
+    "arch": "sm_90a",
+    "barriers": 16,
+    "regs": 128,
+    "spill_loads": 0,
+    "spill_stores": 0,
+    "stack": 0
+   },
+   "tmn_k3_z128_h128_b_t3x64_s8a1_l1": {
+    "arch": "sm_90a",
+    "barriers": 1,
+    "regs": 128,
+    "spill_loads": 52,
+    "spill_stores": 32,
+    "stack": 32
+   }
+  },
+  "note": "manifest of the payload measured in records/ (built from the same overlay before the TMN_CTA_TS probe hooks, default off, were added; cubin digests of a rebuild differ through -lineinfo)"
+ }
+}

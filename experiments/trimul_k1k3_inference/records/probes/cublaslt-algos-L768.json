@@ -1,0 +1,10 @@
+{"N": 768, "ch": 128, "nres": 8, "algos": [
+  {"r": 0, "algo": 66, "tile": 209, "stages": 35, "splitk": 1, "swz": 0, "custom": 4, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.121, "us": 179.08},
+  {"r": 1, "algo": 66, "tile": 24, "stages": 35, "splitk": 1, "swz": 0, "custom": 7, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.136, "us": 186.09},
+  {"r": 2, "algo": 66, "tile": 23, "stages": 35, "splitk": 1, "swz": 0, "custom": 4, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.136, "us": 188.61},
+  {"r": 3, "algo": 66, "tile": 31, "stages": 35, "splitk": 1, "swz": 0, "custom": 7, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.182, "us": 185.36},
+  {"r": 4, "algo": 66, "tile": 32, "stages": 35, "splitk": 1, "swz": 0, "custom": 4, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.182, "us": 185.22},
+  {"r": 5, "algo": 66, "tile": 495, "stages": 35, "splitk": 1, "swz": 0, "custom": 7, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.182, "us": 205.45},
+  {"r": 6, "algo": 66, "tile": 20, "stages": 35, "splitk": 1, "swz": 0, "custom": 1, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.273, "us": 182.08},
+  {"r": 7, "algo": 66, "tile": 29, "stages": 35, "splitk": 1, "swz": 0, "custom": 1, "inner": -1, "cluster": -1, "ws": 4, "waves": 0.227, "us": 183.26},
+  null]}

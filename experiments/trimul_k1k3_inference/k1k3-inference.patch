@@ -1,0 +1,822 @@
+diff -ru csrc/common/tmn_math.cuh b/csrc/common/tmn_math.cuh
+--- a/csrc/common/tmn_math.cuh	2026-09-19 10:27:56.224832218 +0900
++++ b/csrc/common/tmn_math.cuh	2026-09-20 19:18:24.708482823 +0900
+@@ -77,7 +77,12 @@
+ }
+ 
+ // ---------------------------------------------------------------- gate
++#ifdef TMN_SIGMOID_TANH   // experiment: one MUFU (tanh.approx) instead of two (ex2 + rcp); sigmoid(g) = 0.5 tanh(g/2) + 0.5 (tolerance class only)
++TMN_MATH_DEVI float tanh_approx(float x) { float y; asm("tanh.approx.f32 %0, %1;\n" : "=f"(y) : "f"(x)); return y; }
++TMN_MATH_DEVI float sigmoid(float g) { return __fmaf_rn(tanh_approx(__fmul_rn(0.5f, g)), 0.5f, 0.5f); }
++#else
+ TMN_MATH_DEVI float sigmoid(float g) { return rcp_approx_ftz(__fadd_rn(1.f, ex2_approx_ftz(__fmul_rn(-1.4426950408889634f, g)))); }
++#endif
+ TMN_MATH_DEVI float sigmoid_div(float g) { return div_full(1.f, __fadd_rn(1.f, ex2_approx(__fmul_rn(-g, 1.4426950408889634f)))); }
+ // sigmoid(g) * p (* m) on fp32 accumulators; the caller rounds the result once to bf16 (pack_bf16_rn of two neighbours)
+ TMN_MATH_DEVI float gate(float g, float p) { return __fmul_rn(sigmoid(g), p); }
+@@ -85,9 +90,13 @@
+ 
+ // ---------------------------------------------------------------- residual
+ // bf16 z (two packed neighbours) + the bf16-rounded update pair -> bf16 pair: the framework's bf16 add
++#ifdef TMN_RESIDUAL_BF16X2_NATIVE   // experiment: one add.rn.bf16x2 (exact sum rounded once to bf16) instead of unpack + fp32 add + pack
++TMN_MATH_DEVI uint32_t residual_bf16x2(uint32_t z2, uint32_t o2) { uint32_t r; asm("add.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(z2), "r"(o2)); return r; }
++#else
+ TMN_MATH_DEVI uint32_t residual_bf16x2(uint32_t z2, uint32_t o2) {
+   return pack_bf16_rn(__fadd_rn(bf16_lo(z2), bf16_lo(o2)), __fadd_rn(bf16_hi(z2), bf16_hi(o2)));
+ }
++#endif
+ // fp32 z + the bf16-rounded update, in fp32
+ TMN_MATH_DEVI float residual_f32(float z, float o_rounded) { return __fadd_rn(z, o_rounded); }
+ 
+Only in csrc: INTERFACE.md
+Only in csrc: sm80
+Only in csrc: tmn90_z128_h128.cu
+Only in csrc: tmn90_z128_h256.cu
+Only in csrc: tmn90_z128_h384.cu
+Only in csrc: tmn90_z128_h64.cu
+Only in csrc: tmn90_z256_h128.cu
+Only in csrc: tmn90_z256_h256.cu
+Only in csrc: tmn90_z256_h384.cu
+Only in csrc: tmn90_z256_h64.cu
+Only in csrc: tmn90_z384_h128.cu
+Only in csrc: tmn90_z384_h256.cu
+Only in csrc: tmn90_z384_h384.cu
+Only in csrc: tmn90_z384_h64.cu
+Only in csrc: tmn90_z64_h128.cu
+Only in csrc: tmn90_z64_h256.cu
+Only in csrc: tmn90_z64_h384.cu
+Only in csrc: tmn90_z64_h64.cu
+Only in csrc: tmn_k3_wide.cuh
+diff -ru csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
+--- a/csrc/tmn_kernels.cuh	2026-09-19 10:27:56.225832213 +0900
++++ b/csrc/tmn_kernels.cuh	2026-09-20 19:26:32.843532079 +0900
+@@ -27,6 +27,33 @@
+ #define TMN_K3_BULK_STORE 1     // K3 output, bf16 pair tensor in / bf16 out: 1 = residual added in registers (the pair's z re-read from the operand tile by
+ #endif                          //   ldmatrix in the accumulator layout), stmatrix staging, one cp.async.bulk.tensor store per warp slice; 0 = the staged vector
+                                 //   pass (lds128 (+ residual) + st.global), which the fp32-z / fp32-out / pre-normalised operand modes always use
++#ifndef TMN_WSKIP
++#define TMN_WSKIP 0             // experiment: 1 = with a resident weight ring, wait on barW_full only in the first tile (later tiles: the phase already completed)
++#endif
++#ifndef TMN_K1_WARPSTORE
++#define TMN_K1_WARPSTORE 0      // experiment: 1 = K1 lane store path stores each warp's own 16 tokens x 32 channels (no per-block warpgroup barrier)
++#endif
++#ifndef TMN_K1_NO_VSEL
++#define TMN_K1_NO_VSEL 0        // experiment: 1 = drop the per-value validity selects in the K1 epilogue (mask factor is already 0 for invalid rows)
++#ifndef TMN_CTA_TS
++#define TMN_CTA_TS 0            // measurement builds only: per-CTA clock64 / globaltimer probes (K1 -> K1Params::stats, K3 -> K3Params::prof; 8 u64 per CTA)
++#endif
++#ifndef TMN_MASK_TEMPLATE
++#define TMN_MASK_TEMPLATE 0     // 1 = K1 mask element type is a template parameter (MT: 0 fp32 | 1 bf16 | 2 uint8/bool), instantiated under name fields m2 / m3
++#endif
++#ifndef TMN_PDL
++#define TMN_PDL 0               // 1 = programmatic dependent launch: griddepcontrol.wait before the first dependent global access, launch_dependents at the last tile
++#endif
++#endif
++#ifndef TMN_K3_STATS
++#define TMN_K3_STATS 0          // experiment: 1 = K3 uses K1-saved LN_in statistics when the host passes them (p.stats)
++#endif
++#ifndef TMN_K1_STORE32
++#define TMN_K1_STORE32 0        // experiment: 1 = TMA plane store for BJ == 32 tiles (host supplies the [32][2][32] box)
++#endif
++#ifndef TMN_K3_LN_SERIAL
++#define TMN_K3_LN_SERIAL 1      // experiment: 0 = K3 LayerNorm affine passes not serialised (register pressure: check spills)
++#endif
+ #ifndef TMN_K3_REGS_24_240
+ #define TMN_K3_REGS_24_240 1    // K3 producer / consumer register split: 1 = 24 / 240, 0 = 40 / 232 (K1's split); both balance 384 threads x 168 registers
+ #endif
+@@ -68,6 +95,7 @@
+   const void* zres;      // z [N][N][C_Z] (z dtype): residual source (read from global / L2)
+   void* out;             // [N][N][C_Z], z's dtype
+   unsigned long long* prof;   // dev instrumentation (TMN_DEV_PROF builds): per-phase cycle sums, else unused (may be null)
++  const float* stats;    // nullable (experiment TMN_K3_STATS): K1's saved LN_in (mean, rstd) per pair row, stats[2 (i N + j) + {0, 1}]; K3 skips the statistics passes
+   int N, Np, tiles_j, num_tiles, residual, pad0;
+   float eps; int pad1;
+ };
+@@ -103,7 +131,11 @@
+   static constexpr int SPB = NKC / SKCH;                // ring slots per weight block
+   static constexpr int NBLK = CH / 16;                  // n64 weight blocks = 4 C_H / 64 (each: 32 gate rows | 32 proj rows -> 32 plane channels)
+   static constexpr bool W_RESIDENT = NSLOT >= NBLK * SPB;   // the whole weight stream fits the ring: loaded once per CTA, never released
++#ifdef TMN_K1_FORCE_SCHED   // experiment: force the K1 weight-ring / MMA schedule for every instantiation
++  static constexpr int SCHED = TMN_K1_FORCE_SCHED;
++#else
+   static constexpr int SCHED = SCHED_ >= 0 ? SCHED_ : ((W_RESIDENT || NSLOT >= 3 * SPB) ? 0 : 1);
++#endif
+   static_assert(SCHED == 0 || SCHED == 1, "K1 schedules: 0 (two blocks in flight) | 1 (one block, per-slot waits)");
+   static constexpr int SMEM_A = NKCA * CHUNK_BYTES;
+   static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
+@@ -141,6 +173,10 @@
+   static constexpr int BMT = BI * BJ;                   // tokens per CTA tile step: 128 = the two consumer warpgroups split the tokens (64 each, all output
+   static constexpr bool SPLITN = BMT == 64;             // blocks); 64 = both warpgroups serve the same 64 tokens and alternate output blocks (halves the tile smem)
+   static constexpr int NSUB = BMT / 64;                 // 64-token X sub-tiles per tile
++  static constexpr int NCWG = SPLITN ? 2 : BMT / 64;    // consumer warpgroups (experiment TMN_K3_NCWG: 192-token tiles -> 3)
++  static constexpr int NTHR = 128 * (NCWG + 1);         // threads per CTA (== the unit's launch bound)
++  static constexpr int LAUNCH_REGS = (65536 / NTHR) / 8 * 8;
++  static constexpr int cons_regs(int prod) { const int r = ((LAUNCH_REGS * NTHR - 128 * prod) / (128 * NCWG)) / 8 * 8; return r > 240 ? 240 : r; }
+   static constexpr int ESZ = ZF32 ? 4 : 2;
+   static constexpr int CHUNK_CH = 128 / ESZ;
+   static constexpr int CHUNK_BYTES = BMT * 128;         // z chunk = [BMT tok][128 B], 128B-swizzled rows
+@@ -153,19 +189,20 @@
+   static constexpr int SLOTG = CZ * 64, SLOTP = CH * 64;
+   static constexpr int SLOT_BYTES = SLOTG > SLOTP ? SLOTG : SLOTP;   // one ring slot holds one output block's gate OR projection weight rows
+   static constexpr bool W_RESIDENT = NSLOT >= 2 * NB;   // the whole W_og | W_o fits the ring: loaded once per CTA, never released
+-  static constexpr int W_CONSUMERS = 8;                 // every consumer warp arrives on every slot use (split-N: the warpgroup that does not multiply a
++  static constexpr int W_CONSUMERS = 4 * NCWG;          // every consumer warp arrives on every slot use (split-N: the warpgroup that does not multiply a
+                                                         // block still waits its arrival and releases it, so each warp observes every phase of a slot in order)
+   static constexpr int NKCX = CH / 64;                  // X chunks per 64-token sub-tile ([64 ch][64 tok] bf16 = 8 KB)
+   static constexpr int OB = 16 * 2 * BN * ESZ;          // per-warp output staging slice [16 tok][64 ch = a block pair] in z's dtype (2 KB bf16 | 4 KB fp32)
+   static constexpr int SMEM_X = NSUB * CH * 128;
+   static constexpr int SMEM_Z = NKCZ * CHUNK_BYTES;
+   static constexpr int SMEM_W = NSLOT * SLOT_BYTES;
+-  static constexpr int SMEM_OUT = 8 * OB;
++  static constexpr int SMEM_OUT = 4 * NCWG * OB;
+   static constexpr int SMEM_GB = (2 * CZ + 2 * CH) * 4;
+   static constexpr int NBAR = 2 * NKCZ + 2 + 2 * NSLOT;
+   static constexpr int SMEM_BAR = ((NBAR * 8 + 127) / 128) * 128;
+   static constexpr int SMEM = SMEM_X + SMEM_Z + SMEM_W + SMEM_OUT + SMEM_GB + SMEM_BAR;
+-  static_assert((BMT == 128 || BMT == 64) && BJ >= 64 && BJ % 64 == 0, "a consumer warpgroup serves 64 consecutive tokens of one pair row");
++  static_assert((BMT == 192 || BMT == 128 || BMT == 64) && BJ >= 64 && BJ % 64 == 0, "a consumer warpgroup serves 64 consecutive tokens of one pair row");
++  static_assert(cons_regs(24) >= 96, "consumer register share");
+   static_assert(CZ % 64 == 0 && CH % 64 == 0, "C_Z, C_H multiples of 64");
+   static_assert(NACC == 1 || (NACC == 2 && !SPLITN), "one or two accumulator sets (two: full-width tiles only)");
+   static_assert(NBW % 2 == 0, "output blocks are finished in pairs (128-byte row segments)");
+@@ -264,6 +301,26 @@
+   return LnStats{meanA, rA, meanB, rB};
+ }
+ 
++// LN affine pass alone with GIVEN per-row statistics (K1's saved mean / rstd): the same statement as ln_fragment's last loop, so the
++// packed bf16 rows are bit-identical to ln_fragment on the same fragments (experiment TMN_K3_STATS).
++template <int KS, bool SERIAL = false>
++TMN_DEVI void ln_affine_given(uint32_t (&fa)[KS][4], float meanA, float rA, float meanB, float rB, const float* sGamma, const float* sBeta, int lane) {
++#pragma unroll
++  for (int ks = 0; ks < KS; ++ks) fence_regs(fa[ks]);
++  uint32_t chain[2] = {0u, 0u};
++#pragma unroll
++  for (int ks = 0; ks < KS; ++ks) {
++    const uint32_t k0 = (uint32_t)(16 * ks + 2 * (lane & 3)) + (SERIAL ? zero_dep(chain[ks & 1]) : 0u);
++    const float2 g0 = lds64f(smem_u32(sGamma) + 4u * k0), b0 = lds64f(smem_u32(sBeta) + 4u * k0);
++    const float2 g1 = lds64f(smem_u32(sGamma) + 4u * k0 + 32u), b1 = lds64f(smem_u32(sBeta) + 4u * k0 + 32u);
++    fa[ks][0] = pack_bf16(math::ln_affine(bf16lo(fa[ks][0]), meanA, rA, g0.x, b0.x), math::ln_affine(bf16hi(fa[ks][0]), meanA, rA, g0.y, b0.y));
++    fa[ks][1] = pack_bf16(math::ln_affine(bf16lo(fa[ks][1]), meanB, rB, g0.x, b0.x), math::ln_affine(bf16hi(fa[ks][1]), meanB, rB, g0.y, b0.y));
++    fa[ks][2] = pack_bf16(math::ln_affine(bf16lo(fa[ks][2]), meanA, rA, g1.x, b1.x), math::ln_affine(bf16hi(fa[ks][2]), meanA, rA, g1.y, b1.y));
++    fa[ks][3] = pack_bf16(math::ln_affine(bf16lo(fa[ks][3]), meanB, rB, g1.x, b1.x), math::ln_affine(bf16hi(fa[ks][3]), meanB, rB, g1.y, b1.y));
++    chain[ks & 1] = fa[ks][0] ^ fa[ks][3];
++  }
++}
++
+ // The same LayerNorm for an fp32-resident tile in shared memory (chunks of [BM rows][32 ch] fp32, 128-B swizzled rows, 16 KB apart): statistics and
+ // normalisation read the fp32 values (three passes over smem), only the LayerNorm OUTPUT is rounded to bf16 into the A fragment.
+ template <int KS, int CHUNK_BYTES = 16384>
+@@ -444,7 +501,21 @@
+ // LNM: 1 = the shared statement, own summation order (default class); 2 = the reference library's summation order (bitwise class; bf16 z only);
+ //      4 = trimul_tx 1.2's arithmetic (comparison only).
+ // SAVE: the dormant save-intermediates path (LN_in statistics per pair row); when false no instruction of it exists.
+-template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false>
++// programmatic dependent launch (TMN_PDL): no-ops unless enabled; a grid launched without the programmatic attribute returns from the wait at once
++TMN_DEVI void pdl_wait() {
++#if TMN_PDL
++  asm volatile("griddepcontrol.wait;\n" ::: "memory");
++#endif
++}
++TMN_DEVI void pdl_trigger() {
++#if TMN_PDL
++  asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
++#endif
++}
++// per-CTA timeline probes (TMN_CTA_TS): slot 0 start, 1 first tile ready (consumer), 2 last tile start, 3 end (clock64); 4 start, 5 end (globaltimer); 6 n_iter
++TMN_DEVI unsigned long long tmn_globaltimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
++#define TMN_TS(buf, slot, val) do { if (TMN_CTA_TS && (buf)) reinterpret_cast<unsigned long long*>(buf)[blockIdx.x * 8 + (slot)] = (val); } while (0)
++template <class G, bool HAS_MASK, int LNM, bool SAVE, bool EMITX = false, int MT = 0>
+ TMN_DEVI void k1_body(const K1Params& p) {
+   constexpr int CZ = G::CZ, KS = G::KS, NSLOT = G::NSLOT, SPB = G::SPB, NBLK = G::NBLK, SKCH = G::SKCH, SLOT_BYTES = G::SLOT_BYTES, BI = G::BI, BJ = G::BJ;
+   static_assert(!(G::ZF32 && LNM == 2), "the reference-order LayerNorm is defined on bf16 inputs");
+@@ -480,11 +551,13 @@
+     if (TMN_K1_BULK_STORE) tma_prefetch_desc(&p.tm_ab);
+   }
+   __syncthreads();
++  if (tid == 0) { TMN_TS(p.stats, 0, clock64()); TMN_TS(p.stats, 4, tmn_globaltimer()); TMN_TS(p.stats, 6, (unsigned long long)n_iter); }
+ 
+   if (wg == 0) {
+     // ------------------------------------------------------------------ producer warpgroup
+     setmaxnreg_dec<G::PROD_REGS>();
+     if (warp == 0 && lane == 0) {                       // z tiles: one load per tile, issued as soon as the consumers have pulled the previous tile into registers
++      pdl_wait();                                       // TMN_PDL: z (and mask) may still be written by the previous grid; the weight ring is already in flight
+       for (int it = 0; it < n_iter; ++it) {
+         const int tile = (int)blockIdx.x + it * (int)gridDim.x;
+         if (it > 0) mbar_wait(barA_empty, (it - 1) & 1);
+@@ -521,31 +594,47 @@
+   // stmatrix role: lane -> (matrix idx, row rr): channel ch = 16 hq + 8 (idx>>1) + rr; token granule tg = 2 wiw + (idx&1) (8 tokens each), stored at tg ^ (ch & 7)
+   const int idx = lane >> 3, rr = lane & 7;
+   const int chq = 8 * (idx >> 1) + rr;
+-  const uint32_t sts_off0 = (uint32_t)chq * 128 + (uint32_t)(((2 * wiw + (idx & 1)) ^ (chq & 7)) * 16);
++  constexpr uint32_t SWM = (TMN_K1_STORE32 != 0 && BJ == 32) ? 3u : 7u;   // staging swizzle: 64B pattern for the [32][2][32] store box, else 128B
++  const uint32_t sts_off0 = (uint32_t)chq * 128 + (uint32_t)(((2 * wiw + (idx & 1)) ^ (chq & SWM)) * 16);
+   const uint32_t sts_off1 = sts_off0 + 16 * 128;
+   // store role: warp wiw stores channels 8 wiw .. 8 wiw + 7 of the block; instruction e (0,1): lanes 8k..8k+7 -> channel 8 wiw + 4 e + k, granule lane%8
+   const int st_ch0 = 8 * wiw + (lane >> 3), st_g = lane & 7;
+-  const uint32_t ld_off0 = (uint32_t)st_ch0 * 128 + (uint32_t)((st_g ^ (st_ch0 & 7)) * 16);
+-  const uint32_t ld_off1 = (uint32_t)(st_ch0 + 4) * 128 + (uint32_t)((st_g ^ ((st_ch0 + 4) & 7)) * 16);
++  const uint32_t ld_off0 = (uint32_t)st_ch0 * 128 + (uint32_t)((st_g ^ (st_ch0 & SWM)) * 16);
++  const uint32_t ld_off1 = (uint32_t)(st_ch0 + 4) * 128 + (uint32_t)((st_g ^ ((st_ch0 + 4) & SWM)) * 16);
+   const int bar_id = 1 + cw;                            // named barrier of this warpgroup
+   uint32_t w_iter = 0;
+   // TMA plane store (BJ % 64 == 0: this warpgroup's 64 tokens are one plane row segment): the elected thread stores the whole [32 ch][64 tok] staging
+   // buffer of a block with one bulk-tensor store; the buffer written two blocks later is the same one, so the elected thread drains the previous
+   // store's smem READ before each block's warpgroup barrier (issued a block earlier: normally complete already).
+-  constexpr bool TMAST = (TMN_K1_BULK_STORE != 0) && (BJ % 64 == 0);
++  // TMN_K1_STORE32 (experiment): BJ == 32 tiles store through a [32 tok][2 pair rows][32 ch] box; the staging row (128 B) already holds the
++  // warpgroup's 64 tokens as row i (first 32) then row i+1 (next 32), which is exactly that box's linear order under the same 128B swizzle.
++  constexpr bool TMAST = (TMN_K1_BULK_STORE != 0) && (BJ % 64 == 0 || (TMN_K1_STORE32 != 0 && BJ == 32));
+   const bool st_elect = (wiw == 0) && (lane == 0);
+ 
++  pdl_wait();                                                     // TMN_PDL: consumers read the mask and write the planes
+   if (K1OFF > 0 && cw == 1 && n_iter > 0) mbar_wait(barGo, 0);   // start offset: warpgroup 0's first K1OFF weight blocks retire before warpgroup 1 starts
+   for (int t_local = 0; t_local < n_iter; ++t_local) {
+     const int tile = (int)blockIdx.x + t_local * (int)gridDim.x;
+     const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
++    if (t_local == n_iter - 1 && tid == 128) pdl_trigger();       // TMN_PDL: the dependent grid may take SMs as CTAs retire
+     // ---- this thread's two rows: validity + mask; this lane's two store runs: pointers + predicates
+     const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
+     const bool vA = (iA < p.N) && (jA < p.N), vB = (iB < p.N) && (jB < p.N);
+     float mA = vA ? 1.f : 0.f, mB = vB ? 1.f : 0.f;
+     if (HAS_MASK) {
+-      if (vA) mA = __ldg(p.mask + (size_t)iA * p.ms_i + (size_t)jA * p.ms_j);
+-      if (vB) mB = __ldg(p.mask + (size_t)iB * p.ms_i + (size_t)jB * p.ms_j);
++      const size_t oA = (size_t)iA * p.ms_i + (size_t)jA * p.ms_j, oB = (size_t)iB * p.ms_i + (size_t)jB * p.ms_j;
++      if constexpr (MT == 1) {              // bf16 mask (TMN_MASK_TEMPLATE, name field m2): no per-call fp32 cast pass
++        const __nv_bfloat16* mk = reinterpret_cast<const __nv_bfloat16*>(p.mask);
++        if (vA) mA = __bfloat162float(__ldg(mk + oA));
++        if (vB) mB = __bfloat162float(__ldg(mk + oB));
++      } else if constexpr (MT == 2) {       // bool / uint8 mask (m3)
++        const unsigned char* mk = reinterpret_cast<const unsigned char*>(p.mask);
++        if (vA) mA = (float)__ldg(mk + oA);
++        if (vB) mB = (float)__ldg(mk + oB);
++      } else {                              // fp32 mask: the original contract
++        if (vA) mA = __ldg(p.mask + oA);
++        if (vB) mB = __ldg(p.mask + oB);
++      }
+     }
+     const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
+     const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;
+@@ -554,9 +643,18 @@
+     __nv_bfloat16* gp0 = p.ab + (size_t)st_ch0 * plane + (size_t)is_ * p.Np + js_;   // + 32 b * plane per block; + 4 * plane for e = 1
+     const size_t blk_stride = 32 * plane, e_stride = 4 * plane;
+     const int iw = i0 + (64 * cw) / BJ, jw = j0 + (64 * cw) % BJ;              // this warpgroup's plane row / first token (TMA store coordinates)
++    // TMN_K1_WARPSTORE geometry: lane = channel of the block; granule e = tokens 64 cw + 16 wiw + 8 e .. +7 (this warp's own stmatrix granules 2 wiw + e)
++    const int rho_w0 = 64 * cw + 16 * wiw, rho_w1 = rho_w0 + 8;
++    const int is_w0 = i0 + rho_w0 / BJ, js_w0 = j0 + rho_w0 % BJ, is_w1 = i0 + rho_w1 / BJ, js_w1 = j0 + rho_w1 % BJ;
++    const bool ok_w0 = (is_w0 < p.Np) && (js_w0 < p.Np), ok_w1 = (is_w1 < p.Np) && (js_w1 < p.Np);
++    const int n_w0 = min(8, p.Np - js_w0), n_w1 = min(8, p.Np - js_w1);
++    __nv_bfloat16* gw0 = p.ab + (size_t)lane * plane + (size_t)is_w0 * p.Np + js_w0;   // + 32 b * plane per block
++    __nv_bfloat16* gw1 = p.ab + (size_t)lane * plane + (size_t)is_w1 * p.Np + js_w1;
++    const uint32_t wl_off0 = (uint32_t)lane * 128 + (uint32_t)(((2 * wiw) ^ (lane & SWM)) * 16), wl_off1 = (uint32_t)lane * 128 + (uint32_t)(((2 * wiw + 1) ^ (lane & SWM)) * 16);
+ 
+     // ---- A fragments: from the swizzled z tile, LayerNorm applied (bf16: in registers; fp32: from smem, output bf16)
+     mbar_wait(barA_full, t_local & 1);
++    if (tid == 128) { if (t_local == 0) TMN_TS(p.stats, 1, clock64()); if (t_local == n_iter - 1) TMN_TS(p.stats, 2, clock64()); }
+     uint32_t fa[KS][4];
+     LnStats st;
+     if (G::ZF32) {
+@@ -602,7 +700,7 @@
+ #pragma unroll
+       for (int j = 0; j < SPB; ++j) {
+         const int s = slot_of(wi + j);
+-        mbar_wait(barW_full + s, phase_of(wi + j));
++        if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(wi + j));
+         const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+         dlo[j] = (uint32_t)d; dhi[j] = (uint32_t)(d >> 32);
+       }
+@@ -628,8 +726,10 @@
+       for (int q = 0; q < 4; ++q) {
+         float vA0 = math::gate(ac[4 * q + 0], ac[4 * (q + 4) + 0], mA), vA1 = math::gate(ac[4 * q + 1], ac[4 * (q + 4) + 1], mA);   // sigmoid(g) p m, fp32
+         float vB0 = math::gate(ac[4 * q + 2], ac[4 * (q + 4) + 2], mB), vB1 = math::gate(ac[4 * q + 3], ac[4 * (q + 4) + 3], mB);
+-        if (!vA) { vA0 = 0.f; vA1 = 0.f; }
+-        if (!vB) { vB0 = 0.f; vB1 = 0.f; }
++        if (TMN_K1_NO_VSEL == 0) {   // experiment TMN_K1_NO_VSEL: invalid rows already carry mA/mB == 0 (zero-filled OOB z rows give finite products)
++          if (!vA) { vA0 = 0.f; vA1 = 0.f; }
++          if (!vB) { vB0 = 0.f; vB1 = 0.f; }
++        }
+         pk[q][0] = pack_bf16(vA0, vA1); pk[q][1] = pack_bf16(vB0, vB1);
+       }
+       const uint32_t sbuf = stage_u + (uint32_t)((b & 1) * 4096);            // double-buffered: one warpgroup barrier per block
+@@ -640,6 +740,13 @@
+         if (st_elect) tma_store_wait_read<0>();                              // the store issued from the other buffer's twin a block ago has read it
+         named_bar_sync(bar_id, 128);
+         if (st_elect) { tma_store_3d(&p.tm_ab, sStage + cw * 8192 + (b & 1) * 4096, jw, iw, 32 * b); tma_store_commit(); }
++      } else if (TMN_K1_WARPSTORE != 0) {              // warp-local: this warp reads back only the granules its own stmatrix wrote -> no warpgroup barrier
++        __syncwarp();
++        const uint4 v0 = lds128(sbuf + wl_off0), v1 = lds128(sbuf + wl_off1);
++        const size_t bo = (size_t)b * blk_stride;
++        if (p.vec) { if (ok_w0) stg128(gw0 + bo, v0); if (ok_w1) stg128(gw1 + bo, v1); }
++        else { if (ok_w0) stg_ragged(gw0 + bo, v0, n_w0); if (ok_w1) stg_ragged(gw1 + bo, v1, n_w1); }
++        __syncwarp();                                    // the buffer written two blocks later is this one: every lane has read it
+       } else {
+         named_bar_sync(bar_id, 128);
+         const uint4 v0 = lds128(sbuf + ld_off0), v1 = lds128(sbuf + ld_off1);
+@@ -659,7 +766,7 @@
+         static_for<SPB>([&](auto Jc) {
+           constexpr int J = decltype(Jc)::value;
+           const int s = slot_of(w_iter + J);
+-          mbar_wait(barW_full + s, phase_of(w_iter + J));
++          if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(w_iter + J));
+           const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+           if (J == 0) {
+ #pragma unroll
+@@ -694,6 +801,7 @@
+     for (int ks = 0; ks < KS; ++ks) fence_regs(fa[ks]);
+   }
+   if (TMAST && st_elect) tma_store_wait_all();           // every bulk store of this CTA complete before its shared memory is released
++  if (tid == 128) { TMN_TS(p.stats, 3, clock64()); TMN_TS(p.stats, 5, tmn_globaltimer()); }
+ }
+ 
+ 
+@@ -731,25 +839,27 @@
+                                                             // are per warp, and the allocator budgets each side of the branch by its setmaxnreg value
+   if (tid == 0 && dyn_smem_size() < (uint32_t)G::SMEM) __trap();
+   const int n_iter = (p.num_tiles - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x;
+-  for (int i = tid; i < CZ; i += NTHREADS) { sGin[i] = p.gamma_in[i]; sBin[i] = p.beta_in[i]; }
+-  for (int i = tid; i < CH; i += NTHREADS) { sGout[i] = p.gamma_out[i]; sBout[i] = p.beta_out[i]; }
++  for (int i = tid; i < CZ; i += G::NTHR) { sGin[i] = p.gamma_in[i]; sBin[i] = p.beta_in[i]; }
++  for (int i = tid; i < CH; i += G::NTHR) { sGout[i] = p.gamma_out[i]; sBout[i] = p.beta_out[i]; }
+   // register split: 24 / 240 for the bf16-tile kernels (bulk-store epilogue); the fp32-tile / cast / pre-normalised modes keep 40 / 232 (their live set is larger)
+   constexpr bool R240 = (TMN_K3_REGS_24_240 != 0) && !G::ZF32 && !G::OUT32 && !G::RESG && !G::PRENORM;
+   if (tid == 0) {
+     for (int kc = 0; kc < NKCZ; ++kc) mbar_init(barZ_full + kc, 1);
+-    mbar_init(barX_full, 1); mbar_init(barX_empty, 8);
+-    for (int kc = 0; kc < NKCZ; ++kc) mbar_init(barZ_empty + kc, 8);
++    mbar_init(barX_full, 1); mbar_init(barX_empty, 4 * G::NCWG);
++    for (int kc = 0; kc < NKCZ; ++kc) mbar_init(barZ_empty + kc, 4 * G::NCWG);
+     for (int s = 0; s < NSLOT; ++s) { mbar_init(barW_full + s, 1); mbar_init(barW_empty + s, G::W_CONSUMERS); }
+     fence_barrier_init();
+     tma_prefetch_desc(&p.tm_z); tma_prefetch_desc(&p.tm_x); tma_prefetch_desc(&p.tm_wg); tma_prefetch_desc(&p.tm_wo);
+     if ((TMN_K3_BULK_STORE != 0) && !G::ZF32 && !G::OUT32 && !G::RESG && !G::PRENORM) tma_prefetch_desc(&p.tm_out);
+   }
+   __syncthreads();
++  if (tid == 0) { TMN_TS(p.prof, 0, clock64()); TMN_TS(p.prof, 4, tmn_globaltimer()); TMN_TS(p.prof, 6, (unsigned long long)n_iter); }
+ 
+   if (wg == 0) {
+     // ================================================================== producers: warp 0 operand stage, warp 1 weight ring
+-    setmaxnreg_dec<(R240 ? 24 : 40)>();
++    setmaxnreg_dec<(R240 ? 24 : 40)>();   // consumers take the rest of the launch allocation (K3Cfg::cons_regs)
+     if (warp == 0 && lane == 0) {
++      pdl_wait();                                       // TMN_PDL: X is the previous grid's (contraction) output
+       for (int t_local = 0; t_local < n_iter; ++t_local) {
+         const int tile = (int)blockIdx.x + t_local * (int)gridDim.x;
+         const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
+@@ -791,7 +901,7 @@
+   }
+ 
+   // ================================================================== consumers
+-  setmaxnreg_inc<(R240 ? 240 : 232)>();
++  setmaxnreg_inc<(R240 ? G::cons_regs(24) : G::cons_regs(40))>();
+ #ifdef TMN_DEV_PROF
+   unsigned long long pf[12] = {0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull};
+   long long pt0 = clock64();
+@@ -816,17 +926,26 @@
+   // for a 16-column slab is the A-fragment layout) before staging, and each warp's staged [16 tok][64 ch] slice leaves with one bulk-tensor store;
+   // the slice is reused by the next pair once that store has READ it (waited for at the next pair's start, behind two blocks of MMAs).
+   constexpr bool K3ST = (TMN_K3_BULK_STORE != 0) && !ZF32 && !OUT32 && !RESG && !PRENORM;
++  pdl_wait();                                                     // TMN_PDL
+   uint32_t zdep = 0;
+   for (int t_local = 0; t_local < n_iter; ++t_local) {
+     const int tile = (int)blockIdx.x + t_local * (int)gridDim.x;
+     const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
+     const int iw = i0 + tok0 / BJ, jw = j0 + tok0 % BJ;               // this WG's 64 tokens: row iw, columns jw .. jw+63
++    if (t_local == n_iter - 1 && tid == 128) pdl_trigger();       // TMN_PDL
++    float stA = 0.f, srA = 1.f, stB = 0.f, srB = 1.f;                     // experiment TMN_K3_STATS: K1-saved LN_in statistics, loaded before the X wait
++    if (TMN_K3_STATS != 0 && LNM == 1 && p.stats != nullptr) {
++      const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
++      if (iA < p.N && jA < p.N) { const float2 s = __ldg(reinterpret_cast<const float2*>(p.stats) + ((size_t)iA * p.N + jA)); stA = s.x; srA = s.y; }
++      if (iB < p.N && jB < p.N) { const float2 s = __ldg(reinterpret_cast<const float2*>(p.stats) + ((size_t)iB * p.N + jB)); stB = s.x; srB = s.y; }
++    }
+ 
+     // ---- projection operand: X sub-tile [C_H ch rows][64 tok] -> ldmatrix.trans -> release the X stage -> LN_out (before z is touched:
+     //      one raw fragment set live at a time keeps the normalisation inside the register budget)
+     uint32_t fx[KSP][4];
+     PF(0);                                               // 0: loop head / previous tile tail
+     mbar_wait(barX_full, t_local & 1);
++    if (tid == 128) { if (t_local == 0) TMN_TS(p.prof, 1, clock64()); if (t_local == n_iter - 1) TMN_TS(p.prof, 2, clock64()); }
+     PF(1);                                               // 1: X wait
+     {
+       const int tokc = 16 * wiw + ((mat & 1) ? 8 : 0);
+@@ -845,7 +964,7 @@
+     PF(2);                                               // 2: X ldmatrix + release
+ #ifndef TMN_DEV_NOLN
+     if (LNM == 2) ln_stock<1>(fx, sGout, sBout, lane, p.eps); else if (LNM == 3) ln_stock<2>(fx, sGout, sBout, lane, p.eps);
+-    else if (LNM == 4) ln_fragment<KSP, true, math::TX>(fx, sGout, sBout, lane, p.eps); else ln_fragment<KSP, true>(fx, sGout, sBout, lane, p.eps);
++    else if (LNM == 4) ln_fragment<KSP, true, math::TX>(fx, sGout, sBout, lane, p.eps); else ln_fragment<KSP, TMN_K3_LN_SERIAL != 0>(fx, sGout, sBout, lane, p.eps);
+ #endif
+     PF(3);                                               // 3: LN_out
+     // ---- gate operand: z rows -> release the z stage -> LN_in
+@@ -872,7 +991,11 @@
+     }
+     PF(5);                                               // 5: z load + release
+ #ifndef TMN_DEV_NOLN
+-    if (!ZF32 && !PRENORM) { if (LNM == 2 || LNM == 3) ln_stock<0>(fz, sGin, sBin, lane, p.eps); else if (LNM == 4) ln_fragment<KSG, true, math::TX>(fz, sGin, sBin, lane, p.eps); else ln_fragment<KSG, true>(fz, sGin, sBin, lane, p.eps); }
++    if (!ZF32 && !PRENORM) {
++      if (TMN_K3_STATS != 0 && LNM == 1 && p.stats != nullptr) {   // experiment: K1 saved this row's LN_in statistics -> affine pass only
++        ln_affine_given<KSG, TMN_K3_LN_SERIAL != 0>(fz, stA, srA, stB, srB, sGin, sBin, lane);
++      } else if (LNM == 2 || LNM == 3) ln_stock<0>(fz, sGin, sBin, lane, p.eps); else if (LNM == 4) ln_fragment<KSG, true, math::TX>(fz, sGin, sBin, lane, p.eps); else ln_fragment<KSG, TMN_K3_LN_SERIAL != 0>(fz, sGin, sBin, lane, p.eps);
++    }
+ #endif
+     PF(6);                                               // 6: LN_in
+ 
+@@ -884,7 +1007,7 @@
+     auto issue = [&](float (&accP)[16], float (&accG)[16], int qb) {
+       const uint32_t seqP = ((uint32_t)t_local * NB + (uint32_t)blk_of(qb)) * 2u, seqG = seqP + 1u;
+       {
+-        const int s = slot_of(seqP); mbar_wait(barW_full + s, phase_of(seqP));
++        const int s = slot_of(seqP); if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(seqP));
+         PF(7);                                           // 7: W(P) wait
+         const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+ #pragma unroll
+@@ -896,7 +1019,7 @@
+       }
+       {
+         PF(8);                                           // 8: P issue
+-        const int s = slot_of(seqG); mbar_wait(barW_full + s, phase_of(seqG));
++        const int s = slot_of(seqG); if (!(TMN_WSKIP != 0 && G::W_RESIDENT && t_local > 0)) mbar_wait(barW_full + s, phase_of(seqG));
+         PF(7);                                           // 7: W(G) wait
+         const uint64_t d = smem_desc(sW_u + s * SLOT_BYTES, 16, 1024, 1);
+ #pragma unroll
+@@ -1075,6 +1198,7 @@
+     }
+   }
+   if (K3ST && lane == 0) tma_store_wait_all();          // every bulk store of this warp complete before the CTA's shared memory is released
++  if (tid == 128) { TMN_TS(p.prof, 3, clock64()); TMN_TS(p.prof, 5, tmn_globaltimer()); }
+ #ifdef TMN_DEV_PROF
+   if (lane == 0 && p.prof) { for (int i = 0; i < 12; ++i) atomicAdd(p.prof + i, pf[i]); atomicAdd(p.prof + 12, 1ull); }
+ #endif
+Only in csrc: tmn_ptx.cuh
+diff -ru csrc/tmn_sm90_unit.cuh b/csrc/tmn_sm90_unit.cuh
+--- a/csrc/tmn_sm90_unit.cuh	2026-09-19 10:27:56.225832213 +0900
++++ b/csrc/tmn_sm90_unit.cuh	2026-09-20 19:18:24.689482938 +0900
+@@ -11,11 +11,17 @@
+ #include "tmn_k3_wide.cuh"   // the wide-K K3 member; includes tmn_kernels.cuh (K1 + register-resident K3)
+ 
+ // K1 CTA = BI*BJ/64 consumer warpgroups + 1 producer warpgroup; two CTAs per SM for a 64-token tile (== K1Cfg::NTHR, ::MINB)
++#ifdef TMN_K1_FORCE_LNM   // experiment: every bf16 K1 instantiation runs LayerNorm class TMN_K1_FORCE_LNM under its table name (A/B only)
++#define TMN_K1_LNM_OF(L) TMN_K1_FORCE_LNM
++#else
++#define TMN_K1_LNM_OF(L) L
++#endif
+ #define TMN_K1_LB(BI, BJ) __launch_bounds__(128 * ((BI) * (BJ) / 64 + 1), ((BI) * (BJ) == 64 ? 2 : 1))
++#define TMN_K1_MT(M) ((M) == 2 ? 1 : (M) == 3 ? 2 : 0)   // name field m: 0 no mask | 1 fp32 | 2 bf16 | 3 uint8/bool (TMN_MASK_TEMPLATE instantiations)
+ #define TMN_K1(CZ, CH, ZF, ZC, BI, BJ, NS, SK, M, L, V)                                                                              \
+   extern "C" __global__ void TMN_K1_LB(BI, BJ)                                                                                   \
+   tmn_k1_z##CZ##_h##CH##_##ZC##_t##BI##x##BJ##_s##NS##k##SK##_m##M##_l##L##_v##V(const __grid_constant__ tmn::K1Params p) {     \
+-    tmn::sm90::k1_body<tmn::K1Cfg<CZ, CH, ZF, BI, BJ, NS, SK>, (M) != 0, L, (V) != 0>(p);                                        \
++    tmn::sm90::k1_body<tmn::K1Cfg<CZ, CH, ZF, BI, BJ, NS, SK>, (M) != 0, TMN_K1_LNM_OF(L), (V) != 0, false, TMN_K1_MT(M)>(p);                  \
+   }
+ // fp32 z, also emitting bf16(LN_in(z)) rows for a pre-normalised K3 (name field x1)
+ #define TMN_K1X(CZ, CH, BI, BJ, NS, SK, M)                                                                                           \
+@@ -28,15 +34,16 @@
+ #define TMN_MODE_p 2
+ #define TMN_MODE_c 3
+ #define TMN_MODE_g 4
++#define TMN_K3_LB(BI, BJ) __launch_bounds__(128 * ((BI) * (BJ) == 64 ? 3 : (BI) * (BJ) / 64 + 1), 1)   // == K3Cfg::NTHR
+ #define TMN_K3(CZ, CH, ZF, ZC, BI, BJ, NS, NA, L)                                                                                    \
+-  extern "C" __global__ void __launch_bounds__(tmn::NTHREADS, 1)                                                                 \
++  extern "C" __global__ void TMN_K3_LB(BI, BJ)                                                                 \
+   tmn_k3_z##CZ##_h##CH##_##ZC##_t##BI##x##BJ##_s##NS##a##NA##_l##L(const __grid_constant__ tmn::K3Params p) {                    \
+     tmn::sm90::k3_body<tmn::K3Cfg<CZ, CH, TMN_MODE_##ZC, BI, BJ, NS, NA>, L>(p);                                                   \
+   }
+ // the update-only specialisation of the same kernel (name + "_u"): the residual add is compiled out and the residual word only selects the z-chunk
+ // release schedule (the host passes 1: chunks are released pair by pair after their output pass, as on the residual path)
+ #define TMN_K3U(CZ, CH, ZF, ZC, BI, BJ, NS, NA, L)                                                                                   \
+-  extern "C" __global__ void __launch_bounds__(tmn::NTHREADS, 1)                                                                 \
++  extern "C" __global__ void TMN_K3_LB(BI, BJ)                                                                 \
+   tmn_k3_z##CZ##_h##CH##_##ZC##_t##BI##x##BJ##_s##NS##a##NA##_l##L##_u(const __grid_constant__ tmn::K3Params p) {                \
+     tmn::sm90::k3_body<tmn::K3Cfg<CZ, CH, TMN_MODE_##ZC, BI, BJ, NS, NA>, L, true>(p);                                             \
+   }
+@@ -86,9 +93,19 @@
+ TMN_K1_SET_BF16(128, 128, 2, 64, 4, 2)          // streamed ring variant (tuning comparison)
+ TMN_K1(128, 128, false, b, 3, 64, 8, 2, 0, 2, 0) TMN_K1(128, 128, false, b, 3, 64, 8, 2, 1, 2, 0)   // tile-table candidates: 192-token tiles (measured by the 64-wide lane)
+ TMN_K1(128, 128, false, b, 6, 32, 8, 2, 0, 2, 0) TMN_K1(128, 128, false, b, 6, 32, 8, 2, 1, 2, 0)
++TMN_K1(128, 128, false, b, 6, 32, 8, 2, 0, 2, 1) TMN_K1(128, 128, false, b, 6, 32, 8, 2, 1, 2, 1)   // experiment: save LN_in statistics (v1) under the l2 table name
++#if TMN_MASK_TEMPLATE
++// mask element type variants (m2 = bf16, m3 = uint8/bool) of the tabled bf16 K1 configurations, l2 names (the served LN class under TMN_K1_FORCE_LNM)
++TMN_K1(128, 128, false, b, 6, 32, 8, 2, 2, 2, 0) TMN_K1(128, 128, false, b, 6, 32, 8, 2, 3, 2, 0)
++TMN_K1(128, 128, false, b, 3, 64, 8, 2, 2, 2, 0) TMN_K1(128, 128, false, b, 3, 64, 8, 2, 3, 2, 0)
++TMN_K1(128, 128, false, b, 2, 64, 8, 2, 2, 2, 0) TMN_K1(128, 128, false, b, 2, 64, 8, 2, 3, 2, 0)
++TMN_K1(128, 128, false, b, 1, 128, 8, 2, 2, 2, 0) TMN_K1(128, 128, false, b, 1, 128, 8, 2, 3, 2, 0)
++TMN_K1(128, 128, false, b, 2, 64, 4, 2, 2, 2, 0) TMN_K1(128, 128, false, b, 2, 64, 4, 2, 3, 2, 0)
++#endif
+ TMN_K1_SET_F32(128, 128, 2, 64, 8, 2)
+ TMN_K3_SET_BF16(128, 128, 2, 64, 8, 1)          // 8 x 8 KB = both weight matrices resident
+ TMN_K3_SET_BF16(128, 128, 2, 64, 8, 2)          // two accumulator sets (tile-table data: N <= 1536)
++TMN_K3_SET_BF16(128, 128, 3, 64, 8, 1)          // experiment: 192-token tile, three consumer warpgroups (12 math warps, 160 registers)
+ TMN_K3_SET_BF16(128, 128, 1, 128, 8, 1)
+ TMN_K3_SET_BF16(128, 128, 2, 64, 4, 1)          // streamed ring variant
+ TMN_K3_SET_BF16(128, 128, 1, 64, 8, 1)          // split-N
+Only in csrc: tmn_sm90_wide.cu
+Only in python/trimul_native: build.py
+diff -ru -x __pycache__ python/trimul_native/_driver.py b/python/trimul_native/_driver.py
+--- a/python/trimul_native/_driver.py	2026-09-19 10:27:56.225832213 +0900
++++ b/python/trimul_native/_driver.py	2026-09-20 19:18:24.718482762 +0900
+@@ -59,7 +59,17 @@
+ 
+ 
+ # ---------------------------------------------------------------------------------------------------------------- the ctypes form
++class _CUlaunchAttribute(ctypes.Structure):
++    _fields_ = [("id", ctypes.c_int), ("pad", ctypes.c_int), ("value", ctypes.c_ubyte * 64)]   # CUlaunchAttribute: id + 64-byte value union
++
++
++class _CUlaunchConfig(ctypes.Structure):
++    _fields_ = [("gridDimX", ctypes.c_uint), ("gridDimY", ctypes.c_uint), ("gridDimZ", ctypes.c_uint), ("blockDimX", ctypes.c_uint), ("blockDimY", ctypes.c_uint),
++                ("blockDimZ", ctypes.c_uint), ("sharedMemBytes", ctypes.c_uint), ("hStream", ctypes.c_void_p), ("attrs", ctypes.POINTER(_CUlaunchAttribute)), ("numAttrs", ctypes.c_uint)]
++
++
+ _SIGS = {   # entry point -> argtypes; restype is CUresult (c_int) everywhere
++    "cuLaunchKernelEx": [ctypes.POINTER(_CUlaunchConfig), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p],
+     "cuInit": [ctypes.c_uint],
+     "cuDriverGetVersion": [ctypes.POINTER(ctypes.c_int)],
+     "cuGetErrorName": [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)],
+@@ -198,6 +208,17 @@
+     def func_set_attribute(self, func, attr, value):
+         self._check("cuFuncSetAttribute", self._cuFuncSetAttribute(ctypes.c_void_p(int(func)), int(attr), int(value)))
+ 
++    def launch_kernel_ex(self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False):
++        """cuLaunchKernelEx with the programmatic-stream-serialisation attribute (CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION = 3)."""
++        cfg = _CUlaunchConfig(int(grid[0]), int(grid[1]), int(grid[2]), int(block[0]), int(block[1]), int(block[2]), int(smem_bytes), ctypes.c_void_p(int(stream)), None, 0)
++        attrs = (_CUlaunchAttribute * 1)()
++        if pdl:
++            attrs[0].id = 3
++            ctypes.memmove(attrs[0].value, ctypes.byref(ctypes.c_int(1)), 4)
++            cfg.attrs = ctypes.cast(attrs, ctypes.POINTER(_CUlaunchAttribute)); cfg.numAttrs = 1
++        kp = ctypes.cast(kernel_params, ctypes.c_void_p) if kernel_params is not None else ctypes.c_void_p(0)
++        self._check("cuLaunchKernelEx", self._cuLaunchKernelEx(ctypes.byref(cfg), ctypes.c_void_p(int(func)), kp, ctypes.c_void_p(0)))
++
+     def launch_kernel(self, func, grid, block, smem_bytes, stream, kernel_params):
+         """``kernel_params``: a ctypes array of c_void_p (one pointer per kernel argument, each at host memory holding that argument's bytes)."""
+         kp = ctypes.cast(kernel_params, ctypes.c_void_p) if kernel_params is not None else ctypes.c_void_p(0)
+@@ -322,6 +343,24 @@
+     def func_set_attribute(self, func, attr, value):
+         self._unwrap("cuFuncSetAttribute", self.d.cuFuncSetAttribute(self.d.CUfunction(int(func)), self.d.CUfunction_attribute(int(attr)), int(value)))
+ 
++    def launch_kernel_ex(self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False):
++        d = self.d
++        cfg = d.CUlaunchConfig()
++        cfg.gridDimX, cfg.gridDimY, cfg.gridDimZ = int(grid[0]), int(grid[1]), int(grid[2])
++        cfg.blockDimX, cfg.blockDimY, cfg.blockDimZ = int(block[0]), int(block[1]), int(block[2])
++        cfg.sharedMemBytes = int(smem_bytes)
++        cfg.hStream = d.CUstream(int(stream))
++        attrs = []
++        if pdl:
++            at = d.CUlaunchAttribute()
++            at.id = d.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION
++            at.value.programmaticStreamSerializationAllowed = 1
++            attrs.append(at)
++        cfg.attrs = attrs
++        cfg.numAttrs = len(attrs)
++        kp = ctypes.addressof(kernel_params) if kernel_params is not None else 0
++        self._unwrap("cuLaunchKernelEx", d.cuLaunchKernelEx(cfg, d.CUfunction(int(func)), kp, 0))
++
+     def launch_kernel(self, func, grid, block, smem_bytes, stream, kernel_params):
+         kp = ctypes.addressof(kernel_params) if kernel_params is not None else 0
+         self._unwrap("cuLaunchKernel", self.d.cuLaunchKernel(self.d.CUfunction(int(func)), int(grid[0]), int(grid[1]), int(grid[2]), int(block[0]), int(block[1]),
+diff -ru -x __pycache__ python/trimul_native/face.py b/python/trimul_native/face.py
+--- a/python/trimul_native/face.py	2026-09-19 10:27:56.226832207 +0900
++++ b/python/trimul_native/face.py	2026-09-20 19:18:24.719482756 +0900
+@@ -318,7 +318,7 @@
+     dw = str(key.get("direction", "*")).lower()
+     direction = DIRECTION_WORDS.get(dw, "*") if dw not in ("*", "both", "any", "") else "*"
+     cfg = raw.get("config") if isinstance(raw.get("config"), dict) else {}
+-    cfg = {k: (tuple(cfg[k]) if isinstance(cfg[k], list) else cfg[k]) for k in ("variant", "incoming_mode", "k1_cfg", "k3_cfg", "sm80_tiles") if k in cfg}
++    cfg = {k: (tuple(cfg[k]) if isinstance(cfg[k], list) else cfg[k]) for k in ("variant", "incoming_mode", "k1_cfg", "k3_cfg", "sm80_tiles", "stats_handoff") if k in cfg}
+     words = " ".join(str(key.get(k, "")) for k in ("class", "tier", "variant", "lever", "numerics")).lower() + " " + str(cfg.get("variant", "")).lower()
+     klass = "exact" if any(w in words for w in ("exact", "bitwise")) else "fast"
+     rv = key.get("residual", "*")
+@@ -781,7 +781,7 @@
+             if cfg.get("sm80_tiles"):
+                 sub["_sm80_tiles"] = tuple(cfg["sm80_tiles"])
+         ent = {"w_ptr": w_ap.data_ptr(), "arch": arch, "idx": idx, "dname": dname, "sub": sub, "pack": pack, "variant": variant,
+-               "kw90": {k: cfg[k] for k in ("incoming_mode", "k1_cfg", "k3_cfg") if cfg.get(k) is not None},
++               "kw90": {k: cfg[k] for k in ("incoming_mode", "k1_cfg", "k3_cfg", "stats_handoff") if cfg.get(k) is not None},
+                "wsrc": weights if isinstance(weights, dict) else {k: _wget(weights, k) for k in WEIGHT_KEYS}}
+         calls[fkey] = ent
+         while len(calls) > CALL_MEMO_MAX:                                  # bounded: least-recently used call keys leave first
+@@ -804,7 +804,7 @@
+             O = _STATE["sm90"].get(idx) or _sm90_ops(idx)
+             zz = z if z.is_contiguous() else z.contiguous()
+             mm = mask
+-            if mm is not None and mm.dtype != torch.float32:
++            if mm is not None and mm.dtype not in getattr(O, "MASK_NATIVE_DTYPES", (torch.float32,)):   # fp32 | bf16 | bool/uint8 read natively by K1
+                 mm = mm.to(torch.float32)
+             try:
+                 out = O.trimul(zz, mm, direction=dname, weights=ent["pack"], residual=bool(residual), exact=(ent["variant"] == "exact"), eps=float(eps), cache=sub, **ent["kw90"])
+Only in python/trimul_native: __init__.py
+diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/kernel.py
+--- a/python/trimul_native/kernel.py	2026-09-19 10:27:56.571830213 +0900
++++ b/python/trimul_native/kernel.py	2026-09-20 19:18:24.720482750 +0900
+@@ -13,6 +13,8 @@
+ import os
+ 
+ import torch
++PDL = os.environ.get("TRIMUL_NATIVE_PDL", "1").strip().lower() not in ("", "0", "off", "false")   # programmatic dependent launch of K1 / K3 (TMN_PDL builds only)
++MASK_CODE = {torch.float32: 1, torch.bfloat16: 2, torch.bool: 3, torch.uint8: 3}   # K1 name field m: 0 no mask | 1 fp32 | 2 bf16 | 3 bool/uint8 (TMN_MASK_TEMPLATE)
+ 
+ from . import launch as L
+ 
+@@ -33,8 +35,8 @@
+     ("sm_90a", 256, 256, "b"): dict(k1=(2, 64, 4, 4), k3=(2, 64, 4, 1), k3_u_late=1,   # update-only K3 releasing z pair by pair: -18..-24 % K3 at N 800-2048 (per-kernel same-process A/B); 64 / 128 keep the eager release (measured faster there)   # K1 4 x 32 KB ring: -1..-3 % op vs (2,64,8,2) at N 1200-2048 (same-process A/B); K3 (1,128,4,1) at
+                                      k1_variants=[(2, 64, 4, 4), (2, 64, 8, 2), (1, 128, 8, 2)], k3_variants=[(2, 64, 4, 1), (1, 128, 4, 1), (1, 64, 4, 1)]),   # N > 1200: -0.6 % without / +1..3 % with residual -> not tabled
+     ("sm_90a", 256, 256, "f"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 4, 1), k3_mode="c", k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 4, 1)], k3_variants_f=[(1, 64, 4, 1)]),   # fp32 z at 256: route "c" = one bf16 cast pass + the bf16 K1 + K3 mode c (fp32 residual/out); "p" = fp32 K1 emitting bf16 LN rows + K3 mode p; "f" = fp32 tiles (split-N K3)
+-    ("sm_90a", 128, 128, "b"): dict(k1=(6, 32, 8, 2), k3=(2, 64, 8, 1), by_n={1536: dict(k3=(2, 64, 8, 2)), 4096: dict(k3=(2, 64, 8, 1))},   # measured: 192-token K1 tile -3..-5 % op vs (2,64,8,2) at every N (same-process A/B); K3 two accumulator sets N <= 1536
+-                                     k1_variants=[(6, 32, 8, 2), (3, 64, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1), (2, 64, 8, 2), (1, 128, 8, 1), (2, 64, 4, 1), (1, 64, 8, 1)]),
++    ("sm_90a", 128, 128, "b"): dict(k1=(6, 32, 8, 2), k3=(3, 64, 8, 1), by_n={1536: dict(k3=(3, 64, 8, 1)), 4096: dict(k3=(2, 64, 8, 1))},   # experiment: 192-token K3 (3 consumer WGs) as the default up to N 1536   # measured: 192-token K1 tile -3..-5 % op vs (2,64,8,2) at every N (same-process A/B); K3 two accumulator sets N <= 1536
++                                     k1_variants=[(6, 32, 8, 2), (3, 64, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1), (2, 64, 8, 2), (1, 128, 8, 1), (2, 64, 4, 1), (1, 64, 8, 1), (3, 64, 8, 1)]),
+     ("sm_90a", 128, 128, "f"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 8, 1), (1, 64, 8, 1)]),
+     ("sm_90a", 64, 64, "b"): dict(k1=(3, 64, 4, 1), k3=(2, 64, 4, 1), by_n={400: dict(k1=(6, 32, 4, 1), k3=(2, 64, 4, 2)), 1536: dict(k1=(6, 32, 4, 1)), 4096: dict()},   # measured: 192-token K1 tiles (3 consumer warpgroups): (6,32) N<=1536, (3,64) above (-7..-16 % K1 vs the 128-token tiles); K3 a2 N<=400
+                                    k1_variants=[(3, 64, 4, 1), (6, 32, 4, 1), (1, 192, 4, 1), (2, 64, 4, 1), (4, 32, 4, 1), (1, 128, 4, 1)], k3_variants=[(2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1)]),
+@@ -89,7 +91,8 @@
+     slot = max(cz, ch) * 64
+     ob = 16 * 64 * esz
+     nbar = 2 * nkcz + 2 + 2 * nslot
+-    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + nslot * slot + 8 * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
++    ncwg = 2 if bmt == 64 else bmt // 64                                       # consumer warpgroups (== K3Cfg::NCWG)
++    return (bmt // 64) * ch * 128 + nkcz * bmt * 128 + nslot * slot + 4 * ncwg * ob + (2 * cz + 2 * ch) * 4 + ((nbar * 8 + 127) // 128) * 128
+ 
+ 
+ def k3w_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
+@@ -281,6 +284,11 @@
+             self._kern[name] = k
+         return k
+ 
++    def kernel_names(self, cz, ch):
++        """Kernel names compiled into the width's unit (its manifest entry): optional instantiations (native mask types) are probed here."""
++        u = self.unit(cz, ch)
++        return set((getattr(u, "entry", None) or {}).get("kernels") or {})
++
+     def attrs(self, cz, ch, name, smem):
+         return self.kernel(cz, ch, name, smem).attrs()
+ 
+@@ -312,7 +320,12 @@
+         zf32 = z.dtype == torch.float32
+         esz = 4 if zf32 else 2
+         bi, bj, nslot, skch = cfg or TILE_TABLE[(self.arch, cz, ch, "f" if zf32 else "b")]["k1"]
+-        name = k1_name(cz, ch, zf32, bi, bj, nslot, skch, mask is not None, lnm, stats is not None, xz is not None)
++        if mask is not None and mask.dtype not in MASK_CODE:
++            mask = mask.to(torch.float32)
++        mcode = 0 if mask is None else MASK_CODE[mask.dtype]
++        if mcode > 1 and k1_name(cz, ch, zf32, bi, bj, nslot, skch, mcode, lnm, stats is not None, xz is not None) not in self.kernel_names(cz, ch):
++            mask = mask.to(torch.float32); mcode = 1          # no native-mask instantiation of this configuration: the fp32 contract (one cast pass)
++        name = k1_name(cz, ch, zf32, bi, bj, nslot, skch, mcode, lnm, stats is not None, xz is not None)
+         ent = cache.get(("tmn.k1", name, N, Np, transpose, float(eps)))     # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps);
+                                                                                 # pointers / maps / the weight set are re-patched per call below
+         if ent is None:
+@@ -348,18 +361,20 @@
+         if ent[5] != mp:
+             pack.set_ptr(0, mp, field=3); ent[5] = mp
+         if ent[6] != abp:                        # planes pointer + the planes store descriptor (dims [Np (j)][Np (i)][2 ch], box [64][1][32]: one channel row of a 64-token run)
+-            tm_ab = self.tmap(cache, ("ab1", Np, ch), ab, [64, 1, 32], [Np, Np, 2 * ch], [Np * 2, Np * Np * 2], "128B", "128B")
++            # BJ == 32 tiles: [32 tok][2 pair rows][32 ch] box (a warpgroup's 64 tokens span two pair rows); other tiles: one 64-token row.
++            ab_box = [32, 2, 32] if bj == 32 else [64, 1, 32]
++            tm_ab = self.tmap(cache, ("ab1", Np, ch, bj), ab, ab_box, [Np, Np, 2 * ch], [Np * 2, Np * Np * 2], "64B" if bj == 32 else "128B", "128B")
+             pack.set_tensor_map(0, tm_ab, field=2); pack.set_ptr(0, abp, field=6); ent[6] = abp
+         if ent[7] != stp:
+             pack.set_ptr(0, stp, field=7); ent[7] = stp
+         xp = xz.data_ptr() if xz is not None else 0
+         if ent[8] != xp:
+             pack.set_ptr(0, xp, field=8); ent[8] = xp
+-        k.launch_packed(grid, block, pack, smem, self.stream_handle() if stream is None else stream)
++        k.launch_packed(grid, block, pack, smem, self.stream_handle() if stream is None else stream, pdl=PDL)
+         return ab
+ 
+     # ---------------------------------------------------------------- K3
+-    def k3(self, x, z, w, out, *, N, Np, cz, ch, residual, cfg=None, lnm=1, eps=1e-5, cache, stream=None, grid_limit=0, prof=None, zres=None, prenorm=True):
++    def k3(self, x, z, w, out, *, N, Np, cz, ch, residual, cfg=None, lnm=1, eps=1e-5, cache, stream=None, grid_limit=0, prof=None, zres=None, prenorm=True, stats=None):
+         """x = contraction planes [ch, Np, Np] bf16 contiguous (Np % 8 == 0); z = the gate operand rows [N, N, cz] contiguous: the bf16 or fp32 pair
+         tensor itself (modes b / f: LN_in applied here; out has z's dtype), or bf16(LN_in(z)) rows from K1's _x1 kernel with zres = the fp32 pair
+         tensor (mode p: fp32 residual + fp32 out; prenorm=False = mode c: z holds a bf16 cast of zres and LN_in is applied here)."""
+@@ -392,8 +407,8 @@
+             tm_wg = self.tmap(cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B")
+             tm_wo = self.tmap(cache, ("wo", cz, ch), w["wo"], [64, 32], [ch, cz], [ch * 2], "128B", "256B")
+             zero_tm = L.TensorMap(b"\0" * 128)
+-            st = L.Struct([zero_tm, zero_tm, tm_wg, tm_wo, zero_tm, w["ln_in_w"], w["ln_in_b"], w["ln_out_w"], w["ln_out_b"], None, None, None,
+-                           int(N), int(Np), int(tiles_j), int(num_tiles), 0, 0, float(eps), 0])
++            st = L.Struct([zero_tm, zero_tm, tm_wg, tm_wo, zero_tm, w["ln_in_w"], w["ln_in_b"], w["ln_out_w"], w["ln_out_b"], None, None, None, None,
++                           int(N), int(Np), int(tiles_j), int(num_tiles), 0, 0, float(eps), 0])   # field 12: K1-saved LN_in statistics (experiment)
+             pack = L.ArgPack([st])
+             assert pack.sizes[0] == K3_PARAMS_SIZE, pack.sizes[0]
+             grid = (min(num_tiles, self.sms) if not grid_limit else min(num_tiles, self.sms, grid_limit), 1, 1)
+@@ -418,6 +433,7 @@
+         if ent[5] is not tm_x:
+             pack.set_tensor_map(0, tm_x, field=1); ent[5] = tm_x
+         pack.set_ptr(0, out, field=10)
++        pack.set_ptr(0, (stats.data_ptr() if stats is not None else 0), field=12)
+         if mode == "b" and not k3_is_wide(cfg):   # bf16 output store descriptor: dims [cz (c)][N (j)][N (i)], box [64][16][1] = one warp's 16-token x 64-channel slice
+             tm_o = self.tmap(cache, ("o3", N, cz), out, [64, 16, 1], [cz, N, N], [cz * 2, N * cz * 2], "128B", "128B")
+             if ent[9] is not tm_o:
+@@ -428,6 +444,7 @@
+         if ent[7] != pp:
+             pack.set_ptr(0, pp, field=11); ent[7] = pp
+         if ent[6] != rf:
+-            pack.set_i32(0, rf, field=16); ent[6] = rf
+-        k.launch_packed(grid, BLOCK, pack, smem, self.stream_handle() if stream is None else stream)
++            pack.set_i32(0, rf, field=17); ent[6] = rf   # residual flag: field 17 after the stats pointer (experiment)
++        k3_block = (128 * (3 if bi * bj == 64 else bi * bj // 64 + 1), 1, 1)   # == K3Cfg::NTHR (experiment: 192-token tiles launch 512 threads)
++        k.launch_packed(grid, k3_block, pack, smem, self.stream_handle() if stream is None else stream, pdl=PDL)
+         return out
+diff -ru -x __pycache__ python/trimul_native/launch.py b/python/trimul_native/launch.py
+--- a/python/trimul_native/launch.py	2026-09-19 10:27:56.572830207 +0900
++++ b/python/trimul_native/launch.py	2026-09-20 19:18:24.846481988 +0900
+@@ -332,11 +332,15 @@
+         """Build a reusable ``ArgPack`` from a template argument list (see ``launch_packed``)."""
+         return ArgPack(args)
+ 
+-    def launch_packed(self, grid, block, pack, smem=0, stream=None):
++    def launch_packed(self, grid, block, pack, smem=0, stream=None, pdl=False):
+         """Launch with a prebuilt ``ArgPack`` (slots patched by the caller beforehand): one driver call, no packing, no allocation.
+-        ``grid`` / ``block``: 3-tuples of ints (no normalisation here -- this is the per-call fast path)."""
++        ``grid`` / ``block``: 3-tuples of ints (no normalisation here -- this is the per-call fast path).  ``pdl``: programmatic stream
++        serialisation attribute (cuLaunchKernelEx) -- only for kernels compiled with griddepcontrol.wait before their dependent accesses."""
+         st = current_stream_handle(self.unit.device_index) if stream is None else stream
+-        self.unit.drv.launch_kernel(self.handle, grid, block, smem, st, pack.array)
++        if pdl:
++            self.unit.drv.launch_kernel_ex(self.handle, grid, block, smem, st, pack.array, pdl=True)
++        else:
++            self.unit.drv.launch_kernel(self.handle, grid, block, smem, st, pack.array)
+ 
+ 
+ class Unit(object):
+Only in python/trimul_native: manifest.py
+diff -ru -x __pycache__ python/trimul_native/ops.py b/python/trimul_native/ops.py
+--- a/python/trimul_native/ops.py	2026-09-19 10:27:56.572830207 +0900
++++ b/python/trimul_native/ops.py	2026-09-20 19:18:24.847481982 +0900
+@@ -19,6 +19,7 @@
+ import os
+ 
+ import torch
++MASK_NATIVE_DTYPES = (torch.float32, torch.bfloat16, torch.bool, torch.uint8)   # element types K1 reads without a cast (kernel.MASK_CODE)
+ 
+ from . import kernel as K
+ 
+@@ -173,7 +174,7 @@
+         raise Unsupported("no tile-table entry for (c_z=%d, c_hidden=%d, %s z) on %s" % (w["cz"], w["ch"], "fp32" if form == "f" else "bf16", kernels().arch), "no_table")
+ 
+ 
+-def trimul_plane(z3, mask2, w, *, outgoing, residual=False, incoming_mode="kt", k1_cfg=None, k3_cfg=None, cache=None, eps=1e-5, lnm=(2, 1)):
++def trimul_plane(z3, mask2, w, *, outgoing, residual=False, incoming_mode="kt", k1_cfg=None, k3_cfg=None, cache=None, eps=1e-5, lnm=(2, 1), stats_handoff=False):
+     """One pair plane, fast variant: z3 [N, N, cz] contiguous (bf16 | fp32), mask2 None | [N, N] fp32 contiguous."""
+     if cache is None:
+         cache = _CACHE
+@@ -184,6 +185,7 @@
+     stream = kk.stream_handle()
+     ab = _buf(cache, ("ab", Np, ch), (2 * ch, Np, Np), torch.bfloat16, z3.device)
+     xz = zb = None
++    stats = None
+     lnm1, lnm3 = (lnm, lnm) if isinstance(lnm, int) else lnm
+     form = "f" if z3.dtype == torch.float32 else "b"
+     ent = K.lookup(kk.arch, cz, ch, form, N, "outgoing" if outgoing else "incoming", residual)   # deterministic defaults; explicit k1_cfg / k3_cfg override
+@@ -202,7 +204,8 @@
+     else:
+         if f32mode == "p":
+             xz = _buf(cache, ("xz", N, cz), (N, N, cz), torch.bfloat16, z3.device)   # bf16(LN_in(z)) rows: K3's gate operand (mode p)
+-        kk.k1(z3, mask2, w, ab, N=N, Np=Np, cz=cz, ch=ch, cfg=k1_cfg, lnm=lnm1, transpose=transpose, xz=xz, eps=eps, cache=cache, stream=stream)
++        stats = _buf(cache, ("lnstats", N), (N * N * 2,), torch.float32, z3.device) if (stats_handoff and form == "b" and lnm3 == 1) else None   # experiment: K1 saves LN_in (mean, rstd), K3 reuses
++        kk.k1(z3, mask2, w, ab, N=N, Np=Np, cz=cz, ch=ch, cfg=k1_cfg, lnm=lnm1, transpose=transpose, xz=xz, stats=stats, eps=eps, cache=cache, stream=stream)
+     x = _buf(cache, ("x", Np, ch), (ch, Np, Np), torch.bfloat16, z3.device)
+     torch.bmm(ab[:ch], ab[ch:].transpose(1, 2), out=x) if (outgoing or transpose) else torch.bmm(ab[:ch].transpose(1, 2), ab[ch:], out=x)
+     if f32mode == "c" and not residual:            # the update alone: returned in the compute dtype (bf16), as any fused bf16 row reading a cast z does
+@@ -219,7 +222,7 @@
+     elif xz is not None:
+         kk.k3(x, xz, w, out, N=N, Np=Np, cz=cz, ch=ch, residual=residual, cfg=k3_cfg, lnm=lnm3, eps=eps, cache=cache, stream=stream, zres=z3)
+     else:
+-        kk.k3(x, z3, w, out, N=N, Np=Np, cz=cz, ch=ch, residual=residual, cfg=k3_cfg, lnm=lnm3, eps=eps, cache=cache, stream=stream)
++        kk.k3(x, z3, w, out, N=N, Np=Np, cz=cz, ch=ch, residual=residual, cfg=k3_cfg, lnm=lnm3, eps=eps, cache=cache, stream=stream, stats=stats)
+     return out
+ 
+ 
+@@ -247,7 +250,7 @@
+     return epilogue(x, z3, w, residual=residual, lnm=2 if N % 4 == 0 else 3, cache=cache, eps=eps)
+ 
+ 
+-def trimul(z, mask=None, *, direction, weights, residual=False, exact=False, eps=1e-5, cache=None, incoming_mode=None, k1_cfg=None, k3_cfg=None, numerics="ref"):
++def trimul(z, mask=None, *, direction, weights, residual=False, exact=False, eps=1e-5, cache=None, incoming_mode=None, k1_cfg=None, k3_cfg=None, numerics="ref", stats_handoff=False):
+     """The op (module boundary above).  z [N,N,cz] or [B,N,N,cz] (B > 1: one launch set per plane), bf16 or fp32; mask None | [N,N] | [B|1,N,N].
+     Output dtype: bf16 z -> bf16.  fp32-resident z: residual=False returns the UPDATE in bf16 (the compute dtype, at every width: K3 mode g on
+     fp32 tiles, or the cast route at c_z = 256); residual=True returns z + update accumulated and stored in fp32.
+@@ -263,18 +266,18 @@
+         zb = z if z.is_contiguous() else z.contiguous()
+         mb = None
+         if mask is not None:
+-            mb = mask if mask.dtype == torch.float32 else mask.to(torch.float32)
++            mb = mask if mask.dtype in MASK_NATIVE_DTYPES else mask.to(torch.float32)   # fp32 | bf16 | bool/uint8: K1 reads these directly (m1 / m2 / m3 instantiations)
+             if not mb.is_contiguous():
+                 mb = mb.contiguous()
+         if exact:
+             return trimul_plane_exact(zb, mb, w, outgoing=outgoing, residual=residual, cache=cache, eps=eps)
+-        return trimul_plane(zb, mb, w, outgoing=outgoing, residual=residual, incoming_mode=incoming_mode, k1_cfg=k1_cfg, k3_cfg=k3_cfg, cache=cache, eps=eps, lnm=_LNM[numerics])
++        return trimul_plane(zb, mb, w, outgoing=outgoing, residual=residual, incoming_mode=incoming_mode, k1_cfg=k1_cfg, k3_cfg=k3_cfg, cache=cache, eps=eps, lnm=_LNM[numerics], stats_handoff=stats_handoff)
+     z4 = z if z.dim() == 4 else z.unsqueeze(0)
+     B, N = z4.shape[0], z4.shape[1]
+     m3 = None
+     if mask is not None:
+         m3 = mask.reshape(-1, N, N)
+-        if m3.dtype != torch.float32:
++        if m3.dtype not in MASK_NATIVE_DTYPES:
+             m3 = m3.to(torch.float32)
+     outs = []
+     for bi in range(B):
+Only in python/trimul_native: sm80_ops.py
+Only in python/trimul_native: vectors.py

@@ -1,0 +1,86 @@
+{
+ "N": 768,
+ "ch": 128,
+ "results": [
+  {
+   "name": "bmm TN (engine form)",
+   "cupti_us": 178.57193000000004,
+   "graph_us": 180.84928512573242,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"
+   ],
+   "tflops_graph": 641.2196592946325
+  },
+  {
+   "name": "bmm NN (b pre-transposed)",
+   "cupti_us": 192.72240999999983,
+   "graph_us": 194.5907211303711,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN"
+   ],
+   "tflops_graph": 595.9385746574568
+  },
+  {
+   "name": "bmm TN swapped operands (X^T)",
+   "cupti_us": 187.09715999999997,
+   "graph_us": 181.03103637695312,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"
+   ],
+   "tflops_graph": 640.5758886036145
+  },
+  {
+   "name": "matmul TN",
+   "cupti_us": 195.56541000000004,
+   "graph_us": 191.26399993896484,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"
+   ],
+   "tflops_graph": 606.3039413010596
+  },
+  {
+   "name": "bmm fp32 (reference cost)",
+   "cupti_us": 2803.954409999999,
+   "graph_us": 2772.4774169921875,
+   "kernels": [
+    "sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize128x128x8_stag",
+    "void at::native::unrolled_elementwise_kernel<at::native::dir"
+   ],
+   "tflops_graph": 41.82689326205854
+  },
+  {
+   "name": "bmm TN cublaslt-preferred",
+   "cupti_us": 179.09852999999995,
+   "graph_us": 182.29951858520508,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"
+   ],
+   "tflops_graph": 636.1186134334165
+  },
+  {
+   "name": "bmm NN cublaslt-preferred",
+   "cupti_us": 194.48803999999996,
+   "graph_us": 197.1308708190918,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NNN"
+   ],
+   "tflops_graph": 588.2595481375466
+  },
+  {
+   "name": "bmm TN two half-batches on two streams",
+   "cupti_us": 219.10430999999994,
+   "graph_us": 187.8214454650879,
+   "kernels": [
+    "Memset (Device)",
+    "nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TNN"
+   ],
+   "tflops_graph": 617.4168061844425
+  }
+ ]
+}
