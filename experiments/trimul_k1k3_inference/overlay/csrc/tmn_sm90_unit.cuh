@@ -127,6 +127,29 @@ TMN_K1_SET_BF16(128, 256, 2, 64, 8, 2)
 TMN_K1_SET_F32(128, 256, 2, 64, 8, 2)
 TMN_K3_SET_BF16(128, 256, 2, 64, 4, 1)
 TMN_K3_SET_F32(128, 256, 1, 64, 4, 1)           // fp32 z: split-N (the 128-token fp32 tile does not fit beside X)
+// the bidirectional shape (one shared-LayerNorm update, c_hidden = 2 x 128) is served by this unit, which upstream ships with a
+// single bf16 tile per kernel.  These are the tile-table candidates the 128/128 unit carries, instantiated here so the same sweep can run.
+// The [1024 x 128] weight stream is 256 KB, so no ring makes K1 weight-resident at this shape (K1Cfg::W_RESIDENT is false and TMN_WSKIP is inert).
+TMN_K1_SET_BF16(128, 256, 6, 32, 8, 2)          // 192-token tiles (three consumer warpgroups), the 128/128 default
+TMN_K1_SET_BF16(128, 256, 3, 64, 8, 2)
+TMN_K1_SET_BF16(128, 256, 1, 128, 8, 2)
+TMN_K1_SET_BF16(128, 256, 2, 64, 4, 2)          // shorter ring (4 x 32 KB k-chunks)
+TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring (6 x 16 KB; 8 slots would be 249 KB of shared memory, over the 227 KB limit)
+TMN_K3_SET_BF16(128, 256, 2, 64, 4, 2)          // two accumulator sets
+TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
+TMN_K3_SET_BF16(128, 256, 1, 64, 4, 1)          // split-N
+// NOT instantiable at this shape (K3Cfg::SMEM against the 227 KB limit, measured by the static_assert):
+//   (2,64,8,1) 249 KB -- the 8-slot ring the 128/128 unit uses;  (3,64,4,1) 241 KB -- the 192-token three-warpgroup K3 that won at 128/128
+//   (X alone is NSUB * C_H * 128 = 98 KB at 192 tokens).  Doubling c_hidden doubles both the X tile and the projection ring slot, so the two
+//   K3 changes that carried the 128/128 result cannot exist here; the K3 gain at 256 is the arithmetic (tanh gate, bf16x2 residual) only.
+#if TMN_MASK_TEMPLATE
+// mask element type variants (m2 = bf16, m3 = uint8/bool) of the candidate bf16 K1 tiles, l2 names (the served LN class under TMN_K1_FORCE_LNM)
+TMN_K1(128, 256, false, b, 2, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 3, 2, 0)
+TMN_K1(128, 256, false, b, 6, 32, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 6, 32, 8, 2, 3, 2, 0)
+TMN_K1(128, 256, false, b, 3, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 3, 64, 8, 2, 3, 2, 0)
+TMN_K1(128, 256, false, b, 1, 128, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 1, 128, 8, 2, 3, 2, 0)
+TMN_K1(128, 256, false, b, 2, 64, 4, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 4, 2, 3, 2, 0)
+#endif
 #elif TMN_CZ == 256 && TMN_CH == 64
 TMN_K1_SET_BF16(256, 64, 2, 64, 8, 2)
 TMN_K1_SET_F32(256, 64, 2, 64, 4, 2)

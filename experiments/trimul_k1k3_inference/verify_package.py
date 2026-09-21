@@ -45,4 +45,22 @@ for k in ("tmn_k1_z128_h128_b_t6x32_s8k2_m1_l2_v0", "tmn_k1_z128_h128_b_t6x32_s8
     assert man["kernels"][k]["spill_stores"] == 0 and man["kernels"][k]["spill_loads"] == 0, k
 for d in ov["defines"]:
     assert any(fl == "-D%s=%s" % (d, ov["defines"][d]) for fl in man["flags"]), d
-print("PASS: overlay hashes, vendored-upstream agreement, patch coverage, portable Python, records and the recorded payload build")
+# the bidirectional round: the c_hidden 256 unit, its interleaved rows and the tile the table now defaults to
+bd = root / "records" / "bidirectional"
+for L in (384, 768):
+    best = {}
+    for tag in ("base", "tab", "t3x64", "t6x32"):
+        for r in (1, 2, 3):
+            res = json.loads((bd / "interleaved" / ("%s-L%d-r%d.json" % (tag, L, r))).read_text())
+            assert res["c_hidden"] == 256, tag
+            one = res["results"][0]
+            assert one["error"]["finite"] and abs(one["error"]["rel_rms"] - 0.002586) < 2e-5, (tag, L, one["error"])
+            best.setdefault(tag, []).append(one["op_us"]["median"])
+    assert min(best["t3x64"]) < min(best["base"]), (L, best)          # the tabled tile is the measured winner, not an assumption
+    eng = json.loads((bd / "interleaved" / ("engine-cute-L%d.json" % L)).read_text())
+    assert eng["backend"].endswith("CUTE") and eng["op_us"]["median"] > 2 * min(best["t3x64"]), (L, eng["op_us"])
+h256 = json.loads((bd / "payload-manifest-h256.json").read_text())["units"]["tmn90_z128_h256/sm_90a"]
+assert any("_t3x64_" in k and k.startswith("tmn_k1_z128_h256") for k in h256["kernels"]), "the tabled K1 tile is not in the unit"
+for d in json.loads((root / "OVERLAY.json").read_text())["defines"]:
+    assert any(fl.startswith("-D%s=" % d) for fl in h256["flags"]), d
+print("PASS: overlay hashes, vendored-upstream agreement, patch coverage, portable Python, records, the recorded payload build and the bidirectional round")

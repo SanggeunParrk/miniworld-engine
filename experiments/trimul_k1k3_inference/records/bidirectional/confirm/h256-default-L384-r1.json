@@ -1,0 +1,54 @@
+{
+ "length": 384,
+ "width": 128,
+ "hidden_per_direction": 128,
+ "c_hidden": 256,
+ "mask_dtype": "bool",
+ "iters": 40,
+ "build": "/home/psk6950/MiniWorld/runs/trimul_bidir_20260921/final256/build",
+ "results": [
+  {
+   "config": null,
+   "error": {
+    "rel_rms": 0.002585937501862645,
+    "max_abs": 0.03219032287597656,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.002585937501862645,
+    "max_abs": 0.03219032287597656,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 88.10884999999982
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.8703750000000696
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 84.57277499999994
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 73.93445000000004
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t3x64_s8k2_m3_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     244.53887939453125,
+     244.25535202026367,
+     242.7027130126953
+    ],
+    "median": 244.25535202026367
+   }
+  }
+ ]
+}

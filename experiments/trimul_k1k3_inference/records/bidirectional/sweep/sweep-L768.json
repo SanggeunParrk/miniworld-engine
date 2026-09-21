@@ -1,0 +1,554 @@
+{
+ "length": 768,
+ "width": 128,
+ "hidden_per_direction": 128,
+ "c_hidden": 256,
+ "mask_dtype": "fp32",
+ "iters": 40,
+ "build": "/home/psk6950/MiniWorld/runs/trimul_bidir_20260921/tiles256/build",
+ "results": [
+  {
+   "config": null,
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 345.31304999999963
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 2.059200000000112
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 368.1556500000008
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 242.008125
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1019.7599792480469,
+     1050.0665283203125,
+     1046.3664245605469
+    ],
+    "median": 1046.3664245605469
+   }
+  },
+  {
+   "config": {
+    "k1_cfg": [
+     2,
+     64,
+     8,
+     2
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 376.65759999999966
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.8135750000000486
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 376.6829499999993
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 258.7947000000005
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1029.7901153564453,
+     1049.9775695800781,
+     1081.5078735351562
+    ],
+    "median": 1049.9775695800781
+   }
+  },
+  {
+   "config": {
+    "k1_cfg": [
+     6,
+     32,
+     8,
+     2
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 403.8046999999999
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 2.0784750000010037
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 423.07520000000005
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 298.9788500000003
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t6x32_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1049.5091247558594,
+     1061.1808013916016,
+     1051.4733123779297
+    ],
+    "median": 1051.4733123779297
+   }
+  },
+  {
+   "config": {
+    "k1_cfg": [
+     3,
+     64,
+     8,
+     2
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 344.92044999999996
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.859200000000135
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 384.2750000000001
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 267.6313750000003
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t3x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1006.7203521728516,
+     1020.8694458007812,
+     1026.6777801513672
+    ],
+    "median": 1020.8694458007812
+   }
+  },
+  {
+   "config": {
+    "k1_cfg": [
+     1,
+     128,
+     8,
+     2
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 402.4591500000007
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 2.2024000000004094
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 393.8646750000001
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 278.1828000000003
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t1x128_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1066.445083618164,
+     1081.9232177734375,
+     1077.5251007080078
+    ],
+    "median": 1077.5251007080078
+   }
+  },
+  {
+   "config": {
+    "k1_cfg": [
+     2,
+     64,
+     4,
+     2
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 380.39770000000055
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.6527999999997973
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 370.816750000001
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 246.43144999999998
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s4k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1036.7420959472656,
+     1057.1855926513672,
+     1054.3571472167969
+    ],
+    "median": 1054.3571472167969
+   }
+  },
+  {
+   "config": {
+    "k3_cfg": [
+     2,
+     64,
+     4,
+     1
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 367.50975000000005
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 2.2096500000002663
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 373.6026249999998
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 254.02682499999992
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1038.5065460205078,
+     1057.7606201171875,
+     1106.6397094726562
+    ],
+    "median": 1057.7606201171875
+   }
+  },
+  {
+   "config": {
+    "k3_cfg": [
+     2,
+     64,
+     6,
+     1
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 415.47217500000005
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.809574999999836
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 399.1281500000002
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 279.46590000000003
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s6a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1064.0819549560547,
+     1060.4966735839844,
+     1067.489242553711
+    ],
+    "median": 1064.0819549560547
+   }
+  },
+  {
+   "config": {
+    "k3_cfg": [
+     2,
+     64,
+     4,
+     2
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 391.74739999999974
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 2.1856500000002628
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 382.0744749999999
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 299.3363999999997
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t2x64_s4a2_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1059.3766021728516,
+     1074.3309020996094,
+     1114.7440338134766
+    ],
+    "median": 1074.3309020996094
+   }
+  },
+  {
+   "config": {
+    "k3_cfg": [
+     1,
+     128,
+     4,
+     1
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 417.66332500000027
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 1.8208249999993769
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 401.5335250000004
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 273.05874999999986
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t1x128_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1068.1552124023438,
+     1075.53955078125,
+     1072.2265625
+    ],
+    "median": 1072.2265625
+   }
+  },
+  {
+   "config": {
+    "k3_cfg": [
+     1,
+     64,
+     4,
+     1
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025848341174423695,
+    "max_abs": 0.031538963317871094,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 394.4002000000003
+    },
+    "other": {
+     "count": 2.0,
+     "sum_per_call_us": 2.169649999999797
+    },
+    "cublas": {
+     "count": 2.0,
+     "sum_per_call_us": 385.1441750000005
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 388.41079999999977
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h256_b_t2x64_s8k2_m1_l2_v0",
+    "tmn_k3_z128_h256_b_t1x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     1142.2598266601562,
+     1154.4905853271484,
+     1159.2530822753906
+    ],
+    "median": 1154.4905853271484
+   }
+  }
+ ]
+}

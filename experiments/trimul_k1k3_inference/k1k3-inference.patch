@@ -1,6 +1,6 @@
-diff -ru csrc/common/tmn_math.cuh b/csrc/common/tmn_math.cuh
---- a/csrc/common/tmn_math.cuh	2026-09-19 10:27:56.224832218 +0900
-+++ b/csrc/common/tmn_math.cuh	2026-09-20 19:18:24.708482823 +0900
+diff -ru a/csrc/common/tmn_math.cuh b/csrc/common/tmn_math.cuh
+--- a/csrc/common/tmn_math.cuh
++++ b/csrc/common/tmn_math.cuh
 @@ -77,7 +77,12 @@
  }
  
@@ -28,28 +28,9 @@ diff -ru csrc/common/tmn_math.cuh b/csrc/common/tmn_math.cuh
  // fp32 z + the bf16-rounded update, in fp32
  TMN_MATH_DEVI float residual_f32(float z, float o_rounded) { return __fadd_rn(z, o_rounded); }
  
-Only in csrc: INTERFACE.md
-Only in csrc: sm80
-Only in csrc: tmn90_z128_h128.cu
-Only in csrc: tmn90_z128_h256.cu
-Only in csrc: tmn90_z128_h384.cu
-Only in csrc: tmn90_z128_h64.cu
-Only in csrc: tmn90_z256_h128.cu
-Only in csrc: tmn90_z256_h256.cu
-Only in csrc: tmn90_z256_h384.cu
-Only in csrc: tmn90_z256_h64.cu
-Only in csrc: tmn90_z384_h128.cu
-Only in csrc: tmn90_z384_h256.cu
-Only in csrc: tmn90_z384_h384.cu
-Only in csrc: tmn90_z384_h64.cu
-Only in csrc: tmn90_z64_h128.cu
-Only in csrc: tmn90_z64_h256.cu
-Only in csrc: tmn90_z64_h384.cu
-Only in csrc: tmn90_z64_h64.cu
-Only in csrc: tmn_k3_wide.cuh
-diff -ru csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
---- a/csrc/tmn_kernels.cuh	2026-09-19 10:27:56.225832213 +0900
-+++ b/csrc/tmn_kernels.cuh	2026-09-20 19:26:32.843532079 +0900
+diff -ru a/csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
+--- a/csrc/tmn_kernels.cuh
++++ b/csrc/tmn_kernels.cuh
 @@ -27,6 +27,33 @@
  #define TMN_K3_BULK_STORE 1     // K3 output, bf16 pair tensor in / bf16 out: 1 = residual added in registers (the pair's z re-read from the operand tile by
  #endif                          //   ldmatrix in the accumulator layout), stmatrix staging, one cp.async.bulk.tensor store per warp slice; 0 = the staged vector
@@ -446,10 +427,9 @@ diff -ru csrc/tmn_kernels.cuh b/csrc/tmn_kernels.cuh
  #ifdef TMN_DEV_PROF
    if (lane == 0 && p.prof) { for (int i = 0; i < 12; ++i) atomicAdd(p.prof + i, pf[i]); atomicAdd(p.prof + 12, 1ull); }
  #endif
-Only in csrc: tmn_ptx.cuh
-diff -ru csrc/tmn_sm90_unit.cuh b/csrc/tmn_sm90_unit.cuh
---- a/csrc/tmn_sm90_unit.cuh	2026-09-19 10:27:56.225832213 +0900
-+++ b/csrc/tmn_sm90_unit.cuh	2026-09-20 19:18:24.689482938 +0900
+diff -ru a/csrc/tmn_sm90_unit.cuh b/csrc/tmn_sm90_unit.cuh
+--- a/csrc/tmn_sm90_unit.cuh
++++ b/csrc/tmn_sm90_unit.cuh
 @@ -11,11 +11,17 @@
  #include "tmn_k3_wide.cuh"   // the wide-K K3 member; includes tmn_kernels.cuh (K1 + register-resident K3)
  
@@ -508,11 +488,39 @@ diff -ru csrc/tmn_sm90_unit.cuh b/csrc/tmn_sm90_unit.cuh
  TMN_K3_SET_BF16(128, 128, 1, 128, 8, 1)
  TMN_K3_SET_BF16(128, 128, 2, 64, 4, 1)          // streamed ring variant
  TMN_K3_SET_BF16(128, 128, 1, 64, 8, 1)          // split-N
-Only in csrc: tmn_sm90_wide.cu
-Only in python/trimul_native: build.py
-diff -ru -x __pycache__ python/trimul_native/_driver.py b/python/trimul_native/_driver.py
---- a/python/trimul_native/_driver.py	2026-09-19 10:27:56.225832213 +0900
-+++ b/python/trimul_native/_driver.py	2026-09-20 19:18:24.718482762 +0900
+@@ -110,6 +127,29 @@
+ TMN_K1_SET_F32(128, 256, 2, 64, 8, 2)
+ TMN_K3_SET_BF16(128, 256, 2, 64, 4, 1)
+ TMN_K3_SET_F32(128, 256, 1, 64, 4, 1)           // fp32 z: split-N (the 128-token fp32 tile does not fit beside X)
++// the bidirectional shape (one shared-LayerNorm update, c_hidden = 2 x 128) is served by this unit, which upstream ships with a
++// single bf16 tile per kernel.  These are the tile-table candidates the 128/128 unit carries, instantiated here so the same sweep can run.
++// The [1024 x 128] weight stream is 256 KB, so no ring makes K1 weight-resident at this shape (K1Cfg::W_RESIDENT is false and TMN_WSKIP is inert).
++TMN_K1_SET_BF16(128, 256, 6, 32, 8, 2)          // 192-token tiles (three consumer warpgroups), the 128/128 default
++TMN_K1_SET_BF16(128, 256, 3, 64, 8, 2)
++TMN_K1_SET_BF16(128, 256, 1, 128, 8, 2)
++TMN_K1_SET_BF16(128, 256, 2, 64, 4, 2)          // shorter ring (4 x 32 KB k-chunks)
++TMN_K3_SET_BF16(128, 256, 2, 64, 6, 1)          // longer weight ring (6 x 16 KB; 8 slots would be 249 KB of shared memory, over the 227 KB limit)
++TMN_K3_SET_BF16(128, 256, 2, 64, 4, 2)          // two accumulator sets
++TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
++TMN_K3_SET_BF16(128, 256, 1, 64, 4, 1)          // split-N
++// NOT instantiable at this shape (K3Cfg::SMEM against the 227 KB limit, measured by the static_assert):
++//   (2,64,8,1) 249 KB -- the 8-slot ring the 128/128 unit uses;  (3,64,4,1) 241 KB -- the 192-token three-warpgroup K3 that won at 128/128
++//   (X alone is NSUB * C_H * 128 = 98 KB at 192 tokens).  Doubling c_hidden doubles both the X tile and the projection ring slot, so the two
++//   K3 changes that carried the 128/128 result cannot exist here; the K3 gain at 256 is the arithmetic (tanh gate, bf16x2 residual) only.
++#if TMN_MASK_TEMPLATE
++// mask element type variants (m2 = bf16, m3 = uint8/bool) of the candidate bf16 K1 tiles, l2 names (the served LN class under TMN_K1_FORCE_LNM)
++TMN_K1(128, 256, false, b, 2, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 3, 2, 0)
++TMN_K1(128, 256, false, b, 6, 32, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 6, 32, 8, 2, 3, 2, 0)
++TMN_K1(128, 256, false, b, 3, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 3, 64, 8, 2, 3, 2, 0)
++TMN_K1(128, 256, false, b, 1, 128, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 1, 128, 8, 2, 3, 2, 0)
++TMN_K1(128, 256, false, b, 2, 64, 4, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 4, 2, 3, 2, 0)
++#endif
+ #elif TMN_CZ == 256 && TMN_CH == 64
+ TMN_K1_SET_BF16(256, 64, 2, 64, 8, 2)
+ TMN_K1_SET_F32(256, 64, 2, 64, 4, 2)
+diff -ru a/python/trimul_native/_driver.py b/python/trimul_native/_driver.py
+--- a/python/trimul_native/_driver.py
++++ b/python/trimul_native/_driver.py
 @@ -59,7 +59,17 @@
  
  
@@ -574,9 +582,9 @@ diff -ru -x __pycache__ python/trimul_native/_driver.py b/python/trimul_native/_
      def launch_kernel(self, func, grid, block, smem_bytes, stream, kernel_params):
          kp = ctypes.addressof(kernel_params) if kernel_params is not None else 0
          self._unwrap("cuLaunchKernel", self.d.cuLaunchKernel(self.d.CUfunction(int(func)), int(grid[0]), int(grid[1]), int(grid[2]), int(block[0]), int(block[1]),
-diff -ru -x __pycache__ python/trimul_native/face.py b/python/trimul_native/face.py
---- a/python/trimul_native/face.py	2026-09-19 10:27:56.226832207 +0900
-+++ b/python/trimul_native/face.py	2026-09-20 19:18:24.719482756 +0900
+diff -ru a/python/trimul_native/face.py b/python/trimul_native/face.py
+--- a/python/trimul_native/face.py
++++ b/python/trimul_native/face.py
 @@ -318,7 +318,7 @@
      dw = str(key.get("direction", "*")).lower()
      direction = DIRECTION_WORDS.get(dw, "*") if dw not in ("*", "both", "any", "") else "*"
@@ -604,10 +612,9 @@ diff -ru -x __pycache__ python/trimul_native/face.py b/python/trimul_native/face
                  mm = mm.to(torch.float32)
              try:
                  out = O.trimul(zz, mm, direction=dname, weights=ent["pack"], residual=bool(residual), exact=(ent["variant"] == "exact"), eps=float(eps), cache=sub, **ent["kw90"])
-Only in python/trimul_native: __init__.py
-diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/kernel.py
---- a/python/trimul_native/kernel.py	2026-09-19 10:27:56.571830213 +0900
-+++ b/python/trimul_native/kernel.py	2026-09-20 19:18:24.720482750 +0900
+diff -ru a/python/trimul_native/kernel.py b/python/trimul_native/kernel.py
+--- a/python/trimul_native/kernel.py
++++ b/python/trimul_native/kernel.py
 @@ -13,6 +13,8 @@
  import os
  
@@ -628,7 +635,18 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
      ("sm_90a", 128, 128, "f"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 8, 1), (1, 64, 8, 1)]),
      ("sm_90a", 64, 64, "b"): dict(k1=(3, 64, 4, 1), k3=(2, 64, 4, 1), by_n={400: dict(k1=(6, 32, 4, 1), k3=(2, 64, 4, 2)), 1536: dict(k1=(6, 32, 4, 1)), 4096: dict()},   # measured: 192-token K1 tiles (3 consumer warpgroups): (6,32) N<=1536, (3,64) above (-7..-16 % K1 vs the 128-token tiles); K3 a2 N<=400
                                     k1_variants=[(3, 64, 4, 1), (6, 32, 4, 1), (1, 192, 4, 1), (2, 64, 4, 1), (4, 32, 4, 1), (1, 128, 4, 1)], k3_variants=[(2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1)]),
-@@ -89,7 +91,8 @@
+@@ -43,7 +45,9 @@
+     ("sm_90a", 64, 256, "f"): dict(k1=(2, 64, 16, 1), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 16, 1)], k3_variants=[(2, 64, 4, 1)]),
+     ("sm_90a", 128, 64, "b"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 8, 2)]),
+     ("sm_90a", 128, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1)]),
+-    ("sm_90a", 128, 256, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1)]),
++    ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 4, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2)
++                                     k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3: every candidate that fits ties or loses; (2,64,8,1) and (3,64,4,1) are over the shared-memory limit at c_hidden 256
++                                     k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1)]),
+     ("sm_90a", 128, 256, "f"): dict(k1=(2, 64, 8, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(1, 64, 4, 1)]),
+     ("sm_90a", 256, 64, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1)]),
+     ("sm_90a", 256, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(1, 64, 4, 1)]),
+@@ -89,7 +93,8 @@
      slot = max(cz, ch) * 64
      ob = 16 * 64 * esz
      nbar = 2 * nkcz + 2 + 2 * nslot
@@ -638,7 +656,7 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
  
  
  def k3w_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
-@@ -281,6 +284,11 @@
+@@ -281,6 +286,11 @@
              self._kern[name] = k
          return k
  
@@ -650,7 +668,7 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
      def attrs(self, cz, ch, name, smem):
          return self.kernel(cz, ch, name, smem).attrs()
  
-@@ -312,7 +320,12 @@
+@@ -312,7 +322,12 @@
          zf32 = z.dtype == torch.float32
          esz = 4 if zf32 else 2
          bi, bj, nslot, skch = cfg or TILE_TABLE[(self.arch, cz, ch, "f" if zf32 else "b")]["k1"]
@@ -664,7 +682,7 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
          ent = cache.get(("tmn.k1", name, N, Np, transpose, float(eps)))     # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps);
                                                                                  # pointers / maps / the weight set are re-patched per call below
          if ent is None:
-@@ -348,18 +361,20 @@
+@@ -348,18 +363,20 @@
          if ent[5] != mp:
              pack.set_ptr(0, mp, field=3); ent[5] = mp
          if ent[6] != abp:                        # planes pointer + the planes store descriptor (dims [Np (j)][Np (i)][2 ch], box [64][1][32]: one channel row of a 64-token run)
@@ -688,7 +706,7 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
          """x = contraction planes [ch, Np, Np] bf16 contiguous (Np % 8 == 0); z = the gate operand rows [N, N, cz] contiguous: the bf16 or fp32 pair
          tensor itself (modes b / f: LN_in applied here; out has z's dtype), or bf16(LN_in(z)) rows from K1's _x1 kernel with zres = the fp32 pair
          tensor (mode p: fp32 residual + fp32 out; prenorm=False = mode c: z holds a bf16 cast of zres and LN_in is applied here)."""
-@@ -392,8 +407,8 @@
+@@ -392,8 +409,8 @@
              tm_wg = self.tmap(cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B")
              tm_wo = self.tmap(cache, ("wo", cz, ch), w["wo"], [64, 32], [ch, cz], [ch * 2], "128B", "256B")
              zero_tm = L.TensorMap(b"\0" * 128)
@@ -699,7 +717,7 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
              pack = L.ArgPack([st])
              assert pack.sizes[0] == K3_PARAMS_SIZE, pack.sizes[0]
              grid = (min(num_tiles, self.sms) if not grid_limit else min(num_tiles, self.sms, grid_limit), 1, 1)
-@@ -418,6 +433,7 @@
+@@ -418,6 +435,7 @@
          if ent[5] is not tm_x:
              pack.set_tensor_map(0, tm_x, field=1); ent[5] = tm_x
          pack.set_ptr(0, out, field=10)
@@ -707,7 +725,7 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
          if mode == "b" and not k3_is_wide(cfg):   # bf16 output store descriptor: dims [cz (c)][N (j)][N (i)], box [64][16][1] = one warp's 16-token x 64-channel slice
              tm_o = self.tmap(cache, ("o3", N, cz), out, [64, 16, 1], [cz, N, N], [cz * 2, N * cz * 2], "128B", "128B")
              if ent[9] is not tm_o:
-@@ -428,6 +444,7 @@
+@@ -428,6 +446,7 @@
          if ent[7] != pp:
              pack.set_ptr(0, pp, field=11); ent[7] = pp
          if ent[6] != rf:
@@ -717,9 +735,9 @@ diff -ru -x __pycache__ python/trimul_native/kernel.py b/python/trimul_native/ke
 +        k3_block = (128 * (3 if bi * bj == 64 else bi * bj // 64 + 1), 1, 1)   # == K3Cfg::NTHR (experiment: 192-token tiles launch 512 threads)
 +        k.launch_packed(grid, k3_block, pack, smem, self.stream_handle() if stream is None else stream, pdl=PDL)
          return out
-diff -ru -x __pycache__ python/trimul_native/launch.py b/python/trimul_native/launch.py
---- a/python/trimul_native/launch.py	2026-09-19 10:27:56.572830207 +0900
-+++ b/python/trimul_native/launch.py	2026-09-20 19:18:24.846481988 +0900
+diff -ru a/python/trimul_native/launch.py b/python/trimul_native/launch.py
+--- a/python/trimul_native/launch.py
++++ b/python/trimul_native/launch.py
 @@ -332,11 +332,15 @@
          """Build a reusable ``ArgPack`` from a template argument list (see ``launch_packed``)."""
          return ArgPack(args)
@@ -739,10 +757,9 @@ diff -ru -x __pycache__ python/trimul_native/launch.py b/python/trimul_native/la
  
  
  class Unit(object):
-Only in python/trimul_native: manifest.py
-diff -ru -x __pycache__ python/trimul_native/ops.py b/python/trimul_native/ops.py
---- a/python/trimul_native/ops.py	2026-09-19 10:27:56.572830207 +0900
-+++ b/python/trimul_native/ops.py	2026-09-20 19:18:24.847481982 +0900
+diff -ru a/python/trimul_native/ops.py b/python/trimul_native/ops.py
+--- a/python/trimul_native/ops.py
++++ b/python/trimul_native/ops.py
 @@ -19,6 +19,7 @@
  import os
  
@@ -818,5 +835,3 @@ diff -ru -x __pycache__ python/trimul_native/ops.py b/python/trimul_native/ops.p
              m3 = m3.to(torch.float32)
      outs = []
      for bi in range(B):
-Only in python/trimul_native: sm80_ops.py
-Only in python/trimul_native: vectors.py

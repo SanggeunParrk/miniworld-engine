@@ -28,6 +28,8 @@ def main():
     ap.add_argument("--grid", default="r2", help="test-vector grid for `vectors make` (r2 = the release grid, smoke = 4 cases)")
     ap.add_argument("--force", action="store_true", help="apply the overlay even if the upstream base hashes differ")
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--define", action="append", default=[], help="extra K=V switch on top of the recorded ones (e.g. TMN_BIDIR_TILES=1)")
+    ap.add_argument("--unit", default=OVERLAY["unit"], help="unit to compile (default: the recorded %s; e.g. tmn90_z128_h256 for the bidirectional c_hidden=256 shape)" % OVERLAY["unit"])
     a = ap.parse_args()
     up = a.upstream or (os.environ.get("MINIWORLD_ANTHROPIC_ROOT") and os.path.join(os.environ["MINIWORLD_ANTHROPIC_ROOT"], OVERLAY["upstream"]["source_prefix"]))
     if not up or not (Path(up) / "csrc").is_dir() or not (Path(up) / "python" / "trimul_native").is_dir():
@@ -55,17 +57,21 @@ def main():
     defines = dict(OVERLAY["defines"])
     if a.probe:
         defines.update(OVERLAY["probe_define"])
+    for d in a.define:
+        k, _, v = d.partition("=")
+        defines[k] = v or "1"
     env = dict(os.environ, PYTHONPATH=str(out / "python") + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""))
-    cmd = [a.python, "-m", "trimul_native.build", "--archs", ",".join(OVERLAY["archs"]), "--units", OVERLAY["unit"], "--src", str(out / "csrc"),
+    cmd = [a.python, "-m", "trimul_native.build", "--archs", ",".join(OVERLAY["archs"]), "--units", a.unit, "--src", str(out / "csrc"),
            "--out", str(out / "build"), "--lineinfo", "--jobs", str(a.jobs)]
     for k, v in defines.items():
         cmd += ["--define", "%s=%s" % (k, v)]
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=out, env=env, check=True)
     man = json.loads((out / "build" / "manifest.json").read_text())
-    unit = man["units"]["%s/%s" % (OVERLAY["unit"], OVERLAY["archs"][0])]
-    spills = {k: v for k, v in unit["kernels"].items() if (v.get("spill_stores") or v.get("spill_loads")) and "_t6x32_" in k}
-    print("built %d kernels; cubin %s; K1 t6x32 spills: %s" % (len(unit["kernels"]), unit.get("cubin_sha256", "?")[:12], spills or "none"), flush=True)
+    unit = man["units"]["%s/%s" % (a.unit, OVERLAY["archs"][0])]
+    spills = {k: (v.get("spill_stores"), v.get("spill_loads")) for k, v in unit["kernels"].items() if v.get("spill_stores") or v.get("spill_loads")}
+    print("built %d kernels; cubin %s; spilling kernels: %s" % (len(unit["kernels"]), unit.get("cubin_sha256", "?")[:12],
+                                                                ", ".join(sorted(spills)) if spills else "none"), flush=True)
     if not a.no_vectors:
         (out / "testvectors").mkdir(exist_ok=True)
         cmd = [a.python, "-m", "trimul_native.vectors", "make", "--out", str(out / "testvectors"), "--grid", a.grid, "--no-ref", "--no-isolated"]

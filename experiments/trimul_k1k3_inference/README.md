@@ -68,6 +68,43 @@ two streams, all eight cuBLASLt heuristic algorithms).
   64-token warpgroup units (L768 −5 µs per kernel), 2-CTA cluster TMA multicast of the weight fill (K3 startup −2 µs), and handing the
   face a bool pair mask from the engine (K1 −4 µs at L768, one line at the call site).
 
+## The bidirectional shape (c_hidden = 256)
+
+A bidirectional TriMul (AF3's outgoing + incoming in one block, one shared input LayerNorm, one shared output LayerNorm over both
+halves) is the same three kernels at twice the hidden width: K1 with `c_hidden = 2 x 128` in natural layout, the contraction split by
+channel half (outgoing NT on the first 128 planes, incoming TN on the second), K3 normalising all 256 channels and projecting back to
+128. Upstream ships the unit for it, `tmn90_z128_h256`. Measured with `bench_bidir.py` (the composition through `trimul_native.ops`)
+and `bench_engine_bidir.py` (the engine's own path on the same inputs), node02 H100, bf16, B1, C128, pair mask, residual fused in K3,
+one-call CUDA graph, three interleaved rounds of separate processes per row:
+
+| L | engine CuTe (the engine's default today) | v5 `z128_h256`, pristine | + this overlay | + K1 `(3,64,8,2)` |
+|---:|---:|---:|---:|---:|
+| 384 | 600.5 µs | 270.6 | 253.5 (−6.3 %) | **243.2 (−10.1 %)** — 2.47x the CuTe path |
+| 768 | 2126.9 µs | 1112.3 | 1043.8 (−6.2 %) | **1017.6 (−8.5 %)** — 2.09x the CuTe path |
+
+Round-to-round spread was 0.3–5.4 µs; every row matches the fp32 module reference at rel-RMS 2.585e-3 (the CuTe path at 2.539e-3, its
+own rounding). The engine figures agree with the engine's own recorded bidirectional inference benchmark (0.586 / 2.106 ms) to 2.5 %.
+
+**What transfers from the 128/128 result and what does not.** The arithmetic switches (tanh gate, K1 LayerNorm class, bf16x2 residual)
+and the host-side ones (mask element type, PDL) apply unchanged — K1's input LayerNorm is over `c_z`, which is still 128. The two
+*structural* K3 changes cannot exist at this width: `K3Cfg::SMEM` puts the 8-slot ring at 249 KB and the 192-token three-warpgroup tile
+at 241 KB, both over the 227 KB limit, because doubling `c_hidden` doubles both the X tile and the projection ring slot. K1's weight
+stream is 256 KB, so no ring makes it resident either and `TMN_WSKIP` is inert here. That is the whole story of the split result:
+**K1 −18.7 % at both lengths, K3 −3.3 / −4.2 % (arithmetic only)**, contraction unchanged.
+
+The unit is therefore instantiated with the tile candidates the 128/128 unit already carries, and the tile table's default for this
+shape becomes the measured winner, K1 `(3,64,8,2)` — a 192-token tile with three consumer warpgroups (K1 107.4 → 87.3 µs at L384,
+392.8 → 319.3 at L768). Of the K3 tiles that do fit, `(2,64,6,1)`, `(2,64,4,2)`, `(1,128,4,1)` and `(1,64,4,1)` all tie or lose to the
+tabled `(2,64,4,1)`. The bf16 (m2) and bool (m3) mask instantiations cost the same as fp32 here, so their value is only that the caller
+no longer pays the per-call fp32 cast (4.7 µs).
+
+**Where the remaining time is.** Against the same 2.85 TB/s pattern floor, at L768 the essential bytes are K1 756 MB, contraction
+906 MB, K3 604 MB: K1 is at 83 %, the contraction at 86 % (629 TFLOP/s bf16 at the same time — the balance point the 128/128 audit
+found), K3 at 87 %, the whole op at 78 % of the sum. The contraction is now 36 % of the op. Fusing its two GEMMs into one — which a
+per-half transposed K1 store would allow, the way upstream's `INCOMING_MODE="kt"` transposes the unidirectional incoming direction —
+was measured as an upper bound on the same buffers (`bench_contract_forms.py`): **5.8 µs at L384 and nothing outside the noise at
+L768**, so it is not worth the kernel change.
+
 ## Reproduce
 
 Needs an allocated H100 (sm_90a), nvcc 12.x, PyTorch CUDA with `cuda.bindings` or `libcuda.so.1` for the driver binding, and the
@@ -88,6 +125,13 @@ python $e/bench_pdl.py --length 384 --output pdl-L384.json                      
 python $e/bench_contraction.py --length 768 --output contraction-L768.json           # cuBLAS forms of the contraction (no payload needed)
 python $e/build_payload.py --upstream <pkg/v5> --out $e/payload-probe --probe --grid smoke
 TRIMUL_NATIVE_BUILD_DIR=$PWD/$e/payload-probe/build python $e/probe_cta_timeline.py --length 384 --output cta-L384.json
+
+# the bidirectional shape: the same overlay, the c_hidden = 256 unit
+python $e/build_payload.py --upstream <pkg/v5> --unit tmn90_z128_h256 --out $e/payload256 --jobs 4 --no-vectors
+TRIMUL_NATIVE_BUILD_DIR=$PWD/$e/payload256/build \
+  python $e/bench_bidir.py --length 768 --iters 40 --mask-dtype bool --output bidir-L768.json   # --configs sweep for the tiles
+python $e/bench_engine_bidir.py --length 768 --output engine-L768.json                          # the engine's own path, same inputs
+python $e/bench_contract_forms.py --length 768 --output contract-L768.json                      # one-GEMM contraction bound (no payload)
 ```
 
 Serving from the engine: the `native_rebuilt` row of `miniworld_engine.integrations.anthropic.triangle_multiplication` (parity line) imports
@@ -103,6 +147,11 @@ at 128 registers with zero spills), `vectors make --grid r2` produced 216 cases,
 `bench_pdl.py` / `bench_chain.py` at L384 reproduced the recorded kernel times (op 142.3 µs, other 0.9 µs, rel-RMS 2.587e-3 before and
 after replay), the chain gain (+2.5 µs) and bitwise-equal PDL on/off outputs; the `--probe` build reproduced the per-CTA timeline and
 `bench_contraction.py` the cuBLAS forms.
+On node02 H100 (2026-09-21), for the bidirectional round: the `tmn90_z128_h256` unit built from the pinned upstream through the same
+script (60 kernels), the tile table's default for the shape selected without a config override (`tmn_k1_..._t3x64`, op 241.3–244.3 µs at
+L384 and 1012.4–1015.3 at L768, reproducing the explicit row), and the unchanged `tmn90_z128_h128` payload rebuilt from the edited
+overlay still reproduces its recorded times through the face (L384 op 141.8 µs vs 142.3 recorded; L768 K1 187.8 / cuBLAS 178.6 /
+K3 174.7 vs 183.9 / 178.4 / 175.4), so the unit-header and tile-table edits did not disturb the 128/128 result.
 The engine-path numbers in `records/engine-bench/` were measured with the adoption benchmark of the parity line, not re-run from this
 directory. `verify_package.py` is CPU-only. No CI claim is made for `experiments/`.
 
@@ -121,11 +170,15 @@ Anthropic `uplifting-biomolecular-modeling` revision `f4f62fa6592ae4938d49b1757b
 `v5 1.2.2`, Apache-2.0), supplies the kernels, the host package, the build and vector tooling and the driver binding. `OVERLAY.json`
 records the SHA-256 of each upstream file this overlay replaces (they agree with the subset vendored in
 `../trimul_b7b12/vendor/anthropic_v5/UPSTREAM.json`) and of each overlay file; `build_payload.py` refuses an upstream tree whose base
-files differ. Only the `tmn90_z128_h128` unit is built; other widths take the upstream defaults and were not measured.
+files differ. The `tmn90_z128_h128` (unidirectional) and `tmn90_z128_h256` (bidirectional) units are built; other widths take the upstream defaults
+and were not measured.
 
 ## Files
 
 `overlay/` (3 kernel headers, 5 host modules), `k1k3-inference.patch`, `OVERLAY.json`, `build_payload.py`, `fixture.py`, `bench_op.py`,
 `bench_chain.py`, `bench_pdl.py`, `bench_contraction.py`, `lt_search.cu` (cuBLASLt algorithm sweep), `probe_cta_timeline.py`,
+`bench_bidir.py`, `bench_engine_bidir.py`, `bench_contract_forms.py` (the bidirectional round),
 `verify_package.py`, `wiring.svg` (`wiring.ko.svg`: Korean original), `records/` (engine and kernel timings, probes, cuBLASLt sweep,
-payload manifest, NCU summary, the full Korean report `report-2026-09-20.ko.md` with the per-round rejection tables).
+payload manifest, NCU summary, the full Korean report `report-2026-09-20.ko.md` with the per-round rejection tables, and
+`records/bidirectional/` with the interleaved rows, the tile sweep, the mask-dtype rows, the confirmation/regression runs and the
+c_hidden 256 payload manifest).

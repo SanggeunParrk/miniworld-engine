@@ -1,0 +1,25 @@
+{
+ "length": 768,
+ "width": 128,
+ "hidden_per_direction": 128,
+ "impl": "miniworld",
+ "backend": "KernelBackend.CUTE",
+ "error": {
+  "rel_rms": 0.0025387590285390615,
+  "max_abs": 0.030445098876953125,
+  "finite": true
+ },
+ "error_after_replay": {
+  "rel_rms": 0.0025387590285390615,
+  "max_abs": 0.030445098876953125,
+  "finite": true
+ },
+ "op_us": {
+  "rounds": [
+   2121.5834045410156,
+   2126.9212341308594,
+   2126.934051513672
+  ],
+  "median": 2126.9212341308594
+ }
+}

@@ -45,7 +45,9 @@ TILE_TABLE = {
     ("sm_90a", 64, 256, "f"): dict(k1=(2, 64, 16, 1), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 16, 1)], k3_variants=[(2, 64, 4, 1)]),
     ("sm_90a", 128, 64, "b"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 8, 2)]),
     ("sm_90a", 128, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1)]),
-    ("sm_90a", 128, 256, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1)]),
+    ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 4, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2)
+                                     k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3: every candidate that fits ties or loses; (2,64,8,1) and (3,64,4,1) are over the shared-memory limit at c_hidden 256
+                                     k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1)]),
     ("sm_90a", 128, 256, "f"): dict(k1=(2, 64, 8, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(1, 64, 4, 1)]),
     ("sm_90a", 256, 64, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1)]),
     ("sm_90a", 256, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(1, 64, 4, 1)]),
