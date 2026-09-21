@@ -184,7 +184,22 @@ Against the release, module level, three interleaved rounds (`records/width64/fi
 | bidirectional | 768 | 511.7 | **480.8** | −6.0 % |
 
 Less than the 10–14 % at width 128, and the byte model says why: at L768 K1 is 154 µs and K3 115, but the op is 473 — the contraction
-is **42 %** of it here against 37 % at `c_z 128`. The narrower the pair, the larger the share of the one kernel none of this touches.
+is **40 %** of it here against 37 % at `c_z 128`. The narrower the pair, the larger the share of the one kernel none of this touches.
+
+Against the 2.85 TB/s pattern floor this width is close to done: at L768 K1 is at 86 %, the contraction at 84 %, **K3 at 92 %**, the op
+at 84 % of their sum (L384: 85 / 88 / 77 %). One lever is left and it is measured rather than assumed — unlike at width 128, fusing the
+two contraction GEMMs into one IS worth something here (`records/width64/c64-L*.json`, same buffers, rounds within 0.3 µs):
+
+| | split NT+TN (today) | one NT, batch 128 | two NT |
+|---|---:|---:|---:|
+| L384 | 46.2 µs | **44.0 (−2.2)** | 46.4 |
+| L768 | 191.6 | **180.9 (−10.7)** | 208.1 |
+
+−1.8 % and −2.3 % of the op. Note `two_nt` is *slower*, so the gain is not the NT form, it is issuing ONE batched call instead of two
+of half the batch — which at width 128, where each half is already 128 planes, measured as nothing. Collecting it needs either a K1 that
+stores the incoming half transposed (upstream has that mechanism for the unidirectional incoming direction, `INCOMING_MODE="kt"`; this
+would make it per-half) or a grouped-batched cuBLAS call with a different transpose per group, outside `torch.bmm`. Neither is done
+here: 2 % of the one width that only the two-block template trunk uses did not justify a new kernel path.
 
 ## Reproduce
 
