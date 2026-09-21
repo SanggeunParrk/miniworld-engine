@@ -140,8 +140,10 @@ TMN_K3_SET_BF16(128, 256, 1, 128, 4, 1)
 TMN_K3_SET_BF16(128, 256, 1, 64, 4, 1)          // split-N
 // The two K3 tiles that carried the 128/128 result need TMN_K3_PACKED_RING to exist here at all: with uniform ring slots (both sized at the
 // projection's C_H x 64 = 16 KB) they are 249 KB and 241 KB against the 227 KB limit, and the packed ring gives back (NSLOT/2) x 8 KB.
+#if TMN_K3_PACKED_RING                          // without the packed ring these two do not fit, and instantiating them is a compile error
 TMN_K3_SET_BF16(128, 256, 2, 64, 8, 1)          // 8-slot ring: 249 -> 216 KB packed (the ring the 128/128 unit uses)
 TMN_K3_SET_BF16(128, 256, 3, 64, 4, 1)          // 192-token tile, three consumer warpgroups: 241 -> 224 KB packed
+#endif
 #if TMN_MASK_TEMPLATE
 // mask element type variants (m2 = bf16, m3 = uint8/bool) of the candidate bf16 K1 tiles, l2 names (the served LN class under TMN_K1_FORCE_LNM)
 TMN_K1(128, 256, false, b, 2, 64, 8, 2, 2, 2, 0) TMN_K1(128, 256, false, b, 2, 64, 8, 2, 3, 2, 0)
@@ -187,6 +189,15 @@ TMN_K3_SET_BF16(64, 128, 1, 128, 4, 1)
 TMN_K3_SET_F32(64, 128, 2, 64, 4, 1)
 TMN_K1(64, 128, false, b, 4, 32, 8, 1, 0, 2, 0) TMN_K1(64, 128, false, b, 4, 32, 8, 1, 1, 2, 0)   // tile-table data: N <= 800
 TMN_K3(64, 128, false, b, 2, 64, 4, 2, 1) TMN_K3U(64, 128, false, b, 2, 64, 4, 2, 1)         // tile-table data: two accumulator sets, N >= 2048
+// The bidirectional TEMPLATE shape (a per-template pair trunk at c_z 64 -> c_hidden 2 x 64) runs this unit, whose K3 had only the
+// 128-token 4-slot tile.  Shared memory is not the constraint here (the tabled tile uses 100 KB of 227), so the two K3 tiles that
+// won at the other widths -- the 8-slot ring (128/256) and the 192-token three-warpgroup tile (128/128) -- are simply instantiated.
+TMN_K3_SET_BF16(64, 128, 2, 64, 8, 1)           // 8-slot ring: 133 KB
+TMN_K3_SET_BF16(64, 128, 2, 64, 6, 1)
+TMN_K3_SET_BF16(64, 128, 3, 64, 4, 1)           // 192-token tile, three consumer warpgroups: 133 KB
+TMN_K3_SET_BF16(64, 128, 3, 64, 8, 1)           // both: 166 KB
+// Split-N (1,64) cannot exist at c_z 64: NB = c_z / 32 = 2 output blocks, so a split warpgroup would get NBW = 1 and the
+// epilogue finishes blocks in PAIRS (128-byte row segments).  K3Cfg's static_assert says so.
 #elif TMN_CZ == 384 && TMN_CH == 384
 TMN_K1_SET_BF16(384, 384, 2, 64, 6, 2)          // 96 KB z tile + 6 x 16 KB ring (two 3-slot blocks in flight)
 TMN_K3W_SET_BF16(384, 384, 1, 64, 4, 1)         // wide K3, split-N: X 48 KB + z 48 KB + one (24 + 24) KB slot pair per block in flight + staging = 214 KB

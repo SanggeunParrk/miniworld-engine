@@ -1,0 +1,22 @@
+{
+ "length": 384,
+ "width": 64,
+ "hidden_per_direction": 64,
+ "c_hidden": 128,
+ "mask_dtype": "bool",
+ "iters": 40,
+ "build": "/home/psk6950/MiniWorld/runs/trimul_bidir_20260921/z64/build",
+ "results": [
+  {
+   "config": {
+    "k3_cfg": [
+     1,
+     64,
+     4,
+     1
+    ]
+   },
+   "failed": "LoadError('no_kernel:tmn_k3_z64_h128_b_t1x64_s4a1_l1 (CUDA_ERROR_NOT_FOUND in /home/psk6950/MiniWorld/runs/trimul_bidir_20260921/z64/build/sm_90a/tmn90_z64_h128.cubin)')"
+  }
+ ]
+}

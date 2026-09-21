@@ -47,14 +47,18 @@ TILE_TABLE = {
     ("sm_90a", 128, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(2, 64, 8, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(2, 64, 8, 1)]),
     ("sm_90a", 128, 256, "b"): dict(k1=(3, 64, 8, 2), k3=(2, 64, 8, 1),   # measured (bidirectional shared-LN composition, L384/768, interleaved): 192-token K1 tile -18.7 % K1 vs (2,64,8,2);
                                      k1_variants=[(3, 64, 8, 2), (6, 32, 8, 2), (2, 64, 8, 2), (1, 128, 8, 2), (2, 64, 4, 2)],   # K3 8-slot ring (only reachable with the packed ring) -6.2 / -4.0 % K3 vs the 4-slot one, 6 slots less;
-                                     k3_variants=[(2, 64, 8, 1), (2, 64, 6, 1), (2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1), (3, 64, 4, 1)]),   # (3,64,4,1) fits now but loses by 11 %: 512 threads cap it at 128 registers and its epilogue spills 444/408
+                                     k3_variants=[(2, 64, 8, 1), (2, 64, 6, 1), (2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1), (1, 64, 4, 1), (3, 64, 4, 1)]),   # (3,64,4,1) fits now but loses by 11 %: 512 threads cap it at 128 registers and its epilogue spills 444/408.
+    # The default and (3,64,4,1) exist only in a TMN_K3_PACKED_RING build; against a unit built without it the lookup refuses by name (no such kernel), which is what an A/B build should do.
     ("sm_90a", 128, 256, "f"): dict(k1=(2, 64, 8, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(1, 64, 4, 1)]),
     ("sm_90a", 256, 64, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1), (2, 64, 6, 1)]),
     ("sm_90a", 256, 64, "f"): dict(k1=(2, 64, 4, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(1, 64, 4, 1)]),
     ("sm_90a", 256, 128, "b"): dict(k1=(2, 64, 8, 2), k3=(2, 64, 4, 1), k1_variants=[(2, 64, 8, 2)], k3_variants=[(2, 64, 4, 1)]),
     ("sm_90a", 256, 128, "f"): dict(k1=(2, 64, 4, 2), k3=(1, 64, 4, 1), k1_variants=[(2, 64, 4, 2)], k3_variants=[(1, 64, 4, 1)]),
-    ("sm_90a", 64, 128, "b"): dict(k1=(3, 64, 8, 1), k3=(2, 64, 4, 1), by_n={800: dict(k1=(6, 32, 8, 1)), 1536: dict(), 4096: dict(k3=(2, 64, 4, 2))},   # measured: 192-token K1 tiles (3 consumer warpgroups): (6,32) N<=800, (3,64) above (-9..-16 % K1 vs the 128-token tiles); K3 a2 N>=2048
-                                    k1_variants=[(3, 64, 8, 1), (6, 32, 8, 1), (1, 192, 8, 1), (2, 64, 8, 1), (4, 32, 8, 1), (1, 128, 8, 1)], k3_variants=[(2, 64, 4, 1), (2, 64, 4, 2), (1, 128, 4, 1)]),
+    ("sm_90a", 64, 128, "b"): dict(k1=(3, 64, 8, 1), k3=(3, 64, 4, 1), by_n={800: dict(k1=(6, 32, 8, 1)), 1536: dict(), 4096: dict(k3=(2, 64, 4, 2))},   # measured: 192-token K1 tiles (3 consumer warpgroups): (6,32) N<=800, (3,64) above (-9..-16 % K1 vs the 128-token tiles); K3 a2 N>=2048
+                                    # K3 is a 192-token three-warpgroup tile too (measured at the bidirectional template shape, N 384/768, interleaved: K3 -5.5 / -6.6 %, op -1.5 / -1.3 %).
+                                    # Ring size does nothing at this width: W_RESIDENT needs NSLOT >= 2 NB = 4, which the tabled ring already has, so 6 and 8 slots tie with 4 (and (3,64,8,1) ties with (3,64,4,1) at 166 vs 133 KB).
+                                    k1_variants=[(3, 64, 8, 1), (6, 32, 8, 1), (1, 192, 8, 1), (2, 64, 8, 1), (4, 32, 8, 1), (1, 128, 8, 1)],
+                                    k3_variants=[(3, 64, 4, 1), (3, 64, 8, 1), (2, 64, 4, 1), (2, 64, 6, 1), (2, 64, 8, 1), (2, 64, 4, 2), (1, 128, 4, 1)]),
     ("sm_90a", 64, 128, "f"): dict(k1=(3, 64, 8, 1), k3=(2, 64, 4, 1), k1_variants=[(3, 64, 8, 1), (2, 64, 8, 1)], k3_variants=[(2, 64, 4, 1)]),
     # wide-K pairs (c_z/16 + c_hidden/16 > 24): K3 = the wide member (tmn_k3_wide.cuh), marked by a trailing "w" in the K3 config
     ("sm_90a", 384, 384, "b"): dict(k1=(2, 64, 6, 2), k3=(1, 64, 4, 1, "w"), k1_variants=[(2, 64, 6, 2), (1, 128, 6, 2), (2, 64, 4, 3)], k3_variants=[(1, 64, 4, 1, "w")]),
@@ -83,19 +87,18 @@ def k1_smem(cz, ch, zf32, bi, bj, nslot, skch):
     return nkca * bi * bj * 128 + nslot * skch * 8192 + ncwg * 8192 + 2 * cz * 4 + ((nbar * 8 + 127) // 128) * 128
 
 
-PACKED_RING = True         # == TMN_K3_PACKED_RING of the payload this package ships with (build_payload.py sets it); False for an upstream build
-
-
-def k3_smem(cz, ch, mode, bi, bj, nslot, nacc=1):
+def k3_smem(cz, ch, mode, bi, bj, nslot, nacc=1, packed=False):
     """== K3Cfg::SMEM (mode 'b' | 'f' | 'p'; bool accepted: True = 'f')."""
     if isinstance(mode, bool):
         mode = "f" if mode else "b"
     esz = 4 if mode in ("f", "g") else 2          # g: fp32 tile (staging is sized in the tile dtype), bf16 update out
     bmt = bi * bj
     nkcz = cz // (128 // esz)
-    # == K3Cfg::SMEM_W: the packed ring (TMN_K3_PACKED_RING, built into this payload) sizes a slot by its kind -- even = projection (c_h x 64),
-    # odd = gate (c_z x 64) -- instead of giving both the larger extent; identical where c_z == c_h.
-    smem_w = (nslot // 2) * (cz + ch) * 64 if PACKED_RING and cz != ch and nslot % 2 == 0 else nslot * max(cz, ch) * 64
+    # == K3Cfg::SMEM_W.  `packed` is TMN_K3_PACKED_RING *of the unit being launched*, which the caller reads from its build flags:
+    # a slot is then sized by its kind (even = projection c_h x 64, odd = gate c_z x 64) instead of both taking the larger extent.
+    # Identical where c_z == c_h.  Guessing this wrong sizes the dynamic shared memory wrong and the launch fails, so it is never
+    # a constant here -- Kernels.packed_ring() answers it per unit.
+    smem_w = (nslot // 2) * (cz + ch) * 64 if packed and cz != ch and nslot % 2 == 0 else nslot * max(cz, ch) * 64
     ob = 16 * 64 * esz
     nbar = 2 * nkcz + 2 + 2 * nslot
     ncwg = 2 if bmt == 64 else bmt // 64                                       # consumer warpgroups (== K3Cfg::NCWG)
@@ -291,6 +294,17 @@ class Kernels:
             self._kern[name] = k
         return k
 
+    def packed_ring(self, cz, ch):
+        """Was this unit built with TMN_K3_PACKED_RING?  Read from its own manifest flags, never assumed: the host's K3 shared-memory
+        figure has to be the one the cubin was compiled for."""
+        key = (cz, ch, "packed_ring")
+        r = self._has.get(key)
+        if r is None:
+            flags = (getattr(self.unit(cz, ch), "entry", None) or {}).get("flags") or []
+            r = any(f.startswith("-DTMN_K3_PACKED_RING=") and f.rsplit("=", 1)[1] not in ("0", "") for f in flags)
+            self._has[key] = r
+        return r
+
     def kernel_names(self, cz, ch):
         """Kernel names compiled into the width's unit (its manifest entry): optional instantiations (native mask types) are probed here."""
         u = self.unit(cz, ch)
@@ -407,7 +421,8 @@ class Kernels:
                 name, upd = nu, True
         ent = cache.get(("tmn.k3", name, N, Np, float(eps)))
         if ent is None:
-            smem = (k3w_smem if k3_is_wide(cfg) else k3_smem)(cz, ch, mode, bi, bj, nslot, nacc)
+            smem = (k3w_smem(cz, ch, mode, bi, bj, nslot, nacc) if k3_is_wide(cfg)
+                    else k3_smem(cz, ch, mode, bi, bj, nslot, nacc, packed=self.packed_ring(cz, ch)))
             k = self.kernel(cz, ch, name, smem)
             tiles_i, tiles_j = -(-N // bi), -(-N // bj)
             num_tiles = tiles_i * tiles_j

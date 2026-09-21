@@ -1,0 +1,64 @@
+{
+ "length": 384,
+ "width": 128,
+ "direction": "outgoing",
+ "mask_dtype": "bf16",
+ "iters": 5,
+ "results": [
+  {
+   "config": {
+    "k3_cfg": [
+     2,
+     64,
+     4,
+     1
+    ]
+   },
+   "error": {
+    "rel_rms": 0.0025870625395327806,
+    "max_abs": 0.030694007873535156,
+    "finite": true
+   },
+   "error_after_replay": {
+    "rel_rms": 0.0025870625395327806,
+    "max_abs": 0.030694007873535156,
+    "finite": true
+   },
+   "kernels": {
+    "k1": {
+     "count": 1.0,
+     "sum_per_call_us": 49.33159999999987,
+     "median_launch_us": 48.351999999999975
+    },
+    "other": {
+     "count": 1.0,
+     "sum_per_call_us": 0.7231999999999971,
+     "median_launch_us": 0.7359999999998763
+    },
+    "cublas": {
+     "count": 1.0,
+     "sum_per_call_us": 39.423999999999936,
+     "median_launch_us": 39.13599999999997
+    },
+    "k3": {
+     "count": 1.0,
+     "sum_per_call_us": 57.49840000000008,
+     "median_launch_us": 57.37599999999975
+    }
+   },
+   "kernel_names": [
+    "tmn_k1_z128_h128_b_t6x32_s8k2_m2_l2_v0",
+    "tmn_k3_z128_h128_b_t2x64_s4a1_l1"
+   ],
+   "op_us": {
+    "rounds": [
+     146.84991836547852,
+     146.85215950012207,
+     146.9337558746338
+    ],
+    "median": 146.85215950012207
+   },
+   "selection": {}
+  }
+ ]
+}

@@ -149,6 +149,43 @@ per-half transposed K1 store would allow, the way upstream's `INCOMING_MODE="kt"
 was measured as an upper bound on the same buffers (`bench_contract_forms.py`): **5.8 µs at L384 and nothing outside the noise at
 L768**, so it is not worth the kernel change.
 
+## The template shape (c_z 64)
+
+A model does not run TriMul at one width. MiniWorld's trunk, MSA module and confidence head are all pair width 128, but its AF3
+template embedder runs a per-template pair trunk at `num_channels = 64`, so its bidirectional TriMul is `c_z 64 / c_hidden 128` — unit
+`tmn90_z64_h128`, a different cell with its own tile table row. Upstream tunes K1 well there (six variants, 192-token tiles already the
+default) but had instantiated only three bf16 K3 tiles, none of them the ones that won at the other widths.
+
+Shared memory is not the constraint at this width — the tabled K3 uses 100 KB of 227 — so the missing tiles were simply instantiated
+and measured (`records/width64/sweep/`, three interleaved rounds per row, K1 at its table default):
+
+| K3 tile | L384 op | L768 op | K3 kernel |
+|---|---:|---:|---|
+| `(2,64,4,1)` the tabled tile | 122.6 µs | 479.4 | 36.3 / 122.7 |
+| `(2,64,8,1)` 8-slot ring | 122.5 | 480.4 | 36.3 / 122.7 |
+| `(2,64,6,1)` | 122.7 | 478.8 | 36.3 / 122.7 |
+| **`(3,64,4,1)` 192-token, three warpgroups** | **120.8 (−1.5 %)** | **473.0 (−1.3 %)** | **34.4 / 115.4 (−5.5 / −6.6 %)** |
+| `(3,64,8,1)` both | 120.6 | 472.8 | 34.3 / 114.6 |
+
+Ring size does nothing here, and for a structural reason: K3's `W_RESIDENT` needs `NSLOT >= 2·NB = 4` at `c_z 64`, which the tabled
+4-slot ring already satisfies — where at `c_z 128` it needs 8, which is why the 8-slot ring mattered there. The 192-token tile is the
+win, and `(3,64,8,1)` ties it at 166 KB against 133, so the cheaper one becomes the default. Split-N cannot exist at this width at all:
+`NB = c_z/32 = 2`, so a split warpgroup would get one output block and the epilogue finishes them in pairs (`K3Cfg`'s static_assert).
+
+Against the release, module level, three interleaved rounds (`records/width64/final/`):
+
+| case | L | upstream v5 | ours | |
+|---|---:|---:|---:|---:|
+| outgoing | 384 | 92.2 µs | **80.5** | −12.7 % |
+| outgoing | 768 | 323.6 | **300.8** | −7.1 % |
+| incoming | 384 | 89.9 | **80.5** | −10.5 % |
+| incoming | 768 | 327.9 | **301.5** | −8.0 % |
+| bidirectional | 384 | 135.0 | **124.2** | −8.0 % |
+| bidirectional | 768 | 511.7 | **480.8** | −6.0 % |
+
+Less than the 10–14 % at width 128, and the byte model says why: at L768 K1 is 154 µs and K3 115, but the op is 473 — the contraction
+is **42 %** of it here against 37 % at `c_z 128`. The narrower the pair, the larger the share of the one kernel none of this touches.
+
 ## Reproduce
 
 Needs an allocated H100 (sm_90a), nvcc 12.x, PyTorch CUDA with `cuda.bindings` or `libcuda.so.1` for the driver binding, and the

@@ -6,15 +6,25 @@ repo's overlay by `experiments/trimul_k1k3_inference/build_payload.py`, and name
 
 ```bash
 e=experiments/trimul_k1k3_inference
-python $e/build_payload.py --upstream <pkg/v5> --unit tmn90_z128_h128,tmn90_z128_h256 --out $e/payload --jobs 8
+python $e/build_payload.py --upstream <pkg/v5> --jobs 8 --out $e/payload \
+  --unit tmn90_z128_h128,tmn90_z128_h256,tmn90_z64_h64,tmn90_z64_h128
 export TRIMUL_NATIVE_BUILD_DIR=$PWD/$e/payload/build     # this is the opt-in
 ```
 
-One payload can carry several units and a process loads exactly one payload, so build every width the model uses into it:
-`tmn90_z128_h128` serves `TriangleMultiplication` (one direction) and `tmn90_z128_h256` serves
-`BidirectionalTriangleMultiplication`, whose two directions share one input LayerNorm and one 2·`d_hidden` output LayerNorm and are
-therefore ONE unit at twice the hidden width — not two unidirectional calls, which would normalise each half separately and compute a
-different function.
+One payload can carry several units and a process loads exactly one payload, so build every width the model uses into it. A unit is
+named by `(c_z, c_hidden)`, and the bidirectional module is ONE unit at twice the hidden width — its two directions share one input
+LayerNorm and one 2·`d_hidden` output LayerNorm, so it is not two unidirectional calls, which would normalise each half separately and
+compute a different function. A model usually needs more than one width: MiniWorld's trunk, MSA module and confidence head are pair
+width 128, while its AF3 template embedder runs a per-template pair trunk at `num_channels = 64`.
+
+| module | pair width | unit |
+|---|---|---|
+| `TriangleMultiplication` | 128 | `tmn90_z128_h128` |
+| `BidirectionalTriangleMultiplication` | 128 | `tmn90_z128_h256` |
+| `TriangleMultiplication` | 64 | `tmn90_z64_h64` |
+| `BidirectionalTriangleMultiplication` | 64 | `tmn90_z64_h128` |
+
+A width with no unit in the payload is an ordinary fallback, so a missing one costs speed, not correctness.
 
 ## What each option does
 
@@ -67,6 +77,12 @@ reference at the same rel-RMS, so this is a like-for-like timing):
 | incoming | 768 | 634.3 | **569.4** | −10.2 % (1.11x) |
 | bidirectional | 384 | 280.2 | **245.6** | −12.3 % (1.14x) |
 | bidirectional | 768 | 1118.3 | **1003.2** | −10.3 % (1.12x) |
+| outgoing, width 64 | 384 | 92.2 | **80.5** | −12.7 % |
+| outgoing, width 64 | 768 | 323.6 | **300.8** | −7.1 % |
+| incoming, width 64 | 384 | 89.9 | **80.5** | −10.5 % |
+| incoming, width 64 | 768 | 327.9 | **301.5** | −8.0 % |
+| bidirectional, width 64 | 384 | 135.0 | **124.2** | −8.0 % |
+| bidirectional, width 64 | 768 | 511.7 | **480.8** | −6.0 % |
 
 Round spread 0.1–4.0 µs. The ceiling is the contraction: it is a third of the op, already at its DRAM/tensor balance point, and
 untouched by any of this — K1 is 19 % faster and K3 9 %, and that is what 10–14 % of the whole op looks like.
