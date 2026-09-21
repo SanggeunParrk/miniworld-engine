@@ -59,6 +59,10 @@ for L in (384, 768):
     assert min(best["t3x64"]) < min(best["base"]), (L, best)          # the tabled tile is the measured winner, not an assumption
     eng = json.loads((bd / "interleaved" / ("engine-cute-L%d.json" % L)).read_text())
     assert eng["backend"].endswith("CUTE") and eng["op_us"]["median"] > 2 * min(best["t3x64"]), (L, eng["op_us"])
+for r in (8, 20):                                                     # PDL: recorded on both round counts, outputs bitwise equal either way
+    for L in (384, 768):
+        pdl = json.loads((bd / "pdl" / ("rounds%d-L%d.json" % (r, L))).read_text())["res"]
+        assert pdl["single"]["same_output"] and pdl["chain"]["same_output"], (r, L)
 h256 = json.loads((bd / "payload-manifest-h256.json").read_text())["units"]["tmn90_z128_h256/sm_90a"]
 assert any("_t3x64_" in k and k.startswith("tmn_k1_z128_h256") for k in h256["kernels"]), "the tabled K1 tile is not in the unit"
 for d in json.loads((root / "OVERLAY.json").read_text())["defines"]:

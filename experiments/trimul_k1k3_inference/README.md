@@ -98,6 +98,30 @@ shape becomes the measured winner, K1 `(3,64,8,2)` — a 192-token tile with thr
 tabled `(2,64,4,1)`. The bf16 (m2) and bool (m3) mask instantiations cost the same as fp32 here, so their value is only that the caller
 no longer pays the per-call fp32 cast (4.7 µs).
 
+**Which of the 128/128 changes actually act at this width.** Not all of them, and the build flags do not say which:
+
+| change | at c_hidden 256 | measured / reason |
+|---|---|---|
+| tanh gate sigmoid | acts | part of the K1 −18.7 % / K3 −3.3…−4.2 % |
+| K1 LayerNorm class 1 | acts | K1's input LayerNorm is over `c_z`, unchanged at 128 |
+| bf16x2 residual | acts | K3's residual is over `c_z` |
+| K1 `(3,64,8,2)` tile | acts (new here) | K1 107.4 → 87.3 µs (L384), 392.8 → 319.3 (L768) |
+| mask element type (m2/m3) | compiled, ties | bf16 and bool cost the same as fp32 here; the gain is only the caller's dropped 4.7 µs cast |
+| `TMN_WSKIP` | compiled, **inert** | `W_RESIDENT` is false at this width: K1 `NSLOT 8 < NBLK·SPB 16`, K3 `NSLOT 4 < 2·NB 8`, so the wait is never skipped |
+| PDL | compiled, **below the noise** | see below |
+| K3 three consumer warpgroups | **impossible** | 241 KB of shared memory |
+
+PDL was measured with `bench_bidir_pdl.py` (on/off alternating in one process, one op and a two-op chain, outputs bitwise equal in every
+case). At L384 it is zero to within 1.4 µs in both 8-round and 20-round runs. At L768 the two runs disagree in sign — 8 rounds gave
+−10.0 µs single / −61.0 chain, 20 rounds gave +10.9 / −2.6 — with round spreads of 79–249 µs, so there is no effect this measurement can
+resolve. That is consistent with what PDL does: it overlaps a fixed prologue with the previous kernel's tail, and here each kernel is
+about three times longer than at 128/128, where the chain gain was 1.9 µs.
+
+**Register spills.** Every K3 instantiation at this width spills (the served `t2x64_s4a1_l1`: 168 registers, 64 spill loads, 44 stores,
+48 B stack; `t2x64_s4a2_l1` far worse at 204/184), while the served K1 `t3x64` is at 128 registers with none. The K3 launch bound
+(384 threads, 1 CTA/SM) caps the budget at 168 and the 256-channel epilogue does not fit it. This is a lead, but a bounded one: K3 is
+already at 87 % of its streaming floor, above K1's 83 %.
+
 **Where the remaining time is.** Against the same 2.85 TB/s pattern floor, at L768 the essential bytes are K1 756 MB, contraction
 906 MB, K3 604 MB: K1 is at 83 %, the contraction at 86 % (629 TFLOP/s bf16 at the same time — the balance point the 128/128 audit
 found), K3 at 87 %, the whole op at 78 % of the sum. The contraction is now 36 % of the op. Fusing its two GEMMs into one — which a
@@ -177,7 +201,7 @@ and were not measured.
 
 `overlay/` (3 kernel headers, 5 host modules), `k1k3-inference.patch`, `OVERLAY.json`, `build_payload.py`, `fixture.py`, `bench_op.py`,
 `bench_chain.py`, `bench_pdl.py`, `bench_contraction.py`, `lt_search.cu` (cuBLASLt algorithm sweep), `probe_cta_timeline.py`,
-`bench_bidir.py`, `bench_engine_bidir.py`, `bench_contract_forms.py` (the bidirectional round),
+`bench_bidir.py`, `bench_engine_bidir.py`, `bench_contract_forms.py`, `bench_bidir_pdl.py` (the bidirectional round),
 `verify_package.py`, `wiring.svg` (`wiring.ko.svg`: Korean original), `records/` (engine and kernel timings, probes, cuBLASLt sweep,
 payload manifest, NCU summary, the full Korean report `report-2026-09-20.ko.md` with the per-round rejection tables, and
 `records/bidirectional/` with the interleaved rows, the tile sweep, the mask-dtype rows, the confirmation/regression runs and the
