@@ -24,6 +24,20 @@ node02 H100 80 GB, CUDA 12.9, PyTorch 2.10 cu128, same session, CUDA-graph repla
 
 132 CTAs × 256 threads, 231 KB shared memory, 255 registers, no spill, no cooperative launch and no cluster.
 
+At the module level — `miniworld_engine.modules.Transition(128, 4)` in bf16 training, forward + backward, with only the
+backward swapped (`bench_module.py`, `records/module-L{384,768}.json`) — the forward is unchanged, so the op's 2.0× becomes:
+
+| | L384 | L768 |
+|---|---:|---:|
+| engine module fwd + bwd | 1107 µs | 4118 µs |
+| **with this backward** | **743 µs** | **2759 µs** |
+| | **1.49×** | **1.49×** |
+
+Gradients through the real module agree with the engine path to 4.2e-5 (`dgamma`) … 5.9e-4 (`dW*`), against an engine
+run-to-run noise of 0 … 1.3e-6. Note that the module zero-initialises the squeeze weight, which makes the backward
+degenerate (`dh = 0`, so four of the five parameter gradients are exactly zero in *both* paths); `bench_module.py` gives it a
+trained-looking value first, or the comparison would be comparing zeros.
+
 Numerics: all six gradients carry the same relative RMS error against an fp32 autograd reference as the engine's own backward
 does — `dx` 3.07e-3, `dWa` 3.88e-3, `dWs` 3.42e-3 at L384, and the engine's row is printed next to it by `bench.py --engine`.
 Against the engine directly the difference is accumulation order only: `dx` 5.4e-5 (0.02 % of elements differ), `dW*` 2.0-2.5e-4.
@@ -62,6 +76,7 @@ exactly; the sweep is in `records/ratio-r*-L384.json`.
 | `build.sh` | `[OUT=<name>] ./build.sh [-DDW_REPL=<R>]` → `build/<OUT>.cubin` (nvcc, sm_90a, compute node only) |
 | `bench.py` | correctness against an fp32 autograd reference, bit-reproducibility, CUDA-graph timing, `--engine` for the baseline, `--save` for a record |
 | `drv.py` | minimal `cuda.bindings` launcher: TMA descriptors, cubin load, by-value argument packing |
+| `bench_module.py` | the same, at the module level: times `modules.Transition` fwd + bwd with and without this backward, and checks the gradients agree |
 | `verify_package.py` | CPU-only integrity checks (vendored-header hashes, portable paths, recorded measurements) |
 | `records/` | the measurements above, the ratio sweep, and `progression.md` — how it got here and the eleven things that did not work |
 
@@ -78,7 +93,8 @@ Needs a compute node (nvcc and the GPU), torch with CUDA and `cuda.bindings`.
 
 ## Wiring it up
 
-`bench.py` shows the call: the kernel consumes exactly what the forward already saves (`x`, `xn`, `dy`, `rstd`,
+`bench.py` shows the op-level call and `bench_module.py` a working module-level substitution (a local autograd Function that
+calls the engine's own LayerNorm, expand-SwiGLU and squeeze-residual forward kernels and this kernel for the backward): the kernel consumes exactly what the forward already saves (`x`, `xn`, `dy`, `rstd`,
 `c1 = mean·rstd`, `gamma`, and the three weights) and produces the six gradients the autograd function returns, so the change
 is confined to the backward of the Transition autograd function. Three things are needed first.
 

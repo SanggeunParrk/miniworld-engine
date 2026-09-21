@@ -1,0 +1,61 @@
+{
+ "M": 589824,
+ "agreement": {
+  "dx": {
+   "max_abs": 0.0625,
+   "rel_rms": 6.912962271599099e-05
+  },
+  "expand_a.weight": {
+   "max_abs": 8.0,
+   "rel_rms": 0.000524766743183136
+  },
+  "expand_b.weight": {
+   "max_abs": 8.0,
+   "rel_rms": 0.0005317722680047154
+  },
+  "ln_in.bias": {
+   "max_abs": 0.18359375,
+   "rel_rms": 4.512832674663514e-05
+  },
+  "ln_in.weight": {
+   "max_abs": 0.232666015625,
+   "rel_rms": 4.153674308327027e-05
+  },
+  "squeeze.weight": {
+   "max_abs": 32.0,
+   "rel_rms": 0.000589017232414335
+  }
+ },
+ "d_hidden": 128,
+ "engine_self": {
+  "dx": 0.0,
+  "expand_a.weight": 0.0,
+  "expand_b.weight": 0.0,
+  "ln_in.bias": 1.2763455288222758e-06,
+  "ln_in.weight": 5.979580919301952e-07,
+  "squeeze.weight": 0.0
+ },
+ "length": 768,
+ "ms": {
+  "engine": {
+   "median": 4.118342590332031,
+   "min": 4.108375930786133,
+   "samples": [
+    4.118342590332031,
+    4.123944091796875,
+    4.108375930786133
+   ]
+  },
+  "fused-backward": {
+   "median": 2.759283256530762,
+   "min": 2.7459999084472657,
+   "samples": [
+    2.759283256530762,
+    2.7676191329956055,
+    2.7459999084472657
+   ]
+  }
+ },
+ "patched_calls": null,
+ "speedup": 1.492540709832745
+}

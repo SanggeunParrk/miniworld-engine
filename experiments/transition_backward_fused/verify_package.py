@@ -53,7 +53,16 @@ for L, r in rec.items():
     assert engine / fused > 1.9, (L, fused, engine)
 assert rec[384]["time_us"]["fused"]["median"] < 430 and rec[768]["time_us"]["fused"]["median"] < 1600
 
-# 5. the ratio sweep backs the compiled-in default
+# 5. the module-level records agree with the op-level ones and with the README
+for L in (384, 768):
+    mr = json.loads((root / "records" / f"module-L{L}.json").read_text())
+    assert mr["speedup"] > 1.4, (L, mr["speedup"])
+    for name, e in mr["agreement"].items():
+        assert e["rel_rms"] < 1e-3, (L, name, e["rel_rms"])
+        assert mr["engine_self"][name] < 1e-5, (L, name)          # the engine path's own run-to-run noise
+    assert mr["ms"]["engine"]["median"] > mr["ms"]["fused-backward"]["median"]
+
+# 6. the ratio sweep backs the compiled-in default
 ratio = {8: rec[384]["time_us"]["fused"]["median"]}
 for path in (root / "records").glob("ratio-r*-L384.json"):
     r = json.loads(path.read_text())
