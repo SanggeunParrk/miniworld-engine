@@ -48,6 +48,12 @@ with `-DFWD_SAVE=0` it drops the `xn` / `rstd` / `c1` stores that only the backw
 | training (saves `xn`, `rstd`, `c1`) | 155 µs | 563 µs |
 | inference (`-DFWD_SAVE=0`) | **146 µs** | **532 µs** |
 
+Against Anthropic's own kernels at this width (`records/vs-anthropic.md`, one process, same timing, forward only): their
+best row is Triton `v2` at 158.7 µs (L384) / 597.4 µs (L768) — they ship **no CUDA Transition kernel at c = 128**, and no
+Transition backward at all — and the engine's fastest path on the parity checkout is 157.9 / 569.5 µs. This kernel is
+145.9 / 536.3 µs and the most accurate of the six. The larger multiples quoted above are against `main`, whose default
+routes both inference and training to the three-kernel path; part of that win is recovering the difference between branches.
+
 And the two together at the module level — `miniworld_engine.modules.Transition(128, 4)` in bf16 training, forward + backward
 (`bench_module.py`, `records/module-L{384,768}.json`):
 
@@ -105,6 +111,7 @@ exactly; the sweep is in `records/ratio-r*-L384.json`.
 | `src/transition_bwd.cu` | the backward kernel and the partial-sum reduction; the only include is the Anthropic v5 device header set |
 | `src/transition_fwd.cu` | the forward kernel: LayerNorm + expand + SwiGLU + squeeze + residual, emitting `xn` / `rstd` / `c1` |
 | `build.sh`, `build_fwd.sh` | `[OUT=<name>] ./build.sh [-DDW_REPL=<R>]` → `build/<OUT>.cubin` (nvcc, sm_90a, compute node only) |
+| `bench_vs_anthropic.py` | the same forward against Anthropic's own Transition rows and the engine's paths, one process, one timing method |
 | `bench.py`, `bench_fwd.py` | correctness against an fp32 reference, bit-reproducibility, CUDA-graph timing, `--engine` for the baseline, `--save` for a record |
 | `drv.py` | minimal `cuda.bindings` launcher: TMA descriptors, cubin load, by-value argument packing |
 | `bench_module.py` | the same, at the module level: times `modules.Transition` fwd + bwd with and without this backward, and checks the gradients agree |
